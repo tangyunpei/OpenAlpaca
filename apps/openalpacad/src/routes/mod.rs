@@ -23,6 +23,7 @@ pub mod extensions;
 pub mod files;
 mod files_types;
 pub mod followups;
+pub mod memories;
 pub mod orchestrator_latency;
 pub mod persona;
 pub mod sessions;
@@ -96,6 +97,13 @@ pub use sessions::{
     activate_session_handler, archive_session_handler, create_session_handler,
     delete_session_handler, get_session_events_handler, get_session_handler,
     get_session_messages_handler, list_sessions_handler, patch_session_handler,
+};
+pub use memories::{
+    create_memory_handler, delete_memory_handler, forget_memories_handler,
+    get_memory_handler, get_memory_history_handler, list_memories_handler,
+    memory_doctor_handler, recently_learned_memories_handler,
+    recently_used_memories_handler, search_memories_handler, sync_memories_handler,
+    undo_memory_handler, update_memory_handler,
 };
 pub use skills::{list_skills_handler, skill_health_handler};
 pub use status::status_handler;

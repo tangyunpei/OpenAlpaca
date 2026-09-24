@@ -248,6 +248,52 @@ fn sweep_orphaned_uploads(db: &Database, grace_hours: i64) -> usize {
     cleaned
 }
 
+/// The memory reconciliation timer (memory redesign, design §5 *Freshness
+/// without a watcher*): every [`MEMORY_RECONCILE_INTERVAL`], a bounded stat
+/// scan of every partition the owner's control snapshots know — a file
+/// edited, added or removed behind the service's back is re-recorded
+/// `external`, the index follows, and each finding is one `memory_changed`
+/// with no surface (§7b P13). The first scan runs one interval after boot:
+/// `open_default` has just rebuilt or checked the cache, and a partition is
+/// also stat-scanned before every read, so nothing waits on this.
+pub fn spawn_memory_reconciliation(
+    service: Arc<openalpaca_core::memory::service::MemoryService>,
+    owner_id: String,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(MEMORY_RECONCILE_INTERVAL) => {}
+                _ = cancel.cancelled() => {
+                    tracing::info!("Memory reconciliation task shutting down");
+                    break;
+                }
+            }
+            let service = service.clone();
+            let owner = owner_id.clone();
+            let outcome =
+                tokio::task::spawn_blocking(move || service.reconcile_owner(&owner)).await;
+            match outcome {
+                Ok(Ok(report)) if !report.changes.is_empty() => {
+                    tracing::info!(
+                        scanned = report.scanned,
+                        changed = report.changes.len(),
+                        "memory reconciliation: external changes recorded"
+                    );
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::warn!("memory reconciliation failed: {e}"),
+                Err(e) => tracing::warn!("memory reconciliation task failed: {e}"),
+            }
+        }
+    });
+}
+
+/// Design §5: the reconciliation scan runs "at service start, every 30 s,
+/// before management reads, and on `sync`".
+pub const MEMORY_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Spawn telemetry cleanup task.
 ///
 /// Runs once per day, removing old skill_execution_log rows (>90 days)

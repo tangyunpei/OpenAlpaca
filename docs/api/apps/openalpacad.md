@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 106.
+- Total documented method/path endpoints: 119.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -80,6 +80,19 @@
 | GET | `/v1/llm/usage` | `bearer` | `get_llm_usage` | - | `LlmUsageQuery` | `apps/openalpacad/src/routes/settings.rs` |
 | GET | `/v1/llm/usage/daily` | `bearer` | `get_llm_usage_daily` | - | `LlmUsageDailyQuery` | `apps/openalpacad/src/routes/settings.rs` |
 | GET | `/v1/me` | `bearer` | `get_me_handler` | - | - | `apps/openalpacad/src/routes/auth.rs` |
+| GET | `/v1/memories` | `bearer` | `list_memories_handler` | - | `memories::ListMemoriesQuery` | `apps/openalpacad/src/routes/memories.rs` |
+| POST | `/v1/memories` | `bearer` | `create_memory_handler` | `memories::CreateMemoryBody` | - | `apps/openalpacad/src/routes/memories.rs` |
+| GET | `/v1/memories/doctor` | `bearer` | `memory_doctor_handler` | - | - | `apps/openalpacad/src/routes/memories.rs` |
+| POST | `/v1/memories/forget` | `bearer` | `forget_memories_handler` | `memories::ForgetMemoriesBody` | - | `apps/openalpacad/src/routes/memories.rs` |
+| GET | `/v1/memories/recently-learned` | `bearer` | `recently_learned_memories_handler` | - | `memories::RecentlyLearnedQuery` | `apps/openalpacad/src/routes/memories.rs` |
+| GET | `/v1/memories/recently-used` | `bearer` | `recently_used_memories_handler` | - | `memories::RecentlyUsedQuery` | `apps/openalpacad/src/routes/memories.rs` |
+| GET | `/v1/memories/search` | `bearer` | `search_memories_handler` | - | `memories::SearchMemoriesQuery` | `apps/openalpacad/src/routes/memories.rs` |
+| POST | `/v1/memories/sync` | `bearer` | `sync_memories_handler` | - | - | `apps/openalpacad/src/routes/memories.rs` |
+| GET | `/v1/memories/{id}` | `bearer` | `get_memory_handler` | - | `memories::ReadMemoryQuery` | `apps/openalpacad/src/routes/memories.rs` |
+| POST | `/v1/memories/{id}` | `bearer` | `update_memory_handler` | `memories::UpdateMemoryBody` | - | `apps/openalpacad/src/routes/memories.rs` |
+| DELETE | `/v1/memories/{id}` | `bearer` | `delete_memory_handler` | - | - | `apps/openalpacad/src/routes/memories.rs` |
+| GET | `/v1/memories/{id}/history` | `bearer` | `get_memory_history_handler` | - | - | `apps/openalpacad/src/routes/memories.rs` |
+| POST | `/v1/memories/{id}/undo` | `bearer` | `undo_memory_handler` | - | - | `apps/openalpacad/src/routes/memories.rs` |
 | GET | `/v1/models` | `bearer` | `list_models` | - | - | `apps/openalpacad/src/routes/settings.rs` |
 | POST | `/v1/models/refresh` | `bearer` | `refresh_models` | - | - | `apps/openalpacad/src/routes/settings.rs` |
 | GET | `/v1/orchestrator/config` | `bearer` | `get_orchestrator_config` | - | - | `apps/openalpacad/src/routes/settings.rs` |
@@ -394,6 +407,106 @@
 | `kind` | `Option<String>` |
 | `source_task_id` | `Option<String>` |
 | `unattended` | `bool` |
+
+### `memories::CreateMemoryBody`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/memories.rs`
+
+| Field | Type |
+|---|---|
+| `title` | `String` |
+| `body` | `String` |
+| `kind` | `String` |
+| `scope` | `Option<String>` |
+| `aliases` | `Vec<String>` |
+| `tags` | `Vec<String>` |
+| `fact_key` | `Option<String>` |
+| `sources` | `Vec<SourceBody>` |
+| `valid_from` | `Option<String>` |
+| `valid_to` | `Option<String>` |
+| `supersedes` | `Option<SupersedesBody>` |
+| `expected_revision` | `Option<serde_json::Value>` |
+
+### `memories::ForgetMemoriesBody`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/memories.rs`
+
+| Field | Type |
+|---|---|
+| `targets` | `Vec<ForgetTargetBody>` |
+| `reason` | `Option<String>` |
+
+### `memories::ListMemoriesQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/memories.rs`
+
+| Field | Type |
+|---|---|
+| `kind` | `Option<String>` |
+| `status` | `Option<String>` |
+| `scope` | `Option<String>` |
+| `cursor` | `Option<String>` |
+| `limit` | `Option<usize>` |
+| `include_history` | `bool` |
+| `include_candidates` | `bool` |
+
+### `memories::ReadMemoryQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/memories.rs`
+
+| Field | Type |
+|---|---|
+| `section` | `Option<String>` |
+| `revision` | `Option<String>` |
+
+### `memories::RecentlyLearnedQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/memories.rs`
+
+| Field | Type |
+|---|---|
+| `since` | `Option<String>` |
+| `limit` | `Option<usize>` |
+
+### `memories::RecentlyUsedQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/memories.rs`
+
+| Field | Type |
+|---|---|
+| `limit` | `Option<usize>` |
+
+### `memories::SearchMemoriesQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/memories.rs`
+
+| Field | Type |
+|---|---|
+| `q` | `String` |
+| `kind` | `Option<String>` |
+| `scope` | `Option<String>` |
+| `limit` | `Option<usize>` |
+| `historical` | `bool` |
+| `as_of` | `Option<String>` |
+
+### `memories::UpdateMemoryBody`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/memories.rs`
+
+| Field | Type |
+|---|---|
+| `action` | `String` |
+| `patch` | `Option<PatchBody>` |
+| `reason` | `Option<String>` |
+| `expected_revision` | `Option<serde_json::Value>` |
 
 ### `orchestrator_latency::AggregateParams`
 

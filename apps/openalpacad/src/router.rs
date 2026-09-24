@@ -306,6 +306,53 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(crate::routes::get_persona_user_handler)
                 .put(crate::routes::put_persona_user_handler),
         )
+        // Memory (memory redesign, design §7a; plan 3.8): the user-directed
+        // surface over the memory service — a write here records origin
+        // `user`. A single-note mutation takes its revision as `If-Match` and
+        // nowhere else (428 without one, 409 on a stale one). The literal
+        // segments below are matched before `{id}`.
+        .route(
+            "/v1/memories",
+            get(crate::routes::list_memories_handler).post(crate::routes::create_memory_handler),
+        )
+        .route(
+            "/v1/memories/search",
+            get(crate::routes::search_memories_handler),
+        )
+        .route(
+            "/v1/memories/recently-learned",
+            get(crate::routes::recently_learned_memories_handler),
+        )
+        .route(
+            "/v1/memories/recently-used",
+            get(crate::routes::recently_used_memories_handler),
+        )
+        .route(
+            "/v1/memories/doctor",
+            get(crate::routes::memory_doctor_handler),
+        )
+        .route(
+            "/v1/memories/forget",
+            post(crate::routes::forget_memories_handler),
+        )
+        .route(
+            "/v1/memories/sync",
+            post(crate::routes::sync_memories_handler),
+        )
+        .route(
+            "/v1/memories/{id}",
+            get(crate::routes::get_memory_handler)
+                .post(crate::routes::update_memory_handler)
+                .delete(crate::routes::delete_memory_handler),
+        )
+        .route(
+            "/v1/memories/{id}/history",
+            get(crate::routes::get_memory_history_handler),
+        )
+        .route(
+            "/v1/memories/{id}/undo",
+            post(crate::routes::undo_memory_handler),
+        )
         // Daemon config routes
         .route(
             "/v1/daemon/config/providers",
