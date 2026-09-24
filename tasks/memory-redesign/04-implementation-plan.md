@@ -1,6 +1,6 @@
 # Implementation, removal and evaluation plan
 
-**Status: rev 4 (2026-09-23): the owner has answered MD-1…MD-9 and the audit's three decisions (design §0); nothing is implemented.** Rev 4 applies the [audit of rev 3](07-audit-gaps.md) — 49 verified gaps, G1–G49 — to rev 3, which applied the owner's answers to rev 2, which applied the [review](05-review.md). Two of those answers reshape the plan:
+**Status: rev 4.1 (2026-09-24): the owner has answered MD-1…MD-9 and the audit's three decisions (design §0); nothing is implemented.** Rev 4 applies the [audit of rev 3](07-audit-gaps.md) — 49 verified gaps, G1–G49 — to rev 3, which applied the owner's answers to rev 2, which applied the [review](05-review.md). Two of those answers reshape the plan:
 - **MD-6, refuse and reset:** existing schema-42 databases are **refused**, not converted, the way 1–41 already are. The conversion machinery is gone.
 - **MD-9, everything at once:** the GUI ships **with** the cutover.
 
@@ -324,6 +324,19 @@ After slice 3, run `cargo tree -p openalpacad -e normal -i <crate>` for each of 
 | Slice 3 is large, with the GUI in the same PR (MD-9) | Reviewable commits 3.1–3.10 in order, each green — 3.5 is one commit because its three halves are mutually dependent (§2); the GUI commit (3.9) depends on the routes and the event in 3.8 and on `memory_used` from 3.3 |
 | Baseline B cannot be measured | The G12 ruling: a one-time authorized download into the scratch store; failing that, the gate is against A at −10 pp and the report says so |
 
+## 7a. Residue recorded while building slice 3, part 1 (2026-09-23/24)
+
+Rows 3.1–3.4 landed (`8fabf9e0..2a25b47a`), each with a scoped review and its repairs. What the reviews found that is **not** fixed by those rows, and where it goes:
+
+| # | Residue | Disposition |
+|---|---|---|
+| S3-R1 | **Pre-existing resolver hole:** `resolve_workspace_path_for_write`'s absent-parent branch (`crates/openalpaca_core/src/tools/builtins/helpers/mod.rs:99-112`) returns the unresolved join, so `link -> state` plus `file_write("link/newdir/x.json")` lands `state/newdir/x.json`, and the same branch can leave the workspace (`link -> /anywhere`). Confirmed with a throwaway probe. Exposure equals the original F4's (a symlink needs `shell_execute`). | Fixed in part 2 as commit **3.12** (canonicalize the nearest existing ancestor, then re-check), with the probe as its test. |
+| S3-R2 | `registry/mod.rs:34-38` says `workspace_id` is "read by no builtin", but `start_workflow.rs:130` still calls `MemoryScopeContext::from_tool_context`. | Comment corrected in 3.12. |
+| S3-R3 | Subagent memory deliveries never reach the recently-used ring: `to_bundle` keys sections `ContextKey::Package` (`prompt_ctx/package.rs:120`), so `memory_turn` yields `used: []` for a subagent. Moot while the lead's parent bundle is empty (a pre-existing TODO). | Recorded; fix later with an `Option<MemoryUsed>` on `PackageSection`. Not in this wave. |
+| S3-R4 | `crates/openalpaca_core/tests/memory_eval.rs` no longer compiles under `--features live-eval`: it names the old `MemoryStoreTool::new(db, embedder)` and `MemoryRepository`. Default gates are unaffected. | Rewritten in part 2 as commit **3.11** for systems `none`, `D` and `E` (A and B are gone with the engine; their reports are kept). |
+| S3-R5 | Every service operation re-parses the partition (`Partition::load()`), and a fresh cache is rebuilt synchronously at boot — fine at hundreds of notes, unmeasured at 10K. | Measured in slice 4's report; a cached parse is a follow-up if the numbers say so. |
+| S3-R6 | Design rulings the implementers took (listed verbatim in `scratchpad` reports and summarised in their commit messages): pinned notes oldest-first; the 2 KiB pinned sub-budget counts note text while wrappers count against the 8 KiB total; `Freshness::Stale` means the pre-read stat scan found the file changed (a stat scan runs before every read); a `supersedes` target in the other partition is `invalid_input`; `memory_store` answers `dedup` for an exact duplicate; mutations return `MemoryChange` records and `memory_changed` is published by 3.8. | Adopted; folded into design §7c at the next design revision. |
+
 ## 8. Commit boundaries
 
 - **Slice 0:** five `fix:` commits.
@@ -348,6 +361,7 @@ Each substantial commit ends with a line naming what was verified (`CLAUDE.md` c
   - **§6:** the no-network mechanism and its evidence [G48]; the two non-test network uses named.
   - **§7:** the merge [G5]; the LLM-providers collision stated in place, the regenerate instruction dropped [G49]; the risk table's "every revision" corrected and a prompt-injection row added [G21, G2].
   - **Where rev 4 departs from 07:** G28 (one commit, not the reorder), G43 (the consumers move with the SQL to 3.5), G31 (the release template needs nothing), and G11's shape (see design §7: `memory_store` cannot prompt on `supersedes` alone, because annotations are per tool name).
+- **rev 4.1 (2026-09-24):** §7a records the residue of slice 3 part 1 (S3-R1…R6) and adds commits 3.11 (eval harness rewrite for D/E) and 3.12 (the resolver hole) to part 2.
 - **rev 3 (2026-09-23):** applies the owner's answers to MD-1…MD-9.
   - **MD-6 (refuse and reset).** §4 is rewritten: the baseline is re-squashed to 43 without memory tables, and 42 is refused like 1–41, with a refusal text and a switch-over note that name everything the factory reset removes, API keys included. Migration 043's exporter, receipt, backup, stub `vec0` module, `migrate --dry-run` and the `rusqlite` `vtab`/`backup` and `uuid` `v5` features are all removed. Slice 1's fixture shrinks to a minimal real schema-42 file for the refusal test.
   - **MD-9 (everything at once).** The GUI (the former slice 4) joins the cutover as commit 3.9; the former slice 5 becomes slice 4.
