@@ -38,8 +38,9 @@
 //! was seeded), and what a re-base would actually move.
 //!
 //! Nothing here re-bases on its own. The `PATCH` is the only writer, and it
-//! refuses rather than guesses: `404` when no row of the caller's names the old
-//! root (or a row there belongs to somebody else), `409` when rows already name
+//! refuses rather than guesses: `404` when nothing of the caller's — no row,
+//! no memory partition — names the old root (or a row there belongs to
+//! somebody else), `409` when rows already name
 //! the new one (two projects must not merge silently), `409` while a run under
 //! the old root is in flight, `409` when either root is the home store, `409`
 //! when the store directory itself cannot be moved, and `422` when the
@@ -408,7 +409,9 @@ fn workspace_json(
 /// belong to `owner_id`, and a root holding somebody else's is a `404` rather
 /// than a transaction over rows the caller cannot see. `session` and `task`
 /// carry no owner column, which is precisely why the answer is a refusal and
-/// not a half-scoped update.
+/// not a half-scoped update. A root the caller knows only by a memory
+/// partition of their own — no row anywhere — is re-based all the same: the
+/// transaction rewrites nothing and the five steps re-key the notes.
 pub(crate) fn rebase_workspace(
     db: &Database,
     memory: &MemoryService,
@@ -477,7 +480,16 @@ pub(crate) fn rebase_workspace_with(
     if old_rows.other_owners > 0 {
         return owner_mismatch(&old_root, old_rows.other_owners);
     }
-    if old_rows.counts.is_empty() {
+    // A project the caller knows only by its memory partition — no row in
+    // any member — is still a project, exactly as the purge takes it: the
+    // five steps below are the one path that re-keys its notes with their
+    // origin intact, and a `404` here left a hand move plus `doctor
+    // --repair` as the only remedy, which re-records every note as
+    // `external`. The listing is the caller's own (R40).
+    let known_by_memory = memory
+        .known_project_roots(owner_id)
+        .contains(&std::path::PathBuf::from(&old_root));
+    if old_rows.counts.is_empty() && !known_by_memory {
         return api_error(
             StatusCode::NOT_FOUND,
             "WORKSPACE_NOT_FOUND",

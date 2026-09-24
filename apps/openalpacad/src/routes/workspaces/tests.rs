@@ -1552,6 +1552,72 @@ async fn a_project_moved_by_hand_gets_its_snapshot_re_keyed_too() {
     assert_eq!(read.revision, note.revision);
 }
 
+/// A project known only by its memory partition — no row in any member —
+/// is still a project the re-base takes, as the purge already takes it:
+/// design §3's five steps are the one path that re-keys its notes with
+/// their origin intact, and a `404` here left a hand move plus `doctor
+/// --repair` as the only remedy, which re-records every note as
+/// `external`. Scoped like the row path: another owner asking about the
+/// same root gets the `404`, and nothing moves.
+#[tokio::test]
+async fn a_project_known_only_by_its_memory_can_be_re_based() {
+    let f = Fixture::new();
+    let old = f.project("old-project");
+    let new = f.bare_dir("new-project");
+    let note = f.note(&old, "Release step");
+    let old_key = f.project_snapshot(&old).unwrap().partition_key;
+    let old_snapshot_path = openalpaca_storage::memory_files::snapshot_path_for(&old_key).unwrap();
+    assert_eq!(
+        f.memory.known_project_roots(OWNER),
+        [std::path::PathBuf::from(&old)]
+    );
+    assert_eq!(f.get(Some(&old)).await.1["rows"]["artifacts"], 0);
+
+    // Somebody else's re-base of it is nothing of theirs.
+    let (status, body) = f.patch_as("owner-2", &old, &new).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_FOUND");
+    assert!(old_snapshot_path.is_file(), "a refusal moves nothing");
+    assert!(
+        std::path::Path::new(&old)
+            .join(store::STORE_DIR_NAME)
+            .is_dir()
+    );
+
+    let (status, body) = f.patch(&old, &new).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["store_moved"], true);
+
+    assert!(
+        !old_snapshot_path.exists(),
+        "step 5 deleted the old-key snapshot"
+    );
+    let moved = f
+        .project_snapshot(&new)
+        .expect("the new-key snapshot binds the moved directory");
+    assert_ne!(moved.partition_key, old_key);
+    assert_eq!(moved.moved_from, None, "step 5 cleared moved_from");
+    assert!(moved.notes.contains_key(&note.id));
+    assert_eq!(f.partition(&new).health(), PartitionHealth::Ready);
+    assert!(move_states().is_empty(), "{:?}", move_states());
+    let read = f
+        .memory
+        .read(
+            &f.memory_ctx(&new),
+            ReadInput {
+                id: note.id,
+                expected_revision: None,
+                section: None,
+            },
+        )
+        .expect("the note reads from the new root");
+    assert_eq!(read.revision, note.revision);
+    assert_eq!(
+        f.memory.known_project_roots(OWNER),
+        [std::path::PathBuf::from(&new)]
+    );
+}
+
 /// A crash injected after each of the five steps (fixture 17 steps 6–11)
 /// leaves the one state `doctor` names for it: nothing after step 1; the
 /// twin *abandoned* after steps 2 and 3 (the directory never moved); the old
