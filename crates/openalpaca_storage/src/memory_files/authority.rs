@@ -14,12 +14,13 @@
 //!   `supersedes_authority` conflict on the note that carries it (P3).
 //! - **Same `fact_key`**: among the notes that are still effectively active,
 //!   the highest authority wins; a tie goes to the newest `observed_at` when
-//!   every tied note has one, else to the newest `created_at` (an edit never
-//!   flips it), then `updated_at`, then the lowest id (R9); every other note
-//!   in the group is a loser — out of automatic recall, `conflict: true` in a
-//!   search (P4). `doctor` reports the pair as `same_fact_key` unless the
-//!   loser's own un-honored link to the winner already reports it (one
-//!   conflict per pair; fixtures 18 and 24 read together).
+//!   every tied note has one; after that (or first, when any lacks one) to
+//!   the newest `created_at` (an edit never flips it), then `updated_at`,
+//!   then the lowest id (R9); every other note in the group is a loser — out
+//!   of automatic recall, `conflict: true` in a search (P4). `doctor` reports
+//!   the pair as `same_fact_key` unless the loser's own un-honored link to
+//!   the winner already reports it (one conflict per pair; fixtures 18 and 24
+//!   read together).
 //! - **`source_forgotten`**: a note citing a source some tombstone suppresses,
 //!   unless the note was written in a later second than that forget (an edit
 //!   lifts it). The clock is to the second, so a write in the forget's own
@@ -276,12 +277,12 @@ pub fn derive(inputs: &[NoteInput<'_>], snapshot: &ControlSnapshot) -> Derivatio
 
 /// The same-`fact_key` winner of one group (design §3 rule 3, §7c R9): the
 /// highest authority; among the notes tied on it, the newest `observed_at`
-/// when **every** one of them has one, otherwise the newest `created_at` —
-/// the note first written most recently, which an edit does not move — then
-/// the newest `updated_at`, then the lowest id. Deciding the clock once for
-/// the tied set keeps this an order: "`observed_at` when both have one" is
-/// not transitive over three notes, and the winner would then depend on the
-/// order the files were listed in.
+/// when **every** one of them has one; after that (or first, when any lacks
+/// one) the newest `created_at` — the note first written most recently,
+/// which an edit does not move — then the newest `updated_at`, then the
+/// lowest id. Deciding the clock once for the tied set keeps this an order:
+/// "`observed_at` when both have one" is not transitive over three notes, and
+/// the winner would then depend on the order the files were listed in.
 fn same_key_winner(
     ids: &[NoteId],
     by_id: &HashMap<NoteId, &Note>,

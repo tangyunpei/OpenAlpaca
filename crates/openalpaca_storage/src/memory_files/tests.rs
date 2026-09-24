@@ -2743,6 +2743,10 @@ fn a_same_key_group_reads_one_clock_whatever_the_input_order() {
         note(0x03, Some(5), 2, 9),
     ];
     assert_eq!(derive_all(&observed), id_of(0x01));
+    // Every note observed at the same instant: `created_at` is next, not
+    // `updated_at` — 0x09, written last, wins although 0x08 was edited last.
+    let same_observation = [note(0x08, Some(5), 1, 9), note(0x09, Some(5), 3, 2)];
+    assert_eq!(derive_all(&same_observation), id_of(0x09));
     // Written in the same second and never observed: the newer edit, then
     // the lowest id.
     let same_second = [note(0x04, None, 1, 2), note(0x05, None, 1, 7)];
