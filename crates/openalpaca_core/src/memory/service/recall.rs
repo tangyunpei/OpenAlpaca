@@ -137,11 +137,6 @@ impl MemoryService {
                     .filter_map(|(id, _)| NoteId::parse(id).ok()),
             );
             self.reindex(p, true)?;
-        } else {
-            self.touched
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(key.to_string());
         }
         Ok(stale)
     }

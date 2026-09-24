@@ -131,9 +131,6 @@ pub struct MemoryService {
     db: Option<Database>,
     index: MemoryIndex,
     slots: WriteSlots,
-    /// Partition keys whose index rows this process has checked against the
-    /// disk at least once.
-    touched: Mutex<HashSet<String>>,
     fingerprints: Mutex<HashMap<String, HashMap<NoteId, Fingerprint>>>,
     ring: Mutex<VecDeque<RecentlyUsedItem>>,
 }
@@ -160,7 +157,6 @@ impl MemoryService {
             db,
             index,
             slots: WriteSlots::default(),
-            touched: Mutex::new(HashSet::new()),
             fingerprints: Mutex::new(HashMap::new()),
             ring: Mutex::new(VecDeque::with_capacity(RING_CAPACITY)),
         }
@@ -463,10 +459,6 @@ impl MemoryService {
         drop(fingerprints);
         // Stamp the scan so `last_scan` says the rows were checked.
         self.index.reconcile(&key, || Self::scan_entries(p))?;
-        self.touched
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key);
         Ok(())
     }
 
