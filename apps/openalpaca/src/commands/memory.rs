@@ -1278,12 +1278,18 @@ fn print_list(page: &Value) {
             }
         );
     }
-    if let Some(cursor) = page["next_cursor"].as_str() {
-        println!(
-            "{}",
-            format!("More: pass --limit, or continue from cursor {cursor}").dimmed()
-        );
+    if let Some(hint) = list_more_hint(page) {
+        println!("{}", hint.dimmed());
     }
+}
+
+/// The line under a list page that has more: names only what `list` can
+/// take (§7a gives it no `--cursor`), so the hint is never a continuation
+/// the verb refuses.
+fn list_more_hint(page: &Value) -> Option<String> {
+    page["next_cursor"]
+        .as_str()
+        .map(|_| "More: raise --limit (up to 100)".to_string())
 }
 
 fn print_search(found: &Value) {

@@ -540,3 +540,26 @@ fn repair_lifts_a_quarantine_and_adopt_rebinds_an_orphan() {
             .contains("not an owner key")
     );
 }
+
+// ── The list page's "more" hint ──────────────────────────────────
+
+/// A page with a `next_cursor` gets one hint, and the hint names only a
+/// flag `list` takes: `--limit` and its ceiling. `list` has no `--cursor`
+/// (§7a), so the hint never tells the user to continue from one — a
+/// continuation the verb would refuse.
+#[test]
+fn the_list_hint_names_only_what_list_can_take() {
+    assert_eq!(list_more_hint(&json!({ "items": [] })), None);
+    let hint = list_more_hint(&json!({ "items": [], "next_cursor": "eyJvIjoi" }))
+        .expect("a page with more gets a hint");
+    assert!(hint.contains("--limit"), "{hint}");
+    assert!(hint.contains("100"), "{hint}");
+    assert!(
+        !hint.to_lowercase().contains("cursor"),
+        "list takes no cursor: {hint}"
+    );
+    assert!(
+        parse(&["list", "--cursor", "eyJvIjoi"]).is_err(),
+        "and the flag really does not exist"
+    );
+}
