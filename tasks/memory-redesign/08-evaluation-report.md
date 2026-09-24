@@ -60,11 +60,11 @@ Comparison D vs B (`compare.py`): *pending*.
 
 ## 5. Gates at the report's head
 
-Run by the session lead at `d3a3e712` (slice 3 complete): `cargo test --workspace --exclude openalpaca_gui` 3,767 passed / 0 failed / 7 ignored; `cargo clippy --workspace --exclude openalpaca_gui --all-targets` exit 0 (93 pre-existing warning lines, none on changed lines per each scoped review); `python3 scripts/gen_api_docs.py --check` 0; `cargo check -p openalpaca_gui` 0; `cargo test -p openalpaca_core --features live-eval --test memory_eval --no-run` 0; `bun run check` / `test` (96 files, 1,149) / `format:check` / `build` all 0.
+Run by the session lead at `8815b4cd` (slice 3 complete, the edit guard and the follow-up docs in): `cargo test --workspace --exclude openalpaca_gui` 3,769 passed / 0 failed / 7 ignored; clippy, `gen_api_docs.py --check`, `cargo check -p openalpaca_gui` and the four `bun run` gates all exit 0. Earlier, at `d3a3e712`: `cargo test --workspace --exclude openalpaca_gui` 3,767 passed / 0 failed / 7 ignored; `cargo clippy --workspace --exclude openalpaca_gui --all-targets` exit 0 (93 pre-existing warning lines, none on changed lines per each scoped review); `python3 scripts/gen_api_docs.py --check` 0; `cargo check -p openalpaca_gui` 0; `cargo test -p openalpaca_core --features live-eval --test memory_eval --no-run` 0; `bun run check` / `test` (96 files, 1,149) / `format:check` / `build` all 0.
 
 ## 6. Residue and follow-ups
 
-- The CLI `memory edit` truncated-note guard (3.9 review finding 2, CLI half): *in progress*.
+- The CLI `memory edit` truncated-note guard (3.9 review finding 2, CLI half): **done** (`5aa4c1a5`, `d48e427a`) — the CLI refuses before the editor opens, and a route test pins that a note over 32 KiB never loads, so no cut body can reach the route.
 - `GET /v1/memories/recently-used` has no GUI reader (design §7c R8; DESIGN_SPEC §5.7).
 - Subagent deliveries never reach the recently-used ring (plan §7a S3-R3).
 - 100K-note stress and the startup timing at scale (above).
