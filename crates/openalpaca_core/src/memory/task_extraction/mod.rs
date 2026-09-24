@@ -206,6 +206,10 @@ pub(crate) async fn extract_task_memories(
     );
 
     let request = RouterRequest {
+        // `[orchestrator.costs] extraction_model` is the one key for
+        // background extraction, and it names this extractor's model as it
+        // does the chat turn's (plan 3.4; before it this call always took the
+        // router default). `None` is still the router default.
         model: dcfg.orchestrator.costs.extraction_model.clone(),
         messages: Arc::new(vec![
             ChatMessage::system(
@@ -388,7 +392,11 @@ struct Item {
 
 /// Reads one `extractions[]` entry. `None` is an invalid item: no content,
 /// or a kind that is not one of the six. A missing kind is a `fact`; a
-/// missing basis is a claim — the model has to say it saw the thing.
+/// missing basis is a claim — the model has to say it saw the thing; and a
+/// missing confidence is `0.0`, under any positive floor, so an item the
+/// model did not rate is dropped rather than admitted at an invented `0.7`
+/// (the pre-3.4 default). Fail closed: a candidate that was never rated is
+/// not worth the user's confirmation prompt.
 fn read_item(value: &serde_json::Value) -> Option<Item> {
     let content = value.get("content")?.as_str()?.trim();
     if content.is_empty() {
