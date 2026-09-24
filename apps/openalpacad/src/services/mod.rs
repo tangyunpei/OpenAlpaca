@@ -29,6 +29,11 @@ pub struct InitializedServices {
     pub token_manager: Option<Arc<openalpaca_llm::TokenManager>>,
     pub provider_usage_tracker: Option<Arc<openalpaca_llm::ProviderUsageTracker>>,
     pub embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+    /// The memory service (memory redesign, design §7a): one per daemon,
+    /// over the home store's partitions and the disposable index at
+    /// `state/cache/memory-index-v1.sqlite`. The tool registry's read
+    /// surface and the orchestrator's main-loop writers both hold it.
+    pub memory_service: Arc<openalpaca_core::memory::service::MemoryService>,
     pub agent_config_service: Arc<AgentConfigService>,
     pub tool_registry: Arc<openalpaca_core::tools::ToolRegistry>,
     pub security_gate: Arc<openalpaca_core::security::gate::SecurityGate>,
@@ -208,11 +213,19 @@ pub async fn initialize_services(
         Arc::new(catalog)
     };
 
+    // The memory service, before the tool registry that registers its read
+    // surface. `open_default` opens (or recreates and rebuilds) the cache
+    // under the home store; the owner check and source verification read
+    // this database.
+    let memory_service =
+        Arc::new(openalpaca_core::memory::service::MemoryService::open_default(Some(db.clone())));
+
     // Build ToolRegistry
     let (tool_registry, connector_send_lock, mcp_supervisor) = tools::build_tool_registry(
         config_base_dir,
         db,
         &embedder,
+        &memory_service,
         soul_path,
         user_path,
         identity_path,
@@ -273,6 +286,7 @@ pub async fn initialize_services(
         token_manager,
         provider_usage_tracker,
         embedder,
+        memory_service,
         agent_config_service,
         tool_registry,
         security_gate,

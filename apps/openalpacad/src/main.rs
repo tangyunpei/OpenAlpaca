@@ -473,6 +473,10 @@ async fn async_main(
 
     // Wire confirmation broker into orchestrator
     orchestrator.set_confirmation_broker(confirmation_broker.clone());
+    // The memory service: the main loop builds its memory writers from it
+    // (memory redesign, design §7a); the read surface is already in the
+    // registry.
+    orchestrator.set_memory_service(svcs.memory_service.clone());
 
     // Set initial documents
     orchestrator.update_user_document(initial_user_document);
@@ -712,6 +716,7 @@ async fn async_main(
         token_manager: svcs.token_manager,
         provider_usage_tracker: svcs.provider_usage_tracker,
         embedder: svcs.embedder,
+        memory_service: svcs.memory_service,
         local_user_id,
         default_lane_key,
         llm_config_path,
