@@ -351,4 +351,26 @@ mod tests {
         );
         assert!(memory_turn(&ContextBundle::empty()).is_none());
     }
+
+    /// A subagent's package (`ContextManager::distill` → `to_bundle`) keys
+    /// its sections by package name, not by note: the memory it carries is
+    /// still rendered for the turn, and nothing is reported as used.
+    #[test]
+    fn a_distilled_memory_section_is_rendered_but_reports_no_used_entry() {
+        use crate::prompt_ctx::package::{ContextPackage, PackageSection, PackageSectionKind};
+        let package = ContextPackage {
+            sections: vec![PackageSection {
+                kind: PackageSectionKind::Memory,
+                content: "[memory id=x]\nUser prefers vim.\n[/memory]\n".to_string(),
+                token_estimate: 8,
+                priority: SectionPriority::Normal,
+            }],
+            total_tokens: 8,
+            budget: 100,
+            sub_agent_window: 8192,
+        };
+        let turn = memory_turn(&package.to_bundle()).expect("the section is memory");
+        assert!(turn.content.contains("User prefers vim."));
+        assert!(turn.used.is_empty());
+    }
 }

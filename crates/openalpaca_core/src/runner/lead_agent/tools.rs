@@ -421,6 +421,14 @@ impl BuiltInTool for SpawnSubagentTool {
             None, // no predecessor handoff for lead agent spawns
         );
         let bundle = context_package.to_bundle();
+        // Design §5: a distilled memory section reaches a subagent the way
+        // it reaches every other loop — outside Layer 3, which leaves
+        // `ContextKind::Memory` out of its cached output — as one quoted-data
+        // message before the objective. The parent bundle is empty today
+        // (`run_lead_agent`, step 4), so this carries nothing until a lead
+        // distils real context; a package section carries no `memory_used`
+        // key, so nothing is recorded for a subagent.
+        let memory_turn = crate::prompt_ctx::sources::memory::memory_turn(&bundle);
 
         // ── Phase 6 Commit 3: route system-prompt + message-list assembly
         // through the layered compose engine. `PersonaMode::Skip` +
@@ -539,7 +547,11 @@ impl BuiltInTool for SpawnSubagentTool {
         );
 
         // Clone out of the Arc — run_agentic_loop_routed needs Vec<ChatMessage>.
-        let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
+        let mut messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
+        if let Some(memory) = &memory_turn {
+            let insert_at = messages.len().saturating_sub(1);
+            messages.insert(insert_at, ChatMessage::user(&memory.content));
+        }
 
         // **S3 — a subagent's rounds carry a budget too.** The lead's loop is
         // handed a `ContextBudgetManager` and the main loop's is; a subagent's
@@ -554,7 +566,8 @@ impl BuiltInTool for SpawnSubagentTool {
         let budget_config = self.daemon_config.load().execution.context.clone();
         let budget_system_prompt_tokens = (composed.token_budget.static_prompt_tokens
             + composed.token_budget.dynamic_context_tokens)
-            as usize;
+            as usize
+            + memory_turn.as_ref().map_or(0, |m| m.token_estimate());
         let budget_tools_tokens = crate::runner::estimate_tools_tokens(&tools);
 
         let mut sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
