@@ -4,3 +4,4 @@ pub mod preferences;
 pub mod scope_context;
 pub mod task_extraction;
 pub mod workspace;
+pub mod service;
