@@ -206,7 +206,7 @@ pub fn memory_search_tool_definition() -> ToolDefinition {
                 "kind": { "type": "string", "enum": NoteKind::ALL.iter().map(|k| k.as_str()).collect::<Vec<_>>(), "description": "Only notes of this kind" },
                 "scope": { "type": "string", "enum": ["global", "project"], "description": "Only the global or only the current project's notes (default: both)" },
                 "limit": { "type": "integer", "description": "1–20, default 8" },
-                "historical": { "type": "boolean", "description": "Include superseded and archived notes (default false)" },
+                "historical": { "type": "boolean", "description": "Also include notes that are no longer current: superseded, archived, and those whose validity window has ended (default false). Set it for questions about the past — \"used to\", \"before\", \"previously\", \"以前\" — and with `as_of` to ask what held at a date." },
                 "as_of": { "type": "string", "description": "RFC 3339: evaluate each note's validity interval at this instant" }
             }),
             &["query"],

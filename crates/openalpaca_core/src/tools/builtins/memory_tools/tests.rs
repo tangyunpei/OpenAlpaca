@@ -681,3 +681,26 @@ async fn an_unattended_turn_is_refused_forget_and_update_before_anything_runs() 
     let out = sandbox.execute_tool(&call, &attended, &ctx).await.unwrap();
     assert!(out.contains(&id.to_string()), "{out}");
 }
+
+/// The model is told what `historical` adds — superseded, archived and
+/// ended notes — and when to reach for it: a question about the past. A
+/// note whose validity window has ended is hidden from a current search, so
+/// without this the model has no reason to ask for it.
+#[test]
+fn the_historical_flag_says_what_it_adds_and_when_to_use_it() {
+    let definition = memory_search_tool_definition();
+    let text = definition.parameters["properties"]["historical"]["description"]
+        .as_str()
+        .expect("historical has a description");
+    for word in [
+        "superseded",
+        "archived",
+        "ended",
+        "used to",
+        "before",
+        "previously",
+        "以前",
+    ] {
+        assert!(text.contains(word), "{word:?} is missing from {text:?}");
+    }
+}
