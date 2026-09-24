@@ -369,6 +369,30 @@ impl<'a> LlmUsageRepository<'a> {
         })
     }
 
+    /// One agent's requests and cost on today's **UTC** date, summed over
+    /// every model — the durable daily gate the two memory extractors read
+    /// (Learning v2, design 09 §1.8, ruling LR8). `record_and_log` upserts
+    /// the row on every call, a failed parse included, so the count survives
+    /// a restart and resets at 00:00 UTC, where the in-memory cost tracker
+    /// counted since boot and never reset.
+    pub fn usage_today(&self, agent_id: &str) -> Result<(i64, f64)> {
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        self.usage_on(agent_id, &today)
+    }
+
+    /// [`Self::usage_today`] for any `YYYY-MM-DD` date.
+    pub fn usage_on(&self, agent_id: &str, date: &str) -> Result<(i64, f64)> {
+        self.db.with_connection(|conn| {
+            let (requests, cost): (i64, f64) = conn.query_row(
+                "SELECT COALESCE(SUM(total_requests), 0), COALESCE(SUM(total_cost_usd), 0.0)
+                   FROM llm_usage_daily WHERE date = ?1 AND agent_id = ?2",
+                rusqlite::params![date, agent_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            Ok((requests, cost))
+        })
+    }
+
     /// Get daily usage for an agent.
     pub fn get_daily_usage(&self, agent_id: &str, limit: usize) -> Result<Vec<LlmUsageDaily>> {
         self.query_daily_usage(Some(agent_id), None, limit)

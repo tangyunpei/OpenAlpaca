@@ -1192,3 +1192,139 @@ fn message_counts_by_source_ignores_unattributed_rows() {
         .unwrap();
     assert!(counts.is_empty(), "an unattributed row counts for nobody");
 }
+
+// ── Learning v2 (design 09 §1.2, §1.3) ──────────────────────────────────
+
+fn learning_row(
+    repo: &ConversationRepository<'_>,
+    session: &str,
+    role: &str,
+    content: &str,
+    request_id: Option<&str>,
+    workspace_root: Option<&str>,
+) -> i64 {
+    repo.insert_with_structured(
+        &ConversationMessage {
+            lane_key: "user:gui".to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            source: Some("gui".to_string()),
+            session_id: Some(session.to_string()),
+            request_id: request_id.map(str::to_string),
+            workspace_root: workspace_root.map(str::to_string),
+            ..Default::default()
+        },
+        r#"{"v":1,"parts":[{"type":"document","extracted_text":"THE ATTACHMENT"}]}"#,
+        "[Attachments: notes.txt]",
+    )
+    .unwrap()
+}
+
+/// The window is the session's rows past the cursor, in id order, and it
+/// carries the turn's id and project root — and nothing that holds an
+/// attachment's text (U2).
+#[test]
+fn the_learning_window_reads_rows_after_the_cursor_in_id_order() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.create_session("user:gui", "gui", None, None).unwrap();
+    let other = repo.create_session("user:cli", "cli", None, None).unwrap();
+    let first = learning_row(&repo, &session.id, "user", "first", Some("r1"), Some("/p"));
+    let second = learning_row(&repo, &session.id, "assistant", "second", Some("r1"), None);
+    learning_row(&repo, &other.id, "user", "elsewhere", Some("r9"), None);
+    let third = learning_row(&repo, &session.id, "user", "third", None, None);
+
+    let window = repo.learning_window(&session.id, first, 10).unwrap();
+    assert_eq!(
+        window.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![second, third]
+    );
+    assert_eq!(window[0].role, "assistant");
+    assert_eq!(window[0].content, "second");
+    assert_eq!(window[0].request_id.as_deref(), Some("r1"));
+    assert_eq!(window[1].request_id, None);
+    assert!(
+        window.iter().all(|r| !r.content.contains("THE ATTACHMENT")),
+        "the window reads content, never content_json"
+    );
+
+    let all = repo.learning_window(&session.id, 0, 10).unwrap();
+    assert_eq!(all[0].workspace_root.as_deref(), Some("/p"));
+    assert_eq!(
+        repo.learning_window(&session.id, 0, 1).unwrap().len(),
+        1,
+        "limit binds"
+    );
+}
+
+/// Context rows come from before the cursor: the newest ones, in id order.
+#[test]
+fn learning_rows_before_reads_the_newest_rows_at_or_before_an_id() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.create_session("user:gui", "gui", None, None).unwrap();
+    let ids: Vec<i64> = (0..5)
+        .map(|i| {
+            learning_row(
+                &repo,
+                &session.id,
+                "user",
+                &format!("m{i}"),
+                Some("r"),
+                None,
+            )
+        })
+        .collect();
+    let rows = repo.learning_rows_before(&session.id, ids[3], 2).unwrap();
+    assert_eq!(
+        rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![ids[2], ids[3]]
+    );
+}
+
+/// The two new columns round-trip through every message read, and stay off
+/// the wire: `GET /v1/chat/history` serializes this struct directly.
+#[test]
+fn request_id_and_workspace_root_round_trip_and_stay_off_the_wire() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.create_session("user:gui", "gui", None, None).unwrap();
+    learning_row(
+        &repo,
+        &session.id,
+        "user",
+        "hello",
+        Some("req-1"),
+        Some("/repo"),
+    );
+    let messages = repo.list_by_session(&session.id, 10, 0).unwrap();
+    assert_eq!(messages[0].request_id.as_deref(), Some("req-1"));
+    assert_eq!(messages[0].workspace_root.as_deref(), Some("/repo"));
+
+    let wire = serde_json::to_value(&messages[0]).unwrap();
+    assert!(wire.get("request_id").is_none(), "{wire}");
+    assert!(wire.get("workspace_root").is_none(), "{wire}");
+}
+
+/// Design §1.3 *Lifecycle*: `delete_session` deletes the cursor row in its
+/// existing transaction.
+#[test]
+fn deleting_a_session_deletes_its_cursor() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.create_session("user:gui", "gui", None, None).unwrap();
+    let keep = repo.create_session("user:cli", "cli", None, None).unwrap();
+    let cursors = crate::repository::LearningCursorRepository::new(&db);
+    assert!(cursors.advance_cas(&session.id, 7, 0).unwrap());
+    assert!(cursors.advance_cas(&keep.id, 3, 0).unwrap());
+
+    assert!(repo.delete_session(&session.id).unwrap());
+    let rows: Vec<String> = db
+        .with_connection(|c| {
+            Ok(c.prepare("SELECT session_id FROM learning_cursor")?
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .unwrap();
+    assert_eq!(rows, vec![keep.id]);
+}

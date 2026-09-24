@@ -378,3 +378,100 @@ fn provider_usage_since_query_plan_uses_the_timestamp_index() {
         "the timestamp index should turn the WHERE clause into a SEARCH, not a full SCAN: {plan}"
     );
 }
+
+// ── The durable daily gate (Learning v2, design 09 §1.8) ────────────────
+
+fn daily(date: &str, agent: &str, model: &str, requests: i32, cost: f64) -> LlmUsageDaily {
+    LlmUsageDaily {
+        date: date.to_string(),
+        agent_id: agent.to_string(),
+        model: model.to_string(),
+        total_requests: requests,
+        total_input_tokens: 100,
+        total_output_tokens: 10,
+        total_cost_usd: cost,
+    }
+}
+
+/// One agent's day, summed over every model it used, and nothing from
+/// another agent or another day.
+#[test]
+fn usage_on_sums_one_agents_models_for_one_day() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+    repo.upsert_daily_usage(&daily(
+        "2026-09-24",
+        "orchestrator_user_extract",
+        "a",
+        3,
+        0.10,
+    ))
+    .unwrap();
+    repo.upsert_daily_usage(&daily(
+        "2026-09-24",
+        "orchestrator_user_extract",
+        "b",
+        2,
+        0.05,
+    ))
+    .unwrap();
+    repo.upsert_daily_usage(&daily(
+        "2026-09-23",
+        "orchestrator_user_extract",
+        "a",
+        40,
+        9.0,
+    ))
+    .unwrap();
+    repo.upsert_daily_usage(&daily(
+        "2026-09-24",
+        "orchestrator_task_extract",
+        "a",
+        7,
+        1.0,
+    ))
+    .unwrap();
+
+    let (requests, cost) = repo
+        .usage_on("orchestrator_user_extract", "2026-09-24")
+        .unwrap();
+    assert_eq!(requests, 5);
+    assert!((cost - 0.15).abs() < 1e-9, "{cost}");
+    assert_eq!(repo.usage_on("nobody", "2026-09-24").unwrap(), (0, 0.0));
+}
+
+/// `usage_today` reads the UTC date `record_and_log` writes under.
+#[test]
+fn usage_today_counts_what_record_and_log_wrote_today() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+    repo.record_and_log(
+        "orchestrator_user_extract",
+        None,
+        "ollama",
+        "m",
+        10,
+        2,
+        0.0,
+        5,
+        "success",
+        None,
+    )
+    .unwrap();
+    repo.record_and_log(
+        "orchestrator_user_extract",
+        None,
+        "ollama",
+        "m",
+        10,
+        2,
+        0.02,
+        5,
+        "error",
+        Some("JSON parse failure"),
+    )
+    .unwrap();
+    let (requests, cost) = repo.usage_today("orchestrator_user_extract").unwrap();
+    assert_eq!(requests, 2, "a failed parse is a call too");
+    assert!((cost - 0.02).abs() < 1e-9, "{cost}");
+}

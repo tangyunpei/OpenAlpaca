@@ -14,7 +14,7 @@ pub mod subagent;
 pub mod task;
 
 pub use artifact::{ArtifactKind, ArtifactOrigin};
-pub use conversation::{Conversation, ConversationMessage};
+pub use conversation::{Conversation, ConversationMessage, LearningRow};
 pub use core::EventLog;
 pub use file_asset::{AttachmentRef, FileAsset, FileAssetStatus, MessageArtifact};
 pub use identity::{ExternalIdentity, GlobalUser, LinkToken};

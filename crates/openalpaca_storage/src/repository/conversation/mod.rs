@@ -12,7 +12,7 @@
 //! with no behaviour change. Read "conversation" as "session" throughout.
 
 use crate::Database;
-use crate::models::conversation::{Conversation, ConversationMessage};
+use crate::models::conversation::{Conversation, ConversationMessage, LearningRow};
 use crate::sql::escape_like;
 use anyhow::Result;
 use rusqlite::OptionalExtension;
@@ -30,7 +30,14 @@ const SESSION_COLUMNS: &str = "id, lane_key, source, title, message_count, last_
 /// `task_id` was exactly that bug), and the older-context window that motivated
 /// the narrow form discards everything but `(id, role, content)` anyway.
 const MESSAGE_COLUMNS: &str = "id, lane_key, role, content, source, model, tokens_in, \
-     tokens_out, duration_ms, created_at, content_json, display_text, task_id, session_id";
+     tokens_out, duration_ms, created_at, content_json, display_text, task_id, session_id, \
+     request_id, workspace_root";
+
+/// Every column [`ConversationRepository::row_to_learning_row`] reads, in
+/// order — and every column a learning window may read at all (design 09
+/// §1.2). Never `content_json` or `display_text`: on an attachment turn they
+/// carry the files' extracted text (U2).
+const LEARNING_COLUMNS: &str = "id, role, content, source, created_at, request_id, workspace_root";
 
 /// The page [`ConversationRepository::list_sessions`] serves when the caller
 /// asks for a non-positive one. `LIMIT -1` means *no limit* in SQLite, so an
@@ -107,8 +114,8 @@ impl<'a> ConversationRepository<'a> {
         self.db.with_connection(|conn| {
             let session_id = Self::resolve_session_id(conn, msg)?;
             conn.execute(
-                "INSERT INTO conversation_messages (lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, content_json, display_text, task_id, session_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO conversation_messages (lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, content_json, display_text, task_id, session_id, request_id, workspace_root)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 (
                     &msg.lane_key,
                     &msg.role,
@@ -122,6 +129,8 @@ impl<'a> ConversationRepository<'a> {
                     display_text,
                     &msg.task_id,
                     &session_id,
+                    &msg.request_id,
+                    &msg.workspace_root,
                 ),
             )?;
             Ok(conn.last_insert_rowid())
@@ -288,6 +297,62 @@ impl<'a> ConversationRepository<'a> {
                 messages.push(Self::row_to_message(row)?);
             }
             Ok(messages)
+        })
+    }
+
+    /// A session's learning window (design 09 §1.2): its rows with
+    /// `id > after_id`, in id order, at most `limit` of them — through
+    /// `idx_conv_msg_session`, and reading only [`LearningRow`]'s columns.
+    pub fn learning_window(
+        &self,
+        session_id: &str,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<LearningRow>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {LEARNING_COLUMNS}
+                 FROM conversation_messages
+                 WHERE session_id = ?1 AND id > ?2
+                 ORDER BY id ASC
+                 LIMIT ?3",
+            ))?;
+            let rows = stmt
+                .query_map(rusqlite::params![session_id, after_id, limit], |row| {
+                    Self::row_to_learning_row(row)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// The newest `limit` rows of a session with `id <= at_or_before_id`, in
+    /// id order: where a window's `context` rows come from (design 09 §1.2).
+    /// The same columns as [`Self::learning_window`], and nothing else.
+    pub fn learning_rows_before(
+        &self,
+        session_id: &str,
+        at_or_before_id: i64,
+        limit: i64,
+    ) -> Result<Vec<LearningRow>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {LEARNING_COLUMNS} FROM (
+                     SELECT {LEARNING_COLUMNS}
+                     FROM conversation_messages
+                     WHERE session_id = ?1 AND id <= ?2
+                     ORDER BY id DESC
+                     LIMIT ?3
+                 )
+                 ORDER BY id ASC",
+            ))?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![session_id, at_or_before_id, limit],
+                    |row| Self::row_to_learning_row(row),
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
         })
     }
 
@@ -562,6 +627,9 @@ impl<'a> ConversationRepository<'a> {
                   WHERE session_id = ?1",
                 [id],
             )?;
+            // Learning v2 (design 09 §1.3): the session's learning cursor goes
+            // with it. Its unlearned turns went with the messages (LQ4).
+            tx.execute("DELETE FROM learning_cursor WHERE session_id = ?1", [id])?;
             tx.execute("DELETE FROM session WHERE id = ?1", [id])?;
             tx.commit()?;
             Ok(true)
@@ -979,6 +1047,20 @@ impl<'a> ConversationRepository<'a> {
             display_text: row.get(11)?,
             task_id: row.get(12)?,
             session_id: row.get(13)?,
+            request_id: row.get(14)?,
+            workspace_root: row.get(15)?,
+        })
+    }
+
+    fn row_to_learning_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningRow> {
+        Ok(LearningRow {
+            id: row.get(0)?,
+            role: row.get(1)?,
+            content: row.get(2)?,
+            source: row.get(3)?,
+            created_at: row.get(4)?,
+            request_id: row.get(5)?,
+            workspace_root: row.get(6)?,
         })
     }
 }

@@ -6,7 +6,7 @@
 
 - DB path resolver: `openalpaca_storage::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
-- Registered migrations: 1
+- Registered migrations: 2
 
 ## Tables
 
@@ -109,7 +109,7 @@ created_at TEXT NOT NULL DEFAULT (datetime('now'))
 
 ### `conversation_messages` (table)
 
-Source migration: `001_baseline.sql`
+Source migration: `044_learning.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -126,6 +126,8 @@ content_json TEXT
 display_text TEXT
 task_id TEXT
 session_id TEXT
+request_id TEXT
+workspace_root TEXT
 ```
 
 ### `discovered_models` (table)
@@ -250,6 +252,18 @@ created_at TEXT NOT NULL DEFAULT (datetime('now'))
 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 session_id TEXT
 unattended INTEGER NOT NULL DEFAULT 0
+```
+
+### `learning_cursor` (table)
+
+Source migration: `044_learning.sql`
+
+```sql
+session_id TEXT PRIMARY KEY
+extracted_through INTEGER NOT NULL DEFAULT 0
+attempts INTEGER NOT NULL DEFAULT 0
+last_error TEXT
+updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 ```
 
 ### `link_token` (table)

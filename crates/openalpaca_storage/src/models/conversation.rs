@@ -32,6 +32,39 @@ pub struct ConversationMessage {
     /// writer does not name one. `None` only for rows written before a lane
     /// had any session at all.
     pub session_id: Option<String>,
+    /// The turn that wrote this row (migration 044, design 09 §1.3): the
+    /// gateway's request id, on both halves of a turn. `None` marks a row
+    /// that is not a turn — an extension notice, a `post_update`, a
+    /// completion report — which learning leaves out. Off the wire:
+    /// `GET /v1/chat/history` serializes this struct directly.
+    #[serde(skip)]
+    pub request_id: Option<String>,
+    /// The canonical project root the turn named (migration 044, design 09
+    /// §1.1, ruling LR1), on user rows only; `None` when the turn named no
+    /// project. Each row learns into its own turn's project, not the
+    /// session's binding. Off the wire, like `request_id`.
+    #[serde(skip)]
+    pub workspace_root: Option<String>,
+}
+
+/// One row of a learning window (design 09 §1.2): exactly the columns the
+/// extractor may read.
+///
+/// There is deliberately no `content_json` and no `display_text` here: on an
+/// attachment turn those carry the files' extracted text, and an uploaded
+/// document must never mint a note learned from the user's own words (U2).
+/// The type makes that structural rather than a convention of one query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearningRow {
+    pub id: i64,
+    pub role: String,
+    /// The message as typed (user rows) or as answered (assistant rows).
+    pub content: String,
+    pub source: Option<String>,
+    /// UTC, SQLite's `YYYY-MM-DD HH:MM:SS`.
+    pub created_at: String,
+    pub request_id: Option<String>,
+    pub workspace_root: Option<String>,
 }
 
 /// A session: one conversation transcript — an epoch of a lane, bound to at

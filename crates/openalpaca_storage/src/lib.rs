@@ -33,7 +33,7 @@ pub use models::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
 pub use models::{ArtifactKind, ArtifactOrigin};
 pub use models::{OutcomeKind, Task, TaskStatus};
 pub use models::{AttachmentRef, FileAsset, FileAssetStatus, MessageArtifact};
-pub use models::{Conversation, ConversationMessage};
+pub use models::{Conversation, ConversationMessage, LearningRow};
 pub use models::{ExternalIdentity, GlobalUser, LinkToken};
 pub use models::MessageFeedback;
 pub use models::{PREVIEW_CHARS, SkillExecutionEntry, ToolExecutionEntry};
@@ -48,6 +48,7 @@ pub use repository::{
     SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter, SkillExecutionRepository, StorageBytes,
     SubAgentRepository, SubagentSpanRepository, TaskRepository, resolve_skill_key,
 };
+pub use repository::learning_cursor::{LearningCursor, LearningCursorRepository};
 pub use repository::llm_usage::{LlmUsageDaily, ProviderCallUsage};
 pub use repository::subagent_span::{
     NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord, TemplateRunCount,

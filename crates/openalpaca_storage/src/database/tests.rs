@@ -8,7 +8,17 @@ fn test_database_creation() {
 
     let db = Database::open(&db_path).unwrap();
     assert!(db_path.exists());
-    assert_eq!(db.schema_version().unwrap(), migrations::BASELINE_VERSION);
+    assert_eq!(db.schema_version().unwrap(), newest_version());
+}
+
+/// The version a fresh database opens at: the newest registered migration.
+/// `BASELINE_VERSION` keeps meaning "the oldest openable schema" (design 09
+/// §8.9), so a fresh database's version is read from here, never from it.
+fn newest_version() -> i32 {
+    migrations::MIGRATIONS
+        .last()
+        .expect("at least the baseline is registered")
+        .version
 }
 
 #[test]
@@ -31,7 +41,7 @@ fn reopening_a_current_database_preserves_its_data_and_version() {
     }
 
     let db = Database::open(&db_path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), migrations::BASELINE_VERSION);
+    assert_eq!(db.schema_version().unwrap(), newest_version());
     db.with_connection(|conn| {
         let (title, content): (String, String) = conn.query_row(
             "SELECT s.title, m.content FROM session s
@@ -47,7 +57,8 @@ fn reopening_a_current_database_preserves_its_data_and_version() {
             .prepare("SELECT version FROM schema_version ORDER BY version")?
             .query_map([], |row| row.get::<_, i32>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        assert_eq!(versions, vec![migrations::BASELINE_VERSION]);
+        let registered: Vec<i32> = migrations::MIGRATIONS.iter().map(|m| m.version).collect();
+        assert_eq!(versions, registered);
         Ok(())
     })
     .unwrap();
@@ -367,12 +378,15 @@ fn test_foreign_keys_enforced() {
 /// baseline directly, and that baseline creates none of the old engine's
 /// tables — `memory`, its FTS index, the `vec0` table or the triggers that
 /// kept them in step — so opening one never needs the sqlite-vec extension.
+/// The migrations after the baseline create none either: 044's
+/// `learning_cursor` is named without the `memory_` prefix for exactly this
+/// check (design 09 §1.3).
 #[test]
-fn a_fresh_database_opens_at_43_with_no_memory_tables() {
+fn a_fresh_database_opens_at_the_newest_version_with_no_memory_tables() {
     assert_eq!(migrations::BASELINE_VERSION, 43);
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 43);
+    assert_eq!(db.schema_version().unwrap(), newest_version());
     db.with_connection(|conn| {
         let leftovers = conn
             .prepare(
@@ -1033,7 +1047,7 @@ fn a_refused_legacy_database_opens_at_the_baseline_after_its_files_are_deleted()
     delete_database_files(&db_path).unwrap();
 
     let db = Database::open(&db_path).expect("a deleted database must open fresh");
-    assert_eq!(db.schema_version().unwrap(), migrations::BASELINE_VERSION);
+    assert_eq!(db.schema_version().unwrap(), newest_version());
     let legacy_tables: i64 = db
         .with_connection(|conn| {
             Ok(conn.query_row(
@@ -1195,4 +1209,81 @@ fn the_schema42_fixture_is_refused_without_vec0_and_its_bytes_are_unchanged() {
         before,
         "refusing the fixture must not rewrite it"
     );
+}
+
+// ── Migration 044: Learning v2's cursor (design 09 §1.3) ────────────────
+
+/// A 43 database with sessions and messages opens at 44: each existing
+/// session's cursor starts at its newest message — historic sessions are not
+/// re-extracted (design §6) — a session with no message starts at 0, the two
+/// new columns exist and read NULL on the old rows, and no row is lost.
+#[test]
+fn migration_044_seeds_existing_sessions_at_their_last_message() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("at43.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(migrations::MIGRATIONS[0].sql).unwrap();
+        assert_eq!(migrations::MIGRATIONS[0].version, 43);
+        conn.execute_batch(
+            "INSERT INTO session (id, lane_key, source) VALUES ('talked', 'u:gui', 'gui');
+             INSERT INTO session (id, lane_key, source, status) VALUES ('silent', 'u:cli', 'cli', 'archived');
+             INSERT INTO conversation_messages (lane_key, role, content, session_id)
+                 VALUES ('u:gui', 'user', 'one', 'talked');
+             INSERT INTO conversation_messages (lane_key, role, content, session_id)
+                 VALUES ('u:gui', 'assistant', 'two', 'talked');
+             INSERT INTO conversation_messages (lane_key, role, content, session_id)
+                 VALUES ('u:gui', 'user', 'three', 'talked');
+             INSERT INTO conversation_messages (lane_key, role, content)
+                 VALUES ('u:gui', 'user', 'sessionless');",
+        )
+        .unwrap();
+    }
+
+    let db = Database::open(&db_path).expect("a 43 database migrates in place");
+    assert_eq!(db.schema_version().unwrap(), 44);
+    db.with_connection(|conn| {
+        let newest: i64 = conn.query_row(
+            "SELECT MAX(id) FROM conversation_messages WHERE session_id = 'talked'",
+            [],
+            |row| row.get(0),
+        )?;
+        let cursors = conn
+            .prepare(
+                "SELECT session_id, extracted_through, attempts, last_error
+                   FROM learning_cursor ORDER BY session_id",
+            )?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(
+            cursors,
+            vec![
+                ("silent".to_string(), 0, 0, None),
+                ("talked".to_string(), newest, 0, None),
+            ]
+        );
+
+        let (rows, stamped): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COUNT(request_id) + COUNT(workspace_root) FROM conversation_messages",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(rows, 4, "no message is lost");
+        assert_eq!(stamped, 0, "the old rows carry no turn id and no root");
+
+        let versions = conn
+            .prepare("SELECT version FROM schema_version ORDER BY version")?
+            .query_map([], |row| row.get::<_, i32>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(versions, vec![43, 44]);
+        Ok(())
+    })
+    .unwrap();
 }

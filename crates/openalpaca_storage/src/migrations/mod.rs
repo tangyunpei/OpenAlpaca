@@ -12,12 +12,28 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-/// Migrations in execution order. Future schema changes start at version 44.
-pub static MIGRATIONS: &[Migration] = &[Migration {
-    version: 43,
-    name: "baseline",
-    sql: include_str!("001_baseline.sql"),
-}];
+/// Migrations in execution order. Future schema changes start at version 45.
+///
+/// Each file ends by registering its own version (`run_migrations` executes a
+/// migration's SQL and nothing else). A fresh database runs all of them and
+/// opens at the last one's version.
+pub static MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 43,
+        name: "baseline",
+        sql: include_str!("001_baseline.sql"),
+    },
+    // Learning v2 (tasks/memory-redesign/09 §1.3): `request_id` and
+    // `workspace_root` on `conversation_messages`, and the per-session
+    // `learning_cursor`, seeded at each existing session's newest message.
+    Migration {
+        version: 44,
+        name: "learning",
+        sql: include_str!("044_learning.sql"),
+    },
+];
 
-/// Oldest supported populated schema; zero represents a fresh database.
+/// Oldest supported populated schema; zero represents a fresh database. It
+/// stays the baseline's version when later migrations are added: a fresh
+/// database opens at `MIGRATIONS.last()`, not here.
 pub const BASELINE_VERSION: i32 = MIGRATIONS[0].version;
