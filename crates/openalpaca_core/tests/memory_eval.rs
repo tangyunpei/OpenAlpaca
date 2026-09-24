@@ -235,10 +235,15 @@ fn parse_instant(
 
 // ─── Seeding through the service ────────────────────────────────────────────
 
-/// The order the gold notes are stored in: file order, except that a note
-/// whose `supersedes` names another comes after it — the service's
-/// `supersedes` needs the target's id and revision, which exist only once
-/// the target is stored. `Err` names a link that can never be satisfied
+/// The order the gold notes are stored in: the order a user would have told
+/// the assistant — oldest `created_at` first, ties in file order — except
+/// that a note whose `supersedes` names another waits for it, then goes as
+/// early as it can: the service's `supersedes` needs the target's id and
+/// revision, which exist only once the target is stored. The service stamps
+/// its own `created_at` and `updated_at` at write time, and design §3 rule
+/// 3 breaks a same-`fact_key` tie by them, so writing a March note after a
+/// June one would make March the newer knowledge. `Err` names a
+/// `created_at` that is not RFC 3339 or a link that can never be satisfied
 /// (an unknown target, or a cycle).
 fn seed_order(notes: &[GoldNote]) -> Result<Vec<usize>, String> {
     let index: HashMap<&str, usize> = notes
@@ -253,19 +258,29 @@ fn seed_order(notes: &[GoldNote]) -> Result<Vec<usize>, String> {
             }
         }
     }
+    let mut chronological = Vec::with_capacity(notes.len());
+    for (i, n) in notes.iter().enumerate() {
+        let created = parse_instant("created_at", &Some(n.created_at.clone()))
+            .map_err(|e| format!("note {}: {e}", n.id))?;
+        chronological.push((created, i));
+    }
+    chronological.sort();
     let mut placed = vec![false; notes.len()];
     let mut order = Vec::with_capacity(notes.len());
     while order.len() < notes.len() {
-        let before = order.len();
-        for (i, n) in notes.iter().enumerate() {
-            if !placed[i] && n.supersedes.iter().all(|t| placed[index[t.as_str()]]) {
-                placed[i] = true;
-                order.push(i);
-            }
-        }
-        if order.len() == before {
+        // The oldest note not yet stored whose targets all are.
+        let next = chronological.iter().map(|&(_, i)| i).find(|&i| {
+            !placed[i]
+                && notes[i]
+                    .supersedes
+                    .iter()
+                    .all(|t| placed[index[t.as_str()]])
+        });
+        let Some(i) = next else {
             return Err("the supersedes links form a cycle".to_string());
-        }
+        };
+        placed[i] = true;
+        order.push(i);
     }
     Ok(order)
 }
@@ -433,6 +448,8 @@ fn memory_eval_set_v0_is_well_formed() {
             "note {}: empty created_at",
             n.id
         );
+        parse_instant("created_at", &Some(n.created_at.clone()))
+            .unwrap_or_else(|e| panic!("note {}: {e}", n.id));
         if let Some(key) = &n.fact_key {
             let ok = key.len() <= 64
                 && key.bytes().enumerate().all(|(i, b)| {
@@ -487,6 +504,37 @@ fn memory_eval_set_v0_is_well_formed() {
     // stored (the ids and revisions here stand in for the service's).
     let order = seed_order(&notes).expect("a seed order exists");
     assert_eq!(order.len(), notes.len());
+    // The seed order is the order a user would have told the assistant:
+    // oldest `created_at` first, and never a replacement before the note it
+    // replaces (in this set every replacement is also the later one).
+    for pair in order.windows(2) {
+        let (a, b) = (&notes[pair[0]], &notes[pair[1]]);
+        let when = |n: &GoldNote| {
+            parse_instant("created_at", &Some(n.created_at.clone())).expect("checked above")
+        };
+        assert!(
+            when(a) <= when(b),
+            "note {} ({}) is seeded before note {} ({}): not chronological",
+            a.id,
+            a.created_at,
+            b.id,
+            b.created_at
+        );
+    }
+    let position: HashMap<&str, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(at, &i)| (notes[i].id.as_str(), at))
+        .collect();
+    for n in &notes {
+        for target in &n.supersedes {
+            assert!(
+                position[target.as_str()] < position[n.id.as_str()],
+                "note {} is seeded before {target}, the note it supersedes",
+                n.id
+            );
+        }
+    }
     let mut stored = BTreeMap::new();
     for i in order {
         store_input_for(&notes[i], &stored).unwrap_or_else(|e| panic!("note {}: {e}", notes[i].id));
@@ -627,6 +675,40 @@ fn a_superseded_note_is_seeded_before_its_successor() {
     assert_eq!(seed_order(&chain).unwrap(), vec![2, 1, 0]);
     assert!(seed_order(&[gold("x", &["missing"])]).is_err());
     assert!(seed_order(&[gold("x", &["y"]), gold("y", &["x"])]).is_err());
+}
+
+/// Notes are seeded oldest `created_at` first, ties in file order — the
+/// order a user would have said them — and a note still waits for the note
+/// it supersedes, then goes as early as it can. A `created_at` that is not
+/// RFC 3339 is an error, not a guess.
+#[test]
+fn gold_notes_are_seeded_oldest_first_and_after_what_they_replace() {
+    let dated = |id: &str, created_at: &str, supersedes: &[&str]| GoldNote {
+        created_at: created_at.to_string(),
+        ..gold(id, supersedes)
+    };
+    // File order June, March, January: seeded January, March, June.
+    let notes = vec![
+        dated("june", "2026-06-20T10:00:00Z", &[]),
+        dated("march", "2026-03-02T10:00:00Z", &[]),
+        dated("january", "2026-01-05T08:00:00Z", &[]),
+    ];
+    assert_eq!(seed_order(&notes).unwrap(), vec![2, 1, 0]);
+    // The same instant keeps file order.
+    let tie = vec![
+        dated("b", "2026-02-01T00:00:00Z", &[]),
+        dated("a", "2026-02-01T00:00:00Z", &[]),
+    ];
+    assert_eq!(seed_order(&tie).unwrap(), vec![0, 1]);
+    // A replacement dated before its target waits for it, and no longer.
+    let notes = vec![
+        dated("early-successor", "2026-01-01T00:00:00Z", &["target"]),
+        dated("february", "2026-02-01T00:00:00Z", &[]),
+        dated("target", "2026-03-01T00:00:00Z", &[]),
+        dated("april", "2026-04-01T00:00:00Z", &[]),
+    ];
+    assert_eq!(seed_order(&notes).unwrap(), vec![1, 2, 0, 3]);
+    assert!(seed_order(&[dated("x", "June 2026", &[])]).is_err());
 }
 
 /// Every field the design's `memory_store` takes arrives natively — nothing

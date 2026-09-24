@@ -43,8 +43,13 @@ verdict.
 
 Gold notes go in **natively**: `kind`, `scope`, `aliases`, `tags`,
 `fact_key`, `valid_from`/`valid_to`, and each `supersedes` link as the
-service's `{id, expected_revision}` of the note it replaces (the harness
-stores a replaced note first). Global notes land in the owner's home
+service's `{id, expected_revision}` of the note it replaces. They are stored
+in the order a user would have told them: oldest `created_at` first, ties in
+file order, and a replacing note only after the note it replaces. The gold
+`created_at` is not an input — the service stamps its own `created_at` and
+`updated_at` at write time — so the seed order is what those stamps say,
+and they decide a same-`fact_key` tie (design §3 rule 3, §7c R9) and the
+ranking's recency tie-break. Global notes land in the owner's home
 partition, project notes in the scratch project's partition. The service mints
 its own ids; the report maps them back (`conditions.seeded_ids`). Each run
 uses its own owner (`memory-eval-owner-<8 hex>`), so a reused scratch store
@@ -174,8 +179,9 @@ cargo test -p openalpaca_core --features live-eval --test memory_eval
 They check ids, categories, languages, note kinds and scopes, `fact_key`
 grammar, validity timestamps, `supersedes` links (at most one per note, in the
 same scope and project, because the service's `supersedes` names one note in
-the same partition), that every note maps to a store input in an order that
-stores a replaced note first, that every `relies_on` resolves, that the two
+the same partition), that `created_at` is RFC 3339, that the seed order is
+chronological and stores a replaced note first, that every note maps to a
+store input in that order, that every `relies_on` resolves, that the two
 splits share no id, that the judge prompt still carries its five placeholders,
 that E's caps express the two-search bound, and that A, B and C point at their
 archive or refuse. Plain `cargo test -p openalpaca_core` does not compile this
