@@ -72,6 +72,9 @@ enum Commands {
 
     /// Manage the content store (rebase a moved project, purge one you are done with)
     Store(commands::store::StoreArgs),
+
+    /// Show or edit the persona documents (USER.md) through the daemon
+    Persona(commands::persona::PersonaArgs),
 }
 
 #[tokio::main]
@@ -91,5 +94,6 @@ async fn main() -> Result<()> {
         Commands::Plugin(args) => commands::plugin::run(args).await,
         Commands::Ext(args) => commands::ext::run(args).await,
         Commands::Store(args) => commands::store::run(args).await,
+        Commands::Persona(args) => commands::persona::run(args).await,
     }
 }

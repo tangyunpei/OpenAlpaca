@@ -29,6 +29,7 @@
 | `openalpaca plugin` | Manage plugins (list, approve, deny, enable, disable, config) | `apps/openalpaca/src/commands/plugin.rs` |
 | `openalpaca ext` | Manage extensions — MCP servers and plugins (list, info, enable, disable, reload, approve, deny, remove) | `apps/openalpaca/src/commands/ext.rs` |
 | `openalpaca store` | Manage the content store (rebase a moved project, purge one you are done with) | `apps/openalpaca/src/commands/store.rs` |
+| `openalpaca persona` | Show or edit the persona documents (USER.md) through the daemon | `apps/openalpaca/src/commands/persona.rs` |
 
 ## Request/Query Types
 
@@ -201,6 +202,14 @@
 
 - Source: `apps/openalpaca/src/commands/llm_status.rs`
 - No `Subcommand` enum found in module.
+- Parsed flags: none
+
+### `persona`
+
+- Source: `apps/openalpaca/src/commands/persona.rs`
+- Enum `PersonaCommands` variants:
+  - `show` (fields: `target`)
+  - `edit` (fields: `target`)
 - Parsed flags: none
 
 ### `plugin`

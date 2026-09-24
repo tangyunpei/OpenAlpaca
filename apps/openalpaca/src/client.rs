@@ -3,7 +3,7 @@
 //! Wraps discovery.json reading + authenticated reqwest client.
 //! All CLI commands that talk to the daemon should use this.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use reqwest::Response;
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -60,6 +60,15 @@ impl DaemonClient {
         &self.token
     }
 
+    /// GET returning the raw (checked) response, for a caller that reads a
+    /// header — `openalpaca persona` reads the `ETag` it will send back as
+    /// `If-Match`.
+    pub async fn get_raw(&self, path: &str) -> Result<Response> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self.http.get(&url).send().await?;
+        check_response(resp).await
+    }
+
     /// GET with JSON deserialization.
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
@@ -109,6 +118,25 @@ impl DaemonClient {
         let resp = self.http.put(&url).json(body).send().await?;
         let resp = check_response(resp).await?;
         Ok(resp.json().await?)
+    }
+
+    /// PUT with JSON body and per-request headers, returning the raw response
+    /// **unchecked**: the caller decides what a non-2xx status means. The one
+    /// caller is `openalpaca persona edit`, whose `If-Match` is a per-request
+    /// header and whose `409` is an outcome to handle, not an error to print;
+    /// anything else it hands to [`error_from_response`].
+    pub async fn put_raw_with_headers<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+        headers: &[(&str, String)],
+    ) -> Result<Response> {
+        let url = format!("{}{}", self.base_url, path);
+        let mut request = self.http.put(&url).json(body);
+        for (name, value) in headers {
+            request = request.header(*name, value);
+        }
+        Ok(request.send().await?)
     }
 
     /// PATCH with JSON body and JSON response.
@@ -185,10 +213,14 @@ async fn check_response(resp: Response) -> Result<Response> {
     if resp.status().is_success() {
         return Ok(resp);
     }
+    Err(error_from_response(resp).await)
+}
 
+/// The error a refusal reads as, for a caller that took the raw response.
+pub(crate) async fn error_from_response(resp: Response) -> anyhow::Error {
     let status = resp.status();
     let body: serde_json::Value = resp.json().await.unwrap_or_default();
-    bail!("{}", render_error(status.as_u16(), &body));
+    anyhow::anyhow!("{}", render_error(status.as_u16(), &body))
 }
 
 /// What a refusal reads as on the terminal.
