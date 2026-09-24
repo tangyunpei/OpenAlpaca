@@ -206,6 +206,76 @@ moving that directory breaks every row that points into it. Everything else in
 the old directory — logs, `discovery.json`, `openalpacad.lock`, `repl_history` —
 is regenerated and can be discarded.
 
+## Switching to the Markdown Memory Build
+
+Memory used to live inside the database, in three tables searched by keyword
+and by a local embedding model. This build replaces all of that. What
+OpenAlpaca remembers is now a set of Markdown files you can read and edit —
+under `~/.openalpaca/memory/` and, for a project, `<project>/.openalpaca/memory/`
+— searched by keyword only, with no model and no download. The old tables are
+gone from the schema, and **an existing database is not converted**: it is
+refused, and you start again with a factory reset. This was chosen knowingly
+(OpenAlpaca has never been released), so read this section before you start the
+new build on a store an older one created.
+
+When the new build meets a database from before the change, the daemon — and
+every form of `openalpaca config` that opens the database — stops with:
+
+```text
+Unsupported legacy schema version 42: this build starts at schema version 43 and
+cannot read a database from before the memory redesign — its memory storage was
+replaced. Run `openalpaca config reset --factory` to delete `<path>` (with its
+-wal and -shm files) and start again at schema version 43. …
+```
+
+It names the file by its full path, lists what the reset removes and keeps, and
+changes nothing: the file is left exactly as it was. To switch over:
+
+1. **Optionally keep a copy first.** With no daemon running
+   (`openalpaca daemon stop`), copy `~/.openalpaca/state/openalpaca.db`
+   together with `openalpaca.db-wal` and `openalpaca.db-shm` beside it, if they
+   exist. A build from before the memory redesign can open that copy later if
+   you want to look something up.
+2. **Start the new build.** It refuses with the message above.
+3. **Run `openalpaca config reset --factory`** at a terminal and type the
+   confirmation word, `factory-reset`. It deletes the database with its `-wal`
+   and `-shm` files, clears `llm.toml` — every provider setting and API key,
+   with the keychain entries those keys point at — and returns `daemon.toml` to
+   its defaults. Your artifact, upload and session files stay on disk with
+   nothing pointing at them; `.master_key`, `logs/`, `backups/`, `plugins/`,
+   `mcp.toml`, `agents/`, `skills/` and `orchestrator/` are not touched. See
+   [CLI Manual → `config`](CLI_Manual.md#config) for the full list.
+4. **Start again and reconnect a model.** Every provider is switched off again:
+   turn yours back on and re-enter its API keys, in that order — see
+   [Connect a model](#connect-a-model) (in the app, Settings → Models & keys;
+   on the command line, `openalpaca config set ai.<provider>.enabled true` and
+   `openalpaca llm keys add`).
+5. **Save again whatever is worth remembering.** Nothing from the old memory
+   tables is carried over. Ask the assistant to remember it, add a note in the
+   app's Memory view, or run `openalpaca memory add` (see
+   [CLI Manual → `memory`](CLI_Manual.md#memory)).
+6. **Review `USER.md` by hand.** `~/.openalpaca/config/orchestrator/USER.md`
+   survives the reset, and the older build's background learner wrote the
+   facts it picked up from your conversations into it. This build no longer
+   writes there — what it learns becomes a memory note you can confirm or
+   undo — so the file is now only what you want every conversation to know
+   about you. Open it with `openalpaca persona edit user` or the app's
+   Settings → Persona, keep the lines you want as standing instructions, and
+   delete the rest. Nothing moves them into memory notes for you.
+7. **Optionally delete `~/.openalpaca/state/cache/fastembed`** (about 1 GB).
+   It held the removed embedding model; neither the reset nor the new build
+   touches it.
+
+**Keep the builds apart.** A pre-redesign build that contains commit
+`ae8faca8` (the first fix of the memory redesign, 2026-09-23) refuses a
+database whose schema is newer than it knows — `Database <path> is at schema
+version 43, which is newer than this build knows (42). Use the OpenAlpaca build
+that created it. Nothing was changed.` — so pointing it at the new store cannot
+damage it, and that message deliberately names no reset: nothing is wrong with
+the store, only with the build. A build without that commit has no such check:
+never run one against a store this build created. To go back, stop the new
+build and run the older one against the copy you kept in step 1.
+
 ## Run and Verify
 
 ```bash
@@ -231,11 +301,12 @@ filled an existing file is never overwritten. Without the templates the first
 workflow request has no lead agent to run and says so.
 
 It also creates the persona documents in `~/.openalpaca/config/orchestrator/`
-— `SOUL.md`, `USER.md`, `IDENTITY.md` and `BOOTSTRAP.md` — and downloads the
-local embedding model (see [The embedding model](#6-the-embedding-model)).
-That download is why the first start is the slow one: the daemon answers no
-request until it is done, so give `openalpaca daemon status` a few minutes to
-report `Daemon is running`.
+— `SOUL.md`, `USER.md`, `IDENTITY.md` and `BOOTSTRAP.md` — and the memory
+search index, `~/.openalpaca/state/cache/memory-index-v1.sqlite`. Memory needs
+no model and downloads nothing: the notes are Markdown files, and the index is
+an ordinary SQLite full-text index the daemon rebuilds from them whenever it is
+missing. The first start is therefore about as quick as any other; give
+`openalpaca daemon status` a few seconds to report `Daemon is running`.
 
 ### Connect a model
 
@@ -417,14 +488,12 @@ In practice the 90 s is the one that fires. A model that is still loading into
 memory can exceed it before its first token. That is the case to watch: warm
 the model once (`ollama run <tag>` and one prompt) before a long agent run.
 
-### 6. The embedding model
-
-Memory search embeds locally by default (`[embeddings] provider = "local"`),
-and the first boot downloads about 1 GB of model before the daemon reports
-ready. It is cached at `~/.openalpaca/state/cache/fastembed` — inside the
-store, regenerable, safe to delete at the cost of one re-download. Set
-`[embeddings] enabled = false` if you would rather skip it
-(`openalpaca config set ai.embeddings.enabled false` writes the same field).
+Memory needs no model of its own. Storing, searching, reading and forgetting a
+note are file and index work, so the app's Memory view and `openalpaca memory`
+work with every provider switched off. Only the background learning — picking
+up a preference you stated in a conversation — calls a model: the router's
+default, or `[orchestrator.costs] extraction_model` when you name one, and on a
+local model that costs nothing.
 
 ## Runtime Overrides
 
@@ -453,6 +522,11 @@ Upgrade keeps:
 - `~/.openalpaca` data and config (if you have a development build's data
   elsewhere, see [If You Have Data From an Older
   Build](#if-you-have-data-from-an-older-build) — it is not moved for you)
+
+An upgrade from a build before the memory redesign is the one exception: the new
+daemon refuses the old database instead of starting on it. Follow [Switching to
+the Markdown Memory Build](#switching-to-the-markdown-memory-build) before you
+start it.
 
 Upgrade replaces:
 
@@ -569,3 +643,7 @@ The uninstaller removes the GUI MSI, the prefix, the Start Menu folder and the
   - A development build's data directory is still present and this install has
     no database yet. The message lists what to move where. See [If You Have Data
     From an Older Build](#if-you-have-data-from-an-older-build).
+- `Unsupported legacy schema version 42: … from before the memory redesign` at startup
+  - The database was created by a build whose memory lived in the database.
+    This build does not convert it. See [Switching to the Markdown Memory
+    Build](#switching-to-the-markdown-memory-build).

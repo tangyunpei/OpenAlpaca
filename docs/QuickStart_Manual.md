@@ -52,11 +52,10 @@ openalpaca daemon status
 
 Terminal only? Use `openalpaca daemon start --daemon-only`.
 
-The first start takes longer than later ones. It writes the default config,
-agent templates and skills into `~/.openalpaca/config`, and downloads the local
-embedding model (about 1 GB) into `~/.openalpaca/state/cache/fastembed`. The
-daemon answers no request until that download is done, so wait for
-`openalpaca daemon status` to report `Daemon is running` before step 4.
+The first start writes the default config, agent templates and skills into
+`~/.openalpaca/config`. It downloads nothing — memory is Markdown files plus a
+keyword index, with no model of its own — so `openalpaca daemon status` reports
+`Daemon is running` within seconds. Wait for that before step 4.
 
 ## 4. Connect a model
 
@@ -130,7 +129,11 @@ openalpaca daemon tail         # follow daemon events; -c N stops after N
 
 - **Upgrade:** build a newer package, run `install.sh` again with `--yes`, then
   `openalpaca daemon start`. The installer stops the running daemon; your data
-  and config are kept.
+  and config are kept. Coming from a build before the memory redesign? The new
+  daemon refuses that database (`Unsupported legacy schema version 42`) rather
+  than convert it; read [Switching to the Markdown Memory
+  Build](Installation_Manual.md#switching-to-the-markdown-memory-build) before
+  you start it.
 - **Uninstall:** `./scripts/release/uninstall.sh`. It leaves `~/.openalpaca`
   in place; delete that directory yourself for a complete cleanup.
 - **Have a development build's data** under
