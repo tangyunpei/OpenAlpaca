@@ -262,8 +262,9 @@ async fn hidden_identity_fields_are_refused_by_the_tools_own_validator() {
 /// Fixture 18 steps 4–9 as the model sees them: poisoned text becomes an
 /// `extracted_user` note with a safe filename; `confirm` is refused with the
 /// message naming the Memory view and the CLI verb; edit, archive and
-/// supersede of the user's note are `authority_conflict`; a supersede of an
-/// unknown id is `not_found`.
+/// supersede of the user's note are `authority_conflict`; a supersede with
+/// a stale revision is `revision_conflict` and creates nothing; a supersede
+/// of an unknown id is `not_found`.
 #[tokio::test]
 async fn a_tool_call_never_mints_user_and_never_retires_a_user_note() {
     let h = Harness::new();
@@ -346,6 +347,24 @@ async fn a_tool_call_never_mints_user_and_never_retires_a_user_note() {
     assert!(
         err.starts_with("authority_conflict") && err.contains(&approval.to_string()),
         "{err}"
+    );
+    // A stale `expected_revision` on an existing target is `revision_conflict`
+    // naming the current revision — checked before authority — and nothing
+    // is created.
+    let notes_before = fs::read_dir(h.notes_dir(ALICE_KEY)).unwrap().count();
+    let err = h
+        .call(&store, ALICE, serde_json::json!({
+            "title": "Deploy approval", "body": "# Deploy approval\n\nNo approval needed.\n", "kind": "decision",
+            "supersedes": {"id": approval.to_string(), "expected_revision": "f".repeat(64)}
+        }))
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("revision_conflict"), "{err}");
+    assert!(err.contains(&approval_rev), "{err}");
+    assert_eq!(
+        fs::read_dir(h.notes_dir(ALICE_KEY)).unwrap().count(),
+        notes_before,
+        "a refused supersede created nothing"
     );
     let err = h
         .call(&store, ALICE, serde_json::json!({

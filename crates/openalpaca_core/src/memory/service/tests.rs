@@ -2025,6 +2025,47 @@ fn a_tool_call_may_not_edit_archive_or_supersede_a_user_note() {
     assert_eq!(err.class(), "not_found");
 }
 
+/// A supersede checks the target's revision before its authority: a stale
+/// `expected_revision` on the model's own `extracted_user` note — a target a
+/// tool call may otherwise retire — is `revision_conflict` naming the
+/// current revision, and nothing is created; the same call with the current
+/// revision succeeds, so the refusal was the revision and nothing else.
+#[test]
+fn a_supersede_with_a_stale_revision_is_a_conflict_and_creates_nothing() {
+    let h = Harness::new();
+    let tool = h.tool(ALICE, None);
+    let old = h.store(
+        &tool,
+        "Standup time",
+        "# Standup time\n\nStandup is at 09:30.\n",
+        NoteKind::Fact,
+    );
+    assert_eq!(old.origin, Origin::ExtractedUser);
+    let notes = h.home_notes_dir(ALICE_KEY);
+    let before = fs::read_dir(&notes).unwrap().count();
+    let input = |expected_revision: String| StoreInput {
+        title: "Standup time".into(),
+        body: "# Standup time\n\nStandup moved to 10:00.\n".into(),
+        kind: Some(NoteKind::Fact),
+        supersedes: Some((old.id, expected_revision)),
+        ..Default::default()
+    };
+
+    let err = h.service.store(&tool, input("f".repeat(64))).unwrap_err();
+    assert_eq!(err.class(), "revision_conflict");
+    assert!(err.to_string().contains(&old.revision), "{err}");
+    assert_eq!(
+        fs::read_dir(&notes).unwrap().count(),
+        before,
+        "a refused supersede created nothing"
+    );
+    assert_eq!(read(&h, &tool, old.id).revision, old.revision);
+
+    let new = h.service.store(&tool, input(old.revision.clone())).unwrap();
+    assert_eq!(new.superseded, vec![old.id]);
+    assert_eq!(fs::read_dir(&notes).unwrap().count(), before + 1);
+}
+
 /// Fixture 18 step 5: `confirm` from a tool call is refused with the
 /// message naming the Memory view and `openalpaca memory confirm <id>`; the
 /// candidate stays one; a user-directed confirm makes it active and `user`.
