@@ -1,0 +1,9 @@
+;; Outbound networking denied — the slice-3 gate and the slice-4 verification of
+;; the memory redesign (tasks/memory-redesign/04-implementation-plan.md §6).
+;; Usage (macOS; sandbox-exec is deprecated but functional):
+;;   sandbox-exec -f scripts/eval/memory/no-network.sb openalpacad
+;; The daemon may still listen (inbound) so the CLI can reach it; every outbound
+;; connection — a model download, an LLM call, localhost:11434 — is refused.
+(version 1)
+(allow default)
+(deny network-outbound)

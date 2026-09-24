@@ -1,6 +1,6 @@
 # Proposed native Markdown memory design
 
-**Status: rev 4.3 (2026-09-24): the owner has answered MD-1…MD-9 (§0) and the three decisions the rev-3 audit raised (G2, G30, G38); slices 0–3 are implemented (see the [implementation plan](04-implementation-plan.md)'s revision log), slice 4 is not started; the slice-3 rulings (plan §7a, S3-R6) are not yet folded into §7c.** Rev 4 applies the [audit of rev 3](07-audit-gaps.md) — 49 verified gaps, G1–G49 — and adds **§7a, the frozen contracts** that slice 1 could not freeze from rev 3. Rev 3 applied the owner's answers and the instruction that the old engine be removed completely. Rev 2 applied the [review](05-review.md). Every change traces to evidence in [06a–06d](05-review.md#method) or to a gap in 07, and the revision log at the end lists which gaps each change closes. See also [the audit](01-code-audit.md), [framework research](02-framework-research.md), [filesystem research](02-filesystem-research.md) and the [implementation plan](04-implementation-plan.md).
+**Status: rev 4.4 (2026-09-24): the owner has answered MD-1…MD-9 (§0) and the three decisions the rev-3 audit raised (G2, G30, G38); slices 0–3 are implemented (see the [implementation plan](04-implementation-plan.md)'s revision log), slice 4 is not started; the slice-3 rulings are §7c's last table (R1–R8).** Rev 4 applies the [audit of rev 3](07-audit-gaps.md) — 49 verified gaps, G1–G49 — and adds **§7a, the frozen contracts** that slice 1 could not freeze from rev 3. Rev 3 applied the owner's answers and the instruction that the old engine be removed completely. Rev 2 applied the [review](05-review.md). Every change traces to evidence in [06a–06d](05-review.md#method) or to a gap in 07, and the revision log at the end lists which gaps each change closes. See also [the audit](01-code-audit.md), [framework research](02-framework-research.md), [filesystem research](02-filesystem-research.md) and the [implementation plan](04-implementation-plan.md).
 
 ## 0. Owner decisions
 
@@ -627,6 +627,21 @@ Slice 2 (`crates/openalpaca_storage/src/memory_files/` and `memory_index/`, land
 | Q11 | Verification (§5 step 7: re-read and re-hash the selected files) is the service's job, not the index's; `reconcile` reports differences and the caller applies them. | `memory_index/reconcile.rs` |
 | Q12 | The cache runs with a 64 MiB page cache and mmap, and `rebuild` runs FTS `optimize` plus a WAL checkpoint; measured at 10K notes on an Apple M5 Max: search + verification p50 8–14 ms, p95 17–27 ms, cache ≈ 8× the corpus (the trigram index), rebuild ≈ 8 s in release — off the request path. | `memory_index/` |
 
+### Rulings pinned by slice 3
+
+Adopted on the same basis as §7b/§7c (plan §7a S3-R6, folded in at rev 4.4):
+
+| # | Ruling | Where |
+|---|---|---|
+| R1 | Pinned notes are delivered oldest-first. | `memory/service/` recall |
+| R2 | The 2 KiB pinned sub-budget counts note text; wrappers count against the 8 KiB total. | recall |
+| R3 | `Freshness::Stale` means the pre-read stat scan found the file changed; a stat scan runs before every read, stricter than the 30 s reconciliation. | recall |
+| R4 | A `supersedes` target in the other partition is `invalid_input`. | mutations |
+| R5 | `memory_store` answers `dedup` (with the existing id) for an exact duplicate. | mutations, §7b P8 |
+| R6 | Mutations return `MemoryChange` records; the daemon publishes `memory_changed` from them (3.8). | `service/`, `event_bridge.rs` |
+| R7 | A body the read cut at 32 KiB is never written back: the GUI's editor is disabled for it, and `openalpaca memory edit` and the update route refuse it, naming the file. | 3.9 and its follow-up |
+| R8 | `GET /v1/memories/recently-used` has no GUI reader yet (the *notes used* note comes from `done.memory_used` live); DESIGN_SPEC §5.7 records it as not built. | GUI |
+
 ## 8. Module boundaries and cost controls
 
 | Location | Responsibility |
@@ -678,6 +693,7 @@ These exclusions keep the replacement reviewable. Expand only after the evaluati
   - **§7a (new):** the frozen contracts — the snapshot schema with an example, `MemoryAccessContext` with its per-surface table, the six tool schemas, the route table with the cursor rule and error codes, the persona routes, `memory_changed`, `memory_used`, and the CLI syntax [G1, G6, G7, G9, G10, G17, G18, G19, G20, G39, G45].
   - **§8:** modules list the ring, the bridge arms, the persona routes and the `serde_yaml` edge [G22, G30]. **§9:** import/export are listed as excluded [G16].
   - **Where rev 4 departs from 07.** G11, as above. G7: the instruction's single `supersedes: {id, expected_revision}` object is used rather than 07's list; the file field stays a list. G2's refusal message names the Memory *view* rather than "Settings → Memory", because G30 placed the view in the side nav. G6 and G2 add a third `surface` value, `Extraction`, for the background extractor: MD-2 already gives it its own origins, so a two-valued surface could not say which of `extracted_user`/`extracted_other` an extraction write records; no owner-decided rule changes.
+- **rev 4.4 (2026-09-24):** §7c gains the slice-3 rulings R1–R8 (plan §7a S3-R6 folded in; R7 and R8 from the 3.9 review).
 - **rev 4.3 (2026-09-24):** the status line only. Slices 0–3 are implemented (plan rev 4.2), so it no longer reads "not implemented; awaiting the owner's approval". This revision does not fold the slice-3 rulings (plan §7a, S3-R6) into §7c; §7b/§7c still hold the slice-1 and slice-2 rulings only.
 - **rev 4.2 (2026-09-23):** §7c records the twelve rulings the slice-2 library pinned (Q1–Q12); §7a's `pending` gains `origin` (Q1).
 - **rev 4.1 (2026-09-23):** §7b adopts the thirteen readings the slice-1 fixtures pinned (P1–P13) as rulings; §7a gains `sources_status` and an optional `memory_changed.surface`.
