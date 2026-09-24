@@ -171,6 +171,16 @@ impl BuiltInTool for WorkspaceWriteTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: content".to_string())?;
 
+        // The key names the entry (and, spilled, the artifact's path): the
+        // store's own entries are refused before anything is looked up
+        // (design §2, plan 3.2).
+        if let Some(what) = helpers::is_store_owned_path(key, helpers::StoreAccess::Write) {
+            return Err(format!(
+                "Workspace key '{key}' is refused: it names {what}, which the daemon owns. \
+                 Memory notes are written with memory_store and memory_update."
+            ));
+        }
+
         // Enforce the documented 32KB content size limit
         const MAX_WORKSPACE_CONTENT_SIZE: usize = 32768;
         if content.len() > MAX_WORKSPACE_CONTENT_SIZE {

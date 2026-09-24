@@ -200,3 +200,50 @@ async fn test_prune_backups_only_prunes_matching_prefix() {
     assert!(remaining.contains(&"USER.20260101T000001Z.md".to_string()));
     assert!(remaining.contains(&"USER.20260101T000002Z.md".to_string()));
 }
+
+// --- is_store_owned_path (memory redesign, design §2; plan 3.2) ---
+
+#[test]
+fn store_state_is_refused_on_every_access() {
+    for path in [
+        "state/memory-control/home-32acea7eb739b08afd959db91e46d450.json",
+        "state/openalpaca.db",
+        "state",
+        "STATE/x",
+        "./state/x",
+    ] {
+        assert!(is_store_owned_path(path, StoreAccess::Read).is_some(), "{path}");
+        assert!(is_store_owned_path(path, StoreAccess::Write).is_some(), "{path}");
+    }
+    for path in ["src/state/x.rs", "states/x", "my-state/x", "state.md"] {
+        assert!(is_store_owned_path(path, StoreAccess::Read).is_none(), "{path}");
+        assert!(is_store_owned_path(path, StoreAccess::Write).is_none(), "{path}");
+    }
+}
+
+#[test]
+fn partition_control_files_are_refused_on_write_only() {
+    for path in [
+        ".openalpaca/memory/owners/k/.history/id/rev.md",
+        "memory/owners/k/.history",
+        "memory/owners/k/MEMORY.md",
+        "MEMORY.md",
+        "memory.md",
+        ".openalpaca/memory/.gitignore",
+        "memory/.gitignore",
+    ] {
+        assert!(is_store_owned_path(path, StoreAccess::Write).is_some(), "{path}");
+        assert!(is_store_owned_path(path, StoreAccess::Read).is_none(), "{path} is readable");
+    }
+    for path in [
+        "memory/owners/k/notes/a.md",
+        ".gitignore",
+        "src/.gitignore",
+        "history/x.md",
+        "MEMORY.txt",
+        "docs/MEMORY-notes.md",
+    ] {
+        assert!(is_store_owned_path(path, StoreAccess::Write).is_none(), "{path}");
+    }
+}
+

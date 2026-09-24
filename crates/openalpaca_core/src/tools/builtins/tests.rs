@@ -756,6 +756,41 @@ mod workspace_artifact_spill {
             asset.storage_path
         );
     }
+
+    /// Design §2 / plan 3.2: `workspace_write`'s key is a path in the
+    /// artifact store, and the store's own entries are refused before the
+    /// task is even looked up.
+    #[tokio::test]
+    async fn workspace_write_refuses_store_owned_keys() {
+        let fx = Fixture::new();
+        let tool = builtin_tools(Some(fx.db.clone()), None, None, None, None)
+            .into_iter()
+            .find(|t| t.definition.name == "workspace_write")
+            .unwrap();
+        let ToolBackend::BuiltIn(backend) = tool.backend else {
+            panic!("builtin");
+        };
+        let ctx = ToolContext {
+            task_id: Some(TASK_ID.to_string()),
+            agent_id: Some("agent".to_string()),
+            owner_id: Some(OWNER.to_string()),
+            ..Default::default()
+        };
+        for key in ["state/memory-control/x.json", "MEMORY.md", ".history/x", "memory/.gitignore"] {
+            let err = backend
+                .execute_with_context(&serde_json::json!({"key": key, "content": "x"}), &ctx)
+                .await
+                .expect_err(key);
+            assert!(
+                err.contains("state/") || err.contains("memory") || err.contains(".history") || err.contains("MEMORY.md"),
+                "{key}: {err}"
+            );
+        }
+        backend
+            .execute_with_context(&serde_json::json!({"key": "notes/plan.md", "content": "x"}), &ctx)
+            .await
+            .unwrap();
+    }
 }
 
 /// `read_result` — the scoped reader for a spilled tool result (§5.4).

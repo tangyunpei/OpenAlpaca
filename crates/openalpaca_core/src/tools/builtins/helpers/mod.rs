@@ -134,6 +134,65 @@ pub(super) fn is_user_path(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Which way a builtin file tool is touching a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StoreAccess {
+    Read,
+    Write,
+}
+
+/// The store's own files, which the generic file tools refuse (memory
+/// redesign, design §2; plan 3.2). The builtin registry captures the
+/// daemon's CWD as its workspace root and both launchers start the daemon
+/// in the home store, so a relative path reaches the store directly:
+///
+/// - any path whose first component is `state` — the control snapshots,
+///   the database, the discovery file — is refused on every access
+///   (`file_read` would disclose the owner-id mapping);
+/// - a memory partition's control files — a `.history/` component, a
+///   `MEMORY.md` and a `.gitignore` directly under a `memory/` directory —
+///   are refused on write only, so a hand-dropped note stays possible and a
+///   read of a kept revision stays possible.
+///
+/// Returns what was matched, for the refusal message. Names are compared
+/// case-insensitively: the platforms with a case-insensitive file system
+/// would reach the same file either way.
+pub(super) fn is_store_owned_path(path: &str, access: StoreAccess) -> Option<&'static str> {
+    let components: Vec<&str> = Path::new(path)
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(part) => part.to_str(),
+            _ => None,
+        })
+        .collect();
+    if components
+        .first()
+        .is_some_and(|first| first.eq_ignore_ascii_case("state"))
+    {
+        return Some("the store's `state/` directory");
+    }
+    if access == StoreAccess::Read {
+        return None;
+    }
+    if components
+        .iter()
+        .any(|part| part.eq_ignore_ascii_case(".history"))
+    {
+        return Some("a memory partition's `.history/`");
+    }
+    match components.as_slice() {
+        [.., name] if name.eq_ignore_ascii_case("MEMORY.md") => {
+            Some("a memory partition's `MEMORY.md`")
+        }
+        [.., dir, name]
+            if dir.eq_ignore_ascii_case("memory") && name.eq_ignore_ascii_case(".gitignore") =>
+        {
+            Some("a memory partition's `memory/.gitignore`")
+        }
+        _ => None,
+    }
+}
+
 /// Check if a path refers to IDENTITY.md (case-insensitive filename check).
 pub(super) fn is_identity_path(path: &str) -> bool {
     std::path::Path::new(path)

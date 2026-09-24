@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use super::annotations_for_builtin;
 use super::helpers::{
-    MAX_FILE_READ_SIZE, is_identity_path, is_soul_path, is_user_path, resolve_workspace_path,
-    resolve_workspace_path_for_write, validate_workspace_path,
+    MAX_FILE_READ_SIZE, StoreAccess, is_identity_path, is_soul_path, is_store_owned_path,
+    is_user_path, resolve_workspace_path, resolve_workspace_path_for_write,
+    validate_workspace_path,
 };
 
 // --- file_read ---
@@ -26,6 +27,15 @@ impl BuiltInTool for FileReadTool {
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: path".to_string())?;
+
+        // The store's `state/` is the daemon's, never the model's to read
+        // (design §2): the control snapshots there map owner keys to ids.
+        if let Some(what) = is_store_owned_path(path, StoreAccess::Read) {
+            return Err(format!(
+                "Reading '{path}' is refused: it is inside {what}, which belongs to the daemon's \
+                 own state/ and is not workspace content."
+            ));
+        }
 
         // Security: resolve path, reject traversal and symlink escapes
         let full_path = resolve_workspace_path(path, &self.workspace_root)?;
@@ -271,6 +281,16 @@ impl FileWriteTool {
                  Use the update_persona tool with target=\"identity\" instead, \
                  which provides validation, backup, and safe atomic writes."
                 .to_string());
+        }
+
+        // The store's own files (design §2, plan 3.2): `state/` and a memory
+        // partition's control files are the service's, never file_write's.
+        if let Some(what) = is_store_owned_path(path, StoreAccess::Write) {
+            return Err(format!(
+                "Writing '{path}' is refused: it is {what}, which the daemon owns. Memory notes \
+                 are written with memory_store and memory_update; nothing under state/ is \
+                 workspace content."
+            ));
         }
 
         // Security: resolve path, reject symlink escapes BEFORE creating directories.
@@ -836,5 +856,81 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("update_persona"));
+    }
+
+    // ── Memory redesign, plan 3.2: the store's own files are refused ────
+
+    /// Design §2: the builtin file tools refuse any path whose first
+    /// component is `state` (the control snapshots and the database live
+    /// there, and the daemon runs in the home store), and the writers also
+    /// refuse a partition's control files — `.history/`, `MEMORY.md` and
+    /// `memory/.gitignore`. Fixture 18 step 10.
+    #[tokio::test]
+    async fn file_write_refuses_the_store_state_and_the_partition_control_files() {
+        let b = bench();
+        let tool = b.tool(None);
+        let ctx = ToolContext::default();
+        for path in [
+            "state/memory-control/home-32acea7eb739b08afd959db91e46d450.json",
+            "state/openalpaca.db",
+            "State/anything.txt",
+        ] {
+            let err = tool
+                .write(&serde_json::json!({"path": path, "content": "{}"}), &ctx)
+                .await
+                .expect_err(path);
+            assert!(err.contains("state/"), "{path}: {err}");
+            assert!(!b.work.path().join(path).exists(), "{path} was written");
+        }
+        for path in [
+            ".openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/.history/x/y.md",
+            "memory/owners/32acea7eb739b08afd959db91e46d450/MEMORY.md",
+            "MEMORY.md",
+            ".openalpaca/memory/.gitignore",
+            "memory/.gitignore",
+        ] {
+            let err = tool
+                .write(&serde_json::json!({"path": path, "content": "*\n"}), &ctx)
+                .await
+                .expect_err(path);
+            assert!(
+                err.contains("memory") || err.contains(".history") || err.contains("MEMORY.md"),
+                "{path}: {err}"
+            );
+            assert!(!b.work.path().join(path).exists(), "{path} was written");
+        }
+        // Not store-owned: a `state` directory below the first component, an
+        // ordinary note file, a `.gitignore` anywhere but under `memory/`.
+        for path in ["src/state/notes.md", "memory/owners/x/notes/a.md", ".gitignore"] {
+            tool.write(&serde_json::json!({"path": path, "content": "ok\n"}), &ctx)
+                .await
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+            assert!(b.work.path().join(path).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn file_read_refuses_the_store_state_but_not_a_partition_file() {
+        let b = bench();
+        let root = b.work.path().to_path_buf();
+        fs::create_dir_all(root.join("state/memory-control")).unwrap();
+        fs::write(root.join("state/memory-control/home.json"), "{\"owner_id\":\"secret\"}").unwrap();
+        let tool = FileReadTool {
+            workspace_root: root.clone(),
+        };
+        let err = tool
+            .execute(&serde_json::json!({"path": "state/memory-control/home.json"}))
+            .await
+            .expect_err("state/ is refused");
+        assert!(err.contains("state/"), "{err}");
+        assert!(!err.contains("secret"), "{err}");
+        fs::create_dir_all(root.join("memory/owners/k/.history/id")).unwrap();
+        fs::write(root.join("memory/owners/k/.history/id/rev.md"), "old").unwrap();
+        fs::write(root.join("memory/owners/k/MEMORY.md"), "# Memory").unwrap();
+        for path in ["memory/owners/k/.history/id/rev.md", "memory/owners/k/MEMORY.md"] {
+            tool.execute(&serde_json::json!({"path": path}))
+                .await
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+        }
     }
 }
