@@ -729,7 +729,9 @@ Refusals come from the daemon in its own words: `404 MEMORY_NOT_FOUND`,
 `409 MEMORY_REVISION_CONFLICT` (the note changed since it was read; the current
 revision is in the message), `409 MEMORY_QUARANTINED` (its partition's snapshot is
 missing or invalid — `doctor --repair`), `409 MEMORY_NOT_UNDOABLE`,
-`400 MEMORY_INVALID_INPUT`.
+`400 MEMORY_INVALID_INPUT`, `409 MEMORY_BUSY` (a write on the partition is in
+flight — retry), `500 MEMORY_INTERNAL` (the daemon's store or database refused;
+the daemon log has the cause).
 
 ### `chat`
 

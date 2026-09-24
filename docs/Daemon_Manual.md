@@ -632,7 +632,13 @@ MEMORY_NOT_FOUND` (an unknown id, or a revision the history does not keep), `409
 MEMORY_QUARANTINED` (the partition's control snapshot is missing or invalid —
 `openalpaca memory doctor --repair`, with the daemon stopped, is the only way
 out), `400 MEMORY_INVALID_INPUT` (a limit, a grammar, a shape, an unknown key, a
-cursor from another filter set).
+cursor from another filter set). Two more the envelope can carry: `409
+MEMORY_BUSY` (a memory write on that partition is in flight — retry) and `500
+MEMORY_INTERNAL` (the store or the database refused; the cause is in the daemon
+log). `409 MEMORY_AUTHORITY_CONFLICT` and `409 MEMORY_CONFIRM_REFUSED` are the
+model's tool-surface refusals — a tool call editing, archiving or replacing a
+`user` note, a confirm from a tool call — and this user-directed surface never
+produces them.
 
 Every write through these routes — like every write the model's tools and the
 extractor make — is announced as one `memory_changed` frame on `/v1/events`
