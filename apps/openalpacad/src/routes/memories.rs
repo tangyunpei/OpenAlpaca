@@ -911,7 +911,8 @@ fn with_etag(mut response: Response, revision: &str) -> Response {
 
 /// The service's refusal as the §7a status and code. A revision conflict
 /// carries the current revision in its message and as `ETag`, so a client
-/// can re-read or retry without a second request.
+/// can re-read or retry without a second request; what the client kept and
+/// what it should do next are the client's words, not the daemon's.
 fn refusal(e: MemoryError) -> Response {
     match e {
         MemoryError::InvalidInput(m) => invalid(m).into_response(),
@@ -927,7 +928,7 @@ fn refusal(e: MemoryError) -> Response {
                 api_error(
                     StatusCode::CONFLICT,
                     "MEMORY_REVISION_CONFLICT",
-                    format!("{e}. Reload to see the current version — your text is kept."),
+                    e.to_string(),
                 ),
                 &current,
             )

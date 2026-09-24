@@ -277,11 +277,16 @@ async fn a_stale_if_match_is_409_carrying_the_current_revision_as_etag() {
     let (status, json) = split(response).await;
     assert_eq!(status, StatusCode::CONFLICT, "{json}");
     assert_eq!(code(&json), "MEMORY_REVISION_CONFLICT");
-    assert!(
-        json["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains(&revision),
+    // The message is the service's own sentence, current revision included
+    // — the daemon cannot know what a client kept, so it says nothing
+    // about it; each client words its own conflict copy.
+    assert_eq!(
+        json["error"]["message"],
+        MemoryError::RevisionConflict {
+            id,
+            current_revision: revision.clone(),
+        }
+        .to_string(),
         "{json}"
     );
 
