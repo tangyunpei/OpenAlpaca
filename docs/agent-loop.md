@@ -207,8 +207,10 @@ captured):
 the base picks (keyword-suggested tools under
 `tool_selection = "core_union"`, or the whole registry under `"full"`)
 unioned with a per-request set —
-`start_workflow`, `task_status`, `memory_store` + `memory_forget`
-(DB-gated), the globally-registered `memory_search` definition,
+`start_workflow`, `task_status`, `memory_store` + `memory_update` +
+`memory_forget` (when the daemon has a memory service), the
+globally-registered `memory_search`, `memory_read` and `memory_list`
+definitions,
 `read_result` (only when the daemon has both a session log and a
 database — the one case where a result can spill, see
 [Tool Results and the Spill](#tool-results-and-the-spill)), every

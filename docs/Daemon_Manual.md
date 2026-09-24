@@ -73,14 +73,23 @@ root is the human's:
 - master key: `~/.openalpaca/state/.master_key`
 - rotated copies of hand-edited config: `~/.openalpaca/state/backups/`
 - plugins: `~/.openalpaca/plugins/` — one directory per plugin, plus `.permissions.toml` (approvals and the ENABLE bit for all plugins), `.config/<name>.toml` (per-plugin config), `.data/<name>/` (per-plugin durable state, kept across an update) and `.trash/` (where an uninstalled plugin's directory is moved)
-- self-description: `~/.openalpaca/README.md` (what every entry is, with a retention class) and `.layout` (layout version and this install's id), both seeded when the store is created. A `README.md` that is still, byte for byte, the text an earlier build seeded is brought up to date at the next boot (the earlier texts called deleting `state/` a factory reset, which would also lose `.master_key` and the embedding model); one you have edited is never touched
+- self-description: `~/.openalpaca/README.md` (what every entry is, with a retention class) and `.layout` (layout version and this install's id), both seeded when the store is created. A `README.md` that is still, byte for byte, the text an earlier build seeded is brought up to date at the next boot (the earlier texts called deleting `state/` a factory reset, which would also lose `.master_key` and the memory control snapshots, and the last of them still described the removed embedding model's cache); one you have edited is never touched
 - content, home scope: one directory per content kind under the root, created on first use — `artifacts/`, `uploads/`, `sessions/`, `memory/`, `skills/`, `scratch/`, `cache/`
-- embedding model cache: `~/.openalpaca/state/cache/fastembed` — where the
-  local embedding backend puts the ~1 GB model it downloads on first use
-  (`store::embedding_cache_dir()`, created on demand). Regenerable: deleting it
-  costs one re-download. A store that cannot be created falls back to the
-  library default with a `WARN` naming it, rather than dropping a gigabyte
-  under the daemon's working directory
+- memory notes: `~/.openalpaca/memory/owners/<owner-key>/notes/<id>--<slug>.md`,
+  one Markdown file per note, with `.history/` (the last five revisions the
+  daemon wrote) and a rebuildable `MEMORY.md` index beside them; a project's
+  are under `<project>/.openalpaca/memory/owners/<owner-key>/`, where
+  `memory/.gitignore` (`*`, re-asserted on every open) keeps them out of the
+  repository. `<owner-key>` is the first 32 hex characters of the SHA-256 of
+  the owner id. Directories are created `0700` and files `0600`
+- memory control snapshots: `~/.openalpaca/state/memory-control/<partition-key>.json`,
+  one per partition — the revision the daemon last wrote for each note, each
+  note's origin, and the tombstones of forgotten notes. Never swept: losing one
+  quarantines its partition until `openalpaca memory doctor --repair`
+- memory search index: `~/.openalpaca/state/cache/memory-index-v1.sqlite` — a
+  disposable SQLite full-text index over the notes. Deleting it costs one
+  rebuild from the notes at the next start; nothing in it is authoritative.
+  Nothing downloads a model: there is no embedding cache any more
 - a project's own store: `<project>/.openalpaca/` — the same content shape, so an artifact of a project lives beside the project
 - daemon log (launcher-managed startup): `~/.openalpaca/state/logs/daemon.log` —
   the daemon's stdout and stderr, appended across restarts and rotated by
@@ -117,7 +126,7 @@ root is the human's:
    resuming it under its own id exists behind `[orchestrator.routing]
    resume_enabled`, which is **off** by default.
 9. Bootstrap persona documents (SOUL/USER/IDENTITY/BOOTSTRAP) if missing.
-10. Start orchestrator, wake manager, plugin manager, MCP clients, connectors, hot reload, background workers, and HTTP router.
+10. Open the memory service — its search index at `state/cache/memory-index-v1.sqlite` is checked, and rebuilt from the note files when it is missing, damaged or of another version — then start the orchestrator, wake manager, plugin manager, MCP clients, connectors, hot reload, background workers (the 30 s memory reconciliation among them) and the HTTP router.
 
 Shutdown can be initiated by a signal (SIGINT/SIGTERM) or by `POST
 /v1/command {"command":"shutdown"}`; both converge on one cancellation. The
@@ -314,7 +323,11 @@ and `writing_agent` set none and run at the $1 default.
 There is no overall daily budget for turns or workflows. Only the three
 background jobs in the table carry a daily ceiling: a job whose running spend
 has passed it is skipped. That running total is kept in memory and is seeded
-from today's usage rows when the daemon starts.
+from today's usage rows when the daemon starts. The two memory jobs are
+bounded by count as well: `[orchestrator.costs] extract_max_items_per_turn`
+(default 5) notes from one chat turn and `task_extract_max_items_per_run`
+(default 10) candidates from one run; the items past the count are dropped and
+counted, never stored.
 
 An agent template's `max_cost_per_task` overrides the first two rows (the
 shipped `lead_agent` template sets `3.0`). At price `0` none of the caps bite.
@@ -594,9 +607,52 @@ An upload is refused with the reason in the error code: `NO_FILE`,
 
 ### Memory
 
-The memory notes (Markdown files under the home store's `memory/` and a
-project's `.openalpaca/memory/`), through the one memory service the model's
-tools and the automatic per-turn recall also use. These are the **user-directed**
+**How memory works.** A note is one Markdown file with a short frontmatter
+(`id`, `title`, `kind` — `fact`, `preference`, `decision`, `procedure`,
+`reference` or `episode` — `status`, timestamps, and optional `aliases`, `tags`,
+`fact_key`, `sources`, validity bounds and `supersedes`). Notes live in
+**partitions**: one global partition per owner in the home store, and one per
+owner in each project, the project being the nearest `.openalpaca`/`.git` root
+above the request's workspace (`x-workspace-path`) — never the daemon's own
+working directory. A turn with no project reads and writes the global partition
+alone; a turn in a project reads both, and a `preference` defaults to global
+while the other kinds default to the project. Only a real user owns memory: a
+`/v1/command process` turn (owner `system`), the workflows it starts and an
+unlinked connector identity have no partition, recall nothing and write nothing.
+
+Every turn of the main loop and of a file-based skill gets an automatic recall
+— pinned notes, then the notes a keyword search of the message finds, at most
+8 notes and 8 KiB, each re-read and re-hashed before it is sent, delivered as
+quoted reference data rather than instructions — and the turn's `done` frame
+names what it delivered (`memory_used`, below). A workflow's lead gets the same
+recall once at its start. Search is literal: every term of three or more
+characters is matched as a whole word and as a substring, a one- or
+two-character query (a short Chinese word) goes through a bounded scan, and
+nothing asks a model. After a chat turn the daemon asks the conversation model what durable
+facts the **message as typed** carried (never an attachment's text): what you
+said in your own words becomes an active note learned from you (origin
+`extracted_user`, listed as *recently learned* with a one-step undo), and what
+was inferred from the reply or from a run's output becomes a **candidate**,
+kept out of recall until you confirm it. At most
+`[orchestrator.costs] extract_max_items_per_turn` (5) notes per turn and
+`task_extract_max_items_per_run` (10) candidates per run are written, on top of
+the daily cost ceilings; a failed or cancelled run produces nothing. Nothing is
+pruned by age and nothing is replaced because it looks similar: a note is
+replaced only by an explicit `supersedes`, and forgotten only by a forget.
+`USER.md` is not written by any of this — see [Persona](#persona).
+
+The model's tools are the same service with less authority. `memory_search`,
+`memory_read` and `memory_list` are registered for every agent granted
+`memory_read`; `memory_store`, `memory_update` and `memory_forget` are offered to
+the main conversation alone. A tool call records origin `extracted_user` at most,
+never `user`; it cannot confirm a candidate, and it cannot edit, archive or
+replace a note you wrote. `memory_update` and `memory_forget` raise the ordinary
+confirmation card, and an unattended turn (a scheduled skill, a piped
+`openalpaca chat`) is refused them outright.
+
+The routes below reach the memory notes (Markdown files under the home store's
+`memory/` and a project's `.openalpaca/memory/`) through the one memory service
+the model's tools and the automatic per-turn recall also use. These are the **user-directed**
 surface: a write here records origin `user`, the highest authority, which a
 model's tool call can never edit, archive or replace. `x-workspace-path` selects
 the project partition exactly as on `POST /v1/chat` (the nearest
@@ -647,6 +703,28 @@ scan finds edited behind the daemon's back (`change: external`, no `surface`).
 The daemon scans every 30 s on its own and before every read; `sync` is for a
 client that wants the answer now. `openalpaca memory …` is the CLI over these
 routes; `doctor --repair` and `adopt` are local verbs with no route.
+
+### Persona
+
+`USER.md` (`<config>/orchestrator/USER.md`) is what every conversation is told
+about you, and it is yours to write: the background learner no longer adds to
+it — what it learns is a memory note — so the onboarding conversation's
+`update_persona` and these two routes are the only writers.
+
+| Method and path | Purpose |
+|---|---|
+| `GET /v1/persona/user` | The file as raw Markdown, `{content}`, with `ETag: "<sha256>"` — the lowercase hex SHA-256 of its bytes. |
+| `PUT /v1/persona/user` | Replace it: `{content}` plus `If-Match: "<sha256>"` (the header only; `*` means "whatever is there now"). Answers `{etag}` and the same `ETag`. |
+
+Absent `If-Match` is `428 PERSONA_IF_MATCH_REQUIRED`; a hash that is not the
+file's current one is `409 PERSONA_REVISION_CONFLICT`, naming the current
+revision and carrying it as `ETag`, and nothing is written — a concurrent
+onboarding `update_persona` changes the hash, so a stale editor gets the `409`
+instead of overwriting it. A body `update_persona` would refuse is
+`400 PERSONA_INVALID`. The write takes `update_persona`'s own path (a timestamped
+backup, then an atomic replace) and the daemon swaps its in-memory copy itself,
+so a `GET` after a `PUT` already reads the new text. `openalpaca persona show|edit
+user` and the app's Settings → Persona are the clients.
 
 ### Extensions, tools and skills
 
@@ -979,14 +1057,19 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 ## Storage Model
 
 - SQLite location is resolved by `openalpaca_storage::store::database_path()` — `~/.openalpaca/state/openalpaca.db`. Every path in the layout comes from that module; no crate joins a literal directory name onto a store root.
-- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`. The unreleased chain is consolidated into `crates/openalpaca_storage/src/migrations/001_baseline.sql`, which initializes schema version 42 directly. Existing version-42 databases remain usable; older development schemas are rejected rather than upgraded. The next migration version is 43. `GET /v1/status` reports the version the open database is actually at.
-- **If your database is refused.** Startup fails with `Unsupported legacy schema version <n>: this build starts at schema version 42 and cannot upgrade a database created by an older one`, followed by the verb that rescues it and the absolute path of the file. No migration runs — the old schema and its rows are left exactly as they were. There are two ways out, and both are yours to choose. Run `openalpaca config reset --factory`: it deletes that file together with its `-wal` and `-shm` siblings and clears `llm.toml` and `daemon.toml`, after which the next start builds a fresh database at version 42 and every row you had (conversations, memories, tasks, and the rows indexing artifacts and uploads) is gone, the artifact and upload *files* staying on disk unreferenced. The verb reaches a database in this state precisely because it opens none — it deletes files and asks the schema nothing — and it is the only form of `openalpaca config` that clears one (`set`, `get` and a keyed `reset` on an `ai.*` or `daemon.*` key open no database either, and work meanwhile, but leave it refused); it refuses while a daemon is running, prints the absolute store root, and requires you to type `factory-reset` at a terminal. Or, if you want any of those rows back first, open the database with a build from before the squash, export what you want to keep, and then run the reset. A different startup failure — `an older OpenAlpaca install's data is still on this machine` — is not this one; see [Installation Manual → If You Have Data From an Older Build](Installation_Manual.md#if-you-have-data-from-an-older-build). Nor is `Database <path> is at schema version <n>, which is newer than this build knows (42)`: that database was written by a newer OpenAlpaca and is fine as it is, so the message names no remedy — it says only to use the build that created it, and that nothing was changed — and running the reset against it would delete a store nothing is wrong with.
+- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`. The unreleased chain is consolidated into `crates/openalpaca_storage/src/migrations/001_baseline.sql`, which initializes schema version **43** directly and needs nothing beyond SQLite itself — no extension is loaded. Every older schema is refused rather than upgraded, 42 included; the next migration version is 44. `GET /v1/status` reports the version the open database is actually at.
+- Memory is **not** in the database. The notes are Markdown files under `memory/` (see the runtime paths at the top of this manual), each partition's revisions, origins and tombstones are one JSON control snapshot under `state/memory-control/`, and the search index is a separate, disposable SQLite file, `state/cache/memory-index-v1.sqlite`. A backup of your memory is the `memory/` directories **and** `state/memory-control/`; the index can always be rebuilt. See [Memory](#memory).
+- **If your database is refused.** No migration runs — the old schema and its rows are left exactly as they were — and the message names the absolute path of the file. It comes in two wordings:
+  - `Unsupported legacy schema version 42: this build starts at schema version 43 and cannot read a database from before the memory redesign — its memory storage was replaced.` A complete, working database from the build before memory moved to files. It is not converted: the message names `openalpaca config reset --factory`, lists everything that reset removes (every task, message, session record and memory row, `llm.toml` with its API keys and keychain entries, `daemon.toml` back to defaults) and what survives, and says a build from before the memory redesign still opens the file. The whole procedure — keeping a copy first, reconnecting a model, reviewing `USER.md` — is [Installation Manual → Switching to the Markdown Memory Build](Installation_Manual.md#switching-to-the-markdown-memory-build).
+  - `Unsupported legacy schema version <n>: this build starts at schema version 43 and cannot upgrade a database created by an older one`, for 1–41: a partly migrated development database the baseline cannot walk forward. The way out is the same verb, or — to keep any rows — opening the file with a build from before the migrations were squashed and exporting first.
+
+  `openalpaca config reset --factory` deletes that file together with its `-wal` and `-shm` siblings and clears `llm.toml` and `daemon.toml`, after which the next start builds a fresh database at version 43; the artifact, upload and session *files* stay on disk unreferenced, and the memory notes and `state/memory-control/` are not touched (the new owner id leaves them orphaned until `openalpaca memory adopt`). The verb reaches a database in this state precisely because it opens none — it deletes files and asks the schema nothing — and it is the only form of `openalpaca config` that clears one (`set`, `get` and a keyed `reset` on an `ai.*` or `daemon.*` key open no database either, and work meanwhile, but leave it refused); it refuses while a daemon is running, prints the absolute store root, and requires you to type `factory-reset` at a terminal. A different startup failure — `an older OpenAlpaca install's data is still on this machine` — is not this one; see [Installation Manual → If You Have Data From an Older Build](Installation_Manual.md#if-you-have-data-from-an-older-build). Nor is `Database <path> is at schema version <n>, which is newer than this build knows (43)`: that database was written by a newer OpenAlpaca and is fine as it is, so the message names no remedy — it says only to use the build that created it, and that nothing was changed — and running the reset against it would delete a store nothing is wrong with.
 - Session logs live at `~/.openalpaca/sessions/<id>/` and are bounded by **size only**:
   - `[orchestrator.sessions] log_max_session_bytes` (default 256 MiB) per session. On exceed the writer drops whole oldest segments, never the live one, and records the `seq` range that went.
   - `log_max_total_bytes` (default 2 GiB) across all of them, swept once at boot, oldest-touched archived session first, never an active one.
   - `log_retention_days` is **reserved and does nothing**. The key is parsed, clamped and reported by `GET /v1/status`, and the daemon warns at boot when it is set to anything but its default (`0`) — but no age-based sweep exists, so setting it to `90` expires nothing. Whether one is built is an open owner decision (T12 in [`tasks/api-fix-plan.md`](../tasks/api-fix-plan.md) §0). Until then a log leaves only by byte cap, by `DELETE /v1/sessions/{id}`, or by a purge.
 - A tool result larger than `[orchestrator.sessions] tool_result_inline_bytes` (default 32 KiB) is written whole to the session's `results/` directory, and the model is handed the first 2 KB plus a reference it can page with the `read_result` tool. A loop with no session log cuts the result inline at the same threshold instead. See [Agent Loop](agent-loop.md#tool-results-and-the-spill).
-- The `event_log` table is **never pruned**. Every event but `heartbeat` is persisted, plus the sandbox's audit rows (`security_violation`, `tool_auto_approved`, and the refusal an unattended run records). The daily telemetry cleanup removes `skill_execution_log` rows older than 90 days and `tool_execution_log` rows older than 7 days, and nothing else. `event_log` rows go only with a factory reset or with the runs a project purge deletes.
+- The `event_log` table is **never pruned**. Every event but `heartbeat`, `daemon_shutting_down` and `memory_changed` is persisted, plus the sandbox's audit rows (`security_violation`, `tool_auto_approved`, and the refusal an unattended run records). The daily telemetry cleanup removes `skill_execution_log` rows older than 90 days and `tool_execution_log` rows older than 7 days, and nothing else. `event_log` rows go only with a factory reset or with the runs a project purge deletes.
 
 ## Logging and Operations
 

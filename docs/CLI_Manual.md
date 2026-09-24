@@ -107,6 +107,7 @@ openalpaca llm status                        # shows which model will answer
 | [`sessions`](#sessions) | Stored conversations |
 | [`store`](#store) | Project history: re-base or purge |
 | [`memory`](#memory) | Memory notes: list, search, add, edit, confirm, undo, forget, sync, doctor, adopt |
+| [`persona`](#persona) | `USER.md`: show it, edit it |
 | [`chat`](#chat) | Talk to the orchestrator |
 
 ### `daemon`
@@ -177,7 +178,8 @@ Which file is edited: the one in `OPENALPACA_CONFIG_DIR` when that names a direc
 - It **refuses while a daemon is running.** Stop it with `openalpaca daemon stop` first. Deleting a file the daemon has open would leave it writing into an unlinked inode while the next start created a second database beside it. The check is the daemon's own singleton lock, taken before the prompt and held until the files are gone, so a daemon that is still booting also refuses it, and a daemon started while the prompt is open — the app, or `daemon start` in another terminal — exits on the lock instead of opening the database. When the lock is held but no running daemon can be found — one still booting, or a lock file you cannot write (a daemon once run under `sudo` leaves `state/openalpacad.lock` owned by root) — it refuses with a message naming that file instead of telling you to stop a daemon that `openalpaca daemon stop` will not find.
 - It prints the absolute store root it is about to wipe — `OPENALPACA_HOME_STORE` may point anywhere — and the absolute paths of the `llm.toml` and `daemon.toml` it will clear, found the way `config set` finds them (above), so a run from a repository checkout names the checkout's own `./config/` files when that is where they resolve; a file that does not exist is named as none. It then requires you to type `factory-reset`. `y` is not enough, there is no `--yes` flag, and the prompt cannot be answered by a pipe: run it at a terminal.
 - **No backup is taken and there is no undo.**
-- **Not touched:** `state/cache/` (the local embedding model, ~1 GB), `state/.master_key`, `state/logs/`, `state/backups/`, `config/mcp.toml`, `config/agents/`, `config/skills/`, `config/orchestrator/`, and `~/.openalpaca/plugins/`.
+- **Not touched:** `state/memory-control/` (each memory partition's control snapshot — revisions, origins and the tombstones of forgotten notes), `state/cache/` (the memory search index, `memory-index-v1.sqlite`, checked and rebuilt at the next start), `state/.master_key`, `state/logs/`, `state/backups/`, `config/mcp.toml`, `config/agents/`, `config/skills/`, `config/orchestrator/` (so `USER.md` stays as it is), and `~/.openalpaca/plugins/`.
+- **Left on disk, orphaned until adopted:** your memory notes under `memory/` (and each project's `.openalpaca/memory/`). The next start mints a new owner id, so `openalpaca memory doctor` lists the old partitions as orphaned; nothing reassigns them for you — `openalpaca memory adopt <owner-key>` re-binds them.
 - **Left on disk, now unreferenced:** everything under `artifacts/`, `uploads/` and `sessions/`. The rows that indexed those files are gone; the bytes are not. Delete the directories yourself if you want the space back.
 
 ### `gui`
@@ -572,7 +574,7 @@ openalpaca store purge --all --dry-run           # every project root on record
 ```
 
 Notes:
-- A project's path is its identity in four places — its artifacts, its conversations, its runs and its workspace memories — so moving the directory strands all four at once. `rebase` moves them together in one database transaction: either every member lands on the new path or none does.
+- A project's path is its identity in three places — its artifacts, its conversations and its runs — so moving the directory strands all three at once. `rebase` moves them together in one database transaction: either every member lands on the new path or none does. The project's memory notes are files inside `<project>/.openalpaca/memory/`, so they move with the directory; what `rebase` re-keys is their control snapshot, written under the new path before the transaction and the old one deleted after it. A re-base is refused while a memory write for the project is in flight, and a crash part-way leaves a state `openalpaca memory doctor` names (`stale`, `abandoned` or `orphaned`). A project known only by its memory notes — no rows at all — is re-based the same way.
 - `--dry-run` changes nothing and reports what is recorded under each root, whether a store directory stands at either, and which refusal the real call would hit. It names runs that are *queued* under the old root separately from those still running or paused: a re-base takes a queued run's row with it, while a `purge` of that same root would be refused until it finishes, so the two numbers are not interchangeable.
 - The daemon refuses rather than guesses: nothing of yours recorded under the old path is a `404`, and so is a root holding rows that belong to another owner (a re-base rewrites only rows you can see); a run under it that is still running or paused is refused until it finishes (rewriting the row would not move the process); a new path that already has a store recorded against it is refused rather than merged with the old one; two store directories — one at each root — are refused rather than chosen between; either path resolving to the home store (`~/.openalpaca`, or `$HOME` itself) is a `409` `WORKSPACE_IS_HOME`, because the home store is not a project and cannot become one; and a new path that sits *inside* another project's root is a `422` `WORKSPACE_NOT_A_ROOT` naming that root, rather than a silent re-base onto it.
 - If `<old>/.openalpaca` still exists, the directory is moved too, after the transaction. In the usual case you moved the whole project with `mv` already, so only the rows are behind and nothing on disk is touched.
@@ -581,9 +583,9 @@ Notes:
 
 `purge` notes:
 - **`--dry-run` is what happens anyway.** Without `-y` the command prints the plan and deletes nothing; `-y` prints the same plan and then carries it out. `<project>` and `--all` are mutually exclusive, and one of them is required — a destructive verb never guesses which project you meant. The daemon defaults the same way, so a direct `POST /v1/workspaces/purge` with no `dry_run` field is also a dry run.
-- **`<project>` is taken almost literally.** Rows are the proof of a root: it is canonicalized, and if any of your conversations, runs, uploads or memories still name that exact path, it is purgeable outright — no further check, even when the path sits under another project's `.git`/`.openalpaca` (a project moved out from under a monorepo, its own marker gone with it, purges by the root its rows still name). Only a path nothing names is checked against the same `.openalpaca`/`.git` walk `rebase`'s *old* path takes — but unlike `rebase`, purge never silently follows that walk. If it resolves to an **ancestor** different from what you typed, the whole call is refused with a `422` `WORKSPACE_NOT_A_ROOT` naming that root: `openalpaca store purge /repo/src` deletes nothing and tells you to name `/repo` (or give `/repo/src` a project marker of its own first), rather than purging the whole project for a path that named one file of it. A path that resolves to itself, or to no marker at all, is taken as given — and from there the ordinary `404` follows if nothing turns out to be recorded under it.
+- **`<project>` is taken almost literally.** Rows are the proof of a root: it is canonicalized, and if any of your conversations, runs or uploads still name that exact path, or your memory has a partition there, it is purgeable outright — no further check, even when the path sits under another project's `.git`/`.openalpaca` (a project moved out from under a monorepo, its own marker gone with it, purges by the root its rows still name). Only a path nothing names is checked against the same `.openalpaca`/`.git` walk `rebase`'s *old* path takes — but unlike `rebase`, purge never silently follows that walk. If it resolves to an **ancestor** different from what you typed, the whole call is refused with a `422` `WORKSPACE_NOT_A_ROOT` naming that root: `openalpaca store purge /repo/src` deletes nothing and tells you to name `/repo` (or give `/repo/src` a project marker of its own first), rather than purging the whole project for a path that named one file of it. A path that resolves to itself, or to no marker at all, is taken as given — and from there the ordinary `404` follows if nothing turns out to be recorded under it.
 - **What goes:** this project's conversations (`session` rows, their messages, tool-call index rows and queued follow-ups) together with each conversation's log directory under `~/.openalpaca/sessions/`; its runs (`task` rows with their subagent spans, run events, dispatch decisions and LLM call log); and the uploads copied into `<project>/.openalpaca/uploads/`, rows and bytes. Rows go in one transaction per project, then the files.
-- **What stays, and is named in the plan rather than left out of it:** `artifacts/` and every produced file record (never garbage-collected), your workspace memories, `skills/` and `config/`, the store's own `.layout` / `README.md` / `.gitignore`, and any directory inside `<project>/.openalpaca/` that OpenAlpaca did not create. Conversations with no project belong to the home store and are never touched — `--all` says how many there are, names the home store's `state/` as kept too (a factory reset is a separate, deliberate act), and leaves the conversations to `openalpaca sessions delete`.
+- **What stays, and is named in the plan rather than left out of it:** `artifacts/` and every produced file record (never garbage-collected), the project's memory notes under `memory/` (files, not rows, so the purge cannot reach them), `skills/` and `config/`, the store's own `.layout` / `README.md` / `.gitignore`, and any directory inside `<project>/.openalpaca/` that OpenAlpaca did not create. Conversations with no project belong to the home store and are never touched — `--all` says how many there are, names the home store's `state/` as kept too (a factory reset is a separate, deliberate act), and leaves the conversations to `openalpaca sessions delete`.
 - The plan is printed in the retention classes of the README seeded into every store root, so the reason for each verdict is on the line beside it:
 
 ```text
@@ -596,7 +598,7 @@ Would purge /Users/me/code/my-project
                                           (swept: an upload attached to no message is deleted once past the grace period)
     keep  artifacts/                      9 files produced by runs in this project
                                           (never garbage-collected)
-    keep  memory/                         3 workspace memories, and the reserved memory/ directory
+    keep  memory/                         this project's memory notes — files, not rows, so a purge of the database cannot reach them
                                           (yours — never swept)
     keep  skills/, config/                reserved; not created until used
                                           (yours — never swept)
@@ -732,6 +734,33 @@ missing or invalid — `doctor --repair`), `409 MEMORY_NOT_UNDOABLE`,
 `400 MEMORY_INVALID_INPUT`, `409 MEMORY_BUSY` (a write on the partition is in
 flight — retry), `500 MEMORY_INTERNAL` (the daemon's store or database refused;
 the daemon log has the cause).
+
+### `persona`
+
+`USER.md` — what every conversation is told about you — from the command line,
+through the daemon's `GET|PUT /v1/persona/user`.
+
+```bash
+openalpaca persona show user
+openalpaca persona edit user
+```
+
+Notes:
+- `USER.md` is yours to write. The daemon's background learner no longer adds
+  what it picks up from your conversations to it — that becomes a memory note
+  (see [`memory`](#memory)) — so the file holds only what the onboarding
+  conversation put there and what you write. The lines an older build's learner
+  wrote are still in it until you delete them.
+- `show` prints the file as the daemon holds it.
+- `edit` opens it in `$VISUAL`, else `$EDITOR`, else `vi`, and saves it back
+  with the revision it fetched. If the file changed while the editor was open —
+  the onboarding conversation's `update_persona`, or the app's Settings →
+  Persona — the daemon answers `409 PERSONA_REVISION_CONFLICT`, the command
+  prints both revisions and **keeps your text in a named temp file**; merge and
+  edit again. An editor session that changes nothing sends nothing. A document
+  `update_persona` would refuse is `400 PERSONA_INVALID`.
+- `user` is the only document with an editor; `soul` and `identity` are refused
+  by the argument parser.
 
 ### `chat`
 

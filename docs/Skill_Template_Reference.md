@@ -556,7 +556,7 @@ The resolved names become the invocation's allow list: the sandbox refuses any t
 
 Intent-suggested tools from the orchestrator are intentionally **not** merged, preserving skill-level tool isolation.
 
-Capability names provided by built-in tools: `file_read`, `file_write`, `artifact_write`, `shell_execute`, `web_access` (both `web_search` and `web_fetch`), `memory_read` (memory_search), `read_result`, `workspace_read`, `workspace_write`, `persona_write` (update_persona), `messaging` (send). An MCP tool provides a capability equal to its own name (`<server>__<tool>`). A plugin's tools provide the capabilities its manifest declares.
+Capability names provided by built-in tools: `file_read`, `file_write`, `artifact_write`, `shell_execute`, `web_access` (both `web_search` and `web_fetch`), `memory_read` (`memory_search`, `memory_read`, `memory_list`), `read_result`, `workspace_read`, `workspace_write`, `persona_write` (update_persona), `messaging` (send). An MCP tool provides a capability equal to its own name (`<server>__<tool>`). A plugin's tools provide the capabilities its manifest declares.
 
 ### When a Required Tool Is Unavailable
 
@@ -991,7 +991,9 @@ These are the tool names usable in `tools.allow` / `tools.deny`. Names must matc
 | `shell_execute` | `shell_execute` | Execute shell commands | Always registered |
 | `web_search` | `web_access` | Search the web | Always registered; needs the `[web_search]` section (API key) in `config/llm.toml` |
 | `web_fetch` | `web_access` | Fetch and read content from a URL | Always registered |
-| `memory_search` | `memory_read` | Search stored memories (hybrid FTS + vector when an embedder is configured) | Registered only when a database is available |
+| `memory_search` | `memory_read` | Search the owner's memory notes by keyword — whole words and substrings, cited by heading and line range; no meaning-based search | Registered by the daemon over its memory service |
+| `memory_read` | `memory_read` | Read one memory note by id, whole or one section (at most 32 KiB) | Same |
+| `memory_list` | `memory_read` | List memory notes by kind, status and scope, paged | Same |
 | `read_result` | `read_result` | Page back a tool result that was too large to show inline | Always registered, but only useful where results spill to a session log (chat turns and workflows). A skill loop has no session log, so its oversized results are cut inline instead and this tool has nothing to read |
 | `workspace_read` | `workspace_read` | Read entries from the shared task workspace | Always registered; requires database + task context at execution time |
 | `workspace_write` | `workspace_write` | Write entries to the shared task workspace (32 KB per entry, optimistic-locking retries) | Always registered; requires database + task context at execution time |
@@ -1000,7 +1002,7 @@ These are the tool names usable in `tools.allow` / `tools.deny`. Names must matc
 
 **`send` in skill loops** gets special handling: when `send` is in the resolved tool set, the loop's initial tool choice is forced to `send`, a send-context block (available channels) is injected into the prompt, and a post-hoc guard detects "hallucinated send" responses (confirmation text without an actual tool call) and replaces them with a warning asking the user to retry.
 
-The chat-only tools (`start_workflow`, `task_status`, `memory_store`, `memory_forget`, `steer_workflow`, `queue_followup`, the general `invoke_skill`) and the lead agent's coordination tools are created per request and are **not** in the shared registry, so a skill cannot list them.
+The chat-only tools (`start_workflow`, `task_status`, `memory_store`, `memory_update`, `memory_forget`, `steer_workflow`, `queue_followup`, the general `invoke_skill`) and the lead agent's coordination tools are created per request and are **not** in the shared registry, so a skill cannot list them.
 
 **Beyond built-ins**, the registry can also contain:
 - **MCP tools** from `config/mcp.toml`, named `<server>__<tool>`;
@@ -1051,7 +1053,7 @@ Created from `depends_on` (Section 8); like script tools, they are invocation-sc
 **"Skill '<x>' references unknown tools: [...]" (warning in logs)**
 - Use exact registered names (Section 14). This is the legacy `tools.allow` path; unknown names are skipped, not fatal.
 - If `requires_capabilities` is set, `tools.allow` is ignored entirely — a common source of confusion when the tool set doesn't match expectations.
-- `memory_search` is registered only when the daemon has a database. `send` is always registered by the daemon, but a call fails when no connector can deliver to the requested channel.
+- `memory_search`, `memory_read` and `memory_list` are registered by the daemon over its memory service; a registry built without one (a test harness) has none of them. A skill can read memory but never write it: the writers are chat-only. `send` is always registered by the daemon, but a call fails when no connector can deliver to the requested channel.
 
 **`routing.score` vs `routing.weights`**
 - Both keys are accepted (serde alias). `weights` is canonical; `score` is kept for backward compatibility (the shipped `code-review` skill uses it).
