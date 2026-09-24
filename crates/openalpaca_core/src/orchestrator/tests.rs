@@ -7104,6 +7104,73 @@ async fn the_main_loop_recalls_the_natural_question_fixture_through_the_service(
     assert!(!blocks[0].contains(&scene.coffee.id.to_string()));
 }
 
+/// **Plan 3.3, fixture 21 step 2 on the skill tier.** A `/slash` turn is a
+/// model-answering path like the main loop and takes the same per-turn
+/// delivery (`orchestrator/skill/invocation.rs`): `/file what editor do I
+/// prefer?` carries the vim note and not the coffee one, in one block right
+/// before the current user turn, and the turn's `memory_used` names that
+/// note with reason `recall`, taken once.
+#[tokio::test]
+async fn the_skill_tier_recalls_the_natural_question_fixture_through_the_service() {
+    use crate::memory::service::UsedReason;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let (orch, requests, _skills) = filer_skill_orchestrator(db, "vim, as you told me");
+    orch.set_memory_service(scene.service.clone());
+
+    let request_id = Uuid::new_v4();
+    let reply = send_filer(&orch, request_id, "/file what editor do I prefer?").await;
+    assert_eq!(reply, "vim, as you told me");
+
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 1);
+    let messages = &reqs[0].messages;
+    let blocks = memory_messages(&reqs[0]);
+    assert_eq!(
+        blocks.len(),
+        1,
+        "one memory block per turn; messages: {:?}",
+        messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        blocks[0].contains("User prefers vim for editing"),
+        "{}",
+        blocks[0]
+    );
+    assert!(
+        blocks[0].contains(&scene.vim.id.to_string()),
+        "{}",
+        blocks[0]
+    );
+    assert!(!blocks[0].contains("espresso"), "{}", blocks[0]);
+    assert!(!blocks[0].contains(&scene.coffee.id.to_string()));
+    // Design §5 step 8: right before the user turn, after everything cached.
+    let last = messages.len() - 1;
+    assert!(
+        messages[last].content.contains("what editor do I prefer?"),
+        "{}",
+        messages[last].content
+    );
+    assert!(
+        messages[last - 1].content.contains("<memory_context>"),
+        "{}",
+        messages[last - 1].content
+    );
+    drop(reqs);
+
+    let used = orch.take_memory_used(request_id);
+    assert_eq!(used.len(), 1, "{used:?}");
+    assert_eq!(used[0].id, scene.vim.id);
+    assert_eq!(used[0].revision, scene.vim.revision);
+    assert_eq!(used[0].reason, UsedReason::Recall);
+    assert!(orch.take_memory_used(request_id).is_empty(), "taken once");
+}
+
 /// **Plan 3.3.** The same question twice on the same lane, a note stored in
 /// between: the second turn's request carries both notes. Layer 3 is a
 /// per-lane cache keyed by query text, and the memory delivery is built
@@ -7232,12 +7299,18 @@ async fn the_main_loop_prompt_carries_the_user_profile_exactly_once() {
     );
 }
 
-/// The same rule on the skill tier, which composes with the same persona
-/// layer and the same context manager.
-#[tokio::test]
-async fn the_skill_tier_prompt_carries_the_user_profile_exactly_once() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+/// A tool-mode orchestrator with a database and one file-based skill,
+/// `/file`, whose model answers `final_text` and records every request. The
+/// skill directory is returned because the catalog reads `SKILL.md` again
+/// at invocation (`load_full`), so it must outlive the call.
+fn filer_skill_orchestrator(
+    db: openalpaca_storage::Database,
+    final_text: &str,
+) -> (
+    Orchestrator,
+    Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+    tempfile::TempDir,
+) {
     let skills = tempfile::TempDir::new().unwrap();
     let skill_dir = skills.path().join("filer");
     std::fs::create_dir_all(&skill_dir).unwrap();
@@ -7253,7 +7326,7 @@ async fn the_skill_tier_prompt_carries_the_user_profile_exactly_once() {
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(ToolModeMockLlm {
             tool_call: None,
-            final_text: "filed".to_string(),
+            final_text: final_text.to_string(),
             requests: requests.clone(),
         }),
         openalpaca_llm::ProviderType::Anthropic,
@@ -7276,22 +7349,36 @@ async fn the_skill_tier_prompt_carries_the_user_profile_exactly_once() {
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
     );
+    (orch, requests, skills)
+}
+
+/// One `/file …` turn from `user1` on its CLI lane.
+async fn send_filer(orch: &Orchestrator, request_id: Uuid, content: &str) -> String {
+    orch.handle_message(HandleRequest::new(
+        request_id,
+        "cli",
+        content,
+        Principal::User {
+            global_id: "user1".to_string(),
+        },
+        Scope::Global,
+        "user1:cli",
+    ))
+    .await
+    .unwrap()
+}
+
+/// The same rule on the skill tier, which composes with the same persona
+/// layer and the same context manager.
+#[tokio::test]
+async fn the_skill_tier_prompt_carries_the_user_profile_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let (orch, requests, _skills) = filer_skill_orchestrator(db, "filed");
     *orch.user_document.write().unwrap() =
         Some(crate::middleware::user::parse_user_markdown(PROFILE_DOC).unwrap());
 
-    let reply = orch
-        .handle_message(HandleRequest::new(
-            Uuid::new_v4(),
-            "cli",
-            "/file this bug",
-            Principal::User {
-                global_id: "user1".to_string(),
-            },
-            Scope::Global,
-            "user1:cli",
-        ))
-        .await
-        .unwrap();
+    let reply = send_filer(&orch, Uuid::new_v4(), "/file this bug").await;
     assert_eq!(reply, "filed");
     let reqs = requests.lock().unwrap();
     assert_eq!(reqs.len(), 1);
