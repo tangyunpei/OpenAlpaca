@@ -267,7 +267,7 @@ changes nothing: the file is left exactly as it was. To switch over:
    touches it.
 
 **Keep the builds apart.** A pre-redesign build that contains commit
-`ae8faca8` (the first fix of the memory redesign, 2026-09-23) refuses a
+`ae8faca8` (the memory redesign's newer-schema guard — slice 0, 2026-09-23) refuses a
 database whose schema is newer than it knows — `Database <path> is at schema
 version 43, which is newer than this build knows (42). Use the OpenAlpaca build
 that created it. Nothing was changed.` — so pointing it at the new store cannot
