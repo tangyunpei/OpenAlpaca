@@ -398,7 +398,8 @@ pub struct RecallResult {
     pub index_state: IndexState,
     /// The rendered block's size in bytes, wrappers included.
     pub bytes: usize,
-    /// Bytes spent on pinned notes, their wrappers included.
+    /// The pinned notes' text bytes, against the pinned sub-budget (their
+    /// wrappers count against the total).
     pub pinned_bytes: usize,
 }
 
@@ -417,5 +418,12 @@ impl RecallResult {
                 reason: n.reason,
             })
             .collect()
+    }
+
+    /// The whole delivery as quoted data with its trust label (design §5
+    /// step 8): reference data in user or tool context, never a system
+    /// instruction. Empty when nothing was delivered.
+    pub fn render(&self) -> String {
+        super::recall::render_block(&self.notes)
     }
 }

@@ -24,6 +24,7 @@
 
 mod context;
 mod error;
+pub mod recall;
 mod types;
 mod write_slot;
 
@@ -34,6 +35,7 @@ pub use context::{
     Attribution, Capabilities, MemoryAccessContext, Surface, WorkspaceHint, resolve_project_root,
 };
 pub use error::MemoryError;
+pub use recall::TRUST_LABEL;
 pub use types::{
     ExtractionProvenance, ForgetInput, ForgetItem, ForgetItemStatus, ForgetOutput, Freshness,
     ListInput, ListItem, ListOutput, MemoryChange, MemoryUsed, Patch, ReadInput, ReadOutput,
@@ -48,7 +50,8 @@ use openalpaca_storage::Database;
 use openalpaca_storage::memory_files::{
     self as files, Dedup, EffectiveStatus, LoadedPartition, MAX_LIST_ENTRIES, MAX_NOTE_BYTES,
     MAX_SOURCES, MAX_TITLE_CHARS, MemoryFilesError, NewNote, NoteId, NoteScope, NoteSource,
-    NoteStatus, NoteView, Origin, Partition, ScanEntry, SourceType, is_valid_fact_key,
+    NoteStatus, NoteView, Origin, Partition, PartitionHealth, ScanEntry, SourceType,
+    is_valid_fact_key,
 };
 use openalpaca_storage::memory_index::{
     self as index, FileStat, IndexRecord, IndexState, MemoryIndex,
@@ -147,15 +150,30 @@ impl MemoryService {
     /// A service over `index`. `db` is where owners and sources are
     /// verified; without one no owner can be confirmed and every context
     /// construction answers *no owner*.
+    ///
+    /// A fresh or recreated index (`rebuilding`) is rebuilt from the
+    /// partitions the control snapshots name before the first request;
+    /// a valid one keeps its rows and is checked partition by partition on
+    /// first use (design §5, *Freshness without a watcher*).
     pub fn new(db: Option<Database>, index: MemoryIndex) -> Self {
-        Self {
+        let service = Self {
             db,
             index,
             slots: WriteSlots::default(),
             touched: Mutex::new(HashSet::new()),
             fingerprints: Mutex::new(HashMap::new()),
             ring: Mutex::new(VecDeque::with_capacity(RING_CAPACITY)),
+        };
+        match service.index.index_state() {
+            Ok(report) if report.state == IndexState::Rebuilding => {
+                if let Err(e) = service.rebuild_index() {
+                    tracing::warn!("memory index rebuild failed: {e:#}");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("memory index state unreadable: {e}"),
         }
+        service
     }
 
     /// The daemon's service: the cache at `state/cache/memory-index-v1.sqlite`
@@ -171,17 +189,7 @@ impl MemoryService {
                 MemoryIndex::open_in_memory().expect("an in-memory SQLite index always opens")
             }
         };
-        let service = Self::new(db, index);
-        match service.index.index_state() {
-            Ok(report) if report.state == IndexState::Rebuilding => {
-                if let Err(e) = service.rebuild_index() {
-                    tracing::warn!("memory index rebuild failed: {e:#}");
-                }
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!("memory index state unreadable: {e}"),
-        }
-        service
+        Self::new(db, index)
     }
 
     pub fn index(&self) -> &MemoryIndex {
@@ -949,6 +957,42 @@ impl MemoryService {
             superseded: created.superseded,
             dedup: created.dedup,
             change,
+        })
+    }
+
+    /// One reconciliation scan now (`POST /v1/memories/sync`, design §5
+    /// *Freshness*): the snapshot re-records what changed behind the
+    /// service's back, the index follows, and each change is reported as a
+    /// `memory_changed` with `change: external` and no surface (§7b P13).
+    pub fn sync(&self, ctx: &MemoryAccessContext) -> Result<SyncReport, MemoryError> {
+        let resolved = self.resolve(ctx)?;
+        let mut scanned = 0;
+        let mut changes = Vec::new();
+        for p in resolved.all() {
+            if p.health() != PartitionHealth::Ready {
+                continue;
+            }
+            let _write = self
+                .slots
+                .begin_write(&Self::slot_key(p.scope(), &ctx.owner_key));
+            let fresh = Self::open_partition(p.scope(), &ctx.owner_id)?;
+            scanned += fresh.scan()?.len();
+            for change in fresh.reconcile()? {
+                changes.push(MemoryChange {
+                    partition_key: fresh.partition_key().to_string(),
+                    note_id: change.id,
+                    change: "external",
+                    revision: change.revision,
+                    origin: Origin::External,
+                    surface: None,
+                });
+            }
+            self.reindex(&fresh, false)?;
+        }
+        Ok(SyncReport {
+            scanned,
+            changes,
+            index_state: self.index.index_state()?.state,
         })
     }
 
