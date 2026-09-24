@@ -11,7 +11,8 @@
 //!   `ETag: "<sha256>"`, the lowercase hex SHA-256 of the file's bytes.
 //! - `PUT` takes the new Markdown as `{"content"}` and **`If-Match`** — the
 //!   header, never a body field. Absent is `428 PERSONA_IF_MATCH_REQUIRED`.
-//!   A value that is not the file's current hash is `409
+//!   A value that is not the file's current hash (or `*`, RFC 7232's
+//!   any-current-representation) is `409
 //!   PERSONA_REVISION_CONFLICT`, the message naming the current revision and
 //!   the response carrying it as `ETag`, and the file is unchanged — a
 //!   concurrent bootstrap `update_persona` changes the hash, so a stale
@@ -128,7 +129,9 @@ pub(crate) async fn replace_user_document(
             );
         }
     };
-    if expected != current {
+    // RFC 7232 §3.1: `*` matches any current representation, and a seeded
+    // `USER.md` — the read above succeeded — is one.
+    if expected != "*" && expected != current {
         return with_etag(
             api_error(
                 StatusCode::CONFLICT,

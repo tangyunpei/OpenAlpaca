@@ -193,6 +193,26 @@ async fn put_with_an_invalid_body_is_400_and_the_file_is_unchanged() {
     assert_eq!(f.file(), DOC);
 }
 
+/// RFC 7232 §3.1: `If-Match: *` matches any current representation, and a
+/// seeded `USER.md` is always one — so the wildcard is "whatever is there
+/// now", not a revision that can never equal a hash. Neither shipped client
+/// sends it; a hand-written `curl` may.
+#[tokio::test]
+async fn put_with_if_match_star_replaces_whatever_is_current() {
+    let f = Fixture::new();
+    let response = replace_user_document(
+        &f.writer,
+        &headers_with(Some("*")),
+        PersonaUserBody { content: edited() },
+        |_| {},
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let new_revision = UserDocumentWriter::sha256(&edited());
+    assert_eq!(etag_of(&response), Some(format!("\"{new_revision}\"")));
+    assert_eq!(f.file(), edited());
+}
+
 #[test]
 fn if_match_reads_the_quoted_bare_and_weak_forms() {
     let sha = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
