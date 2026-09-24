@@ -648,8 +648,9 @@ the first click and forgets on the second; then four tabs:
   window, a chat turn, an editor on disk — the save is refused and the view
   says *"This note changed since you opened it. Reload to see the current
   version — your text is kept."* `Reload` shows the current version above your
-  draft, and the next save goes against what you have now seen. A note longer
-  than 32 KiB is read-only here: edit the file itself.
+  draft, and the next save goes against what you have now seen. Should a read
+  ever come back cut at 32 KiB, the editor is disabled: edit the file itself.
+  (A note over 32 KiB does not load at all — `doctor` lists it as oversized.)
 - **Diff** — the current text against one of the kept versions.
 - **History** — the last five versions the daemon wrote, newest first, each
   with `Compare`. An edit made outside the app is not one of them, and the tab

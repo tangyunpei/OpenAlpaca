@@ -639,7 +639,7 @@ Adopted on the same basis as §7b/§7c (plan §7a S3-R6, folded in at rev 4.4):
 | R4 | A `supersedes` target in the other partition is `invalid_input`. | mutations |
 | R5 | `memory_store` answers `dedup` (with the existing id) for an exact duplicate. | mutations, §7b P8 |
 | R6 | Mutations return `MemoryChange` records; the daemon publishes `memory_changed` from them (3.8). | `service/`, `event_bridge.rs` |
-| R7 | A body the read cut at 32 KiB is never written back: the GUI's editor is disabled for it, and `openalpaca memory edit` and the update route refuse it, naming the file. | 3.9 and its follow-up |
+| R7 | A body the read cut at 32 KiB is never written back: the GUI's editor is disabled for it and `openalpaca memory edit` refuses it before opening the editor, naming the file. The update route cannot receive one: a note over 32 KiB does not parse, so its read, edit and delete are `404` and `doctor` lists the file as `oversized` (route test pins both directions). | 3.9 and its follow-up `5aa4c1a5`, `d48e427a` |
 | R8 | `GET /v1/memories/recently-used` has no GUI reader yet (the *notes used* note comes from `done.memory_used` live); DESIGN_SPEC §5.7 records it as not built. | GUI |
 
 ## 8. Module boundaries and cost controls
