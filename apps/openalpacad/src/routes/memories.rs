@@ -738,7 +738,10 @@ fn parse_ts(field: &str, value: &str) -> Result<DateTime<Utc>, Refusal> {
         })
 }
 
-/// `?since=`: RFC 3339, or a window `<n>d` / `<n>h` / `<n>m` / `<n>s`.
+/// `?since=`: RFC 3339, or a window `<n>d` / `<n>h` / `<n>m` / `<n>s`. A
+/// window the clock cannot subtract is a `400`, never an overflow panic —
+/// this is a query string under the bearer token, and the router installs
+/// no panic catcher.
 fn parse_since(value: &str) -> Result<DateTime<Utc>, Refusal> {
     let trimmed = value.trim();
     if let Some((digits, unit)) = trimmed
@@ -749,14 +752,16 @@ fn parse_since(value: &str) -> Result<DateTime<Utc>, Refusal> {
         && let Ok(n) = digits.parse::<i64>()
     {
         let window = match unit {
-            "d" => Some(Duration::days(n)),
-            "h" => Some(Duration::hours(n)),
-            "m" => Some(Duration::minutes(n)),
-            "s" => Some(Duration::seconds(n)),
+            "d" => Some(Duration::try_days(n)),
+            "h" => Some(Duration::try_hours(n)),
+            "m" => Some(Duration::try_minutes(n)),
+            "s" => Some(Duration::try_seconds(n)),
             _ => None,
         };
         if let Some(window) = window {
-            return Ok(Utc::now() - window);
+            return window
+                .and_then(|w| Utc::now().checked_sub_signed(w))
+                .ok_or_else(|| invalid("since: the window is too large"));
         }
     }
     parse_ts("since", trimmed).map_err(|_| {

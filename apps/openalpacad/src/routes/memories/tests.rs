@@ -728,6 +728,57 @@ async fn recently_learned_excludes_a_note_re_recorded_as_user() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
 }
 
+/// `since` takes a window (`7d`, `24h`, `30m`) as well as an instant, and a
+/// window too large to subtract from now is `400 MEMORY_INVALID_INPUT` —
+/// a query string under the bearer token must never drop the connection.
+#[tokio::test]
+async fn a_since_window_is_honoured_and_an_oversized_one_is_400() {
+    let f = Fixture::new();
+    let (learned, _) = f.extracted("Learned", "# Learned\n\nThis week.\n");
+    for window in ["7d", "24h", "30m"] {
+        let (status, json) = split(
+            f.api
+                .recently_learned(
+                    &Fixture::headers(),
+                    RecentlyLearnedQuery {
+                        since: Some(window.into()),
+                        limit: None,
+                    },
+                )
+                .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "since={window}: {json}");
+        assert_eq!(
+            json["items"][0]["id"],
+            learned.to_string(),
+            "since={window}"
+        );
+    }
+
+    let (status, json) = split(
+        f.api
+            .recently_learned(
+                &Fixture::headers(),
+                RecentlyLearnedQuery {
+                    since: Some("100000000d".into()),
+                    limit: None,
+                },
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(code(&json), "MEMORY_INVALID_INPUT");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("too large"),
+        "{json}"
+    );
+}
+
 /// `undo` forgets a recently learned note, and is `409 MEMORY_NOT_UNDOABLE`
 /// once its origin moved — the user has since made it theirs, and a plain
 /// forget is the verb for that.
