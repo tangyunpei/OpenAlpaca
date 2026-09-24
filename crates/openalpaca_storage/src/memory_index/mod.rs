@@ -723,13 +723,17 @@ impl MemoryIndex {
     }
 
     /// The active pinned notes of these partitions, newest `updated_at`
-    /// first — design §5 step 2's selection, for the caller to budget.
+    /// first — design §5 step 2's selection, for the caller to budget. A
+    /// note whose validity window has ended by the index clock's "now" is
+    /// left out, as a current search leaves it out (design §4 *Times*).
     pub fn list_pinned(&self, partition_keys: &[String]) -> Result<Vec<IndexedNote>> {
         if partition_keys.is_empty() {
             return Ok(Vec::new());
         }
+        let now = canon_timestamp(&self.now());
         let conn = self.lock();
         let placeholders = placeholders(partition_keys.len());
+        let now_param = partition_keys.len() + 1;
         let sql = format!(
             "SELECT n.id, n.partition_key, n.revision, n.relative_path, n.effective_status,
                     n.pinned, n.mtime_ns, n.size, n.inode,
@@ -737,11 +741,12 @@ impl MemoryIndex {
              FROM note n
              WHERE n.pinned = 1 AND n.effective_status = 'active'
                AND n.partition_key IN ({placeholders})
+               AND (n.valid_to IS NULL OR n.valid_to > ?{now_param})
              ORDER BY n.updated_at DESC, n.id ASC"
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(
-            rusqlite::params_from_iter(partition_keys.iter()),
+            rusqlite::params_from_iter(partition_keys.iter().chain(std::iter::once(&now))),
             indexed_note_from_row,
         )?;
         rows.collect::<rusqlite::Result<Vec<_>>>()

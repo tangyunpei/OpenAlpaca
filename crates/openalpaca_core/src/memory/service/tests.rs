@@ -1501,6 +1501,79 @@ fn a_planned_window_is_current_and_an_ended_one_is_not() {
     assert_eq!(search_ids(&as_of("2026-09-03T00:00:00Z")), vec![ended.id]);
 }
 
+/// The same rule on recall's pinned step (design §5 step 2): a pinned note
+/// whose validity window has ended is not delivered every turn; a pinned
+/// note whose window has not begun is.
+#[test]
+fn recall_leaves_out_a_pinned_note_whose_window_has_ended() {
+    let at = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    let now = at("2026-09-24T12:00:00Z");
+    let h = Harness::with_index(
+        MemoryIndex::open_in_memory()
+            .unwrap()
+            .with_clock(move || now),
+    );
+    let user = h.user(ALICE, None);
+    let store = |title: &str, body: &str, from: &str, to: &str| {
+        h.service
+            .store(
+                &user,
+                StoreInput {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: Some(NoteKind::Episode),
+                    valid_from: Some(at(from)),
+                    valid_to: Some(at(to)),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    };
+    let planned = store(
+        "Lisbon trip",
+        "# Lisbon trip\n\nThe user travels to Lisbon for a conference, 5 to 19 October.\n",
+        "2026-10-05T00:00:00Z",
+        "2026-10-20T00:00:00Z",
+    );
+    let ended = store(
+        "Porto trip",
+        "# Porto trip\n\nThe user travelled to Porto for a conference, 1 to 5 September.\n",
+        "2026-09-01T00:00:00Z",
+        "2026-09-06T00:00:00Z",
+    );
+    // `pinned` is not a tool input: pin both by hand, then let the service
+    // see the edit.
+    let notes = h.home_notes_dir(ALICE_KEY);
+    for id in [planned.id, ended.id] {
+        let file = note_file_for(&notes, id).unwrap();
+        let text = fs::read_to_string(&file)
+            .unwrap()
+            .replace("pinned: false", "pinned: true");
+        fs::write(&file, text).unwrap();
+    }
+    h.service.sync(&user).unwrap();
+
+    let recalled = h
+        .service
+        .recall(
+            &h.tool(ALICE, None),
+            "what should I pack?",
+            RecallBudget::default(),
+        )
+        .unwrap();
+    let pinned: Vec<NoteId> = recalled
+        .memory_used()
+        .iter()
+        .filter(|u| u.reason == UsedReason::Pinned)
+        .map(|u| u.id)
+        .collect();
+    assert_eq!(pinned, vec![planned.id]);
+}
+
 /// Fixture 13: read-after-write, and freshness by verification before any
 /// scan — an external edit is served from the fresh file and marked stale,
 /// a deleted file is never served, and a scan brings the snapshot and the

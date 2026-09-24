@@ -657,6 +657,50 @@ fn list_pinned_returns_active_pinned_notes_of_the_named_partitions() {
     assert!(index.list_pinned(&[]).unwrap().is_empty());
 }
 
+/// Design §4 *Times* holds for pinned notes too: current recall leaves out
+/// a note whose validity window has ended (the bound is exclusive), at the
+/// index clock's "now", and keeps one whose window has not begun.
+#[test]
+fn list_pinned_leaves_out_a_note_whose_window_has_ended() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-24T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let index = MemoryIndex::open_in_memory()
+        .unwrap()
+        .with_clock(move || now);
+    index.rebuild(&[]).unwrap();
+    let pin = |id: &str, from: Option<&str>, to: Option<&str>| {
+        let mut r = record(id, id, id);
+        r.pinned = true;
+        r.valid_from = from.map(str::to_string);
+        r.valid_to = to.map(str::to_string);
+        r
+    };
+    index
+        .upsert_many(&[
+            pin("open", None, None),
+            pin(
+                "planned",
+                Some("2026-10-05T00:00:00Z"),
+                Some("2026-10-20T00:00:00Z"),
+            ),
+            pin(
+                "ended",
+                Some("2026-09-01T00:00:00Z"),
+                Some("2026-09-06T00:00:00Z"),
+            ),
+            pin("ends_now", None, Some("2026-09-24T12:00:00Z")),
+        ])
+        .unwrap();
+    let ids: Vec<String> = index
+        .list_pinned(&["home-p".to_string()])
+        .unwrap()
+        .into_iter()
+        .map(|n| n.id)
+        .collect();
+    assert_eq!(ids, vec!["open", "planned"]);
+}
+
 #[test]
 fn the_index_persists_across_reopen() {
     let dir = tempdir().unwrap();
