@@ -3190,3 +3190,65 @@ fn a_partition_that_fails_to_open_is_skipped_and_the_rest_are_still_scanned() {
         Ok(crate::events::SystemEvent::MemoryChanged { .. })
     ));
 }
+
+/// The timer is a stat scan (design §5, *Freshness without a watcher*): a
+/// tick whose stat scan — mtime, size, inode per file — matches the last
+/// tick's re-hashes and re-parses nothing, so a quiet store costs one
+/// `read_dir` every 30 s and no write-slot stall. The one edit a stat scan
+/// cannot see, a same-size rewrite with its mtime put back, shows the
+/// gate: the timer records nothing for it, and `sync` — which re-hashes
+/// everything on demand — still finds it. Every other test's appended
+/// edit is the change the scan does see.
+#[test]
+fn a_quiet_tick_re_hashes_nothing_and_sync_still_does() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let note = h.store(&user, "Editor", "# Editor\n\nvim.\n", NoteKind::Preference);
+    let mut rx = h.bus.subscribe();
+    assert!(h.service.reconcile_owner(ALICE).unwrap().changes.is_empty());
+
+    let file = note_file_for(&h.home_notes_dir(ALICE_KEY), note.id).unwrap();
+    let before = fs::metadata(&file).unwrap();
+    let text = fs::read_to_string(&file).unwrap();
+    let rewritten = text.replace("vim.", "VIM.");
+    assert_eq!(rewritten.len(), text.len(), "a same-size rewrite");
+    fs::write(&file, &rewritten).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+    let after = fs::metadata(&file).unwrap();
+    assert_eq!(after.len(), before.len());
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+
+    let quiet = h.service.reconcile_owner(ALICE).unwrap();
+    assert_eq!(quiet.scanned, 1, "the stat scan still runs");
+    assert!(
+        quiet.changes.is_empty(),
+        "a file whose stat facts did not change is not re-hashed by the timer: {:?}",
+        quiet.changes
+    );
+    assert!(rx.try_recv().is_err(), "and nothing is published");
+
+    let synced = h.service.sync(&user).unwrap();
+    assert_eq!(synced.changes.len(), 1, "sync re-hashes everything");
+    assert_eq!(synced.changes[0].note_id, note.id);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(crate::events::SystemEvent::MemoryChanged { .. })
+    ));
+    let view = h
+        .service
+        .read(
+            &user,
+            ReadInput {
+                id: note.id,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(view.origin, Origin::External);
+    assert_eq!(view.body, "# Editor\n\nVIM.\n");
+}

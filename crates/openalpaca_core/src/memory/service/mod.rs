@@ -153,6 +153,11 @@ pub struct MemoryService {
     index: MemoryIndex,
     slots: WriteSlots,
     fingerprints: Mutex<HashMap<String, HashMap<NoteId, Fingerprint>>>,
+    /// The reconciliation timer's last stat scan per partition key, sorted
+    /// by file name (design §5: a bounded stat scan, and only a file whose
+    /// mtime, size or inode changed is re-hashed). A tick whose scan
+    /// matches re-parses and re-indexes nothing.
+    last_scans: Mutex<HashMap<String, Vec<ScanEntry>>>,
     ring: Mutex<VecDeque<RecentlyUsedItem>>,
     /// Per request, what it delivered so far in delivery order — the turn's
     /// `memory_used` (design §7a), taken once by the bridge. Oldest first,
@@ -188,6 +193,7 @@ impl MemoryService {
             index,
             slots: WriteSlots::default(),
             fingerprints: Mutex::new(HashMap::new()),
+            last_scans: Mutex::new(HashMap::new()),
             ring: Mutex::new(VecDeque::with_capacity(RING_CAPACITY)),
             used_by_request: Mutex::new(VecDeque::new()),
             bus: None,
@@ -395,9 +401,11 @@ impl MemoryService {
     pub fn finish_project_move(&self, mv: ProjectMove) -> Result<(), MemoryError> {
         files::finish_project_move(&mv.moves, Utc::now())?;
         let mut fingerprints = self.fingerprints.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last_scans = self.last_scans.lock().unwrap_or_else(|e| e.into_inner());
         for m in &mv.moves {
             self.index.remove_partition(&m.old_key)?;
             fingerprints.remove(&m.old_key);
+            last_scans.remove(&m.old_key);
         }
         Ok(())
     }

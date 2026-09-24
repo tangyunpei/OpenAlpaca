@@ -168,18 +168,32 @@ impl MemoryService {
     }
 
     /// One tick's work on one ready partition, under its write slot: the
-    /// stat scan, the re-hash of what changed behind the service's back
-    /// (published as it is found) and the index's catch-up. Answers how
-    /// many files the scan listed and the external changes it recorded.
+    /// stat scan and — only when it differs from the last tick's, or on the
+    /// first tick — the re-hash of what changed behind the service's back
+    /// (published as it is found) and the index's catch-up. A scan that
+    /// matches the last tick's costs the `read_dir` and nothing else; the
+    /// scan is remembered once its work has succeeded, so a tick that
+    /// failed halfway is redone. Answers how many files the scan listed
+    /// and the external changes it recorded.
     fn reconcile_partition(
         &self,
         partition: &files::Partition,
     ) -> Result<(usize, Vec<MemoryChange>), MemoryError> {
-        let scanned = partition.scan()?.len();
+        let mut scan = partition.scan()?;
+        scan.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+        let scanned = scan.len();
+        let key = partition.partition_key();
+        let unchanged = {
+            let last = self.last_scans.lock().unwrap_or_else(|e| e.into_inner());
+            last.get(key) == Some(&scan)
+        };
+        if unchanged {
+            return Ok((scanned, Vec::new()));
+        }
         let mut changes = Vec::new();
         for change in partition.reconcile()? {
             let change = MemoryChange {
-                partition_key: partition.partition_key().to_string(),
+                partition_key: key.to_string(),
                 note_id: change.id,
                 change: "external",
                 revision: change.revision,
@@ -190,6 +204,10 @@ impl MemoryService {
             changes.push(change);
         }
         self.reindex(partition, false)?;
+        self.last_scans
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.to_string(), scan);
         Ok((scanned, changes))
     }
 }
