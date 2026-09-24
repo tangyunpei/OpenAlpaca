@@ -656,8 +656,8 @@ Notes:
   short Chinese term) is a substring scan. Results are cited — the heading and line
   range the excerpt came from, why it matched, and its freshness — and a result
   flagged `conflict` or `same-key loser` is one `doctor` also names. Candidates are
-  never returned. `--historical` includes replaced and archived notes; `--as-of`
-  evaluates validity at that instant.
+  never returned. `--historical` includes superseded, archived and ended-window
+  notes; `--as-of` evaluates validity at that instant.
 - `show` prints the note with its provenance; `--raw` prints the note *file* as the
   daemon holds it, frontmatter and all; `--revision <rev>` reads one of the last
   five revisions the daemon wrote (a hand edit is not one of them) — `--raw` of a

@@ -156,7 +156,7 @@ pub enum MemoryCommands {
         /// Maximum number of results (1-20)
         #[arg(long, default_value = "8")]
         limit: usize,
-        /// Include superseded and archived notes
+        /// Include superseded, archived and ended-window notes
         #[arg(long)]
         historical: bool,
         /// Evaluate validity at this instant (RFC 3339)
