@@ -31,9 +31,11 @@ pub use capabilities::{
 ///
 /// - `workspace_id` — the resolved root for **memory scoping**, CWD-derived when
 ///   the request carried none (`memory/scope_context.rs`,
-///   `MemoryScopeContext::for_request`). Read by `memory_search`
-///   (`tools/builtins/memory_search.rs`) and by the paths that rebuild a
-///   `MemoryScopeContext` out of this one (`memory_ops`, `start_workflow`).
+///   `MemoryScopeContext::for_request`). Set by the main loop, the skill tier
+///   and the lead, and read by no builtin: the memory tools
+///   (`tools/builtins/memory_tools.rs`) take `request_workspace_root`, so the
+///   daemon's CWD never selects a partition (design MD-5). It stays until the
+///   recall path leaves `MemoryScopeContext` (plan 3.3).
 /// - `request_workspace_root` — the same resolution, but only on the
 ///   client-sent branch and never the home store (R22). Read by `artifact_write`
 ///   and its `workspace_write` spill, and by nothing else: it is the only one of

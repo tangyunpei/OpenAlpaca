@@ -114,9 +114,6 @@ fn tool_recovery_hint(tool_name: &str, error: &str) -> Option<&'static str> {
     if tool_name == "shell_execute" && error.contains("not found") {
         return Some("Hint: check if the command is installed or use the full path.");
     }
-    if tool_name == "memory_search" && error.contains("no results") {
-        return Some("Hint: try broader search terms or check workspace_read for shared context.");
-    }
     None
 }
 
