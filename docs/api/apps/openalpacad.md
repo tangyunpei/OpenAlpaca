@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 104.
+- Total documented method/path endpoints: 106.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -87,6 +87,8 @@
 | GET | `/v1/orchestrator/decisions` | `bearer` | `dispatch_decisions_handler` | - | `dispatch_decisions::DecisionParams` | `apps/openalpacad/src/routes/dispatch_decisions.rs` |
 | GET | `/v1/orchestrator/latency` | `bearer` | `orchestrator_latency_handler` | - | `orchestrator_latency::LatencyParams` | `apps/openalpacad/src/routes/orchestrator_latency.rs` |
 | GET | `/v1/orchestrator/latency/aggregate` | `bearer` | `orchestrator_latency_aggregate_handler` | - | `orchestrator_latency::AggregateParams` | `apps/openalpacad/src/routes/orchestrator_latency.rs` |
+| GET | `/v1/persona/user` | `bearer` | `get_persona_user_handler` | - | - | `apps/openalpacad/src/routes/persona.rs` |
+| PUT | `/v1/persona/user` | `bearer` | `put_persona_user_handler` | `persona::PersonaUserBody` | - | `apps/openalpacad/src/routes/persona.rs` |
 | GET | `/v1/sessions` | `bearer` | `list_sessions_handler` | - | `sessions::ListSessionsQuery` | `apps/openalpacad/src/routes/sessions.rs` |
 | POST | `/v1/sessions` | `bearer` | `create_session_handler` | `sessions::CreateSessionRequest` | - | `apps/openalpacad/src/routes/sessions.rs` |
 | GET | `/v1/sessions/{id}` | `bearer` | `get_session_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
@@ -415,6 +417,15 @@
 | `to` | `Option<String>` |
 | `limit` | `Option<usize>` |
 
+### `persona::PersonaUserBody`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/persona.rs`
+
+| Field | Type |
+|---|---|
+| `content` | `String` |
+
 ### `serde_json::Value`
 
 - External or generic type; see handler source.
@@ -544,6 +555,15 @@
 |---|---|
 | `request_id` | `String` |
 | `status` | `String` |
+
+### `persona::PersonaUserResponse`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/persona.rs`
+
+| Field | Type |
+|---|---|
+| `content` | `String` |
 
 ### `sessions::SessionEventsResponse`
 

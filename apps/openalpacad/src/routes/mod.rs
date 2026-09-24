@@ -24,6 +24,7 @@ pub mod files;
 mod files_types;
 pub mod followups;
 pub mod orchestrator_latency;
+pub mod persona;
 pub mod sessions;
 pub mod settings;
 mod settings_types;
@@ -83,6 +84,7 @@ pub use followups::{cancel_followup_handler, list_followups_handler, queue_follo
 pub use orchestrator_latency::{
     orchestrator_latency_aggregate_handler, orchestrator_latency_handler,
 };
+pub use persona::{get_persona_user_handler, put_persona_user_handler};
 pub use settings::{
     delete_key, get_cli_backends, get_daemon_providers, get_discovered_credentials,
     get_key_status, get_llm_settings, get_llm_usage, get_llm_usage_daily,

@@ -58,6 +58,9 @@ use super::registry::{RegisteredTool, ToolBackend};
 /// Context required by the `update_persona` tool at runtime.
 /// Re-export from the update_persona module.
 pub use update_persona::PersonaToolContext;
+/// The `USER.md` replace path a user-directed surface writes through
+/// (`PUT /v1/persona/user`): the tool's own backup-and-atomic-write path.
+pub use update_persona::{UserDocumentRead, UserDocumentWriter, UserDocumentWritten};
 
 // ---------------------------------------------------------------------------
 // WorkspaceReadTool

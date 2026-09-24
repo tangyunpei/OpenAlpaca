@@ -51,6 +51,9 @@ pub struct AppState {
     /// 3.7, 3.8); the same instance the tool registry and the orchestrator
     /// hold.
     pub memory_service: Arc<openalpaca_core::memory::service::MemoryService>,
+    /// `USER.md` and its backups, for `GET|PUT /v1/persona/user` (design
+    /// §7a; MD-3) — the same paths the `update_persona` tool writes.
+    pub persona_user: Arc<openalpaca_core::tools::builtins::UserDocumentWriter>,
     pub local_user_id: String,
     pub default_lane_key: String,
     pub llm_config_path: PathBuf,

@@ -299,6 +299,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/orchestrator/config",
             put(crate::routes::update_orchestrator_config),
         )
+        // The user-directed USER.md editor (memory redesign, design §7a;
+        // MD-3): the PUT takes `If-Match` and answers 409 on a stale one.
+        .route(
+            "/v1/persona/user",
+            get(crate::routes::get_persona_user_handler)
+                .put(crate::routes::put_persona_user_handler),
+        )
         // Daemon config routes
         .route(
             "/v1/daemon/config/providers",

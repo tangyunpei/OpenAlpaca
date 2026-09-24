@@ -44,9 +44,9 @@ pub(super) async fn build_tool_registry(
         soul_path: soul_path.to_path_buf(),
         user_path: user_path.to_path_buf(),
         identity_path: identity_path.to_path_buf(),
-        backup_dir: config_base_dir.join("orchestrator").join("backups"),
+        backup_dir: crate::bootstrap::persona_backup_dir(config_base_dir),
         bus: bus.clone(),
-        max_backups: Some(10),
+        max_backups: Some(crate::bootstrap::PERSONA_MAX_BACKUPS),
     };
     // Capture workspace root once at startup for file tools, avoiding
     // reliance on the process-global current_dir() at tool execution time.

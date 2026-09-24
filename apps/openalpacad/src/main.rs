@@ -277,6 +277,16 @@ async fn async_main(
     // Single EventBus for system-wide event distribution
     let bus = EventBus::new(daemon_config.load().server.event_bus_capacity);
 
+    // `USER.md`'s user-directed writer (`GET|PUT /v1/persona/user`, design
+    // §7a; MD-3): the same paths the `update_persona` tool writes, on the
+    // same bus. Built here, before `user_path` and `bus` move on.
+    let persona_user = Arc::new(openalpaca_core::tools::builtins::UserDocumentWriter {
+        user_path: user_path.clone(),
+        backup_dir: bootstrap::persona_backup_dir(&config_base_dir),
+        max_backups: Some(bootstrap::PERSONA_MAX_BACKUPS),
+        bus: bus.clone(),
+    });
+
     // Create ChatStreamManager early (zero deps — just DashMap::new()) so the
     // event bridge can forward ToolConfirmationRequested events to SSE streams.
     let chat_stream_manager = Arc::new(ChatStreamManager::new());
@@ -717,6 +727,7 @@ async fn async_main(
         provider_usage_tracker: svcs.provider_usage_tracker,
         embedder: svcs.embedder,
         memory_service: svcs.memory_service,
+        persona_user,
         local_user_id,
         default_lane_key,
         llm_config_path,

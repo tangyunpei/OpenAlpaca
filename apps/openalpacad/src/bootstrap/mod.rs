@@ -13,8 +13,8 @@ pub use config::{resolve_config_base_dir, seed_default_configs};
 pub use interrupted::{announce_interrupted, sweep_interrupted_runs};
 pub use migration::{close_orphaned_spans, is_same_file_path, resolve_local_user_id};
 pub use persona::{
-    bootstrap_bootstrap_document, bootstrap_identity_document, bootstrap_system_persona,
-    bootstrap_user_document, load_bootstrap_document_from_file,
+    PERSONA_MAX_BACKUPS, bootstrap_bootstrap_document, bootstrap_identity_document,
+    bootstrap_system_persona, bootstrap_user_document, load_bootstrap_document_from_file,
     load_identity_document_from_file, load_system_persona_from_soul_file,
-    load_user_document_from_file,
+    load_user_document_from_file, persona_backup_dir,
 };
