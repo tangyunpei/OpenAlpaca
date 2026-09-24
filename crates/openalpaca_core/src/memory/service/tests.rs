@@ -2903,6 +2903,67 @@ fn every_service_write_and_a_detected_external_edit_publish_one_memory_changed()
         )
         .unwrap();
 
+    // The other three change words: an archive, a confirm of a candidate
+    // the extractor inferred, and an undo of a note it learned from the
+    // user's own words.
+    let shelved = h.store(&user, "Shelved", "# Shelved\n\nold.\n", NoteKind::Fact);
+    let archived = h
+        .service
+        .update(
+            &user,
+            UpdateInput {
+                id: shelved.id,
+                expected_revision: shelved.revision.clone(),
+                action: UpdateAction::Archive,
+                reason: None,
+            },
+        )
+        .unwrap();
+    let extractor = h
+        .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap();
+    let inferred = h
+        .service
+        .store(
+            &extractor,
+            StoreInput {
+                title: "Inferred".into(),
+                body: "# Inferred\n\nfrom the assistant.\n".into(),
+                kind: Some(NoteKind::Fact),
+                provenance: Some(ExtractionProvenance::OtherOutput),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let confirmed = h
+        .service
+        .update(
+            &user,
+            UpdateInput {
+                id: inferred.id,
+                expected_revision: inferred.revision.clone(),
+                action: UpdateAction::Confirm,
+                reason: None,
+            },
+        )
+        .unwrap();
+    let learned = h
+        .service
+        .store(
+            &extractor,
+            StoreInput {
+                title: "Learned".into(),
+                body: "# Learned\n\nfrom you.\n".into(),
+                kind: Some(NoteKind::Preference),
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    h.service
+        .undo(&user, learned.id, &learned.revision)
+        .unwrap();
+
     // An edit behind the service's back, then the scan that finds it.
     let notes = h.home_notes_dir(ALICE_KEY);
     let file = note_file_for(&notes, by_tool.id).unwrap();
@@ -2930,7 +2991,19 @@ fn every_service_write_and_a_detected_external_edit_publish_one_memory_changed()
     let words: Vec<&str> = seen.iter().map(|e| e.1.as_str()).collect();
     assert_eq!(
         words,
-        ["created", "created", "updated", "forgotten", "external"],
+        [
+            "created",
+            "created",
+            "updated",
+            "forgotten",
+            "created",
+            "archived",
+            "created",
+            "confirmed",
+            "created",
+            "forgotten",
+            "external",
+        ],
         "one event per write, none for the dedup: {seen:?}"
     );
     assert_eq!(seen[0].0, created.id.to_string());
@@ -2942,9 +3015,31 @@ fn every_service_write_and_a_detected_external_edit_publish_one_memory_changed()
     assert_eq!(seen[1].4.as_deref(), Some("model_tool"));
     assert_eq!(seen[2].2.as_deref(), Some(edited.revision.as_str()));
     assert_eq!(seen[3].2, None, "a forget has no revision");
-    assert_eq!(seen[4].0, by_tool.id.to_string());
-    assert_eq!(seen[4].3, "external");
-    assert_eq!(seen[4].4, None, "a scan's finding carries no surface (P13)");
+    // The archive: the note's new revision, on the user's surface.
+    assert_eq!(seen[5].0, shelved.id.to_string());
+    assert_eq!(seen[5].2.as_deref(), Some(archived.revision.as_str()));
+    assert_eq!(seen[5].4.as_deref(), Some("user"));
+    // The extractor's two writes name their surface.
+    assert_eq!(seen[6].0, inferred.id.to_string());
+    assert_eq!(seen[6].4.as_deref(), Some("extraction"));
+    assert_eq!(seen[8].0, learned.id.to_string());
+    assert_eq!(seen[8].3, "extracted_user");
+    assert_eq!(seen[8].4.as_deref(), Some("extraction"));
+    // The confirm: the candidate is the user's now, at its new revision.
+    assert_eq!(seen[7].0, inferred.id.to_string());
+    assert_eq!(seen[7].2.as_deref(), Some(confirmed.revision.as_str()));
+    assert_eq!(seen[7].3, "user");
+    assert_eq!(seen[7].4.as_deref(), Some("user"));
+    // The undo is a forget: no revision, the user's surface.
+    assert_eq!(seen[9].0, learned.id.to_string());
+    assert_eq!(seen[9].2, None, "an undo has no revision");
+    assert_eq!(seen[9].4.as_deref(), Some("user"));
+    assert_eq!(seen[10].0, by_tool.id.to_string());
+    assert_eq!(seen[10].3, "external");
+    assert_eq!(
+        seen[10].4, None,
+        "a scan's finding carries no surface (P13)"
+    );
     assert!(seen.iter().all(|e| e.5 == format!("home-{ALICE_KEY}")));
 }
 

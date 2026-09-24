@@ -918,18 +918,22 @@ async fn every_write_and_a_detected_external_edit_publish_one_memory_changed() {
 
 // ── The management reads ───────────────────────────────────────────────
 
-/// `doctor` reports the owner's partitions and `recently-used` the ring.
+/// `doctor` reports the owner's partitions and `recently-used` the ring:
+/// empty until a model is handed a note, then that delivery newest first,
+/// with the lane it was made on and `tool` for a note the model fetched
+/// itself.
 #[tokio::test]
 async fn the_doctor_and_recently_used_answer_their_shapes() {
     let f = Fixture::new();
-    f.create("Editor", "# Editor\n\nvim.\n", "preference").await;
+    let (editor, editor_revision) = f.create("Editor", "# Editor\n\nvim.\n", "preference").await;
+    let (shell, _) = f.create("Shell", "# Shell\n\nzsh.\n", "preference").await;
     let (status, json) = split(f.api.doctor(&Fixture::headers()).await).await;
     assert_eq!(status, StatusCode::OK, "{json}");
     let partitions = json["partitions"].as_array().unwrap();
     assert_eq!(partitions.len(), 1);
     assert_eq!(partitions[0]["scope"], "global");
     assert_eq!(partitions[0]["health"], "ready");
-    assert_eq!(partitions[0]["notes"], 1);
+    assert_eq!(partitions[0]["notes"], 2);
     assert_eq!(partitions[0]["orphan"], false);
     assert_eq!(json["move_snapshots"].as_array().unwrap().len(), 0);
 
@@ -940,4 +944,52 @@ async fn the_doctor_and_recently_used_answer_their_shapes() {
         0,
         "nothing delivered to a model yet"
     );
+
+    // A model on a lane fetches both notes through `memory_search`, the
+    // shell one first: the ring lists the deliveries newest first, and
+    // `limit` cuts it.
+    let model = f
+        .api
+        .service
+        .context(
+            OWNER,
+            WorkspaceHint::None,
+            Surface::ModelTool,
+            Capabilities::ALL,
+            Attribution {
+                lane_key: Some(format!("{OWNER}:gui")),
+                request_id: Some(uuid::Uuid::new_v4()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for (query, expected) in [("zsh", shell), ("vim", editor)] {
+        let found = f
+            .api
+            .service
+            .search(
+                &model,
+                SearchInput {
+                    query: query.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(found.results.len(), 1, "{query}");
+        assert_eq!(found.results[0].id, expected, "{query}");
+    }
+    let (status, json) = split(f.api.recently_used(RecentlyUsedQuery::default())).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["id"], editor.to_string(), "newest first");
+    assert_eq!(items[0]["revision"], editor_revision);
+    assert_eq!(items[0]["reason"], "tool");
+    assert_eq!(items[0]["lane_key"], format!("{OWNER}:gui"));
+    assert!(items[0]["task_id"].is_null());
+    assert!(items[0]["delivered_at"].is_string());
+    assert_eq!(items[1]["id"], shell.to_string());
+    let (_, json) = split(f.api.recently_used(RecentlyUsedQuery { limit: Some(1) })).await;
+    assert_eq!(json["items"].as_array().unwrap().len(), 1);
+    assert_eq!(json["items"][0]["id"], editor.to_string());
 }
