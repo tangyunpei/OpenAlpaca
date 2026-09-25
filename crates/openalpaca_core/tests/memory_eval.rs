@@ -3299,7 +3299,8 @@ struct Invariants {
     /// Forgotten notes the forced re-run brought back: must be 0.
     forgotten_resurrected: usize,
     /// The forced re-run forgot a note and its flush made an extraction
-    /// call, so `forgotten_resurrected` measured something. For L and a
+    /// call and read its session to the end (no `stopped`), so
+    /// `forgotten_resurrected` measured something. For L and a
     /// replay `false` is a violation: a check that never ran is no pass.
     /// L0 and L-S run no re-run.
     forced_rerun_checked: bool,
@@ -4477,7 +4478,9 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
 
 /// The hard invariants (design 09 §7.3): no user note retired without a
 /// confirm, no forgotten note resurrected — and, where a forced re-run is
-/// `required` (L, a replay), that it really checked.
+/// `required` (L, a replay), that it really checked: its flush made a call
+/// and read its session to the end (`calls` counts an answer before it is
+/// parsed, so a call alone proves nothing was examined).
 fn invariants(learning: &LearningResults, rerun_required: bool) -> Invariants {
     let retired = match &learning.suggestion_check {
         Some(check) => check
@@ -4495,10 +4498,12 @@ fn invariants(learning: &LearningResults, rerun_required: bool) -> Invariants {
         .forced_rerun
         .as_ref()
         .map_or(0, |r| r.resurrected.len());
-    let rerun_checked = learning
-        .forced_rerun
-        .as_ref()
-        .is_some_and(|r| r.skipped.is_none() && r.flush.as_ref().is_some_and(|f| f.calls > 0));
+    let rerun_checked = learning.forced_rerun.as_ref().is_some_and(|r| {
+        r.skipped.is_none()
+            && r.flush
+                .as_ref()
+                .is_some_and(|f| f.calls > 0 && f.stopped.is_none())
+    });
     Invariants {
         user_notes_retired_without_confirm: retired,
         forgotten_resurrected: resurrected,
@@ -4927,10 +4932,15 @@ fn print_learning(l: &LearningResults) {
     }
     if let Some(r) = &l.forced_rerun {
         println!(
-            "forced re-run: forgot {}, {} extraction call(s), {} resurrected{}",
+            "forced re-run: forgot {}, {} extraction call(s), {} resurrected{}{}",
             r.forgotten.as_deref().unwrap_or("nothing"),
             r.flush.as_ref().map_or(0, |f| f.calls),
             r.resurrected.len(),
+            r.flush
+                .as_ref()
+                .and_then(|f| f.stopped.as_deref())
+                .map(|s| format!(", stopped: {s}"))
+                .unwrap_or_default(),
             r.skipped
                 .as_deref()
                 .map(|s| format!(", skipped: {s}"))
@@ -5685,24 +5695,27 @@ fn the_fed_sessions_follow_the_system() {
 }
 
 /// §7.3's resurrection invariant is hard, so a forced re-run that checked
-/// nothing — skipped before its flush, or a flush that made no extraction
-/// call — is not a pass for L or a replay.
+/// nothing — skipped before its flush, a flush that made no extraction call,
+/// or one that stopped before its session's end — is not a pass for L or a
+/// replay.
 #[test]
 fn a_forced_rerun_that_checked_nothing_violates_the_invariant() {
-    use openalpaca_core::memory::learning::FlushReport;
-    let flush = |calls| {
+    use openalpaca_core::memory::learning::{FlushReport, FlushStop};
+    let stopped_flush = |calls, stopped| {
         FlushRecord::new(
             "cs-001",
             FLUSH_FORCED_RERUN,
             0,
             &FlushReport {
                 calls,
+                stopped,
                 ..Default::default()
             },
             Vec::new(),
             0,
         )
     };
+    let flush = |calls| stopped_flush(calls, None);
     let with = |rerun: ForcedRerun| LearningResults {
         forced_rerun: Some(rerun),
         ..Default::default()
@@ -5727,7 +5740,25 @@ fn a_forced_rerun_that_checked_nothing_violates_the_invariant() {
         resurrected: vec!["again".to_string()],
         ..Default::default()
     });
-    for (what, learning) in [("a skipped re-run", &skipped), ("no call", &no_call)] {
+    // `calls` counts an answer before it is parsed: an unusable first answer
+    // stops the flush with nothing examined, and a later chunk that finds no
+    // model leaves the rest of the session unread.
+    let bad_output = with(ForcedRerun {
+        forgotten: Some("note".to_string()),
+        flush: Some(stopped_flush(1, Some(FlushStop::BadOutput))),
+        ..Default::default()
+    });
+    let unavailable = with(ForcedRerun {
+        forgotten: Some("note".to_string()),
+        flush: Some(stopped_flush(2, Some(FlushStop::Unavailable))),
+        ..Default::default()
+    });
+    for (what, learning) in [
+        ("a skipped re-run", &skipped),
+        ("no call", &no_call),
+        ("an unusable answer", &bad_output),
+        ("a later chunk with no model", &unavailable),
+    ] {
         let inv = invariants(learning, true);
         assert!(!inv.forced_rerun_checked, "{what}: {inv:?}");
         assert_eq!(inv.forgotten_resurrected, 0, "{what}");

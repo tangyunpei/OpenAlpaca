@@ -337,7 +337,7 @@ as the spread (minimum, median, maximum) over the live run and the replays.
 | `learning.restatements` | Per `restate` turn: `nothing_written`, `automatic_replacement`, `suggestion`, `duplicate_note`, `first_learned` |
 | `learning.aliases`, `learning.fact_keys` | The share of active learned notes with an alias in the other script (CJK against Latin), with any alias, and with a key |
 | `learning.suggestion_check` | L-S: per seeded note, its suggestions and its status before and after the confirm |
-| `learning.invariants` | User notes retired without a confirm, forgotten notes resurrected — both must be 0 — and `forced_rerun_checked`: the re-run forgot a note and its flush made an extraction call. For L and a replay a re-run that checked nothing (skipped, or no call) is a violation, never a 0 that reads as a pass. A violation fails the run after the report is written |
+| `learning.invariants` | User notes retired without a confirm, forgotten notes resurrected — both must be 0 — and `forced_rerun_checked`: the re-run forgot a note and its flush made an extraction call and read its session to the end (no `stopped`). For L and a replay a re-run that checked nothing (skipped, no call, or a flush that stopped — an unusable answer, no model) is a violation, never a 0 that reads as a pass. A violation fails the run after the report is written |
 | `learning.cost` | Extraction calls and tokens, flush latency p50/p95, flushes by trigger, memory changes by surface, the reader's feed cost |
 
 The proposed targets (coverage ≥ 80 %, changed facts ≥ 12 of 15, other-script
