@@ -78,8 +78,8 @@ const PROMPT_ARGUMENTS_BYTES: usize = 500;
 /// Format the confirmation prompt sent to a chat platform when a
 /// confirm-listed tool awaits interactive approval — the one prompt Telegram,
 /// Discord and iMessage all send: the tool name, the arguments cut to
-/// [`PROMPT_ARGUMENTS_BYTES`], the `/yes` / `/no` instructions and a queue
-/// position hint.
+/// `PROMPT_ARGUMENTS_BYTES` (500 bytes), the `/yes` / `/no` instructions
+/// and a queue position hint.
 ///
 /// The name and the arguments are what the person approves, and both come
 /// from outside OpenAlpaca (an MCP `<server>__<tool>` or plugin
@@ -88,18 +88,21 @@ const PROMPT_ARGUMENTS_BYTES: usize = 500;
 /// selector, a C1 control — is shown as `<U+XXXX>` by [`escape_hidden`],
 /// escaped before the cut so the cut never splits an escape, and one notice
 /// line under the arguments counts them, those the cut left out included.
-/// Display only: `tool_arguments` is borrowed, and a reply is matched by
-/// request id, not by anything shown here.
+/// The name is one line, so it goes through [`escape_hidden_line`], which
+/// shows a newline or a tab in it too: a name must not print lines of its
+/// own. Display only: `tool_arguments` is borrowed, and a reply is matched
+/// by request id, not by anything shown here.
 ///
 /// [`escape_hidden`]: openalpaca_core::utils::text::escape_hidden
+/// [`escape_hidden_line`]: openalpaca_core::utils::text::escape_hidden_line
 pub fn format_confirmation_prompt(
     tool_name: &str,
     tool_arguments: &serde_json::Value,
     queue_len: usize,
 ) -> String {
-    use openalpaca_core::utils::text::{escape_hidden, escape_hidden_within, hidden_notice};
+    use openalpaca_core::utils::text::{escape_hidden_line, escape_hidden_within, hidden_notice};
 
-    let name = escape_hidden(tool_name);
+    let name = escape_hidden_line(tool_name);
     let pretty =
         serde_json::to_string_pretty(tool_arguments).unwrap_or_else(|_| tool_arguments.to_string());
     let args = escape_hidden_within(&pretty, PROMPT_ARGUMENTS_BYTES);

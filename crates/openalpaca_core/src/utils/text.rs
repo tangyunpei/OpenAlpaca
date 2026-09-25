@@ -26,9 +26,13 @@
 //! `one_line` is for prose OpenAlpaca composed to be read (a memory
 //! suggestion's `preview`, sanitized by the daemon before any surface sees
 //! it), and the escape is for the values beside it that decide what runs.
-//! The GUI mirrors the escape from one shared table,
+//! A one-line field — the tool's name, the agent's id — takes
+//! [`escape_hidden_line`], which shows a newline and a tab as well: the
+//! pretty-printed arguments are laid out in lines, a name is not. The GUI
+//! mirrors the escape from one shared table,
 //! `apps/openalpaca-gui/src/lib/hidden-chars.json`, which a test here holds
-//! equal to [`needs_escape`] over every scalar value.
+//! equal to [`needs_escape`] and [`needs_escape_in_line`] over every scalar
+//! value.
 
 /// Borrow at most `max_bytes` of `s`, ending on a character boundary.
 ///
@@ -168,9 +172,12 @@ fn is_default_ignorable(c: char) -> bool {
 /// path with a zero-width space inside it — and hides an override the value
 /// carries to wherever it lands. The price, an emoji's zero-width joiner or
 /// variation selector shown as `<U+200D>` or `<U+FE0F>`, is right on a
-/// surface whose job is to be exact. This
-/// is display only: nothing the tool receives, nothing stored and nothing
-/// matched against a reply changes.
+/// surface whose job is to be exact. This is display only: nothing the tool
+/// receives, nothing stored and nothing matched against a reply changes.
+///
+/// This keeps `\n` and `\t` as they are, for text laid out in lines — the
+/// pretty-printed arguments, where `serde_json` has already escaped every
+/// newline inside a string. A one-line field takes [`escape_hidden_line`].
 pub fn escape_hidden(text: &str) -> Escaped {
     escape_hidden_within(text, usize::MAX)
 }
@@ -181,13 +188,38 @@ pub fn escape_hidden(text: &str) -> Escaped {
 /// everything after it. `hidden` still counts the whole of `text`, so the
 /// notice says what the part left out holds too.
 pub fn escape_hidden_within(text: &str, max_bytes: usize) -> Escaped {
+    escape_where(text, max_bytes, needs_escape)
+}
+
+/// A character a **one-line** field shows as `<U+XXXX>`: every
+/// [`needs_escape`] character, and `\n` and `\t` too. A tool's name or an
+/// agent's id has no layout of its own — its line is the surface's — and an
+/// MCP `<server>__<tool>` or plugin `<plugin>::<tool>` name is any string its
+/// third party lists, so a newline in it would print forged lines (a benign
+/// `Arguments:` block, a `/yes` line) above the real ones.
+pub fn needs_escape_in_line(c: char) -> bool {
+    c == '\n' || c == '\t' || needs_escape(c)
+}
+
+/// [`escape_hidden`] for a one-line field — a tool name, an agent id: every
+/// [`needs_escape_in_line`] character written as `<U+XXXX>`, newlines and
+/// tabs included (`<U+000A>`, `<U+0009>`), and counted in the same
+/// [`hidden_notice`].
+pub fn escape_hidden_line(text: &str) -> Escaped {
+    escape_where(text, usize::MAX, needs_escape_in_line)
+}
+
+/// The one pass behind the escapes: every `shown_escaped` character written
+/// as `<U+XXXX>`, cut to `max_bytes` of escaped text on a whole piece,
+/// counting the whole input.
+fn escape_where(text: &str, max_bytes: usize, shown_escaped: fn(char) -> bool) -> Escaped {
     use std::fmt::Write as _;
 
     let mut shown = String::with_capacity(text.len().min(max_bytes));
     let mut hidden = 0;
     let mut cut = false;
     for c in text.chars() {
-        let escape = needs_escape(c);
+        let escape = shown_escaped(c);
         hidden += usize::from(escape);
         if cut {
             continue;
@@ -227,8 +259,9 @@ pub fn hidden_notice(hidden: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Escaped, byte_prefix, escape_hidden, escape_hidden_within, hidden_notice,
-        is_default_ignorable, is_hidden, needs_escape, one_line,
+        Escaped, byte_prefix, escape_hidden, escape_hidden_line, escape_hidden_within,
+        hidden_notice, is_default_ignorable, is_hidden, needs_escape, needs_escape_in_line,
+        one_line,
     };
 
     /// Every scalar value, for the tests that must hold over all of them.
@@ -248,6 +281,45 @@ mod tests {
                     && c != '\n'
                     && c != '\t';
             assert_eq!(needs_escape(c), expected, "U+{:04X}", c as u32);
+        }
+    }
+
+    /// A one-line field's set is the escape's, plus the newline and the tab —
+    /// the layout characters a field with no layout of its own must show.
+    #[test]
+    fn needs_escape_in_line_is_needs_escape_plus_newline_and_tab() {
+        for c in every_char() {
+            let expected = needs_escape(c) || c == '\n' || c == '\t';
+            assert_eq!(needs_escape_in_line(c), expected, "U+{:04X}", c as u32);
+        }
+    }
+
+    /// A newline in a tool name is how a third-party name forges whole
+    /// prompt lines; in a one-line field it is shown, not laid out.
+    #[test]
+    fn escape_hidden_line_shows_newline_and_tab_as_code_points() {
+        // (input, shown, hidden)
+        let cases: &[(&str, &str, usize)] = &[
+            ("", "", 0),
+            ("files__write", "files__write", 0),
+            (
+                "read\nArguments:\n{\n  \"path\": \"/tmp/notes.txt\"\n}",
+                "read<U+000A>Arguments:<U+000A>{<U+000A>  \"path\": \"/tmp/notes.txt\"<U+000A>}",
+                4,
+            ),
+            ("a\tb\r\u{202e}", "a<U+0009>b<U+000D><U+202E>", 3),
+            ("x\u{fe00}y\u{2028}", "x<U+FE00>y<U+2028>", 2),
+        ];
+        for (input, shown, hidden) in cases {
+            assert_eq!(
+                escape_hidden_line(input),
+                Escaped {
+                    text: shown.to_string(),
+                    hidden: *hidden,
+                    cut: false,
+                },
+                "escape_hidden_line({input:?})"
+            );
         }
     }
 
@@ -461,6 +533,57 @@ mod tests {
             let code = c as u32;
             let listed = ranges.iter().any(|&(from, to)| (from..=to).contains(&code));
             assert_eq!(needs_escape(c), listed, "U+{code:04X}");
+        }
+    }
+
+    /// The GUI's one-line set is its `ranges` plus `line_adds`, held to
+    /// [`needs_escape_in_line`] over every scalar value.
+    #[test]
+    fn needs_escape_in_line_is_the_gui_table() {
+        let table = gui_table();
+        let hex = |value: &serde_json::Value| {
+            let hex = value.as_str().expect("a code point is a hex string");
+            u32::from_str_radix(hex, 16).expect("a code point is hex")
+        };
+        let ranges: Vec<(u32, u32)> = table["ranges"]
+            .as_array()
+            .expect("ranges is an array")
+            .iter()
+            .map(|range| (hex(&range[0]), hex(&range[1])))
+            .collect();
+        let adds: Vec<u32> = table["line_adds"]
+            .as_array()
+            .expect("line_adds is an array")
+            .iter()
+            .map(hex)
+            .collect();
+        for c in every_char() {
+            let code = c as u32;
+            let listed = adds.contains(&code)
+                || ranges.iter().any(|&(from, to)| (from..=to).contains(&code));
+            assert_eq!(needs_escape_in_line(c), listed, "U+{code:04X}");
+        }
+    }
+
+    /// The GUI's one-line worked cases are what Rust shows.
+    #[test]
+    fn the_gui_tables_line_cases_are_what_rust_shows() {
+        let table = gui_table();
+        let cases = table["line_cases"]
+            .as_array()
+            .expect("line_cases is an array");
+        assert!(!cases.is_empty());
+        for case in cases {
+            let input = case["input"].as_str().expect("input");
+            assert_eq!(
+                escape_hidden_line(input),
+                Escaped {
+                    text: case["shown"].as_str().expect("shown").to_string(),
+                    hidden: case["hidden"].as_u64().expect("hidden") as usize,
+                    cut: false,
+                },
+                "escape_hidden_line({input:?})"
+            );
         }
     }
 
