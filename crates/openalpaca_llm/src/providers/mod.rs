@@ -31,6 +31,8 @@ pub fn build_http_client(request_timeout: std::time::Duration) -> reqwest::Clien
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
+pub mod openai_tools;
+
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
 

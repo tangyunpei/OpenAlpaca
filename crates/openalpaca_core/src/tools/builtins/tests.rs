@@ -1253,3 +1253,139 @@ fn memory_tool_descriptions_promise_no_semantic_search() {
         assert_eq!(def.strict, Some(true), "{}", def.name);
     }
 }
+
+/// What OpenAI's strict mode requires of a schema, restated here on its own
+/// (the function-calling guide, *Strict mode*): the root is an object; every
+/// object is closed with `additionalProperties: false` and lists every
+/// property in `required`; arrays and `anyOf` branches obey the same. The
+/// builtins use nothing beyond that. `Err` names the first breach.
+fn openai_strict_accepts(path: &str, schema: &serde_json::Value) -> Result<(), String> {
+    let Some(node) = schema.as_object() else {
+        return Err(format!("{path}: not a schema object"));
+    };
+    let is_object = match node.get("type") {
+        Some(serde_json::Value::String(t)) => t == "object",
+        Some(serde_json::Value::Array(ts)) => ts.iter().any(|t| t == "object"),
+        _ => node.contains_key("properties"),
+    };
+    if is_object {
+        if node.get("additionalProperties") != Some(&serde_json::json!(false)) {
+            return Err(format!("{path}: additionalProperties is not false"));
+        }
+        let properties = node
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .ok_or_else(|| format!("{path}: no properties"))?;
+        let required: std::collections::BTreeSet<&str> = node
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|r| r.iter().filter_map(|k| k.as_str()).collect())
+            .unwrap_or_default();
+        let keys: std::collections::BTreeSet<&str> =
+            properties.keys().map(String::as_str).collect();
+        if required != keys {
+            return Err(format!(
+                "{path}: required {required:?} is not every key {keys:?}"
+            ));
+        }
+        for (key, property) in properties {
+            openai_strict_accepts(&format!("{path}.{key}"), property)?;
+        }
+    }
+    if let Some(items) = node.get("items") {
+        openai_strict_accepts(&format!("{path}[]"), items)?;
+    }
+    if let Some(branches) = node.get("anyOf").and_then(|a| a.as_array()) {
+        for (i, branch) in branches.iter().enumerate() {
+            openai_strict_accepts(&format!("{path}|{i}"), branch)?;
+        }
+    }
+    Ok(())
+}
+
+/// R8: every builtin definition — the registered ones and the per-request
+/// main-loop and skill ones — goes through the OpenAI tool serializer the
+/// OpenAI and Ollama providers use, and `strict: true` goes out exactly where
+/// OpenAI's strict mode accepts the schema. A strict-marked schema that
+/// breaks its rules is refused with a 400 for the whole request, so a future
+/// builtin with an optional property or an open object must lose `strict`
+/// here rather than every tool-carrying turn on OpenAI. The schema itself is
+/// always sent as written.
+#[test]
+fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() {
+    use crate::bus::EventBus;
+    use openalpaca_llm::providers::openai_tools::openai_function_tool;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let ctx = PersonaToolContext {
+        soul_path: dir.path().join("SOUL.md"),
+        user_path: dir.path().join("USER.md"),
+        identity_path: dir.path().join("IDENTITY.md"),
+        backup_dir: dir.path().join("backups"),
+        bus: EventBus::new(16),
+        max_backups: None,
+    };
+    let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+    let provider: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
+    let mut definitions: Vec<ToolDefinition> = builtin_tools_with_persona_context(
+        Some(db.clone()),
+        ctx,
+        Some(dc),
+        None,
+        None,
+        Some(provider),
+    )
+    .into_iter()
+    .map(|t| t.definition)
+    .collect();
+    let service = std::sync::Arc::new(crate::memory::service::MemoryService::new(
+        Some(db),
+        openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+    ));
+    definitions.extend(memory_read_tools(service).into_iter().map(|t| t.definition));
+    definitions.extend([
+        memory_store_tool_definition(),
+        memory_update_tool_definition(),
+        memory_forget_tool_definition(),
+        memory_confirm_tool_definition(),
+        invoke_skill_tool_definition(),
+        start_workflow_tool_definition(),
+        steer_workflow_tool_definition(),
+        task_status_tool_definition(),
+    ]);
+
+    let mut kept = Vec::new();
+    let mut marked = 0;
+    for def in &definitions {
+        let entry = openai_function_tool(def);
+        let function = &entry["function"];
+        assert_eq!(entry["type"], "function", "{}", def.name);
+        assert_eq!(
+            function["parameters"], def.parameters,
+            "{} is sent as written",
+            def.name
+        );
+        let sent_strict = function.get("strict") == Some(&serde_json::json!(true));
+        if def.strict != Some(true) {
+            assert!(!sent_strict, "{} is not strict-marked", def.name);
+            continue;
+        }
+        marked += 1;
+        match openai_strict_accepts("$", &def.parameters) {
+            Ok(()) => {
+                assert!(sent_strict, "{}: a compliant schema keeps strict", def.name);
+                kept.push(def.name.clone());
+            }
+            Err(breach) => assert!(
+                !sent_strict,
+                "{} would be refused by OpenAI's strict mode ({breach}), yet goes out strict",
+                def.name
+            ),
+        }
+    }
+    // The walk saw what it is meant to: all 21 strict-marked builtins, and
+    // the one schema already written in strict mode's shape keeps its flag.
+    assert_eq!(marked, 21, "strict-marked builtins seen");
+    assert!(kept.contains(&"memory_confirm".to_string()), "{kept:?}");
+}

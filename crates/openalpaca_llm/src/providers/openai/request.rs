@@ -189,20 +189,7 @@ pub(crate) fn build_request_body(
         let tools: Vec<serde_json::Value> = request
             .tools
             .iter()
-            .map(|t| {
-                let mut function = serde_json::json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                });
-                if let Some(true) = t.strict {
-                    function["strict"] = serde_json::json!(true);
-                }
-                serde_json::json!({
-                    "type": "function",
-                    "function": function,
-                })
-            })
+            .map(crate::providers::openai_tools::openai_function_tool)
             .collect();
         body["tools"] = serde_json::Value::Array(tools);
 

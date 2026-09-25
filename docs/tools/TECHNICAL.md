@@ -172,7 +172,7 @@ pub struct ToolDefinition {
     pub name: String,                                    // Unique tool identifier
     pub description: String,                             // LLM-facing documentation
     pub parameters: serde_json::Value,                   // JSON Schema for arguments
-    pub strict: Option<bool>,                            // Anthropic strict tool mode
+    pub strict: Option<bool>,                            // OpenAI strict mode; sent only for a schema it accepts
     pub input_examples: Option<Vec<serde_json::Value>>,  // Example inputs for LLM
 }
 ```

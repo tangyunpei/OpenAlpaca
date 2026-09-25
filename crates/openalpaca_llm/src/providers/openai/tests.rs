@@ -190,15 +190,16 @@ fn test_parse_retry_after_ms_missing() {
     assert_eq!(parse_retry_after_ms(&headers), None);
 }
 
-#[test]
-fn test_openai_tool_strict_mode() {
+/// One strict-marked tool, `parameters` as given, through the OpenAI
+/// provider's request builder; the `function` object it sends.
+fn strict_tool_body(parameters: serde_json::Value) -> serde_json::Value {
     let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
     let request = ChatRequest {
         messages: Arc::new(vec![ChatMessage::user("test")]),
         tools: Arc::new(vec![ToolDefinition {
             name: "calc".to_string(),
             description: "Calculate".to_string(),
-            parameters: serde_json::json!({"type": "object"}),
+            parameters,
             strict: Some(true),
             input_examples: None,
         }]),
@@ -212,8 +213,46 @@ fn test_openai_tool_strict_mode() {
         ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
-    let tools = body["tools"].as_array().unwrap();
-    assert_eq!(tools[0]["function"]["strict"], true);
+    body["tools"].as_array().unwrap()[0]["function"].clone()
+}
+
+/// A schema OpenAI's strict mode accepts — every object closed with
+/// `additionalProperties: false`, every property required, an optional one
+/// a nullable type — goes out with `strict: true`.
+#[test]
+fn test_openai_tool_strict_mode() {
+    let function = strict_tool_body(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "expression": { "type": "string" },
+            "precision": { "type": ["integer", "null"] }
+        },
+        "required": ["expression", "precision"],
+        "additionalProperties": false
+    }));
+    assert_eq!(function["strict"], true);
+}
+
+/// R8: OpenAI refuses a strict tool whose schema breaks strict mode's rules
+/// (an optional property, an object left open) with a 400 on the whole
+/// request, so such a tool goes out without `strict` — best-effort adherence,
+/// what every other provider gives it — and its schema untouched.
+#[test]
+fn a_schema_strict_mode_would_refuse_is_sent_without_strict() {
+    let parameters = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "expression": { "type": "string" },
+            "precision": { "type": "integer" }
+        },
+        "required": ["expression"]
+    });
+    let function = strict_tool_body(parameters.clone());
+    assert!(function.get("strict").is_none(), "{function}");
+    assert_eq!(
+        function["parameters"], parameters,
+        "the schema is sent as written"
+    );
 }
 
 // ── SSE Parser Tests ──────────────────────────────────────────────

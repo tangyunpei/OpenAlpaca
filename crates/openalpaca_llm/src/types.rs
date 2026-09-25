@@ -211,7 +211,11 @@ pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
-    /// When `true`, the model guarantees valid JSON matching the schema exactly.
+    /// Asks for OpenAI's strict mode (arguments that match the schema
+    /// exactly). Only the OpenAI-compatible providers send it, and only when
+    /// the schema is one strict mode accepts
+    /// ([`crate::providers::openai_tools::strict_mode_compatible`]); the
+    /// Anthropic provider never serializes it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strict: Option<bool>,
     /// Concrete examples of valid tool inputs (Anthropic `input_examples`).
