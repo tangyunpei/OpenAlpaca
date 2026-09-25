@@ -738,7 +738,15 @@ pub async fn delete_session_handler(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     flush_session_logs(&state).await;
-    delete_session(&deps(&state), &id).await
+    let response = delete_session(&deps(&state), &id).await;
+    // LQ4: the conversation's unlearned turns went with its messages; the
+    // learning queue forgets it too (a flush in flight writes nothing).
+    if response.status() == StatusCode::NO_CONTENT
+        && let Some(queue) = state.gateway.learning()
+    {
+        queue.forget_session(&id);
+    }
+    response
 }
 
 /// Delete a conversation: its rows, and then the transcript on disk.

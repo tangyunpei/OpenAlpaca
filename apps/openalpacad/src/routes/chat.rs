@@ -727,6 +727,12 @@ pub async fn delete_chat_history_handler(
             // (`DELETE /v1/sessions/{id}` does).
             let conv_repo = openalpaca_storage::ConversationRepository::new(&state.db);
             let _ = conv_repo.clear_summary_for_session(&session_id);
+            // LQ4: the cleared turns are not learned — they went with the
+            // messages. The cursor stays where it is: message ids are never
+            // reused, so it still reads correctly for the turns that follow.
+            if let Some(queue) = state.gateway.learning() {
+                queue.forget_session(&session_id);
+            }
             Json(ChatDeleteResponse { deleted }).into_response()
         }
         Err(e) => error_response(

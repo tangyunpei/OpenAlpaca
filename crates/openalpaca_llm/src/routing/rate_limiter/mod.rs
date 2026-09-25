@@ -103,6 +103,11 @@ impl TokenBucket {
         inner.refill();
         inner.tokens
     }
+
+    /// The bucket's size: the most tokens it holds when full.
+    pub async fn capacity(&self) -> f64 {
+        self.inner.lock().await.capacity
+    }
 }
 
 impl TokenBucketInner {
@@ -488,6 +493,12 @@ impl RateLimiterRegistry {
                 ))
             })
             .clone()
+    }
+
+    /// The rate limiter a key already has, without creating one: a key never
+    /// used has none yet, and its buckets would read as full.
+    pub fn get(&self, key_id: &str) -> Option<Arc<KeyRateLimiter>> {
+        self.limiters.get(key_id).map(|l| Arc::clone(l.value()))
     }
 
     /// Check the global circuit breaker before making a request.

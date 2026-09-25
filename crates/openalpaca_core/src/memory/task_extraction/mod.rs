@@ -14,7 +14,8 @@
 //!
 //! Bounded per run by count (`[orchestrator.costs]
 //! task_extract_max_items_per_run`, the items past it dropped and counted)
-//! and by cost (`task_extract_max_daily_cost_usd`); an item under
+//! and by cost (`task_extract_max_daily_cost_usd`, per UTC day, read from
+//! `llm_usage_daily`); an item under
 //! `memory_confidence_threshold` is dropped. Every note cites the task row
 //! as its source. It runs as a tracked job on the orchestrator's
 //! `BackgroundJobs`, attributed to the task, and stops on the shutdown token.
@@ -148,14 +149,16 @@ pub(crate) async fn extract_task_memories(
         }
     };
 
-    // Guard: cost budget.
-    let extract_cost = deps
-        .router
-        .cost_tracker
-        .get_agent_usage(AGENT_LABEL)
-        .await
-        .map(|s| s.total_cost_usd)
-        .unwrap_or(0.0);
+    // Guard: the daily cost cap, read durably for today's UTC date (Learning
+    // v2, design 09 §1.8, ruling LR8). The in-memory cost tracker is seeded
+    // once at boot and never reset, so "daily" used to mean "since boot".
+    let db = deps.db.clone();
+    let extract_cost =
+        tokio::task::spawn_blocking(move || LlmUsageRepository::new(&db).usage_today(AGENT_LABEL))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map_or(0.0, |(_, cost)| cost);
     let max_daily = dcfg.orchestrator.costs.task_extract_max_daily_cost_usd;
     if extract_cost > max_daily {
         tracing::debug!(

@@ -445,6 +445,19 @@ async fn async_main(
     // register a provider a hand edit turned on.
     let llm_settings_for_reload = svcs.llm_settings_service.clone();
     let llm_router_for_shutdown = svcs.llm_router.clone();
+    // Learning v2 (design 09 §1.5): the queue every persisted turn is fed to,
+    // learning off the reply path. Without a router nothing could learn.
+    let learning_queue = svcs.llm_router.clone().map(|router| {
+        openalpaca_core::memory::learning::LearningQueue::new(
+            openalpaca_core::memory::learning::LearningDeps {
+                db: db.clone(),
+                router,
+                daemon_config: daemon_config.clone(),
+                memory_service: svcs.memory_service.clone(),
+            },
+            openalpaca_core::memory::learning::QueueMode::Automatic,
+        )
+    });
     // The session log's writers buffer: shutdown has to drain them (§5.5).
     let session_log_for_shutdown = svcs.shared_context.session_log().cloned();
     let web_search_config_for_reload = svcs.web_search_config.clone();
@@ -515,13 +528,17 @@ async fn async_main(
     let handler = Arc::new(gateway_bridge::OrchestratorHandler::new(
         orchestrator.clone(),
     ));
-    let gateway = Arc::new(Gateway::new(
+    let gateway = Gateway::new(
         svcs.shared_context.clone(),
         lane_manager,
         handler,
         bus.clone(),
         Some(db.clone()),
-    ));
+    );
+    let gateway = Arc::new(match &learning_queue {
+        Some(queue) => gateway.with_learning(queue.clone()),
+        None => gateway,
+    });
 
     // Scheduled skills: register cron jobs for skills with invoke.cron
     // frontmatter (gated by orchestrator.routing.scheduled_skills_enabled).
@@ -699,6 +716,10 @@ async fn async_main(
         local_user_id.clone(),
         cancel_token.clone(),
     );
+    if let Some(ref queue) = learning_queue {
+        background::spawn_learning_sweeper(queue.clone(), cancel_token.clone());
+        background::spawn_learning_catch_up(queue.clone(), cancel_token.clone());
+    }
 
     // Step 14: Build AppState and HTTP router
     let db_for_shutdown = db.clone();
@@ -782,17 +803,44 @@ async fn async_main(
         error!("Server error: {e}");
     }
 
-    // Stop the orchestrator's post-turn jobs — the conversation summary and
-    // the memory extraction — before the cost tracker is flushed, so what
-    // they billed is in the flush and no note is written under a daemon that
-    // is going away (design §6: no fire-and-forget jobs). They stop on the
-    // token; the wait is for a write already in flight.
-    if !orchestrator
-        .background()
-        .shutdown(Duration::from_secs(3))
-        .await
-    {
+    // Learning v2's stop drain (design 09 §1.5, ruling LR6): the server has
+    // stopped, so every session with unlearned turns is flushed, one at a
+    // time, for at most 3 s — or what the force-exit window leaves after 5 s
+    // for the flushes below. What it does not finish, the boot catch-up
+    // learns: nothing is lost.
+    if let Some(ref queue) = learning_queue {
+        let left = force_exit_at
+            .get()
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(FORCE_EXIT_GRACE);
+        let budget = openalpaca_core::memory::learning::SHUTDOWN_DRAIN
+            .min(left.saturating_sub(Duration::from_secs(5)));
+        if !queue.drain(budget).await {
+            info!("Learning drain stopped at its budget; the boot catch-up learns the rest");
+        }
+    }
+
+    // Stop the post-turn jobs — the conversation summary and a finished
+    // run's task extraction — and the learning queue's flushes together,
+    // before the cost tracker is flushed, so what they billed is in the flush
+    // and no note is written under a daemon that is going away (design §6: no
+    // fire-and-forget jobs). They stop on their tokens; the wait is for a
+    // write already in flight.
+    let learning_stopped = async {
+        match &learning_queue {
+            Some(queue) => queue.shutdown(Duration::from_secs(3)).await,
+            None => true,
+        }
+    };
+    let (post_turn_stopped, learning_stopped) = tokio::join!(
+        orchestrator.background().shutdown(Duration::from_secs(3)),
+        learning_stopped
+    );
+    if !post_turn_stopped {
         warn!("Post-turn jobs did not stop within 3s; a summary or extraction may be lost");
+    }
+    if !learning_stopped {
+        warn!("Learning did not stop within 3s; the boot catch-up repeats its last chunk");
     }
 
     // Flush CostTracker to DB (defense-in-depth)

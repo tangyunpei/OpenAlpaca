@@ -187,6 +187,15 @@ impl Scene {
     }
 
     fn with_router(model: Arc<Scripted>, router: Arc<LlmRouter>, config: DaemonConfig) -> Self {
+        Self::build(model, router, config, QueueMode::Manual)
+    }
+
+    fn build(
+        model: Arc<Scripted>,
+        router: Arc<LlmRouter>,
+        config: DaemonConfig,
+        mode: QueueMode,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
@@ -206,7 +215,7 @@ impl Scene {
                 daemon_config: config.clone(),
                 memory_service: service.clone(),
             },
-            QueueMode::Manual,
+            mode,
         );
         Self {
             _env: env,
@@ -268,6 +277,29 @@ impl Scene {
         let q = self.row(session, "user", user, "gui", Some(&request), root);
         let a = self.row(session, "assistant", answer, "gui", Some(&request), None);
         (q, a)
+    }
+
+    /// A turn that ran through the gateway's hook and finished.
+    fn finish_turn(&self, session: &str, user_authored: bool) {
+        let guard = self
+            .queue
+            .turn_started(uuid::Uuid::new_v4(), LANE, user_authored);
+        guard.attach_session(session);
+    }
+
+    /// The queue starts a flush the moment the daemon is quiet.
+    fn no_quiet_period(&self) {
+        self.queue.set_timings(super::queue::Timings {
+            quiet: std::time::Duration::ZERO,
+            ..Default::default()
+        });
+    }
+
+    fn attempts(&self, session: &str) -> u32 {
+        LearningCursorRepository::new(&self.db)
+            .get(session)
+            .unwrap()
+            .attempts
     }
 
     fn cursor(&self, session: &str) -> i64 {
@@ -1378,4 +1410,570 @@ fn budget_for_an_8k_window() {
     // A key configured far below it does.
     let tight = Budget::for_window(Some(128_000), 12, Some(10_000));
     assert_eq!(tight.transcript_bytes, 16_000 * 7 / 10);
+}
+
+// ── Retry and backoff (§1.4, ruling LR20) ───────────────────────────────
+
+/// Only a reachable model's bad output is counted: after three unusable
+/// answers to one chunk the cursor moves past it, with one WARN naming the
+/// session and the rows — one poisoned chunk cannot block a session forever.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn three_invalid_outputs_skip_the_chunk_with_one_warn() {
+    let bad = || Say::Text("I cannot answer in JSON today.".into());
+    let scene = Scene::new(vec![bad(), bad(), bad()]);
+    let s = scene.session();
+    let (_, answer) = scene.turn(&s, PREF, "Noted.");
+
+    for attempt in 1..=2 {
+        let report = scene.queue.flush_session(&s).await;
+        assert_eq!(report.stopped, Some(FlushStop::BadOutput), "{report:?}");
+        assert_eq!(scene.attempts(&s), attempt);
+        assert_eq!(scene.cursor(&s), 0, "the window holds");
+    }
+    let third = scene.queue.flush_session(&s).await;
+    assert_eq!(third.skipped_unusable, 1, "{third:?}");
+    assert_eq!(scene.cursor(&s), answer, "the cursor moved past the chunk");
+    assert_eq!(scene.attempts(&s), 0, "and the count starts over");
+    logs_assert(|lines: &[&str]| {
+        let warns: Vec<&&str> = lines
+            .iter()
+            .filter(|l| l.contains("WARN") && l.contains("memory learning"))
+            .collect();
+        match warns.as_slice() {
+            [one] if one.contains("skipped rows") && one.contains(&s) => Ok(()),
+            other => Err(format!("expected one skip WARN, saw {other:?}")),
+        }
+    });
+}
+
+/// §7b P10 and ruling LR20: a model that cannot answer holds the window,
+/// counts no attempt, backs off (60 s, doubling), and is logged once per
+/// outage — then once more when learning resumes.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn an_unavailable_model_holds_the_window_and_backs_off() {
+    let offline = || Say::Fail(LlmError::Config("the model is offline".into()));
+    let scene = Scene::new(vec![offline(), offline(), items(&[vim_item(&[1])])]);
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+
+    let first = scene.queue.flush_session(&s).await;
+    assert_eq!(first.stopped, Some(FlushStop::Unavailable));
+    let wait = scene.queue.retry_in(&s).expect("a backoff");
+    assert!(
+        wait > std::time::Duration::from_secs(55) && wait <= std::time::Duration::from_secs(60),
+        "{wait:?}"
+    );
+    scene.queue.flush_session(&s).await;
+    let wait = scene.queue.retry_in(&s).expect("a longer backoff");
+    assert!(
+        wait > std::time::Duration::from_secs(115),
+        "doubled: {wait:?}"
+    );
+    assert_eq!(scene.attempts(&s), 0, "an outage counts no attempt");
+    assert_eq!(scene.cursor(&s), 0);
+
+    let back = scene.queue.flush_session(&s).await;
+    assert_eq!(back.stored, 1, "{back:?}");
+    assert_eq!(
+        scene.queue.retry_in(&s),
+        None,
+        "a success clears the backoff"
+    );
+    logs_assert(|lines: &[&str]| {
+        let paused = lines
+            .iter()
+            .filter(|l| l.contains("WARN") && l.contains("memory learning paused"))
+            .count();
+        let resumed = lines
+            .iter()
+            .filter(|l| l.contains("INFO") && l.contains("memory learning resumed"))
+            .count();
+        match (paused, resumed) {
+            (1, 1) => Ok(()),
+            other => Err(format!("expected one WARN and one INFO, saw {other:?}")),
+        }
+    });
+}
+
+// ── The durable daily gates (§1.8, ruling LR8) ──────────────────────────
+
+fn usage_row(
+    date: chrono::NaiveDate,
+    requests: i32,
+    cost: f64,
+) -> openalpaca_storage::LlmUsageDaily {
+    openalpaca_storage::LlmUsageDaily {
+        date: date.format("%Y-%m-%d").to_string(),
+        agent_id: extractor::AGENT_LABEL.to_string(),
+        model: "m".to_string(),
+        total_requests: requests,
+        total_input_tokens: 10,
+        total_output_tokens: 10,
+        total_cost_usd: cost,
+    }
+}
+
+/// A binding cap leaves the window queued: no call, the cursor stays, the
+/// session stays due, and it resumes when the cap no longer binds.
+#[tokio::test]
+async fn a_cap_leaves_the_window_queued() {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.costs.extract_max_calls_per_day = 1;
+    let scene = Scene::with(
+        Scripted::new(vec![items(&[vim_item(&[1])])]),
+        config.clone(),
+    );
+    openalpaca_storage::LlmUsageRepository::new(&scene.db)
+        .upsert_daily_usage(&usage_row(chrono::Utc::now().date_naive(), 1, 0.0))
+        .unwrap();
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+
+    let capped = scene.queue.flush_session(&s).await;
+    assert_eq!(capped.stopped, Some(FlushStop::Cap), "{capped:?}");
+    assert_eq!(scene.model.calls(), 0);
+    assert_eq!(scene.cursor(&s), 0);
+    assert!(scene.queue.is_due(&s), "still queued");
+
+    config.orchestrator.costs.extract_max_calls_per_day = 0; // no cap
+    scene.config.store(Arc::new(config));
+    let resumed = scene.queue.flush_session(&s).await;
+    assert_eq!(resumed.stored, 1, "{resumed:?}");
+}
+
+/// The daily-cap defect, fixed: the gate counts today's UTC date in
+/// `llm_usage_daily`. Yesterday's calls and cost bind nothing — nor does
+/// the in-memory cost tracker, which counts since boot and never resets —
+/// and today's cost binds.
+#[tokio::test]
+async fn the_daily_cap_counts_the_utc_day_from_llm_usage_daily() {
+    let scene = Scene::new(vec![items(&[vim_item(&[1])])]);
+    let today = chrono::Utc::now().date_naive();
+    let usage = openalpaca_storage::LlmUsageRepository::new(&scene.db);
+    usage
+        .upsert_daily_usage(&usage_row(today - chrono::Duration::days(1), 500, 9.0))
+        .unwrap();
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+    let yesterday_heavy = scene.queue.flush_session(&s).await;
+    assert_eq!(yesterday_heavy.stored, 1, "{yesterday_heavy:?}");
+    let (calls, _) = usage.usage_today(extractor::AGENT_LABEL).unwrap();
+    assert_eq!(calls, 1, "the call itself is counted today");
+
+    usage.upsert_daily_usage(&usage_row(today, 0, 1.0)).unwrap();
+    scene.turn(&s, "And I keep my dotfiles in a git repository.", "Noted.");
+    let capped = scene.queue.flush_session(&s).await;
+    assert_eq!(
+        capped.stopped,
+        Some(FlushStop::Cap),
+        "today's $1.00 > $0.25"
+    );
+}
+
+// ── Sharing the model with chat (§1.7, ruling LR7) ──────────────────────
+
+/// A model registered under `provider` with an 8K window, on a router whose
+/// only provider is `model`.
+fn router_for(model: Arc<Scripted>, provider: ProviderType, id: &str) -> Arc<LlmRouter> {
+    let router = LlmRouter::single_provider(model, provider.clone(), id.to_string());
+    router.model_registry().register(
+        id.to_string(),
+        openalpaca_llm::ModelInfo {
+            provider,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 8192,
+            discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: false,
+        },
+    );
+    Arc::new(router)
+}
+
+/// Starts an automatic flush and returns once its first model call is made.
+async fn flush_until_the_call(
+    scene: &Scene,
+    session: &str,
+) -> tokio::task::JoinHandle<FlushReport> {
+    let queue = scene.queue.clone();
+    let session = session.to_string();
+    let flush = tokio::spawn(async move { queue.flush_automatic(&session).await });
+    while scene.model.calls() == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    flush
+}
+
+/// Asserts a yielded flush wrote nothing, counted nothing and stays due.
+fn assert_yielded(scene: &Scene, session: &str, report: &FlushReport) {
+    assert_eq!(report.stopped, Some(FlushStop::Yielded), "{report:?}");
+    assert_eq!(scene.cursor(session), 0);
+    assert_eq!(scene.attempts(session), 0);
+    assert!(scene.active().is_empty());
+    assert!(scene.queue.is_due(session));
+}
+
+/// On a local model — a provider that needs no key — a chat turn that
+/// starts cancels the flush's call: the GPU serves the reply alone.
+#[tokio::test]
+async fn a_local_model_flush_yields_to_a_chat_turn() {
+    let model = Arc::new(Scripted {
+        keyless: true,
+        ..Arc::into_inner(Scripted::new(vec![Say::Hang])).unwrap()
+    });
+    let router = router_for(model.clone(), ProviderType::Ollama, "local-model");
+    let scene = Scene::with_router(model, router, DaemonConfig::default());
+    scene.no_quiet_period();
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+
+    let flush = flush_until_the_call(&scene, &s).await;
+    let _chat = scene.queue.turn_started(uuid::Uuid::new_v4(), LANE, true);
+    let report = tokio::time::timeout(std::time::Duration::from_secs(10), flush)
+        .await
+        .expect("the flush did not yield")
+        .unwrap();
+    assert_yielded(&scene, &s, &report);
+}
+
+/// The same for a keyed `openai` provider whose base URL is loopback — a
+/// llama.cpp or LM Studio server — which would otherwise never yield.
+#[tokio::test]
+async fn an_openai_provider_on_localhost_yields() {
+    let model = Scripted::new(vec![Say::Hang]);
+    let router = router_for(model.clone(), ProviderType::OpenAI, "local-openai");
+    let mut runtime = openalpaca_llm::LlmRuntimeConfig::default();
+    runtime
+        .provider_defaults
+        .get_mut("openai")
+        .expect("openai has defaults")
+        .base_url = Some("http://127.0.0.1:8080/v1".to_string());
+    router.reload_runtime_config(runtime);
+    let scene = Scene::with_router(model, router, DaemonConfig::default());
+    scene.no_quiet_period();
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+
+    let flush = flush_until_the_call(&scene, &s).await;
+    let _chat = scene.queue.turn_started(uuid::Uuid::new_v4(), LANE, true);
+    let report = tokio::time::timeout(std::time::Duration::from_secs(10), flush)
+        .await
+        .expect("the flush did not yield")
+        .unwrap();
+    assert_yielded(&scene, &s, &report);
+}
+
+/// On a keyed remote model a chunk starts only when half of the key's RPM
+/// and TPM would remain after it: the second chunk waits, and a chat round
+/// made then still finds at least half the bucket.
+#[tokio::test]
+async fn a_keyed_flush_leaves_half_the_rate_budget() {
+    let model = Scripted::new(vec![items(&[]), items(&[])]);
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        ProviderType::Anthropic,
+        openalpaca_llm::ProviderEntry {
+            provider: model.clone(),
+            key_pool: Arc::new(ArcSwap::from_pointee(openalpaca_llm::KeyPool::new(
+                vec![openalpaca_llm::ApiKey::new(
+                    "k1".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-test".to_string(),
+                )],
+                openalpaca_llm::SelectionStrategy::RoundRobin,
+            ))),
+        },
+    );
+    const TPM: u32 = 4_000;
+    let router = Arc::new(LlmRouter::new_with_runtime(
+        providers,
+        openalpaca_llm::ModelRegistry::with_defaults(),
+        std::collections::HashMap::new(),
+        Arc::new(openalpaca_llm::CostTracker::new(
+            openalpaca_llm::ModelRegistry::with_defaults(),
+        )),
+        RECORDED_MODEL.to_string(),
+        openalpaca_llm::LlmRuntimeConfig::default(),
+        openalpaca_llm::RateLimitConfig {
+            default_tpm: TPM,
+            ..Default::default()
+        },
+    ));
+    let scene = Scene::with_router(model, router.clone(), DaemonConfig::default());
+    scene.no_quiet_period();
+    let (_dir, root) = project();
+    let s = scene.session();
+    // Two turns in two roots: two chunks, each about 1,200 tokens.
+    let (_, first_answer) = scene.turn_in(&s, &format!("Home. {}", "a ".repeat(1500)), "ok", None);
+    scene.turn_in(
+        &s,
+        &format!("Project. {}", "b ".repeat(1500)),
+        "ok",
+        Some(&root.to_string_lossy()),
+    );
+
+    let report = scene.queue.flush_automatic(&s).await;
+    assert_eq!(report.calls, 1, "{report:?}");
+    assert_eq!(report.stopped, Some(FlushStop::RateHeadroom));
+    assert_eq!(
+        scene.cursor(&s),
+        first_answer,
+        "the first chunk was learned"
+    );
+    assert!(scene.queue.is_due(&s), "the second waits, still due");
+
+    let left = router.rate_headroom(RECORDED_MODEL).await.unwrap();
+    assert!(left.tpm_available >= f64::from(TPM) / 2.0, "{left:?}");
+    let started = std::time::Instant::now();
+    router
+        .complete(openalpaca_llm::RouterRequest {
+            model: None,
+            messages: Arc::new(vec![openalpaca_llm::ChatMessage::user("a chat round")]),
+            tools: Arc::new(vec![]),
+            temperature: None,
+            max_tokens: None,
+            context: Default::default(),
+            tool_choice: None,
+            tools_token_estimate: None,
+            enable_caching: false,
+            thinking: None,
+            context_management: None,
+            fallback_models: Vec::new(),
+            ephemeral_system_notice: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "the chat round waited for the rate budget"
+    );
+}
+
+/// The quiet check runs before every chunk: a turn that starts while the
+/// first chunk's call is out stops the flush at the next chunk boundary,
+/// and the session stays due.
+#[tokio::test]
+async fn a_turn_mid_flush_stops_it_at_the_next_chunk() {
+    let model = Scripted::new(vec![items(&[]), items(&[])]);
+    let scene = Scene::with(model.clone(), DaemonConfig::default());
+    scene.no_quiet_period();
+    let (_dir, root) = project();
+    let s = scene.session();
+    let (_, first_answer) = scene.turn_in(&s, "I live in Porto, in the old town.", "ok", None);
+    scene.turn_in(
+        &s,
+        "This project ships on Tuesdays.",
+        "ok",
+        Some(&root.to_string_lossy()),
+    );
+    let chat: Arc<Mutex<Vec<TurnGuard>>> = Arc::new(Mutex::new(Vec::new()));
+    let queue = scene.queue.clone();
+    let held = chat.clone();
+    *model.on_call.lock().unwrap() = Some(Arc::new(move |_| {
+        held.lock()
+            .unwrap()
+            .push(queue.turn_started(uuid::Uuid::new_v4(), LANE, true));
+    }));
+
+    let report = scene.queue.flush_automatic(&s).await;
+    assert_eq!(report.calls, 1, "{report:?}");
+    assert_eq!(report.stopped, Some(FlushStop::Busy));
+    assert_eq!(scene.cursor(&s), first_answer);
+    assert!(scene.queue.is_due(&s));
+    chat.lock().unwrap().clear();
+}
+
+// ── The triggers (§1.5) ─────────────────────────────────────────────────
+
+/// MD-10's "idle about 2 minutes": a session with an unlearned turn becomes
+/// due once its last turn is `idle_secs` old, and never on idle when
+/// `idle_secs = 0`.
+#[tokio::test(start_paused = true)]
+async fn idle_120s_makes_a_session_due() {
+    let scene = Scene::new(vec![]);
+    let s = scene.session();
+    scene.finish_turn(&s, true);
+    tokio::time::advance(std::time::Duration::from_secs(119)).await;
+    scene.queue.sweep().await;
+    assert!(!scene.queue.is_due(&s), "119 s is not idle yet");
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    scene.queue.sweep().await;
+    assert!(scene.queue.is_due(&s), "121 s is");
+
+    let mut config = DaemonConfig::default();
+    config.orchestrator.learning.idle_secs = 0;
+    scene.config.store(Arc::new(config));
+    let other = scene.session_on("user1:cli");
+    scene.finish_turn(&other, true);
+    tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+    scene.queue.sweep().await;
+    assert!(!scene.queue.is_due(&other), "idle_secs = 0 switches it off");
+}
+
+/// MD-10's "10 new turns": the tenth user-authored turn since the session
+/// was learned makes it due at once; assistant-written turns do not count.
+#[tokio::test]
+async fn the_tenth_user_turn_makes_it_due() {
+    let scene = Scene::new(vec![]);
+    let s = scene.session();
+    for _ in 0..9 {
+        scene.finish_turn(&s, true);
+    }
+    scene.finish_turn(&s, false);
+    assert!(
+        !scene.queue.is_due(&s),
+        "nine of the user's turns and a follow-up"
+    );
+    scene.finish_turn(&s, true);
+    assert!(scene.queue.is_due(&s));
+    assert_eq!(scene.queue.pending_turns(&s), 10);
+}
+
+/// "The user switches conversations": a session that is no longer its
+/// lane's active one — "New chat" archived it — is due at the next sweep.
+#[tokio::test]
+async fn an_archived_session_with_pending_turns_is_due() {
+    let scene = Scene::new(vec![]);
+    let s = scene.session();
+    scene.finish_turn(&s, true);
+    scene.queue.sweep().await;
+    assert!(!scene.queue.is_due(&s), "still the active conversation");
+    scene.session(); // "New chat" archives `s`.
+    scene.queue.sweep().await;
+    assert!(scene.queue.is_due(&s));
+}
+
+/// LQ4: a deleted conversation's queue state is dropped at the next sweep
+/// — its unlearned turns went with its messages.
+#[tokio::test]
+async fn a_deleted_session_is_forgotten() {
+    let scene = Scene::new(vec![]);
+    let s = scene.session();
+    scene.finish_turn(&s, true);
+    assert_eq!(scene.queue.pending_turns(&s), 1);
+    scene.repo().delete_session(&s).unwrap();
+    scene.queue.sweep().await;
+    assert_eq!(scene.queue.pending_turns(&s), 0);
+    assert!(!scene.queue.is_due(&s));
+}
+
+/// "Before the daemon stops": the drain flushes what is pending, and returns
+/// within its budget even when the model never answers — the boot catch-up
+/// learns what it did not finish.
+#[tokio::test(start_paused = true)]
+async fn drain_returns_within_its_budget() {
+    let scene = Scene::new(vec![Say::Hang]);
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+    scene.finish_turn(&s, true);
+
+    let started = tokio::time::Instant::now();
+    let finished = scene.queue.drain(SHUTDOWN_DRAIN).await;
+    assert!(!finished, "the model never answered");
+    assert!(started.elapsed() <= SHUTDOWN_DRAIN + std::time::Duration::from_millis(100));
+    assert!(
+        scene
+            .queue
+            .shutdown(std::time::Duration::from_secs(3))
+            .await,
+        "the stuck flush stops on the shutdown token"
+    );
+    assert_eq!(
+        scene.cursor(&s),
+        0,
+        "nothing lost: the window is still there"
+    );
+}
+
+/// The durable half of "before the daemon stops": at boot, every session
+/// with a user-authored row past its cursor is due — and no other.
+#[tokio::test]
+async fn boot_catchup_finds_unlearned_sessions() {
+    let scene = Scene::new(vec![]);
+    let unlearned = scene.session();
+    scene.turn(&unlearned, PREF, "Noted.");
+    let learned = scene.session_on("user1:cli");
+    let (_, answer) = scene.turn(&learned, "I use a standing desk.", "Nice.");
+    scene.set_cursor(&learned, answer);
+    let followup_only = scene.session_on("user1:telegram");
+    let request = uuid::Uuid::new_v4().to_string();
+    scene.row(
+        &followup_only,
+        "user",
+        "a queued task",
+        INTERNAL_SOURCE,
+        Some(&request),
+        None,
+    );
+
+    scene.queue.catch_up().await;
+    assert!(scene.queue.is_due(&unlearned));
+    assert!(!scene.queue.is_due(&learned));
+    assert!(!scene.queue.is_due(&followup_only));
+}
+
+/// The daemon's path end to end: in `Automatic` mode the sweeper starts a
+/// due session only once no turn is in flight, and learns it.
+#[tokio::test]
+async fn the_sweeper_starts_a_due_session_once_the_daemon_is_quiet() {
+    let model = Scripted::new(vec![items(&[vim_item(&[1])])]);
+    let router = Arc::new(LlmRouter::single_provider(
+        model.clone(),
+        ProviderType::Anthropic,
+        RECORDED_MODEL.to_string(),
+    ));
+    let scene = Scene::build(model, router, DaemonConfig::default(), QueueMode::Automatic);
+    scene.no_quiet_period();
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+    for _ in 0..10 {
+        scene.finish_turn(&s, true);
+    }
+    assert!(scene.queue.is_due(&s));
+
+    let chat = scene.queue.turn_started(uuid::Uuid::new_v4(), LANE, true);
+    scene.queue.sweep().await;
+    scene.queue.wait_idle().await;
+    assert_eq!(scene.model.calls(), 0, "a turn in flight: nothing starts");
+    drop(chat);
+
+    scene.queue.sweep().await;
+    scene.queue.wait_idle().await;
+    assert_eq!(scene.titles(), vec!["Editor preference".to_string()]);
+    assert!(!scene.queue.is_due(&s), "learned");
+}
+
+/// A flush that stops without progress — a cap, the rate headroom, a busy
+/// daemon — waits for the next sweep instead of restarting at once: a
+/// capped session is tried once per tick, not in a loop.
+#[tokio::test]
+async fn a_flush_that_made_no_progress_waits_for_the_next_sweep() {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.costs.extract_max_calls_per_day = 1;
+    let model = Scripted::new(vec![]);
+    let router = Arc::new(LlmRouter::single_provider(
+        model.clone(),
+        ProviderType::Anthropic,
+        RECORDED_MODEL.to_string(),
+    ));
+    let scene = Scene::build(model, router, config, QueueMode::Automatic);
+    scene.no_quiet_period();
+    openalpaca_storage::LlmUsageRepository::new(&scene.db)
+        .upsert_daily_usage(&usage_row(chrono::Utc::now().date_naive(), 1, 0.0))
+        .unwrap();
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+    scene.queue.catch_up().await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), scene.queue.wait_idle())
+        .await
+        .expect("a capped flush restarted itself in a loop");
+    assert!(scene.queue.is_due(&s), "still queued for the next sweep");
+    assert_eq!(scene.model.calls(), 0);
 }

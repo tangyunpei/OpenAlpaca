@@ -327,4 +327,59 @@ mod through_the_service {
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].task_id.as_deref(), Some(TASK));
     }
+    /// **The daily-cap defect (design 09 §1.8, ruling LR8).** The gate reads
+    /// the durable `llm_usage_daily` for today's UTC date: yesterday's spend
+    /// binds nothing, today's does, and the in-memory cost tracker — seeded
+    /// once at boot and never reset — is not consulted at all.
+    #[tokio::test]
+    async fn the_daily_cost_cap_reads_the_utc_day_from_llm_usage_daily() {
+        let daily = |date: String, cost: f64| openalpaca_storage::LlmUsageDaily {
+            date,
+            agent_id: AGENT_LABEL.to_string(),
+            model: "m".to_string(),
+            total_requests: 3,
+            total_input_tokens: 10,
+            total_output_tokens: 10,
+            total_cost_usd: cost,
+        };
+        let today = chrono::Utc::now().date_naive();
+        let yesterday = today - chrono::Duration::days(1);
+
+        // Yesterday's spend, far over the 0.50 cap, and a tracker that still
+        // remembers it: today is a new day, and the run is extracted.
+        {
+            let scene = Scene::new(EVIDENCE_ITEM);
+            LlmUsageRepository::new(&scene.db)
+                .upsert_daily_usage(&daily(yesterday.format("%Y-%m-%d").to_string(), 9.0))
+                .unwrap();
+            let deps = scene.deps();
+            deps.router
+                .cost_tracker
+                .record(&openalpaca_llm::CallRecord {
+                    agent_id: AGENT_LABEL.to_string(),
+                    task_id: None,
+                    model: "m".to_string(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cost_usd: 9.0,
+                    cache_creation_tokens: 0,
+                    cache_read_tokens: 0,
+                })
+                .await;
+            let outcome = extract_task_memories(&deps, scene.params(OWNER, true)).await;
+            assert!(
+                matches!(outcome, TaskExtractionOutcome::Extracted(_)),
+                "{outcome:?}"
+            );
+        } // One scene at a time: each holds the home-store lock.
+
+        // Today's spend over the cap binds, with no call.
+        let scene = Scene::new(EVIDENCE_ITEM);
+        LlmUsageRepository::new(&scene.db)
+            .upsert_daily_usage(&daily(today.format("%Y-%m-%d").to_string(), 0.75))
+            .unwrap();
+        let outcome = extract_task_memories(&scene.deps(), scene.params(OWNER, true)).await;
+        assert_eq!(outcome, TaskExtractionOutcome::Skipped("cost_cap"));
+        assert!(scene.provider.first_request_opt().is_none());
+    }
 }

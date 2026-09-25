@@ -290,6 +290,43 @@ pub fn spawn_memory_reconciliation(
     });
 }
 
+/// Learning v2's sweeper (design 09 §1.5): every 15 s, a session with
+/// unlearned turns that has been idle `[orchestrator.learning] idle_secs`, or
+/// that is no longer its lane's active conversation, becomes due, and a due
+/// session starts when no chat turn has been in flight for 20 s. No bus
+/// subscriber: the switch is read from `session.status`.
+pub fn spawn_learning_sweeper(
+    queue: Arc<openalpaca_core::memory::learning::LearningQueue>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(openalpaca_core::memory::learning::SWEEP_INTERVAL) => {}
+                _ = cancel.cancelled() => break,
+            }
+            queue.sweep().await;
+        }
+    });
+}
+
+/// Learning v2's boot catch-up, the durable half of the stop drain (design
+/// 09 §1.5): 30 s after start, every session with unlearned user turns is
+/// due, and they are learned one at a time when the daemon is quiet.
+pub fn spawn_learning_catch_up(
+    queue: Arc<openalpaca_core::memory::learning::LearningQueue>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::time::sleep(openalpaca_core::memory::learning::BOOT_CATCHUP_DELAY) => {
+                queue.catch_up().await;
+            }
+            _ = cancel.cancelled() => {}
+        }
+    });
+}
+
 /// Design §5: the reconciliation scan runs "at service start, every 30 s,
 /// before management reads, and on `sync`".
 pub const MEMORY_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);

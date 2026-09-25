@@ -1402,3 +1402,89 @@ async fn a_disable_during_an_in_flight_call_does_not_wait_for_it() {
         .expect("the in-flight call finishes on its own Arc");
     assert_eq!(response.model, "claude-sonnet-4-5-20250929");
 }
+
+// ── rate_headroom (Learning v2, design 09 §1.7) ──────────────────────────
+
+/// Background learning reads how much of a model's rate budget is left
+/// before it starts a chunk. The read is the minimum over the provider's
+/// keys, per bucket, and it consumes nothing: two reads in a row agree, and
+/// a key never used reads as full.
+#[tokio::test]
+async fn rate_headroom_reports_the_tightest_key_without_consuming() {
+    let provider = Arc::new(MockProvider::new(
+        "anthropic",
+        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+    ));
+    let pool = KeyPool::new(
+        vec![
+            ApiKey::new(
+                "k1".to_string(),
+                ProviderType::Anthropic,
+                "sk-1".to_string(),
+            ),
+            ApiKey::new(
+                "k2".to_string(),
+                ProviderType::Anthropic,
+                "sk-2".to_string(),
+            ),
+        ],
+        SelectionStrategy::RoundRobin,
+    );
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::Anthropic,
+        ProviderEntry {
+            provider,
+            key_pool: Arc::new(ArcSwap::from_pointee(pool)),
+        },
+    );
+    let config = RateLimitConfig {
+        default_rpm: 60,
+        default_tpm: 10_000,
+        ..RateLimitConfig::default()
+    };
+    let router = LlmRouter::new_with_runtime(
+        providers,
+        ModelRegistry::with_defaults(),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "claude-sonnet-4-5-20250929".to_string(),
+        LlmRuntimeConfig::default(),
+        config,
+    );
+
+    let full = router
+        .rate_headroom("claude-sonnet-4-5-20250929")
+        .await
+        .expect("a loaded model has a rate budget");
+    assert_eq!(full.rpm_capacity, 60.0);
+    assert_eq!(full.tpm_capacity, 10_000.0);
+    assert!(full.tpm_available > 9_999.0, "{full:?}");
+
+    // One key spends 4,000 tokens: the tightest key is what is reported.
+    let limiter = router.rate_limiter_registry.get_or_create("k2", None);
+    limiter.tpm_bucket.acquire(4_000.0).await;
+    let first = router
+        .rate_headroom("claude-sonnet-4-5-20250929")
+        .await
+        .unwrap();
+    assert!(
+        (5_900.0..6_200.0).contains(&first.tpm_available),
+        "the tightest key: {first:?}"
+    );
+    assert!(
+        first.rpm_available > 59.0,
+        "no request was spent: {first:?}"
+    );
+
+    let second = router
+        .rate_headroom("claude-sonnet-4-5-20250929")
+        .await
+        .unwrap();
+    assert!(
+        second.tpm_available >= first.tpm_available,
+        "reading consumed tokens: {first:?} then {second:?}"
+    );
+
+    assert!(router.rate_headroom("not-a-model").await.is_none());
+}

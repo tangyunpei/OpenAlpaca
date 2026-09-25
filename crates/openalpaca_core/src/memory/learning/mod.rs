@@ -41,6 +41,26 @@ pub const CONTEXT_ROW_BYTES: usize = 1024;
 /// Rows one window read takes; a longer window is read again after its
 /// first chunks advance the cursor.
 pub(crate) const WINDOW_READ_ROWS: i64 = 400;
+/// The most chunks one automatic flush runs; the rest stays due and runs at
+/// the next quiet start.
+pub const MAX_CHUNKS_PER_FLUSH: usize = 4;
+/// Consecutive unusable answers to one chunk before the cursor moves past it
+/// with one WARN (ruling LR20).
+pub const MAX_ATTEMPTS: u32 = 3;
+/// The longest the stop drain waits (ruling LR6); what it does not finish,
+/// the boot catch-up learns.
+pub const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long after start the boot catch-up looks for unlearned sessions.
+pub const BOOT_CATCHUP_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long the daemon must have had no turn in flight before a flush
+/// starts (ruling LR7).
+pub const RESUME_QUIET: std::time::Duration = std::time::Duration::from_secs(20);
+/// How often the sweeper looks for idle and switched-away sessions.
+pub const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+/// The first retry delay after a held window; it doubles to [`BACKOFF_CAP`].
+pub const BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(60);
+/// The longest retry delay.
+pub const BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// What one extraction call may spend (design §1.6), from the extraction
 /// model's context window:
