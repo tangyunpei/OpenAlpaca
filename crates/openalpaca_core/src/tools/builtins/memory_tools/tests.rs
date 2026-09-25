@@ -1399,6 +1399,67 @@ async fn the_preview_is_daemon_authored_and_bounded() {
     );
 }
 
+/// Review finding 4 (L4): a note's title and body may hold control
+/// characters, and the CLI prints the preview raw at a terminal — an ESC
+/// sequence could rewrite the text the person approves. The preview and the
+/// `<memory_suggestions>` line carry none; the preview's own line breaks
+/// stay.
+#[tokio::test]
+async fn the_preview_and_the_block_carry_no_control_characters() {
+    use crate::prompt_ctx::sources::memory::memory_suggestions_block;
+    let h = Harness::new();
+    let target = h.user_note(
+        ALICE,
+        "Editor\u{1b}[2J\u{7} choice",
+        "# Editor\n\n## Knowledge\nI use vim\u{1b}[8m for everything.\u{9b}31m\n",
+    );
+    let row = typed_row(&h, "I switched to Helix.", "2026-06-14 09:30:00");
+    let s = suggestion_for(
+        &h,
+        (target.0, &target.1),
+        "Editor\u{1b}]0;owned\u{7} choice",
+        "The user\u{1b}[1A\u{1b}[2K edits with Helix.\u{0}",
+        &[row],
+        crate::memory::service::ExtractionProvenance::UserWords,
+    );
+    let preview = MemoryConfirmTool::new(h.service.clone())
+        .confirmation_preview(
+            &serde_json::json!({"id": s.id.to_string(), "expected_revision": s.revision, "target_revision": target.1}),
+            &h.tool_ctx(ALICE),
+        )
+        .await
+        .unwrap()
+        .expect("a preview");
+    let controls = |text: &str| -> Vec<char> {
+        text.chars()
+            .filter(|c| c.is_control() && *c != '\n')
+            .collect()
+    };
+    assert_eq!(controls(&preview), Vec::<char>::new(), "{preview:?}");
+    assert!(preview.contains("“Editor[2J choice”"), "{preview}");
+    assert!(
+        preview.contains("I use vim[8m for everything.31m"),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("The user[1A[2K edits with Helix."),
+        "{preview}"
+    );
+    assert_eq!(preview.lines().count(), 5, "{preview}");
+
+    let mut other = h.tool_ctx(ALICE);
+    other.lane_key = Some(format!("{ALICE}:other"));
+    let block = memory_suggestions_block(h.service.clone(), &other)
+        .await
+        .expect("a block");
+    let line = block
+        .lines()
+        .find(|l| l.contains(&s.id.to_string()))
+        .expect("the suggestion is listed");
+    assert_eq!(controls(line), Vec::<char>::new(), "{line:?}");
+    assert!(line.contains("“Editor[2J choice” (saved by you)"), "{line}");
+}
+
 /// The turn's own `ModelTool` read context, as the main loop reads with it.
 fn read_ctx(h: &Harness) -> crate::memory::service::MemoryAccessContext {
     h.service
