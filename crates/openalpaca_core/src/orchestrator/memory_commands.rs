@@ -237,9 +237,11 @@ fn remember(service: &MemoryService, ctx: &MemoryAccessContext, args: &str) -> S
 
 // ── /forget ──────────────────────────────────────────────────────────────
 
-/// A single word of hex digits and hyphens, starting with a digit, with at
-/// least [`ID_PREFIX_MIN_HEX`] of them: an id or a prefix of one. Anything
-/// else is text to search for.
+/// A single word of hex digits (`0-9`, `a-f`, `A-F`) and hyphens, starting
+/// with a hex digit, with at least [`ID_PREFIX_MIN_HEX`] of them: an id or a
+/// prefix of one. Anything else is text to search for. A date such as
+/// `2026-09-25`, or a number of eight digits or more, is id-shaped too, and
+/// is looked up as an id prefix rather than searched for.
 fn is_id_shaped(text: &str) -> bool {
     text.chars().next().is_some_and(|c| c.is_ascii_hexdigit())
         && text.chars().all(|c| c.is_ascii_hexdigit() || c == '-')

@@ -152,6 +152,12 @@ pub fn resolve_project_root(hint: WorkspaceHint<'_>) -> Option<PathBuf> {
 /// derive `gui`; `cli` is the name `HandleRequest::source` reserves for the
 /// CLI. A connector (`telegram`, `discord`, `imessage`), a scheduled skill or
 /// a follow-up (`internal`) and `/v1/command process` (`api`) are not.
+///
+/// Wider than `memory_confirm`'s `IN_CHAT_SOURCE`
+/// (`tools/builtins/memory_tools.rs`, `gui` only) on purpose: a memory
+/// command only needs its reply read, while a confirmation card needs a
+/// client that shows its preview and answers it per call. The two coincide
+/// until a production path derives `cli`; see `IN_CHAT_SOURCE`.
 pub const ATTENDED_CHAT_SOURCES: [&str; 2] = ["gui", "cli"];
 
 /// The chat turn a memory command was typed on (design 09 §12.2) — what

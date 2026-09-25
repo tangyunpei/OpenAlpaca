@@ -888,6 +888,15 @@ impl BuiltInTool for MemoryUpdateTool {
 /// The derived source of the GUI's and the CLI's chat turns
 /// (`chat/service.rs`, `EventSource::Gui`): the only turns `memory_confirm`
 /// is offered on (design 09 §4.1, ruling LR13).
+///
+/// Narrower than `ATTENDED_CHAT_SOURCES` (`memory/service/context.rs`: `gui`
+/// and `cli`), which admits the chat memory commands (§12.2), on purpose. A
+/// memory command only needs its reply read; a `memory_confirm` card needs
+/// a client that shows its preview and answers it for this one call, which
+/// the app's card and the CLI's inline prompt do — both on turns that derive
+/// `gui`. `cli` is a name `HandleRequest::source` reserves and no production
+/// path derives, so the two coincide today; a path that starts deriving
+/// `cli` gets the commands at once, and the card only when it is added here.
 pub(crate) const IN_CHAT_SOURCE: &str = "gui";
 
 #[derive(Deserialize)]
