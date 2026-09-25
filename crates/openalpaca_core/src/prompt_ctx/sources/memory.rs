@@ -550,4 +550,213 @@ mod tests {
         assert!(turn.content.contains("User prefers vim."));
         assert!(turn.used.is_empty());
     }
+
+    // ── The per-turn delivery, byte for byte (design 09 §13.2, L10b) ─────
+
+    /// `ALICE`'s owner key: the directory her home partition lives in.
+    const ALICE_KEY: &str = "32acea7eb739b08afd959db91e46d450";
+
+    /// One note file in the canon (design §4), dropped into the partition by
+    /// hand so that its id, its dates — and so its revision and its path —
+    /// are the same on every run.
+    struct FixedNote {
+        id: &'static str,
+        title: &'static str,
+        kind: &'static str,
+        created_at: &'static str,
+        observed_at: Option<&'static str>,
+        window: Option<(&'static str, &'static str)>,
+        pinned: bool,
+        source: Option<&'static str>,
+        body: &'static str,
+    }
+
+    impl FixedNote {
+        fn file(&self) -> String {
+            let window = self.window.unwrap_or(("null", "null"));
+            let sources = match self.source {
+                Some(id) => format!("sources:\n  - type: message\n    id: {id}\n"),
+                None => "sources: []\n".to_string(),
+            };
+            format!(
+                "---\nschema: 1\nid: {id}\ntitle: {title}\nkind: {kind}\nstatus: active\nfact_key: null\naliases: []\ntags: []\ncreated_at: {created}\nupdated_at: {created}\nobserved_at: {observed}\nvalid_from: {from}\nvalid_to: {to}\nreview_after: null\npinned: {pinned}\n{sources}supersedes: []\n---\n{body}",
+                id = self.id,
+                title = self.title,
+                kind = self.kind,
+                created = self.created_at,
+                observed = self.observed_at.unwrap_or("null"),
+                from = window.0,
+                to = window.1,
+                pinned = self.pinned,
+                body = self.body,
+            )
+        }
+    }
+
+    /// A pinned note, five notes the golden question matches and one it does
+    /// not: more matches than the index-first delivery excerpts (design 09
+    /// §13.2), so the two deliveries differ on this scene.
+    const GOLDEN_NOTES: &[FixedNote] = &[
+        FixedNote {
+            id: "00000000-0000-4000-8000-00000000a001",
+            title: "Working hours",
+            kind: "preference",
+            created_at: "2026-09-01T09:00:00Z",
+            observed_at: None,
+            window: None,
+            pinned: true,
+            source: None,
+            body: "# Working hours\n\nThe user works from 09:00 to 17:00 Pacific time.\n",
+        },
+        FixedNote {
+            id: "00000000-0000-4000-8000-00000000a002",
+            title: "Editor preference",
+            kind: "preference",
+            created_at: "2026-09-02T10:00:00Z",
+            observed_at: None,
+            window: None,
+            pinned: false,
+            source: Some("41"),
+            body: "# Editor preference\n\n## Knowledge\nThe user prefers vim for editing.\n",
+        },
+        FixedNote {
+            id: "00000000-0000-4000-8000-00000000a003",
+            title: "Editor theme",
+            kind: "preference",
+            created_at: "2026-09-03T10:00:00Z",
+            observed_at: None,
+            window: None,
+            pinned: false,
+            source: None,
+            body: "# Editor theme\n\nThe editor uses the solarized dark theme.\n",
+        },
+        FixedNote {
+            id: "00000000-0000-4000-8000-00000000a004",
+            title: "Editor font",
+            kind: "fact",
+            created_at: "2026-09-04T10:00:00Z",
+            observed_at: None,
+            window: Some(("2026-01-01T00:00:00Z", "2099-01-01T00:00:00Z")),
+            pinned: false,
+            source: None,
+            body: "# Editor font\n\nThe editor font is JetBrains Mono at 14 pt.\n",
+        },
+        FixedNote {
+            id: "00000000-0000-4000-8000-00000000a005",
+            title: "Editor plugins",
+            kind: "reference",
+            created_at: "2026-09-05T10:00:00Z",
+            observed_at: None,
+            window: None,
+            pinned: false,
+            source: None,
+            body: "# Editor plugins\n\nThe editor runs the fzf plugin and a git gutter.\n",
+        },
+        FixedNote {
+            id: "00000000-0000-4000-8000-00000000a006",
+            title: "Editor keymap",
+            kind: "procedure",
+            created_at: "2026-09-06T10:00:00Z",
+            observed_at: Some("2026-08-30T08:00:00Z"),
+            window: None,
+            pinned: false,
+            source: None,
+            body: "# Editor keymap\n\nThe leader key in the editor is the space bar.\n",
+        },
+        FixedNote {
+            id: "00000000-0000-4000-8000-00000000a007",
+            title: "Coffee",
+            kind: "preference",
+            created_at: "2026-09-07T10:00:00Z",
+            observed_at: None,
+            window: None,
+            pinned: false,
+            source: None,
+            body: "# Coffee\n\nThe user drinks espresso after lunch.\n",
+        },
+    ];
+
+    /// The golden question.
+    const GOLDEN_QUERY: &str = "what editor do I prefer?";
+
+    /// [`scene`] with [`GOLDEN_NOTES`] in Alice's home partition, the index
+    /// in step with them.
+    fn golden_scene() -> Scene {
+        let scene = scene();
+        // The partition's control snapshot comes with its first service
+        // write; this note matches nothing the golden question asks.
+        store(
+            &scene,
+            "Parking",
+            "# Parking\n\nThe car is parked in bay 12.\n",
+        );
+        let notes = scene
+            ._root
+            .path()
+            .join("home")
+            .canonicalize()
+            .unwrap()
+            .join("memory")
+            .join("owners")
+            .join(ALICE_KEY)
+            .join("notes");
+        for note in GOLDEN_NOTES {
+            let id = openalpaca_storage::memory_files::NoteId::parse(note.id).unwrap();
+            let name = openalpaca_storage::memory_files::Note::file_name_for(id, note.title);
+            std::fs::write(notes.join(name), note.file()).unwrap();
+        }
+        let owner = scene
+            .service
+            .context(
+                ALICE,
+                WorkspaceHint::None,
+                Surface::UserSurface,
+                Capabilities::ALL,
+                Attribution::default(),
+            )
+            .unwrap();
+        scene.service.sync(&owner).unwrap();
+        scene
+    }
+
+    /// The turn's memory message and its `memory_used`, as one text: what
+    /// the model reads, then what the turn reports.
+    fn golden_text(turn: &MemoryTurn) -> String {
+        let mut out = turn.content.clone();
+        out.push_str("=== memory_used ===\n");
+        for used in &turn.used {
+            out.push_str(&format!("{} {}\n", used.id, used.reason.as_str()));
+        }
+        out
+    }
+
+    /// The golden question's turn on [`golden_scene`], through the source
+    /// and the renderer the main loop and the skill tier use.
+    async fn golden_turn(scene: &Scene) -> MemoryTurn {
+        let sections = scene
+            .source
+            .resolve(&request(GOLDEN_QUERY, Some(ALICE)))
+            .await;
+        let bundle = ContextBundle {
+            total_tokens: sections.iter().map(|s| s.token_estimate).sum(),
+            sections,
+            available_budget: 8192,
+        };
+        memory_turn(&bundle).expect("the golden question recalls notes")
+    }
+
+    /// **Design 09 §13.2: `recall_mode = "excerpts"` is today's delivery,
+    /// byte for byte.** The per-turn memory message — the wrapper, the trust
+    /// label, the pinned note, then every recalled note as an excerpt under
+    /// its full header — and the turn's `memory_used`, as they were before
+    /// index-first recall existed (characterized at `a90202ed`).
+    #[tokio::test]
+    async fn excerpts_mode_is_todays_delivery_byte_for_byte() {
+        let scene = golden_scene();
+        let turn = golden_turn(&scene).await;
+        assert_eq!(
+            golden_text(&turn),
+            include_str!("memory_recall_excerpts.golden.txt")
+        );
+    }
 }
