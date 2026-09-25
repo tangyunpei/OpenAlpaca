@@ -124,9 +124,11 @@ pub const DIR_KEY_HEX: usize = 16;
 /// timeline, the list, the Memory view) and never delivered by automatic
 /// recall, never shown to the extractor, and forgetting one suppresses no
 /// source: it is the assistant's record of a conversation, not something
-/// the user said. An episode of any other origin is an ordinary note.
-pub fn is_conversation_summary(kind: NoteKind, origin: Origin) -> bool {
-    kind == NoteKind::Episode && origin == Origin::ExtractedOther
+/// the user said. An episode of any other origin is an ordinary note, and
+/// so is an `extracted_other` episode whose stored `status` is `candidate`:
+/// the extractor proposed it, and it is a candidate like any other.
+pub fn is_conversation_summary(kind: NoteKind, origin: Origin, status: NoteStatus) -> bool {
+    kind == NoteKind::Episode && origin == Origin::ExtractedOther && status != NoteStatus::Candidate
 }
 
 // ============================================================================

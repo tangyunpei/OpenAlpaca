@@ -378,6 +378,84 @@ fn forgetting_a_summary_forgets_the_summary_not_what_was_said() {
     assert!(recalled.notes.iter().any(|n| n.id == fact.id));
 }
 
+/// An `episode` candidate the extractor proposed from the assistant's words
+/// is origin `extracted_other` too, and a candidate like any other, not a
+/// conversation summary (review of L10c, finding 1): it counts as no
+/// summary covering its rows, learning's re-run guard sees it among the
+/// window's notes, deleting its conversation leaves it, and forgetting it
+/// is an ordinary forget — the messages it cites are suppressed.
+#[test]
+fn a_learned_episode_candidate_is_not_a_conversation_summary() {
+    let h = Harness::new();
+    let (a, b) = (
+        h.message_row("Let's plan the Lisbon trip."),
+        h.message_row("Happy to help with Lisbon."),
+    );
+    let learning = extraction(&h, None);
+    let candidate = h
+        .service
+        .store(
+            &learning,
+            StoreInput {
+                title: "Lisbon trip talk".to_string(),
+                body: "# Lisbon trip talk\n\n## Knowledge\nWe started planning a Lisbon trip.\n"
+                    .to_string(),
+                kind: Some(NoteKind::Episode),
+                sources: vec![message(a), message(b)],
+                provenance: Some(ExtractionProvenance::OtherOutput),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(candidate.origin, Origin::ExtractedOther);
+    let user = h.user(ALICE, None);
+    let candidates = || {
+        h.list_ids(
+            &user,
+            ListInput {
+                status: Some(NoteStatus::Candidate),
+                ..Default::default()
+            },
+        )
+    };
+    assert!(candidates().contains(&candidate.id));
+
+    assert_eq!(
+        h.service.summary_coverage(&learning, &[a, b]).unwrap(),
+        None,
+        "no summary covers these rows"
+    );
+    let view = h.service.learning_view(&learning, &[], &[a, b]).unwrap();
+    assert!(
+        view.from_this_window.iter().any(|n| n.id == candidate.id),
+        "the re-run guard sees it: {:?}",
+        view.from_this_window
+    );
+    assert_eq!(
+        h.service
+            .forget_conversation_summaries(ALICE, None, &[a, b])
+            .unwrap(),
+        0
+    );
+    assert!(candidates().contains(&candidate.id), "the delete left it");
+
+    h.service
+        .forget(
+            &user,
+            ForgetInput {
+                targets: vec![(candidate.id, candidate.revision.clone())],
+                reason: None,
+            },
+        )
+        .unwrap();
+    let keys = [format!("message:{a}"), format!("message:{b}")];
+    assert_eq!(
+        h.service.suppressed_sources(&learning, &keys).unwrap(),
+        keys.into_iter().collect::<HashSet<_>>(),
+        "an ordinary forget suppresses what it cites"
+    );
+}
+
 /// **§13.3: deleting or clearing a conversation "also forgets the episodes
 /// whose sources all lie in that session"** — in the home partition and in
 /// the conversation's project — and nothing else: not a summary that also

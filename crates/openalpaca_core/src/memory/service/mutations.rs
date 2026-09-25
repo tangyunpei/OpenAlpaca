@@ -243,7 +243,12 @@ impl MemoryService {
             // summary, not what was said. It cites the conversation's own
             // rows, so a forget's suppression would turn every note those
             // rows taught `source_forgotten`; its tombstone suppresses none.
-            let mode = if files::is_conversation_summary(view.note.kind, view.derived.origin) {
+            // An episode candidate the extractor proposed is no summary.
+            let mode = if files::is_conversation_summary(
+                view.note.kind,
+                view.derived.origin,
+                view.note.status,
+            ) {
                 ForgetMode::Withdraw
             } else {
                 ForgetMode::Forget
@@ -352,13 +357,14 @@ impl MemoryService {
                 .index
                 .notes_citing(std::slice::from_ref(&key), &source_keys)?
             {
-                let (Some(kind), Some(origin)) = (
+                let (Some(kind), Some(origin), Some(status)) = (
                     files::NoteKind::parse(&row.kind),
                     Origin::parse(&row.origin),
+                    NoteStatus::parse(&row.status),
                 ) else {
                     continue;
                 };
-                if !files::is_conversation_summary(kind, origin) {
+                if !files::is_conversation_summary(kind, origin, status) {
                     continue;
                 }
                 let Ok(id) = NoteId::parse(&row.id) else {
@@ -374,7 +380,7 @@ impl MemoryService {
                         .sources
                         .iter()
                         .all(|s| s.kind == SourceType::Message && rows.contains(&s.id));
-                if all_here && files::is_conversation_summary(note.kind, origin) {
+                if all_here && files::is_conversation_summary(note.kind, origin, note.status) {
                     targets.push((id, revision));
                 }
             }

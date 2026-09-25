@@ -353,6 +353,44 @@ async fn a_rerun_after_a_crash_still_summarises_the_turns_after_the_summary() {
     assert!(!newest.contains("Answer 0."), "the covered turns: {newest}");
 }
 
+/// An `episode` the extractor proposed from the assistant's words is a
+/// candidate of origin `extracted_other` — not a conversation summary. It
+/// does not count as a summary covering the rows it cites: the
+/// conversation still gets its episode note, over every one of its rows.
+#[tokio::test]
+async fn a_learned_episode_candidate_does_not_hold_back_the_episode_note() {
+    let scene = Scene::new(vec![
+        items(&[item(
+            "Lisbon trip talk",
+            "The user and the assistant started planning a Lisbon trip.",
+            "episode",
+            "assistant",
+            &[1, 2],
+        )]),
+        trip_summary(),
+    ]);
+    let s = scene.session();
+    let rows = four_turns(&scene, &s);
+    let learned = scene.queue.flush_session(&s).await;
+    assert_eq!(learned.candidates, 1, "{learned:?}");
+    let candidates = scene.candidates();
+    assert_eq!(
+        (candidates[0].kind, candidates[0].origin),
+        (NoteKind::Episode, Origin::ExtractedOther)
+    );
+
+    let report = scene.queue.flush_episodes(&s).await;
+    assert_eq!(
+        (report.skipped_summarized, report.calls, report.episodes),
+        (0, 1, 1),
+        "{report:?}"
+    );
+    let note = scene.read(&scene.user_ctx(), episodes(&scene)[0].id);
+    let cited: Vec<i64> = note.sources.iter().map(|s| s.id.parse().unwrap()).collect();
+    assert_eq!(cited, rows, "the whole window");
+    assert_eq!(episode_cursor(&scene, &s), *rows.last().unwrap());
+}
+
 /// An unusable answer holds the window with a backoff, like learning's
 /// (ruling LR20); the third in a row moves the cursor past the chunk with
 /// no episode.

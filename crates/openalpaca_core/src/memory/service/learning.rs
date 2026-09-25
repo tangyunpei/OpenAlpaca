@@ -129,7 +129,7 @@ impl MemoryService {
         let mut dirty: HashSet<String> = HashSet::new();
         let mut newest: Option<i64> = None;
         for row in self.index.notes_citing(&keys, &source_keys)? {
-            if !is_summary_row(&row.kind, &row.origin) {
+            if !is_summary_row(&row.kind, &row.origin, &row.status) {
                 continue;
             }
             let (Some(p), Ok(id)) = (
@@ -229,7 +229,7 @@ impl MemoryService {
                     row.effective_status,
                     index::EffectiveStatus::Active | index::EffectiveStatus::Candidate
                 )
-                || is_summary_row(&row.kind, &row.origin)
+                || is_summary_row(&row.kind, &row.origin, &row.status)
             {
                 continue;
             }
@@ -271,7 +271,7 @@ impl MemoryService {
                 .hits
                 .into_iter()
                 .filter(|h| h.effective_status == index::EffectiveStatus::Active)
-                .filter(|h| !is_summary_row(&h.kind, &h.origin))
+                .filter(|h| !is_summary_row(&h.kind, &h.origin, &h.status))
                 .take(LEARNING_HITS_PER_QUERY)
             {
                 match best.get(&hit.id) {
@@ -395,11 +395,13 @@ impl MemoryService {
 
 /// Whether an index row is a conversation summary (design 09 §13.3): one
 /// never enters the extractor's prompt, as it never enters any prompt on its
-/// own — neither shown nor counted among a window's learned notes.
-fn is_summary_row(kind: &str, origin: &str) -> bool {
+/// own — neither shown nor counted among a window's learned notes. `status`
+/// is the row's stored one: an `extracted_other` episode candidate is not a
+/// summary.
+fn is_summary_row(kind: &str, origin: &str, status: &str) -> bool {
     matches!(
-        (NoteKind::parse(kind), Origin::parse(origin)),
-        (Some(k), Some(o)) if is_conversation_summary(k, o)
+        (NoteKind::parse(kind), Origin::parse(origin), NoteStatus::parse(status)),
+        (Some(k), Some(o), Some(s)) if is_conversation_summary(k, o, s)
     )
 }
 

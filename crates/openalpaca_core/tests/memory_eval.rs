@@ -2818,9 +2818,20 @@ struct LearnedNote {
 
 impl LearnedNote {
     /// A conversation summary (design 09 §13.3): kept out of the fact
-    /// measures — coverage, noise, restatements, aliases, keys.
+    /// measures — coverage, noise, restatements, aliases, keys. An
+    /// `extracted_other` episode candidate is not one.
     fn is_summary(&self) -> bool {
-        self.kind == "episode" && self.origin == "extracted_other"
+        use openalpaca_storage::memory_files::{
+            NoteKind, NoteStatus, Origin, is_conversation_summary,
+        };
+        matches!(
+            (
+                NoteKind::parse(self.kind),
+                Origin::parse(self.origin),
+                NoteStatus::parse(self.status),
+            ),
+            (Some(k), Some(o), Some(s)) if is_conversation_summary(k, o, s)
+        )
     }
 
     fn from_read(r: &openalpaca_core::memory::service::ReadOutput) -> Self {
@@ -3023,7 +3034,9 @@ async fn measure_coverage(
         for hit in results
             .iter()
             .filter(|hit| {
-                !openalpaca_storage::memory_files::is_conversation_summary(hit.kind, hit.origin)
+                !openalpaca_storage::memory_files::is_conversation_summary(
+                    hit.kind, hit.origin, hit.status,
+                )
             })
             .take(COVERAGE_HITS)
         {
@@ -5705,6 +5718,23 @@ fn learned(
         source_forgotten: false,
         knowledge: String::new(),
     }
+}
+
+/// The fact measures leave out the conversation summaries — an active
+/// `extracted_other` episode — and nothing else: an `episode` the extractor
+/// proposed from the assistant's words is a candidate, measured like any
+/// other (review of L10c, finding 1).
+#[test]
+fn only_a_non_candidate_extracted_other_episode_is_a_summary() {
+    let note = |status: &'static str, origin: &'static str| LearnedNote {
+        kind: "episode",
+        origin,
+        ..learned("e", status, None, &[1, 2], &[])
+    };
+    assert!(note("active", "extracted_other").is_summary());
+    assert!(!note("candidate", "extracted_other").is_summary());
+    assert!(!note("active", "extracted_user").is_summary());
+    assert!(!learned("f", "active", None, &[1], &[]).is_summary());
 }
 
 /// Design 09 §7.3's restatement outcomes, from the notes citing the
