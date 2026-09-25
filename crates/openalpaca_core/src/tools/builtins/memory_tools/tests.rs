@@ -1151,6 +1151,11 @@ async fn timeout_leaves_the_suggestion() {
         name: "memory_confirm".into(),
         arguments: confirm_args(&p),
     };
+    use crate::prompt_ctx::sources::memory::memory_suggestions_block;
+    let before = memory_suggestions_block(h.service.clone(), &h.tool_ctx(ALICE))
+        .await
+        .expect("waiting before the card");
+    assert!(before.contains(&p.suggestion.id.to_string()), "{before}");
     let err = sandbox
         .execute_tool(&call, &policy, &h.tool_ctx(ALICE))
         .await
@@ -1163,6 +1168,25 @@ async fn timeout_leaves_the_suggestion() {
         read_json(&h, p.target.0).unwrap()["effective_status"],
         "active"
     );
+
+    // §4.3/§4.5: the card that went out marked it raised on this lane — the
+    // suggestion and the note it would replace are not listed there again…
+    let after = memory_suggestions_block(h.service.clone(), &h.tool_ctx(ALICE))
+        .await
+        .unwrap_or_default();
+    assert!(!after.contains(&p.suggestion.id.to_string()), "{after}");
+    assert!(!after.contains(&p.target.0.to_string()), "{after}");
+    // …while a lane that was never asked still hears about it.
+    let mut other = h.tool_ctx(ALICE);
+    other.lane_key = Some(format!("{ALICE}:other"));
+    let elsewhere = memory_suggestions_block(h.service.clone(), &other)
+        .await
+        .expect("still waiting on another lane");
+    assert!(
+        elsewhere.contains(&p.suggestion.id.to_string()),
+        "{elsewhere}"
+    );
+    assert!(elsewhere.contains(&p.target.0.to_string()), "{elsewhere}");
 }
 
 /// Design 09 §4.4, S5: a target the model names at a revision it no longer
