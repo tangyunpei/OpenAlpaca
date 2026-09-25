@@ -42,7 +42,7 @@
 //! added to.
 #![cfg(feature = "live-eval")]
 
-use openalpaca_core::daemon_config::RoutingConfig;
+use openalpaca_core::daemon_config::{RecallMode, RoutingConfig};
 use openalpaca_core::memory::service::{
     Attribution, Capabilities, MemoryService, RecallBudget, StoreInput, Surface, UsedReason,
     WorkspaceHint,
@@ -1067,6 +1067,30 @@ struct Settings {
     learn_from: Option<PathBuf>,
     /// Re-judge (design 09 §7.4): an archived report to grade again.
     rejudge_from: Option<PathBuf>,
+    /// `OPENALPACA_MEMORY_EVAL_RECALL_MODE` (design 09 §13.4): the
+    /// `[orchestrator.memory] recall_mode` every system runs with; `None`
+    /// leaves `DaemonConfig`'s default (`index`).
+    recall_mode: Option<RecallMode>,
+}
+
+/// `OPENALPACA_MEMORY_EVAL_RECALL_MODE`, read as the config key reads it
+/// (design 09 §13.2): `index` or `excerpts`; unset or empty is the config's
+/// default. Anything else is refused, naming the two values.
+fn recall_mode_from_env_value(value: Option<String>) -> Result<Option<RecallMode>, String> {
+    let Some(value) = value.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    [RecallMode::Index, RecallMode::Excerpts]
+        .into_iter()
+        .find(|mode| mode.as_str() == value)
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "OPENALPACA_MEMORY_EVAL_RECALL_MODE={value:?} is not a recall mode: use `index` or \
+                 `excerpts` ([orchestrator.memory] recall_mode, design 09 §13.2), or leave it unset \
+                 for the config's default"
+            )
+        })
 }
 
 fn env_nonempty(name: &str) -> Option<String> {
@@ -1100,6 +1124,10 @@ impl Settings {
     /// Every pre-flight check happens here, before a router exists, so a
     /// misconfigured run refuses without a single model call.
     fn from_env() -> Self {
+        // First: a mistyped mode refuses the run whatever else is set.
+        let recall_mode =
+            recall_mode_from_env_value(env_nonempty("OPENALPACA_MEMORY_EVAL_RECALL_MODE"))
+                .unwrap_or_else(|e| panic!("memory_eval: {e}"));
         let rejudge_from = env_absolute("OPENALPACA_MEMORY_EVAL_REJUDGE");
         if let Some(path) = &rejudge_from {
             assert!(
@@ -1206,6 +1234,7 @@ impl Settings {
             session_limit: env_number("OPENALPACA_MEMORY_EVAL_SESSIONS"),
             learn_from,
             rejudge_from,
+            recall_mode,
         }
     }
 }
@@ -1425,6 +1454,20 @@ struct Totals {
     /// `memory_update`, `memory_forget`); non-zero means later questions saw
     /// a store the gold set does not describe.
     memory_write_calls: u32,
+    // ── Added for L8's recall-mode comparison (design 09 §13.4) ───────────
+    /// Rows with a non-empty `relies_on` whose every relied-on note was
+    /// delivered or listed — the retrieval of an `index` run, where
+    /// [`Self::rows_with_every_relied_note_delivered`] asks for the bodies.
+    rows_with_every_relied_note_listed_or_delivered: usize,
+    /// The reader's input tokens per question turn (`rows[].reader_tokens_in`,
+    /// every round of the turn): mean and median. `null` with no rows.
+    reader_tokens_in_mean_per_turn: Option<f64>,
+    reader_tokens_in_median_per_turn: Option<f64>,
+    /// The reader's model calls per question turn (`rows[].reader_rounds`):
+    /// one per round, so 1 is a turn answered with no tool round.
+    reader_rounds_mean_per_turn: Option<f64>,
+    /// The main loop's tool calls per question turn (`rows[].tools`).
+    tool_calls_mean_per_turn: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1433,8 +1476,9 @@ struct UsedNote {
     /// note a model stored during the run).
     note: String,
     gold: bool,
-    /// `recall` | `pinned` | `tool` (design §7a `memory_used`).
-    reason: &'static str,
+    /// `pinned` | `recall` | `index` | `tool` (design §7a `memory_used`;
+    /// `index` since design 09 §13.2: listed, not delivered).
+    reason: UsedReason,
 }
 
 #[derive(Debug, Serialize)]
@@ -1463,21 +1507,82 @@ struct Row {
     mode: String,
     /// The ids the router reported answering (V4), one per distinct model.
     reader_models: Vec<String>,
+    /// The turn's `LlmCallCompleted` events from the main loop. The main
+    /// loop publishes **one per turn**, with the whole turn's tokens, so
+    /// this is 1 for an answered turn however many rounds it took; the
+    /// rounds are [`Self::reader_rounds`].
     reader_llm_calls: u32,
     reader_tokens_in: u64,
     reader_tokens_out: u64,
     reader_cost_usd: f64,
     tools: Vec<String>,
     memory_search_calls: u32,
-    /// How many notes the automatic per-turn recall delivered for this
-    /// question (`memory_used` entries with reason `recall` or `pinned`).
+    /// How many notes the automatic per-turn recall delivered **with their
+    /// content** for this question: the distinct notes of `memory_used` with
+    /// reason `recall` or `pinned`. A note only listed in the index block
+    /// (`index`) is not counted, nor one a tool fetched (`tool`), so an
+    /// `index` run and an `excerpts` run count the same thing.
     per_turn_fts_hits: usize,
     // ── Added with the new engine (plan 3.11) ─────────────────────────────
     /// The turn's `memory_used` (design §7a), as `take_memory_used` hands it
-    /// to the daemon's bridge: every note delivered, by recall or by tool.
+    /// to the daemon's bridge: every note delivered, by recall or by tool,
+    /// and every note the index block listed.
     memory_used: Vec<UsedNote>,
-    /// How many of `relies_on` are in `memory_used`.
+    /// How many of `relies_on` reached the model with their content: in
+    /// `memory_used` with any reason but `index` — `recall`, `pinned` or
+    /// `tool`, the meaning the archived excerpts-era reports carry. `tool`
+    /// is any read tool's record, so a `memory_search` or `memory_timeline`
+    /// index row — a title, no body — counts too (design 09 rev 3.15: a
+    /// tool's listing stays `tool`).
     relied_notes_delivered: usize,
+    // ── Added for L8's recall-mode comparison (design 09 §13.4) ───────────
+    /// How many of `relies_on` were only listed: an index line (`index`)
+    /// and no delivery with content of the same note in the turn.
+    relied_notes_listed: usize,
+    /// `memory_used` entries with reason `index`: the index block's lines.
+    index_lines: usize,
+    /// The model calls the router booked to the main loop during the turn
+    /// (its cost tracker's count for the loop's agent id): one per round the
+    /// loop ran — each tool round, the answering round, and the answer
+    /// guard's corrective round when it grants one.
+    reader_rounds: u64,
+}
+
+/// What one turn's `memory_used` did with the question's relied-on notes;
+/// the rules are [`Row`]'s field by field.
+#[derive(Debug, PartialEq, Eq)]
+struct Delivery {
+    per_turn_fts_hits: usize,
+    relied_notes_delivered: usize,
+    relied_notes_listed: usize,
+    index_lines: usize,
+}
+
+/// Count one turn's delivery. A note's content reached the model when any
+/// entry for it has a reason other than `index`; a relied-on note matches a
+/// gold entry only (a note a model stored mid-run has no gold id).
+fn delivery(relies_on: &[String], used: &[UsedNote]) -> Delivery {
+    let entry = |note: &str, content: bool| {
+        used.iter()
+            .any(|u| u.gold && u.note == note && (u.reason != UsedReason::Index) == content)
+    };
+    Delivery {
+        per_turn_fts_hits: used
+            .iter()
+            .filter(|u| matches!(u.reason, UsedReason::Recall | UsedReason::Pinned))
+            .map(|u| u.note.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        relied_notes_delivered: relies_on.iter().filter(|r| entry(r, true)).count(),
+        relied_notes_listed: relies_on
+            .iter()
+            .filter(|r| entry(r, false) && !entry(r, true))
+            .count(),
+        index_lines: used
+            .iter()
+            .filter(|u| u.reason == UsedReason::Index)
+            .count(),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1644,6 +1749,35 @@ fn totals(rows: &[Row], judge_cost_usd: f64, wall_ms: u64) -> Totals {
             .flat_map(|r| r.tools.iter())
             .filter(|t| MEMORY_WRITE_TOOLS.contains(&t.as_str()))
             .count() as u32,
+        rows_with_every_relied_note_listed_or_delivered: rows
+            .iter()
+            .filter(|r| {
+                !r.relies_on.is_empty()
+                    && r.relied_notes_delivered + r.relied_notes_listed == r.relies_on.len()
+            })
+            .count(),
+        reader_tokens_in_mean_per_turn: mean(rows.iter().map(|r| r.reader_tokens_in as f64)),
+        reader_tokens_in_median_per_turn: median(rows.iter().map(|r| r.reader_tokens_in as f64)),
+        reader_rounds_mean_per_turn: mean(rows.iter().map(|r| r.reader_rounds as f64)),
+        tool_calls_mean_per_turn: mean(rows.iter().map(|r| r.tools.len() as f64)),
+    }
+}
+
+/// `None` for no values.
+fn mean(values: impl Iterator<Item = f64>) -> Option<f64> {
+    let (n, sum) = values.fold((0usize, 0.0), |(n, sum), v| (n + 1, sum + v));
+    (n > 0).then(|| sum / n as f64)
+}
+
+/// The middle value, or the mean of the two middle ones; `None` for none.
+fn median(values: impl Iterator<Item = f64>) -> Option<f64> {
+    let mut v: Vec<f64> = values.collect();
+    v.sort_by(f64::total_cmp);
+    let n = v.len();
+    match n {
+        0 => None,
+        _ if n % 2 == 1 => Some(v[n / 2]),
+        _ => Some((v[n / 2 - 1] + v[n / 2]) / 2.0),
     }
 }
 
@@ -2044,8 +2178,17 @@ const COVERAGE_JUDGE_AGENT_ID: &str = "memory_eval_coverage_judge";
 /// The eval's daemon config for a run: no workflow can dispatch, task-output
 /// extraction is off, and — for a system that learns — the extraction's
 /// daily caps are lifted, so a cap never stops a learning phase part-way.
-fn eval_daemon_config(system: System) -> openalpaca_core::daemon_config::DaemonConfig {
+/// `recall_mode` is `OPENALPACA_MEMORY_EVAL_RECALL_MODE`: every automatic
+/// recall of the run reads it from this config (design 09 §13.4); `None`
+/// keeps the default.
+fn eval_daemon_config(
+    system: System,
+    recall_mode: Option<RecallMode>,
+) -> openalpaca_core::daemon_config::DaemonConfig {
     let mut cfg = openalpaca_core::daemon_config::DaemonConfig::default();
+    if let Some(mode) = recall_mode {
+        cfg.orchestrator.memory.recall_mode = mode;
+    }
     // A stray `start_workflow` is refused at the cap instead of dispatching a
     // real (costly) lead-agent run; the refusal still shows as a tool call.
     cfg.orchestrator.routing.max_workflows_per_lane = 0;
@@ -4273,7 +4416,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
 
     // ── Orchestrator ────────────────────────────────────────────────────
     let bus = EventBus::default();
-    let cfg = eval_daemon_config(system);
+    let cfg = eval_daemon_config(system, settings.recall_mode);
     let budget = MainLoopBudget::for_system(system, &cfg.orchestrator.routing);
     let workflow_cap = cfg.orchestrator.routing.max_workflows_per_lane;
     let tool_result_inline_bytes = cfg.orchestrator.sessions.tool_result_inline_bytes;
@@ -4802,7 +4945,7 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
             replay.transcript.corpus_sha256
         );
     }
-    let cfg = eval_daemon_config(System::L);
+    let cfg = eval_daemon_config(System::L, settings.recall_mode);
     let daemon_config = Arc::new(ArcSwap::from_pointee(cfg.clone()));
     let bus = EventBus::default();
     let service =
@@ -4929,7 +5072,7 @@ fn replay_conditions(
     judge: Option<&JudgeGate>,
     learning: LearningConditions,
 ) -> Conditions {
-    let cfg = eval_daemon_config(System::L);
+    let cfg = eval_daemon_config(System::L, settings.recall_mode);
     let recall = RecallBudget::for_mode(cfg.orchestrator.memory.recall_mode);
     Conditions {
         owner_id: replay.owner_id.clone(),
@@ -5019,7 +5162,9 @@ fn print_totals(system: System, t: &Totals) {
     println!(
         "reader: {} calls, {} in / {} out tokens, ${:.4}; judge: {} in / {} out tokens, ${:.4}; \
          latency p50={}ms p95={}ms; memory_search calls={}; rows with per-turn recall hits={}; \
-         rows with every relied-on note delivered={}; memory writes={}; wall {}s",
+         rows with every relied-on note delivered={} (listed or delivered={}); memory writes={}; \
+         wall {}s\nper turn: input tokens mean={:.0} median={:.0}, model calls mean={:.2}, \
+         tool calls mean={:.2}",
         t.reader_llm_calls,
         t.reader_tokens_in,
         t.reader_tokens_out,
@@ -5032,8 +5177,13 @@ fn print_totals(system: System, t: &Totals) {
         t.memory_search_calls,
         t.rows_with_per_turn_fts_hits,
         t.rows_with_every_relied_note_delivered,
+        t.rows_with_every_relied_note_listed_or_delivered,
         t.memory_write_calls,
         t.wall_ms / 1000,
+        t.reader_tokens_in_mean_per_turn.unwrap_or(0.0),
+        t.reader_tokens_in_median_per_turn.unwrap_or(0.0),
+        t.reader_rounds_mean_per_turn.unwrap_or(0.0),
+        t.tool_calls_mean_per_turn.unwrap_or(0.0),
     );
 }
 
@@ -5132,6 +5282,17 @@ async fn ask_questions(
         let lane_key = format!("memory-eval-q{i:04}:cli");
         let request_id = Uuid::new_v4();
         let mut rx = bus.subscribe();
+        // The router's own count of the main loop's model calls — one a
+        // round (`LlmCallCompleted` is one a turn). The learning phase is
+        // over and learning is off, so nothing else calls as the main loop.
+        let loop_calls = || async {
+            router
+                .cost_tracker
+                .get_agent_usage(MAIN_LOOP_AGENT_ID)
+                .await
+                .map_or(0, |u| u.total_requests)
+        };
+        let calls_before = loop_calls().await;
         let t0 = Instant::now();
         let reply = orch
             .handle_message(HandleRequest {
@@ -5152,6 +5313,7 @@ async fn ask_questions(
             })
             .await;
         let latency_ms = t0.elapsed().as_millis() as u64;
+        let reader_rounds = loop_calls().await.saturating_sub(calls_before);
         // What the turn delivered — the daemon's bridge takes exactly this
         // after `handle_message` (`apps/openalpacad/src/gateway_bridge.rs`).
         let used = orch.take_memory_used(request_id);
@@ -5204,21 +5366,11 @@ async fn ask_questions(
                 UsedNote {
                     gold: gold.is_some(),
                     note: gold.cloned().unwrap_or(id),
-                    reason: u.reason.as_str(),
+                    reason: u.reason,
                 }
             })
             .collect();
-        let per_turn_fts_hits = used
-            .iter()
-            .filter(|u| u.reason != UsedReason::Tool)
-            .map(|u| u.id)
-            .collect::<BTreeSet<_>>()
-            .len();
-        let relied_notes_delivered = q
-            .relies_on
-            .iter()
-            .filter(|r| memory_used.iter().any(|u| u.gold && &u.note == *r))
-            .count();
+        let delivered = delivery(&q.relies_on, &memory_used);
 
         // `handle_message` answers with the turn's text — the daemon's
         // `OrchestratorHandler::handle` calls exactly this and wraps it.
@@ -5258,9 +5410,12 @@ async fn ask_questions(
                 .filter(|t| t.as_str() == "memory_search")
                 .count() as u32,
             tools: obs.tools,
-            per_turn_fts_hits,
+            per_turn_fts_hits: delivered.per_turn_fts_hits,
             memory_used,
-            relied_notes_delivered,
+            relied_notes_delivered: delivered.relied_notes_delivered,
+            relied_notes_listed: delivered.relied_notes_listed,
+            index_lines: delivered.index_lines,
+            reader_rounds,
         };
 
         // A turn that errored still gets judged: an empty answer to a
@@ -5288,7 +5443,7 @@ async fn ask_questions(
         }
 
         println!(
-            "[{}] {:<10} {:<24} {:<5} latency={:<6}ms llm_calls={} tokens={}/{} tools={:?} recalled={} relied={}/{}{}",
+            "[{}] {:<10} {:<24} {:<5} latency={:<6}ms rounds={} tokens={}/{} tools={:?} recalled={} listed={} relied={}/{} (+{} listed){}",
             match row.correct {
                 Some(true) => " OK ",
                 Some(false) => "MISS",
@@ -5298,13 +5453,15 @@ async fn ask_questions(
             row.category.as_str(),
             row.language.as_str(),
             row.latency_ms,
-            row.reader_llm_calls,
+            row.reader_rounds,
             row.reader_tokens_in,
             row.reader_tokens_out,
             row.tools,
             row.per_turn_fts_hits,
+            row.index_lines,
             row.relied_notes_delivered,
             row.relies_on.len(),
+            row.relied_notes_listed,
             match (&row.turn_error, &row.judge_error) {
                 (Some(e), _) => format!(" (turn returned Err: {e})"),
                 (None, Some(e)) => format!(" (judge failed: {e})"),
@@ -5324,7 +5481,12 @@ async fn ask_questions(
 struct StubModel {
     seen: std::sync::Mutex<Vec<openalpaca_llm::ChatRequest>>,
     answer: Box<dyn Fn(&openalpaca_llm::ChatRequest) -> String + Send + Sync>,
+    /// The tool calls a reply makes; none for [`stub_router`]'s model.
+    calls: StubCalls,
 }
+
+type StubCalls =
+    Box<dyn Fn(&openalpaca_llm::ChatRequest) -> Vec<openalpaca_llm::ToolCall> + Send + Sync>;
 
 impl StubModel {
     fn requests(&self) -> Vec<openalpaca_llm::ChatRequest> {
@@ -5361,16 +5523,21 @@ impl openalpaca_llm::LlmProvider for StubModel {
         request: openalpaca_llm::ChatRequest,
     ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
         self.seen.lock().unwrap().push(request.clone());
+        let tool_calls = (self.calls)(&request);
         Ok(openalpaca_llm::ChatResponse {
             content: (self.answer)(&request),
-            tool_calls: Vec::new(),
+            finish_reason: if tool_calls.is_empty() {
+                openalpaca_llm::FinishReason::Stop
+            } else {
+                openalpaca_llm::FinishReason::ToolUse
+            },
+            tool_calls,
             model: request.model.clone().unwrap_or_else(|| "stub".to_string()),
             usage: openalpaca_llm::Usage {
                 input_tokens: 10,
                 output_tokens: 5,
                 ..Default::default()
             },
-            finish_reason: openalpaca_llm::FinishReason::Stop,
             thinking: None,
             parts: None,
         })
@@ -5388,6 +5555,19 @@ fn stub_router(
     models: &[&str],
     answer: impl Fn(&openalpaca_llm::ChatRequest) -> String + Send + Sync + 'static,
 ) -> (Arc<openalpaca_llm::LlmRouter>, Arc<StubModel>) {
+    stub_router_with_calls(models, answer, |_| Vec::new())
+}
+
+/// [`stub_router`] whose model also makes the tool calls `calls` returns —
+/// a reply with any is a `ToolUse` turn, as a provider reports it.
+fn stub_router_with_calls(
+    models: &[&str],
+    answer: impl Fn(&openalpaca_llm::ChatRequest) -> String + Send + Sync + 'static,
+    calls: impl Fn(&openalpaca_llm::ChatRequest) -> Vec<openalpaca_llm::ToolCall>
+    + Send
+    + Sync
+    + 'static,
+) -> (Arc<openalpaca_llm::LlmRouter>, Arc<StubModel>) {
     use openalpaca_llm::{
         ApiKey, CostTracker, KeyPool, LlmRouter, LlmRuntimeConfig, ModelInfo, ModelRegistry,
         ProviderEntry, ProviderType, RateLimitConfig, SelectionStrategy,
@@ -5395,6 +5575,7 @@ fn stub_router(
     let stub = Arc::new(StubModel {
         seen: std::sync::Mutex::new(Vec::new()),
         answer: Box::new(answer),
+        calls: Box::new(calls),
     });
     let key = ApiKey::new("default".to_string(), ProviderType::Ollama, String::new());
     let entry = ProviderEntry {
@@ -5818,7 +5999,7 @@ fn cohens_kappa_reads_two_binary_gradings() {
 /// on only where it learns, and the extraction caps lifted there.
 #[test]
 fn a_learning_system_lifts_the_extraction_caps() {
-    let l = eval_daemon_config(System::L);
+    let l = eval_daemon_config(System::L, None);
     assert!(l.orchestrator.learning.enabled);
     assert_eq!(l.orchestrator.costs.extract_max_calls_per_day, 0, "no cap");
     assert_eq!(
@@ -5828,7 +6009,7 @@ fn a_learning_system_lifts_the_extraction_caps() {
     assert_eq!(l.orchestrator.routing.max_workflows_per_lane, 0);
     assert!(!l.orchestrator.costs.task_extract_enabled);
     for system in [System::D, System::E, System::NoMemory, System::L0] {
-        let cfg = eval_daemon_config(system);
+        let cfg = eval_daemon_config(system, None);
         assert!(!cfg.orchestrator.learning.enabled, "{}", system.as_str());
         assert_eq!(
             cfg.orchestrator.costs.extract_max_calls_per_day,
@@ -5838,7 +6019,7 @@ fn a_learning_system_lifts_the_extraction_caps() {
                 .extract_max_calls_per_day
         );
     }
-    let e = eval_daemon_config(System::E);
+    let e = eval_daemon_config(System::E, None);
     assert_eq!(e.orchestrator.routing.main_loop_max_tools_per_round, 1);
 }
 
@@ -6058,35 +6239,51 @@ async fn rejudge_reads_a_fixture_sized_archived_report() {
     );
 }
 
-/// `OPENALPACA_HOME_STORE` pointed at a tempdir for one test — the memory
+/// Process environment variables set for one test and put back after it —
+/// above all `OPENALPACA_HOME_STORE` pointed at a tempdir: the memory
 /// service resolves the home partition from it, and nothing may reach the
-/// real `~/.openalpaca`. Serialized: this binary's only writer of the
-/// variable.
-struct HomeStoreGuard {
+/// real `~/.openalpaca`. Serialized: this binary's only writer of its
+/// environment.
+struct EnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
-    prev: Option<std::ffi::OsString>,
+    prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
 
-static HOME_STORE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-impl HomeStoreGuard {
-    fn set(path: &Path) -> Self {
-        let lock = HOME_STORE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let prev = std::env::var_os(openalpaca_storage::store::HOME_STORE_ENV);
-        // SAFETY: serialized by HOME_STORE_ENV_LOCK — this binary's only writer.
-        unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, path) };
+impl EnvGuard {
+    /// Each `(name, value)` set to `value`, or removed when `None`.
+    fn vars(vars: &[(&'static str, Option<&std::ffi::OsStr>)]) -> Self {
+        let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let mut prev = Vec::with_capacity(vars.len());
+        for (name, value) in vars {
+            prev.push((*name, std::env::var_os(name)));
+            // SAFETY: serialized by ENV_LOCK — this binary's only writer.
+            match value {
+                Some(value) => unsafe { std::env::set_var(name, value) },
+                None => unsafe { std::env::remove_var(name) },
+            }
+        }
         Self { _lock: lock, prev }
+    }
+
+    fn home_store(path: &Path) -> Self {
+        Self::vars(&[(
+            openalpaca_storage::store::HOME_STORE_ENV,
+            Some(path.as_os_str()),
+        )])
     }
 }
 
-impl Drop for HomeStoreGuard {
+impl Drop for EnvGuard {
     fn drop(&mut self) {
-        // SAFETY: as above — still holding the lock.
-        match self.prev.take() {
-            Some(v) => unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, v) },
-            None => unsafe { std::env::remove_var(openalpaca_storage::store::HOME_STORE_ENV) },
+        // SAFETY: as above — still holding the lock. Restored in reverse, so
+        // a name given twice ends as it began.
+        for (name, prev) in self.prev.drain(..).rev() {
+            match prev {
+                Some(v) => unsafe { std::env::set_var(name, v) },
+                None => unsafe { std::env::remove_var(name) },
+            }
         }
     }
 }
@@ -6175,7 +6372,7 @@ async fn replay_learns_from_a_fixture_sized_scratch_database_with_no_reader_call
     use openalpaca_storage::{Database, LearningCursorRepository};
 
     let home = tempfile::tempdir().unwrap();
-    let _env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let _env = EnvGuard::home_store(&home.path().canonicalize().unwrap());
     let kept = tempfile::tempdir().unwrap();
     let (old_owner, old_project, old_transcript) = fixture_scratch(kept.path());
 
@@ -6228,6 +6425,7 @@ async fn replay_learns_from_a_fixture_sized_scratch_database_with_no_reader_call
             router,
             daemon_config: Arc::new(arc_swap::ArcSwap::from_pointee(eval_daemon_config(
                 System::L,
+                None,
             ))),
             memory_service: service.clone(),
         },
@@ -6311,7 +6509,7 @@ async fn the_gateway_feed_maps_every_turn_and_the_forced_rerun_checks() {
     use openalpaca_storage::{Database, IdentityRepository};
 
     let home = tempfile::tempdir().unwrap();
-    let _env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let _env = EnvGuard::home_store(&home.path().canonicalize().unwrap());
     let scratch = tempfile::tempdir().unwrap();
     let project = scratch_project(scratch.path());
     let db = Database::open(&scratch.path().join(SCRATCH_DB)).unwrap();
@@ -6347,7 +6545,7 @@ async fn the_gateway_feed_maps_every_turn_and_the_forced_rerun_checks() {
         .to_string()
     });
     let bus = EventBus::default();
-    let cfg = eval_daemon_config(System::L);
+    let cfg = eval_daemon_config(System::L, None);
     let daemon_config = Arc::new(arc_swap::ArcSwap::from_pointee(cfg.clone()));
     let service = Arc::new(MemoryService::open_default(Some(db.clone())).with_bus(bus.clone()));
     let stack = eval_stack(
@@ -6515,7 +6713,7 @@ async fn l_writes_one_summary_per_long_session_and_keeps_it_out_of_the_fact_meas
     use openalpaca_storage::{Database, IdentityRepository};
 
     let home = tempfile::tempdir().unwrap();
-    let _env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let _env = EnvGuard::home_store(&home.path().canonicalize().unwrap());
     let scratch = tempfile::tempdir().unwrap();
     let project = scratch_project(scratch.path());
     let db = Database::open(&scratch.path().join(SCRATCH_DB)).unwrap();
@@ -6544,7 +6742,7 @@ async fn l_writes_one_summary_per_long_session_and_keeps_it_out_of_the_fact_meas
         .to_string()
     });
     let bus = EventBus::default();
-    let cfg = eval_daemon_config(System::L);
+    let cfg = eval_daemon_config(System::L, None);
     let daemon_config = Arc::new(arc_swap::ArcSwap::from_pointee(cfg.clone()));
     let service = Arc::new(MemoryService::open_default(Some(db.clone())).with_bus(bus.clone()));
     let stack = eval_stack(
@@ -6655,7 +6853,7 @@ async fn l_s_raises_a_suggestion_and_the_users_confirm_retires_the_old_note() {
     use openalpaca_storage::{Database, IdentityRepository};
 
     let home = tempfile::tempdir().unwrap();
-    let _env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let _env = EnvGuard::home_store(&home.path().canonicalize().unwrap());
     let scratch = tempfile::tempdir().unwrap();
     let project = scratch_project(scratch.path());
     let db = Database::open(&scratch.path().join(SCRATCH_DB)).unwrap();
@@ -6700,7 +6898,7 @@ async fn l_s_raises_a_suggestion_and_the_users_confirm_retires_the_old_note() {
         .to_string()
     });
     let bus = EventBus::default();
-    let cfg = eval_daemon_config(System::LS);
+    let cfg = eval_daemon_config(System::LS, None);
     let daemon_config = Arc::new(arc_swap::ArcSwap::from_pointee(cfg.clone()));
     let service = Arc::new(MemoryService::open_default(Some(db.clone())).with_bus(bus.clone()));
 
@@ -6824,4 +7022,490 @@ async fn l_s_raises_a_suggestion_and_the_users_confirm_retires_the_old_note() {
     let inv = invariants(&learning, false);
     assert_eq!(inv.user_notes_retired_without_confirm, 0);
     assert!(!inv.violated, "{inv:?}");
+}
+
+// ─── L8's recall-mode comparison (design 09 §13.4) ──────────────────────────
+
+/// Every variable `Settings::from_env` reads: a test that calls it names
+/// each one, set or removed, so the developer's own shell never leaks in.
+const HARNESS_ENV: [&str; 13] = [
+    "OPENALPACA_MEMORY_EVAL_RECALL_MODE",
+    "OPENALPACA_MEMORY_EVAL_REJUDGE",
+    "OPENALPACA_MEMORY_EVAL_SYSTEM",
+    "OPENALPACA_MEMORY_EVAL_REPORT",
+    "OPENALPACA_MEMORY_EVAL_QUESTIONS",
+    "OPENALPACA_MEMORY_EVAL_CATEGORY",
+    "OPENALPACA_MEMORY_EVAL_LEARN_FROM",
+    "OPENALPACA_MEMORY_EVAL_LIMIT",
+    "OPENALPACA_MEMORY_EVAL_JUDGE_MODEL",
+    "OPENALPACA_MEMORY_EVAL_KEEP",
+    "OPENALPACA_MEMORY_EVAL_SESSIONS",
+    "OPENALPACA_CONFIG_DIR",
+    openalpaca_storage::store::HOME_STORE_ENV,
+];
+
+/// The harness's environment: `set` as given, every other variable of
+/// [`HARNESS_ENV`] removed.
+fn harness_env(set: &[(&'static str, &std::ffi::OsStr)]) -> EnvGuard {
+    let vars: Vec<(&'static str, Option<&std::ffi::OsStr>)> = HARNESS_ENV
+        .iter()
+        .map(|name| {
+            let value = set.iter().find(|(n, _)| n == name).map(|(_, v)| *v);
+            (*name, value)
+        })
+        .collect();
+    EnvGuard::vars(&vars)
+}
+
+/// What a panic said.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(s) => *s,
+        Err(payload) => payload
+            .downcast::<&str>()
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
+    }
+}
+
+/// A mistyped `OPENALPACA_MEMORY_EVAL_RECALL_MODE` refuses the run in
+/// `Settings::from_env` — before the router exists, so before any model
+/// call — and it is the first check: nothing else needs to be set for it to
+/// speak, and the refusal names the two values.
+#[test]
+fn an_unknown_recall_mode_is_refused_before_any_model_call() {
+    let _env = harness_env(&[(
+        "OPENALPACA_MEMORY_EVAL_RECALL_MODE",
+        std::ffi::OsStr::new("snippets"),
+    )]);
+    let refused = match std::panic::catch_unwind(Settings::from_env) {
+        Ok(_) => panic!("a recall mode of `snippets` was accepted"),
+        Err(payload) => panic_message(payload),
+    };
+    for word in [
+        "OPENALPACA_MEMORY_EVAL_RECALL_MODE",
+        "snippets",
+        "`index`",
+        "`excerpts`",
+    ] {
+        assert!(refused.contains(word), "{word} is not named: {refused}");
+    }
+}
+
+/// Three notes a question relies on, all matching it.
+fn quokkaberry_notes() -> Vec<GoldNote> {
+    ["jam recipe", "harvest month", "orchard"]
+        .iter()
+        .enumerate()
+        .map(|(i, what)| GoldNote {
+            title: format!("Quokkaberry {what}"),
+            body: format!("## Knowledge\nThe user's quokkaberry {what}, note {i}.\n"),
+            ..gold(&format!("qb-{i}"), &[])
+        })
+        .collect()
+}
+
+fn quokkaberry_question(id: &str, question: &str) -> Question {
+    Question {
+        id: id.to_string(),
+        category: Category::ExactRecall,
+        language: Language::En,
+        question: question.to_string(),
+        gold_answer: "the three quokkaberry notes".to_string(),
+        relies_on: vec!["qb-0".into(), "qb-1".into(), "qb-2".into()],
+        expect_abstain: false,
+    }
+}
+
+/// The question the stub reader answers by reading every listed note with
+/// `memory_read` first.
+const OPEN_EVERY_NOTE: &str = "Open every note about quokkaberry.";
+
+/// The ids of the index block's lines in a prompt (design 09 §13.2: each
+/// line opens with the note's full id).
+fn listed_ids(prompt: &str) -> Vec<String> {
+    use openalpaca_core::memory::service::INDEX_BLOCK_HEADER;
+    prompt
+        .split(INDEX_BLOCK_HEADER)
+        .nth(1)
+        .map(|rest| {
+            rest.lines()
+                .map_while(|line| line.split_whitespace().next().filter(|w| is_uuid(w)))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The question phase as `run_system` runs it for D, on the stub reader,
+/// over the three quokkaberry notes and two questions: one answered from
+/// what the per-turn recall delivered, one after reading the listed notes.
+async fn quokkaberry_rows(cfg: openalpaca_core::daemon_config::DaemonConfig) -> Vec<Row> {
+    use openalpaca_core::bus::EventBus;
+    use openalpaca_storage::{Database, IdentityRepository};
+
+    let home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::home_store(&home.path().canonicalize().unwrap());
+    let scratch = tempfile::tempdir().unwrap();
+    let project = scratch_project(scratch.path());
+    let db = Database::open(&scratch.path().join(SCRATCH_DB)).unwrap();
+    let owner = new_owner_id();
+    IdentityRepository::new(&db)
+        .create_global_user(&owner, None)
+        .unwrap();
+    let (router, _stub) = stub_router_with_calls(
+        &[TEST_MODEL],
+        |_| "Your notes cover a jam recipe, a harvest month and an orchard.".to_string(),
+        |request| {
+            use openalpaca_llm::Role;
+            let asked = request
+                .messages
+                .iter()
+                .any(|m| m.role == Role::User && m.content.contains(OPEN_EVERY_NOTE));
+            let read = request.messages.iter().any(|m| m.role == Role::Tool);
+            let ids = listed_ids(&prompt_of(request));
+            if !asked || read || ids.is_empty() {
+                return Vec::new();
+            }
+            vec![openalpaca_llm::ToolCall {
+                id: "call-read-listed".to_string(),
+                name: "memory_read".to_string(),
+                arguments: serde_json::json!({ "ids": ids }),
+            }]
+        },
+    );
+    let bus = EventBus::default();
+    let service = Arc::new(MemoryService::open_default(Some(db.clone())).with_bus(bus.clone()));
+    let seed = seed_notes(&service, &owner, &project, &quokkaberry_notes());
+    assert_eq!(seed.seeded, 3, "{seed:?}");
+    let gold_by_service_id: HashMap<String, String> = seed
+        .ids
+        .iter()
+        .map(|(gold, service)| (service.clone(), gold.clone()))
+        .collect();
+    let stack = eval_stack(
+        router.clone(),
+        &db,
+        &bus,
+        Some(&service),
+        Arc::new(arc_swap::ArcSwap::from_pointee(cfg)),
+    );
+    let questions = [
+        quokkaberry_question("qb-q1", "What do my notes say about quokkaberry?"),
+        quokkaberry_question("qb-q2", OPEN_EVERY_NOTE),
+    ];
+    let mut report = new_report(System::D);
+    let out = tempfile::tempdir().unwrap();
+    ask_questions(
+        &stack.orch,
+        &bus,
+        &router,
+        None,
+        "",
+        &questions,
+        &project,
+        &owner,
+        &gold_by_service_id,
+        &mut report,
+        &out.path().join("report.json"),
+    )
+    .await;
+    report.rows
+}
+
+fn reasons(row: &Row) -> Vec<(&str, &str)> {
+    let mut reasons: Vec<(&str, &str)> = row
+        .memory_used
+        .iter()
+        .map(|u| (u.note.as_str(), u.reason.as_str()))
+        .collect();
+    reasons.sort();
+    reasons
+}
+
+/// `recall_mode = "index"`: the per-turn recall excerpts two of the three
+/// relied-on notes and lists the third (design 09 §13.2). A listed note's
+/// body never reached the model, so it is `listed`, not delivered, and it
+/// is no per-turn hit; read with `memory_read` in the same turn, it is
+/// delivered. Under `excerpts` all three are delivered and nothing is
+/// listed. The totals carry the per-turn cost the two modes are compared on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listed_note_is_not_delivered_until_a_tool_reads_it() {
+    let rows = quokkaberry_rows(eval_daemon_config(System::D, Some(RecallMode::Index))).await;
+    let [answered, read] = &rows[..] else {
+        panic!("two rows: {rows:?}");
+    };
+    let listed: Vec<&str> = answered
+        .memory_used
+        .iter()
+        .filter(|u| u.reason == UsedReason::Index)
+        .map(|u| u.note.as_str())
+        .collect();
+    assert_eq!(listed.len(), 1, "{:?}", reasons(answered));
+    assert!(answered.tools.is_empty(), "{:?}", answered.tools);
+    assert_eq!(
+        (
+            answered.per_turn_fts_hits,
+            answered.relied_notes_delivered,
+            answered.relied_notes_listed,
+            answered.index_lines,
+        ),
+        (2, 2, 1, 1),
+        "{:?}",
+        reasons(answered)
+    );
+    assert_eq!(answered.reader_rounds, 1);
+
+    assert_eq!(read.tools, ["memory_read"], "{:?}", reasons(read));
+    assert!(
+        read.memory_used
+            .iter()
+            .any(|u| u.reason == UsedReason::Index
+                && read
+                    .memory_used
+                    .iter()
+                    .any(|t| t.reason == UsedReason::Tool && t.note == u.note)),
+        "the listed note was read: {:?}",
+        reasons(read)
+    );
+    assert_eq!(
+        (
+            read.per_turn_fts_hits,
+            read.relied_notes_delivered,
+            read.relied_notes_listed,
+            read.index_lines,
+        ),
+        (2, 3, 0, 1),
+        "a tool's read delivers the listed note and is no per-turn hit: {:?}",
+        reasons(read)
+    );
+    assert_eq!(read.reader_rounds, 2, "the read's round and the answer's");
+    assert_eq!(
+        read.reader_llm_calls, 1,
+        "one LlmCallCompleted a turn, whatever its rounds"
+    );
+
+    let t = totals(&rows, 0.0, 0);
+    assert_eq!(t.rows_with_every_relied_note_delivered, 1);
+    assert_eq!(t.rows_with_every_relied_note_listed_or_delivered, 2);
+    // The stub bills 10 input tokens a call: 10 for the answer, 20 for the
+    // read and the answer.
+    assert_eq!(t.reader_tokens_in_mean_per_turn, Some(15.0));
+    assert_eq!(t.reader_tokens_in_median_per_turn, Some(15.0));
+    assert_eq!(t.reader_rounds_mean_per_turn, Some(1.5));
+    assert_eq!(t.tool_calls_mean_per_turn, Some(0.5));
+
+    let rows = quokkaberry_rows(eval_daemon_config(System::D, Some(RecallMode::Excerpts))).await;
+    for row in &rows {
+        assert_eq!(
+            (
+                row.per_turn_fts_hits,
+                row.relied_notes_delivered,
+                row.relied_notes_listed,
+                row.index_lines,
+            ),
+            (3, 3, 0, 0),
+            "{}: {:?}",
+            row.id,
+            reasons(row)
+        );
+        assert!(row.tools.is_empty(), "nothing listed, nothing to read");
+    }
+    let t = totals(&rows, 0.0, 0);
+    assert_eq!(t.rows_with_every_relied_note_delivered, 2);
+    assert_eq!(t.rows_with_every_relied_note_listed_or_delivered, 2);
+    assert_eq!(t.reader_rounds_mean_per_turn, Some(1.0));
+}
+
+fn used(note: &str, gold: bool, reason: UsedReason) -> UsedNote {
+    UsedNote {
+        note: note.to_string(),
+        gold,
+        reason,
+    }
+}
+
+/// The counting rules on one turn's `memory_used`: content reached the model
+/// by any reason but `index`; `listed` is an index line with no content
+/// delivery of the same note; a per-turn hit is `recall` or `pinned` only;
+/// `index_lines` counts every index entry, a note the gold set does not
+/// have included.
+#[test]
+fn delivery_is_counted_by_reason() {
+    let relies_on: Vec<String> = ["a", "b", "c", "d", "e", "f"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let memory_used = [
+        used("d", true, UsedReason::Pinned),
+        used("a", true, UsedReason::Recall),
+        used("x", false, UsedReason::Recall),
+        used("b", true, UsedReason::Index),
+        used("c", true, UsedReason::Index),
+        used("y", false, UsedReason::Index),
+        used("c", true, UsedReason::Tool),
+        used("e", true, UsedReason::Tool),
+    ];
+    assert_eq!(
+        delivery(&relies_on, &memory_used),
+        Delivery {
+            per_turn_fts_hits: 3,
+            relied_notes_delivered: 4,
+            relied_notes_listed: 1,
+            index_lines: 3,
+        }
+    );
+    assert_eq!(
+        delivery(&[], &[]),
+        Delivery {
+            per_turn_fts_hits: 0,
+            relied_notes_delivered: 0,
+            relied_notes_listed: 0,
+            index_lines: 0,
+        }
+    );
+    // A service id that happens to spell a relied-on gold id is not it.
+    assert_eq!(
+        delivery(&relies_on[..1], &[used("a", false, UsedReason::Recall)]).relied_notes_delivered,
+        0
+    );
+}
+
+/// `OPENALPACA_MEMORY_EVAL_RECALL_MODE`: unset or empty is the config's
+/// default; `index` and `excerpts` are the two modes, spelled as the
+/// config key spells them; anything else is refused naming both.
+#[test]
+fn the_recall_mode_env_value_reads_index_or_excerpts() {
+    assert_eq!(recall_mode_from_env_value(None), Ok(None));
+    assert_eq!(recall_mode_from_env_value(Some("  ".into())), Ok(None));
+    assert_eq!(
+        recall_mode_from_env_value(Some("index".into())),
+        Ok(Some(RecallMode::Index))
+    );
+    assert_eq!(
+        recall_mode_from_env_value(Some(" excerpts ".into())),
+        Ok(Some(RecallMode::Excerpts))
+    );
+    for bad in ["snippets", "Index", "EXCERPTS", "excerpt"] {
+        let err = recall_mode_from_env_value(Some(bad.into())).unwrap_err();
+        assert!(
+            err.contains("`index`") && err.contains("`excerpts`") && err.contains(bad),
+            "{err}"
+        );
+    }
+}
+
+/// Every system's config takes the mode the run names — D, E, the learning
+/// systems and none alike; unset, it is `DaemonConfig`'s default.
+#[test]
+fn every_system_recalls_in_the_mode_the_run_names() {
+    let default = openalpaca_core::daemon_config::DaemonConfig::default()
+        .orchestrator
+        .memory
+        .recall_mode;
+    assert_eq!(default, RecallMode::Index, "the shipped default");
+    for system in [
+        System::NoMemory,
+        System::D,
+        System::E,
+        System::L,
+        System::L0,
+        System::LS,
+    ] {
+        for mode in [RecallMode::Index, RecallMode::Excerpts] {
+            assert_eq!(
+                eval_daemon_config(system, Some(mode))
+                    .orchestrator
+                    .memory
+                    .recall_mode,
+                mode,
+                "{}",
+                system.as_str()
+            );
+        }
+        assert_eq!(
+            eval_daemon_config(system, None)
+                .orchestrator
+                .memory
+                .recall_mode,
+            default,
+            "{}",
+            system.as_str()
+        );
+    }
+}
+
+/// The variable end to end, offline: `Settings::from_env` reads it,
+/// `run_system` builds the run's config with it, and the report's
+/// `conditions.recall_mode` says what was used — for a question run (`none`,
+/// on the stub reader, one question, no judge) and for a replay's
+/// conditions; unset, both say `index`. That the recall itself follows the
+/// config is `a_listed_note_is_not_delivered_until_a_tool_reads_it`'s.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_recall_mode_the_run_names_is_the_one_its_report_records() {
+    use std::ffi::OsStr;
+    for (value, recorded) in [(Some("excerpts"), "excerpts"), (None, "index")] {
+        let home = tempfile::tempdir().unwrap();
+        let home_path = home.path().canonicalize().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(config.path().join("llm.toml"), "").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let report_path = out.path().join("report-none.json");
+        let mut set: Vec<(&'static str, &OsStr)> = vec![
+            ("OPENALPACA_MEMORY_EVAL_SYSTEM", OsStr::new("none")),
+            ("OPENALPACA_MEMORY_EVAL_REPORT", report_path.as_os_str()),
+            ("OPENALPACA_MEMORY_EVAL_LIMIT", OsStr::new("1")),
+            ("OPENALPACA_MEMORY_EVAL_JUDGE_MODEL", OsStr::new("none")),
+            ("OPENALPACA_CONFIG_DIR", config.path().as_os_str()),
+            (
+                openalpaca_storage::store::HOME_STORE_ENV,
+                home_path.as_os_str(),
+            ),
+        ];
+        if let Some(value) = value {
+            set.push(("OPENALPACA_MEMORY_EVAL_RECALL_MODE", OsStr::new(value)));
+        }
+        let _env = harness_env(&set);
+        let settings = Settings::from_env();
+        assert_eq!(
+            settings.recall_mode.map(RecallMode::as_str),
+            value,
+            "read from the environment"
+        );
+
+        let (router, stub) = stub_router(&[TEST_MODEL], |_| "Noted.".to_string());
+        run_system(&settings, System::NoMemory, router.clone()).await;
+        let (report, _) = load_json::<serde_json::Value>(&report_path);
+        assert_eq!(report["status"], "complete");
+        assert_eq!(report["conditions"]["recall_mode"], recorded);
+        assert_eq!(report["rows"].as_array().map(Vec::len), Some(1));
+        assert!(!stub.requests().is_empty(), "the reader was asked");
+
+        let kept = tempfile::tempdir().unwrap();
+        fixture_scratch(kept.path());
+        let into = tempfile::tempdir().unwrap();
+        let replay = prepare_replay(kept.path(), into.path()).expect("prepared");
+        let learning = learning_conditions(
+            &eval_daemon_config(System::L, settings.recall_mode),
+            &eval_dir().join("conversations-learning.json"),
+            "corpus",
+            &[],
+            &settings,
+            true,
+            0,
+            &eval_dir().join("coverage-judge-prompt.md"),
+            "coverage",
+        );
+        let conditions = replay_conditions(
+            &settings,
+            &replay,
+            &router,
+            &eval_dir().join("notes-gold.json"),
+            "notes".to_string(),
+            "heldout",
+            None,
+            learning,
+        );
+        assert_eq!(conditions.recall_mode, recorded, "a replay's conditions");
+    }
 }
