@@ -2276,7 +2276,8 @@ fn search_input_is_validated() {
         ("   ", None),
         (&"q".repeat(513), None),
         ("ok", Some(0)),
-        ("ok", Some(21)),
+        // Design 09 §13.1: the cap is 50 (it was 20).
+        ("ok", Some(51)),
     ] {
         let err = h
             .service
@@ -2291,6 +2292,31 @@ fn search_input_is_validated() {
             .unwrap_err();
         assert_eq!(err.class(), "invalid_input", "{query:?} {limit:?}");
     }
+    assert!(
+        h.service
+            .search(
+                &ctx,
+                SearchInput {
+                    query: "ok".into(),
+                    limit: Some(50),
+                    ..Default::default()
+                },
+            )
+            .is_ok()
+    );
+    let backwards = h
+        .service
+        .search(
+            &ctx,
+            SearchInput {
+                query: "ok".into(),
+                date_from: parse_date_bound("2026-06-01", DayEdge::Start),
+                date_to: parse_date_bound("2026-05-01", DayEdge::End),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(backwards.class(), "invalid_input", "{backwards}");
     let worker = h
         .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
         .unwrap();
@@ -5368,4 +5394,59 @@ fn an_id_prefix_shared_by_two_notes_finds_both() {
             .len(),
         1
     );
+}
+
+// ============================================================================
+// Layered retrieval helpers (design 09 §13.1, slice L10a)
+// ============================================================================
+
+/// A batch read's bodies share the read budget evenly: a body shorter than
+/// its equal share keeps all of it and leaves the rest to the others, no
+/// body gets more than an equal share of what the shorter ones left, and
+/// the shares never sum past the budget.
+#[test]
+fn a_batch_read_splits_its_budget_evenly() {
+    assert_eq!(split_evenly(&[], 100), Vec::<usize>::new());
+    assert_eq!(
+        split_evenly(&[500, 500, 500, 500], 100),
+        vec![25, 25, 25, 25]
+    );
+    assert_eq!(split_evenly(&[10, 500, 20], 100), vec![10, 70, 20]);
+    assert_eq!(split_evenly(&[10, 500, 500], 100), vec![10, 45, 45]);
+    assert_eq!(split_evenly(&[3, 4], 100), vec![3, 4]);
+    let shares = split_evenly(&[7, 900, 33, 6000, 1], READ_MAX_BYTES);
+    assert!(shares.iter().sum::<usize>() <= READ_MAX_BYTES);
+    assert_eq!(shares[0], 7);
+    assert_eq!(shares[4], 1);
+}
+
+/// A date filter's bound is an RFC 3339 instant or a whole UTC day: a
+/// `YYYY-MM-DD` lower bound starts at its first second, an upper bound ends
+/// at its last, so an inclusive `date_to` keeps the day it names.
+#[test]
+fn a_date_bound_is_an_instant_or_a_whole_utc_day() {
+    let at = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    assert_eq!(
+        parse_date_bound("2026-06-10", DayEdge::Start),
+        Some(at("2026-06-10T00:00:00Z"))
+    );
+    assert_eq!(
+        parse_date_bound("2026-06-10", DayEdge::End),
+        Some(at("2026-06-10T23:59:59Z"))
+    );
+    assert_eq!(
+        parse_date_bound("2026-06-10T08:30:00+02:00", DayEdge::End),
+        Some(at("2026-06-10T06:30:00Z"))
+    );
+    for bad in ["June", "2026-13-01", "10/06/2026", ""] {
+        assert_eq!(parse_date_bound(bad, DayEdge::Start), None, "{bad}");
+    }
+    assert_eq!(approx_tokens(0), 0);
+    assert_eq!(approx_tokens(1), 1);
+    assert_eq!(approx_tokens(8), 2);
+    assert_eq!(approx_tokens(9), 3);
 }

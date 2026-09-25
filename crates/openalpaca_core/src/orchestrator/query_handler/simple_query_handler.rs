@@ -489,6 +489,15 @@ impl Orchestrator {
                 priority: SectionPriority::Normal,
             });
         }
+        // Design 09 §13.1: the main loop's memory guidance, one line — only
+        // where the surface carries the layered read tools it names.
+        if main_loop_set.is_some() && tools_for_loop.iter().any(|d| d.name == "memory_search") {
+            raw_blocks.push(SystemBlock {
+                name: "memory_rules",
+                content: Arc::<str>::from(crate::tools::builtins::main_loop_memory_guidance()),
+                priority: SectionPriority::Normal,
+            });
+        }
 
         // bootstrap/skills_catalog block passing: pre-migration passed the
         // already-rendered strings via `builder.bootstrap(...)` /

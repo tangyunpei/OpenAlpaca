@@ -90,9 +90,9 @@ impl SandboxPolicy {
     /// names** (`execute_tool` checks `tool_call.name`). The two coincide for
     /// `file_read` or an MCP tool, and differ wherever one capability is
     /// served by tools with names of their own — `web_access` is `web_search`
-    /// and `web_fetch`, `memory_read` is `memory_search`, `memory_read` and
-    /// `memory_list`, `messaging` is `send`. So every loop whose policy starts
-    /// from template constraints
+    /// and `web_fetch`, `memory_read` is `memory_search`, `memory_read`,
+    /// `memory_list` and `memory_timeline`, `messaging` is `send`. So every
+    /// loop whose policy starts from template constraints
     /// (the lead, a subagent) calls this with the surface it resolved, and the
     /// rule is the one the main loop and the skill tier already follow by
     /// building their list from the exposed definitions: *the allow list

@@ -320,6 +320,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(crate::routes::search_memories_handler),
         )
         .route(
+            "/v1/memories/timeline",
+            get(crate::routes::timeline_memories_handler),
+        )
+        .route(
             "/v1/memories/recently-learned",
             get(crate::routes::recently_learned_memories_handler),
         )

@@ -15,9 +15,7 @@ use super::{
 use openalpaca_storage::memory_files::{
     EffectiveStatus, NoteId, NoteStatus, Origin, Partition, PartitionHealth, knowledge_text,
 };
-use openalpaca_storage::memory_index::{
-    self as index, MAX_LIMIT, SearchHit, SearchMode, SearchQuery,
-};
+use openalpaca_storage::memory_index::{self as index, SearchHit, SearchMode, SearchQuery};
 use std::collections::{HashMap, HashSet};
 
 /// The most notes one lookup offers the prompt (design 09 §2.3 step 3).
@@ -26,6 +24,10 @@ pub const LEARNING_MAX_NOTES: usize = 20;
 pub const LEARNING_MAX_KEYS: usize = 150;
 /// The hits each query keeps before the union (design 09 §2.3 step 3).
 pub const LEARNING_HITS_PER_QUERY: usize = 5;
+/// How many hits each lookup query asks the index for — the search's old
+/// cap, kept when the explicit search's rose to 50 (design 09 §13.1), so
+/// what the extractor is shown does not change with it.
+const LOOKUP_CANDIDATES: usize = 20;
 
 /// A catalog row, as the index named it, before its file is re-read.
 struct Named<'a> {
@@ -177,7 +179,7 @@ impl MemoryService {
                 continue;
             }
             let mut q = SearchQuery::new(query.to_string(), keys.clone());
-            q.limit = MAX_LIMIT;
+            q.limit = LOOKUP_CANDIDATES;
             // Superseded and archived notes come back too and are dropped
             // below: `historical` is what lifts the validity filter, so a
             // note whose window has ended still counts.

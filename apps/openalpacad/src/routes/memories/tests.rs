@@ -1304,3 +1304,246 @@ async fn undo_dismisses_a_candidate() {
     }
     assert_eq!(f.revision_of(x).await, x_rev);
 }
+
+// ── Layered retrieval (design 09 §13.1, slice L10a) ───────────────────
+
+impl Fixture {
+    /// A note learned from the user's words, dated by what it observed.
+    fn learned_on(&self, title: &str, body: &str, observed: &str) -> NoteId {
+        let ctx = self
+            .api
+            .service
+            .context(
+                OWNER,
+                WorkspaceHint::None,
+                Surface::Extraction,
+                Capabilities::EXTRACTION,
+                Attribution::default(),
+            )
+            .unwrap();
+        self.api
+            .service
+            .store(
+                &ctx,
+                StoreInput {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: Some(NoteKind::Fact),
+                    observed_at: Some(
+                        DateTime::parse_from_rfc3339(observed)
+                            .unwrap()
+                            .with_timezone(&Utc),
+                    ),
+                    provenance: Some(ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+    }
+
+    async fn search(&self, q: SearchMemoriesQuery) -> (StatusCode, serde_json::Value) {
+        split(self.api.search(&Self::headers(), q).await).await
+    }
+
+    async fn timeline(&self, q: TimelineMemoriesQuery) -> (StatusCode, serde_json::Value) {
+        split(self.api.timeline(&Self::headers(), q).await).await
+    }
+}
+
+fn ids_of(json: &serde_json::Value) -> Vec<String> {
+    json["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// **L10a evidence: the route mirrors the tool.** `GET /v1/memories/search`
+/// takes `detail`, `date_from`, `date_to` and `order_by` as `memory_search`
+/// does; with no `detail` it answers the snippets the Memory view reads, so
+/// the app's call is unchanged. A bad value is `400`.
+#[tokio::test]
+async fn search_takes_the_tools_detail_dates_and_order() {
+    let f = Fixture::new();
+    let jan = f.learned_on(
+        "Bike",
+        "# Bike\n\nThe user bought a bike.\n",
+        "2026-01-15T10:00:00Z",
+    );
+    let may = f.learned_on(
+        "Bike repair",
+        "# Bike repair\n\nThe shop fixed the brakes.\n",
+        "2026-05-02T10:00:00Z",
+    );
+    let q = |extra: &dyn Fn(&mut SearchMemoriesQuery)| {
+        let mut q = SearchMemoriesQuery {
+            q: "bike".into(),
+            ..Default::default()
+        };
+        extra(&mut q);
+        q
+    };
+
+    let (status, json) = f.search(q(&|_| {})).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(
+        json["results"][0]["excerpt"].is_string(),
+        "the Memory view's call still answers snippets: {json}"
+    );
+
+    let (status, json) = f.search(q(&|q| q.detail = Some("index".into()))).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let row = json["results"][0].as_object().unwrap();
+    let mut keys: Vec<&str> = row.keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "conflict", "date", "id", "kind", "reason", "scope", "size", "status", "title"
+        ]
+    );
+
+    let (_, json) = f.search(q(&|q| q.order_by = Some("newest".into()))).await;
+    assert_eq!(ids_of(&json), vec![may.to_string(), jan.to_string()]);
+    let (_, json) = f
+        .search(q(&|q| {
+            q.date_from = Some("2026-05-02".into());
+            q.date_to = Some("2026-05-02".into());
+        }))
+        .await;
+    assert_eq!(ids_of(&json), vec![may.to_string()]);
+    let (_, json) = f
+        .search(q(&|q| q.date_to = Some("2026-02-01T00:00:00Z".into())))
+        .await;
+    assert_eq!(ids_of(&json), vec![jan.to_string()]);
+    let (status, _) = f.search(q(&|q| q.limit = Some(50))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    for bad in [
+        q(&|q| q.detail = Some("full".into())),
+        q(&|q| q.order_by = Some("random".into())),
+        q(&|q| q.date_from = Some("spring".into())),
+        q(&|q| q.limit = Some(51)),
+        q(&|q| {
+            q.date_from = Some("2026-06-01".into());
+            q.date_to = Some("2026-05-01".into());
+        }),
+    ] {
+        let (status, json) = f.search(bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(code(&json), "MEMORY_INVALID_INPUT");
+    }
+}
+
+/// **L10a evidence: the route mirrors the tool.** `GET /v1/memories/timeline`
+/// is `memory_timeline`: around an `anchor`, the first hit of `q`, or a
+/// `date`, in index rows in time order; not two anchors, not none, not more
+/// than 20 a side; an unknown note is `404`.
+#[tokio::test]
+async fn the_timeline_route_is_memory_timeline() {
+    let f = Fixture::new();
+    let berlin = f.learned_on(
+        "Office in Berlin",
+        "# Office in Berlin\n\nThe office was in Berlin.\n",
+        "2026-01-10T09:00:00Z",
+    );
+    let june = f.learned_on(
+        "Office move in June",
+        "# Office move in June\n\nThe office moves to Hamburg.\n",
+        "2026-06-10T09:00:00Z",
+    );
+    let july = f.learned_on(
+        "Office plants",
+        "# Office plants\n\nThe plants need water.\n",
+        "2026-07-10T09:00:00Z",
+    );
+    let rows = |json: &serde_json::Value| -> Vec<(String, String)> {
+        json["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["id"].as_str().unwrap().to_string(),
+                    r["reason"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let expected = vec![
+        (berlin.to_string(), "before".to_string()),
+        (june.to_string(), "anchor".to_string()),
+        (july.to_string(), "after".to_string()),
+    ];
+
+    let (status, json) = f
+        .timeline(TimelineMemoriesQuery {
+            anchor: Some(june.to_string()),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(rows(&json), expected);
+    assert_eq!(json["anchor"]["id"], june.to_string());
+    assert!(
+        json["results"][0]["excerpt"].is_null(),
+        "index rows: {json}"
+    );
+
+    let (_, json) = f
+        .timeline(TimelineMemoriesQuery {
+            q: Some("office move june".into()),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(rows(&json), expected);
+
+    let (_, json) = f
+        .timeline(TimelineMemoriesQuery {
+            date: Some("2026-06-10".into()),
+            before: Some(1),
+            after: Some(1),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(
+        rows(&json),
+        vec![
+            (berlin.to_string(), "before".to_string()),
+            (june.to_string(), "after".to_string()),
+        ]
+    );
+    assert_eq!(json["anchor"]["date"], "2026-06-10T00:00:00Z");
+
+    for bad in [
+        TimelineMemoriesQuery::default(),
+        TimelineMemoriesQuery {
+            anchor: Some(june.to_string()),
+            date: Some("2026-06-10".into()),
+            ..Default::default()
+        },
+        TimelineMemoriesQuery {
+            anchor: Some(june.to_string()),
+            after: Some(21),
+            ..Default::default()
+        },
+        TimelineMemoriesQuery {
+            date: Some("June".into()),
+            ..Default::default()
+        },
+    ] {
+        let (status, json) = f.timeline(bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(code(&json), "MEMORY_INVALID_INPUT");
+    }
+    let (status, json) = f
+        .timeline(TimelineMemoriesQuery {
+            anchor: Some("00000013-0000-4000-8000-00000000abcd".into()),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(code(&json), "MEMORY_NOT_FOUND");
+}

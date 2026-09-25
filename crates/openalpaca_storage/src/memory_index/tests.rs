@@ -87,7 +87,7 @@ fn an_index_at_schema_1_is_rebuilt() {
         IndexState::Rebuilding,
         "a v1 cache is recreated"
     );
-    assert_eq!(report.schema_version, 2);
+    assert_eq!(report.schema_version, SCHEMA_VERSION);
     assert_eq!(report.notes, 0, "nothing of the v1 cache is served");
     let conn = index.lock();
     let has_source_table: bool = conn
@@ -146,6 +146,8 @@ pub(super) fn record(id: &str, title: &str, body: &str) -> IndexRecord {
         valid_from: None,
         valid_to: None,
         updated_at: "2026-09-23T10:00:00Z".to_string(),
+        created_at: "2026-09-23T10:00:00Z".to_string(),
+        observed_at: None,
         pinned: false,
         source_forgotten: false,
         conflict: false,
@@ -1791,4 +1793,343 @@ fn suggestion_rows_are_candidates_that_name_a_note_newest_first() {
         ("Commute", EffectiveStatus::Active)
     );
     assert!(index.catalog_note("proj-q", "x").unwrap().is_none());
+}
+
+// ============================================================================
+// Dates, order and the timeline (design 09 §13.1, MD-14)
+// ============================================================================
+
+fn instant(s: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+/// A note about the office, first written at `created`, observed at
+/// `observed` when given.
+fn dated(id: &str, created: &str, observed: Option<&str>) -> IndexRecord {
+    let mut r = record(id, &format!("Office {id}"), "The office moved again.\n");
+    r.created_at = created.to_string();
+    r.updated_at = created.to_string();
+    r.observed_at = observed.map(str::to_string);
+    r
+}
+
+/// Design 09 §13.1: the index row's `date` is `observed_at` when the note
+/// has one, else `created_at` — never `updated_at`, which any edit moves.
+#[test]
+fn a_hit_is_dated_by_observed_at_else_created_at() {
+    let index = ready_index();
+    let mut edited = dated("edited", "2026-03-01T09:00:00Z", None);
+    edited.updated_at = "2026-09-20T09:00:00Z".into();
+    index
+        .upsert_many(&[
+            dated(
+                "seen",
+                "2026-09-01T09:00:00Z",
+                Some("2026-05-10T08:30:00+02:00"),
+            ),
+            edited,
+        ])
+        .unwrap();
+    let r = index.search(&q("office")).unwrap();
+    assert_eq!(hit(&r, "seen").date, "2026-05-10T06:30:00Z");
+    assert_eq!(hit(&r, "edited").date, "2026-03-01T09:00:00Z");
+}
+
+/// Design 09 §13.1: `date_from` and `date_to` bound the note's date,
+/// inclusive at both ends, before the limit.
+#[test]
+fn date_from_and_date_to_bound_the_date_inclusively() {
+    let index = ready_index();
+    index
+        .upsert_many(&[
+            dated("jan", "2026-01-15T00:00:00Z", None),
+            // Created in September, observed in March: March is its date.
+            dated("mar", "2026-09-01T00:00:00Z", Some("2026-03-10T12:00:00Z")),
+            dated("jun", "2026-06-30T23:59:59Z", None),
+            dated("sep", "2026-09-10T00:00:00Z", None),
+        ])
+        .unwrap();
+    let between = |from: Option<&str>, to: Option<&str>| {
+        let mut query = q("office");
+        query.date_from = from.map(instant);
+        query.date_to = to.map(instant);
+        let mut got: Vec<String> = index
+            .search(&query)
+            .unwrap()
+            .hits
+            .into_iter()
+            .map(|h| h.id)
+            .collect();
+        got.sort();
+        got
+    };
+    assert_eq!(
+        between(Some("2026-03-10T12:00:00Z"), Some("2026-06-30T23:59:59Z")),
+        vec!["jun", "mar"],
+        "both bounds are inclusive"
+    );
+    assert_eq!(between(Some("2026-07-01T00:00:00Z"), None), vec!["sep"]);
+    assert_eq!(
+        between(None, Some("2026-03-31T00:00:00Z")),
+        vec!["jan", "mar"],
+        "`mar` is dated by what it observed, not when it was written"
+    );
+    // The bound is applied before the limit: one hit asked for, and the
+    // one in range is the one returned.
+    let mut one = q("office");
+    one.limit = 1;
+    one.date_from = Some(instant("2026-09-05T00:00:00Z"));
+    assert_eq!(ids(&index.search(&one).unwrap()), vec!["sep"]);
+}
+
+/// Design 09 §13.1: `order_by` newest and oldest sort by the date, not by
+/// relevance, and the limit takes the newest (or oldest) of every match.
+#[test]
+fn order_newest_and_oldest_sort_by_the_date() {
+    let index = ready_index();
+    let mut strong = dated("strong", "2026-02-01T00:00:00Z", None);
+    strong.title = "office".into();
+    index
+        .upsert_many(&[
+            strong,
+            dated("mid", "2026-05-01T00:00:00Z", None),
+            dated("late", "2026-08-01T00:00:00Z", Some("2026-04-01T00:00:00Z")),
+            dated("new", "2026-09-01T00:00:00Z", None),
+        ])
+        .unwrap();
+    let relevance = index.search(&q("office")).unwrap();
+    assert_eq!(
+        relevance.hits[0].id, "strong",
+        "the exact title wins on relevance"
+    );
+
+    let mut newest = q("office");
+    newest.order = SearchOrder::Newest;
+    assert_eq!(
+        ids(&index.search(&newest).unwrap()),
+        vec!["new", "mid", "late", "strong"]
+    );
+    let mut oldest = q("office");
+    oldest.order = SearchOrder::Oldest;
+    assert_eq!(
+        ids(&index.search(&oldest).unwrap()),
+        vec!["strong", "late", "mid", "new"]
+    );
+    newest.limit = 2;
+    assert_eq!(ids(&index.search(&newest).unwrap()), vec!["new", "mid"]);
+}
+
+/// Design 09 §13.1: a search page reaches 50 hits.
+#[test]
+fn the_limit_reaches_fifty() {
+    assert_eq!(MAX_LIMIT, 50);
+    let index = ready_index();
+    let records: Vec<IndexRecord> = (0..60)
+        .map(|i| {
+            record(
+                &format!("n{i:02}"),
+                &format!("Parking {i}"),
+                "Parking level.\n",
+            )
+        })
+        .collect();
+    index.upsert_many(&records).unwrap();
+    let mut query = q("parking");
+    query.limit = 50;
+    assert_eq!(index.search(&query).unwrap().count, 50);
+    query.limit = 51;
+    assert!(matches!(
+        index.search(&query).unwrap_err(),
+        IndexError::InvalidInput(m) if m.contains("limit")
+    ));
+}
+
+/// Design 09 §13.1: a historical hit whose window has ended says so, on the
+/// index clock; the same note is not ended when evaluated inside it.
+#[test]
+fn a_hit_says_ended_on_the_index_clock() {
+    let now = instant("2026-09-24T12:00:00Z");
+    let index = MemoryIndex::open_in_memory()
+        .unwrap()
+        .with_clock(move || now);
+    index.rebuild(&[]).unwrap();
+    let mut over = dated("over", "2026-01-01T00:00:00Z", None);
+    over.valid_to = Some("2026-06-01T00:00:00Z".into());
+    let mut running = dated("running", "2026-01-01T00:00:00Z", None);
+    running.valid_to = Some("2026-12-01T00:00:00Z".into());
+    index.upsert_many(&[over, running]).unwrap();
+    let mut historical = q("office");
+    historical.historical = true;
+    let r = index.search(&historical).unwrap();
+    assert!(hit(&r, "over").ended);
+    assert!(!hit(&r, "running").ended);
+    let mut then = q("office");
+    then.as_of = Some(instant("2026-05-01T00:00:00Z"));
+    assert!(!hit(&index.search(&then).unwrap(), "over").ended);
+}
+
+/// Schema 3 adds the note's dates. A cache written at schema 2 is recreated
+/// on open and reports `rebuilding` until a rebuild has run.
+#[test]
+fn an_index_at_schema_2_is_rebuilt() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(INDEX_FILE_NAME);
+    {
+        let index = MemoryIndex::open(&path).unwrap();
+        index.rebuild(&[record("n1", "One", "one")]).unwrap();
+        let conn = index.lock();
+        conn.execute(
+            "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    }
+    let index = MemoryIndex::open(&path).unwrap();
+    let report = index.index_state().unwrap();
+    assert_eq!(report.state, IndexState::Rebuilding);
+    assert_eq!(report.schema_version, 3);
+    assert_eq!(report.notes, 0, "nothing of the v2 cache is served");
+    let conn = index.lock();
+    for column in ["date", "created_at", "observed_at"] {
+        let present: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('note') WHERE name = ?1)",
+                [column],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(present, "note.{column}");
+    }
+}
+
+/// Five dated notes a day apart, one per status the timeline shows or hides.
+fn timeline_notes(index: &MemoryIndex) {
+    let mut superseded = dated("d2", "2026-06-02T00:00:00Z", None);
+    superseded.effective_status = EffectiveStatus::Superseded;
+    superseded.superseded_by = vec!["d4".into()];
+    let mut candidate = dated("d3", "2026-06-03T00:00:00Z", None);
+    candidate.status = "candidate".into();
+    candidate.effective_status = EffectiveStatus::Candidate;
+    let mut archived = dated("d5", "2026-06-05T00:00:00Z", None);
+    archived.status = "archived".into();
+    archived.effective_status = EffectiveStatus::Archived;
+    let mut ended = dated("d6", "2026-06-06T00:00:00Z", None);
+    ended.valid_to = Some("2026-07-01T00:00:00Z".into());
+    let mut elsewhere = dated("d7", "2026-06-07T00:00:00Z", None);
+    elsewhere.partition_key = "home-other".into();
+    index
+        .upsert_many(&[
+            dated("d1", "2026-06-01T00:00:00Z", None),
+            superseded,
+            candidate,
+            // Written in September about the fourth of June.
+            dated("d4", "2026-09-01T00:00:00Z", Some("2026-06-04T00:00:00Z")),
+            archived,
+            ended,
+            elsewhere,
+            dated("d8", "2026-06-08T00:00:00Z", None),
+        ])
+        .unwrap();
+}
+
+fn row_ids(rows: &[TimelineRow]) -> Vec<&str> {
+    rows.iter().map(|r| r.id.as_str()).collect()
+}
+
+/// Design 09 §13.1: around a note, the notes dated before it and after it,
+/// each side in time order; superseded, archived and ended notes are listed
+/// and marked, candidates and other partitions are not.
+#[test]
+fn a_timeline_around_a_note_lists_its_neighbours_in_time_order() {
+    let now = instant("2026-09-24T12:00:00Z");
+    let index = MemoryIndex::open_in_memory()
+        .unwrap()
+        .with_clock(move || now);
+    index.rebuild(&[]).unwrap();
+    timeline_notes(&index);
+    let t = index
+        .timeline(&TimelineQuery {
+            partition_keys: vec!["home-p".into()],
+            point: TimelinePoint::Note {
+                partition_key: "home-p".into(),
+                id: "d4".into(),
+            },
+            before: 5,
+            after: 5,
+        })
+        .unwrap();
+    let anchor = t.anchor.as_ref().expect("the anchor is a timeline note");
+    assert_eq!(anchor.id, "d4");
+    assert_eq!(anchor.date, "2026-06-04T00:00:00Z");
+    assert_eq!(row_ids(&t.before), vec!["d1", "d2"], "no candidate");
+    assert_eq!(
+        row_ids(&t.after),
+        vec!["d5", "d6", "d8"],
+        "no other partition"
+    );
+    let by = |id: &str| {
+        t.before
+            .iter()
+            .chain(t.after.iter())
+            .find(|r| r.id == id)
+            .unwrap()
+    };
+    assert_eq!(by("d2").effective_status, EffectiveStatus::Superseded);
+    assert_eq!(by("d5").effective_status, EffectiveStatus::Archived);
+    assert!(by("d6").ended, "a window that ended by the index clock");
+    assert!(!by("d8").ended);
+    assert_eq!(t.index_state, IndexState::Ready);
+
+    // `before` and `after` take the nearest ones.
+    let t = index
+        .timeline(&TimelineQuery {
+            partition_keys: vec!["home-p".into()],
+            point: TimelinePoint::Note {
+                partition_key: "home-p".into(),
+                id: "d4".into(),
+            },
+            before: 1,
+            after: 2,
+        })
+        .unwrap();
+    assert_eq!(row_ids(&t.before), vec!["d2"]);
+    assert_eq!(row_ids(&t.after), vec!["d5", "d6"]);
+}
+
+/// Design 09 §13.1: around an instant, `before` notes dated earlier and
+/// `after` notes dated at it or later; a candidate or unknown anchor note
+/// has no row, and no neighbours are listed around nothing.
+#[test]
+fn a_timeline_around_an_instant_and_around_no_note() {
+    let index = ready_index();
+    timeline_notes(&index);
+    let t = index
+        .timeline(&TimelineQuery {
+            partition_keys: vec!["home-p".into(), "home-other".into()],
+            point: TimelinePoint::Instant(instant("2026-06-05T00:00:00Z")),
+            before: 2,
+            after: 20,
+        })
+        .unwrap();
+    assert!(t.anchor.is_none());
+    assert_eq!(row_ids(&t.before), vec!["d2", "d4"]);
+    assert_eq!(row_ids(&t.after), vec!["d5", "d6", "d7", "d8"]);
+
+    for id in ["d3", "nope"] {
+        let t = index
+            .timeline(&TimelineQuery {
+                partition_keys: vec!["home-p".into()],
+                point: TimelinePoint::Note {
+                    partition_key: "home-p".into(),
+                    id: id.into(),
+                },
+                before: 5,
+                after: 5,
+            })
+            .unwrap();
+        assert!(t.anchor.is_none(), "{id}");
+        assert!(t.before.is_empty() && t.after.is_empty(), "{id}");
+    }
 }

@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 120.
+- Total documented method/path endpoints: 121.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -89,6 +89,7 @@
 | GET | `/v1/memories/search` | `bearer` | `search_memories_handler` | - | `memories::SearchMemoriesQuery` | `apps/openalpacad/src/routes/memories.rs` |
 | GET | `/v1/memories/suggestions` | `bearer` | `suggestions_memories_handler` | - | `memories::SuggestionsQuery` | `apps/openalpacad/src/routes/memories.rs` |
 | POST | `/v1/memories/sync` | `bearer` | `sync_memories_handler` | - | - | `apps/openalpacad/src/routes/memories.rs` |
+| GET | `/v1/memories/timeline` | `bearer` | `timeline_memories_handler` | - | `memories::TimelineMemoriesQuery` | `apps/openalpacad/src/routes/memories.rs` |
 | GET | `/v1/memories/{id}` | `bearer` | `get_memory_handler` | - | `memories::ReadMemoryQuery` | `apps/openalpacad/src/routes/memories.rs` |
 | POST | `/v1/memories/{id}` | `bearer` | `update_memory_handler` | `memories::UpdateMemoryBody` | - | `apps/openalpacad/src/routes/memories.rs` |
 | DELETE | `/v1/memories/{id}` | `bearer` | `delete_memory_handler` | - | - | `apps/openalpacad/src/routes/memories.rs` |
@@ -496,6 +497,10 @@
 | `limit` | `Option<usize>` |
 | `historical` | `bool` |
 | `as_of` | `Option<String>` |
+| `detail` | `Option<String>` |
+| `date_from` | `Option<String>` |
+| `date_to` | `Option<String>` |
+| `order_by` | `Option<String>` |
 
 ### `memories::SuggestionsQuery`
 
@@ -505,6 +510,19 @@
 | Field | Type |
 |---|---|
 | `limit` | `Option<usize>` |
+
+### `memories::TimelineMemoriesQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/memories.rs`
+
+| Field | Type |
+|---|---|
+| `anchor` | `Option<String>` |
+| `q` | `Option<String>` |
+| `date` | `Option<String>` |
+| `before` | `Option<usize>` |
+| `after` | `Option<usize>` |
 
 ### `memories::UpdateMemoryBody`
 

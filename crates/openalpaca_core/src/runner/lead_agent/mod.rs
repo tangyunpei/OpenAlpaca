@@ -145,7 +145,7 @@ pub async fn run_lead_agent(
     // 2. Build spawn_subagent tool definition from templates
     let spawn_tool_def = spawn_subagent_tool_definition_from_templates(&worker_templates);
 
-    // 3. Build tools: spawn_subagent + check/wait + workspace + memory_search
+    // 3. Build tools: spawn_subagent + check/wait + workspace + memory reads
     let batch_spawn_enabled = daemon_config
         .load()
         .execution
@@ -165,9 +165,15 @@ pub async fn run_lead_agent(
         tools.push(queue_followup_tool_definition());
     }
     tools.extend(crate::tools::builtins::workspace_tool_definitions());
-    // Add memory_search so the lead agent can query user memories directly
-    if let Some(mem_tool) = tool_registry.get("memory_search") {
-        tools.push(mem_tool.definition.clone());
+    // The memory read tools, so the lead agent can query user memories
+    // directly. `memory_search` answers an index by default (design 09
+    // §13.1), so `memory_read` comes with it — the index is only half of a
+    // search without the read that follows — and `memory_timeline`, the
+    // third layer; all three are the `memory_read` capability's.
+    for name in ["memory_search", "memory_read", "memory_timeline"] {
+        if let Some(mem_tool) = tool_registry.get(name) {
+            tools.push(mem_tool.definition.clone());
+        }
     }
     // artifact_write (plan §4.6) — the lead writes deliverables itself as well
     // as delegating them. Offered only where the lead's own template declares
@@ -375,7 +381,7 @@ pub async fn run_lead_agent(
     sandbox_policy.unattended = unattended;
     // The lead's tool surface is assembled here, not in its template — so the
     // allowlist must admit the final defs (extension tools, invoke_skill,
-    // memory_search), mirroring how the main loop derives its policy from the
+    // the memory reads), mirroring how the main loop derives its policy from the
     // exposed definitions. Template denials still win: the sandbox checks the
     // deny list first. A subagent gets the same rule over its *own* surface —
     // the tools its template's capabilities resolve to, never the lead's — in

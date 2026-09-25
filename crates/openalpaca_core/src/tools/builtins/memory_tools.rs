@@ -1,8 +1,15 @@
-//! The six memory tools of design §7 / §7a (plan slice 3, row 3.2):
-//! `memory_search`, `memory_read`, `memory_list` — the read surface,
-//! globally registered under the `memory_read` capability — and
-//! `memory_store`, `memory_update`, `memory_forget`, constructed per request
-//! for the main conversation's surface (`main_loop.rs`).
+//! The memory tools of design §7 / §7a (plan slice 3, row 3.2):
+//! `memory_search`, `memory_read`, `memory_list` and `memory_timeline` —
+//! the read surface, globally registered under the `memory_read`
+//! capability — and `memory_store`, `memory_update`, `memory_forget`,
+//! constructed per request for the main conversation's surface
+//! (`main_loop.rs`).
+//!
+//! **The read surface is layered** (design 09 §13.1, MD-14, after
+//! claude-mem's "filter first, fetch later"): `memory_search` answers an
+//! index by default — one short row per note, no body — `memory_timeline`
+//! shows what surrounds a note in time in the same rows, and `memory_read`
+//! fetches the notes picked, up to ten in one call.
 //!
 //! Every tool validates its own input strictly: the schemas are closed and a
 //! JSON object carrying any property the schema does not name — `owner_id`,
@@ -19,8 +26,10 @@
 //! (`memory_forget` and `memory_update` prompt; `memory_store` does not).
 
 use crate::memory::service::{
-    Capabilities, ForgetInput, ListInput, MemoryError, MemoryService, Patch, ReadInput,
-    SearchInput, StoreInput, UpdateAction, UpdateInput, wire,
+    Capabilities, DayEdge, ForgetInput, ListInput, MemoryError, MemoryService, Patch, READ_MAX_IDS,
+    ReadManyInput, SEARCH_MAX_LIMIT, SearchDetail, SearchInput, SearchOrder, StoreInput,
+    TIMELINE_MAX_SIDE, TimelineAnchor, TimelineInput, UpdateAction, UpdateInput, parse_date_bound,
+    wire,
 };
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use async_trait::async_trait;
@@ -110,6 +119,16 @@ fn parse_status(value: &str) -> Result<NoteStatus, String> {
     })
 }
 
+/// A date filter or a timeline's instant: RFC 3339, or `YYYY-MM-DD` taken
+/// as that whole UTC day (design 09 §13.1).
+fn parse_date(field: &str, value: &str, edge: DayEdge) -> Result<DateTime<Utc>, String> {
+    parse_date_bound(value, edge).ok_or_else(|| {
+        format!(
+            "invalid_input: `{field}` must be an RFC 3339 timestamp or a date (YYYY-MM-DD), got {value:?}"
+        )
+    })
+}
+
 fn parse_ts(field: &str, value: &str) -> Result<DateTime<Utc>, String> {
     DateTime::parse_from_rfc3339(value)
         .map(|t| t.with_timezone(&Utc))
@@ -149,6 +168,10 @@ struct SearchArgs {
     limit: Option<u64>,
     historical: Option<bool>,
     as_of: Option<String>,
+    detail: Option<String>,
+    date_from: Option<String>,
+    date_to: Option<String>,
+    order_by: Option<String>,
 }
 
 struct MemorySearchTool {
@@ -167,6 +190,12 @@ impl BuiltInTool for MemorySearchTool {
         ctx: &ToolContext,
     ) -> Result<String, String> {
         let args: SearchArgs = parse("memory_search", arguments)?;
+        let detail = match args.detail.as_deref() {
+            None => SearchDetail::Index,
+            Some(v) => SearchDetail::parse(v).ok_or_else(|| {
+                format!("invalid_input: `detail` must be `index` or `snippets`, got {v:?}")
+            })?,
+        };
         let input = SearchInput {
             query: args.query,
             kind: args.kind.as_deref().map(parse_kind).transpose()?,
@@ -178,34 +207,61 @@ impl BuiltInTool for MemorySearchTool {
                 .as_deref()
                 .map(|v| parse_ts("as_of", v))
                 .transpose()?,
+            date_from: args
+                .date_from
+                .as_deref()
+                .map(|v| parse_date("date_from", v, DayEdge::Start))
+                .transpose()?,
+            date_to: args
+                .date_to
+                .as_deref()
+                .map(|v| parse_date("date_to", v, DayEdge::End))
+                .transpose()?,
+            order: match args.order_by.as_deref() {
+                None => SearchOrder::Relevance,
+                Some(v) => SearchOrder::parse(v).ok_or_else(|| {
+                    format!(
+                        "invalid_input: `order_by` must be `relevance`, `newest` or `oldest`, got {v:?}"
+                    )
+                })?,
+            },
         };
         let service = self.service.clone();
         let access = service
             .context_for_tool(ctx, Capabilities::READ_ONLY)
             .map_err(refuse)?;
         let out = blocking(move || service.search(&access, input).map_err(refuse)).await?;
-        Ok(wire::search_output_json(&out).to_string())
+        Ok(wire::search_json(&out, detail).to_string())
     }
 }
 
 pub fn memory_search_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "memory_search".to_string(),
-        description: "Search the user's memory notes by the words they contain. Matching is \
-            lexical: whole words and identifiers, partial words (a note saying `prefers` \
-            matches `prefer`), titles, aliases and tags. There is no meaning-based search, \
-            so use the words a note would actually contain and, if nothing matches, try one \
-            more wording. Returns cited excerpts with each note's id, revision, path, line \
-            range, origin, freshness and sources. Active notes only unless `historical` is \
-            true; a result flagged `conflict` is a note another note outranks. Use before \
-            answering about the user's preferences, decisions or past facts."
+        description: "Search the user's memory notes by the words they contain. It returns an \
+            index — one short row per note (id, date, kind, scope, status, title, why it \
+            matched, size in tokens) and no body — so pick the ids that answer the question \
+            and read only those with memory_read, several at once. Matching is lexical: whole \
+            words and identifiers, partial words (a note saying `prefers` matches `prefer`), \
+            titles, aliases and tags. There is no meaning-based search, so use the words a \
+            note would actually contain and, if nothing matches, try one more wording. \
+            `detail: \"snippets\"` returns cited excerpts instead. Active notes only unless \
+            `historical` is true; `date_from`/`date_to` keep notes dated in a range (a note's \
+            date is when it was observed, else when it was saved), and `order_by` sorts by \
+            relevance, newest or oldest. A result flagged `conflict` is a note another note \
+            outranks. Use before answering about the user's preferences, decisions or past \
+            facts."
             .to_string(),
         parameters: closed_schema(
             serde_json::json!({
                 "query": { "type": "string", "description": "1–512 characters: the words to look for" },
                 "kind": { "type": "string", "enum": NoteKind::ALL.iter().map(|k| k.as_str()).collect::<Vec<_>>(), "description": "Only notes of this kind" },
                 "scope": { "type": "string", "enum": ["global", "project"], "description": "Only the global or only the current project's notes (default: both)" },
-                "limit": { "type": "integer", "description": "1–20, default 8" },
+                "limit": { "type": "integer", "description": format!("1–{SEARCH_MAX_LIMIT}, default 10") },
+                "detail": { "type": "string", "enum": ["index", "snippets"], "description": "`index` (default): one row per note and no body; `snippets`: the matching excerpt of each note, with its revision, lines and sources" },
+                "date_from": { "type": "string", "description": "Only notes dated at or after this: RFC 3339, or a date YYYY-MM-DD (from its start)" },
+                "date_to": { "type": "string", "description": "Only notes dated at or before this: RFC 3339, or a date YYYY-MM-DD (to its end)" },
+                "order_by": { "type": "string", "enum": ["relevance", "newest", "oldest"], "description": "Default relevance; newest or oldest sort by the notes' dates" },
                 "historical": { "type": "boolean", "description": "Also include notes that are no longer current: superseded, archived, and those whose validity window has ended (default false). Set it for questions about the past — \"used to\", \"before\", \"previously\", \"以前\" — and with `as_of` to ask what held at a date." },
                 "as_of": { "type": "string", "description": "RFC 3339: evaluate each note's validity interval at this instant" }
             }),
@@ -215,6 +271,7 @@ pub fn memory_search_tool_definition() -> ToolDefinition {
         input_examples: Some(vec![
             serde_json::json!({"query": "editor preference"}),
             serde_json::json!({"query": "deploy approval", "kind": "decision", "limit": 5}),
+            serde_json::json!({"query": "office move", "date_from": "2026-06-01", "order_by": "newest"}),
         ]),
     }
 }
@@ -226,7 +283,7 @@ pub fn memory_search_tool_definition() -> ToolDefinition {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReadArgs {
-    id: String,
+    ids: Vec<String>,
     expected_revision: Option<String>,
     section: Option<String>,
 }
@@ -247,8 +304,18 @@ impl BuiltInTool for MemoryReadTool {
         ctx: &ToolContext,
     ) -> Result<String, String> {
         let args: ReadArgs = parse("memory_read", arguments)?;
-        let input = ReadInput {
-            id: parse_id("id", &args.id)?,
+        if args.ids.is_empty() || args.ids.len() > READ_MAX_IDS {
+            return Err(format!(
+                "invalid_input: `ids` takes 1 to {READ_MAX_IDS} note ids, got {}",
+                args.ids.len()
+            ));
+        }
+        let input = ReadManyInput {
+            ids: args
+                .ids
+                .iter()
+                .map(|id| parse_id("ids", id))
+                .collect::<Result<_, _>>()?,
             expected_revision: args.expected_revision,
             section: args.section,
         };
@@ -256,32 +323,136 @@ impl BuiltInTool for MemoryReadTool {
         let access = service
             .context_for_tool(ctx, Capabilities::READ_ONLY)
             .map_err(refuse)?;
-        let out = blocking(move || service.read(&access, input).map_err(refuse)).await?;
-        Ok(wire::read_output_json(&out).to_string())
+        let out = blocking(move || service.read_many(&access, input).map_err(refuse)).await?;
+        Ok(wire::read_many_json(&out).to_string())
     }
 }
 
 pub fn memory_read_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "memory_read".to_string(),
-        description: "Read one memory note by id: its current Markdown (at most 32 KiB), \
-            frontmatter, provenance (origin, sources, what it supersedes and what supersedes \
-            it) and revision. Pass `expected_revision` to be told if the note changed since \
-            you last saw it; pass `section` (a heading) to read that section only. Ids come \
-            from memory_search or memory_list — a file path is not an id."
+        description: "Read the memory notes you picked from a memory_search or \
+            memory_timeline index — several at once, up to 10 ids in one call, rather than one \
+            call per note. Each comes back with its current Markdown, frontmatter, provenance \
+            (origin, sources, what it supersedes and what supersedes it) and revision; the \
+            bodies share 32 KiB, so a cut body says `truncated` (read it alone for more). An \
+            id no note has answers `not_found` in its place. With a single id, pass \
+            `expected_revision` to be told if the note changed since you last saw it, or \
+            `section` (a heading) to read that section only. Ids come from memory_search, \
+            memory_timeline or memory_list — a file path is not an id."
             .to_string(),
         parameters: closed_schema(
             serde_json::json!({
-                "id": { "type": "string", "description": "The note's id (a hyphenated UUID)" },
-                "expected_revision": { "type": "string", "description": "A 64-hex revision; a mismatch is reported as revision_conflict with the current one" },
-                "section": { "type": "string", "description": "A heading of the note; returns that section only" }
+                "ids": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": READ_MAX_IDS, "description": "1–10 note ids (hyphenated UUIDs), each once" },
+                "expected_revision": { "type": "string", "description": "With a single id: a 64-hex revision; a mismatch is reported as revision_conflict with the current one" },
+                "section": { "type": "string", "description": "With a single id: a heading of the note; returns that section only" }
             }),
-            &["id"],
+            &["ids"],
         ),
         strict: Some(true),
         input_examples: Some(vec![serde_json::json!({
-            "id": "55e811b6-3220-4758-a47b-034bd1023f38"
+            "ids": [
+                "55e811b6-3220-4758-a47b-034bd1023f38",
+                "0c7b2e4a-9d13-4c8e-b1f5-6a2d3e4f5a6b"
+            ]
         })]),
+    }
+}
+
+// ============================================================================
+// memory_timeline (design 09 §13.1, MD-14)
+// ============================================================================
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimelineArgs {
+    anchor: Option<String>,
+    query: Option<String>,
+    date: Option<String>,
+    before: Option<u64>,
+    after: Option<u64>,
+}
+
+struct MemoryTimelineTool {
+    service: Arc<MemoryService>,
+}
+
+#[async_trait]
+impl BuiltInTool for MemoryTimelineTool {
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err("memory_timeline requires execution context — use execute_with_context".to_string())
+    }
+
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        let args: TimelineArgs = parse("memory_timeline", arguments)?;
+        let anchor = match (args.anchor, args.query, args.date) {
+            (Some(id), None, None) => TimelineAnchor::Note(parse_id("anchor", &id)?),
+            (None, Some(query), None) => TimelineAnchor::Query(query),
+            (None, None, Some(date)) => {
+                TimelineAnchor::Date(parse_date("date", &date, DayEdge::Start)?)
+            }
+            _ => {
+                return Err(
+                    "invalid_input: give exactly one of `anchor` (a note id), `query` or `date`"
+                        .to_string(),
+                );
+            }
+        };
+        let side = |name: &str, value: Option<u64>| -> Result<Option<usize>, String> {
+            match value {
+                Some(n) if n > TIMELINE_MAX_SIDE as u64 => Err(format!(
+                    "invalid_input: `{name}` must be between 0 and {TIMELINE_MAX_SIDE}"
+                )),
+                Some(n) => Ok(Some(n as usize)),
+                None => Ok(None),
+            }
+        };
+        let input = TimelineInput {
+            anchor,
+            before: side("before", args.before)?,
+            after: side("after", args.after)?,
+        };
+        let service = self.service.clone();
+        let access = service
+            .context_for_tool(ctx, Capabilities::READ_ONLY)
+            .map_err(refuse)?;
+        let out = blocking(move || service.timeline(&access, input).map_err(refuse)).await?;
+        Ok(wire::timeline_json(&out).to_string())
+    }
+}
+
+pub fn memory_timeline_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "memory_timeline".to_string(),
+        description: "Show what surrounds a memory note in time: the notes dated just before \
+            and just after it, in time order, as the same index rows memory_search returns \
+            (no body); then read the ids you need with memory_read, several at once. Draw it \
+            around exactly one of `anchor` (a note id), `query` (its first search hit becomes \
+            the anchor) or `date` (an instant). Unlike a search, it lists notes that have left \
+            recall — superseded, archived, or whose validity window has ended — each marked by \
+            its `status`, so questions like \"what did I decide before the move\" or \"what \
+            did we discuss last week\" have one tool; unconfirmed candidate notes are never \
+            listed. A note's date is when it was observed, else when it was saved."
+            .to_string(),
+        parameters: closed_schema(
+            serde_json::json!({
+                "anchor": { "type": "string", "description": "A note id: the timeline around that note" },
+                "query": { "type": "string", "description": "1–512 characters: the timeline around the best match" },
+                "date": { "type": "string", "description": "An instant (RFC 3339, or a date YYYY-MM-DD from its start): notes dated before it, then at or after it" },
+                "before": { "type": "integer", "description": format!("How many notes before the anchor: 0–{TIMELINE_MAX_SIDE}, default 5") },
+                "after": { "type": "integer", "description": format!("How many notes after it: 0–{TIMELINE_MAX_SIDE}, default 5") }
+            }),
+            &[],
+        ),
+        strict: Some(true),
+        input_examples: Some(vec![
+            serde_json::json!({"query": "office move", "before": 5, "after": 2}),
+            serde_json::json!({"date": "2026-09-14", "after": 10}),
+        ]),
     }
 }
 
@@ -361,11 +532,12 @@ pub fn memory_list_tool_definition() -> ToolDefinition {
     }
 }
 
-/// The read surface: `memory_search`, `memory_read` and `memory_list`,
-/// each providing the `memory_read` capability. All nine shipped templates
-/// name it, and `AgentTemplate::to_subagent` grants it to every internal
-/// template that does not deny it (design 09 §5); a plugin template gets it
-/// only by naming it. Registered globally by the daemon.
+/// The read surface: `memory_search`, `memory_read`, `memory_list` and
+/// `memory_timeline`, each providing the `memory_read` capability (design 09
+/// §13.1: no new grant). All nine shipped templates name it, and
+/// `AgentTemplate::to_subagent` grants it to every internal template that
+/// does not deny it (design 09 §5); a plugin template gets it only by naming
+/// it. Registered globally by the daemon.
 pub fn memory_read_tools(service: Arc<MemoryService>) -> Vec<RegisteredTool> {
     vec![
         registered(
@@ -384,7 +556,14 @@ pub fn memory_read_tools(service: Arc<MemoryService>) -> Vec<RegisteredTool> {
         ),
         registered(
             memory_list_tool_definition(),
-            Arc::new(MemoryListTool { service }),
+            Arc::new(MemoryListTool {
+                service: service.clone(),
+            }),
+            "memory_read",
+        ),
+        registered(
+            memory_timeline_tool_definition(),
+            Arc::new(MemoryTimelineTool { service }),
             "memory_read",
         ),
     ]

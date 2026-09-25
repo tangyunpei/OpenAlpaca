@@ -30,6 +30,7 @@ mod management;
 mod mutations;
 pub mod recall;
 mod suggestions;
+mod timeline;
 mod types;
 pub mod wire;
 mod write_slot;
@@ -48,15 +49,17 @@ pub use in_chat::{
     PENDING_SUGGESTIONS_READ_MAX, PREVIEW_MAX_BYTES, PendingSuggestion,
     SUGGESTION_LINE_TITLE_BYTES, SuggestionPreview,
 };
+pub use openalpaca_storage::memory_index::SearchOrder;
 pub use recall::{TRUST_LABEL, wrap_delivery};
 pub use suggestions::{SUGGESTION_EXCERPT_BYTES, SUGGESTIONS_DEFAULT_LIMIT, SUGGESTIONS_MAX_LIMIT};
 pub use types::{
     ExtractionProvenance, ForgetInput, ForgetItem, ForgetItemStatus, ForgetOutput, Freshness,
-    HistoryEntry, KnownNote, LearningView, ListInput, ListItem, ListOutput, MemoryChange,
-    MemoryUsed, Patch, ReadInput, ReadOutput, RecallBudget, RecallResult, RecalledNote,
-    RecentlyUsedItem, Retained, SearchInput, SearchOutput, SearchResultItem, StoreInput,
-    StoreOutput, Suggestion, SuggestionTarget, Timing, UpdateAction, UpdateInput, UpdateOutput,
-    UsedReason, WithdrawOutput,
+    HistoryEntry, IndexRow, KnownNote, LearningView, ListInput, ListItem, ListOutput, MemoryChange,
+    MemoryUsed, Patch, ReadInput, ReadManyInput, ReadManyItem, ReadManyOutput, ReadOutput,
+    RecallBudget, RecallResult, RecalledNote, RecentlyUsedItem, Retained, RowStatus, SearchDetail,
+    SearchInput, SearchOutput, SearchResultItem, StoreInput, StoreOutput, Suggestion,
+    SuggestionTarget, TimelineAnchor, TimelineInput, TimelineOutput, Timing, UpdateAction,
+    UpdateInput, UpdateOutput, UsedReason, WithdrawOutput, match_reasons,
 };
 pub use write_slot::QuiesceGuard;
 
@@ -85,8 +88,17 @@ pub const RECALL_TOTAL_BYTES: usize = 8 * 1024;
 pub const RECALL_PINNED_BYTES: usize = 2 * 1024;
 /// Design §4: at most 8 retrieved chunks.
 pub const RECALL_MAX_ITEMS: usize = 8;
-/// Design §4: the explicit tool read response.
+/// Design §4: the explicit tool read response — one note's, or a batch's
+/// together (design 09 §13.1).
 pub const READ_MAX_BYTES: usize = 32 * 1024;
+/// Design 09 §13.1: `memory_read` takes 1–10 ids.
+pub const READ_MAX_IDS: usize = 10;
+/// Design 09 §13.1: `memory_search.limit` is 1–50, default 10.
+pub const SEARCH_DEFAULT_LIMIT: usize = 10;
+pub const SEARCH_MAX_LIMIT: usize = index::MAX_LIMIT;
+/// Design 09 §13.1: `memory_timeline.before` and `after` are 0–20, default 5.
+pub const TIMELINE_DEFAULT_SIDE: usize = 5;
+pub const TIMELINE_MAX_SIDE: usize = 20;
 /// `GET /v1/memories/recently-used`: `limit` max 200, the ring's capacity.
 pub const RING_CAPACITY: usize = 200;
 /// How many requests' deliveries are held for [`MemoryService::take_used`]
@@ -538,6 +550,8 @@ impl MemoryService {
             valid_from: v.note.valid_from.map(format_ts),
             valid_to: v.note.valid_to.map(format_ts),
             updated_at: format_ts(v.note.updated_at),
+            created_at: format_ts(v.note.created_at),
+            observed_at: v.note.observed_at.map(format_ts),
             pinned: v.note.pinned,
             source_forgotten: v.derived.source_forgotten,
             conflict: v.derived.conflict,
@@ -778,54 +792,156 @@ impl MemoryService {
                 current_revision: view.revision,
             });
         }
-        let scope = scope_of(p);
-        let freshness = if view.unverified {
-            Freshness::Unverified
-        } else {
-            Freshness::Verified
-        };
-        let full_body = match &input.section {
-            Some(heading) => section_of(&view.note.body, heading).ok_or_else(|| {
-                MemoryError::invalid(format!(
-                    "note {} has no section headed `{heading}`",
-                    input.id
-                ))
-            })?,
-            None => view.note.body.clone(),
-        };
+        let full_body = Self::body_to_read(&view, input.id, input.section.as_deref())?;
         let (body, truncated) = cut_bytes(&full_body, READ_MAX_BYTES);
-        let note = &view.note;
-        let frontmatter = management::frontmatter_json(note);
-        if ctx.surface == Surface::ModelTool {
-            self.record_used(
-                ctx,
-                &[MemoryUsed {
-                    id: note.id,
-                    revision: view.revision.clone(),
-                    reason: UsedReason::Tool,
-                }],
-            );
+        let out = Self::read_output(p, &view, body, truncated);
+        self.record_reads(ctx, std::slice::from_ref(&out));
+        Ok(out)
+    }
+
+    /// `memory_read` with its ids (design 09 §13.1, MD-14): every note of
+    /// 1–[`READ_MAX_IDS`] distinct ids in one call, in the order asked, each
+    /// with its revision and provenance, the bodies sharing the one
+    /// [`READ_MAX_BYTES`] budget (a cut note says `truncated`).
+    ///
+    /// Each id is looked up in the owner's own partitions, as a single read
+    /// is: one no partition has — another owner's note as much as one that
+    /// never existed — answers [`ReadManyItem::NotFound`] in its place and
+    /// changes nothing about the others. `expected_revision` and `section`
+    /// go with a single id.
+    pub fn read_many(
+        &self,
+        ctx: &MemoryAccessContext,
+        input: ReadManyInput,
+    ) -> Result<ReadManyOutput, MemoryError> {
+        Self::require(ctx.capabilities.read, "memory_read")?;
+        if input.ids.is_empty() || input.ids.len() > READ_MAX_IDS {
+            return Err(MemoryError::invalid(format!(
+                "ids takes 1 to {READ_MAX_IDS} note ids, got {}",
+                input.ids.len()
+            )));
         }
-        Ok(ReadOutput {
+        let mut seen = HashSet::new();
+        if let Some(twice) = input.ids.iter().find(|id| !seen.insert(**id)) {
+            return Err(MemoryError::invalid(format!(
+                "ids names note {twice} twice; name each note once"
+            )));
+        }
+        if input.ids.len() > 1 && (input.expected_revision.is_some() || input.section.is_some()) {
+            return Err(MemoryError::invalid(
+                "expected_revision and section go with a single id",
+            ));
+        }
+        let resolved = self.resolve(ctx)?;
+        let loaded: Vec<(&Partition, LoadedPartition)> = resolved
+            .all()
+            .into_iter()
+            .map(|p| Ok::<_, MemoryError>((p, p.load()?)))
+            .collect::<Result<_, _>>()?;
+        // Every id resolved first, so the budget is shared by what is read.
+        let mut found: Vec<Result<(&Partition, &NoteView, String), ReadManyItem>> = Vec::new();
+        for id in &input.ids {
+            let hit = loaded.iter().find_map(|(p, l)| l.get(id).map(|v| (*p, v)));
+            let Some((p, view)) = hit else {
+                found.push(Err(ReadManyItem::NotFound(*id)));
+                continue;
+            };
+            if let Some(expected) = &input.expected_revision
+                && *expected != view.revision
+            {
+                found.push(Err(ReadManyItem::RevisionConflict {
+                    id: *id,
+                    current_revision: view.revision.clone(),
+                }));
+                continue;
+            }
+            let body = Self::body_to_read(view, *id, input.section.as_deref())?;
+            found.push(Ok((p, view, body)));
+        }
+        let sizes: Vec<usize> = found
+            .iter()
+            .filter_map(|f| f.as_ref().ok().map(|(_, _, body)| body.len()))
+            .collect();
+        let mut shares = split_evenly(&sizes, READ_MAX_BYTES).into_iter();
+        let mut items = Vec::with_capacity(found.len());
+        let mut read = Vec::new();
+        for entry in found {
+            match entry {
+                Ok((p, view, body)) => {
+                    let share = shares.next().unwrap_or(0);
+                    let (body, truncated) = cut_bytes(&body, share);
+                    let out = Self::read_output(p, view, body, truncated);
+                    read.push(out.clone());
+                    items.push(ReadManyItem::Read(Box::new(out)));
+                }
+                Err(item) => items.push(item),
+            }
+        }
+        self.record_reads(ctx, &read);
+        Ok(ReadManyOutput {
+            items,
+            budget_bytes: READ_MAX_BYTES,
+        })
+    }
+
+    /// The text a read serves: the whole body, or the section `section`
+    /// heads (an absent one is `invalid_input`).
+    fn body_to_read(
+        view: &NoteView,
+        id: NoteId,
+        section: Option<&str>,
+    ) -> Result<String, MemoryError> {
+        match section {
+            Some(heading) => section_of(&view.note.body, heading).ok_or_else(|| {
+                MemoryError::invalid(format!("note {id} has no section headed `{heading}`"))
+            }),
+            None => Ok(view.note.body.clone()),
+        }
+    }
+
+    fn read_output(p: &Partition, view: &NoteView, body: String, truncated: bool) -> ReadOutput {
+        let note = &view.note;
+        ReadOutput {
             id: note.id,
             revision: view.revision.clone(),
             title: note.title.clone(),
             kind: note.kind,
-            scope,
+            scope: scope_of(p),
             status: note.status,
             effective_status: view.derived.effective_status,
             origin: view.derived.origin,
-            frontmatter,
+            frontmatter: management::frontmatter_json(note),
             body,
             truncated,
             path: format!("{}/{}", files::NOTES_DIR, view.file_name),
             sources: note.sources.clone(),
             supersedes: note.supersedes.clone(),
             superseded_by: view.derived.superseded_by.clone(),
-            freshness,
+            freshness: if view.unverified {
+                Freshness::Unverified
+            } else {
+                Freshness::Verified
+            },
             conflict: view.derived.conflict,
             source_forgotten: view.derived.source_forgotten,
-        })
+        }
+    }
+
+    /// A read is a delivery on the `ModelTool` surface (design §7a,
+    /// `memory_used` reason `tool`).
+    fn record_reads(&self, ctx: &MemoryAccessContext, reads: &[ReadOutput]) {
+        if ctx.surface != Surface::ModelTool {
+            return;
+        }
+        let used: Vec<MemoryUsed> = reads
+            .iter()
+            .map(|r| MemoryUsed {
+                id: r.id,
+                revision: r.revision.clone(),
+                reason: UsedReason::Tool,
+            })
+            .collect();
+        self.record_used(ctx, &used);
     }
 
     /// `memory_list` (design §7a): metadata, `active` by default; superseded
@@ -1420,6 +1536,55 @@ pub(super) fn source_json(s: &NoteSource) -> serde_json::Value {
         "id": s.id,
         "observed_at": s.observed_at.map(format_ts),
     })
+}
+
+/// Splits `total` bytes over bodies of these sizes (design 09 §13.1, a batch
+/// read): evenly, and a body shorter than its equal share leaves the rest
+/// to the others — no body gets more than an equal share of what the
+/// shorter ones left, and the shares never sum past `total`. In the order
+/// given.
+pub(super) fn split_evenly(sizes: &[usize], total: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..sizes.len()).collect();
+    order.sort_by_key(|&i| sizes[i]);
+    let mut shares = vec![0; sizes.len()];
+    let mut left = total;
+    for (served, &i) in order.iter().enumerate() {
+        let equal = left / (sizes.len() - served);
+        shares[i] = sizes[i].min(equal);
+        left -= shares[i];
+    }
+    shares
+}
+
+/// A note's approximate size in tokens (design 09 §13.1): its body's bytes
+/// ÷ 4, rounded up.
+pub(super) fn approx_tokens(bytes: usize) -> usize {
+    bytes.div_ceil(4)
+}
+
+/// Which end of a calendar day a bare date stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DayEdge {
+    /// Its first second: a `date_from`, a timeline's `date`.
+    Start,
+    /// Its last second: a `date_to`, so an inclusive bound keeps that day.
+    End,
+}
+
+/// A date filter's bound or a timeline's instant (design 09 §13.1): an RFC
+/// 3339 instant, or a calendar date `YYYY-MM-DD` taken in UTC at the edge
+/// `edge` names. `None` for anything else.
+pub fn parse_date_bound(value: &str, edge: DayEdge) -> Option<DateTime<Utc>> {
+    let value = value.trim();
+    if let Ok(t) = DateTime::parse_from_rfc3339(value) {
+        return Some(t.with_timezone(&Utc));
+    }
+    let day = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?;
+    let time = match edge {
+        DayEdge::Start => chrono::NaiveTime::MIN,
+        DayEdge::End => chrono::NaiveTime::from_hms_opt(23, 59, 59)?,
+    };
+    Some(day.and_time(time).and_utc())
 }
 
 /// Cuts `text` to at most `max` bytes on a char boundary.

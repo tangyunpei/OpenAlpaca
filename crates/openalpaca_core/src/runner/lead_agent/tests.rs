@@ -3026,6 +3026,7 @@ struct SubagentSearchesMemory {
     lead: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
     subagent: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
     subagent_tools: std::sync::Mutex<Vec<String>>,
+    lead_tools: std::sync::Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -3054,6 +3055,10 @@ impl openalpaca_llm::LlmProvider for SubagentSearchesMemory {
             }
             &self.subagent
         } else {
+            let mut offered = self.lead_tools.lock().unwrap_or_else(|p| p.into_inner());
+            if offered.is_empty() {
+                offered.extend(request.tools.iter().map(|t| t.name.clone()));
+            }
             &self.lead
         };
         let next = queue.lock().unwrap_or_else(|p| p.into_inner()).pop_front();
@@ -3123,6 +3128,7 @@ async fn a_subagents_memory_search_records_its_task_id_in_the_ring() {
             .into(),
         ),
         subagent_tools: std::sync::Mutex::new(Vec::new()),
+        lead_tools: std::sync::Mutex::new(Vec::new()),
     });
     let router = LlmRouter::single_provider(
         provider.clone(),
@@ -3169,6 +3175,20 @@ async fn a_subagents_memory_search_records_its_task_id_in_the_ring() {
         offered.iter().any(|t| t == "memory_search"),
         "the worker was offered memory_search: {offered:?}"
     );
+    // Design 09 §13.1: the search answers an index, so the read that
+    // follows it — and the timeline — come with it, on the worker's surface
+    // (the `memory_read` capability's) and on the lead's hand-built one.
+    let lead_offered = provider.lead_tools.lock().unwrap().clone();
+    for name in ["memory_search", "memory_read", "memory_timeline"] {
+        assert!(
+            offered.iter().any(|t| t == name),
+            "the worker was offered {name}: {offered:?}"
+        );
+        assert!(
+            lead_offered.iter().any(|t| t == name),
+            "the lead was offered {name}: {lead_offered:?}"
+        );
+    }
 
     let ring = scene.service.recently_used(10);
     assert_eq!(ring.len(), 1, "{ring:?}");

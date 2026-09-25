@@ -5,8 +5,8 @@
 //!   has a `MemoryService` — the three memory writers `memory_store`,
 //!   `memory_update`, `memory_forget` (design §7: only the main conversation
 //!   writes), plus the globally-registered read surface `memory_search`,
-//!   `memory_read`, `memory_list` (definitions only — their backends already
-//!   live in the shared registry). On an attended turn of the GUI's or the
+//!   `memory_read`, `memory_list`, `memory_timeline` (definitions only —
+//!   their backends already live in the shared registry). On an attended turn of the GUI's or the
 //!   CLI's chat, `memory_confirm` too (design 09 §4.1): the assistant raises a
 //!   suggestion, and the person's card answers it.
 //! - **Extension tools** (tool/skill wiring, Chunk 2): every MCP-bridged
@@ -115,6 +115,17 @@ pub fn main_loop_relay_guidance() -> &'static str {
      </workflow_relay_rules>"
 }
 
+/// The main loop's memory guidance (design 09 §13.1, MD-14): the layered
+/// workflow its three read tools teach, said once in the system prompt — one
+/// line, given only to a turn whose surface carries `memory_search`.
+pub fn main_loop_memory_guidance() -> &'static str {
+    "<memory_rules>\n\
+     Memory: memory_search returns an index, one line per note and no body — pick the ids that \
+     matter and read only those with memory_read, several in one call; memory_timeline shows \
+     what surrounds a note in time.\n\
+     </memory_rules>"
+}
+
 /// Build the main-loop tool set for one request on `lane_key`.
 ///
 /// `steer_workflow` + `queue_followup` are included only when the lane has
@@ -214,7 +225,12 @@ pub fn main_loop_tool_set(
     // when the daemon has a service) — the per-request registry clone
     // already carries the backends; only the definitions join the core
     // surface.
-    for name in ["memory_search", "memory_read", "memory_list"] {
+    for name in [
+        "memory_search",
+        "memory_read",
+        "memory_list",
+        "memory_timeline",
+    ] {
         if let Some(tool) = global_registry.get(name) {
             definitions.push(tool.definition.clone());
         }
@@ -514,6 +530,7 @@ mod tests {
                 "memory_search",
                 "memory_read",
                 "memory_list",
+                "memory_timeline",
             ]
         );
         // The read tools have no per-request instance (global backends).
@@ -968,6 +985,7 @@ mod tests {
             "memory_search",
             "memory_read",
             "memory_list",
+            "memory_timeline",
             "start_workflow",
             "task_status",
         ] {

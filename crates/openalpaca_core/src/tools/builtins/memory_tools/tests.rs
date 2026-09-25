@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::bus::EventBus;
-use crate::memory::service::{Attribution, Surface, WorkspaceHint};
+use crate::memory::service::{Attribution, ReadInput, Surface, WorkspaceHint};
 use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::test_util::HomeStoreGuard;
@@ -208,26 +208,31 @@ async fn hidden_identity_fields_are_refused_by_the_tools_own_validator() {
         assert!(!err.contains("vault folder"), "{err}");
     }
     // Bob's note by id from Alice's context: not found, nothing leaked.
-    let err = h
+    let out = h
         .call(
             &*read,
             ALICE,
-            serde_json::json!({"id": bob_note.to_string()}),
+            serde_json::json!({"ids": [bob_note.to_string()]}),
         )
         .await
-        .unwrap_err();
-    assert!(err.starts_with("not_found"), "{err}");
+        .unwrap();
+    assert_eq!(
+        out["notes"],
+        serde_json::json!([{"id": bob_note.to_string(), "error": "not_found"}])
+    );
+    assert_eq!(out["count"], 0);
+    let text = out.to_string();
     assert!(
-        !err.contains("vault folder") && !err.contains("Bob"),
-        "{err}"
+        !text.contains("vault folder") && !text.contains("Bob"),
+        "{text}"
     );
     // A path where an id belongs.
     let err = h
-        .call(&*read, ALICE, serde_json::json!({"id": format!("{}/notes/{bob_note}--bob-s-deploy-notes-location.md", h.notes_dir(BOB_KEY).display())}))
+        .call(&*read, ALICE, serde_json::json!({"ids": [format!("{}/notes/{bob_note}--bob-s-deploy-notes-location.md", h.notes_dir(BOB_KEY).display())]}))
         .await
         .unwrap_err();
     assert!(
-        err.starts_with("invalid_input") && err.contains("id"),
+        err.starts_with("invalid_input") && err.contains("ids"),
         "{err}"
     );
     assert!(!err.contains("vault folder"), "{err}");
@@ -382,10 +387,11 @@ async fn a_tool_call_never_mints_user_and_never_retires_a_user_note() {
         .call(
             &*read,
             ALICE,
-            serde_json::json!({"id": approval.to_string()}),
+            serde_json::json!({"ids": [approval.to_string()]}),
         )
         .await
         .unwrap();
+    let now = &now["notes"][0];
     assert_eq!(now["revision"], approval_rev);
     assert_eq!(now["origin"], "user");
     assert_eq!(now["status"], "active");
@@ -441,7 +447,7 @@ async fn store_search_read_update_forget_round_trip() {
         .call(
             &*search,
             ALICE,
-            serde_json::json!({"query": "what editor do I prefer?"}),
+            serde_json::json!({"query": "what editor do I prefer?", "detail": "snippets"}),
         )
         .await
         .unwrap();
@@ -470,18 +476,21 @@ async fn store_search_read_update_forget_round_trip() {
         )
         .await
         .unwrap();
+    // The default detail is the index: the reason says how it matched.
     assert!(
-        alias["results"][0]["match"]
-            .as_array()
+        alias["results"][0]["reason"]
+            .as_str()
             .unwrap()
-            .iter()
-            .any(|m| m == "alias")
+            .split(',')
+            .any(|m| m == "alias"),
+        "{alias}"
     );
 
     let whole = h
-        .call(&*read, ALICE, serde_json::json!({"id": &id}))
+        .call(&*read, ALICE, serde_json::json!({"ids": [&id]}))
         .await
         .unwrap();
+    let whole = &whole["notes"][0];
     assert_eq!(
         whole["frontmatter"]["aliases"],
         serde_json::json!(["vi", "neovim"])
@@ -505,9 +514,10 @@ async fn store_search_read_update_forget_round_trip() {
     assert_ne!(rev2, rev);
     assert_eq!(edited["status"], "active");
     let whole = h
-        .call(&*read, ALICE, serde_json::json!({"id": &id}))
+        .call(&*read, ALICE, serde_json::json!({"ids": [&id]}))
         .await
         .unwrap();
+    let whole = &whole["notes"][0];
     assert_eq!(whole["frontmatter"]["aliases"], serde_json::json!(["vi"]));
     assert_eq!(whole["frontmatter"]["fact_key"], serde_json::Value::Null);
     assert!(
@@ -544,11 +554,11 @@ async fn store_search_read_update_forget_round_trip() {
             .contains("Session logs")
     );
     assert!(file_for(&h.notes_dir(ALICE_KEY), &id).is_none());
-    let err = h
-        .call(&*read, ALICE, serde_json::json!({"id": &id}))
+    let gone = h
+        .call(&*read, ALICE, serde_json::json!({"ids": [&id]}))
         .await
-        .unwrap_err();
-    assert!(err.starts_with("not_found"), "{err}");
+        .unwrap();
+    assert_eq!(gone["notes"][0]["error"], "not_found");
 }
 
 #[tokio::test]
@@ -1670,4 +1680,854 @@ fn the_historical_flag_says_what_it_adds_and_when_to_use_it() {
     ] {
         assert!(text.contains(word), "{word:?} is missing from {text:?}");
     }
+}
+
+// ============================================================================
+// Layered retrieval (design 09 §13.1, MD-14, slice L10a)
+// ============================================================================
+
+fn ts(s: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+impl Harness {
+    fn extraction_ctx(&self, owner: &str) -> crate::memory::service::MemoryAccessContext {
+        self.service
+            .context(
+                owner,
+                WorkspaceHint::None,
+                Surface::Extraction,
+                Capabilities::EXTRACTION,
+                Attribution::default(),
+            )
+            .unwrap()
+    }
+
+    fn user_ctx(&self, owner: &str) -> crate::memory::service::MemoryAccessContext {
+        self.service
+            .context(
+                owner,
+                WorkspaceHint::None,
+                Surface::UserSurface,
+                Capabilities::ALL,
+                Attribution::default(),
+            )
+            .unwrap()
+    }
+
+    /// A note learned from the user's words, dated by what it observed.
+    fn learned(
+        &self,
+        owner: &str,
+        title: &str,
+        body: &str,
+        observed: &str,
+        valid_to: Option<&str>,
+    ) -> crate::memory::service::StoreOutput {
+        self.service
+            .store(
+                &self.extraction_ctx(owner),
+                StoreInput {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: Some(NoteKind::Fact),
+                    observed_at: Some(ts(observed)),
+                    valid_to: valid_to.map(ts),
+                    provenance: Some(crate::memory::service::ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    }
+}
+
+fn result_ids(out: &serde_json::Value) -> Vec<String> {
+    out["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// **L10a evidence: an index row carries no body and every field.** The
+/// default detail is the index — `{id, date, kind, scope, status, title,
+/// reason, size}` plus §7b's `conflict` — and nothing of the body; `size`
+/// is the body's bytes ÷ 4, so a read can be budgeted. `snippets` is the
+/// cited excerpt as before.
+#[tokio::test]
+async fn an_index_row_carries_every_field_and_no_body() {
+    let h = Harness::new();
+    let body =
+        "# Standing desk\n\nThe user works standing at a desk by the window, every morning.\n";
+    let (id, _) = h.user_note(ALICE, "Standing desk", body);
+    let search = h.read_tool("memory_search");
+
+    let out = h
+        .call(
+            &*search,
+            ALICE,
+            serde_json::json!({"query": "standing desk"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out["count"], 1);
+    assert_eq!(out["index_state"], "ready");
+    assert_eq!(out["partial"], false);
+    let row = out["results"][0].as_object().unwrap();
+    let mut keys: Vec<&str> = row.keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "conflict", "date", "id", "kind", "reason", "scope", "size", "status", "title"
+        ]
+    );
+    assert_eq!(row["id"], id.to_string());
+    assert_eq!(row["kind"], "fact");
+    assert_eq!(row["scope"], "global");
+    assert_eq!(row["status"], "active");
+    assert_eq!(row["title"], "Standing desk");
+    assert_eq!(row["size"], body.len().div_ceil(4));
+    assert_eq!(row["conflict"], false);
+    assert!(row["reason"].as_str().unwrap().contains("title"), "{row:?}");
+    let date = ts(row["date"].as_str().unwrap());
+    assert!(
+        (chrono::Utc::now() - date).num_minutes().abs() < 5,
+        "{date}"
+    );
+    assert!(
+        !out.to_string().contains("by the window"),
+        "no body in an index row: {out}"
+    );
+
+    let snippets = h
+        .call(
+            &*search,
+            ALICE,
+            serde_json::json!({"query": "standing desk", "detail": "snippets"}),
+        )
+        .await
+        .unwrap();
+    let hit = &snippets["results"][0];
+    assert!(hit["excerpt"].as_str().unwrap().contains("by the window"));
+    for key in [
+        "revision",
+        "heading",
+        "line_range",
+        "match",
+        "freshness",
+        "path",
+    ] {
+        assert!(hit.get(key).is_some(), "snippets keep {key}: {hit}");
+    }
+    let err = h
+        .call(
+            &*search,
+            ALICE,
+            serde_json::json!({"query": "desk", "detail": "full"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.starts_with("invalid_input") && err.contains("detail"),
+        "{err}"
+    );
+}
+
+/// Design 09 §13.1: `limit` defaults to 10 and reaches 50.
+#[tokio::test]
+async fn the_search_limit_defaults_to_ten_and_reaches_fifty() {
+    let h = Harness::new();
+    for i in 0..12 {
+        h.user_note(
+            ALICE,
+            &format!("Parking spot {i}"),
+            &format!("# Parking spot {i}\n\nLevel {i} of the garage.\n"),
+        );
+    }
+    let search = h.read_tool("memory_search");
+    let out = h
+        .call(&*search, ALICE, serde_json::json!({"query": "parking"}))
+        .await
+        .unwrap();
+    assert_eq!(out["count"], 10);
+    let out = h
+        .call(
+            &*search,
+            ALICE,
+            serde_json::json!({"query": "parking", "limit": 50}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out["count"], 12);
+    let err = h
+        .call(
+            &*search,
+            ALICE,
+            serde_json::json!({"query": "parking", "limit": 51}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.starts_with("invalid_input") && err.contains("50"),
+        "{err}"
+    );
+}
+
+/// **L10a evidence: `date_from`/`date_to` bound on `observed_at`, else
+/// `created_at`.** A learned note written today about March is March's; a
+/// note the user saved today is today's. A bare date is a whole UTC day,
+/// both ends inclusive.
+#[tokio::test]
+async fn date_bounds_read_observed_at_else_created_at() {
+    let h = Harness::new();
+    let march = h.learned(
+        ALICE,
+        "Gym in March",
+        "# Gym in March\n\nThe user joined the gym on Elm Street.\n",
+        "2026-03-10T09:00:00Z",
+        None,
+    );
+    let (today, _) = h.user_note(
+        ALICE,
+        "Gym today",
+        "# Gym today\n\nThe user goes to the gym on Oak Street.\n",
+    );
+    let search = h.read_tool("memory_search");
+    let ask = |args: serde_json::Value| {
+        let search = search.clone();
+        let h = &h;
+        async move { result_ids(&h.call(&*search, ALICE, args).await.unwrap()) }
+    };
+    let yesterday = (chrono::Utc::now() - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+
+    assert_eq!(
+        ask(serde_json::json!({"query": "gym", "date_to": "2026-06-30"})).await,
+        vec![march.id.to_string()],
+        "written today, dated by what it observed"
+    );
+    assert_eq!(
+        ask(serde_json::json!({"query": "gym", "date_from": yesterday})).await,
+        vec![today.to_string()],
+        "no observation: dated when it was first written"
+    );
+    // A bare date is inclusive at both ends: the whole of the tenth of March.
+    assert_eq!(
+        ask(
+            serde_json::json!({"query": "gym", "date_from": "2026-03-10", "date_to": "2026-03-10"})
+        )
+        .await,
+        vec![march.id.to_string()]
+    );
+    assert!(
+        ask(serde_json::json!({"query": "gym", "date_from": "2026-03-10T09:00:01Z", "date_to": "2026-03-11"}))
+            .await
+            .is_empty()
+    );
+    let row = &h
+        .call(&*search, ALICE, serde_json::json!({"query": "gym elm"}))
+        .await
+        .unwrap()["results"][0];
+    assert_eq!(row["date"], "2026-03-10T09:00:00Z");
+
+    let err = h
+        .call(
+            &*search,
+            ALICE,
+            serde_json::json!({"query": "gym", "date_from": "2026-06-01", "date_to": "2026-05-01"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("invalid_input"), "{err}");
+    let err = h
+        .call(
+            &*search,
+            ALICE,
+            serde_json::json!({"query": "gym", "date_from": "last spring"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.starts_with("invalid_input") && err.contains("date_from"),
+        "{err}"
+    );
+}
+
+/// **L10a evidence: `order_by` newest and oldest.**
+#[tokio::test]
+async fn order_by_newest_and_oldest_sort_by_the_date() {
+    let h = Harness::new();
+    let may = h.learned(
+        ALICE,
+        "Bike repair",
+        "# Bike repair\n\nThe bike shop fixed the brakes.\n",
+        "2026-05-02T10:00:00Z",
+        None,
+    );
+    let jan = h.learned(
+        ALICE,
+        "Bike",
+        "# Bike\n\nThe user bought a bike.\n",
+        "2026-01-15T10:00:00Z",
+        None,
+    );
+    let aug = h.learned(
+        ALICE,
+        "Bike tour",
+        "# Bike tour\n\nA bike tour along the river.\n",
+        "2026-08-20T10:00:00Z",
+        None,
+    );
+    let search = h.read_tool("memory_search");
+    let ids = |v: &[&crate::memory::service::StoreOutput]| {
+        v.iter().map(|o| o.id.to_string()).collect::<Vec<_>>()
+    };
+    let newest = h
+        .call(
+            &*search,
+            ALICE,
+            serde_json::json!({"query": "bike", "order_by": "newest"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_ids(&newest), ids(&[&aug, &may, &jan]));
+    let oldest = h
+        .call(
+            &*search,
+            ALICE,
+            serde_json::json!({"query": "bike", "order_by": "oldest", "limit": 2}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_ids(&oldest), ids(&[&jan, &may]));
+    let relevance = h
+        .call(&*search, ALICE, serde_json::json!({"query": "bike"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        result_ids(&relevance)[0],
+        jan.id.to_string(),
+        "the exact title leads on relevance"
+    );
+    let err = h
+        .call(
+            &*search,
+            ALICE,
+            serde_json::json!({"query": "bike", "order_by": "random"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.starts_with("invalid_input") && err.contains("order_by"),
+        "{err}"
+    );
+}
+
+/// **L10a evidence: a 10-id `memory_read` returns all within 32 KiB and
+/// refuses an 11th id.** The bodies share the one budget: ten 6 KiB bodies
+/// are each cut to an equal share and say so; a short body is never cut to
+/// make room, and a long one takes what the short ones leave.
+#[tokio::test]
+async fn a_ten_id_read_returns_every_note_within_32_kib_and_refuses_an_eleventh() {
+    let h = Harness::new();
+    let read = h.read_tool("memory_read");
+    let long = |i: usize| {
+        format!(
+            "# Long note {i}\n\n{}\n",
+            "lorem ipsum dolor sit amet ".repeat(230)
+        )
+    };
+    let ids: Vec<String> = (0..11)
+        .map(|i| {
+            h.user_note(ALICE, &format!("Long note {i}"), &long(i))
+                .0
+                .to_string()
+        })
+        .collect();
+
+    let out = h
+        .call(&*read, ALICE, serde_json::json!({"ids": &ids[..10]}))
+        .await
+        .unwrap();
+    assert_eq!(out["count"], 10);
+    assert_eq!(out["budget_bytes"], 32 * 1024);
+    let notes = out["notes"].as_array().unwrap();
+    let got: Vec<&str> = notes.iter().map(|n| n["id"].as_str().unwrap()).collect();
+    assert_eq!(
+        got,
+        ids[..10].iter().map(String::as_str).collect::<Vec<_>>(),
+        "in the order asked"
+    );
+    let total: usize = notes
+        .iter()
+        .map(|n| n["body"].as_str().unwrap().len())
+        .sum();
+    assert!(total <= 32 * 1024, "{total}");
+    assert!(
+        total > 32 * 1024 - 64,
+        "the budget is used, not wasted: {total}"
+    );
+    for n in notes {
+        assert_eq!(n["truncated"], true, "a cut note says so");
+        assert_eq!(n["revision"].as_str().unwrap().len(), 64);
+        assert_eq!(n["origin"], "user", "provenance comes with each note");
+    }
+
+    let err = h
+        .call(&*read, ALICE, serde_json::json!({"ids": ids}))
+        .await
+        .unwrap_err();
+    assert!(
+        err.starts_with("invalid_input") && err.contains("10"),
+        "{err}"
+    );
+
+    // Eight short notes and two long ones: the short ones whole, the long
+    // ones sharing what the short ones leave — far more than a tenth each.
+    let short: Vec<String> = (0..8)
+        .map(|i| {
+            h.user_note(
+                ALICE,
+                &format!("Short {i}"),
+                &format!("# Short {i}\n\nfine.\n"),
+            )
+            .0
+            .to_string()
+        })
+        .collect();
+    let big: Vec<String> = (0..2)
+        .map(|i| {
+            h.user_note(
+                ALICE,
+                &format!("Big {i}"),
+                &format!("# Big {i}\n\n{}\n", "x".repeat(20 * 1024)),
+            )
+            .0
+            .to_string()
+        })
+        .collect();
+    let mut mixed = short.clone();
+    mixed.insert(3, big[0].clone());
+    mixed.push(big[1].clone());
+    let out = h
+        .call(&*read, ALICE, serde_json::json!({"ids": mixed}))
+        .await
+        .unwrap();
+    let notes = out["notes"].as_array().unwrap();
+    let total: usize = notes
+        .iter()
+        .map(|n| n["body"].as_str().unwrap().len())
+        .sum();
+    assert!(total <= 32 * 1024, "{total}");
+    for n in notes {
+        let long = big.iter().any(|b| n["id"] == b.as_str());
+        assert_eq!(n["truncated"], long, "{}", n["title"]);
+        if long {
+            assert!(n["body"].as_str().unwrap().len() > 16_000, "{}", n["title"]);
+        }
+    }
+
+    for bad in [
+        serde_json::json!({"ids": []}),
+        serde_json::json!({"ids": [&ids[0], &ids[0]]}),
+        serde_json::json!({"ids": [&ids[0], &ids[1]], "section": "Long note 0"}),
+        serde_json::json!({"ids": [&ids[0], &ids[1]], "expected_revision": "f".repeat(64)}),
+        serde_json::json!({"id": &ids[0]}),
+    ] {
+        let err = h.call(&*read, ALICE, bad.clone()).await.unwrap_err();
+        assert!(err.starts_with("invalid_input"), "{bad}: {err}");
+    }
+    // One id keeps what a single read always took.
+    let one = h
+        .call(
+            &*read,
+            ALICE,
+            serde_json::json!({"ids": [&ids[0]], "expected_revision": "f".repeat(64)}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(one["notes"][0]["error"], "revision_conflict");
+    assert_eq!(
+        one["notes"][0]["current_revision"].as_str().unwrap().len(),
+        64
+    );
+}
+
+/// **L10a evidence: a foreign id in the batch is refused without leaking
+/// the others' order.** Bob's note in Alice's batch reads exactly like an id
+/// no note has — `{id, error: not_found}` in its own place — and Alice's
+/// notes come back as they would without it, in the order she asked. Bob's
+/// note is not read, not recorded, and nothing of it is in the answer.
+#[tokio::test]
+async fn a_foreign_id_in_a_batch_reads_like_one_that_never_existed() {
+    let h = Harness::new();
+    let (bob, _) = h.user_note(
+        BOB,
+        "Bob's locker",
+        "# Bob's locker\n\nCombination 4-8-15.\n",
+    );
+    let (a, _) = h.user_note(
+        ALICE,
+        "Alice's lunch",
+        "# Alice's lunch\n\nNoon, the canteen.\n",
+    );
+    let (b, _) = h.user_note(
+        ALICE,
+        "Alice's train",
+        "# Alice's train\n\nThe 8:12 to the city.\n",
+    );
+    let never = "00000013-0000-4000-8000-00000000abcd";
+    let read = h.read_tool("memory_read");
+
+    let with_bob = h
+        .call(
+            &*read,
+            ALICE,
+            serde_json::json!({"ids": [b.to_string(), bob.to_string(), a.to_string()]}),
+        )
+        .await
+        .unwrap();
+    let with_nothing = h
+        .call(
+            &*read,
+            ALICE,
+            serde_json::json!({"ids": [b.to_string(), never, a.to_string()]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        with_bob["notes"][1],
+        serde_json::json!({"id": bob.to_string(), "error": "not_found"})
+    );
+    assert_eq!(
+        with_bob.to_string().replace(&bob.to_string(), never),
+        with_nothing.to_string(),
+        "Bob's note reads exactly like a note that never existed"
+    );
+    assert_eq!(with_bob["notes"][0]["id"], b.to_string());
+    assert_eq!(with_bob["notes"][2]["id"], a.to_string());
+    assert_eq!(with_bob["count"], 2);
+    let text = with_bob.to_string();
+    assert!(
+        !text.contains("locker") && !text.contains("4-8-15"),
+        "{text}"
+    );
+    assert!(
+        h.service.recently_used(50).iter().all(|u| u.id != bob),
+        "Bob's note is not recorded as read"
+    );
+}
+
+/// Six notes a month apart, one of each state a timeline shows or hides.
+struct TimelineScene {
+    berlin: NoteId,
+    munich: NoteId,
+    candidate: NoteId,
+    parking: NoteId,
+    june_move: NoteId,
+    archived: NoteId,
+    replacement: NoteId,
+}
+
+fn timeline_scene(h: &Harness) -> TimelineScene {
+    let berlin = h.learned(
+        ALICE,
+        "Office in Berlin",
+        "# Office in Berlin\n\nThe office was in Berlin.\n",
+        "2026-01-10T09:00:00Z",
+        None,
+    );
+    let munich = h.learned(
+        ALICE,
+        "Office in Munich",
+        "# Office in Munich\n\nThe office was in Munich.\n",
+        "2026-03-10T09:00:00Z",
+        None,
+    );
+    let candidate = h
+        .service
+        .store(
+            &h.extraction_ctx(ALICE),
+            StoreInput {
+                title: "Office rumour".into(),
+                body: "# Office rumour\n\nThe assistant thinks the office moves again.\n".into(),
+                kind: Some(NoteKind::Fact),
+                observed_at: Some(ts("2026-04-10T09:00:00Z")),
+                provenance: Some(crate::memory::service::ExtractionProvenance::OtherOutput),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let parking = h.learned(
+        ALICE,
+        "Office parking pass",
+        "# Office parking pass\n\nA parking pass for the office garage.\n",
+        "2026-05-10T09:00:00Z",
+        Some("2026-06-01T00:00:00Z"),
+    );
+    let june_move = h.learned(
+        ALICE,
+        "Office move in June",
+        "# Office move in June\n\nThe office moves to Hamburg in June.\n",
+        "2026-06-10T09:00:00Z",
+        None,
+    );
+    let archived = h.learned(
+        ALICE,
+        "Office plants",
+        "# Office plants\n\nThe office plants need water.\n",
+        "2026-07-10T09:00:00Z",
+        None,
+    );
+    let user = h.user_ctx(ALICE);
+    h.service
+        .update(
+            &user,
+            crate::memory::service::UpdateInput {
+                id: archived.id,
+                expected_revision: archived.revision.clone(),
+                action: crate::memory::service::UpdateAction::Archive,
+                reason: None,
+            },
+        )
+        .unwrap();
+    // Saved by the user today, replacing Munich: Munich is superseded.
+    let replacement = h
+        .service
+        .store(
+            &user,
+            StoreInput {
+                title: "Office in Hamburg".into(),
+                body: "# Office in Hamburg\n\nThe office is in Hamburg now.\n".into(),
+                kind: Some(NoteKind::Fact),
+                supersedes: Some((munich.id, munich.revision.clone())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    TimelineScene {
+        berlin: berlin.id,
+        munich: munich.id,
+        candidate: candidate.id,
+        parking: parking.id,
+        june_move: june_move.id,
+        archived: archived.id,
+        replacement: replacement.id,
+    }
+}
+
+/// `(id, status, reason)` of each row, in order.
+fn rows(out: &serde_json::Value) -> Vec<(String, String, String)> {
+    out["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap().to_string(),
+                r["status"].as_str().unwrap().to_string(),
+                r["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn row(id: NoteId, status: &str, reason: &str) -> (String, String, String) {
+    (id.to_string(), status.to_string(), reason.to_string())
+}
+
+/// **L10a evidence: `memory_timeline` by anchor, by query and by date
+/// returns neighbours in time order with superseded/ended notes marked and
+/// candidates absent.** Each row is the index shape, dated by what it
+/// observed; archived notes are listed and marked too; a query's first hit
+/// is the anchor.
+#[tokio::test]
+async fn memory_timeline_by_anchor_query_and_date() {
+    let h = Harness::new();
+    let s = timeline_scene(&h);
+    let timeline = h.read_tool("memory_timeline");
+
+    let by_anchor = h
+        .call(
+            &*timeline,
+            ALICE,
+            serde_json::json!({"anchor": s.june_move.to_string()}),
+        )
+        .await
+        .unwrap();
+    let expected = vec![
+        row(s.berlin, "active", "before"),
+        row(s.munich, "superseded", "before"),
+        row(s.parking, "ended", "before"),
+        row(s.june_move, "active", "anchor"),
+        row(s.archived, "archived", "after"),
+        row(s.replacement, "active", "after"),
+    ];
+    assert_eq!(rows(&by_anchor), expected);
+    assert_eq!(
+        by_anchor["anchor"],
+        serde_json::json!({"id": s.june_move.to_string()})
+    );
+    assert_eq!(by_anchor["count"], 6);
+    assert!(
+        !by_anchor.to_string().contains(&s.candidate.to_string()),
+        "no candidate"
+    );
+    let first = by_anchor["results"][0].as_object().unwrap();
+    let mut keys: Vec<&str> = first.keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "conflict", "date", "id", "kind", "reason", "scope", "size", "status", "title"
+        ]
+    );
+    assert_eq!(first["date"], "2026-01-10T09:00:00Z");
+    assert!(!by_anchor.to_string().contains("was in Berlin"), "no body");
+
+    let by_query = h
+        .call(
+            &*timeline,
+            ALICE,
+            serde_json::json!({"query": "office move june", "before": 1, "after": 1}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(&by_query),
+        vec![
+            row(s.parking, "ended", "before"),
+            row(s.june_move, "active", "anchor"),
+            row(s.archived, "archived", "after"),
+        ]
+    );
+
+    let by_date = h
+        .call(
+            &*timeline,
+            ALICE,
+            serde_json::json!({"date": "2026-05-01", "before": 2, "after": 2}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(&by_date),
+        vec![
+            row(s.berlin, "active", "before"),
+            row(s.munich, "superseded", "before"),
+            row(s.parking, "ended", "after"),
+            row(s.june_move, "active", "after"),
+        ]
+    );
+    assert_eq!(
+        by_date["anchor"],
+        serde_json::json!({"date": "2026-05-01T00:00:00Z"})
+    );
+
+    let nothing = h
+        .call(&*timeline, ALICE, serde_json::json!({"query": "zeppelin"}))
+        .await
+        .unwrap();
+    assert_eq!(nothing["count"], 0);
+    assert_eq!(nothing["anchor"], serde_json::Value::Null);
+}
+
+/// A timeline takes exactly one anchor, at most 20 either side, and is drawn
+/// around no candidate and no note of another owner.
+#[tokio::test]
+async fn memory_timeline_refuses_what_it_cannot_draw() {
+    let h = Harness::new();
+    let s = timeline_scene(&h);
+    let (bob, _) = h.user_note(
+        BOB,
+        "Bob's office",
+        "# Bob's office\n\nBob's office is upstairs.\n",
+    );
+    let timeline = h.read_tool("memory_timeline");
+    for bad in [
+        serde_json::json!({}),
+        serde_json::json!({"anchor": s.berlin.to_string(), "date": "2026-05-01"}),
+        serde_json::json!({"anchor": s.berlin.to_string(), "before": 21}),
+        serde_json::json!({"date": "someday"}),
+        serde_json::json!({"anchor": "notes/berlin.md"}),
+        serde_json::json!({"anchor": s.candidate.to_string()}),
+        serde_json::json!({"query": "office", "owner_id": BOB}),
+    ] {
+        let err = h.call(&*timeline, ALICE, bad.clone()).await.unwrap_err();
+        assert!(err.starts_with("invalid_input"), "{bad}: {err}");
+    }
+    let err = h
+        .call(
+            &*timeline,
+            ALICE,
+            serde_json::json!({"anchor": bob.to_string()}),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("not_found"), "{err}");
+    assert!(!err.contains("upstairs"), "{err}");
+    let most = h
+        .call(
+            &*timeline,
+            ALICE,
+            serde_json::json!({"anchor": s.june_move.to_string(), "before": 20, "after": 0}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(most["count"], 4, "three before and the anchor");
+}
+
+/// Design 09 §13.1: the three descriptions teach the layered workflow —
+/// search returns an index, pick ids, read only those, several at once —
+/// and the timeline's names what it lists and what it leaves out.
+#[test]
+fn the_three_descriptions_teach_search_pick_read() {
+    let search = memory_search_tool_definition().description;
+    let read = memory_read_tool_definition().description;
+    let timeline = memory_timeline_tool_definition().description;
+    for (name, text) in [
+        ("search", &search),
+        ("read", &read),
+        ("timeline", &timeline),
+    ] {
+        assert!(text.contains("index"), "{name}: {text}");
+        assert!(text.contains("several"), "{name}: {text}");
+    }
+    // Search and timeline hand on to the read; the read names where its ids
+    // come from.
+    assert!(search.contains("memory_read"), "{search}");
+    assert!(timeline.contains("memory_read"), "{timeline}");
+    assert!(
+        read.contains("memory_search") && read.contains("memory_timeline"),
+        "{read}"
+    );
+    assert!(
+        search.contains("pick") && read.contains("picked"),
+        "{search}\n{read}"
+    );
+    assert!(read.contains("10"), "{read}");
+    for word in ["superseded", "archived", "ended", "candidate"] {
+        assert!(timeline.contains(word), "{word}: {timeline}");
+    }
+    let schema = memory_search_tool_definition().parameters;
+    for key in ["detail", "date_from", "date_to", "order_by"] {
+        assert!(schema["properties"].get(key).is_some(), "{key}");
+    }
+    assert_eq!(
+        schema["properties"]["detail"]["enum"],
+        serde_json::json!(["index", "snippets"])
+    );
+    let schema = memory_read_tool_definition().parameters;
+    assert_eq!(schema["required"], serde_json::json!(["ids"]));
+    assert_eq!(schema["properties"]["ids"]["maxItems"], 10);
+    let schema = memory_timeline_tool_definition().parameters;
+    for key in ["anchor", "query", "date", "before", "after"] {
+        assert!(schema["properties"].get(key).is_some(), "{key}");
+    }
+    assert_eq!(schema["additionalProperties"], serde_json::json!(false));
 }

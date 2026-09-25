@@ -133,11 +133,11 @@ pub(super) async fn build_tool_registry(
     Ok((tool_registry, connector_send_lock, mcp_supervisor))
 }
 
-/// The memory read surface — `memory_search`, `memory_read`, `memory_list`
-/// (memory redesign, design §7): registered globally, each providing the
-/// `memory_read` capability, so every agent template that grants it (the
-/// six shipped ones) has them; the three writers are the main loop's
-/// per-request tools and are never registered here.
+/// The memory read surface — `memory_search`, `memory_read`, `memory_list`,
+/// `memory_timeline` (memory redesign, design §7; design 09 §13.1):
+/// registered globally, each providing the `memory_read` capability, so
+/// every agent template that grants it has them; the writers are the main
+/// loop's per-request tools and are never registered here.
 fn register_memory_read_tools(
     tool_registry: &openalpaca_core::tools::ToolRegistry,
     memory_service: &Arc<MemoryService>,
@@ -153,7 +153,7 @@ mod tests {
     use super::*;
     use crate::test_util::HomeStoreGuard;
 
-    /// The daemon's registry offers the three read tools under `memory_read`,
+    /// The daemon's registry offers the four read tools under `memory_read`,
     /// read-only, and none of the writers.
     #[test]
     fn the_memory_read_surface_is_registered_under_memory_read() {
@@ -162,7 +162,12 @@ mod tests {
         let service = Arc::new(MemoryService::open_default(None));
         let registry = openalpaca_core::tools::ToolRegistry::default();
         register_memory_read_tools(&registry, &service);
-        for name in ["memory_search", "memory_read", "memory_list"] {
+        for name in [
+            "memory_search",
+            "memory_read",
+            "memory_list",
+            "memory_timeline",
+        ] {
             let tool = registry
                 .get(name)
                 .unwrap_or_else(|| panic!("{name} registered"));

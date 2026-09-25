@@ -17,16 +17,18 @@ mod web_search;
 // Routing V2: these tools are constructed per-request by the tool-mode
 // main loop (via `main_loop_tool_set`) and injected into its per-request
 // registry — never registered globally via `builtin_tools()`. The memory
-// read surface (`memory_read_tools`: search, read, list) is the exception
+// read surface (`memory_read_tools`: search, read, list, timeline) is the exception
 // the daemon registers globally, so every agent granted `memory_read` has
 // it; the three memory writers stay per-request on the main loop.
 pub use invoke_skill::{invoke_skill_tool_definition, InvokeSkillTool};
-pub use main_loop::{main_loop_relay_guidance, main_loop_tool_set, MainLoopToolSet};
+pub use main_loop::{
+    MainLoopToolSet, main_loop_memory_guidance, main_loop_relay_guidance, main_loop_tool_set,
+};
 pub use memory_tools::{
     MemoryConfirmTool, MemoryForgetTool, MemoryStoreTool, MemoryUpdateTool,
     memory_confirm_tool_definition, memory_forget_tool_definition, memory_list_tool_definition,
     memory_read_tool_definition, memory_read_tools, memory_search_tool_definition,
-    memory_store_tool_definition, memory_update_tool_definition,
+    memory_store_tool_definition, memory_timeline_tool_definition, memory_update_tool_definition,
 };
 pub use start_workflow::{start_workflow_tool_definition, StartWorkflowTool};
 pub use steer_workflow::{steer_workflow_tool_definition, SteerWorkflowTool};
@@ -588,7 +590,7 @@ impl BuiltInTool for ScriptToolBuiltIn {
 pub(crate) fn annotations_for_builtin(name: &str) -> Option<openalpaca_mcp::ToolAnnotations> {
     match name {
         "file_read" | "workspace_read" | "read_result" | "memory_search" | "memory_read"
-        | "memory_list" => Some(read_only_annotations()),
+        | "memory_list" | "memory_timeline" => Some(read_only_annotations()),
         "web_fetch" | "web_search" => Some(read_only_open_world_annotations()),
         // Design §7, *Capabilities*: the two memory tools that prompt;
         // `memory_store` deliberately carries none — a plain save never

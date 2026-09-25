@@ -361,6 +361,10 @@ fn build_corpus(
                 1 + rng.below(9),
                 1 + rng.below(28)
             ),
+            // Set from `updated_at` below, so the generator draws exactly
+            // what it drew before notes carried dates.
+            created_at: String::new(),
+            observed_at: None,
             pinned: rng.below(200) == 0,
             source_forgotten: rng.below(100) == 0,
             conflict: false,
@@ -376,6 +380,9 @@ fn build_corpus(
                 inode: 0,
             },
         });
+        if let Some(last) = records.last_mut() {
+            last.created_at = last.updated_at.clone();
+        }
     }
     records
 }

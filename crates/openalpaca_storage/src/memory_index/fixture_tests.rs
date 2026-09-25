@@ -301,6 +301,15 @@ fn derive_records(
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 updated_at: note["updated_at"].as_str().unwrap().to_string(),
+                created_at: note
+                    .get("created_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| note["updated_at"].as_str().unwrap())
+                    .to_string(),
+                observed_at: note
+                    .get("observed_at")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 pinned: note.get("pinned").and_then(Value::as_bool).unwrap_or(false),
                 source_forgotten: sources.iter().any(|s| suppressed.contains(s)),
                 conflict: conflict.contains(id) || losers.contains(id),

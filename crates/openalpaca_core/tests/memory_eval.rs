@@ -73,13 +73,14 @@ const REPORT_SCHEMA: u32 = 1;
 /// Design §5: "the running agent may issue up to two revised searches".
 const FOLLOW_UP_SEARCHES: usize = 2;
 /// The memory tools the main loop offers when a service is installed: the
-/// three read tools the daemon registers globally
+/// four read tools the daemon registers globally
 /// (`apps/openalpacad/src/services/tools.rs`, `memory_read_tools`) and the
 /// three writers `main_loop_tool_set` adds per request.
-const MEMORY_TOOLS: [&str; 6] = [
+const MEMORY_TOOLS: [&str; 7] = [
     "memory_search",
     "memory_read",
     "memory_list",
+    "memory_timeline",
     "memory_store",
     "memory_update",
     "memory_forget",

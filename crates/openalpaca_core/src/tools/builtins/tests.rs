@@ -1188,8 +1188,8 @@ mod read_result {
 
 /// Design §7, *Capabilities*: `memory_forget` and `memory_update` carry
 /// `destructive_local_annotations()` so the sandbox derives its confirmation
-/// set from them; `memory_store`, `memory_search`, `memory_read` and
-/// `memory_list` do not prompt.
+/// set from them; `memory_store`, `memory_search`, `memory_read`,
+/// `memory_list` and `memory_timeline` do not prompt.
 #[test]
 fn memory_tool_annotations_decide_the_confirmation_prompt() {
     for name in ["memory_forget", "memory_update"] {
@@ -1197,7 +1197,12 @@ fn memory_tool_annotations_decide_the_confirmation_prompt() {
         assert_eq!(ann.destructive_hint, Some(true), "{name} prompts");
         assert_eq!(ann.open_world_hint, Some(false));
     }
-    for name in ["memory_search", "memory_read", "memory_list"] {
+    for name in [
+        "memory_search",
+        "memory_read",
+        "memory_list",
+        "memory_timeline",
+    ] {
         let ann = annotations_for_builtin(name).unwrap_or_else(|| panic!("{name} has annotations"));
         assert_eq!(ann.read_only_hint, Some(true), "{name} is read-only");
         assert_ne!(ann.destructive_hint, Some(true));
@@ -1228,7 +1233,7 @@ fn memory_tool_descriptions_promise_no_semantic_search() {
     definitions.push(memory_store_tool_definition());
     definitions.push(memory_update_tool_definition());
     definitions.push(memory_forget_tool_definition());
-    assert_eq!(definitions.len(), 6);
+    assert_eq!(definitions.len(), 7);
     for def in &definitions {
         let text = def.description.to_lowercase();
         for banned in ["semantic", "vector", "hybrid", "similarity", "embedding"] {

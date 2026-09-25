@@ -6,7 +6,7 @@ use openalpaca_storage::memory_files::{
     Dedup, EffectiveStatus, NoteId, NoteKind, NoteScope, NoteSource, NoteStatus, Origin,
     ReplacePolicy,
 };
-use openalpaca_storage::memory_index::{IndexState, MatchReason};
+use openalpaca_storage::memory_index::{IndexState, MatchReason, SearchOrder};
 
 use super::context::Surface;
 
@@ -276,6 +276,37 @@ pub struct ForgetOutput {
     pub changes: Vec<MemoryChange>,
 }
 
+/// `memory_read` with its ids (design 09 §13.1, MD-14): 1–10 notes in one
+/// call, inside the one 32 KiB read budget. `expected_revision` and
+/// `section` go with a single id.
+#[derive(Debug, Clone, Default)]
+pub struct ReadManyInput {
+    pub ids: Vec<NoteId>,
+    pub expected_revision: Option<String>,
+    pub section: Option<String>,
+}
+
+/// One id of a batch read, in the order asked.
+#[derive(Debug, Clone)]
+pub enum ReadManyItem {
+    Read(Box<ReadOutput>),
+    /// No note of this owner's partitions has the id — another owner's note
+    /// reads exactly like one that never existed.
+    NotFound(NoteId),
+    /// `expected_revision` named another revision (a single-id read).
+    RevisionConflict {
+        id: NoteId,
+        current_revision: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ReadManyOutput {
+    pub items: Vec<ReadManyItem>,
+    /// The bytes the bodies shared ([`super::READ_MAX_BYTES`]).
+    pub budget_bytes: usize,
+}
+
 /// `memory_read` (design §7a).
 #[derive(Debug, Clone, Default)]
 pub struct ReadInput {
@@ -374,16 +405,50 @@ impl Freshness {
     }
 }
 
-/// `memory_search` (design §7a).
+/// `memory_search.detail` (design 09 §13.1): what one result carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchDetail {
+    /// One index row per note — `{id, date, kind, scope, status, title,
+    /// reason, size}` and no body — the tool's default.
+    #[default]
+    Index,
+    /// The cited excerpt of design §7a, as before.
+    Snippets,
+}
+
+impl SearchDetail {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SearchDetail::Index => "index",
+            SearchDetail::Snippets => "snippets",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "index" => Some(SearchDetail::Index),
+            "snippets" => Some(SearchDetail::Snippets),
+            _ => None,
+        }
+    }
+}
+
+/// `memory_search` (design §7a; design 09 §13.1).
 #[derive(Debug, Clone, Default)]
 pub struct SearchInput {
     pub query: String,
     pub kind: Option<NoteKind>,
     pub scope: Option<NoteScope>,
-    /// 1–20, default 8.
+    /// 1–50, default 10 (design 09 §13.1).
     pub limit: Option<usize>,
     pub historical: bool,
     pub as_of: Option<DateTime<Utc>>,
+    /// Only notes dated at or after this instant — the date is `observed_at`,
+    /// else `created_at` (design 09 §13.1).
+    pub date_from: Option<DateTime<Utc>>,
+    /// Only notes dated at or before this instant.
+    pub date_to: Option<DateTime<Utc>>,
+    pub order: SearchOrder,
 }
 
 /// One search result, verified against the file it cites (design §5 step 7).
@@ -417,6 +482,132 @@ pub struct SearchResultItem {
     /// The note's effective window, from the re-read file (design 09 §6.1).
     pub valid_from: Option<DateTime<Utc>>,
     pub valid_to: Option<DateTime<Utc>>,
+    /// `observed_at`, else `created_at`, from the re-read file (design 09
+    /// §13.1).
+    pub date: DateTime<Utc>,
+    /// The note's approximate size in tokens — its body's bytes ÷ 4 — so a
+    /// model can budget a read.
+    pub size: usize,
+    /// The window has ended at the instant the search evaluated validity.
+    pub ended: bool,
+}
+
+impl SearchResultItem {
+    /// The result as an index row (design 09 §13.1): the reason is the match
+    /// reasons, joined — `-` for a short query's substring hit (§7b P5).
+    pub fn index_row(&self) -> IndexRow {
+        IndexRow {
+            id: self.id,
+            date: self.date,
+            kind: self.kind,
+            scope: self.scope,
+            status: RowStatus::of(self.effective_status, self.ended),
+            title: self.title.clone(),
+            reason: match_reasons(&self.matches),
+            size: self.size,
+            conflict: self.conflict,
+        }
+    }
+}
+
+/// The match reasons of one hit as the recall header writes them: joined by
+/// `,`, or `-` when there is none.
+pub fn match_reasons(matches: &[MatchReason]) -> String {
+    if matches.is_empty() {
+        "-".to_string()
+    } else {
+        matches
+            .iter()
+            .map(|m| m.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+/// Where a listed note stands (design 09 §13.1): in force, or out of recall
+/// for one of the reasons a timeline marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowStatus {
+    Active,
+    Superseded,
+    Archived,
+    /// Active, but its validity window has ended.
+    Ended,
+}
+
+impl RowStatus {
+    pub fn of(effective: EffectiveStatus, ended: bool) -> Self {
+        match effective {
+            EffectiveStatus::Superseded => RowStatus::Superseded,
+            EffectiveStatus::Archived => RowStatus::Archived,
+            // A candidate is never listed; were one handed here, it reads as
+            // what it is not yet — in force.
+            EffectiveStatus::Active | EffectiveStatus::Candidate if ended => RowStatus::Ended,
+            EffectiveStatus::Active | EffectiveStatus::Candidate => RowStatus::Active,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RowStatus::Active => "active",
+            RowStatus::Superseded => "superseded",
+            RowStatus::Archived => "archived",
+            RowStatus::Ended => "ended",
+        }
+    }
+}
+
+/// One index row (design 09 §13.1): what `memory_search` answers by default
+/// and `memory_timeline` lists — about 50–100 tokens, and no body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexRow {
+    pub id: NoteId,
+    /// `observed_at`, else `created_at`.
+    pub date: DateTime<Utc>,
+    pub kind: NoteKind,
+    pub scope: NoteScope,
+    pub status: RowStatus,
+    pub title: String,
+    /// Why it is listed: the match reasons of a search hit; `before`,
+    /// `anchor` or `after` on a timeline.
+    pub reason: String,
+    /// Approximate tokens: the body's bytes ÷ 4, rounded up.
+    pub size: usize,
+    /// §7b P3/P4: another note outranks it, or it carries a link nothing
+    /// honours — the flag a search result has always carried.
+    pub conflict: bool,
+}
+
+/// What a timeline is drawn around (design 09 §13.1): exactly one of a note,
+/// the first hit of a search, or an instant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimelineAnchor {
+    Note(NoteId),
+    Query(String),
+    Date(DateTime<Utc>),
+}
+
+/// `memory_timeline` (design 09 §13.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineInput {
+    pub anchor: TimelineAnchor,
+    /// Notes before the anchor: 0–20, default 5.
+    pub before: Option<usize>,
+    /// Notes after it: 0–20, default 5.
+    pub after: Option<usize>,
+}
+
+/// A timeline: index rows in time order — `before`, the anchor note (when
+/// the anchor is a note), `after`.
+#[derive(Debug, Clone)]
+pub struct TimelineOutput {
+    /// The note it was drawn around; `None` for an instant, and for a query
+    /// nothing matched (then nothing is listed).
+    pub anchor_note: Option<NoteId>,
+    /// The instant it was drawn around, for a date anchor.
+    pub anchor_date: Option<DateTime<Utc>>,
+    pub rows: Vec<IndexRow>,
+    pub index_state: IndexState,
 }
 
 #[derive(Debug, Clone)]
@@ -427,8 +618,9 @@ pub struct SearchOutput {
 }
 
 /// `memory_used[].reason` (design §7a): `pinned` and `recall` are the
-/// automatic path, `tool` a note the model fetched through `memory_search`
-/// or `memory_read` in that turn.
+/// automatic path, `tool` a note the model fetched through `memory_search`,
+/// `memory_timeline` or `memory_read` in that turn — an index row counts,
+/// its title reached the model (design 09 §13.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsedReason {

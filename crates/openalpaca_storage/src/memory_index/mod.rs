@@ -26,6 +26,7 @@
 pub mod chunker;
 pub mod query;
 mod search;
+mod timeline;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -34,7 +35,8 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
-pub use search::{MatchReason, SearchHit, SearchMode, SearchQuery, SearchResults};
+pub use search::{MatchReason, SearchHit, SearchMode, SearchOrder, SearchQuery, SearchResults};
+pub use timeline::{Timeline, TimelinePoint, TimelineQuery, TimelineRow};
 
 /// The cache file's name under `state/cache/`.
 pub const INDEX_FILE_NAME: &str = "memory-index-v1.sqlite";
@@ -43,17 +45,22 @@ pub const INDEX_FILE_NAME: &str = "memory-index-v1.sqlite";
 /// disposable. Version 2 (design 09 §2.3, ruling LR18) added
 /// `note.supersedes` and the `note_source` table, so learning's per-chunk
 /// lookup reads a note's links and citations without parsing a partition.
-pub const SCHEMA_VERSION: i64 = 2;
+/// Version 3 (design 09 §13.1, MD-14) added the note's dates — `created_at`,
+/// `observed_at` and `date`, the one a search filters and orders by and a
+/// timeline walks.
+pub const SCHEMA_VERSION: i64 = 3;
 /// Design §4: a note is at most 32 KiB. A larger body is refused by
 /// [`MemoryIndex::upsert`] so the cache stays bounded by what `memory_files`
 /// would have written.
 pub const MAX_NOTE_BYTES: usize = 32 * 1024;
 /// Design §7a: `memory_search.query` is 1–512 characters.
 pub const MAX_QUERY_CHARS: usize = 512;
-/// Design §7a: `limit` is 1–20, default 8.
+/// A [`SearchQuery::new`]'s own limit (design §7a). The tool's and the
+/// route's default is the service's (design 09 §13.1: 10), which always
+/// names its limit.
 pub const DEFAULT_LIMIT: usize = 8;
-/// Design §7a: `limit` is 1–20.
-pub const MAX_LIMIT: usize = 20;
+/// The largest page a search returns (design 09 §13.1: `limit` 1–50).
+pub const MAX_LIMIT: usize = 50;
 /// How many best-ranked chunks each FTS table contributes to the candidate
 /// set. The filters run inside the query, so these are *eligible* chunks; the
 /// cap bounds the merge, and hitting it sets `partial`.
@@ -197,6 +204,11 @@ pub struct IndexRecord {
     pub valid_from: Option<String>,
     pub valid_to: Option<String>,
     pub updated_at: String,
+    /// When the note was first written; no edit moves it.
+    pub created_at: String,
+    /// When the evidence was observed, if the note says (design §4). The
+    /// note's date is this, else `created_at` (design 09 §13.1).
+    pub observed_at: Option<String>,
     pub pinned: bool,
     /// Derived at read time by `memory_files`: a source it cites was forgotten.
     /// Excluded from the automatic path (design §6, *Forget contract*).
@@ -349,6 +361,9 @@ CREATE TABLE IF NOT EXISTS note (
     valid_from       TEXT,
     valid_to         TEXT,
     updated_at       TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    observed_at      TEXT,
+    date             TEXT NOT NULL,
     pinned           INTEGER NOT NULL,
     source_forgotten INTEGER NOT NULL,
     conflict         INTEGER NOT NULL,
@@ -365,6 +380,7 @@ CREATE TABLE IF NOT EXISTS note (
 CREATE INDEX IF NOT EXISTS note_partition_title ON note(partition_key, norm_title);
 CREATE INDEX IF NOT EXISTS note_partition_fact_key ON note(partition_key, fact_key);
 CREATE INDEX IF NOT EXISTS note_partition_pinned ON note(partition_key, pinned);
+CREATE INDEX IF NOT EXISTS note_partition_date ON note(partition_key, date, id);
 CREATE TABLE IF NOT EXISTS note_alias (
     note_rowid INTEGER NOT NULL REFERENCES note(rowid) ON DELETE CASCADE,
     norm_alias TEXT NOT NULL
@@ -1040,6 +1056,15 @@ fn validate(record: &IndexRecord) -> Result<()> {
 fn upsert_in(tx: &rusqlite::Transaction<'_>, record: &IndexRecord) -> Result<usize> {
     validate(record)?;
     let updated_at = canonicalize_timestamp("updated_at", &record.updated_at)?;
+    let created_at = canonicalize_timestamp("created_at", &record.created_at)?;
+    let observed_at = record
+        .observed_at
+        .as_deref()
+        .map(|v| canonicalize_timestamp("observed_at", v))
+        .transpose()?;
+    // Design 09 §13.1: a note is dated by what it observed, else by when it
+    // was first written — never by `updated_at`, which any edit moves.
+    let date = observed_at.clone().unwrap_or_else(|| created_at.clone());
     let valid_from = record
         .valid_from
         .as_deref()
@@ -1091,10 +1116,10 @@ fn upsert_in(tx: &rusqlite::Transaction<'_>, record: &IndexRecord) -> Result<usi
             aliases, tags, kind, status, effective_status, origin, authority,
             fact_key, valid_from, valid_to, updated_at, pinned, source_forgotten,
             conflict, same_key_loser, superseded_by, supersedes, body_line_offset,
-            mtime_ns, size, inode
+            mtime_ns, size, inode, created_at, observed_at, date
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-            ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28
+            ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31
         )",
         params![
             record.partition_key,
@@ -1125,6 +1150,9 @@ fn upsert_in(tx: &rusqlite::Transaction<'_>, record: &IndexRecord) -> Result<usi
             record.file.mtime_ns,
             record.file.size as i64,
             record.file.inode as i64,
+            created_at,
+            observed_at,
+            date,
         ],
     )?;
     let note_rowid = tx.last_insert_rowid();

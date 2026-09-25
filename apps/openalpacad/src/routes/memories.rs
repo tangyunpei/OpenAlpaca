@@ -2,7 +2,7 @@
 //! §7 *Surfaces*, §7a *`/v1/memories` and `/v1/persona/user`*; owner
 //! decisions G2 and G30; plan 3.8).
 //!
-//! Fourteen routes over one [`MemoryService`], every one under the bearer
+//! Fifteen routes over one [`MemoryService`], every one under the bearer
 //! middleware and in the shared `api_error` envelope. The owner is the
 //! daemon's `local_user_id`; the project is the `x-workspace-path` header
 //! resolved by the same marker walk a chat turn uses (absent → the global
@@ -20,6 +20,12 @@
 //! takes its targets' revisions in the body by contract, one per id; a
 //! create's `supersedes.expected_revision` is the *target's* revision.) A
 //! successful read or write answers `ETag: "<revision>"`.
+//!
+//! **Layered retrieval** (design 09 §13.1, MD-14): `GET /v1/memories/search`
+//! takes the tool's `detail`, `date_from`, `date_to` and `order_by` — its
+//! `detail` defaults to `snippets`, the answer the app's Memory view reads —
+//! and `GET /v1/memories/timeline` is `memory_timeline`: around exactly one
+//! of `anchor` (a note id), `q` (its first hit) or `date`, in index rows.
 //!
 //! **Suggestions** (Learning v2, design 09 §3.5): `GET
 //! /v1/memories/suggestions` lists the pending ones; `confirm` of a
@@ -49,9 +55,10 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use openalpaca_core::memory::service::{
-    Attribution, Capabilities, ForgetInput, ForgetItemStatus, ListInput, MemoryAccessContext,
-    MemoryError, MemoryService, Patch, ReadInput, SearchInput, StoreInput, Surface, UpdateAction,
-    UpdateInput, WorkspaceHint, wire,
+    Attribution, Capabilities, DayEdge, ForgetInput, ForgetItemStatus, ListInput,
+    MemoryAccessContext, MemoryError, MemoryService, Patch, ReadInput, SearchDetail, SearchInput,
+    SearchOrder, StoreInput, Surface, TimelineAnchor, TimelineInput, UpdateAction, UpdateInput,
+    WorkspaceHint, parse_date_bound, wire,
 };
 use openalpaca_storage::memory_files::{
     Dedup, NoteId, NoteKind, NoteScope, NoteSource, NoteStatus, ReplacePolicy, SourceType,
@@ -91,10 +98,36 @@ pub struct SearchMemoriesQuery {
     pub q: String,
     pub kind: Option<String>,
     pub scope: Option<String>,
+    /// 1–50, default 10.
     pub limit: Option<usize>,
     #[serde(default)]
     pub historical: bool,
     pub as_of: Option<String>,
+    /// `snippets` (default here) or `index` (design 09 §13.1).
+    pub detail: Option<String>,
+    /// RFC 3339, or a date `YYYY-MM-DD` from its start.
+    pub date_from: Option<String>,
+    /// RFC 3339, or a date `YYYY-MM-DD` to its end.
+    pub date_to: Option<String>,
+    /// `relevance` (default), `newest` or `oldest`.
+    pub order_by: Option<String>,
+}
+
+/// `GET /v1/memories/timeline` (design 09 §13.1): exactly one of `anchor`,
+/// `q` and `date`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineMemoriesQuery {
+    /// A note id.
+    pub anchor: Option<String>,
+    /// A search whose first hit is the anchor.
+    pub q: Option<String>,
+    /// An instant: RFC 3339, or a date `YYYY-MM-DD` from its start.
+    pub date: Option<String>,
+    /// 0–20, default 5.
+    pub before: Option<usize>,
+    /// 0–20, default 5.
+    pub after: Option<usize>,
 }
 
 /// `GET /v1/memories/recently-learned`.
@@ -273,6 +306,18 @@ pub async fn search_memories_handler(
 ) -> Response {
     match query {
         Ok(Query(q)) => api(&state).search(&headers, q).await,
+        Err(e) => bad_query(e),
+    }
+}
+
+/// `GET /v1/memories/timeline`.
+pub async fn timeline_memories_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    query: Result<Query<TimelineMemoriesQuery>, QueryRejection>,
+) -> Response {
+    match query {
+        Ok(Query(q)) => api(&state).timeline(&headers, q).await,
         Err(e) => bad_query(e),
     }
 }
@@ -468,12 +513,26 @@ impl MemoryApi {
     }
 
     async fn search(&self, headers: &HeaderMap, q: SearchMemoriesQuery) -> Response {
-        let input = match search_input(q) {
+        let (input, detail) = match search_input(q) {
             Ok(i) => i,
             Err(r) => return r.into_response(),
         };
         match self.run(headers, move |s, ctx| s.search(ctx, input)).await {
-            Ok(out) => ok(wire::search_output_json(&out)),
+            Ok(out) => ok(wire::search_json(&out, detail)),
+            Err(e) => refusal(e),
+        }
+    }
+
+    async fn timeline(&self, headers: &HeaderMap, q: TimelineMemoriesQuery) -> Response {
+        let input = match timeline_input(q) {
+            Ok(i) => i,
+            Err(r) => return r.into_response(),
+        };
+        match self
+            .run(headers, move |s, ctx| s.timeline(ctx, input))
+            .await
+        {
+            Ok(out) => ok(wire::timeline_json(&out)),
             Err(e) => refusal(e),
         }
     }
@@ -861,8 +920,33 @@ fn list_input(q: ListMemoriesQuery) -> Result<ListInput, Refusal> {
     })
 }
 
-fn search_input(q: SearchMemoriesQuery) -> Result<SearchInput, Refusal> {
-    Ok(SearchInput {
+/// A date filter or a timeline's instant (design 09 §13.1): RFC 3339, or a
+/// `YYYY-MM-DD` taken as that whole UTC day.
+fn parse_date(field: &str, value: &str, edge: DayEdge) -> Result<DateTime<Utc>, Refusal> {
+    parse_date_bound(value, edge).ok_or_else(|| {
+        invalid(format!(
+            "{field}: `{value}` is neither an RFC 3339 timestamp nor a date (YYYY-MM-DD)"
+        ))
+    })
+}
+
+/// The search and the detail to render it in — `snippets` unless asked, so
+/// the Memory view's call answers as it always has.
+fn search_input(q: SearchMemoriesQuery) -> Result<(SearchInput, SearchDetail), Refusal> {
+    let detail = match q.detail.as_deref() {
+        None => SearchDetail::Snippets,
+        Some(v) => SearchDetail::parse(v)
+            .ok_or_else(|| invalid(format!("detail must be `index` or `snippets`, got {v:?}")))?,
+    };
+    let order = match q.order_by.as_deref() {
+        None => SearchOrder::Relevance,
+        Some(v) => SearchOrder::parse(v).ok_or_else(|| {
+            invalid(format!(
+                "order_by must be `relevance`, `newest` or `oldest`, got {v:?}"
+            ))
+        })?,
+    };
+    let input = SearchInput {
         query: q.q,
         kind: q.kind.as_deref().map(parse_kind).transpose()?,
         scope: q.scope.as_deref().map(parse_scope).transpose()?,
@@ -873,6 +957,38 @@ fn search_input(q: SearchMemoriesQuery) -> Result<SearchInput, Refusal> {
             .as_deref()
             .map(|v| parse_ts("as_of", v))
             .transpose()?,
+        date_from: q
+            .date_from
+            .as_deref()
+            .map(|v| parse_date("date_from", v, DayEdge::Start))
+            .transpose()?,
+        date_to: q
+            .date_to
+            .as_deref()
+            .map(|v| parse_date("date_to", v, DayEdge::End))
+            .transpose()?,
+        order,
+    };
+    Ok((input, detail))
+}
+
+fn timeline_input(q: TimelineMemoriesQuery) -> Result<TimelineInput, Refusal> {
+    let anchor = match (q.anchor, q.q, q.date) {
+        (Some(id), None, None) => TimelineAnchor::Note(parse_id(&id)?),
+        (None, Some(text), None) => TimelineAnchor::Query(text),
+        (None, None, Some(date)) => {
+            TimelineAnchor::Date(parse_date("date", &date, DayEdge::Start)?)
+        }
+        _ => {
+            return Err(invalid(
+                "give exactly one of anchor (a note id), q (a search) or date",
+            ));
+        }
+    };
+    Ok(TimelineInput {
+        anchor,
+        before: q.before,
+        after: q.after,
     })
 }
 

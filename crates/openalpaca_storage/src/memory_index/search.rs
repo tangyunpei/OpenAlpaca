@@ -56,6 +56,37 @@ pub enum SearchMode {
     Automatic,
 }
 
+/// How a search orders its hits (design 09 §13.1, `order_by`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchOrder {
+    /// The ranking of design §5 step 6.
+    #[default]
+    Relevance,
+    /// The newest `date` first — `observed_at`, else `created_at`.
+    Newest,
+    /// The oldest `date` first.
+    Oldest,
+}
+
+impl SearchOrder {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Relevance => "relevance",
+            Self::Newest => "newest",
+            Self::Oldest => "oldest",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "relevance" => Some(Self::Relevance),
+            "newest" => Some(Self::Newest),
+            "oldest" => Some(Self::Oldest),
+            _ => None,
+        }
+    }
+}
+
 /// One search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchQuery {
@@ -66,7 +97,7 @@ pub struct SearchQuery {
     pub partition_keys: Vec<String>,
     /// A `NoteKind` string.
     pub kind: Option<String>,
-    /// 1–20.
+    /// 1–[`MAX_LIMIT`] (50).
     pub limit: usize,
     /// `true` includes superseded and archived notes and, with no `as_of`,
     /// notes whose validity interval has ended. Candidates are never
@@ -77,6 +108,12 @@ pub struct SearchQuery {
     /// begun is kept (design §4 *Times*), unless `historical`, which then
     /// applies no validity filter.
     pub as_of: Option<DateTime<Utc>>,
+    /// Only notes dated at or after this instant (design 09 §13.1: the date
+    /// is `observed_at`, else `created_at`), applied before the limit.
+    pub date_from: Option<DateTime<Utc>>,
+    /// Only notes dated at or before this instant.
+    pub date_to: Option<DateTime<Utc>>,
+    pub order: SearchOrder,
     pub mode: SearchMode,
 }
 
@@ -89,6 +126,9 @@ impl SearchQuery {
             limit: super::DEFAULT_LIMIT,
             historical: false,
             as_of: None,
+            date_from: None,
+            date_to: None,
+            order: SearchOrder::Relevance,
             mode: SearchMode::Explicit,
         }
     }
@@ -115,6 +155,12 @@ pub struct SearchHit {
     /// used — `as_of`, else the index clock's "now" — so the recall header
     /// and the filter agree on one clock (design 09 §6.1).
     pub upcoming: bool,
+    /// The note's window has ended at that same instant — only a
+    /// `historical` search without `as_of` returns such a note (design 09
+    /// §13.1: an index row marks it).
+    pub ended: bool,
+    /// `observed_at`, else `created_at`, in the canon (design 09 §13.1).
+    pub date: String,
     pub updated_at: String,
     pub pinned: bool,
     pub conflict: bool,
@@ -226,6 +272,16 @@ impl Filter {
         if q.mode == SearchMode::Automatic {
             clause.push_str(" AND n.same_key_loser = 0 AND n.source_forgotten = 0");
         }
+        // Design 09 §13.1: the date bounds are inclusive and, like every
+        // filter here, run before the limit.
+        if let Some(from) = q.date_from {
+            clause.push_str(" AND n.date >= ?");
+            params.push(Value::Text(canon_timestamp(&from)));
+        }
+        if let Some(to) = q.date_to {
+            clause.push_str(" AND n.date <= ?");
+            params.push(Value::Text(canon_timestamp(&to)));
+        }
         Self {
             clause,
             params,
@@ -269,6 +325,7 @@ struct NoteRow {
     valid_from: Option<String>,
     valid_to: Option<String>,
     updated_at: String,
+    date: String,
     pinned: bool,
     conflict: bool,
     same_key_loser: bool,
@@ -563,7 +620,7 @@ fn load_notes(conn: &Connection, rowids: &BTreeSet<i64>) -> Result<HashMap<i64, 
             "SELECT rowid, id, partition_key, scope, revision, relative_path, title, kind,
                     status, effective_status, origin, fact_key, valid_from, valid_to,
                     updated_at, pinned, conflict, same_key_loser, source_forgotten,
-                    superseded_by, authority
+                    superseded_by, authority, date
              FROM note WHERE rowid IN ({})",
             placeholders(batch.len())
         );
@@ -594,6 +651,7 @@ fn load_notes(conn: &Connection, rowids: &BTreeSet<i64>) -> Result<HashMap<i64, 
                 source_forgotten: r.get::<_, i64>(18)? != 0,
                 superseded_by: serde_json::from_str(&superseded).unwrap_or_default(),
                 authority: r.get(20)?,
+                date: r.get(21)?,
             })
         })?;
         for row in rows {
@@ -882,6 +940,11 @@ fn rank(
                 .valid_from
                 .as_deref()
                 .is_some_and(|from| from > filter.instant.as_str()),
+            ended: note
+                .valid_to
+                .as_deref()
+                .is_some_and(|to| to <= filter.instant.as_str()),
+            date: note.date.clone(),
             updated_at: note.updated_at.clone(),
             pinned: note.pinned,
             conflict: note.conflict,
@@ -897,13 +960,24 @@ fn rank(
         });
     }
     // Score, then newest `updated_at`, then id — deterministic to the end.
-    hits.sort_by(|a, b| {
+    // A date order (design 09 §13.1) sorts every match by its date first and
+    // keeps that same order among notes of one date.
+    let by_score = |a: &SearchHit, b: &SearchHit| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| b.updated_at.cmp(&a.updated_at))
             .then_with(|| a.id.cmp(&b.id))
-    });
+    };
+    match q.order {
+        SearchOrder::Relevance => hits.sort_by(by_score),
+        SearchOrder::Newest => {
+            hits.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| by_score(a, b)))
+        }
+        SearchOrder::Oldest => {
+            hits.sort_by(|a, b| a.date.cmp(&b.date).then_with(|| by_score(a, b)))
+        }
+    }
     hits.truncate(q.limit);
     let count = hits.len();
     SearchResults {

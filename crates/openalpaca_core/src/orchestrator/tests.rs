@@ -7085,6 +7085,69 @@ async fn the_main_loop_recalls_the_natural_question_fixture_through_the_service(
     assert!(!blocks[0].contains(&scene.coffee.id.to_string()));
 }
 
+/// Design 09 §13.1 (MD-14): the main loop's system prompt says the layered
+/// workflow once, in one line — search returns an index, pick ids, read only
+/// those, several at once — on a turn whose surface carries the memory read
+/// tools, and not on a turn without them.
+#[tokio::test]
+async fn the_main_loop_prompt_says_search_pick_read_in_one_line() {
+    let guidance = crate::tools::builtins::main_loop_memory_guidance();
+    let lines: Vec<&str> = guidance.lines().collect();
+    assert_eq!(lines.len(), 3, "a tag, one line, a tag: {guidance}");
+    for word in [
+        "memory_search",
+        "index",
+        "memory_read",
+        "several",
+        "memory_timeline",
+    ] {
+        assert!(lines[1].contains(word), "{word}: {}", lines[1]);
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "noted",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+    for tool in crate::tools::builtins::memory_read_tools(scene.service.clone()) {
+        orch.tool_registry.register(tool).unwrap();
+    }
+    send_tool_mode(&orch, Uuid::new_v4(), "what editor do I prefer?").await;
+    {
+        let reqs = requests.lock().unwrap();
+        let system = &reqs[0].messages[0];
+        assert!(matches!(system.role, openalpaca_llm::Role::System));
+        assert_eq!(
+            system.content.matches(guidance).count(),
+            1,
+            "{}",
+            system.content
+        );
+        let tools: Vec<&str> = reqs[0].tools.iter().map(|t| t.name.as_str()).collect();
+        for name in ["memory_search", "memory_read", "memory_timeline"] {
+            assert!(tools.contains(&name), "{name}: {tools:?}");
+        }
+    }
+
+    let (bare, requests) =
+        make_tool_mode_orchestrator(None, "noted", DaemonConfig::default(), vec![]);
+    send_tool_mode(&bare, Uuid::new_v4(), "what editor do I prefer?").await;
+    let reqs = requests.lock().unwrap();
+    assert!(
+        !reqs[0]
+            .messages
+            .iter()
+            .any(|m| m.content.contains("<memory_rules>")),
+        "no memory tools, no memory guidance"
+    );
+}
+
 /// **Plan 3.3, fixture 21 step 2 on the skill tier.** A `/slash` turn is a
 /// model-answering path like the main loop and takes the same per-turn
 /// delivery (`orchestrator/skill/invocation.rs`): `/file what editor do I

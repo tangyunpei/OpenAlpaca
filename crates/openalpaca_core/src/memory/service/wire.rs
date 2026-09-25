@@ -3,9 +3,9 @@
 //! result reads the same on the tool surface and on the wire.
 
 use super::{
-    ForgetItemStatus, ForgetOutput, HistoryEntry, ListItem, ListOutput, ReadOutput,
-    RecentlyUsedItem, SearchOutput, StoreOutput, Suggestion, SyncReport, UpdateOutput,
-    WithdrawOutput, format_ts, source_json,
+    ForgetItemStatus, ForgetOutput, HistoryEntry, IndexRow, ListItem, ListOutput, ReadManyItem,
+    ReadManyOutput, ReadOutput, RecentlyUsedItem, SearchDetail, SearchOutput, StoreOutput,
+    Suggestion, SyncReport, TimelineOutput, UpdateOutput, WithdrawOutput, format_ts, source_json,
 };
 use openalpaca_storage::memory_files::{
     Dedup, DoctorReport, NoteId, PartitionHealth, SnapshotScope,
@@ -22,6 +22,101 @@ fn sources_status(source_forgotten: bool) -> &'static str {
     } else {
         "intact"
     }
+}
+
+/// `memory_search`'s result in the detail asked for (design 09 §13.1): index
+/// rows, or the cited snippets of [`search_output_json`].
+pub fn search_json(out: &SearchOutput, detail: SearchDetail) -> Value {
+    match detail {
+        SearchDetail::Index => search_index_json(out),
+        SearchDetail::Snippets => search_output_json(out),
+    }
+}
+
+/// One index row (design 09 §13.1): `{id, date, kind, scope, status, title,
+/// reason, size}` — no body, no excerpt — and §7b P3's `conflict`, which a
+/// search result has always carried.
+pub fn index_row_json(row: &IndexRow) -> Value {
+    json!({
+        "id": row.id.to_string(),
+        "date": format_ts(row.date),
+        "kind": row.kind.as_str(),
+        "scope": row.scope.as_str(),
+        "status": row.status.as_str(),
+        "title": row.title,
+        "reason": row.reason,
+        "size": row.size,
+        "conflict": row.conflict,
+    })
+}
+
+/// `memory_search`'s index (design 09 §13.1): one row per hit, in the
+/// search's order, with the same `count`, `partial` and `index_state` as the
+/// snippets.
+pub fn search_index_json(out: &SearchOutput) -> Value {
+    let results: Vec<Value> = out
+        .results
+        .iter()
+        .map(|r| index_row_json(&r.index_row()))
+        .collect();
+    let count = results.len();
+    json!({
+        "results": results,
+        "count": count,
+        "partial": out.partial,
+        "index_state": out.index_state.as_str(),
+    })
+}
+
+/// `memory_timeline`'s result (design 09 §13.1): the rows in time order,
+/// each `reason` saying `before`, `anchor` or `after`, and what the
+/// timeline was drawn around — `{id}` of the anchor note, `{date}` of an
+/// instant, or null when a query matched nothing.
+pub fn timeline_json(out: &TimelineOutput) -> Value {
+    let anchor = match (out.anchor_note, out.anchor_date) {
+        (Some(id), _) => json!({ "id": id.to_string() }),
+        (None, Some(at)) => json!({ "date": format_ts(at) }),
+        (None, None) => Value::Null,
+    };
+    json!({
+        "anchor": anchor,
+        "results": out.rows.iter().map(index_row_json).collect::<Vec<_>>(),
+        "count": out.rows.len(),
+        "index_state": out.index_state.as_str(),
+    })
+}
+
+/// `memory_read`'s result with its ids (design 09 §13.1): one entry per id,
+/// in the order asked — the §7a read object, or `{id, error}` for an id
+/// that could not be read (`not_found`; `revision_conflict` with the
+/// current revision). `count` is how many were read; the bodies shared
+/// `budget_bytes`.
+pub fn read_many_json(out: &ReadManyOutput) -> Value {
+    let mut count = 0;
+    let notes: Vec<Value> = out
+        .items
+        .iter()
+        .map(|item| match item {
+            ReadManyItem::Read(read) => {
+                count += 1;
+                read_output_json(read)
+            }
+            ReadManyItem::NotFound(id) => json!({ "id": id.to_string(), "error": "not_found" }),
+            ReadManyItem::RevisionConflict {
+                id,
+                current_revision,
+            } => json!({
+                "id": id.to_string(),
+                "error": "revision_conflict",
+                "current_revision": current_revision,
+            }),
+        })
+        .collect();
+    json!({
+        "notes": notes,
+        "count": count,
+        "budget_bytes": out.budget_bytes,
+    })
 }
 
 /// `memory_search`'s result (design §7a; §7b P3/P6), with each note's
