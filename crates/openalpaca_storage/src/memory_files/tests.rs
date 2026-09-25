@@ -5106,3 +5106,53 @@ fn a_forget_whose_save_fails_caches_no_snapshot() {
         view_digest(&uncached.load().unwrap())
     );
 }
+
+/// Design §6, step 4 (navigation, best effort): a note written and recorded
+/// whose file cannot be stat'ed a moment later — removed or made unreadable
+/// before step 4 looks — is still a write that landed. The caller gets its
+/// revision and the partition as a fresh read finds it, not an error that
+/// would skip the reindex and the `memory_changed` event.
+#[test]
+fn a_write_that_landed_is_not_failed_by_the_stat_after_it() {
+    let sb = Sandbox::new();
+    let cache = settled_cache(NOTE_PARSE_CACHE_BYTES);
+    let p = sb.open_home_cached(ALICE, &cache);
+    let notes = five_notes(&p);
+    p.load().unwrap();
+
+    super::partition::fail_written_stat();
+    let (created, view) = p
+        .create_viewed(
+            new_note(
+                "Editor",
+                "# Editor\n\nThe user edits with vim.\n",
+                NoteKind::Preference,
+            ),
+            Actor::UserSurface,
+        )
+        .expect("a create that landed");
+    assert_eq!(view.get(&created.id).unwrap().revision, created.revision);
+    let navigation = std::fs::read_to_string(p.root().join(NAVIGATION_FILE)).unwrap();
+    assert!(navigation.contains("Editor]"), "{navigation}");
+
+    super::partition::fail_written_stat();
+    let (updated, view) = p
+        .update_viewed(
+            &notes[0].id,
+            &notes[0].revision,
+            edit_body("# Note 0\n\nThe user likes item zero.\n"),
+            Actor::UserSurface,
+        )
+        .expect("an update that landed");
+    assert!(updated.written);
+    assert_eq!(view.get(&notes[0].id).unwrap().revision, updated.revision);
+    assert_eq!(
+        view_digest(&view),
+        view_digest(&sb.open_home(ALICE).load().unwrap())
+    );
+    assert_eq!(
+        view_digest(&p.load().unwrap()),
+        view_digest(&view),
+        "a cached read agrees"
+    );
+}

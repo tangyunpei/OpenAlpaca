@@ -56,6 +56,10 @@ thread_local! {
     /// as 1; 0 fails none ([`fail_snapshot_save`]).
     #[cfg(test)]
     static FAILING_SAVE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Tests: whether the stat of the next note file this thread writes
+    /// fails ([`fail_written_stat`]).
+    #[cfg(test)]
+    static FAILING_STAT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Tests: the `n`th snapshot save this thread makes from now (1: the next)
@@ -63,6 +67,14 @@ thread_local! {
 #[cfg(test)]
 pub(super) fn fail_snapshot_save(n: u32) {
     FAILING_SAVE.with(|c| c.set(n));
+}
+
+/// Tests: the stat of the next note file this thread writes fails once it
+/// is in place, as it would for a file removed or made unreadable a moment
+/// after its rename.
+#[cfg(test)]
+pub(super) fn fail_written_stat() {
+    FAILING_STAT.with(|f| f.set(true));
 }
 
 /// The whole-partition reads this thread has made so far — every note
@@ -1010,6 +1022,10 @@ impl Partition {
     /// The scan entry of one file this process just wrote, and its stat
     /// identity.
     fn scan_one(&self, path: &Path) -> Result<(ScanEntry, StatKey)> {
+        #[cfg(test)]
+        if FAILING_STAT.with(|f| f.replace(false)) {
+            anyhow::bail!("injected stat failure");
+        }
         let meta = fs::symlink_metadata(path)
             .with_context(|| format!("Failed to stat {}", path.display()))?;
         let file_name = path
@@ -1412,8 +1428,23 @@ impl Partition {
         // Step 4: navigation (the index and the event are the caller's),
         // from what was read plus what was written — and the parse cache,
         // which takes the written file untrusted: the next read re-hashes
-        // it (design 09 §6.3).
-        let (entry, stat) = self.scan_one(&target)?;
+        // it (design 09 §6.3). The write has landed: a file that cannot be
+        // stat'ed now costs the patched view and the cache entry, not the
+        // write — the view is read again instead.
+        let (entry, stat) = match self.scan_one(&target) {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!(
+                    "Could not stat the note just written in {} ({}); reading the partition again",
+                    self.partition_key,
+                    e.root_cause()
+                );
+                let view;
+                (*parsed, view) = self.load_parsed(state)?;
+                self.write_navigation(&view.views);
+                return Ok((to_rev, view));
+            }
+        };
         let file_name = entry.file_name.clone();
         let mut replaced_names = Vec::new();
         if write_to != target
