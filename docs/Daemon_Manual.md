@@ -639,14 +639,14 @@ the top 2 as excerpts and lists up to 8 more one line each — `<id> <date>
 <kind> “<title>” — <reason>`, the date and the reason as a `memory_search`
 index row writes them — under the line `More notes that may be relevant
 (read with memory_read):`, so the model opens only the ones it needs; a
-listed note is reported with reason `index`. `excerpts` sends up to 8 notes,
-pinned ones included, each as an excerpt. A match too large to excerpt within
-the budget is listed instead. The key is read on every turn, so a reloaded
-`daemon.toml` applies to the next one. A workflow's lead gets the same recall,
-in the same mode, once at its start. Search is literal: every term of three or more
-characters is matched as a whole word and as a substring, a one- or
-two-character query (a short Chinese word) goes through a bounded scan, and
-nothing asks a model.
+listed note is reported with reason `index`, and a match too large to
+excerpt within the budget is listed instead. `excerpts` sends up to 8 notes,
+pinned ones included, each as an excerpt. The key is read on every turn, so a
+reloaded `daemon.toml` applies to the next one. A workflow's lead gets the same
+recall, in the same mode, once at its start. Search is literal: every term of
+three or more characters is matched as a whole word and as a substring, a
+one- or two-character query (a short Chinese word) goes through a bounded
+scan, and nothing asks a model.
 
 **Learning from conversations** happens in the background and never delays a
 reply. Every turn is queued, and a conversation's turns not yet learned are
