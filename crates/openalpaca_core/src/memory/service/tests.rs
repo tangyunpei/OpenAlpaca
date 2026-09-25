@@ -2948,6 +2948,219 @@ fn forget_takes_ids_with_revisions_and_records_a_tombstone() {
     assert!(!again.retained.transcript);
 }
 
+/// Makes the on-disk index at `path` refuse (or accept again) every write to
+/// its `note` table — a real index failure, from triggers the index's own
+/// connection runs, attached through another connection because the index
+/// keeps its own private.
+fn refuse_index_writes(h: &Harness, path: &Path, refuse: bool) {
+    h.db.with_connection(|c| {
+        c.execute(
+            "ATTACH DATABASE ?1 AS idx",
+            [path.to_string_lossy().as_ref()],
+        )?;
+        let sql = if refuse {
+            "CREATE TRIGGER idx.refuse_insert BEFORE INSERT ON note
+               BEGIN SELECT RAISE(ABORT, 'index write refused'); END;
+             CREATE TRIGGER idx.refuse_update BEFORE UPDATE ON note
+               BEGIN SELECT RAISE(ABORT, 'index write refused'); END;
+             CREATE TRIGGER idx.refuse_delete BEFORE DELETE ON note
+               BEGIN SELECT RAISE(ABORT, 'index write refused'); END;"
+        } else {
+            "DROP TRIGGER idx.refuse_insert;
+             DROP TRIGGER idx.refuse_update;
+             DROP TRIGGER idx.refuse_delete;"
+        };
+        c.execute_batch(sql)?;
+        c.execute_batch("DETACH DATABASE idx")?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// Design §2, §6 (L3 re-review): the index is a disposable cache, and step
+/// 4 of a mutation — the index — follows a write that is already durable
+/// (step 3). So an index that fails after the file landed does not fail the
+/// write: store, edit, archive, confirm, forget and undo each answer `Ok`
+/// with what they wrote and publish `memory_changed`, because a caller that
+/// retried an error would store a duplicate or meet a revision conflict. The
+/// next reconciliation tick brings the index up to date, and so does a
+/// search's stat scan.
+#[test]
+fn an_index_failure_after_a_landed_write_reports_the_write_done() {
+    let cache = tempfile::tempdir().unwrap();
+    let path = cache.path().join("memory-index-v1.sqlite");
+    let h = Harness::with_index(MemoryIndex::open(&path).unwrap());
+    let user = h.user(ALICE, None);
+    let tool = h.tool(ALICE, None);
+    let extraction = h
+        .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap();
+    let coffee = h.store(
+        &user,
+        "Coffee order",
+        "# Coffee order\n\nA flat white.\n",
+        NoteKind::Preference,
+    );
+    let parking = h.store(
+        &user,
+        "Parking bay",
+        "# Parking bay\n\nBay 12.\n",
+        NoteKind::Fact,
+    );
+    let locker = h.store(
+        &user,
+        "Gym locker",
+        "# Gym locker\n\nLocker 7.\n",
+        NoteKind::Fact,
+    );
+    let lunch = h.store(
+        &tool,
+        "Lunch spot",
+        "# Lunch spot\n\nThe noodle bar on Fridays.\n",
+        NoteKind::Preference,
+    );
+    let desk = h
+        .service
+        .store(
+            &extraction,
+            StoreInput {
+                title: "Standing desk".into(),
+                body: "# Standing desk\n\nThe office has a standing desk.\n".into(),
+                kind: Some(NoteKind::Fact),
+                provenance: Some(ExtractionProvenance::OtherOutput),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut rx = h.bus.subscribe();
+
+    refuse_index_writes(&h, &path, true);
+    let bike = h
+        .service
+        .store(
+            &user,
+            StoreInput {
+                title: "Bike lock".into(),
+                body: "# Bike lock\n\nThe bike lock code is 4711.\n".into(),
+                kind: Some(NoteKind::Fact),
+                ..Default::default()
+            },
+        )
+        .expect("the store landed");
+    assert_eq!(bike.dedup, Dedup::Created);
+    let latte = h
+        .service
+        .update(
+            &user,
+            UpdateInput {
+                id: coffee.id,
+                expected_revision: coffee.revision.clone(),
+                action: edit("# Coffee order\n\nAn oat-milk latte.\n"),
+                reason: None,
+            },
+        )
+        .expect("the edit landed");
+    let archived = h
+        .service
+        .update(
+            &user,
+            UpdateInput {
+                id: parking.id,
+                expected_revision: parking.revision.clone(),
+                action: UpdateAction::Archive,
+                reason: None,
+            },
+        )
+        .expect("the archive landed");
+    assert_eq!(archived.status, NoteStatus::Archived);
+    let confirmed = h
+        .service
+        .update(
+            &user,
+            UpdateInput {
+                id: desk.id,
+                expected_revision: desk.revision.clone(),
+                action: UpdateAction::Confirm {
+                    target_revision: None,
+                },
+                reason: None,
+            },
+        )
+        .expect("the confirm landed");
+    assert_eq!(confirmed.status, NoteStatus::Active);
+    let forgot = h
+        .service
+        .forget(
+            &user,
+            ForgetInput {
+                targets: vec![(locker.id, locker.revision.clone())],
+                reason: None,
+            },
+        )
+        .expect("the forget landed");
+    assert_eq!(forgot.results[0].status, ForgetItemStatus::Forgotten);
+    let undone = h
+        .service
+        .undo(&user, lunch.id, &lunch.revision)
+        .expect("the undo landed");
+    assert_eq!(undone.id, lunch.id);
+
+    // Every write is on disk and was announced.
+    let notes = h.home_notes_dir(ALICE_KEY);
+    assert!(note_file_for(&notes, bike.id).is_some());
+    let text = fs::read_to_string(note_file_for(&notes, coffee.id).unwrap()).unwrap();
+    assert!(text.contains("oat-milk latte"), "{text}");
+    assert!(note_file_for(&notes, locker.id).is_none());
+    assert!(note_file_for(&notes, lunch.id).is_none());
+    let mut changed = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let crate::events::SystemEvent::MemoryChanged {
+            note_id, change, ..
+        } = event
+        {
+            changed.push((note_id, change));
+        }
+    }
+    assert_eq!(
+        changed,
+        [
+            (bike.id.to_string(), "created".to_string()),
+            (coffee.id.to_string(), "updated".to_string()),
+            (parking.id.to_string(), "archived".to_string()),
+            (desk.id.to_string(), "confirmed".to_string()),
+            (locker.id.to_string(), "forgotten".to_string()),
+            (lunch.id.to_string(), "forgotten".to_string()),
+        ]
+    );
+
+    // The next reconciliation tick catches the index up, row by row.
+    refuse_index_writes(&h, &path, false);
+    h.service.reconcile_owner(ALICE).unwrap();
+    let key = format!("home-{ALICE_KEY}");
+    let row = |id: NoteId| h.service.index().get(&key, &id.to_string()).unwrap();
+    assert_eq!(row(bike.id).expect("indexed").revision, bike.revision);
+    assert_eq!(row(coffee.id).expect("indexed").revision, latte.revision);
+    assert_eq!(
+        row(parking.id).expect("indexed").effective_status,
+        openalpaca_storage::memory_index::EffectiveStatus::Archived
+    );
+    assert_eq!(
+        row(desk.id).expect("indexed").effective_status,
+        openalpaca_storage::memory_index::EffectiveStatus::Active
+    );
+    assert!(row(locker.id).is_none(), "the forgotten row is gone");
+    assert!(row(lunch.id).is_none(), "the withdrawn row is gone");
+    assert_eq!(
+        search_ids(&search(&h, &user, "bike lock code")),
+        vec![bike.id]
+    );
+    assert_eq!(
+        search_ids(&search(&h, &user, "oat-milk latte")),
+        vec![coffee.id]
+    );
+    assert!(search_ids(&search(&h, &user, "gym locker")).is_empty());
+}
+
 /// Design §6, *recently learned*, and design 09 §3.3: `undo` withdraws a
 /// learned note by id and revision, and is refused once the note is the
 /// user's (edited, confirmed or saved by them).

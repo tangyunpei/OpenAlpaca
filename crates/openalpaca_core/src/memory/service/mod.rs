@@ -647,8 +647,46 @@ impl MemoryService {
     /// [`Self::reindex`] from a view already read — the one a mutation
     /// returns (design 09 §6.3 quick win 3). An incremental pass builds a
     /// row, and copies a body, only for a note whose fingerprint changed
-    /// (quick win 4).
+    /// (quick win 4). A pass that fails part-way may have recorded
+    /// fingerprints of rows it never wrote, so it forgets the partition's
+    /// fingerprints: the next pass rebuilds the partition whole instead of
+    /// trusting them.
     fn reindex_view(
+        &self,
+        p: &Partition,
+        loaded: &LoadedPartition,
+        full: bool,
+    ) -> Result<(), MemoryError> {
+        let result = self.reindex_view_once(p, loaded, full);
+        if result.is_err() {
+            self.fingerprints
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(p.partition_key());
+        }
+        result
+    }
+
+    /// Step 4 of a mutation (design §6): the index follows a write that is
+    /// already durable — the note file and its snapshot entry are the
+    /// authority, and the index is a disposable cache (§2). So an index that
+    /// fails here does not fail the write: a caller that retried an error
+    /// would store a duplicate or meet a revision conflict. The failure is
+    /// logged, [`Self::reindex_view`] has dropped the partition's
+    /// fingerprints, and the rows the index lacks are found by the next
+    /// search's stat scan or the next reconciliation tick (§5, 30 s), which
+    /// re-index the partition whole.
+    fn reindex_after_write(&self, p: &Partition, loaded: &LoadedPartition) {
+        if let Err(e) = self.reindex_view(p, loaded, false) {
+            tracing::warn!(
+                partition = p.partition_key(),
+                "memory: the write landed, but the search index did not follow; \
+                 the next search or reconciliation re-indexes the partition: {e}"
+            );
+        }
+    }
+
+    fn reindex_view_once(
         &self,
         p: &Partition,
         loaded: &LoadedPartition,
@@ -1346,7 +1384,7 @@ impl MemoryService {
             .begin_write(&Self::slot_key(&store_scope, &ctx.owner_key));
         let partition = self.open_partition(&store_scope, &ctx.owner_id)?;
         let (created, view) = partition.create_viewed(new, actor)?;
-        self.reindex_view(&partition, &view, false)?;
+        self.reindex_after_write(&partition, &view);
         let change = (created.dedup == Dedup::Created).then(|| MemoryChange {
             partition_key: partition.partition_key().to_string(),
             note_id: created.id,

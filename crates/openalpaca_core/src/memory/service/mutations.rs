@@ -1,7 +1,8 @@
 //! The mutations of design §6 that touch an existing note — `update`
 //! (edit / archive / confirm), `forget` and `undo` — under the revision
 //! check, the G2 authority rules and the per-partition writer queue. Each
-//! is one single-note mutation of the file layer; the index follows.
+//! is one single-note mutation of the file layer; the index follows, and a
+//! failing index never fails a write that landed (`reindex_after_write`).
 //!
 //! Learning v2 (design 09 §3.2–§3.3) adds two things here: confirming a
 //! suggestion binds its target's revision (S5) and then dismisses every
@@ -120,7 +121,7 @@ impl MemoryService {
         } else {
             self.dismiss_others(ctx, &partition, &mut view, input.id, &suggestion_targets)
         };
-        self.reindex_view(&partition, &view, false)?;
+        self.reindex_after_write(&partition, &view);
         let origin = view
             .get(&input.id)
             .map(|v| v.derived.origin)
@@ -289,7 +290,7 @@ impl MemoryService {
                     status,
                 });
             }
-            self.reindex_view(&partition, &after, false)?;
+            self.reindex_after_write(&partition, &after);
         }
         let forgotten = results
             .iter()
@@ -475,7 +476,7 @@ impl MemoryService {
             }
             Some(ForgetStatus::NotFound) | None => return Err(MemoryError::NotFound(id)),
         }
-        self.reindex_view(&partition, &loaded, false)?;
+        self.reindex_after_write(&partition, &loaded);
         let restored = retired
             .into_iter()
             .filter(|t| {
