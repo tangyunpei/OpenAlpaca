@@ -753,7 +753,7 @@ impl Partition {
         };
         let generation = save_generation();
         let taken = SystemTime::now();
-        let stat = StatKey::lstat(&self.snapshot_path);
+        let stat = cache.key(&self.snapshot_path, StatKey::lstat(&self.snapshot_path));
         if let Some(stat) = stat
             && let Some(hit) = cache.snapshot(
                 &self.partition_key,
@@ -814,7 +814,7 @@ impl Partition {
         else {
             return;
         };
-        let Some(stat) = StatKey::lstat(&self.snapshot_path) else {
+        let Some(stat) = cache.key(&self.snapshot_path, StatKey::lstat(&self.snapshot_path)) else {
             return;
         };
         if save_generation() != generation {

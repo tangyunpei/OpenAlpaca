@@ -5156,3 +5156,46 @@ fn a_write_that_landed_is_not_failed_by_the_stat_after_it() {
         "a cached read agrees"
     );
 }
+
+/// Design 09 §6.3, *Snapshot*: a cached snapshot is bound to the save
+/// generation as well as to the file's stat, so a save of this process
+/// retires it even when the stat cannot tell — here the injected stat
+/// function keeps reporting the key from before the save, as a platform
+/// with no inode could for a same-size save inside one timestamp tick.
+/// Fails with the generation check in `NoteParseCache::snapshot` removed.
+#[test]
+fn a_save_the_stat_cannot_see_retires_the_cached_snapshot() {
+    let sb = Sandbox::new();
+    let frozen: Arc<std::sync::Mutex<Option<(PathBuf, StatKey)>>> = Arc::default();
+    let pinned = Arc::clone(&frozen);
+    let cache = Arc::new(NoteParseCache::new(NOTE_PARSE_CACHE_BYTES).with_stat(
+        move |path: &Path| {
+            if let Some((p, key)) = pinned.lock().unwrap().as_ref()
+                && p == path
+            {
+                return Some(*key);
+            }
+            settled_stat(path)
+        },
+    ));
+    let p = sb.open_home_cached(ALICE, &cache);
+    five_notes(&p);
+    let path = p.snapshot_path().to_path_buf();
+    *frozen.lock().unwrap() = Some((path.clone(), settled_stat(&path).unwrap()));
+
+    // A save through a handle that has no cache: the stat stays frozen.
+    sb.open_home(ALICE)
+        .create(
+            new_note("Uncached", "# Uncached\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let before = snapshot_loads_on_this_thread();
+    let reopened = sb.open_home_cached(ALICE, &cache);
+    assert_eq!(
+        snapshot_loads_on_this_thread() - before,
+        1,
+        "a save retires the cached snapshot its stat still matches"
+    );
+    assert_eq!(reopened.snapshot().unwrap().notes.len(), 6);
+}
