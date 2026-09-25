@@ -337,41 +337,217 @@ fn every_shipped_template_grants_read_result() {
     assert!(seen >= 9, "every shipped template was checked, not {seen}");
 }
 
-/// Design 09 §5, characterization at HEAD: three shipped templates —
-/// writing, research and system — do not name `memory_read`, and nothing
-/// grants it to them on the way to a subagent, so those subagents cannot
-/// search the owner's memory.
-#[test]
-fn writing_research_and_system_lack_memory_read() {
+// ── Design 09 §5 (LQ3): memory search for every built-in agent ──────────
+
+/// Whether the gate admits `memory_read` for `agent`, from the resolved
+/// allowlist — what a subagent's call is checked against, not the raw
+/// frontmatter.
+fn memory_read_admitted(agent: &crate::agent::subagent::SubAgent) -> bool {
     use crate::security::capabilities::{Allowlist, CapabilityManager};
 
+    CapabilityManager::check_agent_capability(
+        &agent.id,
+        "memory_read",
+        &Allowlist::from_agent_constraints(&agent.constraints),
+        &agent.constraints.denied_capabilities,
+    )
+    .is_ok()
+}
+
+fn memory_read_entries(agent: &crate::agent::subagent::SubAgent) -> (usize, usize) {
+    (
+        agent
+            .capabilities
+            .iter()
+            .filter(|c| c.name == "memory_read")
+            .count(),
+        agent
+            .constraints
+            .allowed_capabilities
+            .iter()
+            .filter(|c| *c == "memory_read")
+            .count(),
+    )
+}
+
+/// An installed template written before memory search reached every agent.
+const PLAIN_AGENT: &str = r#"---
+id: "notes_agent"
+name: "Notes Agent"
+description: "A template that does not name memory_read"
+capabilities:
+  - "file_read"
+---
+"#;
+
+/// A template that names `memory_read` itself.
+const NAMING_AGENT: &str = r#"---
+id: "recall_agent"
+name: "Recall Agent"
+description: "A template that names memory_read"
+capabilities:
+  - "file_read"
+  - "memory_read"
+---
+"#;
+
+/// A plugin agent's executor that is never driven: these tests only build
+/// the subagent.
+struct IdlePluginExecutor;
+
+#[async_trait::async_trait]
+impl openalpaca_api::plugin_traits::PluginAgentExecutor for IdlePluginExecutor {
+    async fn spawn(
+        &self,
+        _instance_id: &str,
+        _task_id: &str,
+        _instructions: &str,
+        _context: &serde_json::Value,
+    ) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    async fn step(
+        &self,
+        _instance_id: &str,
+        _tool_results: Option<&serde_json::Value>,
+    ) -> Result<(String, String, Vec<serde_json::Value>), String> {
+        Ok(("complete".to_string(), String::new(), vec![]))
+    }
+
+    async fn stop(&self, _instance_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn plugin_id(&self) -> &str {
+        "acme"
+    }
+
+    fn agent_id(&self) -> &str {
+        "notes_agent"
+    }
+}
+
+fn from_plugin(mut template: AgentTemplate) -> AgentTemplate {
+    template.source = AgentSource::Plugin {
+        plugin_id: "acme".to_string(),
+        executor: Arc::new(IdlePluginExecutor),
+    };
+    template
+}
+
+/// Design 09 §5: every shipped template names `memory_read` — the three
+/// that did not (writing, research, system) among them — and the gate reads
+/// it from the resolved allowlist, so a fresh install's agents can all
+/// search memory.
+#[test]
+fn all_nine_templates_name_memory_read() {
     let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents");
-    for id in ["writing_agent", "research_agent", "system_agent"] {
-        let path = agents.join(format!("{id}.md"));
+    let mut seen = 0;
+    for entry in std::fs::read_dir(&agents).expect("the shipped templates are in the checkout") {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
         let body = std::fs::read_to_string(&path).unwrap();
         let doc = parse_agent_markdown(&body)
             .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
         assert!(
-            !doc.frontmatter
+            doc.frontmatter
                 .capabilities
                 .iter()
                 .any(|c| c == "memory_read"),
-            "{id} names memory_read"
+            "{} must name memory_read",
+            path.display()
         );
         let agent = doc.to_subagent("a1", "task-1");
-        assert!(
-            !agent.capabilities.iter().any(|c| c.name == "memory_read"),
-            "{id} resolves memory tools"
+        assert_eq!(
+            memory_read_entries(&agent),
+            (1, 1),
+            "{}: listed once, never appended a second time",
+            path.display()
         );
-        assert!(
-            CapabilityManager::check_agent_capability(
-                &agent.id,
-                "memory_read",
-                &Allowlist::from_agent_constraints(&agent.constraints),
-                &agent.constraints.denied_capabilities,
-            )
-            .is_err(),
-            "{id} is admitted memory_read"
-        );
+        assert!(memory_read_admitted(&agent), "{}", path.display());
+        seen += 1;
     }
+    assert!(seen >= 9, "every shipped template was checked, not {seen}");
+}
+
+/// Design 09 §5 (LQ3): the owner's installed `config/agents/` is never
+/// re-seeded, so an internal template that does not name `memory_read` is
+/// granted it on the way to a subagent — in its capabilities, which tool
+/// resolution reads, and in its allowlist, which the gate reads — as
+/// `workspace_read`/`workspace_write` are.
+#[test]
+fn an_internal_template_is_granted_memory_read_ambiently() {
+    let doc = parse_agent_markdown(PLAIN_AGENT).unwrap();
+    assert!(
+        !doc.frontmatter
+            .capabilities
+            .iter()
+            .any(|c| c == "memory_read")
+    );
+    let agent = doc.to_subagent("notes-1", "task-1");
+    assert_eq!(memory_read_entries(&agent), (1, 1));
+    assert!(memory_read_admitted(&agent));
+    // The template itself is not rewritten: the grant lives on the subagent.
+    assert_eq!(doc.frontmatter.capabilities, vec!["file_read"]);
+
+    let named = parse_agent_markdown(NAMING_AGENT)
+        .unwrap()
+        .to_subagent("recall-1", "task-1");
+    assert_eq!(memory_read_entries(&named), (1, 1), "no second copy");
+}
+
+/// Design 09 §5: `denied_capabilities` still wins — a template that denies
+/// `memory_read`, in any case, is granted nothing, and the gate refuses it.
+#[test]
+fn an_ambient_grant_respects_denied_capabilities() {
+    for denied in ["memory_read", "Memory_Read"] {
+        let md = format!(
+            "---\nid: \"quiet_agent\"\nname: \"Quiet Agent\"\ndescription: \"Denies memory\"\n\
+             capabilities:\n  - \"file_read\"\ndenied_capabilities:\n  - \"{denied}\"\n---\n"
+        );
+        let agent = parse_agent_markdown(&md)
+            .unwrap()
+            .to_subagent("quiet-1", "task-1");
+        assert!(
+            !agent
+                .capabilities
+                .iter()
+                .any(|c| c.name.eq_ignore_ascii_case("memory_read")),
+            "denied {denied:?}: nothing is appended to the capabilities"
+        );
+        assert!(
+            !agent
+                .constraints
+                .allowed_capabilities
+                .iter()
+                .any(|c| c == "memory_read"),
+            "denied {denied:?}: nothing is appended to the allowlist"
+        );
+        assert!(!memory_read_admitted(&agent), "denied {denied:?}");
+    }
+}
+
+/// Design 09 §5 (LQ3): a plugin-contributed template gets `memory_read`
+/// only by naming it. Its subagent's tool results go back to the plugin's
+/// own process, and the memory read tools never prompt, so an ambient grant
+/// would hand every note the owner has to third-party code by default.
+#[test]
+fn a_plugin_template_gets_no_ambient_memory_read() {
+    let plain = from_plugin(parse_agent_markdown(PLAIN_AGENT).unwrap());
+    let agent = plain.to_subagent("acme-1", "task-1");
+    assert_eq!(memory_read_entries(&agent), (0, 0));
+    assert!(!memory_read_admitted(&agent));
+    // The workspace tools stay ambient for a plugin template, as before.
+    for ws in ["workspace_read", "workspace_write"] {
+        assert!(agent.capabilities.iter().any(|c| c.name == ws), "{ws}");
+    }
+
+    // A plugin template that names it keeps it, exactly as today.
+    let named = from_plugin(parse_agent_markdown(NAMING_AGENT).unwrap());
+    let agent = named.to_subagent("acme-2", "task-1");
+    assert_eq!(memory_read_entries(&agent), (1, 1));
+    assert!(memory_read_admitted(&agent));
 }

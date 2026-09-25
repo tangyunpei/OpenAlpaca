@@ -491,11 +491,13 @@ You are a test agent.
     assert!(inst.id.starts_with("test_agent::"));
     assert_eq!(inst.preset.persona, "You are a test agent.");
     assert_eq!(inst.preset.temperature, 0.3);
-    // 1 explicit skill + 2 injected workspace tools
-    assert_eq!(inst.capabilities.len(), 3);
+    // 1 explicit skill + 2 injected workspace tools + the ambient memory
+    // search every internal template is granted (design 09 §5)
+    assert_eq!(inst.capabilities.len(), 4);
     assert_eq!(inst.capabilities[0].name, "file_read");
     assert_eq!(inst.capabilities[1].name, "workspace_read");
     assert_eq!(inst.capabilities[2].name, "workspace_write");
+    assert_eq!(inst.capabilities[3].name, "memory_read");
 }
 
 // ── GAP-24: an uninstall expires the withdrawal tombstones ───────────────

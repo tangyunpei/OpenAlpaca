@@ -5,6 +5,7 @@ description: "Focused on web search, data collection, and information synthesis"
 icon: "magnifying_glass"
 capabilities:
   - "web_access"
+  - "memory_read"
   - "workspace_read"
   - "workspace_write"
   - "read_result"

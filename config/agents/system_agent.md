@@ -7,6 +7,7 @@ capabilities:
   - "file_write"
   - "artifact_write"
   - "shell_execute"
+  - "memory_read"
   - "workspace_read"
   - "workspace_write"
   - "read_result"

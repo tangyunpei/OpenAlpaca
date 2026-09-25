@@ -362,9 +362,10 @@ pub fn memory_list_tool_definition() -> ToolDefinition {
 }
 
 /// The read surface: `memory_search`, `memory_read` and `memory_list`,
-/// each providing the `memory_read` capability (design §7: no template
-/// change — the six templates that grant `memory_read` keep working).
-/// Registered globally by the daemon.
+/// each providing the `memory_read` capability. All nine shipped templates
+/// name it, and `AgentTemplate::to_subagent` grants it to every internal
+/// template that does not deny it (design 09 §5); a plugin template gets it
+/// only by naming it. Registered globally by the daemon.
 pub fn memory_read_tools(service: Arc<MemoryService>) -> Vec<RegisteredTool> {
     vec![
         registered(

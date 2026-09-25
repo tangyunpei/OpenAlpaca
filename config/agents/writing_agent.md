@@ -5,6 +5,7 @@ description: "Focused on content writing, document generation, and text refineme
 capabilities:
   - "file_write"
   - "artifact_write"
+  - "memory_read"
   - "workspace_read"
   - "workspace_write"
   - "read_result"
