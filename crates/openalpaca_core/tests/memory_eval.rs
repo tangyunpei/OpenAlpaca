@@ -5693,7 +5693,7 @@ async fn ask_questions(
         }
 
         println!(
-            "[{}] {:<10} {:<24} {:<5} latency={:<6}ms rounds={} tokens={}/{} tools={:?} recalled={} listed={} relied={}/{} (+{} listed){}",
+            "[{}] {:<10} {:<24} {:<5} latency={:<6}ms rounds={} tokens={}/{} tools={:?} recalled={} index={} relied={}/{} (+{} listed){}",
             match row.correct {
                 Some(true) => " OK ",
                 Some(false) => "MISS",
