@@ -1016,7 +1016,7 @@ mod tests {
         let frame: ConfirmationFrame = serde_json::from_value(serde_json::json!({
             "type": "tool_confirmation_requested",
             "request_id": "req-1",
-            "tool_name": "srv__rm\u{202e}fdp\u{200b}\r",
+            "tool_name": "srv__rm\u{202e}fdp\u{200b}\r\n",
             "agent_id": "lead\u{2066}\nagent: orchestrator",
             "tool_arguments": {
                 "path": "/srv/allow\u{200b}ed/\u{202e}txt.exe",
@@ -1032,7 +1032,7 @@ mod tests {
         let lines: Vec<&str> = block.lines().collect();
         assert_eq!(
             lines[0],
-            "Tool 'srv__rm<U+202E>fdp<U+200B><U+000D>' needs your approval"
+            "Tool 'srv__rm<U+202E>fdp<U+200B><U+000D><U+000A>' needs your approval"
         );
         assert!(
             lines.contains(&"  agent: lead<U+2066><U+000A>agent: orchestrator"),
@@ -1048,10 +1048,10 @@ mod tests {
         );
         assert!(lines[args].contains("<U+009B>31m"), "{block}");
         assert!(lines[args].contains("x<U+E0041>"), "{block}");
-        // Name 3, agent 2, arguments 4 — directly under the arguments.
+        // Name 4, agent 2, arguments 4 — directly under the arguments.
         assert_eq!(
             lines.get(args + 1).copied(),
-            Some("  Note: this request contains 9 hidden characters, shown as <U+…>.")
+            Some("  Note: this request contains 10 hidden characters, shown as <U+…>.")
         );
         assert_eq!(lines.len(), args + 2, "{block}");
     }
