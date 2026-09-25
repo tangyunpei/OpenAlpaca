@@ -93,6 +93,7 @@ pub(in crate::orchestrator) mod skipped {
         "this turn was refused before a model was reached";
     pub(in crate::orchestrator) const PLUGIN_SKILL: &str =
         "this skill comes from a plugin, whose protocol carries a plain query and no files";
+    pub(in crate::orchestrator) const MEMORY_COMMAND: &str = "this turn was a memory command, answered without a model; it saves only the text typed, never a file";
 }
 
 impl Orchestrator {

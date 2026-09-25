@@ -5154,3 +5154,218 @@ fn a_workspace_move_evicts_the_old_keys() {
     assert_eq!(cache.cached_files(&old_key), None);
     assert_eq!(cache.cached_files(&new_key), Some(1));
 }
+
+// ============================================================================
+// Chat memory commands (design 09 §12, MD-13)
+// ============================================================================
+
+fn alice() -> Principal {
+    Principal::User {
+        global_id: ALICE.into(),
+    }
+}
+
+fn chat_turn(
+    principal: Principal,
+    source: &str,
+    unattended: bool,
+    root: Option<&Path>,
+) -> ChatCommandTurn {
+    ChatCommandTurn {
+        principal,
+        source: source.to_string(),
+        unattended,
+        request_workspace_root: root.map(Path::to_path_buf),
+        lane_key: format!("{ALICE}:{source}"),
+        request_id: uuid::Uuid::new_v4(),
+    }
+}
+
+/// Design 09 §12: a memory command typed on an attended turn of the app's or
+/// the CLI's chat is a user-directed surface — the one chat turn that builds
+/// a `UserSurface` context, so a `/remember` records origin `user`. The owner
+/// comes from the turn's principal and the project from the root the turn
+/// resolved, exactly as for that turn's own tool calls.
+#[test]
+fn a_chat_command_context_is_a_user_surface_on_an_attended_chat_turn() {
+    let h = Harness::new();
+    let repo = h.workspace("repo", Some(".git"));
+    for source in ["gui", "cli"] {
+        let turn = chat_turn(alice(), source, false, Some(&repo));
+        let ctx = h.service.context_for_chat_command(&turn).unwrap();
+        assert_eq!(ctx.surface, Surface::UserSurface, "{source}");
+        assert_eq!(ctx.capabilities, Capabilities::ALL);
+        assert_eq!(ctx.owner_key, ALICE_KEY);
+        assert_eq!(ctx.project_root.as_deref(), Some(repo.as_path()));
+        assert_eq!(
+            ctx.attribution.lane_key.as_deref(),
+            Some(turn.lane_key.as_str())
+        );
+        assert_eq!(ctx.attribution.request_id, Some(turn.request_id));
+        assert_eq!(ctx.attribution.source.as_deref(), Some(source));
+    }
+    let ctx = h
+        .service
+        .context_for_chat_command(&chat_turn(alice(), "gui", false, None))
+        .unwrap();
+    assert!(
+        ctx.project_root.is_none(),
+        "no root: the global partition only"
+    );
+    let out = h.store(&ctx, "Tabs", "I prefer tabs.", NoteKind::Preference);
+    assert_eq!(out.origin, Origin::User);
+    assert_eq!(
+        h.snapshot(&StoreScope::Home, ALICE).unwrap().notes[&out.id].origin,
+        Origin::User
+    );
+}
+
+/// Anything but an attended app or CLI chat turn builds no such context: a
+/// connector's turn, an unattended one, a scheduled skill or a follow-up
+/// (`internal`), a `/v1/command process` turn (`api`) — and a turn with no
+/// owner. Nothing is created for any of them.
+#[test]
+fn a_chat_command_context_is_refused_off_an_attended_chat_turn() {
+    let h = Harness::new();
+    let external = Principal::External {
+        provider: "telegram".into(),
+        id: "12345".into(),
+    };
+    let nobody = Principal::User {
+        global_id: "u_nobody".into(),
+    };
+    for (turn, class) in [
+        (chat_turn(alice(), "gui", true, None), "invalid_input"),
+        (chat_turn(alice(), "cli", true, None), "invalid_input"),
+        (chat_turn(alice(), "telegram", false, None), "invalid_input"),
+        (chat_turn(alice(), "discord", false, None), "invalid_input"),
+        (chat_turn(alice(), "imessage", false, None), "invalid_input"),
+        (chat_turn(alice(), "internal", false, None), "invalid_input"),
+        (chat_turn(alice(), "api", false, None), "invalid_input"),
+        (
+            chat_turn(Principal::System, "gui", false, None),
+            "fixture:no_owner",
+        ),
+        (chat_turn(external, "gui", false, None), "fixture:no_owner"),
+        (chat_turn(nobody, "gui", false, None), "fixture:no_owner"),
+    ] {
+        let err = h
+            .service
+            .context_for_chat_command(&turn)
+            .expect_err("not a user-directed chat turn");
+        assert_eq!(err.class(), class, "{turn:?}: {err}");
+    }
+    assert!(!h.home().join("memory").exists(), "nothing was created");
+}
+
+/// `/forget <id-or-prefix>` resolves among every note the request can read —
+/// any status, superseded and archived included — by a prefix of at least 8
+/// hex characters, hyphens ignored on both sides. A listing records nothing.
+#[test]
+fn notes_are_found_by_an_id_prefix_of_any_status() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let old = h.store(&user, "Editor", "I use vim.", NoteKind::Preference);
+    let new = h
+        .service
+        .store(
+            &user,
+            StoreInput {
+                title: "Editor".into(),
+                body: "I use helix now.".into(),
+                kind: Some(NoteKind::Preference),
+                supersedes: Some((old.id, old.revision.clone())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let archived = h.store(&user, "Old laptop", "A 2019 MacBook.", NoteKind::Fact);
+    h.service
+        .update(
+            &user,
+            UpdateInput {
+                id: archived.id,
+                expected_revision: archived.revision.clone(),
+                action: UpdateAction::Archive,
+                reason: None,
+            },
+        )
+        .unwrap();
+
+    for id in [old.id, new.id, archived.id] {
+        let full = id.to_string();
+        let found = h.service.find_by_id_prefix(&user, &full[..8]).unwrap();
+        assert_eq!(
+            found.iter().map(|i| i.id).collect::<Vec<_>>(),
+            vec![id],
+            "{full}"
+        );
+        let upper = full[..13].to_uppercase();
+        let found = h.service.find_by_id_prefix(&user, &upper).unwrap();
+        assert_eq!(found.len(), 1, "case-insensitive: {upper}");
+        let unhyphenated: String = full.chars().filter(|c| *c != '-').take(12).collect();
+        let found = h.service.find_by_id_prefix(&user, &unhyphenated).unwrap();
+        assert_eq!(found.len(), 1, "hyphens are ignored: {unhyphenated}");
+        assert_eq!(found[0].revision.len(), 64, "with its current revision");
+    }
+    assert!(
+        h.service
+            .find_by_id_prefix(&user, "00000000")
+            .unwrap()
+            .is_empty()
+    );
+    for bad in ["1a2b3c4", "1a2b-3c4", "not-hex!", "1a2b3c4d 5", ""] {
+        let err = h.service.find_by_id_prefix(&user, bad).unwrap_err();
+        assert_eq!(err.class(), "invalid_input", "{bad:?}: {err}");
+    }
+    let extraction = h
+        .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap();
+    assert_eq!(
+        h.service
+            .find_by_id_prefix(&extraction, &old.id.to_string()[..8])
+            .unwrap_err()
+            .class(),
+        "fixture:capability_denied"
+    );
+    // Another owner's notes are not this request's.
+    assert!(
+        h.service
+            .find_by_id_prefix(&h.user(BOB, None), &old.id.to_string()[..8])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Two notes sharing a long prefix are both found, so the caller can list
+/// them instead of choosing.
+#[test]
+fn an_id_prefix_shared_by_two_notes_finds_both() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    h.store(&user, "Seed", "Makes the partition.", NoteKind::Fact);
+    for (n, title) in [(1, "First twin"), (2, "Second twin")] {
+        let id = format!("abcdef12-0000-4000-8000-00000000000{n}");
+        fs::write(
+            h.home_notes_dir(ALICE_KEY).join(format!("{id}--twin-{n}.md")),
+            format!(
+                "---\nschema: 1\nid: {id}\ntitle: {title}\nkind: fact\nstatus: active\ncreated_at: 2026-09-23T10:0{n}:00Z\nupdated_at: 2026-09-23T10:0{n}:00Z\n---\n# {title}\n\nA twin.\n"
+            ),
+        )
+        .unwrap();
+    }
+    h.service.sync(&user).unwrap();
+    let found = h.service.find_by_id_prefix(&user, "abcdef12").unwrap();
+    assert_eq!(
+        found.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(),
+        vec!["Second twin", "First twin"],
+        "newest update first"
+    );
+    assert_eq!(
+        h.service
+            .find_by_id_prefix(&user, "abcdef12-0000-4000-8000-000000000001")
+            .unwrap()
+            .len(),
+        1
+    );
+}

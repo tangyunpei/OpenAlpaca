@@ -1,8 +1,9 @@
 //! Intent classification for user messages.
 //!
-//! Deterministic tiers only (Routing V2): slash commands, task queries, and
-//! skill routing. Everything else is a `SimpleQuery` handled by the main
-//! loop, where task dispatch is the model's tool choice.
+//! Deterministic tiers only (Routing V2): slash commands, task queries, the
+//! chat memory commands, and skill routing. Everything else is a
+//! `SimpleQuery` handled by the main loop, where task dispatch is the model's
+//! tool choice.
 
 mod skill_match;
 mod tool_suggest;
@@ -27,6 +28,11 @@ pub enum Intent {
     },
     /// A skill was invoked (via slash command or trigger pattern match).
     SkillInvocation { skill_name: String, query: String },
+    /// A chat memory command (design 09 §12, MD-13): `/remember`, `/forget`
+    /// or `/memories`, answered by the daemon with no model. `args` are kept
+    /// verbatim — never lower-cased — because the text `/remember` saves is
+    /// exactly what the person typed.
+    MemoryCommand { verb: MemoryVerb, args: String },
 }
 
 impl Intent {
@@ -36,8 +42,58 @@ impl Intent {
             Intent::TaskQuery { .. } => "task_query",
             Intent::TaskControl { .. } => "task_control",
             Intent::SkillInvocation { .. } => "skill_invocation",
+            Intent::MemoryCommand { .. } => "memory_command",
         }
     }
+}
+
+/// The three chat memory commands (design 09 §12.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryVerb {
+    /// `/remember [--kind <k>] [--global | --project] <text>`
+    Remember,
+    /// `/forget <id-or-prefix>` or `/forget <text>`
+    Forget,
+    /// `/memories` or `/memories <query>`
+    Memories,
+}
+
+impl MemoryVerb {
+    pub const ALL: [MemoryVerb; 3] = [
+        MemoryVerb::Remember,
+        MemoryVerb::Forget,
+        MemoryVerb::Memories,
+    ];
+
+    /// The command word, without its slash.
+    pub fn command(self) -> &'static str {
+        match self {
+            MemoryVerb::Remember => "remember",
+            MemoryVerb::Forget => "forget",
+            MemoryVerb::Memories => "memories",
+        }
+    }
+
+    /// The verb a command word names, in any case.
+    fn from_command(word: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|verb| word.eq_ignore_ascii_case(verb.command()))
+    }
+}
+
+/// The slash names the chat memory commands reserve (design 09 §12.3): a
+/// skill claiming one is never reached by that slash — the command is parsed
+/// first — so the skill loader warns about it and `create-skill` refuses it.
+pub const RESERVED_SLASH_NAMES: [&str; 3] = ["remember", "forget", "memories"];
+
+/// Whether `name` — with or without its slash, in any case — is one of
+/// [`RESERVED_SLASH_NAMES`].
+pub fn is_reserved_slash_name(name: &str) -> bool {
+    let name = name.strip_prefix('/').unwrap_or(name);
+    RESERVED_SLASH_NAMES
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
 }
 
 /// Parses user messages into intents using deterministic rules.
@@ -54,17 +110,23 @@ impl IntentParser {
             return intent;
         }
 
-        // 2. Slash commands: /status, /tasks
+        // 2. Chat memory commands: /remember, /forget, /memories — matched on
+        //    the message as typed, so the arguments keep their case.
+        if let Some(intent) = Self::parse_memory_command(trimmed) {
+            return intent;
+        }
+
+        // 3. Slash commands: /status, /tasks
         if let Some(intent) = Self::parse_task_query(&lower) {
             return intent;
         }
 
-        // 3. Natural language task query
+        // 4. Natural language task query
         if Self::is_natural_task_query(&lower) {
             return Intent::TaskQuery { task_id: None };
         }
 
-        // 4. Default: SimpleQuery
+        // 5. Default: SimpleQuery
         Intent::SimpleQuery {
             query: trimmed.to_string(),
         }
@@ -104,6 +166,20 @@ impl IntentParser {
         Some(Intent::TaskControl {
             task_id: (!task_id.is_empty()).then_some(task_id),
             action: action.to_string(),
+        })
+    }
+
+    /// Design 09 §12.3: the command word, in any case, followed by whitespace
+    /// or the end of the message (`/remembering` is not `/remember`); the
+    /// rest, trimmed, is the arguments as typed.
+    fn parse_memory_command(trimmed: &str) -> Option<Intent> {
+        let rest = trimmed.strip_prefix('/')?;
+        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (word, args) = rest.split_at(word_end);
+        let verb = MemoryVerb::from_command(word)?;
+        Some(Intent::MemoryCommand {
+            verb,
+            args: args.trim().to_string(),
         })
     }
 

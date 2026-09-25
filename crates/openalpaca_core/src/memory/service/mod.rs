@@ -40,7 +40,8 @@ mod bench;
 mod tests;
 
 pub use context::{
-    Attribution, Capabilities, MemoryAccessContext, Surface, WorkspaceHint, resolve_project_root,
+    ATTENDED_CHAT_SOURCES, Attribution, Capabilities, ChatCommandTurn, MemoryAccessContext,
+    Surface, WorkspaceHint, resolve_project_root,
 };
 pub use error::MemoryError;
 pub use in_chat::{
@@ -95,6 +96,9 @@ pub const USED_REQUESTS_CAPACITY: usize = 256;
 /// `memory_list.limit`: 1–100, default 50.
 pub const LIST_DEFAULT_LIMIT: usize = 50;
 pub const LIST_MAX_LIMIT: usize = 100;
+/// The shortest id prefix [`MemoryService::find_by_id_prefix`] takes: 8 hex
+/// characters, the first group of a UUID (design 09 §12.1).
+pub const ID_PREFIX_MIN_HEX: usize = 8;
 
 #[cfg(test)]
 thread_local! {
@@ -902,6 +906,59 @@ impl MemoryService {
             None
         };
         Ok(ListOutput { items, next_cursor })
+    }
+
+    /// The notes whose id starts with `prefix` (design 09 §12.1, `/forget
+    /// <id-or-prefix>`): every note of the context's partitions — any status,
+    /// superseded and candidates included, as `openalpaca memory` resolves a
+    /// prefix — newest update first, each with its current revision. The
+    /// prefix is at least [`ID_PREFIX_MIN_HEX`] hex characters; case and
+    /// hyphens are ignored on both sides, so `55E811B63220` finds
+    /// `55e811b6-3220-…`. Records nothing: a lookup is not a recall.
+    pub fn find_by_id_prefix(
+        &self,
+        ctx: &MemoryAccessContext,
+        prefix: &str,
+    ) -> Result<Vec<ListItem>, MemoryError> {
+        Self::require(ctx.capabilities.read, "memory_read")?;
+        let wanted: String = prefix.chars().filter(|c| *c != '-').collect();
+        if !wanted.chars().all(|c| c.is_ascii_hexdigit()) || wanted.len() < ID_PREFIX_MIN_HEX {
+            return Err(MemoryError::invalid(format!(
+                "`{prefix}` is not a note id or a prefix of one (at least {ID_PREFIX_MIN_HEX} hex characters)"
+            )));
+        }
+        let wanted = wanted.to_ascii_lowercase();
+        let resolved = self.resolve(ctx)?;
+        let mut items = Vec::new();
+        for p in resolved.all() {
+            let scope = scope_of(p);
+            for view in p.load()?.views {
+                let id: String = view.note.id.to_string().replace('-', "");
+                if !id.starts_with(&wanted) {
+                    continue;
+                }
+                items.push(ListItem {
+                    id: view.note.id,
+                    revision: view.revision,
+                    title: view.note.title,
+                    kind: view.note.kind,
+                    scope,
+                    status: view.note.status,
+                    effective_status: view.derived.effective_status,
+                    origin: view.derived.origin,
+                    updated_at: view.note.updated_at,
+                    created_at: view.note.created_at,
+                    pinned: view.note.pinned,
+                    supersedes: view.note.supersedes,
+                });
+            }
+        }
+        items.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+        });
+        Ok(items)
     }
 
     /// Recently learned (design §6): `extracted_user` notes that automatic

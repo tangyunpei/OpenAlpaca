@@ -16,6 +16,7 @@ mod direct_send;
 mod handler_attachments;
 mod handler_helpers;
 mod handlers;
+mod memory_commands;
 mod query_handler;
 mod summary;
 mod task_launch;

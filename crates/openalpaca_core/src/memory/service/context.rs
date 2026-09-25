@@ -6,6 +6,8 @@
 //! of construction in design §3 hold by construction: the owner is a
 //! `global_user` row, and the surface is what the constructor says it is.
 
+use super::{MemoryError, MemoryService};
+use crate::security::policy::Principal;
 use openalpaca_storage::memory_files::Actor;
 use openalpaca_storage::memory_files::Origin;
 use std::path::{Path, PathBuf};
@@ -13,8 +15,10 @@ use std::path::{Path, PathBuf};
 /// Who is asking (design §3, §7a). Set by the constructor, never by a caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
-    /// Exactly the HTTP API, the CLI verbs that call it, and the GUI (design
-    /// §4): the only surface that mints origin `user`.
+    /// Exactly the HTTP API, the CLI verbs that call it, the GUI (design
+    /// §4), and a chat memory command typed on an attended app or CLI chat
+    /// turn (design 09 §12, [`MemoryService::context_for_chat_command`]):
+    /// the only surface that mints origin `user`.
     UserSurface,
     /// Every tool call, whichever loop made it and whatever the model was
     /// told (G2): a write records `extracted_user`, `confirm` is refused.
@@ -141,4 +145,90 @@ pub fn resolve_project_root(hint: WorkspaceHint<'_>) -> Option<PathBuf> {
         return None;
     }
     Some(root)
+}
+
+/// The derived sources of the chats a person types into directly (design 09
+/// §12.2): the app's and the CLI's — both `EventSource::Gui` today, so both
+/// derive `gui`; `cli` is the name `HandleRequest::source` reserves for the
+/// CLI. A connector (`telegram`, `discord`, `imessage`), a scheduled skill or
+/// a follow-up (`internal`) and `/v1/command process` (`api`) are not.
+pub const ATTENDED_CHAT_SOURCES: [&str; 2] = ["gui", "cli"];
+
+/// The chat turn a memory command was typed on (design 09 §12.2) — what
+/// [`MemoryService::context_for_chat_command`] builds its context from.
+#[derive(Debug, Clone)]
+pub struct ChatCommandTurn {
+    pub principal: Principal,
+    /// The turn's derived source (`HandleRequest::source`).
+    pub source: String,
+    /// The turn's own M6 declaration: nobody is there to read the answer.
+    pub unattended: bool,
+    /// The MD-5 marker root the turn resolved from its workspace (R22) —
+    /// the root that turn's own tool calls use; `None`: global only.
+    pub request_workspace_root: Option<PathBuf>,
+    pub lane_key: String,
+    pub request_id: uuid::Uuid,
+}
+
+impl ChatCommandTurn {
+    /// An attended turn of the app's or the CLI's own chat: the one kind of
+    /// chat turn on which a person typed the command where they can read
+    /// the answer (design 09 §12.2).
+    pub fn is_attended_chat(&self) -> bool {
+        !self.unattended && ATTENDED_CHAT_SOURCES.contains(&self.source.as_str())
+    }
+}
+
+impl MemoryService {
+    /// A chat memory command's context (design 09 §12; the per-surface table
+    /// of design §7a gains this row): the turn's owner, the project root the
+    /// turn resolved, `UserSurface`, every capability — so `/remember`
+    /// records origin `user`, as the Memory view does.
+    ///
+    /// G2 holds because no model is anywhere on this path: the orchestrator
+    /// answers the command in its deterministic tier, and the text written is
+    /// exactly what the person typed. The constructor checks what makes that
+    /// true itself, so a `UserSurface` context cannot be built from any other
+    /// turn: anything but an attended app or CLI chat turn is
+    /// `invalid_input`, and a principal that is not a `global_user` row —
+    /// `System`, an unlinked `External` — is [`MemoryError::NoOwner`].
+    pub fn context_for_chat_command(
+        &self,
+        turn: &ChatCommandTurn,
+    ) -> Result<MemoryAccessContext, MemoryError> {
+        if !turn.is_attended_chat() {
+            return Err(MemoryError::invalid(format!(
+                "a memory command is a user-directed surface only on an attended turn of the app's or the CLI's chat, not on a `{}` turn{}",
+                turn.source,
+                if turn.unattended {
+                    " nobody attends"
+                } else {
+                    ""
+                }
+            )));
+        }
+        let global_id = match &turn.principal {
+            Principal::User { global_id } => global_id,
+            Principal::System => return Err(MemoryError::NoOwner("system".to_string())),
+            Principal::External { provider, id } => {
+                return Err(MemoryError::NoOwner(format!("{provider}:{id}")));
+            }
+        };
+        let hint = match &turn.request_workspace_root {
+            Some(root) => WorkspaceHint::Root(root.as_path()),
+            None => WorkspaceHint::None,
+        };
+        self.context(
+            global_id,
+            hint,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution {
+                lane_key: Some(turn.lane_key.clone()),
+                task_id: None,
+                request_id: Some(turn.request_id),
+                source: Some(turn.source.clone()),
+            },
+        )
+    }
 }

@@ -9,6 +9,9 @@ impl IntentParser {
     /// for scoring-based skill selection instead of regex trigger matching.
     ///
     /// Priority:
+    /// 0. A chat memory command (`/remember`, `/forget`, `/memories`): its
+    ///    names are reserved, so no skill claiming one is reached by slash
+    ///    (design 09 §12.3)
     /// 1. Slash-command skill invocation: `/review some code`
     /// 2. Weighted router scoring (auto-select if score >= threshold and mode == "auto")
     /// 3. Fall through to standard `parse()` logic
@@ -19,6 +22,11 @@ impl IntentParser {
         router: &SkillRouter,
     ) -> Intent {
         let trimmed = content.trim();
+
+        // 0. The chat memory commands, before any skill.
+        if let Some(intent) = Self::parse_memory_command(trimmed) {
+            return intent;
+        }
 
         // 1. Slash-command skill invocation: "/review some code"
         if let Some(without_slash) = trimmed.strip_prefix('/') {

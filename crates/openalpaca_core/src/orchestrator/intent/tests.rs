@@ -733,3 +733,188 @@ fn test_social_message_yes() {
     // handlers.rs guards against send-flow breakage via ActiveSendHints check
     assert!(parser().is_social_message("yes"));
 }
+
+// --- chat memory commands (design 09 §12.3, MD-13) ---
+
+fn memory(verb: MemoryVerb, args: &str) -> Intent {
+    Intent::MemoryCommand {
+        verb,
+        args: args.to_string(),
+    }
+}
+
+/// The parse table of design 09 §12.3: each verb, any case, the command word
+/// followed by whitespace or the end of the message, and the arguments kept
+/// **verbatim** — the text `/remember` saves is exactly what was typed, not
+/// the lower-cased copy the task commands are matched against.
+#[test]
+fn memory_commands_parse_with_verbatim_args() {
+    for (message, expected) in [
+        (
+            "/remember I prefer TABS",
+            memory(MemoryVerb::Remember, "I prefer TABS"),
+        ),
+        (
+            "/REMEMBER I prefer TABS",
+            memory(MemoryVerb::Remember, "I prefer TABS"),
+        ),
+        (
+            "/Remember   Use pnpm, Not npm  ",
+            memory(MemoryVerb::Remember, "Use pnpm, Not npm"),
+        ),
+        (
+            "/remember --kind Decision --project Ship with `make release`",
+            memory(
+                MemoryVerb::Remember,
+                "--kind Decision --project Ship with `make release`",
+            ),
+        ),
+        (
+            "/remember\nFirst line\n\n  indented second",
+            memory(MemoryVerb::Remember, "First line\n\n  indented second"),
+        ),
+        ("/remember\tTabbed", memory(MemoryVerb::Remember, "Tabbed")),
+        ("/remember", memory(MemoryVerb::Remember, "")),
+        ("  /remember  ", memory(MemoryVerb::Remember, "")),
+        ("/forget 1A2B3C4D", memory(MemoryVerb::Forget, "1A2B3C4D")),
+        ("/Forget my Editor", memory(MemoryVerb::Forget, "my Editor")),
+        ("/forget", memory(MemoryVerb::Forget, "")),
+        ("/memories", memory(MemoryVerb::Memories, "")),
+        ("/MEMORIES", memory(MemoryVerb::Memories, "")),
+        (
+            "/memories Deploy Steps",
+            memory(MemoryVerb::Memories, "Deploy Steps"),
+        ),
+        // A task word inside the text does not turn it into a task query.
+        (
+            "/remember my task status reports go to Dana",
+            memory(MemoryVerb::Remember, "my task status reports go to Dana"),
+        ),
+    ] {
+        assert_eq!(parser().parse(message), expected, "message: {message:?}");
+    }
+}
+
+/// `/remembering` is not `/remember`: the command word must be followed by
+/// whitespace or the end of the message, as `/cancellation` is not `/cancel`.
+#[test]
+fn memory_command_words_must_stand_alone() {
+    for message in [
+        "/remembering what we said",
+        "/rememberthis",
+        "/forgetful",
+        "/forget:all",
+        "/memoriesx",
+        "/memory",
+        "remember I prefer tabs",
+        "please /remember this",
+    ] {
+        assert!(
+            !matches!(parser().parse(message), Intent::MemoryCommand { .. }),
+            "{message:?} must not parse as a memory command"
+        );
+    }
+}
+
+/// Parsed after task control: the task commands are untouched.
+#[test]
+fn task_commands_still_parse_beside_the_memory_commands() {
+    assert_eq!(
+        parser().parse("/cancel"),
+        Intent::TaskControl {
+            task_id: None,
+            action: "cancel".to_string()
+        }
+    );
+    assert_eq!(
+        parser().parse("/tasks"),
+        Intent::TaskQuery { task_id: None }
+    );
+}
+
+#[test]
+fn memory_command_intent_type() {
+    assert_eq!(
+        memory(MemoryVerb::Forget, "x").intent_type(),
+        "memory_command"
+    );
+}
+
+/// The reserved names are exactly the three command words.
+#[test]
+fn the_reserved_slash_names_are_the_three_memory_commands() {
+    assert_eq!(RESERVED_SLASH_NAMES, ["remember", "forget", "memories"]);
+    for name in RESERVED_SLASH_NAMES {
+        assert!(is_reserved_slash_name(name));
+        assert!(is_reserved_slash_name(&format!("/{}", name.to_uppercase())));
+    }
+    assert!(!is_reserved_slash_name("review"));
+    assert!(!is_reserved_slash_name("remembering"));
+}
+
+/// Design 09 §12.3: a skill that claims a reserved name — as its slash
+/// command, an alias, or its directory id (the `/{skill_id}` fallback) — is
+/// not reached by that slash: the memory command is parsed first. It stays
+/// reachable by any other name it has.
+#[test]
+fn a_skill_named_remember_is_not_reached_by_slash() {
+    let tmp = TempDir::new().unwrap();
+    create_test_skill_dir(
+        tmp.path(),
+        "remember",
+        r#"---
+name: "Remember"
+description: "A skill that claims /remember"
+invoke:
+  slash: "/remember"
+  aliases:
+    - "/forget"
+    - "/jot"
+---
+
+## Instructions
+
+Echo.
+"#,
+    );
+    create_test_skill_dir(
+        tmp.path(),
+        "memories",
+        r#"---
+name: "Memories by id"
+description: "Reachable only through the /{skill_id} fallback"
+---
+
+## Instructions
+
+Echo.
+"#,
+    );
+    let catalog = SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    assert!(
+        catalog.get_by_command("remember").is_some(),
+        "the catalog holds it"
+    );
+    let router = SkillRouter::new(0.65, 0.45);
+
+    for (message, expected) in [
+        (
+            "/remember I prefer tabs",
+            memory(MemoryVerb::Remember, "I prefer tabs"),
+        ),
+        ("/forget 1a2b3c4d", memory(MemoryVerb::Forget, "1a2b3c4d")),
+        ("/memories", memory(MemoryVerb::Memories, "")),
+    ] {
+        assert_eq!(
+            parser().parse_with_skills_and_router(message, &catalog, &router),
+            expected,
+            "message: {message:?}"
+        );
+    }
+    // Its other alias still reaches it.
+    assert!(matches!(
+        parser().parse_with_skills_and_router("/jot hello", &catalog, &router),
+        Intent::SkillInvocation { .. }
+    ));
+}

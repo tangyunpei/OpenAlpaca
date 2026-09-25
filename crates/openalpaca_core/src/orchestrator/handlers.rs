@@ -3,6 +3,7 @@ use super::{Orchestrator, principal_id};
 use crate::events::SystemEvent;
 use crate::gateway::HandleRequest;
 use crate::memory::scope_context::MemoryScopeContext;
+use crate::memory::service::ChatCommandTurn;
 use crate::security::gate::SecurityGate;
 use crate::security::policy::Principal;
 use crate::types::Capability;
@@ -136,6 +137,41 @@ impl Orchestrator {
                 return result;
             }
             _ => {}
+        }
+
+        // 3b. The chat memory commands (design 09 §12, MD-13): answered here
+        // with no model, before anything reads the lane or the model is
+        // chosen. The command's text is the message as typed, never the
+        // model input an attachment turn augments.
+        if let Intent::MemoryCommand { verb, args } = &intent {
+            self.bus.publish(SystemEvent::IntentClassified {
+                request_id,
+                intent_type: intent.intent_type().to_string(),
+                timestamp: Utc::now(),
+            });
+            let turn = ChatCommandTurn {
+                principal: principal.clone(),
+                source: source.clone(),
+                unattended,
+                request_workspace_root: scope_ctx
+                    .request_workspace_root
+                    .as_deref()
+                    .map(std::path::PathBuf::from),
+                lane_key: lane_key.clone(),
+                request_id,
+            };
+            let reply = self.handle_memory_command(*verb, args.clone(), turn).await;
+            // A1 — a memory command reaches no model, and saves only what was
+            // typed: the turn's files went nowhere.
+            self.skip_turn_attachments(request_id, attachments.as_ref(), skipped::MEMORY_COMMAND);
+            self.record_orchestration_stage(
+                request_id,
+                "memory_command".to_string(),
+                ack_start.elapsed().as_millis() as u64,
+                None,
+                None,
+            );
+            return Ok(reply);
         }
 
         // 4. Build context ONCE for all remaining paths (D6: single dedup location)
