@@ -15,6 +15,15 @@
 //! A due session starts only when no turn has been in flight for 20 s, one
 //! flush at a time on the whole daemon.
 //!
+//! **Conversation summaries** (design 09 §13.3, MD-16) ride the same queue
+//! with triggers of their own: a quiet period of 30 minutes, a switch, the
+//! stop drain and its boot catch-up — never the two-minute idle nor the ten
+//! turns — and only once four of the user's turns have accumulated since the
+//! session's last summary (its durable episode cursor). A session's facts
+//! are learned before its summary is written; the window, the byte budget,
+//! the daily gates and the yielding to chat are learning's, one call per
+//! summary (`episode.rs`).
+//!
 //! A **flush** learns a session's window chunk by chunk (§1.6): read the
 //! window, ask the model, then store the chunk's notes and advance the
 //! durable cursor in one blocking task (§1.4). Delivery is at-least-once: a
@@ -24,16 +33,18 @@
 //! cancels the call (the GPU serves the reply alone), and on a keyed remote
 //! model a chunk starts only when half of the key's rate budget would remain.
 
+use super::episode::{self, EPISODE_LABEL, EpisodeJob, EpisodeWrite};
 use super::extractor::{self, AGENT_LABEL, PromptInput, StoreCounts, StoreEnd, StoreJob};
 use super::lookup;
 use super::window::{self, NextChunk};
 use super::{
-    BACKOFF_BASE, BACKOFF_CAP, Budget, MAX_ATTEMPTS, MAX_CHUNKS_PER_FLUSH, RESUME_QUIET,
-    WINDOW_READ_ROWS,
+    BACKOFF_BASE, BACKOFF_CAP, Budget, EPISODE_MIN_USER_TURNS, EPISODE_OUT_TOKENS, EPISODE_QUIET,
+    MAX_ATTEMPTS, MAX_CHUNKS_PER_FLUSH, RESUME_QUIET, WINDOW_READ_ROWS,
 };
 use crate::daemon_config::DaemonConfig;
 use crate::memory::service::{
-    Attribution, Capabilities, MemoryError, MemoryService, Surface, WorkspaceHint,
+    Attribution, Capabilities, MemoryAccessContext, MemoryError, MemoryService, Surface,
+    WorkspaceHint,
 };
 use crate::orchestrator::BackgroundJobs;
 use arc_swap::ArcSwap;
@@ -197,6 +208,59 @@ impl FlushReport {
     }
 }
 
+/// What one conversation-summary flush did (design 09 §13.3).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EpisodeReport {
+    /// Model calls made.
+    pub calls: usize,
+    /// `episode` notes written.
+    pub episodes: usize,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// Windows with less of the user's own text than
+    /// `extract_min_content_len`: passed with no call.
+    pub skipped_short: usize,
+    /// Windows of a lane whose owner is not a `global_user` row.
+    pub skipped_no_owner: usize,
+    /// Windows whose project directory no longer exists.
+    pub skipped_root_gone: usize,
+    /// Windows passed after `MAX_ATTEMPTS` unusable answers.
+    pub skipped_unusable: usize,
+    /// Windows a summary already covers — a re-run after a crash between the
+    /// write and the cursor's advance: passed with no call.
+    pub skipped_summarized: usize,
+    /// Windows left with none of the user's turns once the turns a forget
+    /// suppressed are taken out: passed with no call.
+    pub skipped_forgotten: usize,
+    /// Summaries the service refused (a cited row deleted meanwhile).
+    pub refused: usize,
+    /// Why the flush stopped early; `None` when every window with enough
+    /// of the user's turns was summarised.
+    pub stopped: Option<FlushStop>,
+}
+
+impl EpisodeReport {
+    /// Windows the episode cursor moved past, with a summary or without.
+    pub fn windows(&self) -> usize {
+        self.episodes
+            + self.refused
+            + self.skipped_short
+            + self.skipped_no_owner
+            + self.skipped_root_gone
+            + self.skipped_unusable
+            + self.skipped_summarized
+            + self.skipped_forgotten
+    }
+}
+
+/// What the daemon's one flush slot runs next.
+enum Job {
+    /// Learn a session's window (design 09 §1).
+    Learn(String),
+    /// Write a session's conversation summary (design 09 §13.3).
+    Summarize(String),
+}
+
 /// Test seams inside the store-and-advance closure. Production uses
 /// [`StoreHooks::default`]: a no-op and the advance.
 #[derive(Clone)]
@@ -262,6 +326,26 @@ impl FlushPolicy {
     };
 }
 
+/// The model a flush calls, and what it may spend.
+struct CallSetup {
+    model: Option<String>,
+    /// It runs on this machine: a turn that starts cancels its call.
+    local: bool,
+    /// A keyed remote model's rate buckets, read without consuming.
+    headroom: Option<openalpaca_llm::RateHeadroom>,
+    budget: Budget,
+}
+
+/// How one model call ended.
+enum CallOutcome {
+    Answered(openalpaca_llm::ChatResponse, i64),
+    /// A reachable model answered nothing — the reasoning ate the budget:
+    /// a call, and an unusable answer (M2, ruling LR20).
+    Empty(LlmError),
+    /// No answer: the rate headroom, a yield, a cancellation or no model.
+    Stopped(FlushStop),
+}
+
 #[derive(Debug, Default)]
 struct SessionState {
     /// User-authored turns that finished since this session was last learned.
@@ -276,6 +360,18 @@ struct SessionState {
     retry_at: Option<Instant>,
     /// The delay the next hold waits; doubles to the cap.
     backoff: Option<Duration>,
+    /// The user's turns that finished since the session's summary was last
+    /// looked at (design 09 §13.3). A marker: the episode cursor and the
+    /// rows past it decide whether four have accumulated.
+    episode_turns: u32,
+    /// A summary trigger fired: a quiet period, a switch, the drain.
+    episode_due: bool,
+    /// A held summary waits until then.
+    episode_retry_at: Option<Instant>,
+    episode_backoff: Option<Duration>,
+    /// Unusable answers to the window past this episode cursor — kept in
+    /// memory: a restart retries a poisoned window at most three more times.
+    episode_failures: Option<(i64, u32)>,
 }
 
 #[derive(Debug)]
@@ -330,7 +426,9 @@ struct WindowRead {
     cursor: LearningCursor,
     rows: Vec<LearningRow>,
     before: Vec<LearningRow>,
-    /// Chat learning's calls and cost today (UTC), from `llm_usage_daily`.
+    /// The extraction's calls and cost today (UTC), from `llm_usage_daily`:
+    /// chat learning's and the conversation summaries', which share its
+    /// daily caps (design 09 §13.3).
     calls_today: i64,
     cost_today: f64,
 }
@@ -350,7 +448,7 @@ fn read_window(db: &Database, session_id: &str) -> anyhow::Result<WindowRead> {
     let cursor = LearningCursorRepository::new(db).get(session_id)?;
     let rows = repo.learning_window(session_id, cursor.extracted_through, WINDOW_READ_ROWS)?;
     let before = repo.learning_rows_before(session_id, cursor.extracted_through, 8)?;
-    let (calls_today, cost_today) = LlmUsageRepository::new(db).usage_today(AGENT_LABEL)?;
+    let (calls_today, cost_today) = extraction_usage_today(db)?.0;
     Ok(WindowRead {
         session: Some(session),
         cursor,
@@ -358,6 +456,57 @@ fn read_window(db: &Database, session_id: &str) -> anyhow::Result<WindowRead> {
         before,
         calls_today,
         cost_today,
+    })
+}
+
+/// The extraction's calls and cost today (UTC) — chat learning's and the
+/// conversation summaries' together, which share its daily caps (design 09
+/// §13.3) — and the summaries' own calls, from `llm_usage_daily`.
+fn extraction_usage_today(db: &Database) -> anyhow::Result<((i64, f64), i64)> {
+    let usage = LlmUsageRepository::new(db);
+    let (learning_calls, learning_cost) = usage.usage_today(AGENT_LABEL)?;
+    let (episode_calls, episode_cost) = usage.usage_today(EPISODE_LABEL)?;
+    Ok((
+        (learning_calls + episode_calls, learning_cost + episode_cost),
+        episode_calls,
+    ))
+}
+
+/// A summary's window as one blocking read saw it.
+struct EpisodeRead {
+    session: Option<Conversation>,
+    /// The episode cursor.
+    through: i64,
+    rows: Vec<LearningRow>,
+    /// The extraction's calls and cost today, the summaries' included.
+    calls_today: i64,
+    cost_today: f64,
+    /// The summaries' own calls today.
+    episode_calls_today: i64,
+}
+
+fn read_episode_window(db: &Database, session_id: &str) -> anyhow::Result<EpisodeRead> {
+    let repo = ConversationRepository::new(db);
+    let Some(session) = repo.get_session(session_id)? else {
+        return Ok(EpisodeRead {
+            session: None,
+            through: 0,
+            rows: Vec::new(),
+            calls_today: 0,
+            cost_today: 0.0,
+            episode_calls_today: 0,
+        });
+    };
+    let through = LearningCursorRepository::new(db).episode_through(session_id)?;
+    let rows = repo.learning_window(session_id, through, WINDOW_READ_ROWS)?;
+    let ((calls_today, cost_today), episode_calls_today) = extraction_usage_today(db)?;
+    Ok(EpisodeRead {
+        session: Some(session),
+        through,
+        rows,
+        calls_today,
+        cost_today,
+        episode_calls_today,
     })
 }
 
@@ -489,9 +638,15 @@ impl LearningQueue {
         if let Some(previous) = state.lanes.insert(lane, session_id.to_string())
             && previous != session_id
             && let Some(left) = state.sessions.get_mut(&previous)
-            && left.pending_user_turns > 0
         {
-            left.due = true;
+            if left.pending_user_turns > 0 {
+                left.due = true;
+            }
+            // Design 09 §13.3: a switch writes the summary of the
+            // conversation left.
+            if left.episode_turns > 0 {
+                left.episode_due = true;
+            }
         }
     }
 
@@ -519,6 +674,7 @@ impl LearningQueue {
         let session = state.sessions.entry(session_id).or_default();
         session.last_turn_at = Some(now);
         if turn.user_authored {
+            session.episode_turns = session.episode_turns.saturating_add(1);
             session.pending_user_turns = session.pending_user_turns.saturating_add(1);
             // MD-10's "10 new turns": due at once.
             if session.pending_user_turns >= turns_per_flush {
@@ -587,6 +743,8 @@ impl LearningQueue {
                 // The flush finds the session gone before it writes.
                 session.pending_user_turns = 0;
                 session.due = false;
+                session.episode_turns = 0;
+                session.episode_due = false;
             } else {
                 state.sessions.remove(session_id);
             }
@@ -626,11 +784,20 @@ impl LearningQueue {
                 {
                     session.due = true;
                 }
+                // Design 09 §13.3: a summary waits for a quiet period of 30
+                // minutes — two would cut a conversation too often.
+                if session.episode_turns > 0
+                    && session
+                        .last_turn_at
+                        .is_some_and(|at| now.duration_since(at) >= EPISODE_QUIET)
+                {
+                    session.episode_due = true;
+                }
             }
             state
                 .sessions
                 .iter()
-                .filter(|(_, s)| s.pending_user_turns > 0 && !s.running)
+                .filter(|(_, s)| (s.pending_user_turns > 0 || s.episode_turns > 0) && !s.running)
                 .map(|(id, _)| id.clone())
                 .collect()
         };
@@ -653,7 +820,12 @@ impl LearningQueue {
                             None => self.forget_session(&id),
                             Some(openalpaca_storage::SESSION_ARCHIVED) => {
                                 if let Some(s) = self.lock().sessions.get_mut(&id) {
-                                    s.due = true;
+                                    if s.pending_user_turns > 0 {
+                                        s.due = true;
+                                    }
+                                    if s.episode_turns > 0 {
+                                        s.episode_due = true;
+                                    }
                                 }
                             }
                             Some(_) => {}
@@ -673,19 +845,29 @@ impl LearningQueue {
     /// the sessions are learned one at a time when the daemon is quiet.
     pub async fn catch_up(self: &Arc<Self>) {
         let db = self.deps.db.clone();
-        let sessions = match blocking(move || {
-            LearningCursorRepository::new(&db).sessions_with_unlearned_turns()
+        let read = blocking(move || {
+            let repo = LearningCursorRepository::new(&db);
+            Ok((
+                repo.sessions_with_unlearned_turns()?,
+                // Design 09 §13.3: the summaries the stop drain did not
+                // write — four of the user's turns past the episode cursor.
+                repo.sessions_with_unsummarized_turns(EPISODE_MIN_USER_TURNS)?,
+            ))
         })
-        .await
-        {
-            Ok(sessions) => sessions,
+        .await;
+        let (sessions, unsummarized) = match read {
+            Ok(found) => found,
             Err(e) => {
                 tracing::warn!("memory learning: the boot catch-up could not read: {e:#}");
                 return;
             }
         };
-        if !sessions.is_empty() {
-            tracing::info!(sessions = sessions.len(), "memory learning: catching up");
+        if !sessions.is_empty() || !unsummarized.is_empty() {
+            tracing::info!(
+                sessions = sessions.len(),
+                summaries = unsummarized.len(),
+                "memory learning: catching up"
+            );
         }
         {
             let mut state = self.lock();
@@ -693,6 +875,11 @@ impl LearningQueue {
                 let session = state.sessions.entry(id).or_default();
                 session.pending_user_turns = session.pending_user_turns.max(1);
                 session.due = true;
+            }
+            for id in unsummarized {
+                let session = state.sessions.entry(id).or_default();
+                session.episode_turns = session.episode_turns.max(1);
+                session.episode_due = true;
             }
         }
         self.try_start();
@@ -716,33 +903,59 @@ impl LearningQueue {
             return;
         }
         let now = Instant::now();
-        let session_id = {
+        let job = {
             let mut state = self.lock();
             if state.flushing > 0 {
                 return;
             }
-            let Some(id) = state
+            // A session's facts are learned before its summary is written,
+            // and any due learning goes before any summary.
+            let learn = state
                 .sessions
                 .iter()
                 .filter(|(_, s)| s.due && !s.running && s.retry_at.is_none_or(|at| at <= now))
                 .min_by_key(|(_, s)| s.last_turn_at)
-                .map(|(id, _)| id.clone())
-            else {
+                .map(|(id, _)| Job::Learn(id.clone()));
+            let job = learn.or_else(|| {
+                state
+                    .sessions
+                    .iter()
+                    .filter(|(_, s)| {
+                        s.episode_due
+                            && !s.due
+                            && !s.running
+                            && s.episode_retry_at.is_none_or(|at| at <= now)
+                    })
+                    .min_by_key(|(_, s)| s.last_turn_at)
+                    .map(|(id, _)| Job::Summarize(id.clone()))
+            });
+            let Some(job) = job else {
                 return;
             };
             state.flushing += 1;
-            id
+            job
         };
         let queue = Arc::clone(self);
         self.jobs.spawn(async move {
             let slot = FlushSlot(Arc::clone(&queue));
-            let report = queue.run_flush(&session_id, FlushPolicy::AUTOMATIC).await;
+            let progress = match job {
+                Job::Learn(session_id) => {
+                    let report = queue.run_flush(&session_id, FlushPolicy::AUTOMATIC).await;
+                    report.stopped.is_none() || report.chunks > 0
+                }
+                Job::Summarize(session_id) => {
+                    let report = queue
+                        .run_episodes(&session_id, FlushPolicy::AUTOMATIC)
+                        .await;
+                    report.stopped.is_none() || report.windows() > 0
+                }
+            };
             drop(slot);
             // The next due session — the boot catch-up's sessions go one at a
             // time — starts now only after progress. A flush that stopped
             // with none (a cap, the rate headroom, a busy daemon) waits for
             // the next sweep, or it would restart itself in a loop.
-            if report.stopped.is_none() || report.chunks > 0 {
+            if progress {
                 queue.try_start();
             }
         });
@@ -757,29 +970,47 @@ impl LearningQueue {
     /// already stopped — for at most `budget`. `true` when the drain
     /// finished; what it did not finish, the boot catch-up learns.
     pub async fn drain(self: &Arc<Self>, budget: Duration) -> bool {
-        let sessions: Vec<String> = {
+        let (sessions, summaries): (Vec<String>, Vec<String>) = {
             let mut state = self.lock();
             let mut ids: Vec<(Option<Instant>, String)> = Vec::new();
+            let mut episodes: Vec<(Option<Instant>, String)> = Vec::new();
             for (id, session) in state.sessions.iter_mut() {
                 if session.pending_user_turns > 0 || session.due {
                     session.due = true;
                     ids.push((session.last_turn_at, id.clone()));
                 }
+                // Design 09 §13.3: "in the shutdown drain".
+                if session.episode_turns > 0 || session.episode_due {
+                    session.episode_due = true;
+                    episodes.push((session.last_turn_at, id.clone()));
+                }
             }
             ids.sort();
-            ids.into_iter().map(|(_, id)| id).collect()
+            episodes.sort();
+            (
+                ids.into_iter().map(|(_, id)| id).collect(),
+                episodes.into_iter().map(|(_, id)| id).collect(),
+            )
         };
-        if sessions.is_empty() {
+        if sessions.is_empty() && summaries.is_empty() {
             return true;
         }
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         let queue = Arc::clone(self);
         self.jobs.spawn(async move {
+            // Every session's facts first, then the summaries: what MD-10
+            // guarantees before what MD-16 adds.
             for session_id in sessions {
                 if queue.jobs.cancel_token().is_cancelled() {
                     return;
                 }
                 queue.run_flush(&session_id, FlushPolicy::DRAIN).await;
+            }
+            for session_id in summaries {
+                if queue.jobs.cancel_token().is_cancelled() {
+                    return;
+                }
+                queue.run_episodes(&session_id, FlushPolicy::DRAIN).await;
             }
             let _ = done_tx.send(());
         });
@@ -824,6 +1055,40 @@ impl LearningQueue {
             reports.push((id, report));
         }
         reports
+    }
+
+    /// Writes a session's conversation summaries now (design 09 §13.3): one
+    /// `episode` per window of at least four of the user's turns past its
+    /// episode cursor, with no chunk cap and no quiet rule — the harness's
+    /// deterministic stand-in for the quiet period, the switch and the
+    /// drain. One flush per session: a call while one runs returns at once
+    /// with [`FlushStop::AlreadyRunning`].
+    pub async fn flush_episodes(&self, session_id: &str) -> EpisodeReport {
+        self.run_episodes(session_id, FlushPolicy::EXPLICIT).await
+    }
+
+    /// An automatic summary flush of one session, now: what the sweeper
+    /// starts.
+    #[cfg(test)]
+    pub(crate) async fn flush_episodes_automatic(&self, session_id: &str) -> EpisodeReport {
+        self.run_episodes(session_id, FlushPolicy::AUTOMATIC).await
+    }
+
+    /// Whether a summary trigger made this session due (design 09 §13.3).
+    pub fn is_episode_due(&self, session_id: &str) -> bool {
+        self.lock()
+            .sessions
+            .get(session_id)
+            .is_some_and(|s| s.episode_due)
+    }
+
+    /// The user's turns that finished since the session's summary was last
+    /// looked at.
+    pub fn episode_turns(&self, session_id: &str) -> u32 {
+        self.lock()
+            .sessions
+            .get(session_id)
+            .map_or(0, |s| s.episode_turns)
     }
 
     /// An automatic flush of one session, now: what the sweeper starts.
@@ -952,29 +1217,8 @@ impl LearningQueue {
             };
 
             let dcfg = self.deps.daemon_config.load();
-            let model = dcfg
-                .orchestrator
-                .costs
-                .extraction_model
-                .clone()
-                .filter(|m| !m.trim().is_empty());
-            let answering = crate::orchestrator::attachment_adapt::answering_model(
-                &self.deps.router,
-                model.as_deref(),
-            );
-            let local = answering
-                .as_ref()
-                .is_some_and(|a| self.is_local_model(&a.id));
-            // A keyed provider's rate budget caps the chunk too (§1.6).
-            let headroom = match (&answering, local) {
-                (Some(a), false) => self.deps.router.rate_headroom(&a.id).await,
-                _ => None,
-            };
-            let budget = Budget::for_window(
-                answering.as_ref().and_then(|a| a.window),
-                dcfg.orchestrator.costs.extract_max_items_per_call,
-                headroom.map(|h| h.tpm_capacity as u32),
-            );
+            let setup = self.call_setup(&dcfg).await;
+            let budget = setup.budget;
             let chunk = match window::next_chunk(
                 &read.rows,
                 &read.before,
@@ -1021,79 +1265,28 @@ impl LearningQueue {
             }
 
             // The owner must be a `global_user` row (design §3): anything
-            // else learns nothing, and its cursor advances. The owner check
-            // reads the database, so it runs on the blocking pool (§1.9).
-            let service = self.deps.memory_service.clone();
-            let owner = lane_owner(&session.lane_key).to_string();
-            let attribution = Attribution {
-                lane_key: Some(session.lane_key.clone()),
-                task_id: None,
-                request_id: chunk
-                    .last_request_id()
-                    .and_then(|r| Uuid::parse_str(r).ok()),
-                source: Some(session.source.clone()),
-            };
-            let context = blocking(move || {
-                let hint = match &root {
-                    Some(r) => WorkspaceHint::Root(r.as_path()),
-                    None => WorkspaceHint::None,
-                };
-                Ok(service.context(
-                    &owner,
-                    hint,
-                    Surface::Extraction,
-                    Capabilities::EXTRACTION,
-                    attribution,
-                ))
-            })
-            .await;
-            let ctx = match context {
-                Ok(Ok(ctx)) => ctx,
-                Ok(Err(MemoryError::NoOwner(_))) => {
+            // else learns nothing, and its cursor advances.
+            let ctx = match self
+                .owner_context(session_id, &session, root, chunk.last_request_id())
+                .await
+            {
+                Ok(Some(ctx)) => ctx,
+                Ok(None) => {
                     self.advance(session_id, chunk.through, expected).await;
                     report.chunks += 1;
                     report.skipped_no_owner += 1;
                     continue;
                 }
-                Ok(Err(e)) => {
-                    tracing::warn!(session_id, "memory learning: context refused: {e}");
-                    report.stopped = Some(FlushStop::StoreError);
-                    return report;
-                }
-                Err(e) => {
-                    tracing::warn!(session_id, "memory learning: context task failed: {e:#}");
-                    report.stopped = Some(FlushStop::StoreError);
+                Err(stop) => {
+                    report.stopped = Some(stop);
                     return report;
                 }
             };
-
             // A quarantined partition holds the window before any model
             // call: no cost is spent on a chunk that cannot be written.
-            let service = self.deps.memory_service.clone();
-            let preflight_ctx = ctx.clone();
-            match tokio::task::spawn_blocking(move || service.learning_preflight(&preflight_ctx))
-                .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(MemoryError::Quarantined { partition_key, .. })) => {
-                    tracing::warn!(
-                        session_id,
-                        %partition_key,
-                        "memory learning waits: the partition is quarantined; run `openalpaca memory doctor --repair`"
-                    );
-                    report.stopped = Some(FlushStop::Quarantined);
-                    return report;
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!(session_id, "memory learning: pre-flight failed: {e}");
-                    report.stopped = Some(FlushStop::StoreError);
-                    return report;
-                }
-                Err(e) => {
-                    tracing::warn!(session_id, "memory learning: pre-flight task failed: {e}");
-                    report.stopped = Some(FlushStop::StoreError);
-                    return report;
-                }
+            if let Err(stop) = self.preflight(session_id, &ctx).await {
+                report.stopped = Some(stop);
+                return report;
             }
 
             // The durable daily gates (§1.8, ruling LR8): today's UTC calls
@@ -1156,78 +1349,18 @@ impl LearningQueue {
                     max_items: budget.items,
                 },
                 budget.out_tokens,
-                model,
+                setup.model.clone(),
             );
             let threshold = dcfg.orchestrator.memory.memory_confidence_threshold;
             drop(dcfg);
-            if policy.shares_with_chat
-                && let Some(h) = headroom
+            let (response, latency_ms) = match self
+                .call_model(request, policy, &setup, &cancel)
+                .await
             {
-                let estimate = (request
-                    .messages
-                    .iter()
-                    .map(|m| m.content.len())
-                    .sum::<usize>()
-                    / 4)
-                .max(100) as f64;
-                if h.rpm_available - 1.0 < h.rpm_capacity / 2.0
-                    || h.tpm_available - estimate < h.tpm_capacity / 2.0
-                {
-                    report.stopped = Some(FlushStop::RateHeadroom);
-                    return report;
-                }
-            }
-
-            // Ask the model. On a local model a turn that starts cancels
-            // this call: nothing is written and nothing is counted. The call
-            // is registered under the lock that reads the in-flight set: a
-            // turn that started since the quiet check — the window read, the
-            // pre-flight and the gates all await — yields here, before the
-            // call goes out, and a later one finds the token to cancel.
-            let local_call = if policy.shares_with_chat && local {
-                let token = cancel.child_token();
-                let mut state = self.lock();
-                if !state.in_flight.is_empty() {
-                    drop(state);
-                    report.stopped = Some(FlushStop::Yielded);
-                    return report;
-                }
-                state.local_call = Some(token.clone());
-                Some(token)
-            } else {
-                None
-            };
-            let yielded = async {
-                match &local_call {
-                    Some(token) => token.cancelled().await,
-                    None => std::future::pending().await,
-                }
-            };
-            let started = std::time::Instant::now();
-            let response = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => None,
-                _ = yielded => {
-                    self.lock().local_call = None;
-                    report.stopped = Some(FlushStop::Yielded);
-                    return report;
-                }
-                result = self.deps.router.complete(request) => Some(result),
-            };
-            if local_call.is_some() {
-                self.lock().local_call = None;
-            }
-            let Some(response) = response else {
-                report.stopped = Some(FlushStop::Cancelled);
-                return report;
-            };
-            let latency_ms = started.elapsed().as_millis() as i64;
-            let response = match response {
-                Ok(r) => r,
+                CallOutcome::Answered(response, latency_ms) => (response, latency_ms),
                 // An answer the reasoning ate is a reachable model's bad
                 // output, not an outage (M2, ruling LR20).
-                Err(LlmRouterError::Llm(e @ LlmError::EmptyCompletion { .. })) => {
-                    self.note_available();
+                CallOutcome::Empty(e) => {
                     report.calls += 1;
                     if self
                         .count_failure(session_id, &chunk, expected, &e.to_string(), &mut report)
@@ -1237,21 +1370,17 @@ impl LearningQueue {
                     }
                     return report;
                 }
-                Err(e) => {
-                    // §7b P10: the window holds, nothing is counted, and the
-                    // outage is logged once, not once per retry.
-                    self.note_unavailable(&e);
-                    report.stopped = Some(FlushStop::Unavailable);
+                CallOutcome::Stopped(stop) => {
+                    report.stopped = Some(stop);
                     return report;
                 }
             };
-            self.note_available();
             report.calls += 1;
             report.input_tokens += u64::from(response.usage.input_tokens);
             report.output_tokens += u64::from(response.usage.output_tokens);
 
             let parsed = extractor::parse_items(&response.content);
-            self.record_usage(&response, latency_ms, parsed.is_err())
+            self.record_usage(AGENT_LABEL, &response, latency_ms, parsed.is_err())
                 .await;
             let items = match parsed {
                 Ok(items) => items,
@@ -1312,6 +1441,601 @@ impl LearningQueue {
                     return report;
                 }
             }
+        }
+    }
+
+    /// The model a flush calls, and what it may spend (design 09 §1.6,
+    /// §1.7): the extraction model as the answering model resolves it,
+    /// whether it runs on this machine, a keyed provider's rate headroom and
+    /// the byte budget from its window. Learning's chunks and the
+    /// conversation summaries share it.
+    async fn call_setup(&self, dcfg: &DaemonConfig) -> CallSetup {
+        let model = dcfg
+            .orchestrator
+            .costs
+            .extraction_model
+            .clone()
+            .filter(|m| !m.trim().is_empty());
+        let answering = crate::orchestrator::attachment_adapt::answering_model(
+            &self.deps.router,
+            model.as_deref(),
+        );
+        let local = answering
+            .as_ref()
+            .is_some_and(|a| self.is_local_model(&a.id));
+        // A keyed provider's rate budget caps the chunk too (§1.6).
+        let headroom = match (&answering, local) {
+            (Some(a), false) => self.deps.router.rate_headroom(&a.id).await,
+            _ => None,
+        };
+        let budget = Budget::for_window(
+            answering.as_ref().and_then(|a| a.window),
+            dcfg.orchestrator.costs.extract_max_items_per_call,
+            headroom.map(|h| h.tpm_capacity as u32),
+        );
+        CallSetup {
+            model,
+            local,
+            headroom,
+            budget,
+        }
+    }
+
+    /// One model call that shares the model with chat (design 09 §1.7). On
+    /// a keyed remote model it starts only when half of each rate bucket
+    /// would remain after its own estimate — the router's, bytes ÷ 4. On a
+    /// local model a turn that starts cancels it: nothing is written and
+    /// nothing is counted. The call is registered under the lock that reads
+    /// the in-flight set, so a turn that started since the quiet check — the
+    /// window read, the pre-flight and the gates all await — yields here,
+    /// before the call goes out, and a later one finds the token to cancel.
+    /// An explicit flush and the stop drain share nothing and just call.
+    async fn call_model(
+        &self,
+        request: openalpaca_llm::RouterRequest,
+        policy: FlushPolicy,
+        setup: &CallSetup,
+        cancel: &CancellationToken,
+    ) -> CallOutcome {
+        if policy.shares_with_chat
+            && let Some(h) = setup.headroom
+        {
+            let estimate = (request
+                .messages
+                .iter()
+                .map(|m| m.content.len())
+                .sum::<usize>()
+                / 4)
+            .max(100) as f64;
+            if h.rpm_available - 1.0 < h.rpm_capacity / 2.0
+                || h.tpm_available - estimate < h.tpm_capacity / 2.0
+            {
+                return CallOutcome::Stopped(FlushStop::RateHeadroom);
+            }
+        }
+        let local_call = if policy.shares_with_chat && setup.local {
+            let token = cancel.child_token();
+            let mut state = self.lock();
+            if !state.in_flight.is_empty() {
+                return CallOutcome::Stopped(FlushStop::Yielded);
+            }
+            state.local_call = Some(token.clone());
+            Some(token)
+        } else {
+            None
+        };
+        let yielded = async {
+            match &local_call {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending().await,
+            }
+        };
+        let started = std::time::Instant::now();
+        let response = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => None,
+            _ = yielded => {
+                self.lock().local_call = None;
+                return CallOutcome::Stopped(FlushStop::Yielded);
+            }
+            result = self.deps.router.complete(request) => Some(result),
+        };
+        if local_call.is_some() {
+            self.lock().local_call = None;
+        }
+        let Some(response) = response else {
+            return CallOutcome::Stopped(FlushStop::Cancelled);
+        };
+        let latency_ms = started.elapsed().as_millis() as i64;
+        match response {
+            Ok(response) => {
+                self.note_available();
+                CallOutcome::Answered(response, latency_ms)
+            }
+            Err(LlmRouterError::Llm(e @ LlmError::EmptyCompletion { .. })) => {
+                self.note_available();
+                CallOutcome::Empty(e)
+            }
+            Err(e) => {
+                // §7b P10: the window holds, nothing is counted, and the
+                // outage is logged once, not once per retry.
+                self.note_unavailable(&e);
+                CallOutcome::Stopped(FlushStop::Unavailable)
+            }
+        }
+    }
+
+    /// A chunk's memory context: the lane's owner — the user part of its key
+    /// (design 09 §1.1) — the chunk's own project root, the `Extraction`
+    /// surface. `Ok(None)` when the owner is not a `global_user` row (design
+    /// §3): such a lane learns nothing. The owner check reads the database,
+    /// so it runs on the blocking pool (§1.9).
+    async fn owner_context(
+        &self,
+        session_id: &str,
+        session: &Conversation,
+        root: Option<PathBuf>,
+        request_id: Option<&str>,
+    ) -> Result<Option<MemoryAccessContext>, FlushStop> {
+        let service = self.deps.memory_service.clone();
+        let owner = lane_owner(&session.lane_key).to_string();
+        let attribution = Attribution {
+            lane_key: Some(session.lane_key.clone()),
+            task_id: None,
+            request_id: request_id.and_then(|r| Uuid::parse_str(r).ok()),
+            source: Some(session.source.clone()),
+        };
+        let context = blocking(move || {
+            let hint = match &root {
+                Some(r) => WorkspaceHint::Root(r.as_path()),
+                None => WorkspaceHint::None,
+            };
+            Ok(service.context(
+                &owner,
+                hint,
+                Surface::Extraction,
+                Capabilities::EXTRACTION,
+                attribution,
+            ))
+        })
+        .await;
+        match context {
+            Ok(Ok(ctx)) => Ok(Some(ctx)),
+            Ok(Err(MemoryError::NoOwner(_))) => Ok(None),
+            Ok(Err(e)) => {
+                tracing::warn!(session_id, "memory learning: context refused: {e}");
+                Err(FlushStop::StoreError)
+            }
+            Err(e) => {
+                tracing::warn!(session_id, "memory learning: context task failed: {e:#}");
+                Err(FlushStop::StoreError)
+            }
+        }
+    }
+
+    /// Refuses a chunk whose partition is quarantined, before any model
+    /// call (design §2): the window waits for `memory doctor --repair`.
+    async fn preflight(
+        &self,
+        session_id: &str,
+        ctx: &MemoryAccessContext,
+    ) -> Result<(), FlushStop> {
+        let service = self.deps.memory_service.clone();
+        let preflight_ctx = ctx.clone();
+        match tokio::task::spawn_blocking(move || service.learning_preflight(&preflight_ctx)).await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(MemoryError::Quarantined { partition_key, .. })) => {
+                tracing::warn!(
+                    session_id,
+                    %partition_key,
+                    "memory learning waits: the partition is quarantined; run `openalpaca memory doctor --repair`"
+                );
+                Err(FlushStop::Quarantined)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(session_id, "memory learning: pre-flight failed: {e}");
+                Err(FlushStop::StoreError)
+            }
+            Err(e) => {
+                tracing::warn!(session_id, "memory learning: pre-flight task failed: {e}");
+                Err(FlushStop::StoreError)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Conversation summaries (design 09 §13.3)
+    // ------------------------------------------------------------------
+
+    async fn run_episodes(&self, session_id: &str, policy: FlushPolicy) -> EpisodeReport {
+        let Some(running) = RunningFlush::begin(self, session_id) else {
+            return EpisodeReport {
+                stopped: Some(FlushStop::AlreadyRunning),
+                ..Default::default()
+            };
+        };
+        let report = self.summarize(session_id, policy).await;
+        running.finish_episodes(&report);
+        macro_rules! finished {
+            ($level:expr) => {
+                tracing::event!(
+                    $level,
+                    session_id,
+                    calls = report.calls,
+                    episodes = report.episodes,
+                    refused = report.refused,
+                    skipped_short = report.skipped_short,
+                    skipped_no_owner = report.skipped_no_owner,
+                    skipped_root_gone = report.skipped_root_gone,
+                    skipped_unusable = report.skipped_unusable,
+                    skipped_summarized = report.skipped_summarized,
+                    skipped_forgotten = report.skipped_forgotten,
+                    input_tokens = report.input_tokens,
+                    output_tokens = report.output_tokens,
+                    stopped = ?report.stopped,
+                    "conversation summary finished"
+                );
+            };
+        }
+        if report.calls > 0 || report.windows() > 0 {
+            finished!(tracing::Level::INFO);
+        } else {
+            finished!(tracing::Level::DEBUG);
+        }
+        report
+    }
+
+    /// A session's summaries (design 09 §13.3): while at least four of the
+    /// user's turns lie past its episode cursor, one call per window — the
+    /// next chunk that fits learning's byte budget and never mixes roots —
+    /// under learning's quiet rule, daily gates and yielding to chat, each
+    /// summary written and the cursor moved in one blocking task.
+    async fn summarize(&self, session_id: &str, policy: FlushPolicy) -> EpisodeReport {
+        let mut report = EpisodeReport::default();
+        let cancel = self.jobs.cancel_token();
+        let mut windows = 0usize;
+        loop {
+            let learning = self.deps.daemon_config.load().orchestrator.learning.clone();
+            if !learning.enabled || learning.episode_max_per_day == 0 {
+                report.stopped = Some(FlushStop::Disabled);
+                return report;
+            }
+            if policy.max_chunks.is_some_and(|max| windows >= max) {
+                report.stopped = Some(FlushStop::ChunkLimit);
+                return report;
+            }
+            if cancel.is_cancelled() {
+                report.stopped = Some(FlushStop::Cancelled);
+                return report;
+            }
+            if policy.shares_with_chat && !self.is_quiet() {
+                report.stopped = Some(FlushStop::Busy);
+                return report;
+            }
+
+            let mut in_flight = self.in_flight_ids();
+            let db = self.deps.db.clone();
+            let owned_id = session_id.to_string();
+            let read = match blocking(move || read_episode_window(&db, &owned_id)).await {
+                Ok(read) => read,
+                Err(e) => {
+                    tracing::warn!(
+                        session_id,
+                        "conversation summary: the window could not be read: {e:#}"
+                    );
+                    report.stopped = Some(FlushStop::StoreError);
+                    return report;
+                }
+            };
+            in_flight.extend(self.in_flight_ids());
+            let Some(session) = read.session else {
+                self.forget_session(session_id);
+                report.stopped = Some(FlushStop::SessionGone);
+                return report;
+            };
+            // "Only when at least 4 user turns have accumulated since the
+            // session's last episode."
+            if window::user_turns(&read.rows, &in_flight) < EPISODE_MIN_USER_TURNS as usize {
+                return report;
+            }
+
+            let dcfg = self.deps.daemon_config.load();
+            let setup = self.call_setup(&dcfg).await;
+            // No context rows: a summary covers its own window.
+            let mut chunk = match window::next_chunk(
+                &read.rows,
+                &[],
+                &in_flight,
+                setup.budget.transcript_bytes,
+                WINDOW_READ_ROWS as usize,
+            ) {
+                NextChunk::Empty => return report,
+                NextChunk::Blocked => {
+                    report.stopped = Some(FlushStop::InFlight);
+                    return report;
+                }
+                NextChunk::Chunk(chunk) => chunk,
+            };
+            let expected = read.through;
+
+            if chunk.users_text_bytes() < dcfg.orchestrator.costs.extract_min_content_len {
+                self.advance_episode(session_id, chunk.through, expected)
+                    .await;
+                windows += 1;
+                report.skipped_short += 1;
+                continue;
+            }
+            let root = chunk.root.as_ref().map(PathBuf::from);
+            if let Some(r) = &root
+                && !tokio::fs::metadata(r).await.is_ok_and(|m| m.is_dir())
+            {
+                self.advance_episode(session_id, chunk.through, expected)
+                    .await;
+                windows += 1;
+                report.skipped_root_gone += 1;
+                continue;
+            }
+            let ctx = match self
+                .owner_context(session_id, &session, root, chunk.last_request_id())
+                .await
+            {
+                Ok(Some(ctx)) => ctx,
+                Ok(None) => {
+                    self.advance_episode(session_id, chunk.through, expected)
+                        .await;
+                    windows += 1;
+                    report.skipped_no_owner += 1;
+                    continue;
+                }
+                Err(stop) => {
+                    report.stopped = Some(stop);
+                    return report;
+                }
+            };
+            if let Err(stop) = self.preflight(session_id, &ctx).await {
+                report.stopped = Some(stop);
+                return report;
+            }
+
+            // A summary already cites this window — a re-run after a crash
+            // between its write and the cursor's advance: no second one, and
+            // no call. Then the turns a forget suppressed are taken out, so
+            // no summary restates what the user said to forget (design 03
+            // §6's hard guarantee).
+            let service = self.deps.memory_service.clone();
+            let check_ctx = ctx.clone();
+            let ids: Vec<i64> = chunk.rows.iter().map(|r| r.id).collect();
+            let checked = tokio::task::spawn_blocking(move || {
+                let covered = service.summary_cites(&check_ctx, &ids)?;
+                let keys: Vec<String> = ids.iter().map(|id| format!("message:{id}")).collect();
+                let suppressed = service.suppressed_sources(&check_ctx, &keys)?;
+                Ok::<_, MemoryError>((covered, suppressed))
+            })
+            .await;
+            let (covered, suppressed) = match checked {
+                Ok(Ok(found)) => found,
+                Ok(Err(MemoryError::Quarantined { .. })) => {
+                    report.stopped = Some(FlushStop::Quarantined);
+                    return report;
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(session_id, "conversation summary: the lookup failed: {e}");
+                    report.stopped = Some(FlushStop::StoreError);
+                    return report;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id,
+                        "conversation summary: the lookup task failed: {e}"
+                    );
+                    report.stopped = Some(FlushStop::StoreError);
+                    return report;
+                }
+            };
+            if covered {
+                self.advance_episode(session_id, chunk.through, expected)
+                    .await;
+                windows += 1;
+                report.skipped_summarized += 1;
+                continue;
+            }
+            if !suppressed.is_empty() {
+                let forgotten_turns: HashSet<String> = chunk
+                    .rows
+                    .iter()
+                    .filter(|r| suppressed.contains(&format!("message:{}", r.id)))
+                    .filter_map(|r| r.request_id.clone())
+                    .collect();
+                chunk.rows.retain(|r| {
+                    !suppressed.contains(&format!("message:{}", r.id))
+                        && r.request_id
+                            .as_ref()
+                            .is_none_or(|q| !forgotten_turns.contains(q))
+                });
+                if episode::user_turns(&chunk.rows) == 0 {
+                    self.advance_episode(session_id, chunk.through, expected)
+                        .await;
+                    windows += 1;
+                    report.skipped_forgotten += 1;
+                    continue;
+                }
+            }
+
+            // The durable daily gates (§1.8): the summaries count under the
+            // extraction's own caps — its calls and cost with chat
+            // learning's — and under their own daily count.
+            let max_calls = i64::from(dcfg.orchestrator.costs.extract_max_calls_per_day);
+            let max_cost = dcfg.orchestrator.costs.extract_max_daily_cost_usd;
+            if (max_calls > 0 && read.calls_today >= max_calls)
+                || read.cost_today > max_cost
+                || read.episode_calls_today >= i64::from(learning.episode_max_per_day)
+            {
+                self.notice_cap(session_id, read.calls_today, read.cost_today);
+                report.stopped = Some(FlushStop::Cap);
+                return report;
+            }
+
+            let (transcript, _) = chunk.transcript();
+            let today = chunk.today();
+            let request = episode::build_request(
+                &today,
+                &transcript,
+                EPISODE_OUT_TOKENS.min(setup.budget.out_tokens),
+                setup.model.clone(),
+            );
+            drop(dcfg);
+            let (response, latency_ms) =
+                match self.call_model(request, policy, &setup, &cancel).await {
+                    CallOutcome::Answered(response, latency_ms) => (response, latency_ms),
+                    CallOutcome::Empty(e) => {
+                        report.calls += 1;
+                        if self
+                            .count_episode_failure(
+                                session_id,
+                                &chunk,
+                                expected,
+                                &e.to_string(),
+                                &mut report,
+                            )
+                            .await
+                        {
+                            windows += 1;
+                            continue;
+                        }
+                        return report;
+                    }
+                    CallOutcome::Stopped(stop) => {
+                        report.stopped = Some(stop);
+                        return report;
+                    }
+                };
+            report.calls += 1;
+            report.input_tokens += u64::from(response.usage.input_tokens);
+            report.output_tokens += u64::from(response.usage.output_tokens);
+            let parsed = episode::parse_summary(&response.content);
+            self.record_usage(EPISODE_LABEL, &response, latency_ms, parsed.is_err())
+                .await;
+            let summary = match parsed {
+                Ok(summary) => summary,
+                Err(why) => {
+                    if self
+                        .count_episode_failure(session_id, &chunk, expected, &why, &mut report)
+                        .await
+                    {
+                        windows += 1;
+                        continue;
+                    }
+                    return report;
+                }
+            };
+
+            let job = EpisodeJob {
+                db: self.deps.db.clone(),
+                service: self.deps.memory_service.clone(),
+                ctx,
+                session_id: session_id.to_string(),
+                input: episode::store_input(&summary, &chunk.rows, &today),
+                through: chunk.through,
+                expected,
+                hooks: self.hooks.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+            };
+            let (written, end) =
+                match tokio::task::spawn_blocking(move || episode::store_and_advance(job)).await {
+                    Ok(done) => done,
+                    Err(e) => (
+                        EpisodeWrite::Refused,
+                        StoreEnd::Held(format!("the store task failed: {e}")),
+                    ),
+                };
+            match written {
+                EpisodeWrite::Written => report.episodes += 1,
+                EpisodeWrite::Existing => {}
+                EpisodeWrite::Refused => report.refused += 1,
+            }
+            match end {
+                StoreEnd::Advanced | StoreEnd::CursorMoved => {
+                    windows += 1;
+                    if let Some(s) = self.lock().sessions.get_mut(session_id) {
+                        s.episode_failures = None;
+                    }
+                }
+                StoreEnd::SessionGone => {
+                    self.forget_session(session_id);
+                    report.stopped = Some(FlushStop::SessionGone);
+                    return report;
+                }
+                StoreEnd::Held(why) => {
+                    tracing::warn!(session_id, "conversation summary holds the window: {why}");
+                    report.stopped = Some(FlushStop::StoreError);
+                    return report;
+                }
+            }
+        }
+    }
+
+    /// Counts one unusable answer against a summary's window, in memory
+    /// (ruling LR20's rule, without its durable count). After `MAX_ATTEMPTS`
+    /// of them the episode cursor moves past the window with one WARN and
+    /// `true` lets the flush go on; otherwise the window holds (`false`).
+    async fn count_episode_failure(
+        &self,
+        session_id: &str,
+        chunk: &window::Chunk,
+        expected: i64,
+        error: &str,
+        report: &mut EpisodeReport,
+    ) -> bool {
+        let attempts = {
+            let mut state = self.lock();
+            let session = state.sessions.entry(session_id.to_string()).or_default();
+            let attempts = match session.episode_failures {
+                Some((at, n)) if at == expected => n + 1,
+                _ => 1,
+            };
+            session.episode_failures = Some((expected, attempts));
+            attempts
+        };
+        if attempts < MAX_ATTEMPTS {
+            tracing::info!(
+                session_id,
+                attempts,
+                "conversation summary: the model's answer was unusable, retrying later: {error}"
+            );
+            report.stopped = Some(FlushStop::BadOutput);
+            return false;
+        }
+        let first = expected + 1;
+        tracing::warn!(
+            session_id,
+            first_row = first,
+            last_row = chunk.through,
+            attempts,
+            "conversation summary skipped rows {first}..={} after {attempts} unusable answers: {error}",
+            chunk.through
+        );
+        self.advance_episode(session_id, chunk.through, expected)
+            .await;
+        if let Some(s) = self.lock().sessions.get_mut(session_id) {
+            s.episode_failures = None;
+        }
+        report.skipped_unusable += 1;
+        true
+    }
+
+    /// Moves the episode cursor past a window that needs no summary.
+    async fn advance_episode(&self, session_id: &str, through: i64, expected: i64) {
+        let db = self.deps.db.clone();
+        let id = session_id.to_string();
+        if let Err(e) = blocking(move || {
+            LearningCursorRepository::new(&db).advance_episode_cas(&id, through, expected)
+        })
+        .await
+        {
+            tracing::warn!(
+                session_id,
+                "conversation summary: the episode cursor did not move: {e:#}"
+            );
         }
     }
 
@@ -1433,6 +2157,7 @@ impl LearningQueue {
     /// pool (§1.9), and before the next chunk's gate reads it.
     async fn record_usage(
         &self,
+        label: &'static str,
         response: &openalpaca_llm::ChatResponse,
         latency_ms: i64,
         parse_failed: bool,
@@ -1460,7 +2185,7 @@ impl LearningQueue {
         let db = self.deps.db.clone();
         if let Err(e) = blocking(move || {
             LlmUsageRepository::new(&db).record_and_log(
-                AGENT_LABEL,
+                label,
                 None,
                 &provider,
                 &model,
@@ -1495,6 +2220,7 @@ struct RunningFlush<'a> {
     queue: &'a LearningQueue,
     session_id: String,
     pending_at_start: u32,
+    episode_turns_at_start: u32,
 }
 
 impl<'a> RunningFlush<'a> {
@@ -1506,11 +2232,44 @@ impl<'a> RunningFlush<'a> {
         }
         session.running = true;
         let pending_at_start = session.pending_user_turns;
+        let episode_turns_at_start = session.episode_turns;
         Some(Self {
             queue,
             session_id: session_id.to_string(),
             pending_at_start,
+            episode_turns_at_start,
         })
+    }
+
+    /// The session's summary bookkeeping once a summary flush ends. One that
+    /// summarised every window with enough of the user's turns has looked at
+    /// every turn it saw pending, and the session is no longer due; turns
+    /// that finished while it ran stay pending. A held window waits out a
+    /// doubling backoff; anything else that stopped early stays due.
+    fn finish_episodes(self, report: &EpisodeReport) {
+        let timings = self.queue.timings();
+        let mut state = self.queue.lock();
+        let Some(session) = state.sessions.get_mut(&self.session_id) else {
+            return;
+        };
+        match report.stopped {
+            None => {
+                session.episode_turns = session
+                    .episode_turns
+                    .saturating_sub(self.episode_turns_at_start);
+                session.episode_due = false;
+                session.episode_retry_at = None;
+                session.episode_backoff = None;
+            }
+            Some(stop) if stop.backs_off() => {
+                let delay = session.episode_backoff.unwrap_or(timings.backoff_base);
+                session.episode_retry_at = Some(Instant::now() + delay);
+                session.episode_backoff = Some((delay * 2).min(timings.backoff_cap));
+                session.episode_due = true;
+            }
+            Some(FlushStop::SessionGone | FlushStop::Disabled | FlushStop::AlreadyRunning) => {}
+            Some(_) => session.episode_due = true,
+        }
     }
 
     /// The session's bookkeeping once the flush ends. A flush that learned

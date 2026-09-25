@@ -10,7 +10,14 @@
 //!
 //! The unit of learning is a **session** (§1.1): its rows past the durable
 //! `learning_cursor` are the window.
+//!
+//! The same queue writes **conversation summaries** (design 09 §13.3, owner
+//! decision MD-16): one `episode` note per stretch of at least four of the
+//! user's turns, after a quiet period of 30 minutes, on a switch and in the
+//! stop drain — found by search, the timeline and the Memory view, and never
+//! recalled on its own (`episode.rs`).
 
+mod episode;
 mod extractor;
 mod lookup;
 pub mod queue;
@@ -18,7 +25,9 @@ pub mod queue;
 mod tests;
 mod window;
 
-pub use queue::{FlushReport, FlushStop, LearningDeps, LearningQueue, QueueMode, TurnGuard};
+pub use queue::{
+    EpisodeReport, FlushReport, FlushStop, LearningDeps, LearningQueue, QueueMode, TurnGuard,
+};
 
 // Task-output extraction shares the item fields' cleaning and the keys'
 // rendering (design 09 §2.7).
@@ -73,6 +82,23 @@ pub const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1
 pub const BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(60);
 /// The longest retry delay.
 pub const BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(3600);
+
+// Conversation summaries (design 09 §13.3, owner decision MD-16): the
+// quiet period and the four turns are the design's numbers; only the daily
+// count, `[orchestrator.learning] episode_max_per_day`, is a key.
+
+/// A conversation whose last turn is this old gets its summary: MD-10's
+/// idle trigger stretched for a summary, which two minutes would cut too
+/// often.
+pub const EPISODE_QUIET: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// A summary is written only once at least this many of the user's turns
+/// have accumulated since the session's last one.
+pub const EPISODE_MIN_USER_TURNS: u32 = 4;
+/// The most prose a summary's `## Knowledge` holds.
+pub const EPISODE_MAX_KNOWLEDGE_BYTES: usize = 1024;
+/// The most output tokens one summary call asks for (under the window's own
+/// `out_tok`, design 09 §1.6).
+pub const EPISODE_OUT_TOKENS: u32 = 1024;
 
 /// What one extraction call may spend (design §1.6), from the extraction
 /// model's context window:

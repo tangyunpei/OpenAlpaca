@@ -93,6 +93,43 @@ impl MemoryService {
             .collect())
     }
 
+    /// Whether a conversation summary already cites any of these message
+    /// rows (design 09 §13.3): a re-run after a crash between a summary's
+    /// write and its episode cursor's advance writes no second one. Only the
+    /// `Extraction` surface may ask; it records nothing.
+    pub(crate) fn summary_cites(
+        &self,
+        ctx: &MemoryAccessContext,
+        message_ids: &[i64],
+    ) -> Result<bool, MemoryError> {
+        Self::require_extraction(ctx)?;
+        if message_ids.is_empty() {
+            return Ok(false);
+        }
+        let resolved = self.resolve(ctx)?;
+        let partitions: Vec<&Partition> = resolved
+            .all()
+            .into_iter()
+            .filter(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)))
+            .collect();
+        for p in &partitions {
+            self.touch(p)?;
+        }
+        let keys: Vec<String> = partitions
+            .iter()
+            .map(|p| p.partition_key().to_string())
+            .collect();
+        let source_keys: Vec<String> = message_ids
+            .iter()
+            .map(|id| format!("message:{id}"))
+            .collect();
+        Ok(self
+            .index
+            .notes_citing(&keys, &source_keys)?
+            .iter()
+            .any(|row| is_summary_row(&row.kind, &row.origin)))
+    }
+
     /// Learning's known-notes lookup for one chunk (design 09 §2.3). Only
     /// the `Extraction` surface may make it; it records nothing.
     ///

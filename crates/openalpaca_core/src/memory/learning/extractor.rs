@@ -97,22 +97,23 @@ pub(crate) fn render_prompt(input: &PromptInput<'_>) -> (String, String) {
         .split_once(USER_MARKER)
         .expect("extractor_prompt.txt has a `=== user ===` line");
     let items = input.max_items.to_string();
-    let value = |name: &str| -> Option<&str> {
-        match name {
-            "today" => Some(input.today),
-            "known_notes" => Some(input.known_notes),
-            "known_keys" => Some(input.known_keys),
-            "conversation" => Some(input.conversation),
-            "items" => Some(items.as_str()),
-            _ => None,
-        }
-    };
-    let mut out = String::with_capacity(
-        template.len()
-            + input.conversation.len()
-            + input.known_notes.len()
-            + input.known_keys.len(),
-    );
+    let user = fill_template(template, |name| match name {
+        "today" => Some(input.today),
+        "known_notes" => Some(input.known_notes),
+        "known_keys" => Some(input.known_keys),
+        "conversation" => Some(input.conversation),
+        "items" => Some(items.as_str()),
+        _ => None,
+    });
+    (system.trim_end().to_string(), user.trim_end().to_string())
+}
+
+/// Fills a prompt fixture's `{{name}}` placeholders in one pass, so a value
+/// that happens to contain `{{items}}` is quoted, never expanded; a name
+/// `value` does not know is left as it is. Shared with the episode writer's
+/// prompt (design 09 §13.3).
+pub(crate) fn fill_template<'v>(template: &str, value: impl Fn(&str) -> Option<&'v str>) -> String {
+    let mut out = String::with_capacity(template.len() * 2);
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
         out.push_str(&rest[..start]);
@@ -129,7 +130,7 @@ pub(crate) fn render_prompt(input: &PromptInput<'_>) -> (String, String) {
         rest = &after[end + 2..];
     }
     out.push_str(rest);
-    (system.trim_end().to_string(), out.trim_end().to_string())
+    out
 }
 
 /// The chunk's request: the fixture's prompt, `thinking: Disabled` (M2),
@@ -430,7 +431,7 @@ fn read_item(
 
 /// Whitespace runs collapsed to one space, the ends trimmed: a title or a
 /// reason is one line.
-fn one_line(text: &str) -> String {
+pub(crate) fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

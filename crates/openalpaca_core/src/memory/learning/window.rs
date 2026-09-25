@@ -272,6 +272,17 @@ fn classify(
     (entries, false)
 }
 
+/// The user's own turns among a window's rows — typed rows, long or not,
+/// never a follow-up's assistant-written text nor a `/slash` turn — up to a
+/// turn still in flight (design 09 §13.3's "at least 4 user turns").
+pub(crate) fn user_turns(rows: &[LearningRow], in_flight: &HashSet<String>) -> usize {
+    let (entries, _) = classify(rows, Some(in_flight), false);
+    entries
+        .iter()
+        .filter(|e| matches!(e, Entry::Keep(r) if r.kind.is_users_text()))
+        .count()
+}
+
 /// The context rows for a chunk: the last kept turn before it and its
 /// answer, from `before` (rows at or before the cursor, in id order).
 pub(crate) fn context_rows(before: &[LearningRow]) -> Vec<LearnRow> {

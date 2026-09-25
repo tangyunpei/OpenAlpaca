@@ -3636,3 +3636,7 @@ async fn same_key_without_replaces_supersedes_the_key_winner() {
     assert_eq!(active.len(), 1, "{active:?}");
     assert_eq!(active[0].supersedes, [old.id]);
 }
+
+// ── Conversation summaries (design 09 §13.3, slice L10c) ────────────────
+
+mod episodes;
