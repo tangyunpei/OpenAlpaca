@@ -820,3 +820,149 @@ fn undo_says_what_a_withdrawal_did() {
         format!("Candidate {SUGGESTION} (Commute) dismissed.")
     );
 }
+
+// ── search filters and timeline (design 09 §13.1, slice L10a) ─────────
+
+/// **L10a evidence: the CLI mirrors the tool.** `search` takes `--since`,
+/// `--until` and `--order` beside the old flags, its limit default is the
+/// tool's 10; `timeline` takes exactly one of an id, `--query` and `--date`.
+#[test]
+fn the_search_filters_and_timeline_parse() {
+    match parse(&[
+        "search",
+        "office",
+        "--since",
+        "2026-06-01",
+        "--until",
+        "2026-06-30T12:00:00Z",
+        "--order",
+        "newest",
+    ]) {
+        Ok(MemoryCommands::Search {
+            since,
+            until,
+            order,
+            limit,
+            ..
+        }) => {
+            assert_eq!(since.as_deref(), Some("2026-06-01"));
+            assert_eq!(until.as_deref(), Some("2026-06-30T12:00:00Z"));
+            assert_eq!(order.as_deref(), Some("newest"));
+            assert_eq!(limit, 10);
+        }
+        other => panic!("{other:?}"),
+    }
+    match parse(&["timeline", "55e811b6"]) {
+        Ok(MemoryCommands::Timeline {
+            id,
+            query,
+            date,
+            before,
+            after,
+            ..
+        }) => {
+            assert_eq!(id.as_deref(), Some("55e811b6"));
+            assert!(query.is_none() && date.is_none());
+            assert_eq!((before, after), (5, 5));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        parse(&["timeline", "--query", "office move", "--global"]),
+        Ok(MemoryCommands::Timeline {
+            query: Some(_),
+            at: ScopeArgs { global: true, .. },
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse(&[
+            "timeline",
+            "--date",
+            "2026-06-10",
+            "--before",
+            "2",
+            "--after",
+            "3"
+        ]),
+        Ok(MemoryCommands::Timeline {
+            date: Some(_),
+            before: 2,
+            after: 3,
+            ..
+        })
+    ));
+    assert!(parse(&["timeline"]).is_err(), "an anchor is required");
+    assert!(
+        parse(&["timeline", "55e811b6", "--date", "2026-06-10"]).is_err(),
+        "one anchor, not two"
+    );
+}
+
+/// The route's names for the tool's filters, each sent only when given.
+#[test]
+fn search_sends_the_tools_filters_by_their_route_names() {
+    let plain = SearchFilters {
+        query: "office move",
+        kind: None,
+        scope: None,
+        limit: 10,
+        historical: false,
+        as_of: None,
+        since: None,
+        until: None,
+        order: None,
+    };
+    assert_eq!(
+        search_path(&plain),
+        "/v1/memories/search?q=office%20move&limit=10"
+    );
+    let all = SearchFilters {
+        kind: Some("decision"),
+        historical: true,
+        since: Some("2026-06-01"),
+        until: Some("2026-06-30T12:00:00+02:00"),
+        order: Some("oldest"),
+        ..plain
+    };
+    assert_eq!(
+        search_path(&all),
+        "/v1/memories/search?q=office%20move&limit=10&kind=decision\
+         &date_from=2026-06-01&date_to=2026-06-30T12%3A00%3A00%2B02%3A00&order_by=oldest\
+         &historical=true"
+    );
+}
+
+/// `timeline` asks `GET /v1/memories/timeline` for the rows around its
+/// anchor — a full id as `anchor`, a search as `q`, a date as `date` — with
+/// `before` and `after`.
+#[tokio::test]
+async fn timeline_asks_the_daemon_for_the_rows_around_its_anchor() {
+    let answer = serde_json::json!({
+        "anchor": {"id": ID}, "results": [], "count": 0, "index_state": "ready"
+    })
+    .to_string();
+    let (addr, server) = serve(vec![
+        json_answer("200 OK", OLD_REV, &answer),
+        json_answer("200 OK", OLD_REV, &answer),
+        json_answer("200 OK", OLD_REV, &answer),
+    ]);
+    let api = Api::for_tests(DaemonClient::for_tests(&format!("http://{addr}"), "token"));
+    timeline(&api, Some(ID), None, None, 5, 5).await.unwrap();
+    timeline(&api, None, Some("office move"), None, 2, 0)
+        .await
+        .unwrap();
+    timeline(&api, None, None, Some("2026-06-10"), 5, 20)
+        .await
+        .unwrap();
+    let requests = server.join().expect("the server finishes");
+    let lines: Vec<&str> = requests.iter().map(|r| r.lines().next().unwrap()).collect();
+    assert_eq!(
+        lines,
+        vec![
+            format!("GET /v1/memories/timeline?anchor={ID}&before=5&after=5 HTTP/1.1"),
+            "GET /v1/memories/timeline?q=office%20move&before=2&after=0 HTTP/1.1".to_string(),
+            "GET /v1/memories/timeline?date=2026-06-10&before=5&after=20 HTTP/1.1".to_string(),
+        ]
+    );
+}

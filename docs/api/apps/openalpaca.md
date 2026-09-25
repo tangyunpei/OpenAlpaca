@@ -209,7 +209,7 @@
 
 - Source: `apps/openalpaca/src/commands/memory.rs`
 - No `Subcommand` enum found in module.
-- Parsed flags: `--alias`, `--as-of`, `--candidates`, `--fact-key`, `--format`, `--historical`, `--history`, `--kind`, `--limit`, `--raw`, `--repair`, `--revision`, `--scope`, `--status`, `--supersedes`, `--tag`, `--title`, `--yes`, `-y`
+- Parsed flags: `--after`, `--alias`, `--as-of`, `--before`, `--candidates`, `--date`, `--fact-key`, `--format`, `--historical`, `--history`, `--kind`, `--limit`, `--order`, `--query`, `--raw`, `--repair`, `--revision`, `--scope`, `--since`, `--status`, `--supersedes`, `--tag`, `--title`, `--until`, `--yes`, `-y`
 
 ### `persona`
 

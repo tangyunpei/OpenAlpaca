@@ -4,6 +4,8 @@
 //! ```text
 //! openalpaca memory list    [--kind K] [--status S] [--scope global|project] [--history] [--candidates] [--limit N]
 //! openalpaca memory search  <query> [--kind K] [--scope S] [--limit N] [--historical] [--as-of RFC3339]
+//!                           [--since D] [--until D] [--order relevance|newest|oldest]
+//! openalpaca memory timeline <id> | --query Q | --date D  [--before N] [--after N]
 //! openalpaca memory show    <id> [--revision <rev>] [--raw]
 //! openalpaca memory add     --kind K --title T [--scope S] [--alias A]... [--tag T]... [--fact-key KEY]
 //!                           [--supersedes <id>] [BODY | -]       body: the argument, stdin ("-"), or $EDITOR
@@ -30,6 +32,14 @@
 //! these verbs report, never a silent overwrite. On `edit`'s `409` the
 //! edited text is **kept** in a named temp file, because an editor session
 //! is work.
+//!
+//! **Layered retrieval** (design 09 §13.1, MD-14): `search` takes the
+//! tool's date filters (`--since`/`--until`, RFC 3339 or `YYYY-MM-DD`, both
+//! inclusive, on a note's date — when it was observed, else when it was
+//! saved) and order (`--order`), and still prints the cited excerpts;
+//! `timeline` is `memory_timeline` — the notes around one note, the first
+//! hit of `--query`, or `--date`, in time order, superseded, archived and
+//! ended ones marked.
 //!
 //! **Suggestions** (Learning v2, design 09 §3.5): `suggestions` lists the
 //! learned changes to notes you saved that wait for you; `confirm` of one
@@ -161,8 +171,8 @@ pub enum MemoryCommands {
         /// Filter by scope (global, project)
         #[arg(long)]
         scope: Option<String>,
-        /// Maximum number of results (1-20)
-        #[arg(long, default_value = "8")]
+        /// Maximum number of results (1-50)
+        #[arg(long, default_value = "10")]
         limit: usize,
         /// Include superseded, archived and ended-window notes
         #[arg(long)]
@@ -170,6 +180,42 @@ pub enum MemoryCommands {
         /// Evaluate validity at this instant (RFC 3339)
         #[arg(long)]
         as_of: Option<String>,
+        /// Only notes dated at or after this (RFC 3339, or YYYY-MM-DD from its start)
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+        /// Only notes dated at or before this (RFC 3339, or YYYY-MM-DD to its end)
+        #[arg(long, value_name = "DATE")]
+        until: Option<String>,
+        /// Sort by relevance (default), or by date: newest, oldest
+        #[arg(long, value_name = "ORDER")]
+        order: Option<String>,
+        /// Output format
+        #[arg(long, value_enum, default_value = "table")]
+        format: OutputFormat,
+        #[command(flatten)]
+        at: ScopeArgs,
+    },
+    /// Show the notes around one note, a search's best match, or a date, in time order
+    #[command(group(
+        clap::ArgGroup::new("around")
+            .required(true)
+            .args(["id", "query", "date"])
+    ))]
+    Timeline {
+        /// The note to draw it around (a unique prefix will do)
+        id: Option<String>,
+        /// Draw it around the best match of this search
+        #[arg(long)]
+        query: Option<String>,
+        /// Draw it around this instant (RFC 3339, or YYYY-MM-DD from its start)
+        #[arg(long)]
+        date: Option<String>,
+        /// How many notes before it (0-20)
+        #[arg(long, default_value = "5")]
+        before: usize,
+        /// How many notes after it (0-20)
+        #[arg(long, default_value = "5")]
+        after: usize,
         /// Output format
         #[arg(long, value_enum, default_value = "table")]
         format: OutputFormat,
@@ -325,32 +371,53 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             limit,
             historical,
             as_of,
+            since,
+            until,
+            order,
             format,
             at,
         } => {
             let api = Api::connect(&at)?;
-            let mut q = vec![
-                format!("q={}", urlencoding::encode(&query)),
-                format!("limit={limit}"),
-            ];
-            if let Some(k) = kind {
-                q.push(format!("kind={}", urlencoding::encode(&k)));
-            }
-            if let Some(s) = scope {
-                q.push(format!("scope={}", urlencoding::encode(&s)));
-            }
-            if historical {
-                q.push("historical=true".into());
-            }
-            if let Some(t) = as_of {
-                q.push(format!("as_of={}", urlencoding::encode(&t)));
-            }
-            let found = api
-                .get(&format!("/v1/memories/search?{}", q.join("&")))
-                .await?;
+            let path = search_path(&SearchFilters {
+                query: &query,
+                kind: kind.as_deref(),
+                scope: scope.as_deref(),
+                limit,
+                historical,
+                as_of: as_of.as_deref(),
+                since: since.as_deref(),
+                until: until.as_deref(),
+                order: order.as_deref(),
+            });
+            let found = api.get(&path).await?;
             match format {
                 OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&found)?),
                 OutputFormat::Table => print_search(&found),
+            }
+            Ok(())
+        }
+        MemoryCommands::Timeline {
+            id,
+            query,
+            date,
+            before,
+            after,
+            format,
+            at,
+        } => {
+            let api = Api::connect(&at)?;
+            let found = timeline(
+                &api,
+                id.as_deref(),
+                query.as_deref(),
+                date.as_deref(),
+                before,
+                after,
+            )
+            .await?;
+            match format {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&found)?),
+                OutputFormat::Table => print_timeline(&found),
             }
             Ok(())
         }
@@ -756,6 +823,76 @@ impl Api {
             }
         }
     }
+}
+
+// ── search and timeline (design 09 §13.1) ───────────────────────
+
+/// What `memory search` asks for.
+pub(crate) struct SearchFilters<'a> {
+    pub query: &'a str,
+    pub kind: Option<&'a str>,
+    pub scope: Option<&'a str>,
+    pub limit: usize,
+    pub historical: bool,
+    pub as_of: Option<&'a str>,
+    pub since: Option<&'a str>,
+    pub until: Option<&'a str>,
+    pub order: Option<&'a str>,
+}
+
+/// `GET /v1/memories/search` for these filters: the tool's parameters by
+/// their route names — `--since` is `date_from`, `--until` `date_to`,
+/// `--order` `order_by` — each sent only when given, so the daemon's
+/// defaults stay the defaults. The detail is the route's own (snippets),
+/// which is what this verb prints.
+pub(crate) fn search_path(f: &SearchFilters<'_>) -> String {
+    let mut q = vec![
+        format!("q={}", urlencoding::encode(f.query)),
+        format!("limit={}", f.limit),
+    ];
+    let optional = [
+        ("kind", f.kind),
+        ("scope", f.scope),
+        ("as_of", f.as_of),
+        ("date_from", f.since),
+        ("date_to", f.until),
+        ("order_by", f.order),
+    ];
+    for (name, value) in optional {
+        if let Some(v) = value {
+            q.push(format!("{name}={}", urlencoding::encode(v)));
+        }
+    }
+    if f.historical {
+        q.push("historical=true".into());
+    }
+    format!("/v1/memories/search?{}", q.join("&"))
+}
+
+/// `memory timeline`: around a note (its id, or a unique prefix of one),
+/// the first hit of a search, or a date — `GET /v1/memories/timeline`.
+pub(crate) async fn timeline(
+    api: &Api,
+    id: Option<&str>,
+    query: Option<&str>,
+    date: Option<&str>,
+    before: usize,
+    after: usize,
+) -> Result<Value> {
+    let mut q = Vec::new();
+    match (id, query, date) {
+        (Some(id), None, None) => {
+            let id = api.resolve_id(id).await?;
+            q.push(format!("anchor={id}"));
+        }
+        (None, Some(text), None) => q.push(format!("q={}", urlencoding::encode(text))),
+        (None, None, Some(at)) => q.push(format!("date={}", urlencoding::encode(at))),
+        _ => bail!("draw a timeline around exactly one of a note id, --query or --date"),
+    }
+    q.push(format!("before={before}"));
+    q.push(format!("after={after}"));
+    api.get(&format!("/v1/memories/timeline?{}", q.join("&")))
+        .await
 }
 
 // ── suggestions, confirm, undo ───────────────────────────────────
@@ -1569,6 +1706,41 @@ fn print_search(found: &Value) {
     }
     if found["partial"].as_bool().unwrap_or(false) {
         println!("{}", "(partial: a scan cap was hit)".dimmed());
+    }
+    if found["index_state"] == "rebuilding" {
+        println!("{}", "(the search index is rebuilding)".dimmed());
+    }
+}
+
+/// One row per note, oldest first: date, id, kind, scope, status, title —
+/// the anchor in bold, a note out of recall with its status in yellow.
+fn print_timeline(found: &Value) {
+    let rows = found["results"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        println!("{}", "No notes to show.".dimmed());
+        return;
+    }
+    for r in &rows {
+        let status = r["status"].as_str().unwrap_or("");
+        let line = format!(
+            "{:<20} {:<8} {:<10} {:<7} {:<10} {}",
+            r["date"].as_str().unwrap_or(""),
+            r["id"]
+                .as_str()
+                .map(|s| s.chars().take(8).collect::<String>())
+                .unwrap_or_default(),
+            r["kind"].as_str().unwrap_or(""),
+            r["scope"].as_str().unwrap_or(""),
+            status,
+            r["title"].as_str().unwrap_or(""),
+        );
+        if r["reason"] == "anchor" {
+            println!("{}", line.bold());
+        } else if status != "active" {
+            println!("{}", line.yellow());
+        } else {
+            println!("{line}");
+        }
     }
     if found["index_state"] == "rebuilding" {
         println!("{}", "(the search index is rebuilding)".dimmed());
