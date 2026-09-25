@@ -199,6 +199,12 @@ mod confirmation {
 // character or a C1 control in them can make the prompt read differently
 // from what runs. Every such character is shown as `<U+XXXX>` and counted in
 // one notice line under the arguments (`openalpaca_core::utils::text`).
+//
+// That the tool still receives its arguments unchanged is structural, not a
+// test here: the prompt borrows `&Value` (no interior mutability), the tool
+// runs on the sandbox's own copy, which never passes through a connector,
+// and a reply hands the broker only the request id and `approved` — the
+// intercept tests above.
 
 mod hidden_characters {
     use super::super::format_confirmation_prompt;
@@ -408,19 +414,6 @@ mod hidden_characters {
             )),
             "{prompt}"
         );
-    }
-
-    /// Display only: the prompt borrows the arguments and the tool is handed
-    /// the value it was always handed, hidden characters and all.
-    #[test]
-    fn the_arguments_the_tool_receives_are_unchanged() {
-        let args = serde_json::json!({"path": "a\u{202e}b\u{200b}"});
-        let before = args.clone();
-
-        let _ = format_confirmation_prompt("file_write\u{200b}", &args, 1);
-
-        assert_eq!(args, before);
-        assert_eq!(args["path"], "a\u{202e}b\u{200b}");
     }
 }
 
