@@ -798,7 +798,9 @@ impl MemoryIndex {
     /// The distinct `fact_key`s of the effectively active notes of these
     /// partitions, the most recently updated first, at most `limit` —
     /// learning's `known_keys` (design 09 §2.3 step 4), read from the
-    /// catalog rather than a partition parse.
+    /// catalog rather than a partition parse. A conversation summary holds
+    /// no key for learning (design 09 §13.3): one a model's edit put on it
+    /// is not listed.
     pub fn fact_keys(&self, partition_keys: &[String], limit: usize) -> Result<Vec<String>> {
         if partition_keys.is_empty() || limit == 0 {
             return Ok(Vec::new());
@@ -809,6 +811,7 @@ impl MemoryIndex {
             "SELECT fact_key, MAX(updated_at) AS newest FROM note
              WHERE partition_key IN ({}) AND effective_status = 'active'
                AND fact_key IS NOT NULL
+               AND NOT (kind = 'episode' AND origin = 'extracted_other')
              GROUP BY fact_key
              ORDER BY newest DESC, fact_key ASC
              LIMIT ?{limit_param}",
@@ -916,7 +919,9 @@ impl MemoryIndex {
     /// The winner of `fact_key` in one partition (design 03 §3 rule 3, §7c
     /// R9): the effectively active note with that key that is not a
     /// same-key loser. Derivation leaves at most one such note per key and
-    /// partition.
+    /// partition. A conversation summary is never learning's target (design
+    /// 09 §13.3): a key only a summary holds — a model's edit put it there —
+    /// has no winner here.
     pub fn fact_key_winner(
         &self,
         partition_key: &str,
@@ -928,6 +933,7 @@ impl MemoryIndex {
                 "SELECT {CATALOG_COLUMNS} FROM note n
                  WHERE n.partition_key = ?1 AND n.fact_key = ?2
                    AND n.effective_status = 'active' AND n.same_key_loser = 0
+                   AND NOT (n.kind = 'episode' AND n.origin = 'extracted_other')
                  ORDER BY n.updated_at DESC, n.id ASC
                  LIMIT 1"
             ),

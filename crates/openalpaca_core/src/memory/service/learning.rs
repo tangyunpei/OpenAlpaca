@@ -184,7 +184,8 @@ impl MemoryService {
     ///    union ranked by each note's best score. This window's active notes
     ///    come first; at most 20 are returned.
     /// 4. **Keys**: the 150 most recently updated distinct `fact_key`s of
-    ///    effectively active notes, from the index.
+    ///    effectively active notes other than a conversation summary, from
+    ///    the index.
     ///
     /// Every returned note is re-read and re-hashed first; one that changed
     /// behind the service's back is reported with origin `external` (the
@@ -338,7 +339,8 @@ impl MemoryService {
     /// (design 09 §2.5, ruling LR11): the effectively active note with that
     /// key that is not a same-key loser, looked up in the project partition
     /// first and then the home one, and verified against its file. A key
-    /// no note carries is absent from the answer. Only the `Extraction`
+    /// no note carries is absent from the answer, and so is one only a
+    /// conversation summary holds (design 09 §13.3). Only the `Extraction`
     /// surface may ask; it records nothing.
     pub fn learning_key_targets(
         &self,

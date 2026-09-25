@@ -6,7 +6,9 @@
 use super::*;
 use crate::daemon_config::RecallMode;
 use crate::memory::learning::episode::EPISODE_LABEL;
-use crate::memory::service::{RecallBudget, SearchInput, TimelineAnchor, TimelineInput};
+use crate::memory::service::{
+    Patch, RecallBudget, SearchInput, TimelineAnchor, TimelineInput, UpdateAction, UpdateInput,
+};
 
 /// The scripted model's summary.
 fn summary(topic: &str, discussed: &str, decided: &str, open: &str) -> Say {
@@ -389,6 +391,88 @@ async fn a_learned_episode_candidate_does_not_hold_back_the_episode_note() {
     let cited: Vec<i64> = note.sources.iter().map(|s| s.id.parse().unwrap()).collect();
     assert_eq!(cited, rows, "the whole window");
     assert_eq!(episode_cursor(&scene, &s), *rows.last().unwrap());
+}
+
+/// A key a model's edit put on a summary is no key for learning (review of
+/// L10c, R1): the extractor is not told it is known, and the user's own
+/// later statement under it is learned as an active note that replaces
+/// nothing — not parked as a suggestion to replace the assistant's record
+/// of the conversation.
+#[tokio::test]
+async fn a_fact_under_a_key_a_model_put_on_a_summary_is_learned_active() {
+    let scene = Scene::new(vec![
+        items(&[]),
+        trip_summary(),
+        items(&[full_item(serde_json::json!({
+            "title": "Editor",
+            "content": "The user edits code with vim.",
+            "fact_key": "user.editor",
+            "rows": [3],
+        }))]),
+    ]);
+    let s = scene.session();
+    four_turns(&scene, &s);
+    scene.queue.flush_session(&s).await;
+    let report = scene.queue.flush_episodes(&s).await;
+    assert_eq!(report.episodes, 1, "{report:?}");
+    let summary = episodes(&scene)[0].clone();
+    let tool = scene
+        .service
+        .context(
+            OWNER,
+            WorkspaceHint::None,
+            Surface::ModelTool,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    scene
+        .service
+        .update(
+            &tool,
+            UpdateInput {
+                id: summary.id,
+                expected_revision: summary.revision.clone(),
+                action: UpdateAction::Edit(Patch {
+                    fact_key: Some(Some("user.editor".to_string())),
+                    ..Default::default()
+                }),
+                reason: None,
+            },
+        )
+        .unwrap();
+
+    scene.turn(
+        &s,
+        "By the way, I always edit my code with vim these days, so please remember that about me.",
+        "Noted, you edit with vim.",
+    );
+    let learned = scene.queue.flush_session(&s).await;
+    assert_eq!(
+        (
+            learned.active,
+            learned.replaced,
+            learned.candidates,
+            learned.suggestions
+        ),
+        (1, 0, 0, 0),
+        "{learned:?}"
+    );
+    let prompt = scene.model.prompts().last().cloned().unwrap();
+    assert!(prompt.contains("<known_keys></known_keys>"), "{prompt}");
+    let editor = scene
+        .active()
+        .into_iter()
+        .find(|i| i.title == "Editor")
+        .expect("the user's statement is an active note");
+    assert_eq!(editor.origin, Origin::ExtractedUser);
+    assert!(editor.supersedes.is_empty(), "{:?}", editor.supersedes);
+    let still = scene.read(&scene.user_ctx(), summary.id);
+    assert_eq!(
+        (still.origin, still.effective_status),
+        (Origin::ExtractedOther, EffectiveStatus::Active),
+        "the summary stands"
+    );
 }
 
 /// An unusable answer holds the window with a backoff, like learning's

@@ -918,6 +918,44 @@ fn fact_key_winner_skips_losers_and_inactive_notes() {
     );
 }
 
+/// A conversation summary holds no key for learning (design 09 §13.3,
+/// review of L10c, R1): a key a model's edit put on one is not among
+/// `known_keys` and makes it no key's winner. An episode of another origin
+/// with a key is an ordinary note.
+#[test]
+fn fact_keys_and_the_key_winner_skip_a_conversation_summary() {
+    let index = ready_index();
+    let mut summary = record("summary", "Conversation on 2026-09-20: Lisbon", "body");
+    summary.kind = "episode".into();
+    summary.origin = "extracted_other".into();
+    summary.fact_key = Some("user.editor".into());
+    summary.updated_at = "2026-09-24T12:00:00Z".into();
+    let mut saved = record("saved", "The Lisbon trip", "body");
+    saved.kind = "episode".into();
+    saved.fact_key = Some("user.trip".into());
+    saved.updated_at = "2026-09-20T10:00:00Z".into();
+    index.upsert_many(&[summary, saved]).unwrap();
+
+    assert_eq!(
+        index.fact_keys(&["home-p".into()], 150).unwrap(),
+        vec!["user.trip".to_string()]
+    );
+    assert_eq!(
+        index
+            .fact_key_winner("home-p", "user.editor")
+            .unwrap()
+            .map(|n| n.id),
+        None
+    );
+    assert_eq!(
+        index
+            .fact_key_winner("home-p", "user.trip")
+            .unwrap()
+            .map(|n| n.id),
+        Some("saved".to_string())
+    );
+}
+
 // ============================================================================
 // Search
 // ============================================================================

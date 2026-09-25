@@ -471,6 +471,65 @@ fn a_model_edit_or_archive_leaves_a_summary_a_summary() {
     );
 }
 
+/// A summary holds no key for learning (review of L10c, R1). A model's
+/// edit may put a `fact_key` on one and it stays a summary; were it the
+/// key's target, the user's own later statement under that key would be
+/// parked as a suggestion to replace the assistant's record instead of
+/// being learned. It is neither a key's target nor among the known keys.
+#[test]
+fn a_key_a_model_edit_put_on_a_summary_is_no_key_for_learning() {
+    let h = Harness::new();
+    let row = h.message_row("We planned the Lisbon trip.");
+    let learning = extraction(&h, None);
+    let note = summary(
+        &h,
+        "Conversation on 2026-09-20: Lisbon trip planning",
+        "Discussed: flights to Lisbon.",
+        &[row],
+    );
+    h.service
+        .update(
+            &h.tool(ALICE, None),
+            UpdateInput {
+                id: note.id,
+                expected_revision: note.revision.clone(),
+                action: UpdateAction::Edit(Patch {
+                    fact_key: Some(Some("user.editor".to_string())),
+                    ..Default::default()
+                }),
+                reason: None,
+            },
+        )
+        .unwrap();
+    let read = h
+        .service
+        .read(
+            &h.user(ALICE, None),
+            ReadInput {
+                id: note.id,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        (read.origin, read.status),
+        (Origin::ExtractedOther, NoteStatus::Active),
+        "still a summary"
+    );
+    assert_eq!(read.frontmatter["fact_key"], "user.editor");
+
+    let targets = h
+        .service
+        .learning_key_targets(&learning, &["user.editor".to_string()])
+        .unwrap();
+    assert!(
+        targets.is_empty(),
+        "a summary is no key's target: {targets:?}"
+    );
+    let view = h.service.learning_view(&learning, &[], &[row]).unwrap();
+    assert!(view.keys.is_empty(), "known keys: {:?}", view.keys);
+}
+
 /// An `episode` candidate the extractor proposed from the assistant's words
 /// is origin `extracted_other` too, and a candidate like any other, not a
 /// conversation summary (review of L10c, finding 1): it counts as no
