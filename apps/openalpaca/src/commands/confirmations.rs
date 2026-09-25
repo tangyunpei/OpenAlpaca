@@ -246,9 +246,41 @@ fn notice_lines(prompts: &[PendingPrompt]) -> Vec<String> {
         .collect()
 }
 
-/// `--format json`: the daemon's own fields, as they came.
+/// `--format json`: the daemon's own fields, as they came, with every
+/// character a one-line field would show as `<U+XXXX>` written instead with
+/// JSON's own escape (a backslash, `u` and four hex digits; a surrogate pair
+/// past U+FFFF). A JSON reader gets exactly the values the daemon sent; a
+/// terminal never receives a raw C1 control, bidi override or zero-width
+/// character, which `serde_json` writes as they are (it escapes only the C0
+/// controls). No notice line: it would not be JSON.
 fn listing_json(prompts: &[PendingPrompt]) -> String {
-    serde_json::to_string_pretty(prompts).unwrap_or_default()
+    json_with_hidden_escaped(&serde_json::to_string_pretty(prompts).unwrap_or_default())
+}
+
+/// `json` with each hidden character written as a JSON `\uXXXX` escape.
+///
+/// Sound on `serde_json`'s output and only there: it writes JSON's structure
+/// in ASCII laid out with `\n` and spaces, and escapes every C0 control
+/// inside a string itself, so every other character of the one-line set
+/// (`needs_escape_in_line`) it leaves raw is inside a string, where the
+/// escape is the same character to any reader.
+fn json_with_hidden_escaped(json: &str) -> String {
+    use openalpaca_core::utils::text::needs_escape_in_line;
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c != '\n' && needs_escape_in_line(c) {
+            let mut units = [0u16; 2];
+            for unit in c.encode_utf16(&mut units) {
+                // Writing into a `String` cannot fail.
+                let _ = write!(out, "\\u{unit:04x}");
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Under the table, what each card with a daemon-authored preview says
@@ -945,6 +977,34 @@ mod tests {
                 "req-args — Note: this request contains 1 hidden character, shown as <U+…>."
                     .to_string(),
             ]
+        );
+    }
+
+    /// `--format json` hands on the daemon's own values, so it writes a
+    /// hidden character with JSON's own escape: a JSON reader gets exactly
+    /// what the daemon sent, and a terminal never receives the character.
+    #[test]
+    fn the_json_listing_writes_hidden_characters_as_json_escapes() {
+        let prompts = vec![PendingPrompt {
+            // A wide blank: every JSON string is one line, so the one-line set.
+            lane_key: Some("alice\u{3000}:gui".to_string()),
+            ..spoofed_prompt()
+        }];
+        let json = listing_json(&prompts);
+        assert_no_raw(&json, true);
+        assert!(!json.contains('\u{3000}'), "{json}");
+        for escape in [
+            "u202e", "u200b", "u009b", "udb40", "udc41", "u2066", "u3000",
+        ] {
+            assert!(json.contains(&format!("\\{escape}")), "{escape}: {json}");
+        }
+        assert!(json.lines().count() > 10, "still pretty-printed: {json}");
+
+        let read: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(
+            read,
+            serde_json::to_value(&prompts).unwrap(),
+            "the same values the daemon sent"
         );
     }
 
