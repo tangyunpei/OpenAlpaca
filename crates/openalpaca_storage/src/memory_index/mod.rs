@@ -238,6 +238,9 @@ pub struct IndexedNote {
     pub pinned: bool,
     pub file: FileStat,
     pub chunks: u32,
+    /// The note's window has not begun by the index clock's "now" (design 09
+    /// §6.1) — the clock `list_pinned`'s validity filter reads.
+    pub upcoming: bool,
 }
 
 /// Whether the index can be served from (design §5, *Freshness without a
@@ -728,13 +731,15 @@ impl MemoryIndex {
 
     /// The catalog row of one note, if indexed.
     pub fn get(&self, partition_key: &str, id: &str) -> Result<Option<IndexedNote>> {
+        let now = canon_timestamp(&self.now());
         let conn = self.lock();
         conn.query_row(
             "SELECT n.id, n.partition_key, n.revision, n.relative_path, n.effective_status,
                     n.pinned, n.mtime_ns, n.size, n.inode,
-                    (SELECT COUNT(*) FROM chunk c WHERE c.note_rowid = n.rowid)
+                    (SELECT COUNT(*) FROM chunk c WHERE c.note_rowid = n.rowid),
+                    n.valid_from IS NOT NULL AND n.valid_from > ?3
              FROM note n WHERE n.partition_key = ?1 AND n.id = ?2",
-            params![partition_key, id],
+            params![partition_key, id, now],
             indexed_note_from_row,
         )
         .optional()
@@ -744,7 +749,8 @@ impl MemoryIndex {
     /// The active pinned notes of these partitions, newest `updated_at`
     /// first — design §5 step 2's selection, for the caller to budget. A
     /// note whose validity window has ended by the index clock's "now" is
-    /// left out, as a current search leaves it out (design §4 *Times*).
+    /// left out, as a current search leaves it out (design §4 *Times*); one
+    /// whose window has not begun by that "now" is kept and says `upcoming`.
     pub fn list_pinned(&self, partition_keys: &[String]) -> Result<Vec<IndexedNote>> {
         if partition_keys.is_empty() {
             return Ok(Vec::new());
@@ -756,7 +762,8 @@ impl MemoryIndex {
         let sql = format!(
             "SELECT n.id, n.partition_key, n.revision, n.relative_path, n.effective_status,
                     n.pinned, n.mtime_ns, n.size, n.inode,
-                    (SELECT COUNT(*) FROM chunk c WHERE c.note_rowid = n.rowid)
+                    (SELECT COUNT(*) FROM chunk c WHERE c.note_rowid = n.rowid),
+                    n.valid_from IS NOT NULL AND n.valid_from > ?{now_param}
              FROM note n
              WHERE n.pinned = 1 AND n.effective_status = 'active'
                AND n.partition_key IN ({placeholders})
@@ -967,6 +974,7 @@ fn indexed_note_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedNot
     let size: i64 = row.get(7)?;
     let inode: i64 = row.get(8)?;
     let chunks: i64 = row.get(9)?;
+    let upcoming: bool = row.get(10)?;
     Ok(IndexedNote {
         id: row.get(0)?,
         partition_key: row.get(1)?,
@@ -980,6 +988,7 @@ fn indexed_note_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedNot
             inode: inode as u64,
         },
         chunks: chunks as u32,
+        upcoming,
     })
 }
 

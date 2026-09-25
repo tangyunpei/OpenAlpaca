@@ -3017,3 +3017,164 @@ async fn a_lead_run_is_primed_with_its_memory_once_and_its_profile_once() {
     assert_eq!(ring[0].task_id.as_deref(), Some("task-1"));
     assert_eq!(ring[0].lane_key.as_deref(), Some("user-1:cli"));
 }
+
+// ── Design 09 §6.2: a subagent's notes reach *recently used* ──────────
+
+/// A provider for a lead that spawns one worker, and a worker that searches
+/// memory once and then answers. It keeps the tools the worker was offered.
+struct SubagentSearchesMemory {
+    lead: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    subagent: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    subagent_tools: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for SubagentSearchesMemory {
+    fn name(&self) -> &str {
+        "subagent-searches-memory"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        let is_subagent = request
+            .messages
+            .first()
+            .is_some_and(|m| m.content.contains("You are a subagent"));
+        let queue = if is_subagent {
+            let mut offered = self
+                .subagent_tools
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if offered.is_empty() {
+                offered.extend(request.tools.iter().map(|t| t.name.clone()));
+            }
+            &self.subagent
+        } else {
+            &self.lead
+        };
+        let next = queue.lock().unwrap_or_else(|p| p.into_inner()).pop_front();
+        Ok(next.unwrap_or_else(|| scripted_response("done", vec![])))
+    }
+}
+
+/// Design 09 §6.2 (LR15), on the real spawn path: a subagent reaches memory
+/// only through its own memory tools, and its `memory_search` lands in the
+/// recently-used ring carrying the run's `task_id` — `ToolContext.task_id`
+/// is set for every subagent and the service copies it into the delivery's
+/// attribution. The worker's template names no memory capability, so the
+/// search is there by the ambient grant (§5). The lead is given no memory
+/// service, so nothing it recalls can put a row in the ring.
+#[tokio::test]
+async fn a_subagents_memory_search_records_its_task_id_in_the_ring() {
+    let scene = lead_memory_scene();
+    let shared = Arc::new(SharedContext::new());
+    let worker = crate::test_util::make_agent("worker", vec![]);
+    shared
+        .agent_registry
+        .register_template(crate::test_util::template_from_agent(&worker));
+    // The read surface is registered globally in production; mirror that.
+    let registry = ToolRegistry::default();
+    for tool in crate::tools::builtins::memory_read_tools(scene.service.clone()) {
+        registry.register(tool).unwrap();
+    }
+
+    let provider = Arc::new(SubagentSearchesMemory {
+        lead: std::sync::Mutex::new(
+            vec![
+                scripted_response(
+                    "",
+                    vec![openalpaca_llm::ToolCall {
+                        id: "call-1".to_string(),
+                        name: "spawn_subagent".to_string(),
+                        arguments: serde_json::json!({
+                            "agent_id": "worker",
+                            "objective": "find out how the owner wants status reports",
+                        }),
+                    }],
+                ),
+                scripted_response(
+                    "",
+                    vec![openalpaca_llm::ToolCall {
+                        id: "call-2".to_string(),
+                        name: "wait_for_subagents".to_string(),
+                        arguments: serde_json::json!({}),
+                    }],
+                ),
+                scripted_response("terse, as noted", vec![]),
+            ]
+            .into(),
+        ),
+        subagent: std::sync::Mutex::new(
+            vec![
+                scripted_response(
+                    "",
+                    vec![openalpaca_llm::ToolCall {
+                        id: "sub-call-1".to_string(),
+                        name: "memory_search".to_string(),
+                        arguments: serde_json::json!({ "query": "status reports" }),
+                    }],
+                ),
+                scripted_response("The owner prefers terse status reports.", vec![]),
+            ]
+            .into(),
+        ),
+        subagent_tools: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "how should the status reports read?",
+        Arc::new(router),
+        Arc::new(registry),
+        shared,
+        EventBus::default(),
+        None,
+        None,
+        None,
+        "task-1",
+        LEAD_OWNER,
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+    )
+    .await;
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+    let offered = provider.subagent_tools.lock().unwrap().clone();
+    assert!(
+        offered.iter().any(|t| t == "memory_search"),
+        "the worker was offered memory_search: {offered:?}"
+    );
+
+    let ring = scene.service.recently_used(10);
+    assert_eq!(ring.len(), 1, "{ring:?}");
+    assert_eq!(ring[0].id, scene.global);
+    assert_eq!(ring[0].reason, crate::memory::service::UsedReason::Tool);
+    assert_eq!(ring[0].task_id.as_deref(), Some("task-1"));
+    // Subagents are lane-detached: the row names the run, not a lane.
+    assert!(ring[0].lane_key.is_none(), "{:?}", ring[0].lane_key);
+}

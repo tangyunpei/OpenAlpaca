@@ -111,6 +111,10 @@ pub struct SearchHit {
     pub fact_key: Option<String>,
     pub valid_from: Option<String>,
     pub valid_to: Option<String>,
+    /// The note's window has not begun at the instant the validity filter
+    /// used — `as_of`, else the index clock's "now" — so the recall header
+    /// and the filter agree on one clock (design 09 §6.1).
+    pub upcoming: bool,
     pub updated_at: String,
     pub pinned: bool,
     pub conflict: bool,
@@ -874,6 +878,10 @@ fn rank(
             fact_key: note.fact_key.clone(),
             valid_from: note.valid_from.clone(),
             valid_to: note.valid_to.clone(),
+            upcoming: note
+                .valid_from
+                .as_deref()
+                .is_some_and(|from| from > filter.instant.as_str()),
             updated_at: note.updated_at.clone(),
             pinned: note.pinned,
             conflict: note.conflict,

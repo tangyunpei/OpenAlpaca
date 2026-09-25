@@ -52,8 +52,8 @@ pub use types::{
     HistoryEntry, KnownNote, LearningView, ListInput, ListItem, ListOutput, MemoryChange,
     MemoryUsed, Patch, ReadInput, ReadOutput, RecallBudget, RecallResult, RecalledNote,
     RecentlyUsedItem, Retained, SearchInput, SearchOutput, SearchResultItem, StoreInput,
-    StoreOutput, Suggestion, SuggestionTarget, UpdateAction, UpdateInput, UpdateOutput, UsedReason,
-    WithdrawOutput,
+    StoreOutput, Suggestion, SuggestionTarget, Timing, UpdateAction, UpdateInput, UpdateOutput,
+    UsedReason, WithdrawOutput,
 };
 pub use write_slot::QuiesceGuard;
 

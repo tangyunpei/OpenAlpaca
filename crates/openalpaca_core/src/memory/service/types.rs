@@ -414,6 +414,9 @@ pub struct SearchResultItem {
     /// Partition-relative path.
     pub path: String,
     pub pinned: bool,
+    /// The note's effective window, from the re-read file (design 09 §6.1).
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -486,8 +489,26 @@ impl Default for RecallBudget {
     }
 }
 
+/// Where a recalled note's window stands, on the index's clock (design 09
+/// §6.1). Only a window that has not begun is named: one that has ended
+/// never reaches automatic recall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Timing {
+    /// `valid_from` is later than "now": the note describes a plan, not the
+    /// present.
+    Upcoming,
+}
+
+impl Timing {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Timing::Upcoming => "upcoming",
+        }
+    }
+}
+
 /// One delivered note (design §5 step 7: id, path, heading, line range,
-/// revision, sources, match reason, freshness).
+/// revision, sources, match reason, freshness; design 09 §6.1: the window).
 #[derive(Debug, Clone)]
 pub struct RecalledNote {
     pub id: NoteId,
@@ -505,10 +526,19 @@ pub struct RecalledNote {
     /// The text delivered: the matched chunk, or the whole body of a pinned
     /// note.
     pub text: String,
+    /// The note's effective window, from the re-read file.
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
+    /// `Some(Upcoming)` when the index, on its own clock, says the window
+    /// has not begun.
+    pub timing: Option<Timing>,
 }
 
 impl RecalledNote {
-    /// The quoted-data block for one note.
+    /// The quoted-data block for one note. A note with a window says so at
+    /// the end of its header — both bounds, `-` for an open one, then
+    /// `timing=upcoming` when the window has not begun (design 09 §6.1); a
+    /// note with none renders exactly as it did before windows were shown.
     pub fn render(&self) -> String {
         let sources: Vec<String> = self.sources.iter().map(|s| s.suppression_key()).collect();
         let matches: Vec<&str> = self.matches.iter().map(|m| m.as_str()).collect();
@@ -517,8 +547,22 @@ impl RecalledNote {
             .as_deref()
             .map(|h| h.replace('"', "'"))
             .unwrap_or_default();
+        let mut window = String::new();
+        if self.valid_from.is_some() || self.valid_to.is_some() {
+            let bound =
+                |t: Option<DateTime<Utc>>| t.map_or_else(|| "-".to_string(), super::format_ts);
+            window = format!(
+                " valid_from={} valid_to={}",
+                bound(self.valid_from),
+                bound(self.valid_to)
+            );
+            if let Some(timing) = self.timing {
+                window.push_str(" timing=");
+                window.push_str(timing.as_str());
+            }
+        }
         format!(
-            "[memory id={} revision={} path={} kind={} scope={} heading=\"{}\" lines={}-{} match={} freshness={} sources={} reason={}]\n{}\n[/memory]\n",
+            "[memory id={} revision={} path={} kind={} scope={} heading=\"{}\" lines={}-{} match={} freshness={} sources={} reason={}{}]\n{}\n[/memory]\n",
             self.id,
             self.revision,
             self.path,
@@ -539,6 +583,7 @@ impl RecalledNote {
                 sources.join(",")
             },
             self.reason.as_str(),
+            window,
             self.text.trim_end_matches('\n'),
         )
     }

@@ -24,7 +24,8 @@ fn sources_status(source_forgotten: bool) -> &'static str {
     }
 }
 
-/// `memory_search`'s result (design §7a; §7b P3/P6).
+/// `memory_search`'s result (design §7a; §7b P3/P6), with each note's
+/// `valid_from` and `valid_to` (RFC 3339 or null; design 09 §6.1).
 pub fn search_output_json(out: &SearchOutput) -> Value {
     let results: Vec<Value> = out
         .results
@@ -51,6 +52,8 @@ pub fn search_output_json(out: &SearchOutput) -> Value {
                 "superseded_by": ids_json(&r.superseded_by),
                 "path": r.path,
                 "pinned": r.pinned,
+                "valid_from": r.valid_from.map(format_ts),
+                "valid_to": r.valid_to.map(format_ts),
             })
         })
         .collect();

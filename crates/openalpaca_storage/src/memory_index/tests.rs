@@ -1375,6 +1375,77 @@ fn a_current_search_keeps_a_note_whose_window_has_not_started() {
     assert_eq!(got, vec!["ended", "planned"]);
 }
 
+/// Design 09 §6.1: every hit and every pinned row says whether its window
+/// has not begun yet, on the index's own clock — the instant its validity
+/// filter used — so the recall header and the filter cannot disagree. A
+/// note with no `valid_from`, or one whose window has begun, is not
+/// upcoming; with `as_of` the instant is that one.
+#[test]
+fn hits_and_pinned_rows_say_upcoming_on_the_index_clock() {
+    let at = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    let now = at("2026-09-24T12:00:00Z");
+    let index = MemoryIndex::open_in_memory()
+        .unwrap()
+        .with_clock(move || now);
+    index.rebuild(&[]).unwrap();
+    let windowed = |id: &str, from: Option<&str>, to: Option<&str>| {
+        let mut r = record(id, id, "The user's conference trip.\n");
+        r.pinned = true;
+        r.valid_from = from.map(str::to_string);
+        r.valid_to = to.map(str::to_string);
+        r
+    };
+    index
+        .upsert_many(&[
+            windowed(
+                "planned",
+                Some("2026-10-05T00:00:00Z"),
+                Some("2026-10-20T00:00:00Z"),
+            ),
+            windowed(
+                "current",
+                Some("2026-09-01T00:00:00Z"),
+                Some("2026-10-01T00:00:00Z"),
+            ),
+            windowed("open", None, None),
+            windowed("until", None, Some("2026-12-31T00:00:00Z")),
+        ])
+        .unwrap();
+
+    let r = index.search(&q("conference trip")).unwrap();
+    assert_eq!(r.count, 4);
+    for (id, upcoming) in [
+        ("planned", true),
+        ("current", false),
+        ("open", false),
+        ("until", false),
+    ] {
+        assert_eq!(hit(&r, id).upcoming, upcoming, "hit {id}");
+    }
+    let pinned: Vec<(String, bool)> = index
+        .list_pinned(&["home-p".to_string()])
+        .unwrap()
+        .into_iter()
+        .map(|n| (n.id, n.upcoming))
+        .collect();
+    assert_eq!(pinned.len(), 4);
+    for (id, upcoming) in &pinned {
+        assert_eq!(*upcoming, id == "planned", "pinned row {id}");
+    }
+    assert!(index.get("home-p", "planned").unwrap().unwrap().upcoming);
+    assert!(!index.get("home-p", "current").unwrap().unwrap().upcoming);
+
+    // Evaluated inside the window, the same note has begun.
+    let mut during = q("conference trip");
+    during.as_of = Some(at("2026-10-10T00:00:00Z"));
+    let r = index.search(&during).unwrap();
+    assert!(!hit(&r, "planned").upcoming);
+}
+
 #[test]
 fn authority_orders_notes_with_equal_lexical_evidence() {
     let index = ready_index();

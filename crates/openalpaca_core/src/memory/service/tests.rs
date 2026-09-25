@@ -1574,39 +1574,97 @@ fn recall_leaves_out_a_pinned_note_whose_window_has_ended() {
     assert_eq!(pinned, vec![planned.id]);
 }
 
-/// Design 09 §6.1, characterization at HEAD: a note whose window has not
-/// begun by the index clock is recalled — it is current knowledge (design
-/// §4 *Times*) — and its header says nothing about the window, so the model
-/// cannot tell a plan from the present. The index clock is pinned months
-/// before the wall clock, so only the index can call this window upcoming.
-#[test]
-fn an_upcoming_note_renders_no_window() {
-    let at = |s: &str| {
-        chrono::DateTime::parse_from_rfc3339(s)
-            .unwrap()
-            .with_timezone(&chrono::Utc)
-    };
-    let now = at("2026-01-10T12:00:00Z");
-    let h = Harness::with_index(
+/// The first line of a rendered note: its `[memory …]` header.
+fn header_of(note: &RecalledNote) -> String {
+    note.render().lines().next().unwrap().to_string()
+}
+
+fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+/// A harness whose index clock is pinned at `now`.
+fn harness_at(now: &str) -> Harness {
+    let now = at(now);
+    Harness::with_index(
         MemoryIndex::open_in_memory()
             .unwrap()
             .with_clock(move || now),
-    );
-    let planned = h
-        .service
+    )
+}
+
+fn store_windowed(
+    h: &Harness,
+    title: &str,
+    body: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> StoreOutput {
+    h.service
         .store(
             &h.user(ALICE, None),
             StoreInput {
-                title: "Lisbon trip".into(),
-                body: "# Lisbon trip\n\nThe user travels to Lisbon for a conference in March.\n"
-                    .into(),
+                title: title.into(),
+                body: body.into(),
                 kind: Some(NoteKind::Episode),
-                valid_from: Some(at("2026-03-01T00:00:00Z")),
-                valid_to: Some(at("2026-04-01T00:00:00Z")),
+                valid_from: from.map(at),
+                valid_to: to.map(at),
                 ..Default::default()
             },
         )
+        .unwrap()
+}
+
+/// Design 09 §6.1: "upcoming" is the index's word, on the index's clock —
+/// the instant its validity filter used — never the wall clock. The index
+/// clock is pinned months before the wall clock, so this window has ended by
+/// the wall clock and only the index can call it upcoming. The index marks
+/// the hit and the pinned row, and both headers print both bounds and then
+/// `timing=upcoming`.
+#[test]
+fn timing_upcoming_uses_the_index_clock() {
+    let h = harness_at("2026-01-10T12:00:00Z");
+    let planned = store_windowed(
+        &h,
+        "Lisbon trip",
+        "# Lisbon trip\n\nThe user travels to Lisbon for a conference in March.\n",
+        Some("2026-03-01T00:00:00Z"),
+        Some("2026-04-01T00:00:00Z"),
+    );
+    let packing = store_windowed(
+        &h,
+        "Packing list",
+        "# Packing list\n\nA raincoat and the adapter.\n",
+        Some("2026-03-01T00:00:00Z"),
+        Some("2026-04-01T00:00:00Z"),
+    );
+    // `pinned` is not a tool input: pin one by hand, then let the service
+    // see the edit.
+    let file = note_file_for(&h.home_notes_dir(ALICE_KEY), packing.id).unwrap();
+    let text = fs::read_to_string(&file)
+        .unwrap()
+        .replace("pinned: false", "pinned: true");
+    fs::write(&file, text).unwrap();
+    h.service.sync(&h.user(ALICE, None)).unwrap();
+
+    // The index marks the hit on its own clock.
+    let hits = h
+        .service
+        .index()
+        .search(&openalpaca_storage::memory_index::SearchQuery::new(
+            "conference trip",
+            vec![format!("home-{ALICE_KEY}")],
+        ))
         .unwrap();
+    let hit = hits
+        .hits
+        .iter()
+        .find(|hit| hit.id == planned.id.to_string())
+        .unwrap();
+    assert!(hit.upcoming);
+
     let recalled = h
         .service
         .recall(
@@ -1615,12 +1673,166 @@ fn an_upcoming_note_renders_no_window() {
             RecallBudget::default(),
         )
         .unwrap();
-    assert_eq!(recall_ids(&recalled), HashSet::from([planned.id]));
-    let rendered = recalled.notes[0].render();
-    let header = rendered.lines().next().unwrap();
-    assert!(!header.contains("valid_from="), "{header}");
-    assert!(!header.contains("valid_to="), "{header}");
-    assert!(!header.contains("timing="), "{header}");
+    let by_id = |id: NoteId| {
+        recalled
+            .notes
+            .iter()
+            .find(|n| n.id == id)
+            .unwrap_or_else(|| panic!("{id} was not recalled"))
+    };
+    let window = " valid_from=2026-03-01T00:00:00Z valid_to=2026-04-01T00:00:00Z timing=upcoming]";
+    let header = header_of(by_id(planned.id));
+    assert!(
+        header.ends_with(&format!(" reason=recall{window}")),
+        "{header}"
+    );
+    let header = header_of(by_id(packing.id));
+    assert!(
+        header.ends_with(&format!(" reason=pinned{window}")),
+        "{header}"
+    );
+    assert!(recalled.render().contains(TRUST_LABEL));
+}
+
+/// Design 09 §6.1: a windowed note's header carries both bounds, RFC 3339
+/// to the second with `Z`, and `-` for an open one; a window that has begun
+/// says nothing more.
+#[test]
+fn a_windowed_note_renders_both_bounds() {
+    let h = harness_at("2026-09-24T12:00:00Z");
+    let current = store_windowed(
+        &h,
+        "Berlin office",
+        "# Berlin office\n\nThe user works from the Berlin office this quarter.\n",
+        Some("2026-09-01T00:00:00Z"),
+        Some("2026-10-01T00:00:00Z"),
+    );
+    let until = store_windowed(
+        &h,
+        "Office badge",
+        "# Office badge\n\nThe user's office badge is valid until the end of the year.\n",
+        None,
+        Some("2026-12-31T00:00:00Z"),
+    );
+    let recalled = h
+        .service
+        .recall(
+            &h.tool(ALICE, None),
+            "which office badge do I use?",
+            RecallBudget::default(),
+        )
+        .unwrap();
+    let header = |id: NoteId| {
+        header_of(
+            recalled
+                .notes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap_or_else(|| panic!("{id} was not recalled")),
+        )
+    };
+    let current = header(current.id);
+    assert!(
+        current.ends_with(
+            " reason=recall valid_from=2026-09-01T00:00:00Z valid_to=2026-10-01T00:00:00Z]"
+        ),
+        "{current}"
+    );
+    let until = header(until.id);
+    assert!(
+        until.ends_with(" reason=recall valid_from=- valid_to=2026-12-31T00:00:00Z]"),
+        "{until}"
+    );
+}
+
+/// Design 09 §6.1: an unwindowed note renders byte for byte as before the
+/// window was added — no expectation that reads a header moves.
+#[test]
+fn an_unwindowed_header_is_byte_identical() {
+    let note = RecalledNote {
+        id: NoteId::parse("55e811b6-3220-4758-a47b-034bd1023f38").unwrap(),
+        revision: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".into(),
+        title: "Build and test commands".into(),
+        kind: NoteKind::Procedure,
+        scope: NoteScope::Global,
+        path: "notes/55e811b6-3220-4758-a47b-034bd1023f38--build.md".into(),
+        heading: Some("Knowledge \"now\"".into()),
+        line_range: (22, 24),
+        matches: vec![
+            openalpaca_storage::memory_index::MatchReason::Title,
+            openalpaca_storage::memory_index::MatchReason::Term,
+        ],
+        freshness: Freshness::Verified,
+        sources: Vec::new(),
+        reason: UsedReason::Recall,
+        text: "Run the focused checks.\n".into(),
+        valid_from: None,
+        valid_to: None,
+        timing: None,
+    };
+    assert_eq!(
+        note.render(),
+        "[memory id=55e811b6-3220-4758-a47b-034bd1023f38 \
+         revision=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 \
+         path=notes/55e811b6-3220-4758-a47b-034bd1023f38--build.md kind=procedure \
+         scope=global heading=\"Knowledge 'now'\" lines=22-24 match=title,term \
+         freshness=verified sources=- reason=recall]\nRun the focused checks.\n[/memory]\n"
+    );
+    // And one the index calls upcoming but whose re-read file has no bound
+    // left says nothing about a window either.
+    let edited = RecalledNote {
+        timing: Some(Timing::Upcoming),
+        ..note.clone()
+    };
+    assert_eq!(edited.render(), note.render());
+}
+
+/// Design 09 §6.1 and §11: `memory_search` results carry `valid_from` and
+/// `valid_to` — RFC 3339, or null — read from the re-read file, on the
+/// service's result and on the wire.
+#[test]
+fn search_results_carry_validity() {
+    let h = harness_at("2026-09-24T12:00:00Z");
+    let planned = store_windowed(
+        &h,
+        "Lisbon trip",
+        "# Lisbon trip\n\nThe user travels to Lisbon for a conference, 5 to 19 October.\n",
+        Some("2026-10-05T00:00:00Z"),
+        Some("2026-10-20T00:00:00Z"),
+    );
+    let open = store_windowed(
+        &h,
+        "Conference badge",
+        "# Conference badge\n\nThe user's conference badge is in the blue folder.\n",
+        None,
+        None,
+    );
+    let out = search(&h, &h.tool(ALICE, None), "conference");
+    let item = |id: NoteId| out.results.iter().find(|r| r.id == id).unwrap();
+    assert_eq!(
+        item(planned.id).valid_from,
+        Some(at("2026-10-05T00:00:00Z"))
+    );
+    assert_eq!(item(planned.id).valid_to, Some(at("2026-10-20T00:00:00Z")));
+    assert_eq!(
+        (item(open.id).valid_from, item(open.id).valid_to),
+        (None, None)
+    );
+
+    let json = wire::search_output_json(&out);
+    let row = |id: NoteId| {
+        json["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id.to_string())
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(planned.id)["valid_from"], "2026-10-05T00:00:00Z");
+    assert_eq!(row(planned.id)["valid_to"], "2026-10-20T00:00:00Z");
+    assert!(row(open.id)["valid_from"].is_null());
+    assert!(row(open.id)["valid_to"].is_null());
 }
 
 /// Fixture 13: read-after-write, and freshness by verification before any
