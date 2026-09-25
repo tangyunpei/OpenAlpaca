@@ -433,22 +433,53 @@ async fn stream_sse_events(
     Ok(StreamResult::Response(state.usage))
 }
 
-/// What the inline prompt prints under its headline (design 09 §4.4): the
-/// daemon-authored preview first, labelled as OpenAlpaca's own text, then the
-/// literal arguments, which stay. Either may be absent.
-pub(crate) fn confirmation_details(frame: &serde_json::Value) -> (Option<String>, Option<String>) {
+/// What the inline `[y/N]` prompt prints, in order.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ConfirmationDetails {
+    /// `Tool '<name>' requires confirmation`.
+    pub headline: String,
+    /// The daemon-authored preview, under `From OpenAlpaca:`.
+    pub preview: Option<String>,
+    /// `Arguments: ` and the pretty-printed JSON.
+    pub arguments: Option<String>,
+    /// The hidden-character notice, directly under the arguments.
+    pub notice: Option<String>,
+}
+
+/// What the inline prompt prints (design 09 §4.4): the headline naming the
+/// tool, the daemon-authored preview, labelled as OpenAlpaca's own text, then
+/// the literal arguments, which stay. Either of the last two may be absent.
+///
+/// The name and the arguments are what the person approves, and a terminal
+/// is the renderer where a raw ESC or C1 CSI rewrites the line and a bidi
+/// override reorders it, so every hidden character in them is shown as
+/// `<U+XXXX>` (`openalpaca_core::utils::text::escape_hidden`, after the
+/// JSON is serialized) and one notice under the arguments counts them. The
+/// name is one line — an MCP `<server>__<tool>` or plugin `<plugin>::<tool>`
+/// name is whatever its third party lists — so it takes `escape_hidden_line`,
+/// which also shows a line break and every space but the plain one: a name
+/// cannot print a forged `Arguments:` block above the real one. The preview
+/// is left as it comes: the daemon composed it for reading and took every
+/// control and format character out of what it quotes (`utils::text::one_line`).
+/// Display only — the answer is built from the frame's `request_id`, untouched.
+pub(crate) fn confirmation_details(frame: &serde_json::Value) -> ConfirmationDetails {
+    use openalpaca_core::utils::text::{escape_hidden, escape_hidden_line, hidden_notice};
+
+    let name = escape_hidden_line(frame["tool_name"].as_str().unwrap_or(""));
     let preview = frame["preview"]
         .as_str()
         .filter(|p| !p.is_empty())
         .map(|p| format!("From OpenAlpaca:\n{}", indent(p)));
     let args = &frame["tool_arguments"];
-    let arguments = (!args.is_null()).then(|| {
-        format!(
-            "Arguments: {}",
-            serde_json::to_string_pretty(args).unwrap_or_default()
-        )
-    });
-    (preview, arguments)
+    let arguments = (!args.is_null())
+        .then(|| escape_hidden(&serde_json::to_string_pretty(args).unwrap_or_default()));
+    let hidden = name.hidden + arguments.as_ref().map_or(0, |args| args.hidden);
+    ConfirmationDetails {
+        headline: format!("Tool '{}' requires confirmation", name.text),
+        preview,
+        arguments: arguments.map(|args| format!("Arguments: {}", args.text)),
+        notice: hidden_notice(hidden),
+    }
 }
 
 /// Every line of `text`, two spaces in.
@@ -482,21 +513,18 @@ async fn handle_confirmation_prompt(client: &DaemonClient, event_text: &str) -> 
     }
     let parsed: serde_json::Value = serde_json::from_str(&data)?;
     let request_id = parsed["request_id"].as_str().unwrap_or("");
-    let tool_name = parsed["tool_name"].as_str().unwrap_or("");
 
+    let details = confirmation_details(&parsed);
     println!();
-    println!(
-        "{}",
-        format!("Tool '{}' requires confirmation", tool_name)
-            .yellow()
-            .bold()
-    );
-    let (preview, arguments) = confirmation_details(&parsed);
-    if let Some(preview) = preview {
+    println!("{}", details.headline.yellow().bold());
+    if let Some(preview) = details.preview {
         println!("{preview}");
     }
-    if let Some(arguments) = arguments {
+    if let Some(arguments) = details.arguments {
         println!("{}", arguments.dimmed());
+    }
+    if let Some(notice) = details.notice {
+        println!("{}", notice.yellow());
     }
 
     let approved = tokio::task::block_in_place(|| {

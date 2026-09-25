@@ -646,7 +646,9 @@ fn the_inline_prompt_prints_the_preview_before_the_arguments() {
         "preview": "Replace your saved note “Editor” with “Editor”?\nYours: vim.",
         "per_call": true,
     });
-    let (preview, arguments) = confirmation_details(&frame);
+    let ConfirmationDetails {
+        preview, arguments, ..
+    } = confirmation_details(&frame);
     assert_eq!(
         preview.as_deref(),
         Some("From OpenAlpaca:\n  Replace your saved note “Editor” with “Editor”?\n  Yours: vim.")
@@ -660,7 +662,134 @@ fn the_inline_prompt_prints_the_preview_before_the_arguments() {
         "preview": null,
         "per_call": false,
     });
-    let (preview, arguments) = confirmation_details(&ordinary);
+    let ConfirmationDetails {
+        preview, arguments, ..
+    } = confirmation_details(&ordinary);
     assert_eq!(preview, None);
     assert!(arguments.unwrap().starts_with("Arguments: "));
+}
+
+/// Every character the inline prompt must never print raw: a bidi override,
+/// a zero-width space, a C1 CSI, a carriage return, a tag character and an
+/// isolate. (A newline is the pretty-printed arguments' own layout.)
+const RAW: [char; 6] = [
+    '\u{202e}',
+    '\u{200b}',
+    '\u{9b}',
+    '\r',
+    '\u{e0041}',
+    '\u{2066}',
+];
+
+fn assert_no_raw(text: &str) {
+    for c in RAW {
+        assert!(
+            !text.contains(c),
+            "raw U+{:04X} printed: {text:?}",
+            c as u32
+        );
+    }
+}
+
+/// The arguments are what runs: every hidden character in them — in a value
+/// or in a key — is shown as `<U+XXXX>`, the pretty-printed layout keeps its
+/// own lines, and one notice under them says how many there were.
+#[test]
+fn the_inline_prompt_shows_hidden_characters_in_the_arguments_as_escapes() {
+    let frame = serde_json::json!({
+        "request_id": "req-1",
+        "tool_name": "file_write",
+        "tool_arguments": {
+            "path": "/srv/allow\u{200b}ed/\u{202e}txt.exe",
+            "c1": "\u{9b}31m",
+            "tag\u{e0041}": "x",
+        },
+        "preview": null,
+        "per_call": false,
+    });
+    let details = confirmation_details(&frame);
+    let arguments = details.arguments.expect("the arguments");
+    assert_no_raw(&arguments);
+    assert!(
+        arguments.contains("\"/srv/allow<U+200B>ed/<U+202E>txt.exe\""),
+        "{arguments}"
+    );
+    assert!(arguments.contains("\"<U+009B>31m\""), "{arguments}");
+    assert!(arguments.contains("\"tag<U+E0041>\": \"x\""), "{arguments}");
+    assert_eq!(
+        arguments.lines().count(),
+        5,
+        "still pretty-printed: {arguments}"
+    );
+    assert!(!arguments.contains("<U+000A>"), "{arguments}");
+    assert_eq!(
+        details.notice.as_deref(),
+        Some("Note: this request contains 4 hidden characters, shown as <U+…>.")
+    );
+}
+
+/// The headline names a third party's tool (MCP `<server>__<tool>`, plugin
+/// `<plugin>::<tool>`): escaped on one line, so a line break in the name
+/// cannot print a forged `Arguments:` block above the real one, and counted
+/// in the same notice as the arguments.
+#[test]
+fn the_inline_prompt_headline_shows_the_tool_name_on_one_line() {
+    let frame = serde_json::json!({
+        "request_id": "req-1",
+        "tool_name": "srv__rm\u{202e}fdp\u{200b}\r\nArguments: {}",
+        "tool_arguments": { "path": "\u{2066}a" },
+        "per_call": false,
+    });
+    let details = confirmation_details(&frame);
+    assert_eq!(
+        details.headline,
+        "Tool 'srv__rm<U+202E>fdp<U+200B><U+000D><U+000A>Arguments: {}' requires confirmation"
+    );
+    assert_no_raw(&details.headline);
+    assert!(!details.headline.contains('\n'));
+    // Name 4, arguments 1.
+    assert_eq!(
+        details.notice.as_deref(),
+        Some("Note: this request contains 5 hidden characters, shown as <U+…>.")
+    );
+}
+
+/// The notice says one character in the singular, and nothing at all when
+/// nothing was escaped: a CJK path, a right-to-left letter and a line break
+/// inside a string (which `serde_json` writes as `\r\n`) are not hidden.
+#[test]
+fn the_inline_prompt_notice_counts_only_what_was_escaped() {
+    let one = serde_json::json!({
+        "tool_name": "shell_execute",
+        "tool_arguments": { "command": "ls\u{200b}" },
+    });
+    assert_eq!(
+        confirmation_details(&one).notice.as_deref(),
+        Some("Note: this request contains 1 hidden character, shown as <U+…>.")
+    );
+
+    let clean = serde_json::json!({
+        "tool_name": "file_write",
+        "tool_arguments": { "path": "notes/日本語.md", "text": "שלום\r\nb\tc" },
+    });
+    let details = confirmation_details(&clean);
+    assert_eq!(details.notice, None);
+    let arguments = details.arguments.unwrap();
+    assert!(!arguments.contains("<U+"), "{arguments}");
+    assert!(arguments.contains(r#""שלום\r\nb\tc""#), "{arguments}");
+}
+
+/// Display only: the frame the answer is built from — its request id — is
+/// what the daemon sent, whatever the prompt showed.
+#[test]
+fn showing_the_inline_prompt_changes_nothing_in_the_frame() {
+    let frame = serde_json::json!({
+        "request_id": "req-1",
+        "tool_name": "srv__rm\u{202e}",
+        "tool_arguments": { "path": "/srv/\u{202e}x" },
+    });
+    let before = frame.clone();
+    let _ = confirmation_details(&frame);
+    assert_eq!(frame, before);
+    assert_eq!(frame["tool_arguments"]["path"], "/srv/\u{202e}x");
 }
