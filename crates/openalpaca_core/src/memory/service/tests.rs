@@ -5613,6 +5613,50 @@ fn index_mode_excerpts_the_top_two_and_lists_the_next_eight_within_8_kib() {
     }
 }
 
+/// **`recall_mode = "excerpts"` keeps design §4's item cap** (L10b review,
+/// finding 2): the pinned note and the top 7 recalled notes — 8 items in
+/// all — with room left in the 8 KiB, so it is the cap and not the bytes
+/// that stops the recall; nothing is listed.
+#[test]
+fn excerpts_mode_caps_the_delivery_at_eight_items_pinned_included() {
+    let (h, pinned) = index_scene();
+    let ctx = h.tool(ALICE, None);
+    let ranked = full_ranking(&h, &ctx, RELEASE_QUESTION);
+    assert_eq!(ranked.len(), 12, "{ranked:?}");
+
+    let recalled = h
+        .service
+        .recall(
+            &ctx,
+            RELEASE_QUESTION,
+            RecallBudget::for_mode(RecallMode::Excerpts),
+        )
+        .unwrap();
+    assert_eq!(recalled.notes.len(), RECALL_MAX_ITEMS);
+    assert_eq!(recalled.notes[0].id, pinned);
+    assert_eq!(recalled.notes[0].reason, UsedReason::Pinned);
+    let excerpted: Vec<NoteId> = recalled
+        .notes
+        .iter()
+        .filter(|n| n.reason == UsedReason::Recall)
+        .map(|n| n.id)
+        .collect();
+    assert_eq!(excerpted, ranked[..RECALL_MAX_ITEMS - 1].to_vec());
+    assert!(recalled.listed.is_empty());
+    assert!(recalled.truncated, "five matching notes were left out");
+    let largest = recalled
+        .notes
+        .iter()
+        .map(|n| n.render().len())
+        .max()
+        .unwrap();
+    assert!(
+        recalled.bytes + largest <= RECALL_TOTAL_BYTES,
+        "another excerpt would have fit: {} + {largest}",
+        recalled.bytes
+    );
+}
+
 /// With two recalled notes or fewer, the index-first delivery is the
 /// excerpts one byte for byte: there is nothing to list.
 #[test]
