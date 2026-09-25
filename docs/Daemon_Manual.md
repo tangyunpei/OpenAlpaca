@@ -646,7 +646,8 @@ listed note is reported with reason `index`, and a match too large to
 excerpt within the budget is listed instead. `excerpts` sends up to 8 notes,
 pinned ones included, each as an excerpt. A file-based skill's turn is recalled
 in `excerpts` whatever the key says unless the skill can call `memory_read`
-(its `requires_capabilities` or, without them, its `tools.allow` names it) —
+(its `requires_capabilities` or, without them, its `tools.allow` names it,
+and its `tools.deny` does not) —
 none of the shipped skills can, and a list it cannot open would only take the
 room of excerpts. The key is read on every turn, so a reloaded `daemon.toml`
 applies to the next one. A workflow's lead gets the same
@@ -680,7 +681,13 @@ characters; one over 8 KiB keeps its first 6 KiB and last 2 KiB). Each message
 learns into the project its own turn named, or into the global partition when
 it named none, whatever project the conversation was later bound to. What you
 said in your own words becomes an active note learned from you (origin
-`extracted_user`, listed as *recently learned* with a one-step undo). When it
+`extracted_user`, listed as *recently learned* with a one-step undo). A learned
+note carries `aliases` — other words you might search it by, the other language
+included — a `fact_key` naming the fact it answers for (reusing a key your notes
+already use when one fits), and `observed_at`, when you said it. A fact about you (a key
+starting `user.`) that replaces no note is saved in the **global** partition,
+whichever project you said it in; a replacement is saved in the partition of
+the note it replaces. When it
 changes a note that was itself learned, it replaces that note at once (an
 explicit `supersedes`; undo brings the old one back). When it changes a note you
 saved, edited by hand or imported, it is written as a **suggestion** instead: a
@@ -759,15 +766,21 @@ forget. `USER.md` is not written by any of this — see [Persona](#persona).
 
 The model's tools are the same service with less authority. `memory_search`,
 `memory_read`, `memory_list` and `memory_timeline` are registered for every
-agent granted `memory_read`; `memory_store`, `memory_update` and `memory_forget`
-are offered to the main conversation alone.
+agent granted `memory_read` — all nine shipped agent templates name it, and a
+built-in template that neither names nor denies it is granted it anyway, so an
+install whose `config/agents/` predates that needs no edit (a plugin's agent
+template gets it only by naming it, since its results go to the plugin's own
+process); a workflow's lead has `memory_search`, `memory_read` and
+`memory_timeline` on its own surface. `memory_store`, `memory_update` and
+`memory_forget` are offered to the main conversation alone.
 
 **The read tools are layered**: filter first, fetch later. `memory_search`
 answers an **index** by default — one row per note, `{id, date, kind, scope,
 status, title, reason, size, conflict}`, no body — where `date` is when the
 note's evidence was observed, else when it was first saved, `reason` is how it
 matched, and `size` is its approximate token count (body bytes ÷ 4);
-`detail: "snippets"` gives the cited excerpts instead. It also takes
+`detail: "snippets"` gives the cited excerpts instead, each with the note's
+`valid_from` and `valid_to` (RFC 3339, or null). It also takes
 `date_from` and `date_to` (inclusive, on that date; RFC 3339, or `YYYY-MM-DD`
 as that whole UTC day) and `order_by` (`relevance`, the default, `newest` or
 `oldest`), and `limit` is 1–50, default 10. `memory_read` takes `ids`, 1–10 in
@@ -875,7 +888,7 @@ addressed. Bodies and queries are closed objects — an unknown key is a `400`.
 | Method and path | Purpose |
 |---|---|
 | `GET /v1/memories` | List notes: `kind`, `status` (default `active`), `scope`, `include_history`, `include_candidates`, `limit` (1–100, default 50) and `cursor`. Answers `{items, next_cursor}`, each item with `supersedes` (the ids it names as replaced); a cursor is valid for the filter set that issued it, and one from another filter set is `400 MEMORY_INVALID_INPUT`. |
-| `GET /v1/memories/search` | Literal search: `q` (1–512 chars), `kind`, `scope`, `limit` (1–50, default 10), `historical`, `as_of`, and the model tool's `date_from`, `date_to` (inclusive, on the note's date — observed, else first saved; RFC 3339 or `YYYY-MM-DD`) and `order_by` (`relevance`, `newest`, `oldest`). `detail` defaults to `snippets` here: cited results with `freshness`, `conflict`, `same_key_loser`, `sources_status`; `detail=index` answers the tool's index rows. Either way with `count`, `partial` and `index_state`. Candidates are never returned. |
+| `GET /v1/memories/search` | Literal search: `q` (1–512 chars), `kind`, `scope`, `limit` (1–50, default 10), `historical`, `as_of`, and the model tool's `date_from`, `date_to` (inclusive, on the note's date — observed, else first saved; RFC 3339 or `YYYY-MM-DD`) and `order_by` (`relevance`, `newest`, `oldest`). `detail` defaults to `snippets` here: cited results with `freshness`, `conflict`, `same_key_loser`, `sources_status`, `valid_from` and `valid_to`; `detail=index` answers the tool's index rows. Either way with `count`, `partial` and `index_state`. Candidates are never returned. |
 | `GET /v1/memories/timeline` | `memory_timeline`: around exactly one of `anchor` (a note id), `q` (its first hit) or `date` (RFC 3339 or `YYYY-MM-DD`), the nearest `before` and `after` notes (0–20, default 5), in date order. Answers `{anchor, results, count, index_state}` — `anchor` is `{id}`, `{date}` or null when `q` matched nothing — with index rows whose `reason` is `before`, `anchor` or `after`, superseded, archived and ended notes marked by `status`, candidates never listed. An unknown anchor is `404`; no anchor, two, or a side over 20 is `400`. |
 | `GET /v1/memories/recently-learned` | The extractor's `extracted_user` notes that recall would use, newest first, each with `supersedes` (what it replaced) — `since` (RFC 3339, or a window like `7d`, `24h`, `30m`; default 7 days) and `limit`. A note that is not in force, loses its `fact_key` to another note, or cites a message a forget suppressed is not listed. An edit through this surface re-records a note as `user` and it leaves the list. |
 | `GET /v1/memories/suggestions` | The pending suggestions, newest first — `limit` (1–100, default 20). Each item: `id`, `revision`, `title`, `knowledge` (the suggested text), `reason`, `created_at`, `observed_at` (the cited message's time), `origin`, `scope`, `sources`, `older_count`, and `target: {id, revision, title, excerpt, origin, scope}` — the note it would replace, as read now. Where several name one note only the newest is listed, and `older_count` counts the rest. A suggestion whose note is gone or no longer in force is not listed (undo still dismisses it). Records nothing. |
@@ -981,7 +994,7 @@ Every chat message (any source: GUI, CLI, connectors) is routed by the orchestra
    - `/status` / `/tasks` — task summary; `/status <task_id>` for one task.
    - `/cancel`, `/pause`, `/resume` — task control. Bare forms (no id) resolve against the lane's active workflows; an explicit id (`/cancel <id>`) targets that task.
    - `/steer <text>` — inject a steering message into the lane's running workflow (guaranteed delivery, bypasses the model; requires `orchestrator.routing.steering_enabled`, default on).
-   - `/remember`, `/forget`, `/memories` — the chat memory commands (see [Memory](#memory), *Chat memory commands*): parsed after task control and before any skill, the command word in any case and followed by a space or nothing (`/remembering` is not one). Only on an attended turn of the app's or the CLI's chat; every other turn is answered with a fixed sentence and changes nothing. Their names are reserved: a skill claiming one as its slash command, an alias or its id is not reached by that slash, and the skill loader logs one `WARN` naming it.
+   - `/remember`, `/forget`, `/memories` — the chat memory commands (see [Memory](#memory), *Chat memory commands*): matched before any skill — a slash command or the router's pick — and before the task commands above, which the three words cannot be confused with; the command word in any case and followed by a space or nothing (`/remembering` is not one). Only on an attended turn of the app's or the CLI's chat; every other turn is answered with a fixed sentence and changes nothing. Their names are reserved: a skill claiming one as its slash command, an alias or its id is not reached by that slash, and the skill loader logs one `WARN` naming it.
    - `/<skill> [args]` — invoke a skill by slash command, alias, or skill ID (directory name); skills can also be selected by the weighted skill router.
 2. **Social fast path** — trivial acknowledgements ("ok", "thanks") answered with an ultra-light prompt.
 3. **Main loop** — everything else, including messages sent while workflows run. The model answers directly or calls routing tools: `start_workflow` (background workflow), `steer_workflow` / `queue_followup` (offered while the lane has active workflows), `task_status`, and memory tools. Workflows run in the background under a lead agent that can spawn subagents; concurrency is capped per lane (`max_workflows_per_lane`, default 3). On completion the workflow posts a model-authored completion report to the lane, and queued follow-ups auto-start (`followup_autostart`, default on).

@@ -740,10 +740,12 @@ Notes:
   OpenAlpaca`, `imported`). A change to a note that was itself *learned* needs no
   question: it replaces the old note at once, and `undo` brings the old one back.
 - `confirm` makes a candidate an active note of yours. For a suggestion it also
-  reads the note the suggestion would replace and sends that note's current
-  revision with the confirm, so a note you edited after the suggestion was made is
-  a `409`, never retired unseen, and one already replaced or archived some other
-  way is refused, since nothing is left to replace (`undo` the suggestion
+  reads the note the suggestion would replace, at that moment, and sends that
+  revision with the confirm — so it replaces the note **as it stands when you run
+  it**, including an edit you made after the suggestion was written (`show` the
+  suggestion and the note it names first to read both); only a change landing between
+  that read and the confirm is a `409`. One already replaced or archived some
+  other way is refused, since nothing is left to replace (`undo` the suggestion
   instead); then it prints what the suggestion replaced — kept
   as history, readable with `show` — and any other suggestions for the same note,
   which the confirm dismissed. It is refused for a note that is not a candidate.

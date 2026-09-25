@@ -94,8 +94,8 @@ Every registered tool has a `ToolBackend` that executes its logic:
 
 | Backend | Examples | Source | Notes |
 |---------|----------|--------|-------|
-| **BuiltIn** | `shell_execute`, `file_read`, `file_write`, `artifact_write`, `read_result`, `web_search`, `web_fetch`, `memory_search`/`memory_read`/`memory_list`, `workspace_read`/`workspace_write`, `update_persona`, `send` | Rust code, registered at startup | Tools needing identity override `execute_with_context()` |
-| **BuiltIn (per request)** | Chat: `start_workflow`, `task_status`, `memory_store`, `memory_update`, `memory_forget`, `invoke_skill`, `steer_workflow`, `queue_followup`. Lead agent: `spawn_subagent`, `spawn_subagents_batch`, `check_subagent_status`, `wait_for_subagents`, `post_update`, `queue_followup`, `invoke_skill` | Built fresh for one chat turn or one lead-agent run | Registered into a per-request copy of the registry, never the shared one (§4.2) |
+| **BuiltIn** | `shell_execute`, `file_read`, `file_write`, `artifact_write`, `read_result`, `web_search`, `web_fetch`, `memory_search`/`memory_read`/`memory_list`/`memory_timeline`, `workspace_read`/`workspace_write`, `update_persona`, `send` | Rust code, registered at startup | Tools needing identity override `execute_with_context()` |
+| **BuiltIn (per request)** | Chat: `start_workflow`, `task_status`, `memory_store`, `memory_update`, `memory_forget`, `memory_confirm` (attended `gui` turns only), `invoke_skill`, `steer_workflow`, `queue_followup`. Lead agent: `spawn_subagent`, `spawn_subagents_batch`, `check_subagent_status`, `wait_for_subagents`, `post_update`, `queue_followup`, `invoke_skill` | Built fresh for one chat turn or one lead-agent run | Registered into a per-request copy of the registry, never the shared one (§4.2) |
 | **BuiltIn (skill scripts)** | `skill_script:analyze`, `invoke_skill:<id>` | Skill `SKILL.md` frontmatter | Available only during that skill's invocation |
 | **Http** | User-defined REST API wrappers | `config/tools/*.toml` | SSRF-validated, response capped |
 | **Command** | User-defined CLI wrappers | `config/tools/*.toml` | Treated as shell-like for injection sanitization |
@@ -207,7 +207,7 @@ of its capabilities matches any agent capability and none is denied.
   `denied_capabilities: [web_access]` for an offline coding agent).
 
 **Built-in capability names:** `file_read`, `file_write`, `artifact_write`,
-`shell_execute`, `memory_read` (memory_search, memory_read, memory_list), `read_result`,
+`shell_execute`, `memory_read` (memory_search, memory_read, memory_list, memory_timeline), `read_result`,
 `web_access` (web_search, web_fetch), `workspace_read`, `workspace_write`,
 `persona_write` (update_persona), `messaging` (send), `orchestration`
 (lead-agent coordination tools).
@@ -594,15 +594,16 @@ three places: `annotations_for_builtin()` for built-ins, the optional
 imported tools.  Plugin tools carry none, and so do the per-request
 tools — except that the chat loop registers its instances with the profile
 their *name* has in `annotations_for_builtin()`, which is how
-`memory_update` and `memory_forget` prompt on the main loop.
+`memory_update`, `memory_forget` and `memory_confirm` prompt on the main loop
+(`memory_confirm` per call: `approval_is_per_call`).
 
 **Built-in annotation profiles:**
 
 | Tools | Profile |
 |-------|---------|
-| `file_read`, `workspace_read`, `memory_search`, `memory_read`, `memory_list`, `read_result` | read-only, idempotent, closed-world |
+| `file_read`, `workspace_read`, `memory_search`, `memory_read`, `memory_list`, `memory_timeline`, `read_result` | read-only, idempotent, closed-world |
 | `web_fetch`, `web_search` | read-only, idempotent, open-world |
-| `file_write`, `workspace_write`, `artifact_write`, `update_persona`, `memory_update`, `memory_forget` | destructive, closed-world |
+| `file_write`, `workspace_write`, `artifact_write`, `update_persona`, `memory_update`, `memory_forget`, `memory_confirm` | destructive, closed-world |
 | `shell_execute`, `send` | destructive, open-world |
 
 Annotations feed three mechanisms:
@@ -797,8 +798,8 @@ reference is [Skill_Template_Reference.md](../Skill_Template_Reference.md)
 
 | Caller | Tool surface | Allow list |
 |--------|--------------|------------|
-| **Chat main loop** | `start_workflow`, `task_status`, the six memory tools (with a memory service), `read_result` (with a session log), every tool of every enabled extension, `invoke_skill`, keyword-suggested built-ins; plus `steer_workflow` and `queue_followup` while the lane has a running workflow and steering is on | Exactly the surface it was handed |
-| **Lead agent** | `spawn_subagent`, `spawn_subagents_batch` (when `batch_spawn_enabled`, the default), `check_subagent_status`, `wait_for_subagents`, `post_update` and `queue_followup` (when steering is on), workspace tools, `memory_search`, `artifact_write` and `read_result` (when its template grants them), every tool of every enabled extension, `invoke_skill` | The template's capabilities plus the assembled surface; template denials still win |
+| **Chat main loop** | `start_workflow`, `task_status`, the memory tools (with a memory service: the four readers and three writers, and `memory_confirm` on an attended `gui` turn), `read_result` (with a session log), every tool of every enabled extension, `invoke_skill`, keyword-suggested built-ins; plus `steer_workflow` and `queue_followup` while the lane has a running workflow and steering is on | Exactly the surface it was handed |
+| **Lead agent** | `spawn_subagent`, `spawn_subagents_batch` (when `batch_spawn_enabled`, the default), `check_subagent_status`, `wait_for_subagents`, `post_update` and `queue_followup` (when steering is on), workspace tools, `memory_search`, `memory_read` and `memory_timeline`, `artifact_write` and `read_result` (when its template grants them), every tool of every enabled extension, `invoke_skill` | The template's capabilities plus the assembled surface; template denials still win |
 | **Subagents** | `resolve_agent_tools()` — the template's capabilities resolved to tools, plus the workspace tools | The template's capabilities plus the workspace tools, plus the surface those capabilities resolved to — a template that grants `web_access` admits `web_search` and `web_fetch`. The widening adds that surface and nothing else, and template denials still win — see [TECHNICAL.md §11.2](./TECHNICAL.md#112-sandboxpolicy) |
 | **Skills** | `requires_capabilities` or `tools.allow` resolved to tools, minus `tools.deny`, plus the skill's own `skill_script:*` and `invoke_skill:*` | Exactly the resolved surface |
 

@@ -94,7 +94,7 @@ under `crates/openalpaca_core/src/`.
 | `tools/builtins/artifact_write.rs` | `artifact_write`, the `workspace_write` artifact spill |
 | `tools/builtins/read_result.rs` | `read_result` |
 | `tools/builtins/shell_execute.rs` | `shell_execute` |
-| `tools/builtins/memory_tools.rs` | The six memory tools — `memory_search`, `memory_read`, `memory_list` (the read surface, `memory_read_tools()`) and `memory_store`, `memory_update`, `memory_forget` (per request, main loop only) — thin, strictly validated adapters over `memory::service::MemoryService` |
+| `tools/builtins/memory_tools.rs` | The eight memory tools — `memory_search`, `memory_read`, `memory_list`, `memory_timeline` (the read surface, `memory_read_tools()`) and `memory_store`, `memory_update`, `memory_forget`, `memory_confirm` (per request, main loop only; `memory_confirm` on attended `gui` turns only) — thin, strictly validated adapters over `memory::service::MemoryService` |
 | `tools/builtins/update_persona/` | `update_persona` (`mod.rs` dispatcher; `soul.rs`, `user.rs`, `identity.rs`, `common.rs`) |
 | `tools/builtins/send.rs` | `send` (connector message/file delivery) |
 | `tools/builtins/helpers/mod.rs` | Workspace path validation, backup management |
@@ -660,8 +660,9 @@ All of these are registered in the shared `ToolRegistry` at daemon startup.
 | `artifact_write` | `name`, `kind`, `content` (required); `note`, `summary`, `metadata` | `artifact_write` | `kind` ∈ `markdown`, `code`, `terminal`, `table`, `plan`, `image`, `html`, `binary`; versioned; max `max_artifact_bytes` (10 MB); store chosen from `request_workspace_root`, else the home store; needs a database |
 | `read_result` | `result_ref` (required), `offset`, `limit` | `read_result` | Reads only inside the calling session's `results/`; page 8 KB default, 64 KB max; needs `ToolContext.session_id` |
 | `shell_execute` | `command` (required) | `shell_execute` | 300s internal safety timeout; output cap 512 KB; injection patterns blocked by sanitizer |
-| `memory_search` | `query` (required, 1–512 chars); `kind`, `scope`, `limit` (1–20, default 8), `historical`, `as_of` | `memory_read` | Lexical only: every term of ≥ 3 characters against a `unicode61` and a trigram FTS5 table, a bounded substring scan for a 1–2 character query, no model; filters (status, supersession, tombstones, same-`fact_key` losers, validity) before the limit; every hit re-read and re-hashed; cited by heading and line range with `freshness`, `conflict`, `partial`, `index_state` |
-| `memory_read` | `id` (required); `expected_revision`, `section` | `memory_read` | One note, ≤ 32 KiB, with provenance; the service re-checks owner and scope |
+| `memory_search` | `query` (required, 1–512 chars); `kind`, `scope`, `limit` (1–50, default 10), `detail` (`index` default, or `snippets`), `date_from`, `date_to` (RFC 3339 or `YYYY-MM-DD`, inclusive), `order_by` (`relevance` default, `newest`, `oldest`), `historical`, `as_of` | `memory_read` | Lexical only: every term of ≥ 3 characters against a `unicode61` and a trigram FTS5 table, a bounded substring scan for a 1–2 character query, no model; filters (status, supersession, tombstones, same-`fact_key` losers, validity, the date bounds) before the limit; every hit re-read and re-hashed. `index` answers one row per note — `id`, `date`, `kind`, `scope`, `status`, `title`, `reason`, `size`, `conflict` — and no body; `snippets` answers cited excerpts by heading and line range with `freshness`, `conflict`, `valid_from`, `valid_to`; both with `partial` and `index_state` |
+| `memory_read` | `ids` (required, 1–10 distinct note ids); `expected_revision`, `section` (single id only) | `memory_read` | One entry per id in the order asked, each with provenance, the bodies sharing 32 KiB (a short one is never cut to make room); an id no note of the caller has answers `{id, error: "not_found"}` in its place; the old `id` argument is `invalid_input`; the service re-checks owner and scope |
+| `memory_timeline` | exactly one of `anchor` (a note id), `query`, `date`; `before`, `after` (0–20, default 5) | `memory_read` | The notes dated around the anchor, in date order, as `memory_search` index rows whose `reason` is `before`, `anchor` or `after`; superseded, archived and ended notes are listed and marked, candidates never |
 | `memory_list` | `kind`, `status` (default `active`), `scope`, `cursor`, `limit` (1–100), `include_history`, `include_candidates` | `memory_read` | Metadata only, paged by an opaque cursor |
 | `workspace_read` | `key` (optional) | `workspace_read` | Reads shared task workspace; requires `ToolContext.task_id` |
 | `workspace_write` | `key`, `content` (required), `entry_type`, `file_asset_id` | `workspace_write` | 32 KB content cap; optimistic locking with up to 5 jittered-backoff retries; an `artifact` entry is also saved to the artifact store and keeps a 512-character preview |
@@ -671,9 +672,9 @@ All of these are registered in the shared `ToolRegistry` at daemon startup.
 Built-in tools also carry MCP-style annotations
 (`annotations_for_builtin()` in `builtins/mod.rs`):
 
-- read-only, closed-world: `file_read`, `workspace_read`, `memory_search`, `memory_read`, `memory_list`, `read_result`
+- read-only, closed-world: `file_read`, `workspace_read`, `memory_search`, `memory_read`, `memory_list`, `memory_timeline`, `read_result`
 - read-only, open-world: `web_fetch`, `web_search`
-- destructive, closed-world: `file_write`, `workspace_write`, `artifact_write`, `update_persona`, `memory_update`, `memory_forget`
+- destructive, closed-world: `file_write`, `workspace_write`, `artifact_write`, `update_persona`, `memory_update`, `memory_forget`, `memory_confirm` — and `memory_confirm` alone is also **per call** (`approval_is_per_call`): its card is always raised, never answered from the approval cache or `auto_approve`, and never offers *Always allow*
 - none: `memory_store` — deliberately, so a plain save never prompts; what bounds a tool-issued `supersedes` is authority (a tool call can never retire a note the user wrote), not a card
 - destructive, open-world: `shell_execute`, `send`
 
@@ -699,7 +700,7 @@ pub fn builtin_tools(
 /// The memory read surface, registered by the daemon over its one service
 /// (`apps/openalpacad/src/services/tools.rs`, `register_memory_read_tools`)
 pub fn memory_read_tools(service: Arc<MemoryService>) -> Vec<RegisteredTool>
-// Returns: memory_search, memory_read, memory_list — each providing `memory_read`
+// Returns: memory_search, memory_read, memory_list, memory_timeline — each providing `memory_read`
 
 /// Full built-in tools with persona and connector context
 pub fn builtin_tools_with_persona_context(
@@ -776,8 +777,8 @@ the registry made for that one invocation:
 These tools are **not in the shared registry**.  Each caller value-clones
 the registry, registers its own instances into the clone, and builds its
 `SandboxManager` over that clone.  None carries annotations — except the
-chat loop's `memory_update` and `memory_forget`, registered with their
-built-in destructive profile so they prompt — and only the
+chat loop's `memory_update`, `memory_forget` and `memory_confirm`, registered
+with their built-in destructive profile so they prompt — and only the
 lead's own tools (the coordination tools, `post_update`, `queue_followup`)
 declare a capability, `orchestration`.  They reach the model because the
 caller lists them, and the caller's allow list is built from that same list.
@@ -791,9 +792,10 @@ caller lists them, and the caller's allow list is built from that same list.
 | `start_workflow` | `goal` (required), `title` | Always |
 | `task_status` | `task_id` (optional) | Always |
 | `memory_store` | `title`, `body`, `kind` (required); `scope`, `aliases`, `tags`, `fact_key`, `sources`, `valid_from`, `valid_to`, `supersedes: {id, expected_revision}` | When the daemon has a memory service. Records origin `extracted_user`, never `user`; an exact duplicate answers the existing id; a `supersedes` whose target is a `user` note is `authority_conflict` |
-| `memory_update` | `id`, `expected_revision`, `action` (`edit` \| `archive` \| `confirm`) (required); `patch`, `reason` | Same. Prompts (destructive); refused on an `unattended` turn. `confirm` is always refused from a tool call — the refusal names the Memory view and `openalpaca memory confirm`; `edit`/`archive` of a `user` note is `authority_conflict` |
+| `memory_update` | `id`, `expected_revision`, `action` (`edit` \| `archive` \| `confirm`) (required); `patch`, `reason` | Same. Prompts (destructive); refused on an `unattended` turn. `confirm` is always refused from a tool call, before any card — the refusal names `memory_confirm` for a suggestion that tool would take on an attended `gui` turn, and the Memory view and `openalpaca memory confirm` otherwise; `edit`/`archive` of a `user` note, and `edit` of a suggestion, is `authority_conflict`; `archive` of a suggestion is `invalid_input` |
 | `memory_forget` | `targets: [{id, expected_revision}]` (1–20, required); `reason` | Same. Prompts (destructive); refused on an `unattended` turn. Forgets by id and revision only — never "the best match" |
-| `memory_search`, `memory_read`, `memory_list` | see 6.1 (definitions only; the backends are shared) | When registered |
+| `memory_confirm` | `id`, `expected_revision`, `target_revision` (all required) | With a memory service, on an attended turn whose source is `gui` (the app's and the CLI's chat). The card shows a daemon-written preview of both notes; only a person's Approve for this call confirms the suggestion, as a user-directed write (origin `user`); without it the tool answers `approval_required`. Deny dismisses the suggestion for good. An inferred suggestion is `not_a_suggestion` |
+| `memory_search`, `memory_read`, `memory_list`, `memory_timeline` | see 6.1 (definitions only; the backends are shared) | When registered |
 | `read_result` | see 6.1 (definition only) | With a session log **and** a database |
 | every `<server>__<tool>` / `<plugin>::<tool>` | — | When its extension is enabled (`extension_tool_defs()`) |
 | `invoke_skill` | `skill`, `query` (both required) | With an LLM router |
@@ -824,7 +826,8 @@ why custom TOML tools may not use the four coordination names.
 | `queue_followup` | `description` (required) | Queues work to start after the run. Only when `steering_enabled` |
 | `invoke_skill` | `skill`, `query` | Same tool as the chat loop's |
 
-The lead's surface also lists the workspace tools, `memory_search`, every
+The lead's surface also lists the workspace tools, `memory_search`,
+`memory_read` and `memory_timeline`, every
 enabled extension tool, and — only when its own template grants the
 capability — `artifact_write` and `read_result`.  Its allow list is its
 template's capabilities plus the names on the assembled surface; a template
@@ -1223,7 +1226,7 @@ called **tool's name**.  The two are the same word for `file_read`,
 `file_write`, `artifact_write`, `shell_execute`, `read_result`, the
 workspace tools and any `<server>__<tool>`, and different words wherever
 one capability is served by tools with names of their own: `web_access`
-is `web_search` and `web_fetch`, `memory_read` is `memory_search`, `memory_read` and `memory_list`,
+is `web_search` and `web_fetch`, `memory_read` is `memory_search`, `memory_read`, `memory_list` and `memory_timeline`,
 `messaging` is `send`.  So one rule holds for every row: **the allow list
 admits the tools the loop was handed.**  The first three rows build their
 list from the exposed definitions directly.  The lead and the subagent

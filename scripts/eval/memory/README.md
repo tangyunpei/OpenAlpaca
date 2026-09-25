@@ -471,10 +471,11 @@ or E report with the archived A and B reports:
   paths with hashes, how many notes were seeded — and how many as a
   replacement — what was on the tool surface, the scratch store; new with 3.11:
   `system_description`, `memory_tools_offered`, `follow_up_search_bound`, the
-  per-turn recall's `recall_mode` (`index` or `excerpts`, design 09 §13.2), the
   retrieved byte budget `recall_total_bytes` / `recall_pinned_bytes` /
   `recall_max_items` / `read_max_bytes`, `notes_scope_applied`,
-  `notes_superseding` and `seeded_ids`) are the run's recorded conditions — the
+  `notes_superseding` and `seeded_ids`; new with Learning v2's L10b (design 09
+  §13.2, `3db79ce1`): the per-turn recall's `recall_mode`, `index` or
+  `excerpts`) are the run's recorded conditions — the
   report is the record; nothing is a measurement without them. `embedder` is
   B's E5 record in the archived reports and always `null` from D on.
 - `totals`: `correct`/`incorrect`/`unparsed`/`judge_errors`/`turn_errors`,

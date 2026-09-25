@@ -43,9 +43,12 @@
 //!
 //! **Suggestions** (Learning v2, design 09 §3.5): `suggestions` lists the
 //! learned changes to notes you saved that wait for you; `confirm` of one
-//! also fetches the note it replaces and sends that note's revision as
-//! `target_revision`, so a note edited since is a `409`, never retired
-//! unseen; `undo` of one dismisses it (*Keep mine*) — a withdrawal that
+//! also fetches the note it replaces, at that moment, and sends that
+//! revision as `target_revision` — so the confirm replaces the note as it
+//! stands then, an edit you made after the suggestion was written included;
+//! only a change landing between that read and the confirm is the daemon's
+//! `409`, and a note already replaced or archived some other way is its
+//! `400`; `undo` of one dismisses it (*Keep mine*) — a withdrawal that
 //! forgets nothing else you said.
 //!
 //! `doctor --repair` and `adopt` are local: they take the daemon's singleton
@@ -985,8 +988,12 @@ impl Confirmed {
 
 /// `confirm` (design 09 §3.5, S5): the candidate's revision as `If-Match`
 /// and, when it names a note it would replace, that note's current revision
-/// as `target_revision` — fetched now, so a note edited since the listing
-/// is a visible `409`, never retired unseen.
+/// as `target_revision` — fetched now, right before the confirm, so what is
+/// retired is the note as it stands at this moment (an edit made since the
+/// suggestion or the listing included; the title is printed after). Only a
+/// change landing between this read and the POST is the daemon's `409`; a
+/// target already replaced or archived another way is its `400`, and a gone
+/// one its `404`. The app's *Replace* sends the revision it displayed.
 pub(crate) async fn confirm_note(api: &Api, id: NoteId) -> Result<Confirmed> {
     let current = api.get(&format!("/v1/memories/{id}")).await?;
     let revision = revision_of(&current)?;
