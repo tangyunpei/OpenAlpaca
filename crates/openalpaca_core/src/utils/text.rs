@@ -24,7 +24,9 @@
 //! code point Unicode says renders as nothing — is shown as `<U+XXXX>` and
 //! [`hidden_notice`] says how many there were. The two do not compete:
 //! `one_line` is for prose OpenAlpaca composed to be read (a memory
-//! suggestion's `preview`, sanitized by the daemon before any surface sees
+//! suggestion's `preview`, stripped of control and format characters by the
+//! daemon before any surface sees it — the default-ignorable letters the
+//! escape also shows, a variation selector or a Hangul filler, pass through
 //! it), and the escape is for the values beside it that decide what runs.
 //! A one-line field — the tool's name, the agent's id — takes
 //! [`escape_hidden_line`], which shows a newline, a tab and every other
