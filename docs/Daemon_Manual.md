@@ -737,7 +737,9 @@ index block, not to a workflow's lead — and learning never shows one to the
 extractor: it reaches a model only when the model or you look for it (a note
 you pinned is delivered, as every pinned note is). An episode you saved
 yourself, or one learned from what you said, is an ordinary note and is
-recalled as any other.
+recalled as any other. The assistant's own edit or archive of an episode note
+(`memory_update`) leaves it an episode note; an edit you make makes it your
+note, recalled as any other.
 
 Forgetting an episode note — the Memory view, `/forget`, `memory_forget`,
 `DELETE /v1/memories/{id}` — forgets that note and nothing else: unlike any

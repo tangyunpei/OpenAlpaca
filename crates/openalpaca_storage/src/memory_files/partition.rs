@@ -118,6 +118,8 @@ fn read_note_file(path: &Path) -> Result<Vec<u8>> {
 /// The surface a mutation comes from, mapped to the origin it records
 /// (design §4, §7a): a user-directed surface records `user`; a model tool
 /// call records `extracted_user`; the extractor records what it was told.
+/// One exception: an edit or archive of a conversation summary by anyone
+/// but the user keeps its `extracted_other` (design 09 §13.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Actor {
     UserSurface,
@@ -1663,6 +1665,18 @@ impl Partition {
         // every way it could stop being one other than a bound confirm is
         // closed below (S9, S10).
         let suggestion = new.status == NoteStatus::Candidate && !new.supersedes.is_empty();
+        // Design 09 §13.3: a conversation summary is the assistant's record
+        // of a conversation. An edit or archive by anyone but the user
+        // leaves it one — origin `extracted_other` — where a tool call's
+        // `extracted_user` would have it recalled on its own and read as
+        // learned from what the user said.
+        let written_origin = if !actor.is_user_directed()
+            && super::is_conversation_summary(view.note.kind, view.derived.origin, view.note.status)
+        {
+            Origin::ExtractedOther
+        } else {
+            actor.origin()
+        };
         let origin = match &action {
             UpdateAction::Confirm { target_revision } => {
                 if !actor.is_user_directed() {
@@ -1736,7 +1750,7 @@ impl Partition {
                     return Ok((updated, loaded));
                 }
                 new.status = NoteStatus::Archived;
-                actor.origin()
+                written_origin
             }
             UpdateAction::Edit(patch) => {
                 if view.derived.origin == Origin::User && !actor.is_user_directed() {
@@ -1763,7 +1777,7 @@ impl Partition {
                     };
                     return Ok((updated, loaded));
                 }
-                actor.origin()
+                written_origin
             }
         };
         new.updated_at = self.now();

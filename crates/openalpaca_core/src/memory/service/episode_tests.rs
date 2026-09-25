@@ -378,6 +378,99 @@ fn forgetting_a_summary_forgets_the_summary_not_what_was_said() {
     assert!(recalled.notes.iter().any(|n| n.id == fact.id));
 }
 
+/// A model tool's edit or archive leaves a summary a summary (review of
+/// L10c, finding 2). A tool call records `extracted_user` for what it
+/// writes, and a summary re-recorded so would be recalled on its own, read
+/// as learned from what the user said, outlive its conversation's delete
+/// and, forgotten, suppress the conversation's rows. The assistant's
+/// rewording of the assistant's record keeps origin `extracted_other`; the
+/// user's own edit makes it the user's note, as any user edit does.
+#[test]
+fn a_model_edit_or_archive_leaves_a_summary_a_summary() {
+    let h = Harness::new();
+    let row = h.message_row("We planned the Lisbon trip.");
+    let (tool, user) = (h.tool(ALICE, None), h.user(ALICE, None));
+    let origin = |id: NoteId| {
+        h.service
+            .read(
+                &user,
+                ReadInput {
+                    id,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .origin
+    };
+    let update = |ctx: &MemoryAccessContext, note: &StoreOutput, action: UpdateAction| {
+        h.service
+            .update(
+                ctx,
+                UpdateInput {
+                    id: note.id,
+                    expected_revision: note.revision.clone(),
+                    action,
+                    reason: None,
+                },
+            )
+            .unwrap()
+    };
+    let body = |title: &str| Patch {
+        body: Some(format!(
+            "# {title}\n\n## Knowledge\nDiscussed: flights to Lisbon and a hotel near Alfama.\n"
+        )),
+        ..Default::default()
+    };
+
+    let title = "Conversation on 2026-09-20: Lisbon trip planning";
+    let edited = summary(&h, title, "Discussed: flights to Lisbon.", &[row]);
+    update(&tool, &edited, UpdateAction::Edit(body(title)));
+    assert_eq!(origin(edited.id), Origin::ExtractedOther, "a model edit");
+    for mode in [RecallMode::Index, RecallMode::Excerpts] {
+        let recalled = h
+            .service
+            .recall(&tool, "Lisbon hotel Alfama", RecallBudget::for_mode(mode))
+            .unwrap();
+        assert!(
+            !recalled.notes.iter().any(|n| n.id == edited.id)
+                && !recalled.listed.iter().any(|l| l.id == edited.id),
+            "{mode:?}: the edited summary was recalled on its own"
+        );
+    }
+    let archived = summary(
+        &h,
+        "Conversation on 2026-09-21: Lisbon",
+        "Discussed.",
+        &[row],
+    );
+    update(&tool, &archived, UpdateAction::Archive);
+    assert_eq!(
+        origin(archived.id),
+        Origin::ExtractedOther,
+        "a model archive"
+    );
+
+    let mine = "Conversation on 2026-09-22: Lisbon";
+    let owned = summary(&h, mine, "Discussed.", &[row]);
+    update(&user, &owned, UpdateAction::Edit(body(mine)));
+    assert_eq!(origin(owned.id), Origin::User, "the user's own edit");
+
+    assert_eq!(
+        h.service
+            .forget_conversation_summaries(ALICE, None, &[row])
+            .unwrap(),
+        2,
+        "the delete forgets both summaries, not the user's note"
+    );
+    assert!(
+        h.service
+            .suppressed_sources(&extraction(&h, None), &[format!("message:{row}")])
+            .unwrap()
+            .is_empty(),
+        "and suppresses none of the conversation's rows"
+    );
+}
+
 /// An `episode` candidate the extractor proposed from the assistant's words
 /// is origin `extracted_other` too, and a candidate like any other, not a
 /// conversation summary (review of L10c, finding 1): it counts as no
