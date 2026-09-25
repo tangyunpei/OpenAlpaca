@@ -81,6 +81,12 @@ const PROMPT_ARGUMENTS_BYTES: usize = 500;
 /// `PROMPT_ARGUMENTS_BYTES` (500 bytes), the `/yes` / `/no` instructions
 /// and, when others wait before it, its place in the chat's queue.
 ///
+/// A cut says how much it left out — `... (31 more characters not shown)` —
+/// because what it leaves out still runs: a model can pad a shell command
+/// past the cut, or put a key that sorts first (`serde_json` prints keys
+/// sorted) in front of the one that matters, and a bare `...` reads as the
+/// end of a value that goes on.
+///
 /// `queue_len` is the queue's length with this request just pushed to its
 /// back, so it is also this prompt's place. A reply answers the **oldest**
 /// waiting request, not the prompt last on screen, so a queued prompt says
@@ -114,7 +120,11 @@ pub fn format_confirmation_prompt(
     let pretty =
         serde_json::to_string_pretty(tool_arguments).unwrap_or_else(|_| tool_arguments.to_string());
     let args = escape_hidden_within(&pretty, PROMPT_ARGUMENTS_BYTES);
-    let ellipsis = if args.cut { "..." } else { "" };
+    let rest = match args.left_out {
+        0 => String::new(),
+        1 => "... (1 more character not shown)".to_string(),
+        n => format!("... ({n} more characters not shown)"),
+    };
     let notice = hidden_notice(name.hidden + args.hidden)
         .map(|line| format!("\n{line}"))
         .unwrap_or_default();
@@ -128,7 +138,7 @@ pub fn format_confirmation_prompt(
     format!(
         "A tool requires your confirmation before executing{queue_info}:\n\n\
          Tool: {name}\n\
-         Arguments:\n{args}{ellipsis}{notice}\n\n\
+         Arguments:\n{args}{rest}{notice}\n\n\
          Reply /yes or /no to approve or deny.",
         name = name.text,
         args = args.text,

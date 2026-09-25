@@ -94,17 +94,21 @@ pub fn is_hidden(c: char) -> bool {
         )
 }
 
-/// What [`escape_hidden`] made of a text for an approval surface.
+/// What [`escape_hidden`] or [`escape_hidden_line`] made of a text for an
+/// approval surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Escaped {
-    /// The text, every [`needs_escape`] character in it written as
+    /// The text, every character of the escape's set in it — [`needs_escape`],
+    /// or [`needs_escape_in_line`] for [`escape_hidden_line`] — written as
     /// `<U+XXXX>`.
     pub text: String,
     /// How many characters were escaped in the **whole** input — the part a
     /// byte budget left out included, so a notice never undercounts.
     pub hidden: usize,
-    /// Whether a byte budget left part of the input out.
-    pub cut: bool,
+    /// How many characters of the input a byte budget left out, 0 when all
+    /// of it is shown. A surface that cuts says this number: what is left
+    /// out still runs.
+    pub left_out: usize,
 }
 
 /// A character an approval surface shows as `<U+XXXX>` instead of itself:
@@ -203,7 +207,8 @@ pub fn escape_hidden(text: &str) -> Escaped {
 /// comes after escaping and never lands inside an escape or a character: the
 /// first piece that would cross the budget is left out whole, with
 /// everything after it. `hidden` still counts the whole of `text`, so the
-/// notice says what the part left out holds too.
+/// notice says what the part left out holds too, and `left_out` says how
+/// many characters of `text` the cut left out, for the surface to print.
 pub fn escape_hidden_within(text: &str, max_bytes: usize) -> Escaped {
     escape_where(text, max_bytes, needs_escape)
 }
@@ -247,11 +252,12 @@ fn escape_where(text: &str, max_bytes: usize, shown_escaped: fn(char) -> bool) -
 
     let mut shown = String::with_capacity(text.len().min(max_bytes));
     let mut hidden = 0;
-    let mut cut = false;
+    let mut left_out = 0;
     for c in text.chars() {
         let escape = shown_escaped(c);
         hidden += usize::from(escape);
-        if cut {
+        if left_out > 0 {
+            left_out += 1;
             continue;
         }
         let before = shown.len();
@@ -263,13 +269,13 @@ fn escape_where(text: &str, max_bytes: usize, shown_escaped: fn(char) -> bool) -
         }
         if shown.len() > max_bytes {
             shown.truncate(before);
-            cut = true;
+            left_out = 1;
         }
     }
     Escaped {
         text: shown,
         hidden,
-        cut,
+        left_out,
     }
 }
 
@@ -368,7 +374,7 @@ mod tests {
                 Escaped {
                     text: shown.to_string(),
                     hidden: *hidden,
-                    cut: false,
+                    left_out: 0,
                 },
                 "escape_hidden_line({input:?})"
             );
@@ -456,7 +462,7 @@ mod tests {
                 Escaped {
                     text: shown.to_string(),
                     hidden: *hidden,
-                    cut: false,
+                    left_out: 0,
                 },
                 "escape_hidden({input:?})"
             );
@@ -508,10 +514,14 @@ mod tests {
         }
         for budget in 0..=whole.text.len() + 2 {
             let cut = escape_hidden_within(input, budget);
-            let expected_end = *ends.iter().rev().find(|&&end| end <= budget).unwrap();
-            assert_eq!(cut.text, whole.text[..expected_end], "budget {budget}");
+            let shown = ends.iter().rposition(|&end| end <= budget).unwrap();
+            assert_eq!(cut.text, whole.text[..ends[shown]], "budget {budget}");
             assert!(cut.text.len() <= budget, "budget {budget}");
-            assert_eq!(cut.cut, whole.text.len() > budget, "budget {budget}");
+            assert_eq!(
+                cut.left_out,
+                pieces.len() - shown,
+                "budget {budget}: every input character after the cut"
+            );
             assert_eq!(
                 cut.hidden, 3,
                 "budget {budget}: the count is the whole input's"
@@ -529,7 +539,7 @@ mod tests {
             Escaped {
                 text: "ab".to_string(),
                 hidden: 1,
-                cut: true,
+                left_out: 3,
             }
         );
     }
@@ -643,7 +653,7 @@ mod tests {
                 Escaped {
                     text: case["shown"].as_str().expect("shown").to_string(),
                     hidden: case["hidden"].as_u64().expect("hidden") as usize,
-                    cut: false,
+                    left_out: 0,
                 },
                 "escape_hidden_line({input:?})"
             );
@@ -663,7 +673,7 @@ mod tests {
                 Escaped {
                     text: case["shown"].as_str().expect("shown").to_string(),
                     hidden: case["hidden"].as_u64().expect("hidden") as usize,
-                    cut: false,
+                    left_out: 0,
                 },
                 "escape_hidden({input:?})"
             );
