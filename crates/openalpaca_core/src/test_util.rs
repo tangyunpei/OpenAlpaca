@@ -142,16 +142,6 @@ impl RecordingProvider {
         })
     }
 
-    /// A provider whose answer is nothing at all, because the output budget
-    /// was spent before a character was written.
-    pub(crate) fn spent_budget() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
-            seen: std::sync::Mutex::new(Vec::new()),
-            reply: String::new(),
-            finish_reason: openalpaca_llm::FinishReason::MaxTokens,
-        })
-    }
-
     /// The first request this provider saw, panicking when it saw none —
     /// "the call never reached a provider" is the failure worth reporting.
     pub(crate) fn first_request(&self) -> openalpaca_llm::ChatRequest {

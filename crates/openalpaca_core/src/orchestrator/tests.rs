@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use openalpaca_llm::{ChatRequest, ContentPart, ImageSource};
 use openalpaca_storage::{OutcomeKind, TaskStatus};
+use std::sync::Mutex;
 use uuid::Uuid;
 
 fn make_tool_registry() -> Arc<ToolRegistry> {
@@ -7373,15 +7374,21 @@ async fn the_skill_tier_prompt_carries_the_user_profile_exactly_once() {
     );
 }
 
-// ── Extraction reads the message as typed (plan 3.4, MD-2) ────────────
+// ── Learning reads the message as typed (plan 3.4, MD-2; Learning v2) ────
+//
+// `handle_message` persists nothing and learns nothing: learning reads the
+// rows the gateway persisted, when the learning queue flushes the session
+// (design 09 §1.5). So these tests drive a `Gateway` over the orchestrator,
+// with persistence and a manual queue, and flush it by hand.
 
 /// The words that make [`MarkerExtractorLlm`] extract a preference.
 const VIM_MARKER: &str = "prefers vim for editing";
 
 /// A provider that answers every turn with "noted" and answers the memory
-/// extractor faithfully: a preference note **only when the text it was
-/// handed carries [`VIM_MARKER`]**. What reaches the extractor is therefore
-/// what decides whether a note exists.
+/// extractor faithfully: a preference note, citing the transcript row that
+/// carries [`VIM_MARKER`], **only when the text it was handed carries it**.
+/// What reaches the extractor is therefore what decides whether a note
+/// exists.
 struct MarkerExtractorLlm {
     requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
 }
@@ -7391,6 +7398,21 @@ impl MarkerExtractorLlm {
         request.messages.iter().any(|m| {
             matches!(m.role, openalpaca_llm::Role::System) && m.content.contains("memory extractor")
         })
+    }
+
+    /// The `R<n>` of the transcript line carrying the marker.
+    fn marker_row(request: &ChatRequest) -> Option<u32> {
+        request
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, openalpaca_llm::Role::User))
+            .flat_map(|m| m.content.lines())
+            .filter(|line| line.contains(VIM_MARKER))
+            .find_map(|line| {
+                let rest = line.strip_prefix('R')?;
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                digits.parse().ok()
+            })
     }
 }
 
@@ -7411,17 +7433,14 @@ impl openalpaca_llm::LlmProvider for MarkerExtractorLlm {
         use openalpaca_llm::{ChatResponse, FinishReason, Usage};
         self.requests.lock().unwrap().push(request.clone());
         let content = if Self::is_extractor_call(&request) {
-            let saw_marker = request
-                .messages
-                .iter()
-                .any(|m| matches!(m.role, openalpaca_llm::Role::User) && m.content.contains(VIM_MARKER));
-            if saw_marker {
-                r#"{"extractions": [{"title": "Editor preference",
-                    "content": "The user prefers vim for editing.",
-                    "kind": "preference", "stated_by": "user", "confidence": 0.95}]}"#
-                    .to_string()
-            } else {
-                r#"{"extractions": []}"#.to_string()
+            match Self::marker_row(&request) {
+                Some(row) => format!(
+                    r#"{{"items": [{{"title": "Editor preference",
+                        "content": "The user prefers vim for editing.",
+                        "kind": "preference", "stated_by": "user", "confidence": 0.95,
+                        "rows": [{row}]}}]}}"#
+                ),
+                None => r#"{"items": []}"#.to_string(),
             }
         } else {
             "noted".to_string()
@@ -7470,13 +7489,9 @@ impl ExtractionScene {
         }
     }
 
-    /// Every active note of `user1`'s global partition, by title.
-    fn active_titles(&self) -> Vec<String> {
-        use crate::memory::service::{
-            Attribution, Capabilities, ListInput, Surface, WorkspaceHint,
-        };
-        let owner = self
-            .service
+    fn user_ctx(&self) -> crate::memory::service::MemoryAccessContext {
+        use crate::memory::service::{Attribution, Capabilities, Surface, WorkspaceHint};
+        self.service
             .context(
                 "user1",
                 WorkspaceHint::None,
@@ -7484,9 +7499,34 @@ impl ExtractionScene {
                 Capabilities::ALL,
                 Attribution::default(),
             )
-            .unwrap();
+            .unwrap()
+    }
+
+    /// Every active note of `user1`'s global partition, by title.
+    fn active_titles(&self) -> Vec<String> {
         self.service
-            .list(&owner, ListInput::default())
+            .list(
+                &self.user_ctx(),
+                crate::memory::service::ListInput::default(),
+            )
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|i| i.title)
+            .collect()
+    }
+
+    /// Every candidate of `user1`'s global partition, by title.
+    fn candidate_titles(&self) -> Vec<String> {
+        self.service
+            .list(
+                &self.user_ctx(),
+                crate::memory::service::ListInput {
+                    status: Some(openalpaca_storage::memory_files::NoteStatus::Candidate),
+                    include_candidates: true,
+                    ..Default::default()
+                },
+            )
             .unwrap()
             .items
             .into_iter()
@@ -7495,100 +7535,185 @@ impl ExtractionScene {
     }
 }
 
-fn extracting_orchestrator(
-    db: openalpaca_storage::Database,
-) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
-    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = openalpaca_llm::LlmRouter::single_provider(
-        Arc::new(MarkerExtractorLlm {
-            requests: requests.clone(),
-        }),
-        openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
-    );
-    let mut config = DaemonConfig::default();
-    // Extract on every turn: the frequency gate is not what is under test.
-    config.orchestrator.costs.extract_every_n_turns = 1;
-    let orch = make_orchestrator_with_llm_agents_and_config(Arc::new(router), vec![], config, Some(db));
-    (orch, requests)
+/// The daemon's `OrchestratorHandler`, in ten lines: the gateway hands each
+/// turn to the orchestrator.
+struct OrchestratorTurns(Arc<Orchestrator>);
+
+#[async_trait]
+impl crate::gateway::MessageHandler for OrchestratorTurns {
+    async fn handle(&self, request: HandleRequest) -> Result<crate::gateway::HandleResult, String> {
+        self.0
+            .handle_message(request)
+            .await
+            .map(crate::gateway::HandleResult::text)
+    }
+
+    async fn handle_with_attachments(
+        &self,
+        request: HandleRequest,
+        attachments: Vec<ResolvedAttachment>,
+    ) -> Result<crate::gateway::HandleResult, String> {
+        self.0
+            .handle_message_with_attachments(request, attachments)
+            .await
+            .map(crate::gateway::HandleResult::text)
+    }
 }
 
-fn user1_request(content: &str) -> HandleRequest {
-    HandleRequest {
-        request_id: Uuid::new_v4(),
-        source: "cli".to_string(),
+/// An orchestrator over [`MarkerExtractorLlm`], a gateway that persists its
+/// turns and feeds them to a manual learning queue, and the request log.
+struct LearningStack {
+    gateway: crate::gateway::Gateway,
+    queue: Arc<crate::memory::learning::LearningQueue>,
+    db: openalpaca_storage::Database,
+    requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+}
+
+impl LearningStack {
+    fn new(db: openalpaca_storage::Database, scene: &ExtractionScene) -> Self {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+            Arc::new(MarkerExtractorLlm {
+                requests: requests.clone(),
+            }),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        ));
+        let config = DaemonConfig::default();
+        let orch = make_orchestrator_with_llm_agents_and_config(
+            router.clone(),
+            vec![],
+            config.clone(),
+            Some(db.clone()),
+        );
+        orch.set_memory_service(scene.service.clone());
+        let queue = crate::memory::learning::LearningQueue::new(
+            crate::memory::learning::LearningDeps {
+                db: db.clone(),
+                router,
+                daemon_config: Arc::new(ArcSwap::from_pointee(config)),
+                memory_service: scene.service.clone(),
+            },
+            crate::memory::learning::QueueMode::Manual,
+        );
+        let gateway = crate::gateway::Gateway::new(
+            Arc::new(SharedContext::new()),
+            Arc::new(LaneManager::new()),
+            Arc::new(OrchestratorTurns(Arc::new(orch))),
+            EventBus::default(),
+            Some(db.clone()),
+        )
+        .with_learning(queue.clone());
+        Self {
+            gateway,
+            queue,
+            db,
+            requests,
+        }
+    }
+
+    async fn say(&self, content: &str) -> crate::gateway::GatewayResponse {
+        self.gateway.handle_event(user1_turn(content)).await
+    }
+
+    fn session(&self) -> String {
+        openalpaca_storage::ConversationRepository::new(&self.db)
+            .active_session_id("user1:gui")
+            .unwrap()
+            .expect("a turn opened the session")
+    }
+
+    async fn flush(&self) -> crate::memory::learning::FlushReport {
+        self.queue.flush_session(&self.session()).await
+    }
+
+    fn extractor_calls(&self) -> Vec<ChatRequest> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| MarkerExtractorLlm::is_extractor_call(r))
+            .cloned()
+            .collect()
+    }
+}
+
+fn user1_turn(content: &str) -> crate::gateway::GatewayRequest {
+    crate::gateway::GatewayRequest {
+        source: openalpaca_api::events::EventSource::Gui {
+            connection_id: "user1".to_string(),
+        },
         content: content.to_string(),
+        attachments: Vec::new(),
         principal: Principal::User {
             global_id: "user1".to_string(),
         },
         scope: Scope::Global,
-        lane_key: "user1:cli".to_string(),
         workspace_path: None,
         stream_id: None,
+        lane_override: None,
         model_override: None,
         unattended: false,
         turn_sink: None,
     }
 }
 
-/// The control: the same preference typed by the user is extracted, through
-/// the tracked post-turn job the turn started.
+/// The control: the same preference typed by the user is learned at the
+/// session's next flush.
 #[tokio::test]
-async fn a_preference_the_user_typed_becomes_a_note_after_the_turn() {
+async fn a_preference_the_user_typed_becomes_a_note_at_the_next_flush() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
     let scene = ExtractionScene::new(&db);
-    let (orch, _requests) = extracting_orchestrator(db);
-    orch.set_memory_service(scene.service.clone());
+    let stack = LearningStack::new(db, &scene);
 
-    let reply = orch
-        .handle_message(user1_request(
-            "For the record: the user prefers vim for editing, every time.",
-        ))
-        .await
-        .unwrap();
-    assert_eq!(reply, "noted");
-    orch.background().wait_idle().await;
+    let reply = stack
+        .say("For the record: the user prefers vim for editing, every time.")
+        .await;
+    assert_eq!(reply.content, "noted");
+    assert!(
+        stack.extractor_calls().is_empty(),
+        "the reply path learns nothing"
+    );
+    stack.flush().await;
 
     assert_eq!(scene.active_titles(), vec!["Editor preference".to_string()]);
 }
 
-/// **Plan 3.4, MD-2.** A preference that appears only in an attachment's
-/// extracted text yields no note at all: the extractor's input is
-/// `HandleRequest.content`, the message as typed, never the model input the
-/// attachment path augments with the files' text (U2). The model that
-/// answered the turn *did* see the text — the same request log shows it —
-/// and the extractor did not.
+/// **Plan 3.4, MD-2, U2.** A preference that appears only in an attachment's
+/// extracted text yields no note at all: the window reads the message as
+/// typed (`content`), never the attachment text the model input carried.
+/// The model that answered the turn *did* see the text — the same request
+/// log shows it — and the extractor did not.
 #[tokio::test]
 async fn a_preference_that_appears_only_in_an_attachments_text_yields_no_note() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
     let scene = ExtractionScene::new(&db);
-    let (orch, requests) = extracting_orchestrator(db);
-    orch.set_memory_service(scene.service.clone());
+    let stack = LearningStack::new(db, &scene);
 
     let typed = "Summarise the attached notes file for me, please.";
-    let model_input = format!(
-        "{typed}\n\n<attachment name=\"notes.txt\">\nThe user prefers vim for editing.\n</attachment>"
-    );
-    let reply = orch
-        .handle_message_internal(user1_request(typed), model_input, false, None)
-        .await
-        .unwrap();
-    assert_eq!(reply, "noted");
-    orch.background().wait_idle().await;
+    let turn = crate::gateway::GatewayRequest {
+        attachments: vec![ResolvedAttachment {
+            file_id: "notes-1".to_string(),
+            filename: "notes.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            size_bytes: 40,
+            extracted_text: Some("The user prefers vim for editing.".to_string()),
+            storage_path: "/dev/null".to_string(),
+        }],
+        ..user1_turn(typed)
+    };
+    let reply = stack.gateway.handle_event(turn).await;
+    assert_eq!(reply.content, "noted");
+    stack.flush().await;
 
     assert!(
         scene.active_titles().is_empty(),
         "the attachment's text minted a note: {:?}",
         scene.active_titles()
     );
-
-    let reqs = requests.lock().unwrap();
-    let extractor: Vec<&ChatRequest> = reqs
-        .iter()
-        .filter(|r| MarkerExtractorLlm::is_extractor_call(r))
-        .collect();
+    let extractor = stack.extractor_calls();
     assert_eq!(extractor.len(), 1, "the extraction ran once");
     assert!(
         extractor[0]
@@ -7604,135 +7729,110 @@ async fn a_preference_that_appears_only_in_an_attachments_text_yields_no_note() 
             .any(|m| m.content.contains(typed)),
         "the extractor was handed the message as typed"
     );
+    let reqs = stack.requests.lock().unwrap();
+    // Native document part or labelled text block (U2), whichever the
+    // answering model takes: its request carries the text either way.
     assert!(
         reqs.iter()
             .filter(|r| !MarkerExtractorLlm::is_extractor_call(r))
-            .any(|r| r.messages.iter().any(|m| m.content.contains(VIM_MARKER))),
+            .any(|r| format!("{:?}", r.messages).contains(VIM_MARKER)),
         "the answering model saw the attachment's text, as it should"
     );
 }
 
-// ── Learning v2 characterization: the cadence at HEAD (design 09 §0.2) ──
+// ── Learning v2: the cadence, flipped (design 09 §8.12, L1 commit 5) ─────
 //
-// These pin what the per-turn extractor does before Learning v2 replaces it
-// (design 09 §8.12, L1 commit 3). The extractor commit flips each one.
+// L1's third commit pinned the per-turn extractor's cadence at HEAD —
+// `default_cadence_extracts_one_turn_in_five`, `a_long_message_is_cut_to_800_chars`
+// and `a_followup_row_mints_an_extracted_user_note`. Each is flipped here.
 
-/// The extractor calls `requests` recorded, of every kind.
-fn extractor_calls(requests: &std::sync::Mutex<Vec<ChatRequest>>) -> Vec<ChatRequest> {
-    requests
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|r| MarkerExtractorLlm::is_extractor_call(r))
-        .cloned()
-        .collect()
-}
-
-/// An orchestrator over [`MarkerExtractorLlm`] with `config` as given — the
-/// shipped cadence, unless the test changes it.
-fn cadence_orchestrator(
-    db: openalpaca_storage::Database,
-    config: DaemonConfig,
-) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
-    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = openalpaca_llm::LlmRouter::single_provider(
-        Arc::new(MarkerExtractorLlm {
-            requests: requests.clone(),
-        }),
-        openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
-    );
-    let orch =
-        make_orchestrator_with_llm_agents_and_config(Arc::new(router), vec![], config, Some(db));
-    (orch, requests)
-}
-
-/// **D1, at HEAD.** Only every fifth turn of a lane is extracted, and only
-/// that turn: four turns reach the extractor zero times.
+/// **D1, flipped.** Every persisted turn is learned at the next flush — not
+/// one in five, and not only the flushing turn — and the reply path makes no
+/// extraction call at all.
 #[tokio::test]
-async fn default_cadence_extracts_one_turn_in_five() {
+async fn every_persisted_turn_is_learned_at_the_next_flush() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
     let scene = ExtractionScene::new(&db);
-    let (orch, requests) = cadence_orchestrator(db, DaemonConfig::default());
-    orch.set_memory_service(scene.service.clone());
+    let stack = LearningStack::new(db, &scene);
 
     for i in 0..4 {
-        orch.handle_message(user1_request(&format!(
-            "Turn {i}: the user prefers vim for editing, every time."
-        )))
-        .await
-        .unwrap();
-        orch.background().wait_idle().await;
+        stack
+            .say(&format!("Turn {i}: here is something about my week."))
+            .await;
     }
-    assert_eq!(
-        extractor_calls(&requests).len(),
-        0,
-        "four turns, no extraction"
+    assert!(
+        stack.extractor_calls().is_empty(),
+        "no turn waited on learning"
     );
-    assert!(scene.active_titles().is_empty());
+    let report = stack.flush().await;
+    assert_eq!(report.calls, 1, "{report:?}");
+    let calls = stack.extractor_calls();
+    let prompt: String = calls[0]
+        .messages
+        .iter()
+        .map(|m| m.content.clone())
+        .collect();
+    for i in 0..4 {
+        assert!(
+            prompt.contains(&format!("Turn {i}:")),
+            "turn {i} missing: {prompt}"
+        );
+    }
 }
 
-/// **D2, at HEAD.** The user's message is cut to 800 characters before the
-/// extractor sees it: the tail of a 2,000-character message never arrives.
+/// **D2, flipped.** Messages are no longer cut to 800 characters: the tail
+/// of a 2,000-character message reaches the extractor.
 #[tokio::test]
-async fn a_long_message_is_cut_to_800_chars() {
+async fn a_long_message_reaches_the_extractor_whole() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
     let scene = ExtractionScene::new(&db);
-    let mut config = DaemonConfig::default();
-    config.orchestrator.costs.extract_every_n_turns = 1;
-    let (orch, requests) = cadence_orchestrator(db, config);
-    orch.set_memory_service(scene.service.clone());
+    let stack = LearningStack::new(db, &scene);
 
     let tail = "TAIL-SENTINEL-the-end-of-the-message";
     let message = format!("{}{tail}", "a".repeat(2000 - tail.len()));
     assert_eq!(message.chars().count(), 2000);
-    orch.handle_message(user1_request(&message)).await.unwrap();
-    orch.background().wait_idle().await;
+    stack.say(&message).await;
+    stack.flush().await;
 
-    let calls = extractor_calls(&requests);
+    let calls = stack.extractor_calls();
     assert_eq!(calls.len(), 1);
     assert!(
-        calls[0].messages.iter().all(|m| !m.content.contains(tail)),
-        "the message's tail reached the extractor"
-    );
-    assert!(
-        calls[0]
-            .messages
-            .iter()
-            .any(|m| m.content.contains(&"a".repeat(800))),
-        "the first 800 characters did"
+        calls[0].messages.iter().any(|m| m.content.contains(tail)),
+        "the message's tail did not reach the extractor"
     );
 }
 
-/// **F7, at HEAD.** A follow-up replays the model's own `queue_followup`
-/// text as a `user` turn with source `internal`, and the extractor files it
-/// as the user's own words: an active `extracted_user` note.
+/// **F7, flipped.** A follow-up replays the model's own `queue_followup`
+/// text as a `user` turn with source `internal`; learning labels it the
+/// assistant's, so the item it supports is a candidate — never an active
+/// note in the user's name.
 #[tokio::test]
-async fn a_followup_row_mints_an_extracted_user_note() {
+async fn a_followup_row_is_assistant_written() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
     let scene = ExtractionScene::new(&db);
-    let mut config = DaemonConfig::default();
-    config.orchestrator.costs.extract_every_n_turns = 1;
-    let (orch, _requests) = cadence_orchestrator(db, config);
-    orch.set_memory_service(scene.service.clone());
+    let stack = LearningStack::new(db, &scene);
 
+    stack.say("Please set my editor up tomorrow.").await;
     // What the follow-up runner hands the gateway: the assistant-written
     // text, source `internal`, on the originating lane.
-    let followup = HandleRequest {
-        source: "internal".to_string(),
-        lane_key: "user1:gui".to_string(),
-        ..user1_request("Next, remember the user prefers vim for editing and set it up.")
+    let followup = crate::gateway::GatewayRequest {
+        source: openalpaca_api::events::EventSource::Internal,
+        lane_override: Some("user1:gui".to_string()),
+        ..user1_turn("Next, remember the user prefers vim for editing and set it up.")
     };
-    orch.handle_message(followup).await.unwrap();
-    orch.background().wait_idle().await;
+    stack.gateway.handle_event(followup).await;
+    stack.flush().await;
 
-    assert_eq!(
-        scene.active_titles(),
-        vec!["Editor preference".to_string()],
+    assert!(
+        scene.active_titles().is_empty(),
         "the assistant's own text became an active note in the user's name"
+    );
+    assert_eq!(
+        scene.candidate_titles(),
+        vec!["Editor preference".to_string()]
     );
 }
 

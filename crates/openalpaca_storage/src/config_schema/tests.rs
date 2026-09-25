@@ -100,8 +100,14 @@ fn test_daemon_keys_in_category() {
     // four decay knobs and the two embedding-indexer knobs (plan 3.6), plus
     // Learning v2's five (design 09 §1.10: the three
     // `[orchestrator.learning]` keys, `extract_max_calls_per_day`, and the
-    // `memory_confidence_threshold` row it never had).
-    assert_eq!(keys.len(), 48);
+    // `memory_confidence_threshold` row it never had), less
+    // `extract_every_n_turns`, which Learning v2's cadence replaced.
+    assert_eq!(keys.len(), 47);
+    assert!(
+        !keys
+            .iter()
+            .any(|d| d.key == "daemon.orchestrator.extract_every_n_turns")
+    );
     for key in [
         "daemon.orchestrator.learning.enabled",
         "daemon.orchestrator.learning.idle_secs",
@@ -168,7 +174,7 @@ fn test_daemon_keys_in_category() {
     // The two extraction count keys (memory redesign, plan 3.4)
     assert!(
         keys.iter()
-            .any(|d| d.key == "daemon.orchestrator.extract_max_items_per_turn")
+            .any(|d| d.key == "daemon.orchestrator.extract_max_items_per_call")
     );
     assert!(
         keys.iter()
@@ -389,7 +395,8 @@ fn test_validate_new_daemon_keys() {
     assert!(validate("daemon.orchestrator.extract_max_calls_per_day", "10001").is_err());
     assert!(validate("daemon.orchestrator.memory_confidence_threshold", "0.65").is_ok());
     assert!(validate("daemon.orchestrator.memory_confidence_threshold", "1.5").is_err());
-    assert!(validate("daemon.orchestrator.extract_every_n_turns", "5").is_ok());
+    assert!(validate("daemon.orchestrator.extract_max_items_per_call", "12").is_ok());
+    assert!(validate("daemon.orchestrator.extract_max_items_per_call", "51").is_err());
 
     // Execution keys
     assert!(validate("daemon.execution.max_tools_per_round", "5").is_ok());

@@ -109,8 +109,8 @@ Systems (`OPENALPACA_MEMORY_EVAL_SYSTEM`):
   temperature (`runner/agentic_loop/backend.rs`), so the reader runs at the
   provider's default; the report records `reader_temperature: null`. The judge
   *is* at temperature 0 with reasoning disabled.
-- The background user-trait extraction is switched off for the run
-  (`extract_every_n_turns = usize::MAX`, `task_extract_enabled = false`),
+- Background learning is switched off for the run
+  (`[orchestrator.learning] enabled = false`, `task_extract_enabled = false`),
   `start_workflow` is refused at `max_workflows_per_lane = 0` (so a stray call
   can never dispatch a paid lead run), and every turn is `unattended` (a tool
   that would need a confirmation — `memory_forget`, `memory_update` — is

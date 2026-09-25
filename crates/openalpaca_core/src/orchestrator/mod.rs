@@ -8,12 +8,11 @@ pub mod intent;
 pub mod skill;
 pub mod task_state;
 
-mod attachment_adapt;
+pub(crate) mod attachment_adapt;
 mod background_jobs;
 mod bootstrap;
 mod context_builder;
 mod direct_send;
-mod extraction;
 mod handler_attachments;
 mod handler_helpers;
 mod handlers;
@@ -61,9 +60,8 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use openalpaca_llm::{ChatMessage, LlmRouter};
 use openalpaca_storage::{Database, Task};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
 /// Takes a path out of the filesystem watcher's poll set (S8).
@@ -178,10 +176,10 @@ pub struct Orchestrator {
     /// reference into the dispatch family (Routing V2).
     task_dispatcher: Arc<TaskDispatcher>,
     db: Option<Database>,
-    /// Per-lane turn counter for extraction frequency gating.
-    extraction_turn_counter: Arc<Mutex<HashMap<String, usize>>>,
-    /// The post-turn jobs (summary, memory extraction): tracked and
-    /// cancellable, never fire-and-forget (design §6).
+    /// The post-turn jobs (the conversation summary, a finished run's task
+    /// extraction): tracked and cancellable, never fire-and-forget (design
+    /// §6). Chat learning is not one of them: it runs off the reply path in
+    /// the learning queue (Learning v2, design 09 §1.9).
     background: Arc<BackgroundJobs>,
     /// Path to USER.md, read by the onboarding check (MD-3: nothing here
     /// writes it — `update_persona` and the persona routes do). Set via
@@ -377,7 +375,6 @@ impl Orchestrator {
             intent_parser: IntentParser,
             task_dispatcher,
             db,
-            extraction_turn_counter: Arc::new(Mutex::new(HashMap::new())),
             background,
             user_path: Arc::new(RwLock::new(None)),
             identity_path: Arc::new(RwLock::new(None)),

@@ -24,6 +24,7 @@
 
 mod context;
 mod error;
+mod learning;
 mod management;
 mod mutations;
 pub mod recall;

@@ -298,20 +298,7 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
             max: Some(100.0),
         },
         default: Some("0.25"),
-        description: "Daily cost cap for memory extractions (USD)",
-        category: "Daemon",
-        subcategory: Some("Orchestrator"),
-        sensitive: false,
-        backend: ConfigBackend::DaemonToml,
-    },
-    ConfigKeyDef {
-        key: "daemon.orchestrator.extract_every_n_turns",
-        kind: ConfigKind::Int {
-            min: Some(1),
-            max: Some(100),
-        },
-        default: Some("5"),
-        description: "Run memory extraction every N user turns",
+        description: "Cost cap per UTC day for learning's extraction calls (USD)",
         category: "Daemon",
         subcategory: Some("Orchestrator"),
         sensitive: false,
@@ -369,13 +356,13 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
     },
     // -- Daemon: Orchestrator – Extraction counts (memory redesign, plan 3.4) --
     ConfigKeyDef {
-        key: "daemon.orchestrator.extract_max_items_per_turn",
+        key: "daemon.orchestrator.extract_max_items_per_call",
         kind: ConfigKind::Int {
             min: Some(1),
             max: Some(50),
         },
-        default: Some("5"),
-        description: "Max memory notes one chat turn's extraction may write; items past it are dropped and counted",
+        default: Some("12"),
+        description: "Max memory notes one learning extraction call may write; items past it are dropped and counted",
         category: "Daemon",
         subcategory: Some("Orchestrator"),
         sensitive: false,

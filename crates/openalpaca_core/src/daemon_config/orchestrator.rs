@@ -283,11 +283,11 @@ impl Default for MemoryConfig {
 pub struct CostsConfig {
     /// Maximum daily cost (USD) for conversation summaries.
     pub summary_max_daily_cost_usd: f64,
-    /// Maximum daily cost (USD) for memory extractions.
+    /// Maximum cost (USD) per UTC day for chat learning's extraction calls,
+    /// read durably from `llm_usage_daily` (design 09 §1.8).
     pub extract_max_daily_cost_usd: f64,
-    /// Run extraction every N user turns.
-    pub extract_every_n_turns: usize,
-    /// Minimum content length (chars) to trigger extraction.
+    /// A learning chunk with less of the user's own text than this many bytes
+    /// is not sent, and the cursor moves past it (design 09 §1.6).
     pub extract_min_content_len: usize,
     /// Whether task output memory extraction is enabled.
     pub task_extract_enabled: bool,
@@ -295,10 +295,11 @@ pub struct CostsConfig {
     pub task_extract_max_daily_cost_usd: f64,
     /// Minimum content length (chars) for task output to trigger extraction.
     pub task_extract_min_content_len: usize,
-    /// Notes one chat turn's extraction may write at most (design §4
-    /// *Initial limits*: 5). The model's items past this count are dropped
-    /// and counted, never stored.
-    pub extract_max_items_per_turn: usize,
+    /// Notes one chat-learning extraction call may write at most (design 09
+    /// §1.10; the per-turn 5 of design 03 §4 before it). The model's items
+    /// past this count are dropped and counted, never stored, and a small
+    /// model's output budget can lower it further (§1.6).
+    pub extract_max_items_per_call: usize,
     /// Notes one task run's extraction may write at most (design §4: 10).
     pub task_extract_max_items_per_run: usize,
     /// Chat-learning extraction calls per UTC day (Learning v2, design 09
@@ -321,12 +322,11 @@ impl Default for CostsConfig {
         Self {
             summary_max_daily_cost_usd: 0.50,
             extract_max_daily_cost_usd: 0.25,
-            extract_every_n_turns: 5,
             extract_min_content_len: 20,
             task_extract_enabled: true,
             task_extract_max_daily_cost_usd: 0.50,
             task_extract_min_content_len: 100,
-            extract_max_items_per_turn: 5,
+            extract_max_items_per_call: 12,
             task_extract_max_items_per_run: 10,
             extract_max_calls_per_day: 200,
             summary_model: None,

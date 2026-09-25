@@ -328,70 +328,18 @@ impl Orchestrator {
         // Emit OrchestrationStage event + persist the latency record
         self.record_orchestration_stage(request_id, mode, ack_ms, None, None);
 
-        // 6 + 7. The summary update and the memory extraction run after the
-        // answer, as one tracked background job (`BackgroundJobs`): never on
-        // the response path, stopped by the shutdown token, and waited for
-        // by whoever needs the turn's extraction to have landed.
-        {
-            use super::extraction::{ExtractionTurn, TurnExtractionDeps, extract_turn_memories};
-            use super::summary::update_summary_background;
-
-            let summary = match (self.db.clone(), self.llm_router.clone()) {
-                (Some(db), Some(router)) => {
-                    Some((db, router, self.daemon_config.clone(), lane_key.clone()))
-                }
-                _ => None,
-            };
-
-            // MD-2, plan 3.4: the extractor's input is the message **as
-            // typed** (`intent_source_content`), never `model_input_content`
-            // — on an attachment turn that carries the files' text, and an
-            // uploaded document must not mint an `extracted_user` note.
-            let extraction = match (
-                &result,
-                owner_id,
-                self.db.clone(),
-                self.llm_router.clone(),
-                self.memory_service(),
-            ) {
-                (Ok(response), Some(owner), Some(db), Some(router), Some(service)) => Some((
-                    TurnExtractionDeps {
-                        db,
-                        router,
-                        daemon_config: self.daemon_config.clone(),
-                        memory_service: service,
-                        turn_counter: self.extraction_turn_counter.clone(),
-                        cancel: self.background.cancel_token(),
-                    },
-                    ExtractionTurn {
-                        owner_id: owner.to_string(),
-                        lane_key: lane_key.clone(),
-                        source: source.clone(),
-                        request_id,
-                        project_root: scope_ctx
-                            .request_workspace_root
-                            .as_deref()
-                            .map(std::path::PathBuf::from),
-                        user_message: intent_source_content.clone(),
-                        assistant_response: response.clone(),
-                    },
-                )),
-                _ => None,
-            };
-
+        // 6. The summary update runs after the answer, as a tracked
+        // background job (`BackgroundJobs`): never on the response path, and
+        // stopped by the shutdown token. Memory learning is not here any
+        // more: the gateway queues every persisted turn, and the learning
+        // queue extracts a session's turns together, off the reply path
+        // (Learning v2, design 09 §1.9).
+        if let (Some(db), Some(router)) = (self.db.clone(), self.llm_router.clone()) {
+            let config = self.daemon_config.clone();
+            let lane = lane_key.clone();
             // NOTE: ctx is intentionally moved into this job — do not reference it after this block
             self.background.spawn(async move {
-                let summary_fut = async {
-                    if let Some((db, router, config, lane)) = summary {
-                        update_summary_background(db, router, config, lane, ctx).await;
-                    }
-                };
-                let extract_fut = async {
-                    if let Some((deps, turn)) = extraction {
-                        extract_turn_memories(&deps, turn).await;
-                    }
-                };
-                tokio::join!(summary_fut, extract_fut);
+                super::summary::update_summary_background(db, router, config, lane, ctx).await;
             });
         }
 

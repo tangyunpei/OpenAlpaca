@@ -77,9 +77,10 @@ fn test_navigate_to_section_missing() {
 /// beside the cost caps they bound with.
 #[test]
 fn test_find_mapping_extraction_count_keys() {
-    let per_turn = find_mapping("daemon.orchestrator.extract_max_items_per_turn").unwrap();
-    assert_eq!(per_turn.section, &["orchestrator", "costs"]);
-    assert_eq!(per_turn.field, "extract_max_items_per_turn");
+    let per_call = find_mapping("daemon.orchestrator.extract_max_items_per_call").unwrap();
+    assert_eq!(per_call.section, &["orchestrator", "costs"]);
+    assert_eq!(per_call.field, "extract_max_items_per_call");
+    assert!(find_mapping("daemon.orchestrator.extract_every_n_turns").is_none());
     let per_run = find_mapping("daemon.orchestrator.task_extract_max_items_per_run").unwrap();
     assert_eq!(per_run.section, &["orchestrator", "costs"]);
     assert_eq!(per_run.field, "task_extract_max_items_per_run");

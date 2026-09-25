@@ -37,15 +37,14 @@ min_recent_messages = 4
 # drain_timeout_secs = 10
 
 [orchestrator.costs]
-extract_every_n_turns = 5
 extract_max_daily_cost_usd = 0.25
 # Memory-extraction model calls per UTC day (0 = no cap). The cost cap above
 # never binds on a $0 local model; this does.
 extract_max_calls_per_day = 200
 extract_min_content_len = 20
-# Memory notes one chat turn's extraction may write at most; the model's items
-# past this count are dropped and counted, never stored (design §4).
-extract_max_items_per_turn = 5
+# Memory notes one learning extraction call may write at most; the model's
+# items past this count are dropped and counted, never stored.
+extract_max_items_per_call = 12
 summary_max_daily_cost_usd = 0.5
 task_extract_enabled = true
 task_extract_max_daily_cost_usd = 0.5

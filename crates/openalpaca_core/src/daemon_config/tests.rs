@@ -42,7 +42,7 @@ fn test_validate_clamps_out_of_range_values() {
     config.orchestrator.memory.prompt_recent_messages = 0; // min is 1
     config.orchestrator.memory.summary_max_chars = 999_999; // max is 32000
     config.orchestrator.memory.memory_confidence_threshold = 2.5; // max is 1.0
-    config.orchestrator.costs.extract_every_n_turns = 0; // min is 1
+    config.orchestrator.learning.turns_per_flush = 0; // min is 1
     config.security.max_input_length = 0; // min is 1024
     config.server.event_bus_capacity = 1; // min is 64
 
@@ -51,7 +51,7 @@ fn test_validate_clamps_out_of_range_values() {
     assert_eq!(config.orchestrator.memory.prompt_recent_messages, 1);
     assert_eq!(config.orchestrator.memory.summary_max_chars, 32000);
     assert_eq!(config.orchestrator.memory.memory_confidence_threshold, 1.0);
-    assert_eq!(config.orchestrator.costs.extract_every_n_turns, 1);
+    assert_eq!(config.orchestrator.learning.turns_per_flush, 1);
     assert_eq!(config.security.max_input_length, 1024);
     assert_eq!(config.server.event_bus_capacity, 64);
 }
@@ -576,37 +576,40 @@ fn test_artifacts_validate_clamps() {
     assert_eq!(config.execution.artifacts.max_versions_per_artifact, 200);
 }
 
-// ── The two extraction count keys (memory redesign, plan 3.4) ────────
+// ── The two extraction count keys (memory redesign, plan 3.4; Learning v2) ──
 
-/// Design §4 *Initial limits*: extracted notes per chat turn / per task run
-/// are 5 / 10, under `[orchestrator.costs]`.
+/// Design 09 §1.10: a learning call writes at most 12 notes, a task run 10,
+/// under `[orchestrator.costs]`.
 #[test]
-fn extraction_count_keys_default_to_five_and_ten() {
+fn extraction_count_keys_default_to_twelve_per_call_and_ten_per_run() {
     let config = DaemonConfig::default();
-    assert_eq!(config.orchestrator.costs.extract_max_items_per_turn, 5);
+    assert_eq!(config.orchestrator.costs.extract_max_items_per_call, 12);
     assert_eq!(config.orchestrator.costs.task_extract_max_items_per_run, 10);
 
     let parsed: DaemonConfig = toml::from_str("").unwrap();
-    assert_eq!(parsed.orchestrator.costs.extract_max_items_per_turn, 5);
+    assert_eq!(parsed.orchestrator.costs.extract_max_items_per_call, 12);
     assert_eq!(parsed.orchestrator.costs.task_extract_max_items_per_run, 10);
 }
 
 /// A zero would switch extraction off by the back door and an absurd count
-/// would let one turn flood a partition: both keys are clamped to 1..=50 and
+/// would let one call flood a partition: both keys are clamped to 1..=50 and
 /// 1..=100, as the registry rows say.
 #[test]
 fn extraction_count_keys_are_clamped() {
     let mut config: DaemonConfig = toml::from_str(
         r#"
 [orchestrator.costs]
-extract_max_items_per_turn = 0
+extract_max_items_per_call = 0
 task_extract_max_items_per_run = 5000
 "#,
     )
     .unwrap();
     config.validate();
-    assert_eq!(config.orchestrator.costs.extract_max_items_per_turn, 1);
-    assert_eq!(config.orchestrator.costs.task_extract_max_items_per_run, 100);
+    assert_eq!(config.orchestrator.costs.extract_max_items_per_call, 1);
+    assert_eq!(
+        config.orchestrator.costs.task_extract_max_items_per_run,
+        100
+    );
 }
 
 // ── Learning v2's keys (design 09 §1.10) ─────────────────────────────

@@ -100,11 +100,6 @@ static MAPPINGS: &[TomlMapping] = &[
         field: "extract_max_daily_cost_usd",
     },
     TomlMapping {
-        schema_key: "daemon.orchestrator.extract_every_n_turns",
-        section: &["orchestrator", "costs"],
-        field: "extract_every_n_turns",
-    },
-    TomlMapping {
         schema_key: "daemon.orchestrator.extract_min_content_len",
         section: &["orchestrator", "costs"],
         field: "extract_min_content_len",
@@ -138,9 +133,9 @@ static MAPPINGS: &[TomlMapping] = &[
     },
     // Orchestrator: Extraction counts (memory redesign, plan 3.4)
     TomlMapping {
-        schema_key: "daemon.orchestrator.extract_max_items_per_turn",
+        schema_key: "daemon.orchestrator.extract_max_items_per_call",
         section: &["orchestrator", "costs"],
-        field: "extract_max_items_per_turn",
+        field: "extract_max_items_per_call",
     },
     TomlMapping {
         schema_key: "daemon.orchestrator.task_extract_max_items_per_run",

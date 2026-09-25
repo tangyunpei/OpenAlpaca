@@ -1677,9 +1677,10 @@ async fn memory_eval() {
     // A stray `start_workflow` is refused at the cap instead of dispatching a
     // real (costly) lead-agent run; the refusal still shows as a tool call.
     cfg.orchestrator.routing.max_workflows_per_lane = 0;
-    // The background user-trait extraction is a real model call per turn and
-    // writes memories of its own; the eval measures recall, not learning.
-    cfg.orchestrator.costs.extract_every_n_turns = usize::MAX;
+    // Background learning is a real model call and writes memories of its
+    // own; the eval measures recall, not learning. (Its `handle_message`
+    // turns persist nothing and feed no learning queue either.)
+    cfg.orchestrator.learning.enabled = false;
     cfg.orchestrator.costs.task_extract_enabled = false;
     let budget = MainLoopBudget::for_system(settings.system, &cfg.orchestrator.routing);
     cfg.orchestrator.routing.main_loop_max_rounds = budget.max_rounds;

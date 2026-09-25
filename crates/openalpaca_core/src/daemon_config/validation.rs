@@ -61,22 +61,16 @@ impl DaemonConfig {
             "extract_max_daily_cost_usd",
         );
         clamp_val(
-            &mut self.orchestrator.costs.extract_every_n_turns,
-            1,
-            100,
-            "extract_every_n_turns",
-        );
-        clamp_val(
             &mut self.orchestrator.costs.task_extract_max_daily_cost_usd,
             0.0,
             100.0,
             "task_extract_max_daily_cost_usd",
         );
         clamp_val(
-            &mut self.orchestrator.costs.extract_max_items_per_turn,
+            &mut self.orchestrator.costs.extract_max_items_per_call,
             1,
             50,
-            "extract_max_items_per_turn",
+            "extract_max_items_per_call",
         );
         clamp_val(
             &mut self.orchestrator.costs.task_extract_max_items_per_run,

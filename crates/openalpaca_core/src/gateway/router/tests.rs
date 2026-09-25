@@ -1149,6 +1149,27 @@ async fn the_gateway_stamps_the_turn_id_on_both_halves_and_the_root_on_the_user_
     );
 }
 
+/// A manual learning queue over `db`: nothing flushes on its own.
+fn manual_queue(db: &openalpaca_storage::Database) -> Arc<crate::memory::learning::LearningQueue> {
+    let service = crate::memory::service::MemoryService::new(
+        Some(db.clone()),
+        openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+    );
+    crate::memory::learning::LearningQueue::new(
+        crate::memory::learning::LearningDeps {
+            db: db.clone(),
+            router: crate::test_util::router_recording(crate::test_util::RecordingProvider::new(
+                r#"{"items": []}"#,
+            )),
+            daemon_config: Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::daemon_config::DaemonConfig::default(),
+            )),
+            memory_service: Arc::new(service),
+        },
+        crate::memory::learning::QueueMode::Manual,
+    )
+}
+
 /// Reports what the learning queue says about the turn it is handling.
 struct InFlightProbe {
     queue: Arc<crate::memory::learning::LearningQueue>,
@@ -1174,8 +1195,7 @@ impl MessageHandler for InFlightProbe {
 async fn a_turn_is_in_flight_from_before_its_row_until_after_its_answer() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
-    let queue =
-        crate::memory::learning::LearningQueue::new(crate::memory::learning::QueueMode::Manual);
+    let queue = manual_queue(&db);
     let probe = Arc::new(InFlightProbe {
         queue: queue.clone(),
         seen: std::sync::Mutex::new(Vec::new()),
@@ -1234,8 +1254,7 @@ async fn a_turn_is_in_flight_from_before_its_row_until_after_its_answer() {
 async fn a_failed_turn_leaves_the_in_flight_set() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
-    let queue =
-        crate::memory::learning::LearningQueue::new(crate::memory::learning::QueueMode::Manual);
+    let queue = manual_queue(&db);
     let gw = Gateway::new(
         Arc::new(SharedContext::new()),
         Arc::new(LaneManager::new()),
