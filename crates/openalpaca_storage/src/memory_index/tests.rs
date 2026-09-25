@@ -61,6 +61,53 @@ fn open_recreates_a_file_of_another_schema_version() {
     assert_eq!(report.schema_version, SCHEMA_VERSION);
 }
 
+/// Design 09 §2.3 (ruling LR18): schema 2 adds `note.supersedes` and the
+/// `note_source` table. A cache written at schema 1 — no `note_source`, the
+/// old version in `meta` — is invalid on open and recreated, and the fresh
+/// index reports `rebuilding` until a rebuild has run: the index's
+/// documented path for any schema change (design 03 §5).
+#[test]
+fn an_index_at_schema_1_is_rebuilt() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(INDEX_FILE_NAME);
+    {
+        let index = MemoryIndex::open(&path).unwrap();
+        index.rebuild(&[record("n1", "One", "one")]).unwrap();
+        let conn = index.lock();
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS note_source;
+             UPDATE meta SET value = '1' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+    }
+    let index = MemoryIndex::open(&path).unwrap();
+    let report = index.index_state().unwrap();
+    assert_eq!(
+        report.state,
+        IndexState::Rebuilding,
+        "a v1 cache is recreated"
+    );
+    assert_eq!(report.schema_version, 2);
+    assert_eq!(report.notes, 0, "nothing of the v1 cache is served");
+    let conn = index.lock();
+    let has_source_table: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'note_source')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(has_source_table);
+    let has_supersedes: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('note') WHERE name = 'supersedes')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(has_supersedes);
+}
+
 #[test]
 fn canonicalize_timestamp_normalizes_offsets_and_subseconds() {
     assert_eq!(
@@ -104,6 +151,8 @@ pub(super) fn record(id: &str, title: &str, body: &str) -> IndexRecord {
         conflict: false,
         same_key_loser: false,
         superseded_by: Vec::new(),
+        supersedes: Vec::new(),
+        sources: Vec::new(),
         body: body.to_string(),
         body_line_offset: 0,
         file: FileStat {
@@ -714,6 +763,157 @@ fn the_index_persists_across_reopen() {
     assert_eq!(report.state, IndexState::Ready);
     assert_eq!(report.notes, 1);
     assert!(index.get("home-p", "n1").unwrap().is_some());
+}
+
+// ============================================================================
+// Learning's catalog reads (design 09 §2.3, ruling LR18)
+// ============================================================================
+
+/// `note_source` finds the notes that cite a message, whatever their
+/// status and in either named partition, and forgets a note's rows when the
+/// note is re-indexed without the source or removed.
+#[test]
+fn notes_citing_finds_notes_through_note_source() {
+    let index = ready_index();
+    let mut a = record("a", "Editor", "vim");
+    a.sources = vec!["message:7".into(), "message:8".into()];
+    a.supersedes = vec!["old".into()];
+    let mut b = record("b", "Laptop", "a thinkpad");
+    b.status = "candidate".into();
+    b.effective_status = EffectiveStatus::Candidate;
+    b.sources = vec!["message:8".into(), "message:8".into()];
+    let mut c = record("c", "Commute", "by train");
+    c.partition_key = "proj-q".into();
+    c.sources = vec!["message:7".into()];
+    let mut d = record("d", "Unrelated", "tea");
+    d.sources = vec!["task:t1".into()];
+    index.upsert_many(&[a, b, c, d]).unwrap();
+
+    let keys = |notes: &[CatalogNote]| notes.iter().map(|n| n.id.clone()).collect::<Vec<_>>();
+    let found = index
+        .notes_citing(&["home-p".into()], &["message:8".into()])
+        .unwrap();
+    assert_eq!(
+        keys(&found),
+        vec!["a", "b"],
+        "one row per note, deduplicated"
+    );
+    assert_eq!(found[0].supersedes, vec!["old".to_string()]);
+    assert_eq!(found[1].effective_status, EffectiveStatus::Candidate);
+    let both = index
+        .notes_citing(&["home-p".into(), "proj-q".into()], &["message:7".into()])
+        .unwrap();
+    assert_eq!(keys(&both), vec!["a", "c"]);
+    assert!(
+        index
+            .notes_citing(&["home-p".into()], &[])
+            .unwrap()
+            .is_empty()
+    );
+
+    // Re-indexed without the source, then removed: its rows go with it.
+    let mut a2 = record("a", "Editor", "vim");
+    a2.sources = vec!["message:9".into()];
+    index.upsert(&a2).unwrap();
+    assert_eq!(
+        keys(
+            &index
+                .notes_citing(&["home-p".into()], &["message:7".into()])
+                .unwrap()
+        ),
+        Vec::<String>::new()
+    );
+    index.remove("home-p", "b").unwrap();
+    assert!(
+        index
+            .notes_citing(&["home-p".into()], &["message:8".into()])
+            .unwrap()
+            .is_empty()
+    );
+    let conn = index.lock();
+    let orphans: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM note_source WHERE note_rowid NOT IN (SELECT rowid FROM note)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphans, 0);
+}
+
+/// `known_keys` (design 09 §2.3 step 4): the distinct keys of effectively
+/// active notes, the most recently updated first, capped.
+#[test]
+fn fact_keys_lists_active_keys_newest_first() {
+    let index = ready_index();
+    let keyed = |id: &str, key: &str, updated: &str| {
+        let mut r = record(id, id, "body");
+        r.fact_key = Some(key.into());
+        r.updated_at = updated.into();
+        r
+    };
+    let mut superseded = keyed("s", "user.old", "2026-09-24T12:00:00Z");
+    superseded.effective_status = EffectiveStatus::Superseded;
+    let mut candidate = keyed("c", "user.maybe", "2026-09-24T12:00:00Z");
+    candidate.effective_status = EffectiveStatus::Candidate;
+    index
+        .upsert_many(&[
+            keyed("a", "user.editor", "2026-09-20T10:00:00Z"),
+            keyed("b", "user.editor", "2026-09-22T10:00:00Z"),
+            keyed("l", "user.laptop", "2026-09-21T10:00:00Z"),
+            superseded,
+            candidate,
+            record("n", "No key", "body"),
+        ])
+        .unwrap();
+    assert_eq!(
+        index.fact_keys(&["home-p".into()], 150).unwrap(),
+        vec!["user.editor".to_string(), "user.laptop".to_string()]
+    );
+    assert_eq!(
+        index.fact_keys(&["home-p".into()], 1).unwrap(),
+        vec!["user.editor".to_string()]
+    );
+    assert!(index.fact_keys(&["proj-q".into()], 150).unwrap().is_empty());
+}
+
+/// The key's R9 winner in one partition: never a same-key loser, never a
+/// note that is not effectively active.
+#[test]
+fn fact_key_winner_skips_losers_and_inactive_notes() {
+    let index = ready_index();
+    let keyed = |id: &str| {
+        let mut r = record(id, id, "body");
+        r.fact_key = Some("user.editor".into());
+        r
+    };
+    let mut loser = keyed("loser");
+    loser.same_key_loser = true;
+    let mut gone = keyed("gone");
+    gone.effective_status = EffectiveStatus::Superseded;
+    let mut maybe = keyed("maybe");
+    maybe.effective_status = EffectiveStatus::Candidate;
+    index
+        .upsert_many(&[loser, gone, maybe, keyed("winner")])
+        .unwrap();
+    let winner = index
+        .fact_key_winner("home-p", "user.editor")
+        .unwrap()
+        .expect("a winner");
+    assert_eq!(winner.id, "winner");
+    assert_eq!(winner.origin, "user");
+    assert!(
+        index
+            .fact_key_winner("home-p", "user.none")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        index
+            .fact_key_winner("proj-q", "user.editor")
+            .unwrap()
+            .is_none()
+    );
 }
 
 // ============================================================================

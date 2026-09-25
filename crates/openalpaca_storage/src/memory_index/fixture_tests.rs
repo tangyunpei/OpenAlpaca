@@ -306,6 +306,8 @@ fn derive_records(
                 conflict: conflict.contains(id) || losers.contains(id),
                 same_key_loser: losers.contains(id),
                 superseded_by: superseded_by.get(id).cloned().unwrap_or_default(),
+                supersedes: str_list(note.get("supersedes")),
+                sources: sources.clone(),
                 body: body.to_string(),
                 body_line_offset: 0,
                 file: FileStat {

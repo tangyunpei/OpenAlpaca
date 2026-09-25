@@ -40,8 +40,10 @@ pub use search::{MatchReason, SearchHit, SearchMode, SearchQuery, SearchResults}
 pub const INDEX_FILE_NAME: &str = "memory-index-v1.sqlite";
 /// The on-disk schema this build writes. A file carrying another value is
 /// recreated on open (and reports `rebuilding`), never migrated: the index is
-/// disposable.
-pub const SCHEMA_VERSION: i64 = 1;
+/// disposable. Version 2 (design 09 §2.3, ruling LR18) added
+/// `note.supersedes` and the `note_source` table, so learning's per-chunk
+/// lookup reads a note's links and citations without parsing a partition.
+pub const SCHEMA_VERSION: i64 = 2;
 /// Design §4: a note is at most 32 KiB. A larger body is refused by
 /// [`MemoryIndex::upsert`] so the cache stays bounded by what `memory_files`
 /// would have written.
@@ -207,6 +209,14 @@ pub struct IndexRecord {
     pub same_key_loser: bool,
     /// Ids of the notes and tombstones whose honored link supersedes this one.
     pub superseded_by: Vec<String>,
+    /// The ids the note's own frontmatter lists in `supersedes` (design §4),
+    /// whether or not derivation honours the link — a candidate's link
+    /// counts for nothing until it is confirmed, and is still listed here.
+    pub supersedes: Vec<String>,
+    /// The note's `sources` as suppression keys, `message:<id>` or
+    /// `task:<id>` (design §4) — the `note_source` rows learning's lookup
+    /// finds this window's notes through (design 09 §2.3).
+    pub sources: Vec<String>,
     /// The Markdown body below the frontmatter, as read.
     pub body: String,
     /// How many file lines precede the body's first line, so hit line ranges
@@ -341,6 +351,7 @@ CREATE TABLE IF NOT EXISTS note (
     conflict         INTEGER NOT NULL,
     same_key_loser   INTEGER NOT NULL,
     superseded_by    TEXT NOT NULL,
+    supersedes       TEXT NOT NULL,
     body_line_offset INTEGER NOT NULL,
     mtime_ns         INTEGER NOT NULL,
     size             INTEGER NOT NULL,
@@ -357,6 +368,12 @@ CREATE TABLE IF NOT EXISTS note_alias (
 );
 CREATE INDEX IF NOT EXISTS note_alias_norm ON note_alias(norm_alias, note_rowid);
 CREATE INDEX IF NOT EXISTS note_alias_note ON note_alias(note_rowid);
+CREATE TABLE IF NOT EXISTS note_source (
+    note_rowid INTEGER NOT NULL REFERENCES note(rowid) ON DELETE CASCADE,
+    source_key TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS note_source_key ON note_source(source_key, note_rowid);
+CREATE INDEX IF NOT EXISTS note_source_note ON note_source(note_rowid);
 CREATE TABLE IF NOT EXISTS chunk (
     id            INTEGER PRIMARY KEY,
     note_rowid    INTEGER NOT NULL REFERENCES note(rowid) ON DELETE CASCADE,
@@ -410,6 +427,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "partition",
     "note",
     "note_alias",
+    "note_source",
     "chunk",
     "fts_word",
     "fts_tri",
@@ -605,7 +623,8 @@ impl MemoryIndex {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         tx.execute_batch(
-            "DELETE FROM chunk; DELETE FROM note_alias; DELETE FROM note; DELETE FROM partition;",
+            "DELETE FROM chunk; DELETE FROM note_alias; DELETE FROM note_source;
+             DELETE FROM note; DELETE FROM partition;",
         )?;
         let mut report = RebuildReport::default();
         for record in records {
@@ -752,6 +771,155 @@ impl MemoryIndex {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(IndexError::from)
     }
+
+    /// The distinct `fact_key`s of the effectively active notes of these
+    /// partitions, the most recently updated first, at most `limit` —
+    /// learning's `known_keys` (design 09 §2.3 step 4), read from the
+    /// catalog rather than a partition parse.
+    pub fn fact_keys(&self, partition_keys: &[String], limit: usize) -> Result<Vec<String>> {
+        if partition_keys.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.lock();
+        let limit_param = partition_keys.len() + 1;
+        let sql = format!(
+            "SELECT fact_key, MAX(updated_at) AS newest FROM note
+             WHERE partition_key IN ({}) AND effective_status = 'active'
+               AND fact_key IS NOT NULL
+             GROUP BY fact_key
+             ORDER BY newest DESC, fact_key ASC
+             LIMIT ?{limit_param}",
+            placeholders(partition_keys.len())
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let limit = limit as i64;
+        let params: Vec<&dyn rusqlite::ToSql> = partition_keys
+            .iter()
+            .map(|k| k as &dyn rusqlite::ToSql)
+            .chain(std::iter::once(&limit as &dyn rusqlite::ToSql))
+            .collect();
+        let rows = stmt.query_map(params.as_slice(), |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(IndexError::from)
+    }
+
+    /// The notes of these partitions whose `sources` cite any of
+    /// `source_keys` (`message:<id>`, `task:<id>`), whatever their status —
+    /// the caller filters (design 09 §2.3 step 2). Ordered by partition,
+    /// then id.
+    pub fn notes_citing(
+        &self,
+        partition_keys: &[String],
+        source_keys: &[String],
+    ) -> Result<Vec<CatalogNote>> {
+        if partition_keys.is_empty() || source_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.lock();
+        let mut out: Vec<CatalogNote> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for batch in source_keys.chunks(200) {
+            let sources = (partition_keys.len() + 1..=partition_keys.len() + batch.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT {CATALOG_COLUMNS} FROM note n
+                 WHERE n.partition_key IN ({})
+                   AND n.rowid IN (SELECT s.note_rowid FROM note_source s
+                                   WHERE s.source_key IN ({sources}))
+                 ORDER BY n.partition_key, n.id",
+                placeholders(partition_keys.len())
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(partition_keys.iter().chain(batch.iter())),
+                catalog_note_from_row,
+            )?;
+            for row in rows {
+                let row = row?;
+                if seen.insert((row.partition_key.clone(), row.id.clone())) {
+                    out.push(row);
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            a.partition_key
+                .cmp(&b.partition_key)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(out)
+    }
+
+    /// The winner of `fact_key` in one partition (design 03 §3 rule 3, §7c
+    /// R9): the effectively active note with that key that is not a
+    /// same-key loser. Derivation leaves at most one such note per key and
+    /// partition.
+    pub fn fact_key_winner(
+        &self,
+        partition_key: &str,
+        fact_key: &str,
+    ) -> Result<Option<CatalogNote>> {
+        let conn = self.lock();
+        conn.query_row(
+            &format!(
+                "SELECT {CATALOG_COLUMNS} FROM note n
+                 WHERE n.partition_key = ?1 AND n.fact_key = ?2
+                   AND n.effective_status = 'active' AND n.same_key_loser = 0
+                 ORDER BY n.updated_at DESC, n.id ASC
+                 LIMIT 1"
+            ),
+            params![partition_key, fact_key],
+            catalog_note_from_row,
+        )
+        .optional()
+        .map_err(IndexError::from)
+    }
+}
+
+/// A catalog row with what learning's lookup reads (design 09 §2.3): the
+/// note's identity and filter fields, its own `supersedes` list and its
+/// title — no body and no chunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogNote {
+    pub id: String,
+    pub partition_key: String,
+    pub revision: String,
+    pub relative_path: String,
+    pub title: String,
+    pub kind: String,
+    /// The stored `NoteStatus`.
+    pub status: String,
+    pub effective_status: EffectiveStatus,
+    pub origin: String,
+    pub fact_key: Option<String>,
+    pub same_key_loser: bool,
+    pub supersedes: Vec<String>,
+    pub updated_at: String,
+}
+
+const CATALOG_COLUMNS: &str = "n.id, n.partition_key, n.revision, n.relative_path, n.title, \
+     n.kind, n.status, n.effective_status, n.origin, n.fact_key, n.same_key_loser, \
+     n.supersedes, n.updated_at";
+
+fn catalog_note_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogNote> {
+    let effective: String = row.get(7)?;
+    let supersedes: String = row.get(11)?;
+    Ok(CatalogNote {
+        id: row.get(0)?,
+        partition_key: row.get(1)?,
+        revision: row.get(2)?,
+        relative_path: row.get(3)?,
+        title: row.get(4)?,
+        kind: row.get(5)?,
+        status: row.get(6)?,
+        effective_status: EffectiveStatus::parse(&effective).unwrap_or(EffectiveStatus::Active),
+        origin: row.get(8)?,
+        fact_key: row.get(9)?,
+        same_key_loser: row.get::<_, i64>(10)? != 0,
+        supersedes: serde_json::from_str(&supersedes).unwrap_or_default(),
+        updated_at: row.get(12)?,
+    })
 }
 
 fn indexed_note_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedNote> {
@@ -867,17 +1035,18 @@ fn upsert_in(tx: &rusqlite::Transaction<'_>, record: &IndexRecord) -> Result<usi
     let tags_json = serde_json::to_string(&record.tags).unwrap_or_else(|_| "[]".into());
     let superseded_json =
         serde_json::to_string(&record.superseded_by).unwrap_or_else(|_| "[]".into());
+    let supersedes_json = serde_json::to_string(&record.supersedes).unwrap_or_else(|_| "[]".into());
 
     tx.execute(
         "INSERT INTO note (
             partition_key, id, scope, revision, relative_path, title, norm_title,
             aliases, tags, kind, status, effective_status, origin, authority,
             fact_key, valid_from, valid_to, updated_at, pinned, source_forgotten,
-            conflict, same_key_loser, superseded_by, body_line_offset,
+            conflict, same_key_loser, superseded_by, supersedes, body_line_offset,
             mtime_ns, size, inode
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-            ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
+            ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28
         )",
         params![
             record.partition_key,
@@ -903,6 +1072,7 @@ fn upsert_in(tx: &rusqlite::Transaction<'_>, record: &IndexRecord) -> Result<usi
             record.conflict as i64,
             record.same_key_loser as i64,
             superseded_json,
+            supersedes_json,
             record.body_line_offset as i64,
             record.file.mtime_ns,
             record.file.size as i64,
@@ -916,6 +1086,16 @@ fn upsert_in(tx: &rusqlite::Transaction<'_>, record: &IndexRecord) -> Result<usi
             tx.prepare_cached("INSERT INTO note_alias (note_rowid, norm_alias) VALUES (?1, ?2)")?;
         for alias in &norm_aliases {
             alias_stmt.execute(params![note_rowid, alias])?;
+        }
+    }
+    {
+        let mut source_stmt =
+            tx.prepare_cached("INSERT INTO note_source (note_rowid, source_key) VALUES (?1, ?2)")?;
+        let mut seen = std::collections::HashSet::new();
+        for key in &record.sources {
+            if !key.is_empty() && seen.insert(key.as_str()) {
+                source_stmt.execute(params![note_rowid, key])?;
+            }
         }
     }
 
@@ -973,6 +1153,10 @@ fn delete_note_rows(tx: &rusqlite::Transaction<'_>, note_rowid: i64) -> rusqlite
         "DELETE FROM note_alias WHERE note_rowid = ?1",
         params![note_rowid],
     )?;
+    tx.execute(
+        "DELETE FROM note_source WHERE note_rowid = ?1",
+        params![note_rowid],
+    )?;
     tx.execute("DELETE FROM note WHERE rowid = ?1", params![note_rowid])?;
     Ok(())
 }
@@ -987,6 +1171,10 @@ fn delete_partition_rows(
     )?;
     tx.execute(
         "DELETE FROM note_alias WHERE note_rowid IN (SELECT rowid FROM note WHERE partition_key = ?1)",
+        params![partition_key],
+    )?;
+    tx.execute(
+        "DELETE FROM note_source WHERE note_rowid IN (SELECT rowid FROM note WHERE partition_key = ?1)",
         params![partition_key],
     )?;
     let removed = tx.execute(

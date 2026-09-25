@@ -42,10 +42,10 @@ pub use error::MemoryError;
 pub use recall::{TRUST_LABEL, wrap_delivery};
 pub use types::{
     ExtractionProvenance, ForgetInput, ForgetItem, ForgetItemStatus, ForgetOutput, Freshness,
-    HistoryEntry, ListInput, ListItem, ListOutput, MemoryChange, MemoryUsed, Patch, ReadInput,
-    ReadOutput, RecallBudget, RecallResult, RecalledNote, RecentlyUsedItem, Retained, SearchInput,
-    SearchOutput, SearchResultItem, StoreInput, StoreOutput, UpdateAction, UpdateInput,
-    UpdateOutput, UsedReason,
+    HistoryEntry, KnownNote, LearningView, ListInput, ListItem, ListOutput, MemoryChange,
+    MemoryUsed, Patch, ReadInput, ReadOutput, RecallBudget, RecallResult, RecalledNote,
+    RecentlyUsedItem, Retained, SearchInput, SearchOutput, SearchResultItem, StoreInput,
+    StoreOutput, UpdateAction, UpdateInput, UpdateOutput, UsedReason,
 };
 pub use write_slot::QuiesceGuard;
 
@@ -508,6 +508,8 @@ impl MemoryService {
                 conflict: v.derived.conflict,
                 same_key_loser: v.derived.same_key_loser_to.is_some(),
                 superseded_by: v.derived.superseded_by.iter().map(|id| id.to_string()).collect(),
+                supersedes: v.note.supersedes.iter().map(|id| id.to_string()).collect(),
+                sources: v.note.sources.iter().map(NoteSource::suppression_key).collect(),
                 body: v.note.body.clone(),
                 body_line_offset: body_line_offset(&v.note),
                 file: stats.get(v.file_name.as_str()).copied().unwrap_or_default(),

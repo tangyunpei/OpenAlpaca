@@ -33,6 +33,43 @@ fn owner_key_is_first_32_hex_of_sha256_over_utf8() {
     assert_eq!(owner_key("用户").len(), OWNER_KEY_HEX);
 }
 
+/// Design 09 §2.5: the change test compares a note's `## Knowledge`
+/// section — or, for a note learned before L2, the body below its title.
+#[test]
+fn knowledge_text_reads_the_section_or_the_body_below_the_title() {
+    let sectioned = "# Editor preference\n\n## Knowledge\nSince June the user edits with Helix.\nBefore that, vim.\n\n## Evidence and limits\nFrom what you said on 2026-09-24.\n";
+    assert_eq!(
+        knowledge_text(sectioned),
+        "Since June the user edits with Helix.\nBefore that, vim."
+    );
+    assert_eq!(
+        knowledge_text("# Editor preference\n\nThe user prefers vim.\n"),
+        "The user prefers vim."
+    );
+    assert_eq!(knowledge_text("no title, just text"), "no title, just text");
+    assert_eq!(
+        knowledge_text("# T\n\n### knowledge\nnot the section\n"),
+        "### knowledge\nnot the section"
+    );
+}
+
+/// NFKC, case-fold, whitespace collapsed, trailing punctuation removed.
+#[test]
+fn normalize_statement_ignores_case_spacing_width_and_trailing_punctuation() {
+    assert_eq!(
+        normalize_statement("The user  edits\nwith VIM."),
+        normalize_statement("the user edits with vim")
+    );
+    assert_eq!(
+        normalize_statement("用户使用ＶＩＭ。"),
+        normalize_statement("用户使用vim")
+    );
+    assert_ne!(
+        normalize_statement("The user edits with vim."),
+        normalize_statement("The user edits with Helix.")
+    );
+}
+
 #[test]
 fn partition_keys_have_the_design_shape() {
     let owner = owner_key("u_example_alice");

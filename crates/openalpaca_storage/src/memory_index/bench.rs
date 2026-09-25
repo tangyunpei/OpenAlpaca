@@ -296,6 +296,8 @@ fn build_corpus(root: &Path, rng: &mut Rng, vocab: &Vocabulary) -> Vec<IndexReco
             conflict: false,
             same_key_loser: rng.below(100) == 0,
             superseded_by: Vec::new(),
+            supersedes: Vec::new(),
+            sources: Vec::new(),
             body,
             body_line_offset: 7,
             file: FileStat {

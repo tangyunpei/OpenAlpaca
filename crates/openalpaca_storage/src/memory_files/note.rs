@@ -276,6 +276,50 @@ pub fn revision_of(bytes: &[u8]) -> String {
     sha256_hex(bytes)
 }
 
+/// The knowledge a note body states (design §4's sections): the text of its
+/// `## Knowledge` section, up to the next heading — or, for a body without
+/// one, the body below its `#` title line. A note learned before Learning
+/// v2 L2 is `# {title}\n\n{content}` (design 09 §2.5, §2.6), so the second
+/// branch reads its content. Trimmed.
+pub fn knowledge_text(body: &str) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    let heading = |line: &str| line.trim_start().starts_with('#');
+    if let Some(start) = lines.iter().position(|l| {
+        let t = l.trim();
+        t.strip_prefix("##").is_some_and(|rest| {
+            !rest.starts_with('#') && rest.trim().eq_ignore_ascii_case("knowledge")
+        })
+    }) {
+        let rest = &lines[start + 1..];
+        let end = rest.iter().position(|l| heading(l)).unwrap_or(rest.len());
+        return rest[..end].join("\n").trim().to_string();
+    }
+    let mut rest: &[&str] = &lines;
+    if let Some(first) = rest.iter().position(|l| !l.trim().is_empty())
+        && rest[first].trim_start().starts_with("# ")
+    {
+        rest = &rest[first + 1..];
+    }
+    rest.join("\n").trim().to_string()
+}
+
+/// Two statements of knowledge compare equal after this (design 09 §2.5):
+/// NFKC, case-folded, whitespace runs collapsed to one space, and trailing
+/// punctuation removed — "The user edits with vim." and "the user edits
+/// with  vim" are one statement; "vim" and "Helix" are not.
+pub fn normalize_statement(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let folded: String = text.nfkc().collect::<String>().to_lowercase();
+    let collapsed = folded.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed
+        .trim_end_matches(|c: char| {
+            c.is_ascii_punctuation()
+                || c.is_whitespace()
+                || matches!(c, '。' | '、' | '」' | '』' | '“' | '”' | '‘' | '’' | '…')
+        })
+        .to_string()
+}
+
 /// Truncates a timestamp to the second, which is all the canon writes.
 pub(super) fn to_second(ts: DateTime<Utc>) -> DateTime<Utc> {
     DateTime::from_timestamp(ts.timestamp(), 0).unwrap_or(ts)

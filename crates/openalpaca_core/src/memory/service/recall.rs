@@ -57,7 +57,7 @@ fn wrapper_bytes() -> usize {
 }
 
 /// What re-reading a selected file found (design §5 step 7).
-enum Verified {
+pub(super) enum Verified {
     /// The file parses to the note the index named; `stale` says its hash
     /// moved since indexing and the fresh bytes are what is served.
     Fresh {
@@ -71,7 +71,12 @@ enum Verified {
     Gone,
 }
 
-fn verify(p: &Partition, relative_path: &str, id: NoteId, expected_revision: &str) -> Verified {
+pub(super) fn verify(
+    p: &Partition,
+    relative_path: &str,
+    id: NoteId,
+    expected_revision: &str,
+) -> Verified {
     if p.snapshot().is_some_and(|s| s.tombstone(&id).is_some()) {
         return Verified::Gone;
     }
@@ -132,7 +137,7 @@ impl MemoryService {
     /// the scan found changed behind the service's back, so a hit among them
     /// is answered `stale` — the index was out of date for it, and the fresh
     /// bytes are what is served.
-    fn touch(&self, p: &Partition) -> Result<HashSet<NoteId>, MemoryError> {
+    pub(super) fn touch(&self, p: &Partition) -> Result<HashSet<NoteId>, MemoryError> {
         let key = p.partition_key();
         let never_indexed = self.index.last_scan(key)?.is_none();
         if never_indexed {

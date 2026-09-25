@@ -3504,3 +3504,242 @@ fn a_quiet_tick_re_hashes_nothing_and_sync_still_does() {
     assert_eq!(view.origin, Origin::External);
     assert_eq!(view.body, "# Editor\n\nVIM.\n");
 }
+
+// ============================================================================
+// Learning's lookup (design 09 §2.3, ruling LR18)
+// ============================================================================
+
+fn learned(
+    h: &Harness,
+    ctx: &MemoryAccessContext,
+    title: &str,
+    body: &str,
+    fact_key: Option<&str>,
+    provenance: ExtractionProvenance,
+    message: i64,
+) -> StoreOutput {
+    h.service
+        .store(
+            ctx,
+            StoreInput {
+                title: title.into(),
+                body: body.into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: fact_key.map(str::to_string),
+                sources: vec![NoteSource {
+                    kind: SourceType::Message,
+                    id: message.to_string(),
+                    observed_at: None,
+                }],
+                provenance: Some(provenance),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+
+/// Step 2: this window's learned notes — active **and** candidate — are
+/// found through the index's `note_source`; a note the user saved, and one
+/// another window taught, are not. The candidate is the re-run guard's
+/// only: it is never offered to the model.
+#[test]
+fn learning_view_finds_this_windows_candidates_through_note_source() {
+    let h = Harness::new();
+    let this_row = h.message_row("I edit with vim; my project is probably Rust.");
+    let other_row = h.message_row("I commute by train.");
+    let extraction = h
+        .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap();
+    let active = learned(
+        &h,
+        &extraction,
+        "Editor preference",
+        "# Editor preference\n\n## Knowledge\nThe user edits with vim.\n",
+        Some("user.editor"),
+        ExtractionProvenance::UserWords,
+        this_row,
+    );
+    let candidate = learned(
+        &h,
+        &extraction,
+        "Probably Rust",
+        "# Probably Rust\n\nThe project is probably written in Rust.\n",
+        None,
+        ExtractionProvenance::OtherOutput,
+        this_row,
+    );
+    learned(
+        &h,
+        &extraction,
+        "Commute",
+        "# Commute\n\nThe user commutes by train.\n",
+        None,
+        ExtractionProvenance::UserWords,
+        other_row,
+    );
+    h.service
+        .store(
+            &h.user(ALICE, None),
+            StoreInput {
+                title: "Saved by hand".into(),
+                body: "# Saved by hand\n\nCites the same row.\n".into(),
+                kind: Some(NoteKind::Fact),
+                sources: vec![NoteSource {
+                    kind: SourceType::Message,
+                    id: this_row.to_string(),
+                    observed_at: None,
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let view = h
+        .service
+        .learning_view(&extraction, &[], &[this_row])
+        .unwrap();
+    let window: HashSet<NoteId> = view.from_this_window.iter().map(|n| n.id).collect();
+    assert_eq!(window, HashSet::from([active.id, candidate.id]));
+    let cand = view
+        .from_this_window
+        .iter()
+        .find(|n| n.id == candidate.id)
+        .unwrap();
+    assert_eq!(cand.effective_status, EffectiveStatus::Candidate);
+    assert_eq!(cand.origin, Origin::ExtractedOther);
+    assert!(cand.from_this_window);
+    let listed: Vec<NoteId> = view.notes.iter().map(|n| n.id).collect();
+    assert_eq!(listed, vec![active.id], "the active one only, first");
+    assert_eq!(view.notes[0].knowledge, "The user edits with vim.");
+    assert_eq!(view.notes[0].fact_key.as_deref(), Some("user.editor"));
+    assert_eq!(view.keys, vec!["user.editor".to_string()]);
+}
+
+/// Background learning's reads are its own: every other surface is
+/// refused, whatever its capabilities.
+#[test]
+fn learning_view_refuses_every_surface_but_extraction() {
+    let h = Harness::new();
+    for ctx in [h.tool(ALICE, None), h.user(ALICE, None)] {
+        let err = h
+            .service
+            .learning_view(&ctx, &["vim".to_string()], &[])
+            .unwrap_err();
+        assert_eq!(err.class(), "invalid_input", "{err}");
+        let err = h
+            .service
+            .learning_key_targets(&ctx, &["user.editor".to_string()])
+            .unwrap_err();
+        assert_eq!(err.class(), "invalid_input", "{err}");
+    }
+}
+
+/// The lookup records nothing: not in the recently-used ring, not as a
+/// turn's `memory_used`, not on the bus. It counts a note recall would
+/// skip — one whose validity window has ended — and verifies each.
+#[test]
+fn learning_view_records_nothing_in_recently_used() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let saved = h
+        .service
+        .store(
+            &user,
+            StoreInput {
+                title: "Editor preference".into(),
+                body: "# Editor preference\n\nThe user edits with vim.\n".into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("user.editor".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let ended = h
+        .service
+        .store(
+            &user,
+            StoreInput {
+                title: "Berlin trip".into(),
+                body: "# Berlin trip\n\nThe user visits Berlin for the editor conference.\n".into(),
+                kind: Some(NoteKind::Episode),
+                valid_from: Some("2020-01-01T00:00:00Z".parse().unwrap()),
+                valid_to: Some("2020-01-05T00:00:00Z".parse().unwrap()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut rx = h.bus.subscribe();
+    let extraction = h
+        .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap();
+    let view = h
+        .service
+        .learning_view(&extraction, &["which editor do I use".to_string()], &[])
+        .unwrap();
+    let listed: HashSet<NoteId> = view.notes.iter().map(|n| n.id).collect();
+    assert!(listed.contains(&saved.id), "{listed:?}");
+    assert!(listed.contains(&ended.id), "an ended window still counts");
+    let editor = view.notes.iter().find(|n| n.id == saved.id).unwrap();
+    assert_eq!(editor.origin, Origin::User);
+    assert_eq!(editor.revision, saved.revision);
+    assert!(h.service.recently_used(RING_CAPACITY).is_empty());
+    assert!(rx.try_recv().is_err(), "nothing is published");
+}
+
+/// Ruling LR11: a key's target is its R9 winner in the chunk's project
+/// partition first, then in the home partition.
+#[test]
+fn learning_key_targets_look_in_the_project_first_then_home() {
+    let h = Harness::new();
+    let ws = h.workspace("lantern", Some(".git"));
+    let user_home = h.user(ALICE, None);
+    let user_project = h.user(ALICE, Some(&ws));
+    let keyed = |ctx: &MemoryAccessContext, title: &str, key: &str, scope: NoteScope| {
+        h.service
+            .store(
+                ctx,
+                StoreInput {
+                    title: title.into(),
+                    body: format!("# {title}\n\nbody\n"),
+                    kind: Some(NoteKind::Fact),
+                    scope: Some(scope),
+                    fact_key: Some(key.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    };
+    let home_laptop = keyed(&user_home, "Home laptop", "user.laptop", NoteScope::Global);
+    let project_db = keyed(
+        &user_project,
+        "Staging DB",
+        "lantern.db",
+        NoteScope::Project,
+    );
+    keyed(&user_home, "Global DB", "lantern.db", NoteScope::Global);
+
+    let extraction = h
+        .ctx(
+            ALICE,
+            Some(&ws),
+            Surface::Extraction,
+            Capabilities::EXTRACTION,
+        )
+        .unwrap();
+    let targets = h
+        .service
+        .learning_key_targets(
+            &extraction,
+            &[
+                "user.laptop".to_string(),
+                "lantern.db".to_string(),
+                "user.none".to_string(),
+            ],
+        )
+        .unwrap();
+    assert_eq!(targets["user.laptop"].id, home_laptop.id);
+    assert_eq!(targets["user.laptop"].scope, NoteScope::Global);
+    assert_eq!(targets["lantern.db"].id, project_db.id, "the project first");
+    assert_eq!(targets["lantern.db"].scope, NoteScope::Project);
+    assert!(!targets.contains_key("user.none"));
+}

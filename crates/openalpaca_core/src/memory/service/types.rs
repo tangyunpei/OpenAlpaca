@@ -39,6 +39,53 @@ pub struct StoreInput {
     pub provenance: Option<ExtractionProvenance>,
 }
 
+/// One note background learning may show the extractor, or check an item
+/// against (design 09 §2.3): read from the index and verified against its
+/// file. Built by [`super::MemoryService::learning_view`] and
+/// [`super::MemoryService::learning_key_target`] only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnownNote {
+    pub id: NoteId,
+    /// The file's revision as the verification read it — what a
+    /// replacement's `expected_revision` binds.
+    pub revision: String,
+    /// `home-<owner-key>` or `proj-<owner-key>-<dir-key>`.
+    pub partition_key: String,
+    pub scope: NoteScope,
+    pub title: String,
+    pub kind: NoteKind,
+    /// The derived origin (design §4): what tells a learned note from one
+    /// the user saved or edited.
+    pub origin: Origin,
+    /// `Active` or `Candidate`; nothing else is ever known.
+    pub effective_status: EffectiveStatus,
+    pub fact_key: Option<String>,
+    /// The note's `## Knowledge` section, or — for a note learned before L2 —
+    /// its body below the title ([`openalpaca_storage::memory_files::knowledge_text`]).
+    pub knowledge: String,
+    /// The ids its own frontmatter lists in `supersedes`.
+    pub supersedes: Vec<NoteId>,
+    /// A learned note (`extracted_user` or `extracted_other`) that cites a
+    /// row of the chunk being learned (design 09 §2.3 step 2).
+    pub from_this_window: bool,
+}
+
+/// What learning's known-notes lookup found for one chunk (design 09 §2.3).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LearningView {
+    /// At most 20 effectively active notes the extractor may be shown: this
+    /// window's own first, then the search's by best score. The prompt
+    /// lists as many as its byte budget holds.
+    pub notes: Vec<KnownNote>,
+    /// This window's learned notes, **active and candidate** — the re-run
+    /// guard's input (design 09 §1.4(b)). A candidate is never shown to the
+    /// model: it is never a replacement target.
+    pub from_this_window: Vec<KnownNote>,
+    /// At most 150 distinct `fact_key`s of effectively active notes, the
+    /// most recently updated first.
+    pub keys: Vec<String>,
+}
+
 /// One `memory_changed` a mutation produced (design §7a) — the routes
 /// publish it; the service records it.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -47,7 +47,7 @@ pub use authority::{
 pub use doctor::{DoctorReport, MoveSnapshotReport, PartitionReport, RefusedPartition, doctor};
 pub use note::{
     NewNote, Note, NoteId, NoteKind, NoteParseError, NotePatch, NoteScope, NoteSource, NoteStatus,
-    SourceType, UnknownField, is_valid_fact_key, revision_of,
+    SourceType, UnknownField, is_valid_fact_key, knowledge_text, normalize_statement, revision_of,
 };
 pub use partition::{
     Actor, CrashPoint, Created, Dedup, ForgetOutcome, ForgetStatus, LoadedPartition, MalformedFile,
