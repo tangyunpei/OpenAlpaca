@@ -178,6 +178,21 @@ fn is_default_ignorable(c: char) -> bool {
 /// This keeps `\n` and `\t` as they are, for text laid out in lines — the
 /// pretty-printed arguments, where `serde_json` has already escaped every
 /// newline inside a string. A one-line field takes [`escape_hidden_line`].
+///
+/// What no character set can do, and this does not claim: right-to-left
+/// letters are not format characters and stay as written, so the Unicode
+/// bidi algorithm still reorders the digits and neutral characters next to
+/// them **inside** a value, on every surface: a path made of `/tmp/`, a
+/// Hebrew letter and `/1/2` displays as `/tmp/1/2/` and then the letter,
+/// and a Hebrew letter followed by ` 100 200` displays as `200 100 ` and
+/// then the letter. Isolating the arguments block (`unicode-bidi: isolate`
+/// on a web surface) keeps them from reordering the text around the block,
+/// not the text within a value; the plain-text surfaces have no isolation
+/// at all. Stacked combining marks that draw over neighbouring
+/// lines in some renderers are the same kind of residue. Forcing logical
+/// order on approval surfaces (an LRO … PDF around the arguments on plain
+/// text, `unicode-bidi: bidi-override` in the GUI) is an owner decision,
+/// not taken.
 pub fn escape_hidden(text: &str) -> Escaped {
     escape_hidden_within(text, usize::MAX)
 }
