@@ -24,7 +24,8 @@
 //! cancels the call (the GPU serves the reply alone), and on a keyed remote
 //! model a chunk starts only when half of the key's rate budget would remain.
 
-use super::extractor::{self, AGENT_LABEL, StoreCounts, StoreEnd, StoreJob};
+use super::extractor::{self, AGENT_LABEL, PromptInput, StoreCounts, StoreEnd, StoreJob};
+use super::lookup;
 use super::window::{self, NextChunk};
 use super::{
     BACKOFF_BASE, BACKOFF_CAP, Budget, MAX_ATTEMPTS, MAX_CHUNKS_PER_FLUSH, RESUME_QUIET,
@@ -135,6 +136,11 @@ pub struct FlushReport {
     pub active: usize,
     /// `extracted_other` candidates.
     pub candidates: usize,
+    /// Among `active`: automatic replacements of a learned note (MD-11).
+    pub replaced: usize,
+    /// Changes to a note the user saved: suggestions (MD-11). Decided from
+    /// Learning v2 L2 on, written from L3 on (S1, S2); counted meanwhile.
+    pub suggestions: usize,
     /// Items an existing note already held byte for byte.
     pub deduplicated: usize,
     /// Rule 14: items past `extract_max_items_per_call`.
@@ -145,6 +151,16 @@ pub struct FlushReport {
     pub dropped_invalid: usize,
     /// Rule 12: items left citing only forgotten rows.
     pub dropped_suppressed: usize,
+    /// Rule 11: a second item with the same key or the same target.
+    pub dropped_duplicate_key: usize,
+    /// Rule 13: what this chunk already taught (a re-run).
+    pub dropped_already_learned: usize,
+    /// §2.5: an item that only restates the note it would replace.
+    pub dropped_unchanged: usize,
+    /// §2.5: the target moved between the lookup and the write.
+    pub dropped_conflict: usize,
+    /// Rule 9: a `replaces` naming no listed note; the item was kept.
+    pub replaces_unknown: usize,
     /// Items the service refused.
     pub failed: usize,
     /// Chunks with less of the user's own text than
@@ -166,9 +182,15 @@ impl FlushReport {
         self.stored += counts.stored;
         self.active += counts.active;
         self.candidates += counts.candidates;
+        self.replaced += counts.replaced;
+        self.suggestions += counts.suggestions;
         self.deduplicated += counts.deduplicated;
         self.dropped_over_cap += counts.dropped_over_cap;
         self.dropped_suppressed += counts.dropped_suppressed;
+        self.dropped_duplicate_key += counts.dropped_duplicate_key;
+        self.dropped_already_learned += counts.dropped_already_learned;
+        self.dropped_unchanged += counts.dropped_unchanged;
+        self.dropped_conflict += counts.dropped_conflict;
         self.failed += counts.failed;
     }
 }
@@ -830,11 +852,18 @@ impl LearningQueue {
                     stored = report.stored,
                     active = report.active,
                     candidates = report.candidates,
+                    replaced = report.replaced,
+                    suggestions = report.suggestions,
                     deduplicated = report.deduplicated,
                     dropped_over_cap = report.dropped_over_cap,
                     dropped_below_threshold = report.dropped_below_threshold,
                     dropped_invalid = report.dropped_invalid,
                     dropped_suppressed = report.dropped_suppressed,
+                    dropped_duplicate_key = report.dropped_duplicate_key,
+                    dropped_already_learned = report.dropped_already_learned,
+                    dropped_unchanged = report.dropped_unchanged,
+                    dropped_conflict = report.dropped_conflict,
+                    replaces_unknown = report.replaces_unknown,
                     failed = report.failed,
                     skipped_short = report.skipped_short,
                     skipped_no_owner = report.skipped_no_owner,
@@ -1076,12 +1105,57 @@ impl LearningQueue {
                 return report;
             }
 
+            // The known-notes lookup (§2.3): what the owner already has that
+            // the chunk's rows bring up, and the keys in use — read-only, on
+            // the blocking pool, recorded nowhere.
+            let service = self.deps.memory_service.clone();
+            let lookup_ctx = ctx.clone();
+            let queries = lookup::queries_for(&chunk);
+            let chunk_ids: Vec<i64> = chunk.rows.iter().map(|r| r.id).collect();
+            let view = match tokio::task::spawn_blocking(move || {
+                service.learning_view(&lookup_ctx, &queries, &chunk_ids)
+            })
+            .await
+            {
+                Ok(Ok(view)) => view,
+                Ok(Err(MemoryError::Quarantined { partition_key, .. })) => {
+                    tracing::warn!(
+                        session_id,
+                        %partition_key,
+                        "memory learning waits: the partition is quarantined; run `openalpaca memory doctor --repair`"
+                    );
+                    report.stopped = Some(FlushStop::Quarantined);
+                    return report;
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(session_id, "memory learning: the lookup failed: {e}");
+                    report.stopped = Some(FlushStop::StoreError);
+                    return report;
+                }
+                Err(e) => {
+                    tracing::warn!(session_id, "memory learning: the lookup task failed: {e}");
+                    report.stopped = Some(FlushStop::StoreError);
+                    return report;
+                }
+            };
+            let lookup = lookup::render(view, budget.known_bytes);
+
             // Build the call, then check the keyed model's rate headroom: a
             // chunk starts only when half of each bucket would remain after
             // its own estimate (§1.7) — the router's estimate, bytes ÷ 4.
             let (transcript, numbered) = chunk.transcript();
-            let request =
-                extractor::build_request(&transcript, budget.items, budget.out_tokens, model);
+            let today = chunk.today();
+            let request = extractor::build_request(
+                &PromptInput {
+                    today: &today,
+                    known_notes: &lookup.notes_text,
+                    known_keys: &lookup.keys_text,
+                    conversation: &transcript,
+                    max_items: budget.items,
+                },
+                budget.out_tokens,
+                model,
+            );
             let threshold = dcfg.orchestrator.memory.memory_confidence_threshold;
             drop(dcfg);
             if policy.shares_with_chat
@@ -1189,9 +1263,11 @@ impl LearningQueue {
                     return report;
                 }
             };
-            let validated = extractor::validate(&items, &numbered, threshold);
+            let validated = extractor::validate(&items, &numbered, threshold, lookup.listed.len());
             report.dropped_invalid += validated.invalid;
             report.dropped_below_threshold += validated.below_threshold;
+            report.replaces_unknown += validated.replaces_unknown;
+            report.dropped_duplicate_key += validated.duplicate_key;
 
             // Store the chunk's notes and advance its cursor in one blocking
             // task (§1.4): dropping this future does not separate them.
@@ -1201,6 +1277,9 @@ impl LearningQueue {
                 ctx,
                 session_id: session_id.to_string(),
                 items: validated.items,
+                listed: lookup.listed,
+                from_this_window: lookup.from_this_window,
+                today,
                 max_items: budget.items,
                 through: chunk.through,
                 expected,

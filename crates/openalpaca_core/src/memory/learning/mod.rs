@@ -12,12 +12,18 @@
 //! `learning_cursor` are the window.
 
 mod extractor;
+mod lookup;
 pub mod queue;
 #[cfg(test)]
 mod tests;
 mod window;
 
 pub use queue::{FlushReport, FlushStop, LearningDeps, LearningQueue, QueueMode, TurnGuard};
+
+// Task-output extraction shares the item fields' cleaning and the keys'
+// rendering (design 09 §2.7).
+pub(crate) use extractor::{clean_aliases, clean_fact_key};
+pub(crate) use lookup::{MAX_KEYS_BYTES, render_keys};
 
 // Engineering bounds, not owner-facing choices (design §1.10): only MD-10's
 // two numbers, the off switch and the daily call cap are configuration.
@@ -39,10 +45,11 @@ pub const REPLY_CUT_BYTES: usize = 4 * 1024;
 /// A context row keeps this much.
 pub const CONTEXT_ROW_BYTES: usize = 1024;
 /// The most a request adds to its chunk's rows and known notes: the fixed
-/// prompt and two context rows at their cut, with their labels (3.7 KiB
-/// measured; `the_fixed_prompt_and_its_context_fit_the_tpm_caps_overhead`
-/// pins it). The TPM cap of [`Budget::for_window`] leaves room for it.
-pub const REQUEST_OVERHEAD_BYTES: usize = 4 * 1024;
+/// prompt and two context rows at their cut, with their labels (5.1 KiB
+/// measured with the L2 prompt fixture;
+/// `the_fixed_prompt_and_its_context_fit_the_tpm_caps_overhead` pins it).
+/// The TPM cap of [`Budget::for_window`] leaves room for it.
+pub const REQUEST_OVERHEAD_BYTES: usize = 6 * 1024;
 /// Rows one window read takes; a longer window is read again after its
 /// first chunks advance the cursor.
 pub(crate) const WINDOW_READ_ROWS: i64 = 400;
@@ -83,7 +90,7 @@ pub const BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(3600
 /// whole estimated request (bytes ÷ 4, the router's own estimate) — its
 /// rows, its known notes, and [`REQUEST_OVERHEAD_BYTES`] of fixed prompt and
 /// context — is at most 40 % of the key's TPM capacity, so a chunk can always
-/// start once the key is idle (§1.7). Below about 2,200 TPM the fixed prompt,
+/// start once the key is idle (§1.7). Below about 3,000 TPM the fixed prompt,
 /// its context and one cut turn alone pass half the bucket, and a session on
 /// such a key stays due.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

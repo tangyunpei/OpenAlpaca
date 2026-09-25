@@ -110,6 +110,16 @@ impl Chunk {
             .sum()
     }
 
+    /// The UTC date of the chunk's last row, `YYYY-MM-DD`: the prompt's
+    /// `<today>` (design 09 §2.1).
+    pub(crate) fn today(&self) -> String {
+        self.rows
+            .last()
+            .and_then(|r| r.created_at.get(..10))
+            .map(str::to_string)
+            .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string())
+    }
+
     /// The newest turn id of the chunk, for the extraction's attribution.
     pub(crate) fn last_request_id(&self) -> Option<&str> {
         self.rows.iter().rev().find_map(|r| r.request_id.as_deref())

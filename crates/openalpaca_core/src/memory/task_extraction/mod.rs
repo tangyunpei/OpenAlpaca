@@ -12,6 +12,11 @@
 //! rather than showing what was learned — and an owner that is not a
 //! `global_user` row (a `system` run has no partition, design §3).
 //!
+//! Each item carries the chat extractor's aliases — the other language
+//! included — and `fact_key`, cleaned by the same rules, and the prompt
+//! lists the keys already in use so a run reuses them (design 09 §2.7). An
+//! item never replaces anything: it is a candidate, and it names no target.
+//!
 //! Bounded per run by count (`[orchestrator.costs]
 //! task_extract_max_items_per_run`, the items past it dropped and counted)
 //! and by cost (`task_extract_max_daily_cost_usd`, per UTC day, read from
@@ -172,6 +177,23 @@ pub(crate) async fn extract_task_memories(
         .costs
         .task_extract_max_items_per_run
         .max(1);
+
+    // The keys in use (design 09 §2.7), read like the chat extractor's
+    // `known_keys`: from the index, on the blocking pool, recorded nowhere.
+    let service = deps.memory_service.clone();
+    let keys_ctx = ctx.clone();
+    let view =
+        tokio::task::spawn_blocking(move || service.learning_view(&keys_ctx, &[], &[])).await;
+    let known_keys = match view {
+        Ok(Ok(view)) => crate::memory::learning::render_keys(
+            &view.keys,
+            crate::memory::learning::MAX_KEYS_BYTES,
+        ),
+        failed => {
+            tracing::debug!(task_id = %params.task_id, "task extraction: no known keys: {failed:?}");
+            String::new()
+        }
+    };
     let threshold = dcfg.orchestrator.memory.memory_confidence_threshold;
 
     // Build the extraction prompt.
@@ -180,6 +202,7 @@ pub(crate) async fn extract_task_memories(
 
     let user_prompt = format!(
         "## Task Output\nTask: {desc_trunc}\nOutput:\n{output_trunc}\n\n\
+         <known_keys>{known_keys}</known_keys>\n\n\
          Extract the durable knowledge this run's output shows: findings about the \
          project or its environment, decisions taken, procedures that worked, references \
          worth keeping.\n\
@@ -191,7 +214,9 @@ pub(crate) async fn extract_task_memories(
                \"content\": \"one concise statement\",\n\
                \"kind\": \"fact\" | \"preference\" | \"decision\" | \"procedure\" | \"reference\" | \"episode\",\n\
                \"basis\": \"evidence\" | \"claim\",\n\
-               \"confidence\": 0.0 to 1.0\n\
+               \"confidence\": 0.0 to 1.0,\n\
+               \"aliases\": [\"other names a later question might use\"],\n\
+               \"fact_key\": \"subject.attribute\" | null\n\
              }}\n\
            ]\n\
          }}\n\n\
@@ -202,6 +227,13 @@ pub(crate) async fn extract_task_memories(
          true, with nothing in it to show it. Claims are never stored; mark them honestly.\n\
          - Do not extract that the task was completed, what the assistant did, or the \
          task's own instructions.\n\
+         - \"aliases\": other names a later question might use, including the other \
+         language (Chinese for an English statement, English for a Chinese one), plus \
+         common alternative spellings and proper nouns. 0 to 8; never the title.\n\
+         - \"fact_key\": <subject>.<attribute>[.<qualifier>] in lowercase English, the \
+         project's name as the subject for a fact about a project. Reuse a key from \
+         known_keys when the item is about the same attribute; mint a new one only when \
+         none fits. Never put the value in the key.\n\
          - Only extract what is clearly stated or strongly implied. Do not invent.\n\
          - Prefer fewer high-quality extractions over many low-quality ones.\n\
          - At most {max_items} extractions, most useful first.\n\
@@ -224,7 +256,8 @@ pub(crate) async fn extract_task_memories(
         ]),
         tools: Arc::new(vec![]),
         temperature: Some(0.0),
-        max_tokens: Some(512),
+        // Aliases and a key per item did not fit 512 tokens (design 09 §2.7).
+        max_tokens: Some(1024),
         context: RequestContext {
             agent_id: Some(AGENT_LABEL.to_string()),
             task_id: Some(params.task_id.clone()),
@@ -232,7 +265,7 @@ pub(crate) async fn extract_task_memories(
         tool_choice: None,
         tools_token_estimate: None,
         enable_caching: false,
-        // M2: an internal utility call, capped at 512 tokens — no reasoning.
+        // M2: an internal utility call, capped at 1,024 tokens — no reasoning.
         thinking: Some(openalpaca_llm::ThinkingConfig::Disabled),
         context_management: None,
         fallback_models: Vec::new(),
@@ -351,6 +384,8 @@ pub(crate) async fn extract_task_memories(
             title: item.title,
             body: item.body,
             kind: Some(item.kind),
+            aliases: item.aliases,
+            fact_key: item.fact_key,
             sources: sources.clone(),
             // Tool output, never the user's words: a candidate (MD-2).
             provenance: Some(ExtractionProvenance::OtherOutput),
@@ -391,6 +426,9 @@ struct Item {
     /// it. Never stored.
     claim: bool,
     confidence: f64,
+    /// Rules 7–8 of the chat extractor (design 09 §2.4, §2.7).
+    aliases: Vec<String>,
+    fact_key: Option<String>,
 }
 
 /// Reads one `extractions[]` entry. `None` is an invalid item: no content,
@@ -426,6 +464,8 @@ fn read_item(value: &serde_json::Value) -> Option<Item> {
         .unwrap_or_else(|| content.chars().take(80).collect());
     Some(Item {
         body: format!("# {title}\n\n{content}\n"),
+        aliases: crate::memory::learning::clean_aliases(value.get("aliases"), &title),
+        fact_key: crate::memory::learning::clean_fact_key(value.get("fact_key")),
         title,
         kind,
         claim,

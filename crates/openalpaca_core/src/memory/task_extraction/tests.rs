@@ -307,8 +307,78 @@ mod through_the_service {
         assert!(scene.provider.first_request_opt().is_none());
     }
 
+    /// **Design 09 §2.7.** Task-output extraction shares the chat
+    /// extractor's item fields: the prompt lists the keys in use, and the
+    /// aliases and the `fact_key` an item carries pass the same cleaning
+    /// (rules 7–8) onto the candidate — which stays a candidate, replacing
+    /// nothing.
+    #[tokio::test]
+    async fn task_candidates_carry_aliases_and_fact_key() {
+        let scene = Scene::new(
+            r#"{"extractions": [
+                {"title": "Store layout", "content": "The database lives under state/ and notes under memory/.",
+                 "kind": "fact", "basis": "evidence", "confidence": 0.9,
+                 "aliases": ["state directory", "状态目录", "store layout", "State Directory"],
+                 "fact_key": "OpenAlpaca.Store.Layout"}
+            ]}"#,
+        );
+        scene
+            .service
+            .store(
+                &scene.user_ctx(),
+                crate::memory::service::StoreInput {
+                    title: "Content directories".into(),
+                    body: "# Content directories\n\nEvery content directory is 0700.\n".into(),
+                    kind: Some(NoteKind::Fact),
+                    fact_key: Some("openalpaca.store.modes".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let outcome = extract_task_memories(&scene.deps(), scene.params(OWNER, true)).await;
+        assert!(
+            matches!(&outcome, TaskExtractionOutcome::Extracted(r) if r.stored == 1),
+            "{outcome:?}"
+        );
+        let prompt = scene
+            .provider
+            .first_request()
+            .messages
+            .iter()
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            prompt.contains("<known_keys>openalpaca.store.modes</known_keys>"),
+            "{prompt}"
+        );
+        let candidates = scene.candidates();
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        let note = scene
+            .service
+            .read(
+                &scene.user_ctx(),
+                ReadInput {
+                    id: candidates[0].id,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            note.frontmatter["aliases"],
+            serde_json::json!(["state directory", "状态目录"])
+        );
+        assert_eq!(
+            note.frontmatter["fact_key"],
+            serde_json::json!("openalpaca.store.layout")
+        );
+        assert!(note.supersedes.is_empty());
+        assert_eq!(note.status, NoteStatus::Candidate);
+    }
+
     /// **M2.** Task-output knowledge extraction is an internal utility call
-    /// on a 512-token budget, and asks for no reasoning.
+    /// on a 1,024-token budget (design 09 §2.7: aliases and a key per item
+    /// did not fit 512), and asks for no reasoning.
     #[tokio::test]
     async fn the_task_extractor_asks_for_no_reasoning() {
         let scene = Scene::new(r#"{"extractions": []}"#);
@@ -319,7 +389,7 @@ mod through_the_service {
             "the task extractor must ask for no reasoning, got {:?}",
             request.thinking
         );
-        assert_eq!(request.max_tokens, Some(512));
+        assert_eq!(request.max_tokens, Some(1024));
         // Attributed to the run: the usage row names it.
         let logs = LlmUsageRepository::new(&scene.db)
             .get_agent_usage(AGENT_LABEL, 10)

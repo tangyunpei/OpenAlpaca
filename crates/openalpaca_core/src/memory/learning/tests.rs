@@ -9,14 +9,16 @@ use super::queue::StoreHooks;
 use super::*;
 use crate::daemon_config::DaemonConfig;
 use crate::memory::service::{
-    Attribution, Capabilities, ForgetInput, ListInput, ListItem, MemoryAccessContext,
-    MemoryService, ReadInput, Surface, WorkspaceHint,
+    Attribution, Capabilities, ExtractionProvenance, ForgetInput, ListInput, ListItem,
+    MemoryAccessContext, MemoryService, ReadInput, ReadOutput, StoreInput, StoreOutput, Surface,
+    WorkspaceHint,
 };
 use crate::test_util::{HomeStoreGuard, RECORDED_MODEL};
 use arc_swap::ArcSwap;
 use openalpaca_llm::{
     ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter, ProviderType, Usage,
 };
+use openalpaca_storage::memory_files::{EffectiveStatus, NoteId, NoteScope};
 use openalpaca_storage::memory_files::{NoteKind, NoteStatus, Origin, SourceType};
 use openalpaca_storage::memory_index::MemoryIndex;
 use openalpaca_storage::{
@@ -363,6 +365,100 @@ impl Scene {
     fn titles(&self) -> Vec<String> {
         self.active().into_iter().map(|i| i.title).collect()
     }
+
+    /// A note the user saved (origin `user`), with a `## Knowledge` body.
+    fn save(&self, title: &str, knowledge: &str, key: Option<&str>) -> StoreOutput {
+        self.service
+            .store(
+                &self.user_ctx(),
+                StoreInput {
+                    title: title.into(),
+                    body: format!("# {title}\n\n## Knowledge\n{knowledge}\n"),
+                    kind: Some(NoteKind::Fact),
+                    fact_key: key.map(str::to_string),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    }
+
+    /// A note learned earlier (origin `extracted_user`), in the home
+    /// partition, with the body learning writes.
+    fn learned(&self, title: &str, knowledge: &str, key: Option<&str>) -> StoreOutput {
+        let ctx = self
+            .service
+            .context(
+                OWNER,
+                WorkspaceHint::None,
+                Surface::Extraction,
+                Capabilities::EXTRACTION,
+                Attribution::default(),
+            )
+            .unwrap();
+        self.service
+            .store(
+                &ctx,
+                StoreInput {
+                    title: title.into(),
+                    body: format!(
+                        "# {title}\n\n## Knowledge\n{knowledge}\n\n## Evidence and limits\nFrom what you said on 2026-09-01.\n"
+                    ),
+                    kind: Some(NoteKind::Fact),
+                    fact_key: key.map(str::to_string),
+                    provenance: Some(ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    }
+
+    /// A note as the user's own surface reads it.
+    fn read(&self, ctx: &MemoryAccessContext, id: NoteId) -> ReadOutput {
+        self.service
+            .read(
+                ctx,
+                ReadInput {
+                    id,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    }
+
+    /// Sets a row's `created_at` (UTC, SQLite's form).
+    fn set_created_at(&self, row: i64, at: &str) {
+        self.db
+            .with_connection(|c| {
+                c.execute(
+                    "UPDATE conversation_messages SET created_at = ?1 WHERE id = ?2",
+                    (at, row),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+/// One item with every field §2.2 names; `extra` overrides or adds.
+fn full_item(extra: serde_json::Value) -> String {
+    let mut item = serde_json::json!({
+        "title": "Editor preference",
+        "content": "The user edits with Helix.",
+        "kind": "preference",
+        "stated_by": "user",
+        "confidence": 0.9,
+        "rows": [1],
+        "aliases": [],
+        "fact_key": null,
+        "replaces": null,
+        "replace_reason": null,
+        "valid_from": null,
+        "valid_to": null
+    });
+    for (k, v) in extra.as_object().expect("an object").iter() {
+        item[k] = v.clone();
+    }
+    item.to_string()
 }
 
 const PREF: &str = "I prefer vim for editing, always have.";
@@ -406,12 +502,12 @@ async fn a_user_stated_preference_becomes_an_active_extracted_user_note() {
     assert_eq!(learned[0].id, active[0].id);
 }
 
-/// Characterization at HEAD (design 09 §8 L2, D3): the extractor reads only
-/// title, content, kind, stated_by, confidence and rows, so the aliases, the
-/// `fact_key` and the validity a model sends never reach the note, and the
-/// note carries no `observed_at`.
+/// Design 09 §2.2, §2.5 (the flipped characterization of D3): the aliases
+/// — the other language included — the `fact_key` and the validity a model
+/// sends reach the note, and the note records `observed_at`, the time of
+/// its newest cited row.
 #[tokio::test]
-async fn a_learned_note_has_no_aliases_key_or_observed_at() {
+async fn aliases_and_fact_key_reach_the_note() {
     let scene = Scene::new(vec![Say::Text(
         serde_json::json!({"items": [{
             "title": "Editor preference",
@@ -420,15 +516,15 @@ async fn a_learned_note_has_no_aliases_key_or_observed_at() {
             "stated_by": "user",
             "confidence": 0.9,
             "rows": [1],
-            "aliases": ["Helix", "编辑器"],
-            "fact_key": "user.editor",
+            "aliases": ["Helix", "编辑器", "helix", " Editor preference "],
+            "fact_key": "User.Editor",
             "valid_from": "2026-06-01",
             "valid_to": null
         }]})
         .to_string(),
     )]);
     let s = scene.session();
-    scene.turn(&s, "I edit with Helix these days.", "Noted.");
+    let (question, _) = scene.turn(&s, "I edit with Helix these days.", "Noted.");
     let report = scene.queue.flush_session(&s).await;
     assert_eq!(report.active, 1, "{report:?}");
 
@@ -443,10 +539,33 @@ async fn a_learned_note_has_no_aliases_key_or_observed_at() {
             },
         )
         .unwrap();
-    assert_eq!(note.frontmatter["aliases"], serde_json::json!([]));
-    assert_eq!(note.frontmatter["fact_key"], serde_json::Value::Null);
-    assert_eq!(note.frontmatter["observed_at"], serde_json::Value::Null);
-    assert_eq!(note.frontmatter["valid_from"], serde_json::Value::Null);
+    assert_eq!(
+        note.frontmatter["aliases"],
+        serde_json::json!(["Helix", "编辑器"]),
+        "deduplicated without regard to case, the title removed"
+    );
+    assert_eq!(
+        note.frontmatter["fact_key"],
+        serde_json::json!("user.editor")
+    );
+    assert_eq!(
+        note.frontmatter["valid_from"],
+        serde_json::json!("2026-06-01T00:00:00Z")
+    );
+    let created: String = scene
+        .db
+        .with_connection(|c| {
+            Ok(c.query_row(
+                "SELECT created_at FROM conversation_messages WHERE id = ?1",
+                [question],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        note.frontmatter["observed_at"],
+        serde_json::json!(created.replace(' ', "T") + "Z")
+    );
 }
 
 /// **MD-2.** Something the model infers from the assistant's reply is a
@@ -1054,7 +1173,14 @@ async fn a_crash_before_the_cursor_moves_reruns_without_a_duplicate() {
 
     scene.queue.set_store_hooks(StoreHooks::default());
     let rerun = scene.queue.flush_session(&s).await;
-    assert_eq!((rerun.stored, rerun.deduplicated), (0, 1), "{rerun:?}");
+    // Guard (b), §1.4: the lookup finds the note this chunk already taught
+    // through the index's `note_source`, and the item is dropped before any
+    // write — exact dedup would answer the same, one guard later.
+    assert_eq!(
+        (rerun.stored, rerun.dropped_already_learned),
+        (0, 1),
+        "{rerun:?}"
+    );
     assert_eq!(scene.active().len(), 1, "no duplicate");
     assert_eq!(scene.cursor(&s), answer);
 }
@@ -1480,8 +1606,8 @@ fn budget_for_an_8k_window() {
             known_bytes: 8 * 1024,
         }
     );
-    // The default 40,000 TPM caps nothing a 128K model would send (58.5 KiB
-    // of rows and notes beside the request's own 4 KiB).
+    // The default 40,000 TPM caps nothing a 128K model would send (56.5 KiB
+    // of rows and notes beside the request's own 6 KiB).
     assert_eq!(
         Budget::for_window(Some(128_000), 12, Some(40_000)),
         Budget::for_window(Some(128_000), 12, None)
@@ -1494,14 +1620,25 @@ fn budget_for_an_8k_window() {
     );
 }
 
-/// The largest request text a chunk adds to its rows: the fixed prompt, and
-/// two context rows at their cut with the longest label.
+/// The largest request text a chunk adds to its rows and its known notes:
+/// the fixed prompt, and two context rows at their cut with the longest
+/// label.
 fn request_overhead_bytes() -> usize {
-    let prompt: usize = extractor::build_request("", 12, 2800, None)
-        .messages
-        .iter()
-        .map(|m| m.content.len())
-        .sum();
+    let prompt: usize = extractor::build_request(
+        &extractor::PromptInput {
+            today: "2026-09-24",
+            known_notes: "",
+            known_keys: "",
+            conversation: "",
+            max_items: 12,
+        },
+        2800,
+        None,
+    )
+    .messages
+    .iter()
+    .map(|m| m.content.len())
+    .sum();
     let request = "context-turn";
     let before = [
         openalpaca_storage::LearningRow {
@@ -2291,4 +2428,695 @@ async fn a_flush_that_made_no_progress_waits_for_the_next_sweep() {
         .expect("a capped flush restarted itself in a loop");
     assert!(scene.queue.is_due(&s), "still queued for the next sweep");
     assert_eq!(scene.model.calls(), 0);
+}
+
+// ── Richer extraction (design 09 §2, slice L2) ──────────────────────────
+
+/// Rule 8: a key that breaks the grammar is dropped and the item kept.
+#[tokio::test]
+async fn an_invalid_fact_key_drops_the_key_not_the_item() {
+    let scene = Scene::new(vec![items(&[full_item(
+        serde_json::json!({"fact_key": "Editor Preference!"}),
+    )])]);
+    let s = scene.session();
+    scene.turn(&s, "I edit with Helix these days.", "Noted.");
+    let report = scene.queue.flush_session(&s).await;
+    assert_eq!(
+        (report.stored, report.dropped_invalid),
+        (1, 0),
+        "{report:?}"
+    );
+    let note = scene.read(&scene.user_ctx(), scene.active()[0].id);
+    assert_eq!(note.frontmatter["fact_key"], serde_json::Value::Null);
+}
+
+/// Rule 6 of the prompt and §2.5: a key reused from `known_keys` is kept as
+/// is, and — its winner being a learned note the prompt listed, whose value
+/// changed — the new note replaces it automatically (MD-11, LR11).
+#[tokio::test]
+async fn a_reused_key_is_kept() {
+    let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
+        "fact_key": "user.editor",
+        "content": "Since June the user edits with Helix; before that, vim.",
+    }))])]);
+    let old = scene.learned(
+        "Editor preference",
+        "The user edits with vim.",
+        Some("user.editor"),
+    );
+    let s = scene.session();
+    scene.turn(
+        &s,
+        "I switched my editor from vim to Helix in June.",
+        "Noted.",
+    );
+    let report = scene.queue.flush_session(&s).await;
+    let prompt = &scene.model.prompts()[0];
+    assert!(
+        prompt.contains("<known_keys>user.editor</known_keys>"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("n1 key=user.editor origin=learned"),
+        "{prompt}"
+    );
+    assert_eq!((report.stored, report.replaced), (1, 1), "{report:?}");
+
+    let ctx = scene.user_ctx();
+    let new = scene
+        .active()
+        .into_iter()
+        .find(|i| i.id != old.id)
+        .expect("the replacement");
+    let note = scene.read(&ctx, new.id);
+    assert_eq!(
+        note.frontmatter["fact_key"],
+        serde_json::json!("user.editor")
+    );
+    assert_eq!(note.supersedes, vec![old.id]);
+    assert_eq!(
+        scene.read(&ctx, old.id).effective_status,
+        EffectiveStatus::Superseded
+    );
+}
+
+/// Rule 9: a `replaces` that names no listed note is dropped and counted;
+/// the item is kept, as a new note.
+#[tokio::test]
+async fn an_unknown_replaces_ref_is_ignored() {
+    let scene = Scene::new(vec![items(&[full_item(
+        serde_json::json!({"replaces": "n7", "replace_reason": "a guess"}),
+    )])]);
+    let s = scene.session();
+    scene.turn(&s, "I edit with Helix these days.", "Noted.");
+    let report = scene.queue.flush_session(&s).await;
+    assert_eq!(
+        (report.stored, report.replaces_unknown, report.replaced),
+        (1, 1, 0),
+        "{report:?}"
+    );
+    let note = scene.read(&scene.user_ctx(), scene.active()[0].id);
+    assert!(note.supersedes.is_empty());
+    assert!(!note.body.contains("Replaces"), "{}", note.body);
+}
+
+/// §2.5: `observed_at` is the `created_at` of the item's newest cited row,
+/// and the evidence line dates the note by it.
+#[tokio::test]
+async fn observed_at_is_the_newest_cited_rows_time() {
+    let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
+        "title": "Commute",
+        "content": "The user cycles to work, and has since September.",
+        "kind": "fact",
+        "rows": [3, 1],
+    }))])]);
+    let s = scene.session();
+    let (first, _) = scene.turn(&s, "I cycle to work now.", "Nice.");
+    let (second, _) = scene.turn(&s, "Since September, every day.", "Great.");
+    scene.set_created_at(first, "2026-09-20 10:00:00");
+    scene.set_created_at(second, "2026-09-21 11:30:00");
+    scene.queue.flush_session(&s).await;
+    let note = scene.read(&scene.user_ctx(), scene.active()[0].id);
+    assert_eq!(
+        note.frontmatter["observed_at"],
+        serde_json::json!("2026-09-21T11:30:00Z")
+    );
+    assert_eq!(
+        note.sources
+            .iter()
+            .map(|s| s.observed_at.map(|t| t.to_rfc3339()))
+            .collect::<Vec<_>>(),
+        vec![
+            Some("2026-09-20T10:00:00+00:00".to_string()),
+            Some("2026-09-21T11:30:00+00:00".to_string())
+        ]
+    );
+    assert!(
+        note.body.contains("From what you said on 2026-09-21."),
+        "{}",
+        note.body
+    );
+}
+
+/// Rule 10 (§2.2): a date-only `valid_to` is the next day's midnight, so
+/// the stated last day is inside the half-open window; an inverted pair
+/// drops both bounds and keeps the item.
+#[tokio::test]
+async fn a_date_only_valid_to_includes_that_day() {
+    let scene = Scene::new(vec![items(&[
+        full_item(serde_json::json!({
+            "title": "Berlin trip",
+            "content": "The user is in Berlin from 1 to 5 October 2026.",
+            "kind": "episode",
+            "valid_from": "2026-10-01",
+            "valid_to": "2026-10-05",
+        })),
+        full_item(serde_json::json!({
+            "title": "Rome trip",
+            "content": "The user goes to Rome in November 2026.",
+            "kind": "episode",
+            "valid_from": "2026-11-09",
+            "valid_to": "2026-11-02",
+        })),
+    ])]);
+    let s = scene.session();
+    scene.turn(
+        &s,
+        "I'm in Berlin 1-5 October, then Rome in November.",
+        "Noted.",
+    );
+    let report = scene.queue.flush_session(&s).await;
+    assert_eq!(report.stored, 2, "{report:?}");
+    let ctx = scene.user_ctx();
+    let by_title = |t: &str| {
+        let id = scene
+            .active()
+            .into_iter()
+            .find(|i| i.title == t)
+            .unwrap()
+            .id;
+        scene.read(&ctx, id)
+    };
+    let berlin = by_title("Berlin trip");
+    assert_eq!(
+        berlin.frontmatter["valid_from"],
+        serde_json::json!("2026-10-01T00:00:00Z")
+    );
+    assert_eq!(
+        berlin.frontmatter["valid_to"],
+        serde_json::json!("2026-10-06T00:00:00Z")
+    );
+    let rome = by_title("Rome trip");
+    assert_eq!(rome.frontmatter["valid_from"], serde_json::Value::Null);
+    assert_eq!(rome.frontmatter["valid_to"], serde_json::Value::Null);
+}
+
+/// Rule 11: two items with one key keep the one whose newest cited row is
+/// latest.
+#[tokio::test]
+async fn two_items_with_one_key_keep_the_latest() {
+    let scene = Scene::new(vec![items(&[
+        full_item(serde_json::json!({
+            "fact_key": "user.editor",
+            "content": "The user edits with vim.",
+            "rows": [3],
+        })),
+        full_item(serde_json::json!({
+            "fact_key": "user.editor",
+            "content": "The user edits with Helix.",
+            "rows": [1],
+        })),
+    ])]);
+    let s = scene.session();
+    scene.turn(&s, "I used to edit with Helix.", "Noted.");
+    scene.turn(&s, "Actually I edit with vim again.", "Noted.");
+    let report = scene.queue.flush_session(&s).await;
+    assert_eq!(
+        (report.stored, report.dropped_duplicate_key),
+        (1, 1),
+        "{report:?}"
+    );
+    let note = scene.read(&scene.user_ctx(), scene.active()[0].id);
+    assert!(
+        note.body.contains("The user edits with vim."),
+        "{}",
+        note.body
+    );
+}
+
+/// Rule 11, second pass: one item names the listed note by `replaces`, the
+/// other reaches the same note by its key; one survives — the later.
+#[tokio::test]
+async fn two_items_reaching_one_target_by_different_routes_keep_one() {
+    let scene = Scene::new(vec![items(&[
+        full_item(serde_json::json!({
+            "title": "Editor",
+            "content": "The user edits with Emacs.",
+            "rows": [1],
+            "replaces": "n1",
+        })),
+        full_item(serde_json::json!({
+            "content": "The user edits with Helix.",
+            "fact_key": "user.editor",
+            "rows": [3],
+        })),
+    ])]);
+    let old = scene.learned(
+        "Editor preference",
+        "The user edits with vim.",
+        Some("user.editor"),
+    );
+    let s = scene.session();
+    scene.turn(&s, "I tried Emacs instead of vim for my editor.", "Noted.");
+    scene.turn(&s, "No, Helix is my editor now.", "Noted.");
+    let report = scene.queue.flush_session(&s).await;
+    assert!(
+        scene.model.prompts()[0].contains("n1 key=user.editor"),
+        "the learned note is listed as n1"
+    );
+    assert_eq!(
+        (report.stored, report.replaced, report.dropped_duplicate_key),
+        (1, 1, 1),
+        "{report:?}"
+    );
+    let active = scene.active();
+    assert_eq!(active.len(), 1, "{active:?}");
+    let note = scene.read(&scene.user_ctx(), active[0].id);
+    assert!(note.body.contains("Helix"), "{}", note.body);
+    assert_eq!(note.supersedes, vec![old.id]);
+}
+
+/// §2.5, case 2 for a saved note: the prompt listed it, the model reused
+/// its key without calling it replaced — a restatement, dropped as
+/// `unchanged`, and no suggestion is raised.
+#[tokio::test]
+async fn a_restated_listed_saved_fact_is_unchanged() {
+    let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
+        "title": "Laptop",
+        "content": "The user works on a ThinkPad X1 laptop.",
+        "kind": "fact",
+        "fact_key": "user.laptop",
+    }))])]);
+    let saved = scene.save(
+        "Work laptop",
+        "The user's work laptop is a ThinkPad X1.",
+        Some("user.laptop"),
+    );
+    let s = scene.session();
+    scene.turn(&s, "My work laptop is a ThinkPad X1, by the way.", "Noted.");
+    let report = scene.queue.flush_session(&s).await;
+    assert!(
+        scene.model.prompts()[0].contains("origin=saved-by-you"),
+        "the saved note is listed"
+    );
+    assert_eq!(
+        (report.stored, report.dropped_unchanged, report.suggestions),
+        (0, 1, 0),
+        "{report:?}"
+    );
+    let active = scene.active();
+    assert_eq!(active.len(), 1);
+    assert_eq!(
+        (active[0].id, &active[0].revision),
+        (saved.id, &saved.revision)
+    );
+}
+
+/// §2.5, case 2 for a learned note: equal knowledge after normalisation —
+/// case, spacing, trailing punctuation — is a restatement.
+#[tokio::test]
+async fn a_learned_restatement_with_equal_content_is_unchanged() {
+    let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
+        "title": "Editor",
+        "content": "the user  edits with VIM",
+        "fact_key": "user.editor",
+    }))])]);
+    let learned = scene.learned(
+        "Editor preference",
+        "The user edits with vim.",
+        Some("user.editor"),
+    );
+    let s = scene.session();
+    scene.turn(&s, "I edit with vim, as always.", "Noted.");
+    let report = scene.queue.flush_session(&s).await;
+    assert_eq!(
+        (report.stored, report.dropped_unchanged),
+        (0, 1),
+        "{report:?}"
+    );
+    assert_eq!(
+        scene.active().into_iter().map(|i| i.id).collect::<Vec<_>>(),
+        vec![learned.id]
+    );
+}
+
+/// §2.5, case 3: the note the key names was never shown to the model — a
+/// change in new words is what the lexical lookup misses — so it is a
+/// change, and against a note the user saved it is a suggestion (MD-11,
+/// G2): the saved note stays exactly as it was. S1 and S2 (L3) write the
+/// suggestion; until then it is decided and counted, never applied.
+#[tokio::test]
+async fn a_change_against_an_unlisted_saved_note_is_a_suggestion() {
+    let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
+        "title": "Commute",
+        "content": "Since March 2026 the user cycles to the office; before that, the bus.",
+        "kind": "fact",
+        "fact_key": "user.commute",
+    }))])]);
+    let saved = scene.save("Commute", "The user commutes by bus.", Some("user.commute"));
+    let s = scene.session();
+    scene.turn(&s, "Since March I cycle to the office.", "Noted.");
+    let report = scene.queue.flush_session(&s).await;
+    assert!(
+        !scene.model.prompts()[0].contains("\"Commute\""),
+        "the saved note was not listed: {}",
+        scene.model.prompts()[0]
+    );
+    assert_eq!(
+        (report.suggestions, report.stored, report.dropped_unchanged),
+        (1, 0, 0),
+        "{report:?}"
+    );
+    let active = scene.active();
+    assert_eq!(active.len(), 1, "{active:?}");
+    assert_eq!(
+        (active[0].id, &active[0].revision),
+        (saved.id, &saved.revision)
+    );
+    assert_eq!(active[0].origin, Origin::User);
+    assert!(
+        scene.candidates().is_empty(),
+        "nothing is written before L3"
+    );
+}
+
+/// Rulings LR10, LR11: a learned `user.*` fact restated with a new value
+/// in a project chat replaces the **global** note — its key is looked up in
+/// both of the chunk's partitions, and the replacement is written in its
+/// target's — instead of piling up a second note in the project.
+#[tokio::test]
+async fn a_global_fact_restated_in_a_project_session_replaces_it() {
+    let (_dir, root) = project();
+    let root_str = root.to_string_lossy().to_string();
+    let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
+        "title": "Work laptop",
+        "content": "The user's work laptop is now a MacBook Pro; before, a ThinkPad X1.",
+        "kind": "fact",
+        "fact_key": "user.laptop",
+        "replace_reason": "The user said they got a new work laptop.",
+    }))])]);
+    let old = scene.learned(
+        "Work laptop",
+        "The user's work laptop is a ThinkPad X1.",
+        Some("user.laptop"),
+    );
+    let s = scene.session();
+    scene.turn_in(
+        &s,
+        "I got a new work laptop: a MacBook Pro.",
+        "Noted.",
+        Some(&root_str),
+    );
+    let report = scene.queue.flush_session(&s).await;
+    assert_eq!((report.stored, report.replaced), (1, 1), "{report:?}");
+
+    let in_project = scene.ctx_in(Some(&root));
+    let project_notes: Vec<ListItem> = scene
+        .list(&in_project, None)
+        .into_iter()
+        .filter(|i| i.scope == NoteScope::Project)
+        .collect();
+    assert!(project_notes.is_empty(), "{project_notes:?}");
+    let new = scene
+        .active()
+        .into_iter()
+        .find(|i| i.id != old.id)
+        .expect("the replacement");
+    assert_eq!(new.scope, NoteScope::Global);
+    let note = scene.read(&scene.user_ctx(), new.id);
+    assert_eq!(note.supersedes, vec![old.id]);
+    assert!(
+        note.body.contains(
+            "Replaces “Work laptop” (learned): The user said they got a new work laptop."
+        ),
+        "{}",
+        note.body
+    );
+    assert_eq!(
+        scene.read(&scene.user_ctx(), old.id).effective_status,
+        EffectiveStatus::Superseded
+    );
+}
+
+/// Ruling LR17: a learned note whose key's subject is `user` and that
+/// replaces nothing is global whatever its kind — a `fact` learned in a
+/// project chat is still the user's — while a project's own key stays in
+/// the project.
+#[tokio::test]
+async fn a_user_fact_first_learned_in_a_project_is_global() {
+    let (_dir, root) = project();
+    let root_str = root.to_string_lossy().to_string();
+    let scene = Scene::new(vec![items(&[
+        full_item(serde_json::json!({
+            "title": "Work laptop",
+            "content": "The user's work laptop is a ThinkPad X1.",
+            "kind": "fact",
+            "fact_key": "user.laptop",
+        })),
+        full_item(serde_json::json!({
+            "title": "Staging database",
+            "content": "Lantern's staging database is Postgres 16.",
+            "kind": "fact",
+            "fact_key": "lantern.staging.db",
+        })),
+    ])]);
+    let s = scene.session();
+    scene.turn_in(
+        &s,
+        "My work laptop is a ThinkPad X1, and staging runs Postgres 16.",
+        "Noted.",
+        Some(&root_str),
+    );
+    let report = scene.queue.flush_session(&s).await;
+    assert_eq!(report.stored, 2, "{report:?}");
+    let notes = scene.list(&scene.ctx_in(Some(&root)), None);
+    let scope_of = |t: &str| notes.iter().find(|i| i.title == t).unwrap().scope;
+    assert_eq!(scope_of("Work laptop"), NoteScope::Global);
+    assert_eq!(scope_of("Staging database"), NoteScope::Project);
+}
+
+/// Guard (b) needs equal knowledge, not only the key: a re-run whose item
+/// keeps the key but changes the value corrects the earlier copy (guard
+/// (c)) — one note stays recallable, and it is the new one.
+#[tokio::test]
+async fn already_learned_needs_equal_content_not_only_the_key() {
+    let scene = Scene::new(vec![
+        items(&[full_item(serde_json::json!({
+            "fact_key": "user.editor",
+            "content": "The user edits with vim.",
+        }))]),
+        items(&[full_item(serde_json::json!({
+            "fact_key": "user.editor",
+            "content": "The user edits with Helix.",
+        }))]),
+    ]);
+    let s = scene.session();
+    scene.turn(&s, "I edit with Helix, not vim.", "Noted.");
+    scene.queue.set_store_hooks(StoreHooks {
+        skip_advance: true,
+        ..StoreHooks::default()
+    });
+    let first = scene.queue.flush_session(&s).await;
+    assert_eq!(first.stored, 1, "{first:?}");
+    let earlier = scene.active()[0].id;
+
+    scene.queue.set_store_hooks(StoreHooks::default());
+    let rerun = scene.queue.flush_session(&s).await;
+    assert_eq!(
+        (rerun.dropped_already_learned, rerun.stored, rerun.replaced),
+        (0, 1, 1),
+        "{rerun:?}"
+    );
+    let active = scene.active();
+    assert_eq!(active.len(), 1, "{active:?}");
+    assert_ne!(active[0].id, earlier);
+    let note = scene.read(&scene.user_ctx(), active[0].id);
+    assert_eq!(note.supersedes, vec![earlier]);
+}
+
+/// Guard (b) over candidates: exact dedup covers effectively active notes
+/// only, so a re-run of a chunk whose item was inferred used to write a
+/// second, identical candidate. The lookup finds this window's candidate
+/// through `note_source`.
+#[tokio::test]
+async fn a_rerun_never_duplicates_an_inferred_candidate() {
+    let inferred = || {
+        items(&[item(
+            "Probably uses Rust",
+            "The user's project is probably written in Rust.",
+            "fact",
+            "assistant",
+            &[2],
+        )])
+    };
+    let scene = Scene::new(vec![inferred(), inferred()]);
+    let s = scene.session();
+    scene.turn(
+        &s,
+        "Can you look at my project and tell me what it does?",
+        "It looks like a Rust workspace.",
+    );
+    scene.queue.set_store_hooks(StoreHooks {
+        skip_advance: true,
+        ..StoreHooks::default()
+    });
+    let first = scene.queue.flush_session(&s).await;
+    assert_eq!(first.candidates, 1, "{first:?}");
+    scene.queue.set_store_hooks(StoreHooks::default());
+    let rerun = scene.queue.flush_session(&s).await;
+    assert_eq!(
+        (rerun.stored, rerun.dropped_already_learned),
+        (0, 1),
+        "{rerun:?}"
+    );
+    assert_eq!(scene.candidates().len(), 1);
+}
+
+/// §2.6: the body follows design 03 §4's sections. `## Knowledge` holds
+/// exactly the item's content; `## Evidence and limits` says whose words
+/// it was and when.
+#[tokio::test]
+async fn the_note_body_has_knowledge_and_evidence_sections() {
+    let scene = Scene::new(vec![items(&[
+        vim_item(&[1]),
+        item(
+            "Probably uses Rust",
+            "The user's project is probably written in Rust.",
+            "fact",
+            "assistant",
+            &[2],
+        ),
+    ])]);
+    let s = scene.session();
+    let (question, answer) = scene.turn(&s, PREF, "It looks like a Rust workspace.");
+    scene.set_created_at(question, "2026-09-24 10:02:11");
+    scene.set_created_at(answer, "2026-09-24 10:02:40");
+    scene.queue.flush_session(&s).await;
+    let ctx = scene.user_ctx();
+    let learned = scene.read(&ctx, scene.active()[0].id);
+    assert_eq!(
+        learned.body,
+        "# Editor preference\n\n## Knowledge\nThe user prefers vim for editing.\n\n## Evidence and limits\nFrom what you said on 2026-09-24.\n"
+    );
+    let inferred = scene.read(&ctx, scene.candidates()[0].id);
+    assert_eq!(
+        inferred.body,
+        "# Probably uses Rust\n\n## Knowledge\nThe user's project is probably written in Rust.\n\n## Evidence and limits\nInferred from the conversation on 2026-09-24; not said by you.\n"
+    );
+}
+
+/// §2.3 step 3 end to end: a note named only at the end of a long row is
+/// still looked up — the row's last window is searched — and listed.
+#[tokio::test]
+async fn a_note_named_late_in_a_long_row_is_listed() {
+    let scene = Scene::new(vec![]);
+    scene.save(
+        "Espresso machine",
+        "The user owns a Gaggia espresso machine.",
+        None,
+    );
+    let s = scene.session();
+    let message = format!(
+        "{} and finally the gaggia broke.",
+        "Here is the whole story of my week at work. ".repeat(60)
+    );
+    assert!(message.chars().count() > 4 * 512);
+    scene.turn(&s, &message, "Sorry to hear.");
+    scene.queue.flush_session(&s).await;
+    assert!(
+        scene.model.prompts()[0].contains("\"Espresso machine\""),
+        "{}",
+        scene.model.prompts()[0]
+    );
+}
+
+/// The prompt is the committed fixture (§2.1): one fixed chunk, with its
+/// context rows, known notes and keys, renders byte for byte to the golden
+/// file beside it.
+#[test]
+fn the_extractor_prompt_matches_its_fixture() {
+    let row = |id: i64, role: &str, content: &str, request: &str, at: &str| {
+        openalpaca_storage::LearningRow {
+            id,
+            role: role.to_string(),
+            content: content.to_string(),
+            source: Some("gui".to_string()),
+            created_at: at.to_string(),
+            request_id: Some(request.to_string()),
+            workspace_root: None,
+        }
+    };
+    let before = [
+        row(1, "user", "I edit with vim.", "a", "2026-09-24 10:00:03"),
+        row(2, "assistant", "Noted: vim.", "a", "2026-09-24 10:00:20"),
+    ];
+    let rows = [
+        row(
+            3,
+            "user",
+            "I switched to Helix in June, and I commute by train now.",
+            "b",
+            "2026-09-24 10:02:11",
+        ),
+        row(
+            4,
+            "assistant",
+            "Got it: Helix, and the train.",
+            "b",
+            "2026-09-24 10:02:40",
+        ),
+    ];
+    let window::NextChunk::Chunk(chunk) = window::next_chunk(
+        &rows,
+        &before,
+        &std::collections::HashSet::new(),
+        24 * 1024,
+        400,
+    ) else {
+        panic!("a chunk");
+    };
+    let known = |title: &str, knowledge: &str, key: Option<&str>, origin: Origin| {
+        crate::memory::service::KnownNote {
+            id: NoteId::new(),
+            revision: "0".repeat(64),
+            partition_key: "home-x".into(),
+            scope: NoteScope::Global,
+            title: title.into(),
+            kind: NoteKind::Preference,
+            origin,
+            effective_status: EffectiveStatus::Active,
+            fact_key: key.map(str::to_string),
+            knowledge: knowledge.into(),
+            supersedes: Vec::new(),
+            from_this_window: false,
+        }
+    };
+    let view = crate::memory::service::LearningView {
+        notes: vec![
+            known(
+                "Editor preference",
+                "The user edits with vim.",
+                Some("user.editor"),
+                Origin::ExtractedUser,
+            ),
+            known(
+                "Commute",
+                "The user commutes by bus.",
+                Some("user.commute"),
+                Origin::User,
+            ),
+        ],
+        from_this_window: Vec::new(),
+        keys: vec![
+            "user.editor".into(),
+            "user.commute".into(),
+            "user.laptop".into(),
+        ],
+    };
+    let lookup = lookup::render(view, 8 * 1024);
+    let (transcript, _) = chunk.transcript();
+    let today = chunk.today();
+    let (system, user) = extractor::render_prompt(&extractor::PromptInput {
+        today: &today,
+        known_notes: &lookup.notes_text,
+        known_keys: &lookup.keys_text,
+        conversation: &transcript,
+        max_items: 12,
+    });
+    let rendered = format!("{system}\n=== rendered user message ===\n{user}\n");
+    assert!(
+        !rendered.contains("{{"),
+        "a placeholder was left: {rendered}"
+    );
+    assert_eq!(rendered, include_str!("extractor_prompt.golden.txt"));
 }
