@@ -273,18 +273,12 @@ pub async fn run_lead_agent(
         owner_id: Some(created_by.to_string()),
         workspace_id: workspace.workspace_id.clone(),
         request_workspace_root: workspace.request_workspace_root.clone(),
-        skill_stack: vec![],
-        effective_constraints: None,
         lane_key: Some(lane_key.to_string()),
         source: Some(source.to_string()),
-        request_id: None,
-        principal: None,
-        scope: None,
-        workspace_path: None,
-        // Filled in by the sandbox at dispatch (T28), which owns the bus.
-        session_id: None,
-        session_log: None,
-        event_bus: None,
+        // No request, principal, scope or workspace path is threaded to the
+        // lead, and the bus and session handles are the sandbox's to fill in
+        // at dispatch (T28).
+        ..Default::default()
     };
 
     // Build a per-request ToolRegistry containing the base tools plus

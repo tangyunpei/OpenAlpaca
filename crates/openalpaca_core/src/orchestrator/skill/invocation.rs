@@ -751,24 +751,18 @@ impl Orchestrator {
                 // `agent_id="unknown"`, so a refused tool could not be traced
                 // back to what invoked it.
                 agent_id: Some(format!("skill:{skill_name}")),
-                task_id: None,
                 owner_id: owner_id.map(|s| s.to_string()),
                 workspace_id: scope_ctx.workspace_id.clone(),
                 request_workspace_root: scope_ctx.request_workspace_root.clone(),
                 skill_stack: vec![skill_name.to_string()],
-                effective_constraints: None,
                 lane_key: Some(lane_key.to_string()),
                 source: Some(source.to_string()),
                 request_id: Some(request_id),
-                principal: None,
-                scope: None,
-                workspace_path: None,
-                // No agent instance: this path is not a subagent lane.
-                agent_instance_id: None,
-                // Filled in by the sandbox at dispatch (T28), which owns the bus.
-                session_id: None,
-                session_log: None,
-                event_bus: None,
+                // No run, no principal or scope, no workspace path, no agent
+                // instance (this path is not a subagent lane); the bus and
+                // session handles are the sandbox's to fill in at dispatch
+                // (T28).
+                ..Default::default()
             };
             let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
                 || !skill_doc.frontmatter.depends_on.is_empty();
@@ -1252,24 +1246,16 @@ impl Orchestrator {
         let tool_ctx = ToolContext {
             // V5, as on the file-skill tier above.
             agent_id: Some(format!("skill:{skill_name}")),
-            task_id: None,
             owner_id: owner_id.map(|s| s.to_string()),
             workspace_id: scope_ctx.workspace_id.clone(),
             request_workspace_root: scope_ctx.request_workspace_root.clone(),
             skill_stack: vec![skill_name.to_string()],
-            effective_constraints: None,
             lane_key: Some(lane_key.to_string()),
             source: Some(source.to_string()),
             request_id: Some(request_id),
-            principal: None,
-            scope: None,
-            workspace_path: None,
-            // No agent instance: this path is not a subagent lane.
-            agent_instance_id: None,
-            // Filled in by the sandbox at dispatch (T28), which owns the bus.
-            session_id: None,
-            session_log: None,
-            event_bus: None,
+            // As on the file-skill tier above: everything else unset, and
+            // the bus and session handles filled in by the sandbox (T28).
+            ..Default::default()
         };
 
         let callback = SandboxToolCallback {

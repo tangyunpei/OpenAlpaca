@@ -145,12 +145,9 @@ impl Orchestrator {
             // lines), and it is what every event, audit row and artifact this
             // turn produces is now attributed to.
             agent_id: Some(MAIN_LOOP_AGENT_ID.to_string()),
-            task_id: None,
             owner_id: owner_id.map(|s| s.to_string()),
             workspace_id: scope_ctx.workspace_id.clone(),
             request_workspace_root: scope_ctx.request_workspace_root.clone(),
-            skill_stack: vec![],
-            effective_constraints: None,
             lane_key: Some(lane_key.to_string()),
             source: Some(source.to_string()),
             request_id: Some(request_id),
@@ -165,12 +162,10 @@ impl Orchestrator {
                 }
                 _ => None,
             },
-            // No agent instance: this path is not a subagent lane.
-            agent_instance_id: None,
-            // Filled in by the sandbox at dispatch (T28), which owns the bus.
-            session_id: None,
-            session_log: None,
-            event_bus: None,
+            // Everything else is unset: no run (`task_id`), no skill chain, no
+            // agent instance (this path is not a subagent lane), and the bus
+            // and session handles the sandbox fills in at dispatch (T28).
+            ..Default::default()
         };
 
         // M6: whether the client behind this turn can answer a confirmation

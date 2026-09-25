@@ -343,19 +343,11 @@ impl BuiltInTool for SpawnSubagentTool {
             owner_id: Some(self.created_by.clone()),
             workspace_id: self.workspace.workspace_id.clone(),
             request_workspace_root: self.workspace.request_workspace_root.clone(),
-            skill_stack: vec![],
-            effective_constraints: None,
-            // Subagents are lane-detached: no lane/request threading here.
-            lane_key: None,
-            source: None,
-            request_id: None,
-            principal: None,
-            scope: None,
-            workspace_path: None,
-            // Filled in by the sandbox at dispatch (T28), which owns the bus.
-            session_id: None,
-            session_log: None,
-            event_bus: None,
+            // Subagents are lane-detached: no lane, source, request,
+            // principal, scope or workspace path is threaded here, and the
+            // bus and session handles are the sandbox's to fill in at
+            // dispatch (T28).
+            ..Default::default()
         };
         let mut sandbox = SandboxManager::new(
             self.tool_registry.clone(),
