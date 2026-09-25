@@ -52,13 +52,15 @@ export interface SkippedAttachmentRef {
 
 /**
  * One memory note the turn delivered (memory redesign, design §5 step 8): an
- * automatic recall (`recall`), a pinned note (`pinned`), or one the model
- * fetched with `memory_search`/`memory_read` in that turn (`tool`).
+ * automatic recall (`recall`), a pinned note (`pinned`), a note the recall
+ * listed in its index block without its text (`index`, design 09 §13.2), or
+ * one the model fetched with `memory_search`/`memory_read` in that turn
+ * (`tool`).
  */
 export interface MemoryUsedRef {
   id: string;
   revision: string;
-  reason: "pinned" | "recall" | "tool" | (string & {});
+  reason: "pinned" | "recall" | "index" | "tool" | (string & {});
 }
 
 /**

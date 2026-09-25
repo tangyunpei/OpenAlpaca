@@ -3,10 +3,12 @@
  * (design §5 step 8, §7 *Surfaces*; plan 3.9).
  *
  * The notes the turn delivered to the model: recalled automatically for the
- * question (`recall`), pinned (`pinned`), or fetched by the model itself with
- * `memory_search`/`memory_read` (`tool`). Each opens in the Memory view, where
- * a wrong one can be corrected or forgotten — the point of saying which notes
- * shaped an answer is that the owner can do something about one.
+ * question (`recall`), pinned (`pinned`), listed for it in the recall's index
+ * block without their text (`index`, design 09 §13.2), or fetched by the
+ * model itself with `memory_search`/`memory_read` (`tool`). Each opens in the
+ * Memory view, where a wrong one can be corrected or forgotten — the point of
+ * saying which notes shaped an answer is that the owner can do something
+ * about one.
  *
  * The muted-note shape of `SkippedAttachmentsNote` (§3.15), and **live only**
  * for the same reason: nothing persists `memory_used`, so a reloaded
@@ -28,6 +30,8 @@ export function usedReasonLabel(reason: string): string {
       return "recalled";
     case "pinned":
       return "pinned";
+    case "index":
+      return "listed";
     case "tool":
       return "looked up";
     default:
