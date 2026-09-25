@@ -7611,6 +7611,130 @@ async fn a_preference_that_appears_only_in_an_attachments_text_yields_no_note() 
     );
 }
 
+// ── Learning v2 characterization: the cadence at HEAD (design 09 §0.2) ──
+//
+// These pin what the per-turn extractor does before Learning v2 replaces it
+// (design 09 §8.12, L1 commit 3). The extractor commit flips each one.
+
+/// The extractor calls `requests` recorded, of every kind.
+fn extractor_calls(requests: &std::sync::Mutex<Vec<ChatRequest>>) -> Vec<ChatRequest> {
+    requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| MarkerExtractorLlm::is_extractor_call(r))
+        .cloned()
+        .collect()
+}
+
+/// An orchestrator over [`MarkerExtractorLlm`] with `config` as given — the
+/// shipped cadence, unless the test changes it.
+fn cadence_orchestrator(
+    db: openalpaca_storage::Database,
+    config: DaemonConfig,
+) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(MarkerExtractorLlm {
+            requests: requests.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let orch =
+        make_orchestrator_with_llm_agents_and_config(Arc::new(router), vec![], config, Some(db));
+    (orch, requests)
+}
+
+/// **D1, at HEAD.** Only every fifth turn of a lane is extracted, and only
+/// that turn: four turns reach the extractor zero times.
+#[tokio::test]
+async fn default_cadence_extracts_one_turn_in_five() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = ExtractionScene::new(&db);
+    let (orch, requests) = cadence_orchestrator(db, DaemonConfig::default());
+    orch.set_memory_service(scene.service.clone());
+
+    for i in 0..4 {
+        orch.handle_message(user1_request(&format!(
+            "Turn {i}: the user prefers vim for editing, every time."
+        )))
+        .await
+        .unwrap();
+        orch.background().wait_idle().await;
+    }
+    assert_eq!(
+        extractor_calls(&requests).len(),
+        0,
+        "four turns, no extraction"
+    );
+    assert!(scene.active_titles().is_empty());
+}
+
+/// **D2, at HEAD.** The user's message is cut to 800 characters before the
+/// extractor sees it: the tail of a 2,000-character message never arrives.
+#[tokio::test]
+async fn a_long_message_is_cut_to_800_chars() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = ExtractionScene::new(&db);
+    let mut config = DaemonConfig::default();
+    config.orchestrator.costs.extract_every_n_turns = 1;
+    let (orch, requests) = cadence_orchestrator(db, config);
+    orch.set_memory_service(scene.service.clone());
+
+    let tail = "TAIL-SENTINEL-the-end-of-the-message";
+    let message = format!("{}{tail}", "a".repeat(2000 - tail.len()));
+    assert_eq!(message.chars().count(), 2000);
+    orch.handle_message(user1_request(&message)).await.unwrap();
+    orch.background().wait_idle().await;
+
+    let calls = extractor_calls(&requests);
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].messages.iter().all(|m| !m.content.contains(tail)),
+        "the message's tail reached the extractor"
+    );
+    assert!(
+        calls[0]
+            .messages
+            .iter()
+            .any(|m| m.content.contains(&"a".repeat(800))),
+        "the first 800 characters did"
+    );
+}
+
+/// **F7, at HEAD.** A follow-up replays the model's own `queue_followup`
+/// text as a `user` turn with source `internal`, and the extractor files it
+/// as the user's own words: an active `extracted_user` note.
+#[tokio::test]
+async fn a_followup_row_mints_an_extracted_user_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = ExtractionScene::new(&db);
+    let mut config = DaemonConfig::default();
+    config.orchestrator.costs.extract_every_n_turns = 1;
+    let (orch, _requests) = cadence_orchestrator(db, config);
+    orch.set_memory_service(scene.service.clone());
+
+    // What the follow-up runner hands the gateway: the assistant-written
+    // text, source `internal`, on the originating lane.
+    let followup = HandleRequest {
+        source: "internal".to_string(),
+        lane_key: "user1:gui".to_string(),
+        ..user1_request("Next, remember the user prefers vim for editing and set it up.")
+    };
+    orch.handle_message(followup).await.unwrap();
+    orch.background().wait_idle().await;
+
+    assert_eq!(
+        scene.active_titles(),
+        vec!["Editor preference".to_string()],
+        "the assistant's own text became an active note in the user's name"
+    );
+}
+
 // ── Onboarding completes from the files, with no background writer (MD-3) ──
 
 const BOOTSTRAP_MD: &str = "---\nsummary: \"x\"\nread_when:\n  - y\n---\n\n# Hello\n";
