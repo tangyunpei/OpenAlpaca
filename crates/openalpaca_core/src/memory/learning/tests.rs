@@ -1437,14 +1437,69 @@ fn budget_for_an_8k_window() {
             known_bytes: 8 * 1024,
         }
     );
-    // The default 40,000 TPM caps nothing a 128K model would send (62.5 KiB).
+    // The default 40,000 TPM caps nothing a 128K model would send (58.5 KiB
+    // of rows and notes beside the request's own 4 KiB).
     assert_eq!(
         Budget::for_window(Some(128_000), 12, Some(40_000)),
         Budget::for_window(Some(128_000), 12, None)
     );
-    // A key configured far below it does.
+    // A key configured far below it does, leaving room for the prompt.
     let tight = Budget::for_window(Some(128_000), 12, Some(10_000));
-    assert_eq!(tight.transcript_bytes, 16_000 * 7 / 10);
+    assert_eq!(
+        tight.transcript_bytes,
+        (16_000 - REQUEST_OVERHEAD_BYTES) * 7 / 10
+    );
+}
+
+/// The largest request text a chunk adds to its rows: the fixed prompt, and
+/// two context rows at their cut with the longest label.
+fn request_overhead_bytes() -> usize {
+    let prompt: usize = extractor::build_request("", 12, 2800, None)
+        .messages
+        .iter()
+        .map(|m| m.content.len())
+        .sum();
+    let request = "context-turn";
+    let before = [
+        openalpaca_storage::LearningRow {
+            id: 1,
+            role: "user".to_string(),
+            content: "u".repeat(LONG_USER_ROW_BYTES + 1),
+            source: Some("gui".to_string()),
+            created_at: "2026-09-24 10:00:00".to_string(),
+            request_id: Some(request.to_string()),
+            workspace_root: None,
+        },
+        openalpaca_storage::LearningRow {
+            id: 2,
+            role: "assistant".to_string(),
+            content: "a".repeat(LONG_USER_ROW_BYTES + 1),
+            source: Some("gui".to_string()),
+            created_at: "2026-09-24 10:00:01".to_string(),
+            request_id: Some(request.to_string()),
+            workspace_root: None,
+        },
+    ];
+    let context = window::context_rows(&before);
+    assert_eq!(context.len(), 2);
+    let chunk = window::Chunk {
+        context,
+        rows: Vec::new(),
+        through: 2,
+        root: None,
+    };
+    prompt + chunk.transcript().0.len()
+}
+
+/// The TPM cap budgets the whole request, not only the chunk's rows: what a
+/// request adds to them fits the overhead the cap subtracts.
+#[test]
+fn the_fixed_prompt_and_its_context_fit_the_tpm_caps_overhead() {
+    let overhead = request_overhead_bytes();
+    assert!(
+        overhead <= REQUEST_OVERHEAD_BYTES,
+        "the request adds {overhead} bytes, over REQUEST_OVERHEAD_BYTES"
+    );
 }
 
 // ── Retry and backoff (§1.4, ruling LR20) ───────────────────────────────
@@ -1807,17 +1862,13 @@ async fn a_turn_before_the_call_is_registered_still_makes_it_yield() {
     assert_yielded(&scene, &s, &report);
 }
 
-/// On a keyed remote model a chunk starts only when half of the key's RPM
-/// and TPM would remain after it: the second chunk waits, and a chat round
-/// made then still finds at least half the bucket.
-#[tokio::test]
-async fn a_keyed_flush_leaves_half_the_rate_budget() {
-    let model = Scripted::new(vec![items(&[]), items(&[])]);
+/// A remote provider with one key whose TPM bucket holds `tpm`.
+fn keyed_router(model: Arc<Scripted>, tpm: u32) -> Arc<LlmRouter> {
     let mut providers = std::collections::HashMap::new();
     providers.insert(
         ProviderType::Anthropic,
         openalpaca_llm::ProviderEntry {
-            provider: model.clone(),
+            provider: model,
             key_pool: Arc::new(ArcSwap::from_pointee(openalpaca_llm::KeyPool::new(
                 vec![openalpaca_llm::ApiKey::new(
                     "k1".to_string(),
@@ -1828,8 +1879,7 @@ async fn a_keyed_flush_leaves_half_the_rate_budget() {
             ))),
         },
     );
-    const TPM: u32 = 4_000;
-    let router = Arc::new(LlmRouter::new_with_runtime(
+    Arc::new(LlmRouter::new_with_runtime(
         providers,
         openalpaca_llm::ModelRegistry::with_defaults(),
         std::collections::HashMap::new(),
@@ -1839,20 +1889,36 @@ async fn a_keyed_flush_leaves_half_the_rate_budget() {
         RECORDED_MODEL.to_string(),
         openalpaca_llm::LlmRuntimeConfig::default(),
         openalpaca_llm::RateLimitConfig {
-            default_tpm: TPM,
+            default_tpm: tpm,
             ..Default::default()
         },
-    ));
+    ))
+}
+
+/// On a keyed remote model a chunk starts only when half of the key's RPM
+/// and TPM would remain after it: the second chunk waits, and a chat round
+/// made then still finds at least half the bucket.
+#[tokio::test]
+async fn a_keyed_flush_leaves_half_the_rate_budget() {
+    let model = Scripted::new(vec![items(&[]), items(&[])]);
+    const TPM: u32 = 10_000;
+    let router = keyed_router(model.clone(), TPM);
     let scene = Scene::with_router(model, router.clone(), DaemonConfig::default());
     scene.no_quiet_period();
     let (_dir, root) = project();
     let s = scene.session();
-    // Two turns in two roots: two chunks, each about 1,200 tokens.
-    let (_, first_answer) = scene.turn_in(&s, &format!("Home. {}", "a ".repeat(1500)), "ok", None);
+    // Two turns in two roots: two chunks, each filling its transcript
+    // budget — about 2,400 and 3,000 tokens with the prompt and context.
+    let (_, first_answer) = scene.turn_in(
+        &s,
+        &format!("Home. {}", "a ".repeat(2500)),
+        &"c ".repeat(2500),
+        None,
+    );
     scene.turn_in(
         &s,
-        &format!("Project. {}", "b ".repeat(1500)),
-        "ok",
+        &format!("Project. {}", "b ".repeat(2500)),
+        &"d ".repeat(2500),
         Some(&root.to_string_lossy()),
     );
 
@@ -1891,6 +1957,30 @@ async fn a_keyed_flush_leaves_half_the_rate_budget() {
         started.elapsed() < std::time::Duration::from_secs(1),
         "the chat round waited for the rate budget"
     );
+}
+
+/// §1.7's "a chunk can always start once the key is idle", on a key far
+/// below the default TPM: the 40 % cap covers the whole request — the fixed
+/// prompt and its context rows too, not only the chunk's own rows — so an
+/// idle key's first chunk leaves half the bucket and goes out.
+#[tokio::test]
+async fn an_idle_key_far_below_the_default_tpm_still_learns() {
+    let model = Scripted::new(vec![]);
+    let router = keyed_router(model.clone(), 3_000);
+    let scene = Scene::with_router(model, router, DaemonConfig::default());
+    scene.no_quiet_period();
+    let s = scene.session();
+    // A learned turn long enough that the next chunk's context rows are
+    // full, then new turns that fill the transcript budget.
+    let (_, learned) = scene.turn(&s, &"u".repeat(10 * 1024), &"a".repeat(5 * 1024));
+    scene.set_cursor(&s, learned);
+    for i in 0..3 {
+        scene.turn(&s, &format!("Fact {i}: {}", "z ".repeat(500)), "ok");
+    }
+
+    let report = scene.queue.flush_automatic(&s).await;
+    assert!(report.calls >= 1, "the idle key never started: {report:?}");
+    assert!(scene.cursor(&s) > learned, "no progress: {report:?}");
 }
 
 /// The quiet check runs before every chunk: a turn that starts while the

@@ -38,6 +38,11 @@ pub const LONG_USER_ROW_BYTES: usize = 8 * 1024;
 pub const REPLY_CUT_BYTES: usize = 4 * 1024;
 /// A context row keeps this much.
 pub const CONTEXT_ROW_BYTES: usize = 1024;
+/// The most a request adds to its chunk's rows and known notes: the fixed
+/// prompt and two context rows at their cut, with their labels (3.7 KiB
+/// measured; `the_fixed_prompt_and_its_context_fit_the_tpm_caps_overhead`
+/// pins it). The TPM cap of [`Budget::for_window`] leaves room for it.
+pub const REQUEST_OVERHEAD_BYTES: usize = 4 * 1024;
 /// Rows one window read takes; a longer window is read again after its
 /// first chunks advance the cursor.
 pub(crate) const WINDOW_READ_ROWS: i64 = 400;
@@ -75,8 +80,12 @@ pub const BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(3600
 /// ```
 ///
 /// On a provider that needs a key, `in_bytes` is also capped so the chunk's
-/// estimated input (bytes ÷ 4, the router's own estimate) is at most 40 % of
-/// the key's TPM capacity.
+/// whole estimated request (bytes ÷ 4, the router's own estimate) — its
+/// rows, its known notes, and [`REQUEST_OVERHEAD_BYTES`] of fixed prompt and
+/// context — is at most 40 % of the key's TPM capacity, so a chunk can always
+/// start once the key is idle (§1.7). Below about 2,200 TPM the fixed prompt,
+/// its context and one cut turn alone pass half the bucket, and a session on
+/// such a key stays due.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     pub out_tokens: u32,
@@ -100,8 +109,10 @@ impl Budget {
             .min((out_tokens.saturating_sub(300) / 180).max(1));
         let mut in_bytes = window.saturating_sub(out_tokens + 1000) * 2;
         if let Some(tpm) = tpm_capacity {
-            // 40 % of TPM, in tokens, at 4 bytes a token.
-            in_bytes = in_bytes.min(tpm as usize * 4 * 2 / 5);
+            // 40 % of TPM, in tokens, at 4 bytes a token — less what the
+            // request adds to the rows and the known notes.
+            in_bytes =
+                in_bytes.min((tpm as usize * 4 * 2 / 5).saturating_sub(REQUEST_OVERHEAD_BYTES));
         }
         Self {
             out_tokens: out_tokens as u32,
