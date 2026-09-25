@@ -16,6 +16,18 @@
 //! [`one_line`] is what a person reads before acting on it — an approval
 //! card, a list to pick an id from: one line with nothing hidden in it. The
 //! CLI prints note titles through it too.
+//!
+//! [`escape_hidden`] answers the same danger for a different text: the exact
+//! values a person approves or denies — a tool's arguments, the tool's name,
+//! the agent asking. Nothing may be dropped from those, because what is
+//! dropped from the prompt still runs, so every hidden character is shown as
+//! `<U+XXXX>` and [`hidden_notice`] says how many there were. The two do not
+//! compete: `one_line` is for prose OpenAlpaca composed to be read (a memory
+//! suggestion's `preview`, sanitized by the daemon before any surface sees
+//! it), and the escape is for the values beside it that decide what runs.
+//! The GUI mirrors the escape from one shared table,
+//! `apps/openalpaca-gui/src/lib/hidden-chars.json`, which a test here holds
+//! equal to [`needs_escape`] over every scalar value.
 
 /// Borrow at most `max_bytes` of `s`, ending on a character boundary.
 ///
@@ -77,9 +89,331 @@ pub fn is_hidden(c: char) -> bool {
         )
 }
 
+/// What [`escape_hidden`] made of a text for an approval surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Escaped {
+    /// The text, every [`needs_escape`] character in it written as
+    /// `<U+XXXX>`.
+    pub text: String,
+    /// How many characters were escaped in the **whole** input — the part a
+    /// byte budget left out included, so a notice never undercounts.
+    pub hidden: usize,
+    /// Whether a byte budget left part of the input out.
+    pub cut: bool,
+}
+
+/// A character an approval surface shows as `<U+XXXX>` instead of itself:
+/// every [hidden](is_hidden) character, and the line and paragraph
+/// separators (U+2028, U+2029), which break a line where the text shows
+/// none — but not `\n` and `\t`, the two characters the surfaces' own layout
+/// (pretty-printed JSON) is written in. `\r` is escaped: at a terminal it
+/// returns the cursor and the rest of the line overwrites what was shown.
+///
+/// The GUI derives its copy from `apps/openalpaca-gui/src/lib/hidden-chars.json`;
+/// a test on each side holds its own to that table.
+pub fn needs_escape(c: char) -> bool {
+    match c {
+        '\n' | '\t' => false,
+        '\u{2028}' | '\u{2029}' => true,
+        c => is_hidden(c),
+    }
+}
+
+/// `text` for a person deciding whether it runs: every [`needs_escape`]
+/// character written as `<U+XXXX>` — uppercase hex, zero-padded to at least
+/// four digits (`<U+202E>`, `<U+009B>`, `<U+E0041>`) — and everything else as
+/// it is, right-to-left letters included. Put [`hidden_notice`] of the count
+/// under it.
+///
+/// Escaped, not dropped as [`one_line`] drops them: what an approval prompt
+/// shows is what will run, and a value with its hidden characters taken out
+/// reads as a different value from the one that runs — `/srv/allowed` for a
+/// path with a zero-width space inside it — and hides an override the value
+/// carries to wherever it lands. The price, an emoji's zero-width joiner
+/// shown as `<U+200D>`, is right on a surface whose job is to be exact. This
+/// is display only: nothing the tool receives, nothing stored and nothing
+/// matched against a reply changes.
+pub fn escape_hidden(text: &str) -> Escaped {
+    escape_hidden_within(text, usize::MAX)
+}
+
+/// [`escape_hidden`], cut to at most `max_bytes` of **escaped** text. The cut
+/// comes after escaping and never lands inside an escape or a character: the
+/// first piece that would cross the budget is left out whole, with
+/// everything after it. `hidden` still counts the whole of `text`, so the
+/// notice says what the part left out holds too.
+pub fn escape_hidden_within(text: &str, max_bytes: usize) -> Escaped {
+    use std::fmt::Write as _;
+
+    let mut shown = String::with_capacity(text.len().min(max_bytes));
+    let mut hidden = 0;
+    let mut cut = false;
+    for c in text.chars() {
+        let escape = needs_escape(c);
+        hidden += usize::from(escape);
+        if cut {
+            continue;
+        }
+        let before = shown.len();
+        if escape {
+            // Writing into a `String` cannot fail.
+            let _ = write!(shown, "<U+{:04X}>", u32::from(c));
+        } else {
+            shown.push(c);
+        }
+        if shown.len() > max_bytes {
+            shown.truncate(before);
+            cut = true;
+        }
+    }
+    Escaped {
+        text: shown,
+        hidden,
+        cut,
+    }
+}
+
+/// The one line an approval surface prints directly under what it escaped,
+/// or `None` when nothing was: the same words on every surface (the GUI's
+/// copy is held to them by `hidden-chars.json`'s `notices`).
+pub fn hidden_notice(hidden: usize) -> Option<String> {
+    match hidden {
+        0 => None,
+        1 => Some("Note: this request contains 1 hidden character, shown as <U+…>.".to_string()),
+        n => Some(format!(
+            "Note: this request contains {n} hidden characters, shown as <U+…>."
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{byte_prefix, is_hidden, one_line};
+    use super::{
+        Escaped, byte_prefix, escape_hidden, escape_hidden_within, hidden_notice, is_hidden,
+        needs_escape, one_line,
+    };
+
+    /// Every scalar value, for the tests that must hold over all of them.
+    fn every_char() -> impl Iterator<Item = char> {
+        (0..=0x10ffff_u32).filter_map(char::from_u32)
+    }
+
+    /// The escape's set is `is_hidden`'s, plus the line and paragraph
+    /// separators, less the newline and the tab the surfaces lay JSON out
+    /// with — and nothing else, so neither can drift from the other.
+    #[test]
+    fn needs_escape_is_hidden_plus_the_separators_less_newline_and_tab() {
+        for c in every_char() {
+            let expected =
+                (is_hidden(c) || c == '\u{2028}' || c == '\u{2029}') && c != '\n' && c != '\t';
+            assert_eq!(needs_escape(c), expected, "U+{:04X}", c as u32);
+        }
+    }
+
+    #[test]
+    fn escape_hidden_shows_every_hidden_character_as_its_code_point() {
+        // (input, shown, hidden)
+        let cases: &[(&str, &str, usize)] = &[
+            ("", "", 0),
+            ("ls -la /tmp", "ls -la /tmp", 0),
+            // A bidi override is shown, neither obeyed nor dropped.
+            (
+                "Invoice \u{202e}gpj.exe\u{202c}",
+                "Invoice <U+202E>gpj.exe<U+202C>",
+                2,
+            ),
+            // A zero-width space inside a path is a different path.
+            ("/srv/allow\u{200b}ed", "/srv/allow<U+200B>ed", 1),
+            // C1: U+009B is a terminal's one-byte CSI.
+            ("a\u{9b}31mb", "a<U+009B>31mb", 1),
+            // A carriage return can overwrite a line at a terminal.
+            ("done\r", "done<U+000D>", 1),
+            // Astral: a tag character, five hex digits.
+            ("tag\u{e0041}", "tag<U+E0041>", 1),
+            ("\u{1d173}", "<U+1D173>", 1),
+            // At least four digits, zero-padded.
+            ("\u{0}\u{1b}[2J\u{7f}", "<U+0000><U+001B>[2J<U+007F>", 3),
+            // Line and paragraph separators are escaped, not laid out.
+            ("one\u{2028}two\u{2029}", "one<U+2028>two<U+2029>", 2),
+            // Isolates, the BOM and the soft hyphen.
+            (
+                "\u{feff}Edi\u{ad}tor \u{2066}x\u{2069}",
+                "<U+FEFF>Edi<U+00AD>tor <U+2066>x<U+2069>",
+                4,
+            ),
+            // Newline and tab are the layout, and stay.
+            ("{\n\t\"a\": 1\n}", "{\n\t\"a\": 1\n}", 0),
+            // Visible text stays as written: CJK, right-to-left letters (not
+            // format characters), emoji — an emoji's joiner is the price.
+            ("日本語 שלום 👩\u{200d}💻", "日本語 שלום 👩<U+200D>💻", 1),
+        ];
+        for (input, shown, hidden) in cases {
+            assert_eq!(
+                escape_hidden(input),
+                Escaped {
+                    text: shown.to_string(),
+                    hidden: *hidden,
+                    cut: false,
+                },
+                "escape_hidden({input:?})"
+            );
+        }
+    }
+
+    /// Pretty-printed JSON keeps its structural newlines and indentation;
+    /// only what `serde_json` passes through raw inside a string — it
+    /// escapes C0 controls itself, not Cf, C1 or the separators — is shown
+    /// escaped.
+    #[test]
+    fn pretty_json_keeps_its_layout_and_shows_what_serde_passes_through() {
+        let args = serde_json::json!({
+            "cmd": "cat /srv/\u{202e}txt.sh",
+            "note": "a\u{200b}b\u{9b}\u{2028}\r",
+        });
+        let pretty = serde_json::to_string_pretty(&args).unwrap();
+        let escaped = escape_hidden(&pretty);
+        assert_eq!(
+            escaped.text,
+            "{\n  \"cmd\": \"cat /srv/<U+202E>txt.sh\",\n  \
+             \"note\": \"a<U+200B>b<U+009B><U+2028>\\r\"\n}"
+        );
+        assert_eq!(escaped.hidden, 4);
+    }
+
+    /// The cut comes after escaping and never lands inside an escape or a
+    /// character: at every budget the text shown is a whole-piece prefix of
+    /// the uncut text, within the budget, and the count is the whole input's.
+    #[test]
+    fn escape_hidden_within_never_cuts_inside_an_escape_or_a_character() {
+        let input = "ab\u{202e}c日\u{e0041}🙂\u{200b}";
+        let whole = escape_hidden(input);
+        assert_eq!(whole.text, "ab<U+202E>c日<U+E0041>🙂<U+200B>");
+        // Where a cut may end: before or after each whole piece.
+        let pieces = [
+            "a",
+            "b",
+            "<U+202E>",
+            "c",
+            "日",
+            "<U+E0041>",
+            "🙂",
+            "<U+200B>",
+        ];
+        let mut ends = vec![0];
+        for piece in pieces {
+            ends.push(ends.last().unwrap() + piece.len());
+        }
+        for budget in 0..=whole.text.len() + 2 {
+            let cut = escape_hidden_within(input, budget);
+            let expected_end = *ends.iter().rev().find(|&&end| end <= budget).unwrap();
+            assert_eq!(cut.text, whole.text[..expected_end], "budget {budget}");
+            assert!(cut.text.len() <= budget, "budget {budget}");
+            assert_eq!(cut.cut, whole.text.len() > budget, "budget {budget}");
+            assert_eq!(
+                cut.hidden, 3,
+                "budget {budget}: the count is the whole input's"
+            );
+        }
+    }
+
+    /// A cut stops at the first piece that does not fit — a later, shorter
+    /// piece never slips in after a gap.
+    #[test]
+    fn escape_hidden_within_is_a_prefix_not_a_packing() {
+        let cut = escape_hidden_within("ab\u{200b}cd", 4);
+        assert_eq!(
+            cut,
+            Escaped {
+                text: "ab".to_string(),
+                hidden: 1,
+                cut: true,
+            }
+        );
+    }
+
+    #[test]
+    fn hidden_notice_is_one_line_only_when_something_was_escaped() {
+        assert_eq!(hidden_notice(0), None);
+        assert_eq!(
+            hidden_notice(1).as_deref(),
+            Some("Note: this request contains 1 hidden character, shown as <U+…>.")
+        );
+        assert_eq!(
+            hidden_notice(3).as_deref(),
+            Some("Note: this request contains 3 hidden characters, shown as <U+…>.")
+        );
+    }
+
+    /// The GUI's table, read as committed.
+    fn gui_table() -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/openalpaca-gui/src/lib/hidden-chars.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()))
+    }
+
+    /// The GUI derives its set from `hidden-chars.json`; this holds that
+    /// table to [`needs_escape`] over every scalar value, so a change on
+    /// either side fails here (and the GUI's own test holds its module to
+    /// the same table).
+    #[test]
+    fn needs_escape_is_the_gui_table() {
+        let table = gui_table();
+        let ranges: Vec<(u32, u32)> = table["ranges"]
+            .as_array()
+            .expect("ranges is an array")
+            .iter()
+            .map(|range| {
+                let bound = |i: usize| {
+                    let hex = range[i].as_str().expect("a range bound is a hex string");
+                    u32::from_str_radix(hex, 16).expect("a range bound is hex")
+                };
+                (bound(0), bound(1))
+            })
+            .collect();
+        for pair in ranges.windows(2) {
+            assert!(
+                pair[0].0 <= pair[0].1 && pair[0].1 < pair[1].0,
+                "ranges must be sorted and disjoint: {pair:X?}"
+            );
+        }
+        for c in every_char() {
+            let code = c as u32;
+            let listed = ranges.iter().any(|&(from, to)| (from..=to).contains(&code));
+            assert_eq!(needs_escape(c), listed, "U+{code:04X}");
+        }
+    }
+
+    /// The GUI's worked cases and notices are what Rust shows.
+    #[test]
+    fn the_gui_tables_cases_and_notices_are_what_rust_shows() {
+        let table = gui_table();
+        let cases = table["cases"].as_array().expect("cases is an array");
+        assert!(!cases.is_empty());
+        for case in cases {
+            let input = case["input"].as_str().expect("input");
+            assert_eq!(
+                escape_hidden(input),
+                Escaped {
+                    text: case["shown"].as_str().expect("shown").to_string(),
+                    hidden: case["hidden"].as_u64().expect("hidden") as usize,
+                    cut: false,
+                },
+                "escape_hidden({input:?})"
+            );
+        }
+        let notices = table["notices"].as_array().expect("notices is an array");
+        assert!(!notices.is_empty());
+        for notice in notices {
+            let hidden = notice["hidden"].as_u64().expect("hidden") as usize;
+            assert_eq!(
+                hidden_notice(hidden).as_deref(),
+                notice["text"].as_str(),
+                "hidden_notice({hidden})"
+            );
+        }
+    }
 
     /// The hand-written table is Unicode's: every scalar value is hidden
     /// exactly when it is `Cc` or `Cf` by the `regex` crate's tables, so a
