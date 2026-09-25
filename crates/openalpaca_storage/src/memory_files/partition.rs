@@ -1167,6 +1167,15 @@ impl Partition {
                             current_revision: current.revision.clone(),
                         });
                     }
+                    // A link retires its target without changing the
+                    // target's file, so a revision that still matches does
+                    // not mean the target is still the one in force.
+                    if current.derived.effective_status != EffectiveStatus::Active {
+                        return Err(MemoryFilesError::InvalidInput(format!(
+                            "note {target}, which note {id} would replace, is no longer active (it is {}): there is nothing left for this suggestion to replace — undo it to dismiss it (`openalpaca memory undo {id}`, or Keep mine in the Memory view)",
+                            current.derived.effective_status
+                        )));
+                    }
                 }
                 new.status = NoteStatus::Active;
                 Origin::User

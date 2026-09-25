@@ -4021,6 +4021,62 @@ fn confirm_refuses_a_moved_target_and_leaves_the_candidate() {
     assert_eq!(p.read(&b.id).unwrap().note.status, NoteStatus::Candidate);
 }
 
+/// S5: a supersede link retires its target without touching the target's
+/// file, so the revision a suggestion binds still matches after the target
+/// was replaced another way — by a tool call's replacement of a hand-edited
+/// note (G2 allows it) or by the user's own `memory add --supersedes`.
+/// Confirming the suggestion then would leave two active notes for one
+/// fact, so it is `invalid_input` pointing at undo, and writes nothing.
+#[test]
+fn confirm_refuses_a_suggestion_whose_target_was_replaced_another_way() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let edited = hand_edited(&p, "Commute", "# Commute\n\nbus\n");
+    let saved = saved_note(&p, "Editor", "# Editor\n\nvim\n");
+    for (target, actor) in [(&edited, Actor::ModelTool), (&saved, Actor::UserSurface)] {
+        let b = learned_change(&p, target, "# Changed\n\nlearned value\n").unwrap();
+        assert!(b.suggestion, "{actor:?}");
+        let y = p
+            .create(
+                NewNote {
+                    supersedes: Some((target.note.id, target.revision.clone())),
+                    ..new_note(
+                        &target.note.title,
+                        "# Replaced\n\nanother hand's value\n",
+                        target.note.kind,
+                    )
+                },
+                actor,
+            )
+            .unwrap();
+        assert_eq!(effective(&p, &target.note.id), EffectiveStatus::Superseded);
+        assert_eq!(
+            p.read(&target.note.id).unwrap().revision,
+            target.revision,
+            "a link leaves the target's file alone"
+        );
+        let err = p
+            .update(
+                &b.id,
+                &b.revision,
+                UpdateAction::Confirm {
+                    target_revision: Some(target.revision.clone()),
+                },
+                Actor::UserSurface,
+            )
+            .unwrap_err();
+        assert_eq!(err.class(), "invalid_input", "{actor:?}: {err}");
+        assert!(err.to_string().contains("no longer active"), "{err}");
+        assert!(err.to_string().contains("undo"), "{err}");
+        let still = p.read(&b.id).unwrap();
+        assert_eq!(
+            (still.revision.as_str(), still.note.status),
+            (b.revision.as_str(), NoteStatus::Candidate)
+        );
+        assert_eq!(effective(&p, &y.id), EffectiveStatus::Active);
+    }
+}
+
 /// S9 (flipped from `archiving_a_candidate_activates_its_link`): a suggestion
 /// is never archived, on any surface, so its link never starts to count; a
 /// candidate that names nothing archives as before.
