@@ -3074,6 +3074,11 @@ struct Invariants {
     user_notes_retired_without_confirm: usize,
     /// Forgotten notes the forced re-run brought back: must be 0.
     forgotten_resurrected: usize,
+    /// The forced re-run forgot a note and its flush made an extraction
+    /// call, so `forgotten_resurrected` measured something. For L and a
+    /// replay `false` is a violation: a check that never ran is no pass.
+    /// L0 and L-S run no re-run.
+    forced_rerun_checked: bool,
     violated: bool,
 }
 
@@ -4227,7 +4232,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
         learning.forced_rerun = Some(rerun);
     }
     if let Some(learning) = report.learning.as_mut() {
-        learning.invariants = Some(invariants(learning));
+        learning.invariants = Some(invariants(learning, system == System::L));
     }
 
     // ── Totals ──────────────────────────────────────────────────────────
@@ -4283,8 +4288,9 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
 }
 
 /// The hard invariants (design 09 §7.3): no user note retired without a
-/// confirm, no forgotten note resurrected.
-fn invariants(learning: &LearningResults) -> Invariants {
+/// confirm, no forgotten note resurrected — and, where a forced re-run is
+/// `required` (L, a replay), that it really checked.
+fn invariants(learning: &LearningResults, rerun_required: bool) -> Invariants {
     let retired = match &learning.suggestion_check {
         Some(check) => check
             .targets
@@ -4301,10 +4307,15 @@ fn invariants(learning: &LearningResults) -> Invariants {
         .forced_rerun
         .as_ref()
         .map_or(0, |r| r.resurrected.len());
+    let rerun_checked = learning
+        .forced_rerun
+        .as_ref()
+        .is_some_and(|r| r.skipped.is_none() && r.flush.as_ref().is_some_and(|f| f.calls > 0));
     Invariants {
         user_notes_retired_without_confirm: retired,
         forgotten_resurrected: resurrected,
-        violated: retired > 0 || resurrected > 0,
+        forced_rerun_checked: rerun_checked,
+        violated: retired > 0 || resurrected > 0 || (rerun_required && !rerun_checked),
     }
 }
 
@@ -4547,7 +4558,7 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
     )
     .await;
     learning.forced_rerun = Some(rerun);
-    learning.invariants = Some(invariants(&learning));
+    learning.invariants = Some(invariants(&learning, true));
     print_learning(&learning);
     let violated = learning.invariants.as_ref().is_some_and(|i| i.violated);
     report.learning = Some(learning);
@@ -4724,6 +4735,18 @@ fn print_learning(l: &LearningResults) {
             c.extraction_tokens_out,
             c.flush_latency_p50_ms,
             c.flush_latency_p95_ms
+        );
+    }
+    if let Some(r) = &l.forced_rerun {
+        println!(
+            "forced re-run: forgot {}, {} extraction call(s), {} resurrected{}",
+            r.forgotten.as_deref().unwrap_or("nothing"),
+            r.flush.as_ref().map_or(0, |f| f.calls),
+            r.resurrected.len(),
+            r.skipped
+                .as_deref()
+                .map(|s| format!(", skipped: {s}"))
+                .unwrap_or_default()
         );
     }
     if let Some(i) = &l.invariants {
@@ -5447,6 +5470,65 @@ fn the_fed_sessions_follow_the_system() {
         corpus.suggestion_sessions[..2].to_vec()
     );
     assert_eq!(ids(corpus_sessions(&corpus, System::L0, Some(3))).len(), 3);
+}
+
+/// §7.3's resurrection invariant is hard, so a forced re-run that checked
+/// nothing — skipped before its flush, or a flush that made no extraction
+/// call — is not a pass for L or a replay.
+#[test]
+fn a_forced_rerun_that_checked_nothing_violates_the_invariant() {
+    use openalpaca_core::memory::learning::FlushReport;
+    let flush = |calls| {
+        FlushRecord::new(
+            "cs-001",
+            FLUSH_FORCED_RERUN,
+            0,
+            &FlushReport {
+                calls,
+                ..Default::default()
+            },
+            Vec::new(),
+            0,
+        )
+    };
+    let with = |rerun: ForcedRerun| LearningResults {
+        forced_rerun: Some(rerun),
+        ..Default::default()
+    };
+    let skipped = with(ForcedRerun {
+        skipped: Some("no active learned note cites a fed message".to_string()),
+        ..Default::default()
+    });
+    let no_call = with(ForcedRerun {
+        forgotten: Some("note".to_string()),
+        flush: Some(flush(0)),
+        ..Default::default()
+    });
+    let checked = with(ForcedRerun {
+        forgotten: Some("note".to_string()),
+        flush: Some(flush(1)),
+        ..Default::default()
+    });
+    let resurrected = with(ForcedRerun {
+        forgotten: Some("note".to_string()),
+        flush: Some(flush(1)),
+        resurrected: vec!["again".to_string()],
+        ..Default::default()
+    });
+    for (what, learning) in [("a skipped re-run", &skipped), ("no call", &no_call)] {
+        let inv = invariants(learning, true);
+        assert!(!inv.forced_rerun_checked, "{what}: {inv:?}");
+        assert_eq!(inv.forgotten_resurrected, 0, "{what}");
+        assert!(inv.violated, "{what}: 0 resurrected is not a pass");
+    }
+    let inv = invariants(&checked, true);
+    assert!(inv.forced_rerun_checked && !inv.violated, "{inv:?}");
+    let inv = invariants(&resurrected, true);
+    assert!(inv.forced_rerun_checked && inv.violated, "{inv:?}");
+    // L with no re-run at all is not a pass; L0 and L-S run none.
+    assert!(invariants(&LearningResults::default(), true).violated);
+    let inv = invariants(&LearningResults::default(), false);
+    assert!(!inv.forced_rerun_checked && !inv.violated, "{inv:?}");
 }
 
 /// Re-judge mode (design 09 §7.4) on a fixture-sized archived report: every

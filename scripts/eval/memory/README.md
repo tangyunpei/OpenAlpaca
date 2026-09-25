@@ -279,7 +279,8 @@ report counts the two learning paths apart: `extraction` (the flushes) and
 - **L** — learning on. After the questions, a **forced re-run**: the first
   learned note still active is forgotten, its session's cursor moved back to
   0, and the session flushed again; a note citing a forgotten row is a
-  resurrection.
+  resurrection. A re-run that could not run, or whose flush made no
+  extraction call, fails the run: it checked nothing.
 - **L0** — the same feed, never flushed: only the reader's own writes learn.
 - **L-S** — the change pairs' 8 old notes seeded as the user's own, then only
   `suggestion_sessions` (the 8 changes and the old notes' restatements).
@@ -322,7 +323,7 @@ as the spread (minimum, median, maximum) over the live run and the replays.
 | `learning.restatements` | Per `restate` turn: `nothing_written`, `automatic_replacement`, `suggestion`, `duplicate_note`, `first_learned` |
 | `learning.aliases`, `learning.fact_keys` | The share of active learned notes with an alias in the other script (CJK against Latin), with any alias, and with a key |
 | `learning.suggestion_check` | L-S: per seeded note, its suggestions and its status before and after the confirm |
-| `learning.invariants` | User notes retired without a confirm, forgotten notes resurrected — both must be 0; a violation fails the run after the report is written |
+| `learning.invariants` | User notes retired without a confirm, forgotten notes resurrected — both must be 0 — and `forced_rerun_checked`: the re-run forgot a note and its flush made an extraction call. For L and a replay a re-run that checked nothing (skipped, or no call) is a violation, never a 0 that reads as a pass. A violation fails the run after the report is written |
 | `learning.cost` | Extraction calls and tokens, flush latency p50/p95, flushes by trigger, memory changes by surface, the reader's feed cost |
 
 The proposed targets (coverage ≥ 80 %, changed facts ≥ 12 of 15, other-script
