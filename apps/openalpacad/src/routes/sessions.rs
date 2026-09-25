@@ -813,11 +813,12 @@ pub(super) async fn delete_session(deps: &Deps<'_>, id: &str) -> Response {
 
 /// Deleting, clearing or purging a conversation forgets its summaries
 /// (design 09 §13.3, LQ4): the `episode` notes of origin `extracted_other`
-/// whose sources all lie among `message_ids` — the conversation's rows, read
-/// before they went — in the owner's home partition and `root`'s. Best
-/// effort: the rows are already gone and the caller's answer stands, so a
-/// failure is one WARN; an owner with no memory (not a `global_user` row)
-/// has nothing to forget.
+/// that are not candidates — one the extractor proposed is an ordinary
+/// candidate, not a summary — whose sources all lie among `message_ids`
+/// (the conversation's rows, read before they went), in the owner's home
+/// partition and `root`'s. Best effort: the rows are already gone and the
+/// caller's answer stands, so a failure is one WARN; an owner with no
+/// memory (not a `global_user` row) has nothing to forget.
 pub(crate) async fn forget_conversation_summaries(
     memory: Option<Arc<openalpaca_core::memory::service::MemoryService>>,
     owner: &str,
