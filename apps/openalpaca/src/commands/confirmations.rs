@@ -35,6 +35,7 @@ use anyhow::{Result, bail};
 use clap::Subcommand;
 use colored::Colorize;
 use futures_util::StreamExt;
+use openalpaca_core::utils::text::{Escaped, escape_hidden, escape_hidden_line, hidden_notice};
 use openalpaca_storage::discovery;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -137,7 +138,7 @@ impl TableRow for PendingPrompt {
         format!(
             "{:<38} {:<18} {:<10} {:<20}",
             self.request_id,
-            self.tool_name,
+            escape_hidden_line(&self.tool_name).text,
             run,
             self.raised_at.chars().take(19).collect::<String>(),
         )
@@ -173,20 +174,81 @@ async fn list(format: OutputFormat) -> Result<()> {
     let page: PendingPrompts = client.get("/v1/chat/confirmations").await?;
     let prompts = pending_prompts(page);
 
-    if matches!(format, OutputFormat::Table) {
-        println!("{}", listing_note(prompts.len()).dimmed());
-        if prompts.is_empty() {
-            return Ok(());
-        }
+    if matches!(format, OutputFormat::Json) {
+        println!("{}", listing_json(&prompts));
+        return Ok(());
     }
-    print_list(&prompts, format);
-    if matches!(format, OutputFormat::Table) {
-        for block in preview_blocks(&prompts) {
-            println!();
-            println!("{block}");
-        }
+    println!("{}", listing_note(prompts.len()).dimmed());
+    if prompts.is_empty() {
+        return Ok(());
+    }
+    print_list(&prompts, OutputFormat::Table);
+    for line in notice_lines(&prompts) {
+        println!("{}", line.yellow());
+    }
+    for block in preview_blocks(&prompts) {
+        println!();
+        println!("{block}");
     }
     Ok(())
+}
+
+/// A prompt's tool-controlled text as a person is shown it: the tool's name
+/// and the agent's id on one line each (`escape_hidden_line`, which also
+/// shows a line break and every space but the plain one), the arguments
+/// serialized on one line and then escaped (`escape_hidden`). The name comes
+/// from a third party (an MCP `<server>__<tool>` or plugin `<plugin>::<tool>`
+/// name), the id from a template, the arguments from the model.
+struct EscapedPrompt {
+    name: Escaped,
+    agent: Option<Escaped>,
+    arguments: Option<Escaped>,
+}
+
+impl EscapedPrompt {
+    fn new(tool_name: &str, agent_id: Option<&str>, arguments: &serde_json::Value) -> Self {
+        Self {
+            name: escape_hidden_line(tool_name),
+            agent: agent_id.map(escape_hidden_line),
+            arguments: (!arguments.is_null())
+                .then(|| escape_hidden(&serde_json::to_string(arguments).unwrap_or_default())),
+        }
+    }
+
+    /// The one line that counts every character shown escaped, or `None`.
+    fn notice(&self) -> Option<String> {
+        let hidden = |escaped: &Option<Escaped>| escaped.as_ref().map_or(0, |e| e.hidden);
+        hidden_notice(self.name.hidden + hidden(&self.agent) + hidden(&self.arguments))
+    }
+}
+
+/// Under the table, one notice for each prompt that carries a hidden
+/// character, named by its id: `<request_id> — Note: this request contains
+/// 2 hidden characters, shown as <U+…>.`
+///
+/// It counts the whole request — the name, the agent and the arguments —
+/// not only the name the table shows escaped: the arguments are what
+/// `approve <id>` lets run and the table has no room for them, so this line
+/// is the one warning a person answering by id gets. `--format json` carries
+/// the arguments, and `watch` shows a prompt's arguments escaped.
+fn notice_lines(prompts: &[PendingPrompt]) -> Vec<String> {
+    prompts
+        .iter()
+        .filter_map(|prompt| {
+            EscapedPrompt::new(
+                &prompt.tool_name,
+                Some(&prompt.agent_id),
+                &prompt.tool_arguments,
+            )
+            .notice()
+            .map(|notice| format!("{} — {notice}", prompt.request_id))
+        })
+        .collect()
+}
+
+/// `--format json`: the daemon's own fields, as they came.
+fn listing_json(prompts: &[PendingPrompt]) -> String {
+    serde_json::to_string_pretty(prompts).unwrap_or_default()
 }
 
 /// Under the table, what each card with a daemon-authored preview says
@@ -214,7 +276,7 @@ fn refuse_entire_tool(request_id: &str, prompt: Option<&PendingPrompt>) -> Resul
         Some(prompt) if prompt.per_call => bail!(
             "`{}` asks about one call only, so --entire-tool does not apply to it: run \
              `openalpaca tasks confirmations approve {request_id}` without it. Nothing was answered.",
-            prompt.tool_name
+            escape_hidden_line(&prompt.tool_name).text
         ),
         _ => Ok(()),
     }
@@ -244,8 +306,13 @@ fn answer_path(request_id: &str) -> String {
 ///
 /// It reports the **answer**, not the outcome: the tool runs on the daemon
 /// after this returns, and whether it then succeeded is the run's to say.
+/// The name is escaped on one line like the prompt's, with no notice: the
+/// prompt above it already counted it.
 fn answered_line(approved: bool, entire_tool: bool, tool_name: Option<&str>) -> String {
-    let what = tool_name.unwrap_or("the tool call");
+    let what = tool_name.map_or_else(
+        || "the tool call".to_string(),
+        |name| escape_hidden_line(name).text,
+    );
     match (approved, entire_tool) {
         (true, true) => {
             format!("Approved — {what}, and every later call of it this session. The run continues.")
@@ -332,13 +399,27 @@ fn confirmation_frame(text: &str) -> Option<ConfirmationFrame> {
 }
 
 /// The block printed when a prompt arrives — what is being asked, and by whom.
+///
+/// The tool's name, the agent's id and the arguments come from outside
+/// OpenAlpaca, and this prints them at a terminal, where a raw ESC or C1 CSI
+/// rewrites the line and a bidi override reorders it: every hidden character
+/// in them is shown as `<U+XXXX>` ([`EscapedPrompt`]) and one notice directly
+/// under the arguments counts them. The run and request ids are the daemon's
+/// own; the preview is the daemon's text, composed with every control and
+/// format character taken out of what it quotes (`utils::text::one_line`),
+/// and printed as it comes.
 fn prompt_block(frame: &ConfirmationFrame) -> String {
-    let mut out = format!("Tool '{}' needs your approval", frame.tool_name);
+    let shown = EscapedPrompt::new(
+        &frame.tool_name,
+        frame.agent_id.as_deref(),
+        &frame.tool_arguments,
+    );
+    let mut out = format!("Tool '{}' needs your approval", shown.name.text);
     if let Some(task_id) = &frame.task_id {
         out.push_str(&format!("\n  run:   {task_id}"));
     }
-    if let Some(agent_id) = &frame.agent_id {
-        out.push_str(&format!("\n  agent: {agent_id}"));
+    if let Some(agent) = &shown.agent {
+        out.push_str(&format!("\n  agent: {}", agent.text));
     }
     out.push_str(&format!("\n  id:    {}", frame.request_id));
     if let Some(preview) = frame.preview.as_deref().filter(|p| !p.is_empty()) {
@@ -347,11 +428,11 @@ fn prompt_block(frame: &ConfirmationFrame) -> String {
             crate::chat_stream::indent(&crate::chat_stream::indent(preview))
         ));
     }
-    if !frame.tool_arguments.is_null() {
-        out.push_str(&format!(
-            "\n  args:  {}",
-            serde_json::to_string(&frame.tool_arguments).unwrap_or_default()
-        ));
+    if let Some(arguments) = &shown.arguments {
+        out.push_str(&format!("\n  args:  {}", arguments.text));
+    }
+    if let Some(notice) = shown.notice() {
+        out.push_str(&format!("\n  {notice}"));
     }
     out
 }
@@ -769,5 +850,216 @@ mod tests {
         assert_eq!(read_answer("always\n", true), (false, false));
         assert_eq!(read_answer("y\n", true), (true, false));
         assert_eq!(read_answer("a\n", false), (true, true));
+    }
+
+    // ── Hidden characters (approval surfaces show them as <U+XXXX>) ──
+
+    /// Every character an approval surface must never print raw: a bidi
+    /// override, a zero-width space, a C1 CSI, a carriage return, a tag
+    /// character, a line break and an isolate.
+    const RAW: [char; 7] = [
+        '\u{202e}',
+        '\u{200b}',
+        '\u{9b}',
+        '\r',
+        '\u{e0041}',
+        '\n',
+        '\u{2066}',
+    ];
+
+    fn assert_no_raw(text: &str, allow_newline: bool) {
+        for c in RAW {
+            if allow_newline && c == '\n' {
+                continue;
+            }
+            assert!(
+                !text.contains(c),
+                "raw U+{:04X} printed: {text:?}",
+                c as u32
+            );
+        }
+    }
+
+    /// A pending prompt whose name, agent and arguments all hide characters.
+    fn spoofed_prompt() -> PendingPrompt {
+        PendingPrompt {
+            request_id: "req-spoof".to_string(),
+            tool_name: "srv__rm\u{202e}fdp\u{200b}".to_string(),
+            tool_arguments: serde_json::json!({
+                "path": "/srv/allow\u{200b}ed/\u{202e}txt.exe",
+                "c1": "\u{9b}31m",
+                "tag": "x\u{e0041}",
+            }),
+            task_id: None,
+            agent_id: "lead\u{2066}".to_string(),
+            lane_key: Some("alice:gui".to_string()),
+            preview: None,
+            per_call: false,
+            raised_at: "2026-09-25T10:00:00+00:00".to_string(),
+        }
+    }
+
+    /// The table's TOOL cell is a third party's name (MCP `<server>__<tool>`,
+    /// plugin `<plugin>::<tool>`): a bidi override or a zero-width space in
+    /// it is shown as an escape, and a line break cannot start a forged row.
+    #[test]
+    fn the_listing_shows_a_hidden_character_in_the_tool_name_as_an_escape() {
+        let mut prompt = spoofed_prompt();
+        let row = prompt.table_row();
+        assert!(row.contains("srv__rm<U+202E>fdp<U+200B>"), "{row}");
+        assert_no_raw(&row, false);
+
+        prompt.tool_name = "file_write\r\nreq-fake   shell_execute".to_string();
+        let row = prompt.table_row();
+        assert!(row.contains("file_write<U+000D><U+000A>req-fake"), "{row}");
+        assert_eq!(row.lines().count(), 1, "one prompt, one row: {row:?}");
+    }
+
+    /// Under the table, one notice per prompt that hides anything, named by
+    /// its id. It counts the whole request — name, agent and arguments —
+    /// because the table prints only the name, and the arguments it does
+    /// not print are what `approve <id>` lets run.
+    #[test]
+    fn the_listing_names_each_request_that_hides_characters() {
+        let spoofed = spoofed_prompt();
+        let clean = PendingPrompt {
+            request_id: "req-clean".to_string(),
+            tool_name: "file_write".to_string(),
+            tool_arguments: serde_json::json!({ "path": "notes/日本語.md", "text": "a\r\nb\tc" }),
+            agent_id: "orchestrator".to_string(),
+            ..spoofed_prompt()
+        };
+        let only_arguments = PendingPrompt {
+            request_id: "req-args".to_string(),
+            tool_name: "shell_execute".to_string(),
+            tool_arguments: serde_json::json!({ "command": "ls\u{200b}" }),
+            agent_id: "orchestrator".to_string(),
+            ..spoofed_prompt()
+        };
+        assert_eq!(
+            notice_lines(&[spoofed, clean, only_arguments]),
+            vec![
+                // Name 2, agent 1, arguments 4 (U+200B, U+202E, U+009B, U+E0041).
+                "req-spoof — Note: this request contains 7 hidden characters, shown as <U+…>."
+                    .to_string(),
+                "req-args — Note: this request contains 1 hidden character, shown as <U+…>."
+                    .to_string(),
+            ]
+        );
+    }
+
+    /// `watch` shows the name and the agent on one line each and the
+    /// arguments escaped, with one notice counting all of them directly
+    /// under the arguments.
+    #[test]
+    fn the_watch_block_shows_hidden_characters_as_escapes_and_counts_them() {
+        let frame: ConfirmationFrame = serde_json::from_value(serde_json::json!({
+            "type": "tool_confirmation_requested",
+            "request_id": "req-1",
+            "tool_name": "srv__rm\u{202e}fdp\u{200b}\r",
+            "agent_id": "lead\u{2066}\nagent: orchestrator",
+            "tool_arguments": {
+                "path": "/srv/allow\u{200b}ed/\u{202e}txt.exe",
+                "c1": "\u{9b}31m",
+                "tag": "x\u{e0041}",
+            },
+            "task_id": "task-1",
+        }))
+        .expect("frame");
+        let block = prompt_block(&frame);
+        assert_no_raw(&block, true);
+
+        let lines: Vec<&str> = block.lines().collect();
+        assert_eq!(
+            lines[0],
+            "Tool 'srv__rm<U+202E>fdp<U+200B><U+000D>' needs your approval"
+        );
+        assert!(
+            lines.contains(&"  agent: lead<U+2066><U+000A>agent: orchestrator"),
+            "{block}"
+        );
+        let args = lines
+            .iter()
+            .position(|line| line.starts_with("  args:  "))
+            .expect("the arguments");
+        assert!(
+            lines[args].contains("allow<U+200B>ed/<U+202E>txt.exe"),
+            "{block}"
+        );
+        assert!(lines[args].contains("<U+009B>31m"), "{block}");
+        assert!(lines[args].contains("x<U+E0041>"), "{block}");
+        // Name 3, agent 2, arguments 4 — directly under the arguments.
+        assert_eq!(
+            lines.get(args + 1).copied(),
+            Some("  Note: this request contains 9 hidden characters, shown as <U+…>.")
+        );
+        assert_eq!(lines.len(), args + 2, "{block}");
+    }
+
+    /// Nothing escaped, no notice: a CJK path, a right-to-left letter and a
+    /// newline inside a string (which `serde_json` writes as `\n`) are not
+    /// hidden characters.
+    #[test]
+    fn the_watch_block_prints_no_notice_when_nothing_is_hidden() {
+        let frame: ConfirmationFrame = serde_json::from_value(serde_json::json!({
+            "request_id": "req-1",
+            "tool_name": "file_write",
+            "agent_id": "lead_agent",
+            "tool_arguments": { "path": "notes/日本語.md", "text": "שלום\r\nb\tc" },
+        }))
+        .expect("frame");
+        let block = prompt_block(&frame);
+        assert!(!block.contains("Note:"), "{block}");
+        assert!(!block.contains("<U+"), "{block}");
+        assert!(block.contains("notes/日本語.md"), "{block}");
+        assert!(block.contains(r"שלום\r\nb\tc"), "{block}");
+    }
+
+    /// The name repeated after an answer, and in the refusal of
+    /// `--entire-tool`, is escaped on one line like the prompt's.
+    #[test]
+    fn the_answer_and_the_refusal_escape_the_tool_name() {
+        let name = "srv__rm\u{202e}fdp\u{200b}\n";
+        let line = answered_line(true, false, Some(name));
+        assert!(
+            line.contains("srv__rm<U+202E>fdp<U+200B><U+000A>"),
+            "{line}"
+        );
+        assert_no_raw(&line, false);
+
+        let per_call = PendingPrompt {
+            tool_name: name.to_string(),
+            per_call: true,
+            ..spoofed_prompt()
+        };
+        let err = refuse_entire_tool("req-spoof", Some(&per_call))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("srv__rm<U+202E>fdp<U+200B><U+000A>"), "{err}");
+        assert_no_raw(&err, false);
+    }
+
+    /// Display only: rendering takes the frame by reference, and what is
+    /// answered — the path built from the request id and the body — is
+    /// what it was.
+    #[test]
+    fn showing_a_prompt_changes_nothing_that_is_answered() {
+        let frame: ConfirmationFrame = serde_json::from_value(serde_json::json!({
+            "request_id": "req-1",
+            "tool_name": "srv__rm\u{202e}",
+            "tool_arguments": { "path": "/srv/\u{202e}x" },
+        }))
+        .expect("frame");
+        let _ = prompt_block(&frame);
+        assert_eq!(frame.tool_name, "srv__rm\u{202e}");
+        assert_eq!(frame.tool_arguments["path"], "/srv/\u{202e}x");
+        assert_eq!(
+            answer_path(&frame.request_id),
+            "/v1/chat/confirmations/req-1"
+        );
+        assert_eq!(
+            answer_body(true, false),
+            serde_json::json!({ "approved": true })
+        );
     }
 }
