@@ -27,7 +27,7 @@
           "mode": "noise"
         },
         {
-          "user": "When I run Lantern locally it listens on port 8080, so point any curl examples at localhost:8080.",
+          "user": "When I run Lantern locally it listens on port 8080 (that's what the first README says, as of today, 1 October 2025), so point any curl examples at localhost:8080.",
           "states": [
             "d5dc170b-63bd-56f1-b478-16392d64aeee"
           ],
@@ -94,7 +94,7 @@
           "mode": "change"
         },
         {
-          "user": "That already bit me today, 15 December: `cargo nextest run` under Rosetta crashed with SIGILL inside `ring`. I'd installed an x86_64 toolchain by accident.",
+          "user": "That already bit me today, 15 December 2025: `cargo nextest run` under Rosetta crashed with SIGILL inside `ring`. I'd installed an x86_64 toolchain by accident.",
           "states": [
             "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31"
           ],
@@ -136,7 +136,7 @@
           "mode": "noise"
         },
         {
-          "user": "以后每周五下午四点我做周回顾，到时候帮我整理一份本周完成事项的清单。",
+          "user": "从今天（2026 年 1 月 5 日）起，每周五下午四点我做周回顾，到时候帮我整理一份本周完成事项的清单。",
           "states": [
             "55da76c5-8f67-5628-a520-4cd45df14bb7"
           ],
@@ -596,7 +596,7 @@
       "narrative_date": "2026-01-28",
       "turns": [
         {
-          "user": "这个月我试了用 Pandoc 给 Moss 做 Markdown 管道，结果全量构建一次要 90 秒，太慢，放弃了。",
+          "user": "这个月（2026 年 1 月）我试了用 Pandoc 给 Moss 做 Markdown 管道，结果全量构建一次要 90 秒，太慢，放弃了。",
           "states": [
             "facd99a8-a0bd-55bf-b07c-b8112deb086d"
           ],
@@ -638,7 +638,7 @@
       "narrative_date": "2026-02-01",
       "turns": [
         {
-          "user": "Moss targets Python 3.12; the .python-version file in the repo says 3.12.",
+          "user": "As of today, 1 February 2026, Moss targets Python 3.12; the .python-version file in the repo says 3.12.",
           "states": [
             "b06901d5-5151-5665-97d6-c899757dd602"
           ],
@@ -714,7 +714,7 @@
           "mode": "explicit"
         },
         {
-          "user": "The default branch is main. We renamed it from master this month.",
+          "user": "The default branch is main. We renamed it from master this month, February 2026.",
           "states": [
             "09ac90e3-aefd-5be8-ba0b-3ae4ec6ad02e"
           ],
@@ -934,7 +934,7 @@
           "mode": "noise"
         },
         {
-          "user": "Thanks, but no, I'm declining Notion. Privacy and offline access matter more to me, so my notes stay in my Obsidian vault at ~/Vault, with its daily-notes template. Please don't suggest Notion again.",
+          "user": "Thanks, but no: today, 25 February 2026, I'm declining Notion. Privacy and offline access matter more to me, so my notes stay in my Obsidian vault at ~/Vault, with its daily-notes template. Please don't suggest Notion again.",
           "states": [
             "61de9275-35d8-51a8-91be-b43bf6430dd5"
           ],
@@ -1001,7 +1001,7 @@
       "narrative_date": "2026-03-02",
       "turns": [
         {
-          "user": "Noting this from the staging .env today: the Lantern staging database is lantern_staging on host pg-staging-1.",
+          "user": "Noting this from the staging .env today, 2 March 2026: the Lantern staging database is lantern_staging on host pg-staging-1.",
           "states": [
             "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f"
           ],
@@ -1080,7 +1080,7 @@
           "mode": "noise"
         },
         {
-          "user": "No. No analytics on Moss: I rejected Google Analytics and Plausible this month, for reader privacy. And there's no comment system either. Let's keep it that way.",
+          "user": "No. No analytics on Moss: I rejected Google Analytics and Plausible this month, March 2026, for reader privacy. And there's no comment system either. Let's keep it that way.",
           "states": [
             "e4ba0eee-12e6-5aee-920b-47f45ed2ebf3"
           ],
@@ -1329,7 +1329,7 @@
           "mode": "noise"
         },
         {
-          "user": "Please not on Spotify, I moved off Spotify this month and I'm on Apple Music now. And keep it lo-fi: that's what I listen to while coding. During meetings I listen to nothing.",
+          "user": "Please not on Spotify, I moved off Spotify this month, March 2026, and I'm on Apple Music now. And keep it lo-fi: that's what I listen to while coding. During meetings I listen to nothing.",
           "states": [
             "944b902b-7e38-58db-a0e2-f12322ba7822"
           ],
@@ -1403,7 +1403,7 @@
       "narrative_date": "2026-04-06",
       "turns": [
         {
-          "user": "周回顾的时间改了：从这周开始改成每周一上午 9:30，不再是周五下午。",
+          "user": "周回顾的时间改了：从今天（2026 年 4 月 6 日，周一）开始改成每周一上午 9:30，不再是周五下午。",
           "states": [
             "28215b64-1fbc-5779-be03-28ff04dadb3c"
           ],
@@ -1435,7 +1435,7 @@
       "narrative_date": "2026-04-10",
       "turns": [
         {
-          "user": "要给 partner acme 轮换 API key 了，partner keys 每 90 天就过期。流程是先跑 `just rotate-key acme`，把新 key 存到 1Password 的 \"Lantern-dev\" vault，再到 #lantern-ops 发个消息。Make it a checklist for me?",
+          "user": "要给一个 partner 轮换 API key 了，partner keys 每 90 天就过期。流程是先跑 `just rotate-key <partner>`，把新 key 存到 1Password 的 \"Lantern-dev\" vault，再到 #lantern-ops 发个消息。Make it a checklist for me?",
           "states": [
             "f46f7a75-7041-5aa9-8344-7b823d624e40"
           ],
@@ -1486,7 +1486,7 @@
           "mode": "noise"
         },
         {
-          "user": "You know what, no. I've decided against it today: a hand-written template engine isn't worth the maintenance, so Moss keeps Jinja2.",
+          "user": "You know what, no. I've decided against it today, 14 April 2026: a hand-written template engine isn't worth the maintenance, so Moss keeps Jinja2.",
           "states": [
             "1cdfac00-4307-5c20-b98c-d3385fafd85d"
           ],
@@ -1658,7 +1658,7 @@
       "narrative_date": "2026-05-12",
       "turns": [
         {
-          "user": "I replaced the left ear pad on my Sony WH-1000XM5 this month. How do I reset their Bluetooth pairing now?",
+          "user": "I replaced the left ear pad on my Sony WH-1000XM5 this month, May 2026. How do I reset their Bluetooth pairing now?",
           "states": [
             "406c9791-ad5a-5131-ab68-caccf7d222fd"
           ],
@@ -1768,7 +1768,7 @@
       "narrative_date": "2026-06-03",
       "turns": [
         {
-          "user": "About the résumé for the Singapore backend role I asked for yesterday: cancel it, please don't produce one. I've decided to stay at Quillpay through 2027.",
+          "user": "About the résumé for the Singapore backend role I asked for yesterday, 2 June: cancel it today, 3 June 2026, and please don't produce one. I've decided to stay at Quillpay through 2027.",
           "states": [
             "e962bf67-7c00-51c5-b0c2-52184801ad23"
           ],
@@ -1865,7 +1865,7 @@
       "narrative_date": "2026-07-09",
       "turns": [
         {
-          "user": "帮我订一下「绿茶餐厅」这周五晚上两个人的位子。",
+          "user": "今天是 2026 年 7 月 9 日。帮我订一下「绿茶餐厅」这周五晚上两个人的位子。",
           "states": [
             "900fe1ee-77ae-5ee8-a693-4751ba634072"
           ],
@@ -2087,7 +2087,7 @@
           "mode": "restate"
         },
         {
-          "user": "What's a good icebreaker for a team of eight?",
+          "user": "What's a good icebreaker for a small team?",
           "states": [],
           "mode": "noise"
         },
@@ -2138,6 +2138,13 @@
           "mode": "restate"
         },
         {
+          "user": "Also, reconcile_partial_batch stays #[ignore]d: issue #212 is still open.",
+          "states": [
+            "49adb6bf-6ff0-5c3b-acd0-aa8194c9c63b"
+          ],
+          "mode": "restate"
+        },
+        {
           "user": "Looks good, thanks.",
           "states": [],
           "mode": "noise"
@@ -2158,7 +2165,7 @@
           "mode": "restate"
         },
         {
-          "user": "It's for my Ledger Platform team at Quillpay, eight people.",
+          "user": "It's for my Ledger Platform team at Quillpay.",
           "states": [
             "c0489a40-6678-5f2d-98e8-1973ebb7fd57"
           ],
