@@ -390,6 +390,15 @@ function daemon(url: URL, method: string, headers: Headers, body: unknown) {
         `note ${target.id} is at revision ${target.revision}`,
       );
     }
+    // A target retired some other way leaves nothing to replace
+    // (`partition.rs`, the confirm arm).
+    if (target.status !== "active") {
+      return refusal(
+        400,
+        "MEMORY_INVALID_INPUT",
+        `note ${target.id}, which note ${id} would replace, is no longer active (it is ${target.status}): there is nothing left for this suggestion to replace — undo it to dismiss it (\`openalpaca memory undo ${id}\`, or Keep mine in the Memory view)`,
+      );
+    }
     // S6: the other suggestions for the same note are dismissed.
     dismissed = notes
       .filter(
@@ -1244,6 +1253,44 @@ describe("the Memory view", () => {
       action: "confirm",
       target_revision: saved.revision,
     });
+  });
+
+  it("keeps the owner's note from the detail once the note it would replace was retired another way", async () => {
+    // The card lists only suggestions whose note is still in force, so the
+    // detail is where this one is dismissed; its Replace is refused and its
+    // refusal sends the owner to Keep mine.
+    const { saved, suggestion } = savedAndSuggested();
+    saved.status = "archived";
+    renderView();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Candidates" }));
+    const list = await screen.findByRole("list", { name: "Notes" });
+    await user.click(
+      await within(list).findByRole("button", { name: "Commute" }),
+    );
+    expect(screen.queryByRole("region", { name: "Suggestions" })).toBeNull();
+
+    const replace = await screen.findByRole("button", { name: "Replace" });
+    await waitFor(() => expect(replace).toBeEnabled());
+    await user.click(replace);
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toContain(
+        "or Keep mine in the Memory view",
+      ),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Keep mine" }));
+    await waitFor(() =>
+      expect(sent("POST", "/v1/memories/n-2/undo")).toHaveLength(1),
+    );
+    expect(
+      sent("POST", "/v1/memories/n-2/undo")[0]?.headers.get("If-Match"),
+    ).toBe(`"${suggestion.revision}"`);
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe("Kept your note"),
+    );
+    expect(notes.map((n) => n.id)).toEqual(["n-1"]);
+    expect(useUiStore.getState().openMemoryId).toBeNull();
   });
 
   it("names what a recently learned replacement replaced, and says it is back after the undo", async () => {

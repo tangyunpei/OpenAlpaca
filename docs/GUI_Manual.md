@@ -636,7 +636,7 @@ Two columns, in the Library's shape. The left one, top to bottom:
   note after the suggestion was made, the Replace is refused rather than
   retiring your edit unseen. A suggestion whose note was already replaced or
   archived some other way leaves this card; its Replace in the note's detail is
-  refused too, and Keep mine clears it. **Keep mine** dismisses the suggestion and leaves
+  refused too, and the detail's Keep mine clears it. **Keep mine** dismisses the suggestion and leaves
   your note as it was (*"Kept your note"*). Neither forgets anything else you
   said in the same message. A suggestion is never used in answers while it
   waits; one that was only inferred from the conversation says so.
@@ -657,9 +657,10 @@ Two columns, in the Library's shape. The left one, top to bottom:
 
 The right column is one note: a pinned head — title, kind, scope, who wrote it,
 when, and tags for a candidate, a conflict or a file changed on disk — with
-`Confirm` (a candidate; `Replace` for a suggestion, which checks the note it
-replaces as above), `Archive` (an active note; a suggestion is replaced or kept,
-never archived) and `Forget`, which arms on the first click and forgets on the
+`Confirm` (a candidate; `Replace` and `Keep mine` for a suggestion — Replace
+checks the note it replaces as above, Keep mine dismisses the suggestion as on
+the card), `Archive` (an active note; a suggestion is replaced or kept, never
+archived) and `Forget`, which arms on the first click and forgets on the
 second; then four tabs:
 
 - **Note** — the Markdown rendered as text elements, never as HTML (a note is a

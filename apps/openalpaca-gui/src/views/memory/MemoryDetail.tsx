@@ -17,7 +17,10 @@
  * moved meanwhile is a `409` and is said as such — never retried with the new
  * revision behind the owner's back. A **suggestion** (a candidate naming the
  * note it would replace, design 09 §3.5) is confirmed with *Replace*, which
- * also sends the replaced note's revision as read here, as `target_revision`.
+ * also sends the replaced note's revision as read here, as `target_revision`,
+ * or dismissed with *Keep mine* — the undo route, a withdrawal. The
+ * Suggestions card lists only a suggestion whose note is still in force, so
+ * one whose note was retired another way is dismissed here or nowhere.
  */
 
 import { useState } from "react";
@@ -26,6 +29,7 @@ import { Button, SectionEmpty, Tab, Tag } from "@/components/ui";
 import {
   useForgetMemory,
   useMemoryNote,
+  useUndoMemory,
   useUpdateMemory,
 } from "@/hooks/useMemories";
 import {
@@ -38,6 +42,7 @@ import { useUiStore, type MemoryTab } from "@/stores/ui";
 import { relativeTime } from "@/views/library/format";
 
 import {
+  KEPT_YOUR_NOTE,
   MEMORY_ACTION_CONFLICT,
   originLabel,
   replacedToast,
@@ -104,6 +109,7 @@ export function MemoryDetail({
   const target = useMemoryNote(replacesId, workspacePath);
   const update = useUpdateMemory(workspacePath);
   const forget = useForgetMemory(workspacePath);
+  const keep = useUndoMemory(workspacePath);
 
   const [armed, setArmed] = useState(false);
   // The kept version the Diff tab compares against; `null` = the newest one.
@@ -146,7 +152,7 @@ export function MemoryDetail({
     );
   }
 
-  const busy = update.isPending || forget.isPending;
+  const busy = update.isPending || forget.isPending || keep.isPending;
 
   const send = (change: MemoryUpdate, done: string, verb: string) => {
     update.mutate(
@@ -158,6 +164,24 @@ export function MemoryDetail({
             isMemoryConflict(error)
               ? MEMORY_ACTION_CONFLICT
               : `Could not ${verb} — ${error.message}`,
+          ),
+      },
+    );
+  };
+
+  const onKeep = () => {
+    keep.mutate(
+      { id: model.id, revision: model.revision },
+      {
+        onSuccess: () => {
+          clearMemory();
+          showToast(KEPT_YOUR_NOTE);
+        },
+        onError: (error) =>
+          showToast(
+            isMemoryConflict(error)
+              ? MEMORY_ACTION_CONFLICT
+              : `Could not keep your note — ${error.message}`,
           ),
       },
     );
@@ -257,6 +281,11 @@ export function MemoryDetail({
                   }}
                 >
                   Replace
+                </Button>
+              )}
+              {status === "candidate" && replacesId !== null && (
+                <Button variant="ghostSm" disabled={busy} onClick={onKeep}>
+                  Keep mine
                 </Button>
               )}
               {status === "active" && (
