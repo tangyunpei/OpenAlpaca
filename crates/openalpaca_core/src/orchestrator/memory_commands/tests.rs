@@ -978,15 +978,12 @@ async fn forget_with_text_lists_matches_and_forgets_nothing() {
 #[tokio::test]
 async fn memories_lists_ten_bounded_lines_with_no_body() {
     let scene = Scene::new();
-    let long_title = "A very long title ".repeat(11);
-    let long_title = long_title.trim();
-    scene.save(long_title, "BODY-TEXT long", NoteKind::Fact);
     let commute = scene.save(
         "Commute",
         "# Commute\n\n## Knowledge\nThe user takes the bus.\n",
         NoteKind::Fact,
     );
-    for n in 0..9 {
+    for n in 0..10 {
         scene.save(
             &format!("Note {n}"),
             &format!("BODY-TEXT {n}"),
@@ -1037,15 +1034,8 @@ async fn memories_lists_ten_bounded_lines_with_no_body() {
         format!("{}  Newest  [decision/global]", id8(newest.id))
     );
     for line in &lines[..10] {
-        assert!(line.chars().count() <= 160, "{line}");
         assert!(line.ends_with("/global]"), "{line}");
     }
-    assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("A very long title") && l.contains('…')),
-        "{reply}"
-    );
     assert!(!reply.contains("BODY-TEXT"), "no body is printed: {reply}");
     assert_eq!(
         lines[10],
@@ -1053,6 +1043,40 @@ async fn memories_lists_ten_bounded_lines_with_no_body() {
     );
     assert_eq!(lines[11], "1 suggestion is waiting in the Memory view.");
     assert_eq!(scene.llm.calls(), 0);
+}
+
+/// A line is at most 160 characters, whatever the title: the title gives
+/// way, ending in `…`, and the id, the kind, the scope and the match reasons
+/// stay whole.
+#[tokio::test]
+async fn a_long_title_gives_way_to_the_line_bound() {
+    let scene = Scene::new();
+    let long_title = "A very long title ".repeat(11);
+    let long = scene.save(long_title.trim(), "BODY-TEXT long", NoteKind::Fact);
+    for reply in [
+        scene.say("/memories").await,
+        scene.say("/memories very long title").await,
+        scene.say("/forget very long title").await,
+    ] {
+        let line = reply.lines().next().unwrap();
+        assert!(
+            line.chars().count() <= 160,
+            "{} chars: {line}",
+            line.chars().count()
+        );
+        assert!(
+            line.starts_with(&format!("{}  A very long title", id8(long.id))),
+            "{line}"
+        );
+        assert!(line.contains("…  [fact/global]"), "{line}");
+    }
+    assert!(
+        scene
+            .say("/memories very long title")
+            .await
+            .ends_with("[fact/global]  (matched: term)"),
+        "the match reasons stay whole"
+    );
 }
 
 #[tokio::test]
