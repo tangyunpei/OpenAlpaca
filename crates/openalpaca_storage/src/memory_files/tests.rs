@@ -1530,7 +1530,9 @@ fn authority_rules_of_g2_are_enforced_by_the_file_layer() {
         .update(
             &candidate.id,
             &candidate.revision,
-            UpdateAction::Confirm,
+            UpdateAction::Confirm {
+                target_revision: None,
+            },
             Actor::ModelTool,
         )
         .unwrap_err();
@@ -1547,7 +1549,9 @@ fn authority_rules_of_g2_are_enforced_by_the_file_layer() {
         .update(
             &candidate.id,
             &candidate.revision,
-            UpdateAction::Confirm,
+            UpdateAction::Confirm {
+                target_revision: None,
+            },
             Actor::UserSurface,
         )
         .unwrap();
@@ -1560,7 +1564,9 @@ fn authority_rules_of_g2_are_enforced_by_the_file_layer() {
         p.update(
             &candidate.id,
             &confirmed.revision,
-            UpdateAction::Confirm,
+            UpdateAction::Confirm {
+                target_revision: None
+            },
             Actor::UserSurface
         ),
         Err(MemoryFilesError::InvalidInput(_))
@@ -1890,7 +1896,9 @@ fn update_archive_confirm_crash_after_each_step_recovers_per_the_table() {
             ),
             Which::Confirm => (
                 &confirm_target,
-                UpdateAction::Confirm,
+                UpdateAction::Confirm {
+                    target_revision: None,
+                },
                 Origin::ExtractedOther,
                 Origin::User,
             ),
@@ -3719,11 +3727,8 @@ fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing(
 }
 
 // ============================================================================
-// Learning v2 L3 (design 09 §3.2): characterization at HEAD
+// Learning v2 L3 (design 09 §3.1–§3.3): suggestions, S1–S5, S9, S10, withdraw
 // ============================================================================
-//
-// Written against the unchanged file layer before S1–S10 land (04 §1); the
-// L3 storage commit flips each one.
 
 /// A note the service wrote once and a hand then edited: its bytes no longer
 /// match the snapshot's record, so it reads as `external` (rank 2).
@@ -3738,6 +3743,14 @@ fn hand_edited(p: &Partition, title: &str, body: &str) -> NoteView {
     let view = p.read(&saved.id).unwrap();
     assert_eq!(view.derived.origin, Origin::External);
     view
+}
+
+/// A note the user saved (origin `user`).
+fn saved_note(p: &Partition, title: &str, body: &str) -> NoteView {
+    let saved = p
+        .create(new_note(title, body, NoteKind::Fact), Actor::UserSurface)
+        .unwrap();
+    p.read(&saved.id).unwrap()
 }
 
 /// A candidate naming `target` in `supersedes`, from the extractor.
@@ -3760,44 +3773,351 @@ fn candidate_naming(
     )
 }
 
-/// D5 at HEAD (`partition.rs:982-984`): a `supersedes` naming a `user` note
-/// from a surface the user did not direct is refused at create time,
-/// whatever the new note's status — so not even a suggestion can exist.
+/// What learning writes for a change it found (design 09 §2.5): an active
+/// user-words note naming `target`, under `SuggestUnlessLearned`.
+fn learned_change(
+    p: &Partition,
+    target: &NoteView,
+    body: &str,
+) -> Result<Created, MemoryFilesError> {
+    p.create(
+        NewNote {
+            status: Some(NoteStatus::Active),
+            supersedes: Some((target.note.id, target.revision.clone())),
+            replace_policy: ReplacePolicy::SuggestUnlessLearned,
+            ..new_note(&target.note.title, body, target.note.kind)
+        },
+        Actor::Extraction {
+            origin: Origin::ExtractedUser,
+        },
+    )
+}
+
+fn effective(p: &Partition, id: &NoteId) -> EffectiveStatus {
+    p.read(id).unwrap().derived.effective_status
+}
+
+/// S1 (flipped from `create_refuses_an_extraction_candidate_naming_a_user_note`):
+/// a candidate may name a note the user saved — it retires nothing while it
+/// stays a candidate — so a suggestion can exist, and the saved note stays
+/// active.
 #[test]
-fn create_refuses_an_extraction_candidate_naming_a_user_note() {
+fn a_candidate_may_name_a_note_the_user_saved() {
     let sb = Sandbox::new();
     let p = sb.open_home(ALICE);
-    let saved = p
-        .create(
-            new_note(
-                "Commute",
-                "# Commute\n\nThe user takes the bus.\n",
-                NoteKind::Fact,
-            ),
-            Actor::UserSurface,
-        )
-        .unwrap();
-    let target = p.read(&saved.id).unwrap();
-    let err = candidate_naming(&p, &target, Origin::ExtractedUser).unwrap_err();
-    assert_eq!(err.class(), "authority_conflict");
+    let target = saved_note(&p, "Commute", "# Commute\n\nThe user takes the bus.\n");
+    for origin in [Origin::ExtractedUser, Origin::ExtractedOther] {
+        let created = candidate_naming(&p, &target, origin).unwrap();
+        assert!(created.suggestion);
+        assert_eq!(created.superseded, [target.note.id]);
+        assert_eq!(
+            p.read(&created.id).unwrap().note.status,
+            NoteStatus::Candidate
+        );
+    }
+    assert_eq!(effective(&p, &target.note.id), EffectiveStatus::Active);
+    assert_eq!(p.read(&target.note.id).unwrap().revision, target.revision);
+}
+
+/// The G2 regression beside S1: an **active** replacement of a `user` note
+/// from a surface the user did not direct is still `authority_conflict` —
+/// a tool call's, and an extraction's that asks to apply it directly.
+#[test]
+fn an_active_model_tool_supersede_of_a_user_note_is_still_authority_conflict() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let target = saved_note(&p, "Commute", "# Commute\n\nThe user takes the bus.\n");
+    for actor in [
+        Actor::ModelTool,
+        Actor::Extraction {
+            origin: Origin::ExtractedUser,
+        },
+    ] {
+        let err = p
+            .create(
+                NewNote {
+                    supersedes: Some((target.note.id, target.revision.clone())),
+                    ..new_note("Commute", "# Commute\n\nBike.\n", NoteKind::Fact)
+                },
+                actor,
+            )
+            .unwrap_err();
+        assert_eq!(err.class(), "authority_conflict", "{actor:?}");
+        assert!(err.to_string().contains("Memory view"), "{err}");
+    }
     assert_eq!(p.load().unwrap().views.len(), 1, "nothing written");
 }
 
-/// S3 at HEAD (`partition.rs:1158-1169`, `authority.rs:192-202`): a
-/// forgotten candidate's tombstone keeps its `supersedes` and its origin,
-/// and is honoured by rank — a forgotten user-words candidate (rank 4)
-/// retires a hand-edited target (rank 2) it never replaced while it lived.
+/// S2 and ruling LR9: under `SuggestUnlessLearned`, a change to a learned
+/// note is an automatic replacement; a change to one the user saved, edited
+/// by hand or imported is written as a suggestion, and the target stays.
 #[test]
-fn a_forgotten_candidates_tombstone_is_honoured_by_rank() {
+fn suggest_unless_learned_replaces_only_a_learned_target() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let learned = p
+        .create(
+            new_note("Editor", "# Editor\n\nvim\n", NoteKind::Preference),
+            Actor::Extraction {
+                origin: Origin::ExtractedUser,
+            },
+        )
+        .unwrap();
+    let learned = p.read(&learned.id).unwrap();
+    let auto = learned_change(&p, &learned, "# Editor\n\nHelix\n").unwrap();
+    assert!(!auto.suggestion);
+    assert_eq!(auto.origin, Origin::ExtractedUser);
+    assert_eq!(p.read(&auto.id).unwrap().note.status, NoteStatus::Active);
+    assert_eq!(effective(&p, &learned.note.id), EffectiveStatus::Superseded);
+
+    let saved = saved_note(&p, "Commute", "# Commute\n\nbus\n");
+    let edited = hand_edited(&p, "Style", "# Style\n\nsentence case\n");
+    for target in [&saved, &edited] {
+        let created = learned_change(&p, target, "# Changed\n\nnew value\n").unwrap();
+        assert!(created.suggestion, "{:?}", target.derived.origin);
+        assert_eq!(created.origin, Origin::ExtractedUser);
+        assert_eq!(
+            p.read(&created.id).unwrap().note.status,
+            NoteStatus::Candidate
+        );
+        assert_eq!(effective(&p, &target.note.id), EffectiveStatus::Active);
+    }
+}
+
+/// S4: a restated change does not mint a second identical suggestion — the
+/// same fields and the same `supersedes` answer `dedup` with the pending
+/// candidate's id; a different wording is a second suggestion.
+#[test]
+fn a_repeated_identical_suggestion_is_dedup() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let target = saved_note(&p, "Commute", "# Commute\n\nbus\n");
+    let first = learned_change(&p, &target, "# Commute\n\nbike\n").unwrap();
+    let again = learned_change(&p, &target, "# Commute\n\nbike\n").unwrap();
+    assert_eq!(again.dedup, Dedup::Existing);
+    assert_eq!((again.id, again.suggestion), (first.id, true));
+    let other = learned_change(&p, &target, "# Commute\n\na bicycle\n").unwrap();
+    assert_eq!(other.dedup, Dedup::Created);
+    assert_ne!(other.id, first.id);
+}
+
+/// S5: confirming a suggestion needs its target's revision; without it the
+/// confirm is `invalid_input` and writes nothing.
+#[test]
+fn confirm_of_a_suggestion_requires_the_target_revision() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let target = saved_note(&p, "Commute", "# Commute\n\nbus\n");
+    let b = learned_change(&p, &target, "# Commute\n\nbike\n").unwrap();
+    let err = p
+        .update(
+            &b.id,
+            &b.revision,
+            UpdateAction::Confirm {
+                target_revision: None,
+            },
+            Actor::UserSurface,
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "invalid_input");
+    assert!(err.to_string().contains("target_revision"), "{err}");
+    assert_eq!(p.read(&b.id).unwrap().revision, b.revision);
+
+    let confirmed = p
+        .update(
+            &b.id,
+            &b.revision,
+            UpdateAction::Confirm {
+                target_revision: Some(target.revision.clone()),
+            },
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert_eq!(confirmed.status, NoteStatus::Active);
+    let view = p.read(&b.id).unwrap();
+    assert_eq!(view.derived.origin, Origin::User);
+    assert_eq!(effective(&p, &target.note.id), EffectiveStatus::Superseded);
+    // A candidate that names nothing confirms as before, with no target.
+    let plain = p
+        .create(
+            NewNote {
+                status: Some(NoteStatus::Candidate),
+                ..new_note("Lunch", "# Lunch\n\nnoodles\n", NoteKind::Fact)
+            },
+            Actor::Extraction {
+                origin: Origin::ExtractedOther,
+            },
+        )
+        .unwrap();
+    assert!(!plain.suggestion);
+    p.update(
+        &plain.id,
+        &plain.revision,
+        UpdateAction::Confirm {
+            target_revision: None,
+        },
+        Actor::UserSurface,
+    )
+    .unwrap();
+}
+
+/// S5: a target edited since the suggestion is `revision_conflict` naming
+/// the target's current revision; a target that went is `not_found`. The
+/// candidate is left exactly as it was either way.
+#[test]
+fn confirm_refuses_a_moved_target_and_leaves_the_candidate() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let target = saved_note(&p, "Commute", "# Commute\n\nbus\n");
+    let b = learned_change(&p, &target, "# Commute\n\nbike\n").unwrap();
+    let moved = p
+        .update(
+            &target.note.id,
+            &target.revision,
+            edit_body("# Commute\n\nthe bus, line 42\n"),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let err = p
+        .update(
+            &b.id,
+            &b.revision,
+            UpdateAction::Confirm {
+                target_revision: Some(target.revision.clone()),
+            },
+            Actor::UserSurface,
+        )
+        .unwrap_err();
+    match &err {
+        MemoryFilesError::RevisionConflict {
+            id,
+            current_revision,
+        } => {
+            assert_eq!(*id, target.note.id);
+            assert_eq!(*current_revision, moved.revision);
+        }
+        other => panic!("{other:?}"),
+    }
+    let still = p.read(&b.id).unwrap();
+    assert_eq!(
+        (still.revision.as_str(), still.note.status),
+        (b.revision.as_str(), NoteStatus::Candidate)
+    );
+    assert_eq!(effective(&p, &target.note.id), EffectiveStatus::Active);
+
+    p.forget(&[(target.note.id, moved.revision.clone())])
+        .unwrap();
+    let err = p
+        .update(
+            &b.id,
+            &b.revision,
+            UpdateAction::Confirm {
+                target_revision: Some(moved.revision.clone()),
+            },
+            Actor::UserSurface,
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "not_found");
+    assert_eq!(p.read(&b.id).unwrap().note.status, NoteStatus::Candidate);
+}
+
+/// S9 (flipped from `archiving_a_candidate_activates_its_link`): a suggestion
+/// is never archived, on any surface, so its link never starts to count; a
+/// candidate that names nothing archives as before.
+#[test]
+fn archiving_a_suggestion_is_refused_on_every_surface() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let target = hand_edited(&p, "Commute", "# Commute\n\nThe user takes the bus.\n");
+    let candidate = candidate_naming(&p, &target, Origin::ExtractedOther).unwrap();
+    for actor in [Actor::ModelTool, Actor::UserSurface] {
+        let err = p
+            .update(
+                &candidate.id,
+                &candidate.revision,
+                UpdateAction::Archive,
+                actor,
+            )
+            .unwrap_err();
+        assert_eq!(err.class(), "invalid_input", "{actor:?}");
+        assert!(err.to_string().contains("not archived"), "{err}");
+    }
+    assert_eq!(
+        p.read(&candidate.id).unwrap().note.status,
+        NoteStatus::Candidate
+    );
+    assert_eq!(effective(&p, &target.note.id), EffectiveStatus::Active);
+    let plain = p
+        .create(
+            NewNote {
+                status: Some(NoteStatus::Candidate),
+                ..new_note("Lunch", "# Lunch\n\nnoodles\n", NoteKind::Fact)
+            },
+            Actor::Extraction {
+                origin: Origin::ExtractedOther,
+            },
+        )
+        .unwrap();
+    let archived = p
+        .update(
+            &plain.id,
+            &plain.revision,
+            UpdateAction::Archive,
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert_eq!(archived.status, NoteStatus::Archived);
+}
+
+/// S10 (flipped from `a_model_tool_edit_of_a_candidate_records_extracted_user`):
+/// a tool call never edits a suggestion — the refusal names the Memory view
+/// (P9) — while the user still can.
+#[test]
+fn a_model_tool_edit_of_a_suggestion_is_authority_conflict() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let target = hand_edited(&p, "Commute", "# Commute\n\nThe user takes the bus.\n");
+    let candidate = candidate_naming(&p, &target, Origin::ExtractedOther).unwrap();
+    let err = p
+        .update(
+            &candidate.id,
+            &candidate.revision,
+            edit_body("# Commute\n\nThe user said they cycle now.\n"),
+            Actor::ModelTool,
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "authority_conflict");
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&candidate.id.to_string()) && msg.contains("Memory view"),
+        "{msg}"
+    );
+    assert_eq!(
+        p.snapshot().unwrap().notes[&candidate.id].origin,
+        Origin::ExtractedOther,
+        "nothing re-recorded"
+    );
+    let edited = p
+        .update(
+            &candidate.id,
+            &candidate.revision,
+            edit_body("# Commute\n\nThe user cycles, they said.\n"),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert!(edited.written);
+}
+
+/// S3 (flipped from `a_forgotten_candidates_tombstone_is_honoured_by_rank`):
+/// a forgotten candidate's tombstone carries no links, so a forgotten
+/// suggestion retires nothing — while a forgotten *active* replacement
+/// still keeps its predecessor retired (fixtures 16 and 24).
+#[test]
+fn a_forgotten_candidates_tombstone_carries_no_links() {
     let sb = Sandbox::new();
     let p = sb.open_home(ALICE);
     let target = hand_edited(&p, "Commute", "# Commute\n\nThe user takes the bus.\n");
     let candidate = candidate_naming(&p, &target, Origin::ExtractedUser).unwrap();
-    assert_eq!(
-        p.read(&target.note.id).unwrap().derived.effective_status,
-        EffectiveStatus::Active,
-        "a candidate supersedes nothing"
-    );
     let out = p
         .forget(&[(candidate.id, candidate.revision.clone())])
         .unwrap();
@@ -3808,66 +4128,142 @@ fn a_forgotten_candidates_tombstone_is_honoured_by_rank() {
         .tombstone(&candidate.id)
         .cloned()
         .unwrap();
-    assert_eq!(tomb.supersedes, [target.note.id]);
-    assert_eq!(
-        p.read(&target.note.id).unwrap().derived.effective_status,
-        EffectiveStatus::Superseded,
-        "the forgotten candidate's tombstone retires the hand-edited note"
-    );
-}
+    assert!(tomb.supersedes.is_empty(), "{tomb:?}");
+    assert_eq!(effective(&p, &target.note.id), EffectiveStatus::Active);
 
-/// S9 at HEAD (`partition.rs:1078-1091`): archiving a candidate that carries
-/// `supersedes` makes its link count — derivation skips a link only while
-/// the note is a candidate — and a tool call's archive records
-/// `extracted_user` (rank 4), which retires a hand-edited target.
-#[test]
-fn archiving_a_candidate_activates_its_link() {
-    let sb = Sandbox::new();
-    let p = sb.open_home(ALICE);
-    let target = hand_edited(&p, "Commute", "# Commute\n\nThe user takes the bus.\n");
-    let candidate = candidate_naming(&p, &target, Origin::ExtractedOther).unwrap();
-    let archived = p
-        .update(
-            &candidate.id,
-            &candidate.revision,
-            UpdateAction::Archive,
+    let old = p
+        .create(
+            new_note("Editor", "# Editor\n\nvim\n", NoteKind::Fact),
             Actor::ModelTool,
         )
         .unwrap();
-    assert_eq!(archived.status, NoteStatus::Archived);
+    let old = p.read(&old.id).unwrap();
+    let new = learned_change(&p, &old, "# Editor\n\nhelix\n").unwrap();
+    p.forget(&[(new.id, new.revision.clone())]).unwrap();
     assert_eq!(
-        p.snapshot().unwrap().notes[&candidate.id].origin,
-        Origin::ExtractedUser
+        p.snapshot().unwrap().tombstone(&new.id).unwrap().supersedes,
+        [old.note.id]
     );
+    assert_eq!(effective(&p, &old.note.id), EffectiveStatus::Superseded);
+}
+
+/// Ruling LR12: a withdrawal's tombstone carries no links and suppresses no
+/// source — the note it replaced comes back and a sibling citing the same
+/// message stays learned — while a forget suppresses the message for every
+/// note that cites it (fixture 16's reading, unchanged).
+#[test]
+fn a_withdrawal_keeps_no_link_and_suppresses_no_source() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let row = NoteSource {
+        kind: SourceType::Message,
+        id: "4812".into(),
+        observed_at: None,
+    };
+    let learned = |title: &str, body: &str| {
+        let c = p
+            .create(
+                NewNote {
+                    sources: vec![row.clone()],
+                    ..new_note(title, body, NoteKind::Fact)
+                },
+                Actor::Extraction {
+                    origin: Origin::ExtractedUser,
+                },
+            )
+            .unwrap();
+        p.read(&c.id).unwrap()
+    };
+    let old = learned("Editor", "# Editor\n\nvim\n");
+    let sibling = learned("Home city", "# Home city\n\nBerlin\n");
+    let new = p
+        .create(
+            NewNote {
+                sources: vec![row.clone()],
+                supersedes: Some((old.note.id, old.revision.clone())),
+                replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                ..new_note("Editor", "# Editor\n\nHelix\n", NoteKind::Fact)
+            },
+            Actor::Extraction {
+                origin: Origin::ExtractedUser,
+            },
+        )
+        .unwrap();
+    assert_eq!(effective(&p, &old.note.id), EffectiveStatus::Superseded);
+
+    let out = p
+        .forget_as(&[(new.id, new.revision.clone())], ForgetMode::Withdraw)
+        .unwrap();
+    assert_eq!(out[0].status, ForgetStatus::Forgotten);
+    let tomb = p.snapshot().unwrap().tombstone(&new.id).cloned().unwrap();
+    assert!(tomb.supersedes.is_empty() && tomb.suppressed_sources.is_empty());
+    assert!(file_for(&p, &new.id).is_none(), "the note file is gone");
+    assert_eq!(effective(&p, &old.note.id), EffectiveStatus::Active);
+    let view = p.read(&sibling.note.id).unwrap();
+    assert!(view.derived.recallable(), "{:?}", view.derived);
+
+    // An explicit forget of the old note still suppresses the message, and
+    // the sibling leaves automatic recall with it.
+    p.forget(&[(old.note.id, old.revision.clone())]).unwrap();
+    let view = p.read(&sibling.note.id).unwrap();
+    assert!(view.derived.source_forgotten);
+    assert!(!view.derived.recallable());
+}
+
+/// Design 09 §3.4: a suggestion never enters its target's same-`fact_key`
+/// group, so the target stays the winner with no conflict; after the
+/// confirm, the explicit link retires it and there is still no conflict row.
+#[test]
+fn a_suggestion_stays_out_of_the_key_group_until_it_is_confirmed() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let target = p
+        .create(
+            NewNote {
+                fact_key: Some("user.commute".into()),
+                ..new_note("Commute", "# Commute\n\nbus\n", NoteKind::Fact)
+            },
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let target = p.read(&target.id).unwrap();
+    let b = p
+        .create(
+            NewNote {
+                fact_key: Some("user.commute".into()),
+                supersedes: Some((target.note.id, target.revision.clone())),
+                replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                ..new_note("Commute", "# Commute\n\nbike\n", NoteKind::Fact)
+            },
+            Actor::Extraction {
+                origin: Origin::ExtractedUser,
+            },
+        )
+        .unwrap();
+    assert!(b.suggestion);
+    let loaded = p.load().unwrap();
+    assert!(loaded.conflicts.is_empty(), "{:?}", loaded.conflicts);
+    let x = loaded.get(&target.note.id).unwrap();
+    assert!(x.derived.recallable() && !x.derived.conflict);
+    p.update(
+        &b.id,
+        &b.revision,
+        UpdateAction::Confirm {
+            target_revision: Some(target.revision.clone()),
+        },
+        Actor::UserSurface,
+    )
+    .unwrap();
+    let loaded = p.load().unwrap();
+    assert!(loaded.conflicts.is_empty(), "{:?}", loaded.conflicts);
     assert_eq!(
-        p.read(&target.note.id).unwrap().derived.effective_status,
+        loaded
+            .get(&target.note.id)
+            .unwrap()
+            .derived
+            .effective_status,
         EffectiveStatus::Superseded
     );
-}
-
-/// S10 at HEAD (`partition.rs:1092-1106`): a tool call may edit a candidate
-/// that carries `supersedes` — only a `user` note is protected — and the
-/// edit re-records it as `extracted_user`, laundering an inferred
-/// suggestion into one that reads as the user's words.
-#[test]
-fn a_model_tool_edit_of_a_candidate_records_extracted_user() {
-    let sb = Sandbox::new();
-    let p = sb.open_home(ALICE);
-    let target = hand_edited(&p, "Commute", "# Commute\n\nThe user takes the bus.\n");
-    let candidate = candidate_naming(&p, &target, Origin::ExtractedOther).unwrap();
-    assert_eq!(candidate.origin, Origin::ExtractedOther);
-    let edited = p
-        .update(
-            &candidate.id,
-            &candidate.revision,
-            edit_body("# Commute\n\nThe user said they cycle now.\n"),
-            Actor::ModelTool,
-        )
-        .unwrap();
-    assert!(edited.written);
-    assert_eq!(edited.status, NoteStatus::Candidate);
-    assert_eq!(
-        p.snapshot().unwrap().notes[&candidate.id].origin,
-        Origin::ExtractedUser
-    );
+    let confirmed = loaded.get(&b.id).unwrap();
+    assert!(confirmed.derived.recallable() && !confirmed.derived.conflict);
 }

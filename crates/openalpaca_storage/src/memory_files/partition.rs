@@ -18,7 +18,7 @@ use super::fsx::{
     ComponentState, canonical_string_lenient, create_private_dir, fsync_dir, read_regular_nofollow,
     real_directory_state, remove_dir_all_if_exists, remove_file_if_exists, write_atomic_private,
 };
-use super::note::{NewNote, Note, NoteId, NotePatch, NoteStatus, to_second};
+use super::note::{NewNote, Note, NoteId, NotePatch, NoteStatus, ReplacePolicy, to_second};
 use super::snapshot::{
     ControlSnapshot, NoteRecord, Origin, Pending, SnapshotError, SnapshotScope, Tombstone,
 };
@@ -90,6 +90,11 @@ pub struct Created {
     /// The ids this note's frontmatter names (the `memory_store` result's
     /// `superseded`).
     pub superseded: Vec<NoteId>,
+    /// The note is a **suggestion** (design 09 §3.1): a candidate that names
+    /// a note in `supersedes` and retires nothing until the user confirms it
+    /// — what [`ReplacePolicy::SuggestUnlessLearned`] writes for a target the
+    /// user saved or edited (S2), and an inferred candidate with a target.
+    pub suggestion: bool,
 }
 
 /// `memory_update.action` (design §7a).
@@ -97,7 +102,30 @@ pub struct Created {
 pub enum UpdateAction {
     Edit(NotePatch),
     Archive,
-    Confirm,
+    /// `target_revision` binds the note a suggestion replaces (design 09
+    /// §3.2, S5): required when the candidate carries `supersedes`, and a
+    /// target that moved or went is `revision_conflict` or `not_found`, the
+    /// candidate left as it is. Ignored for a candidate that names nothing.
+    Confirm {
+        target_revision: Option<String>,
+    },
+}
+
+/// What a forget leaves behind (design 09 §3.3, ruling LR12). Both remove
+/// the one note and its `.history`, tombstone first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForgetMode {
+    /// "Forget what I said" (design §6, *Forget contract*): the tombstone
+    /// keeps the note's `supersedes` — so a forgotten replacement keeps
+    /// retiring what it replaced — and suppresses every source it cited.
+    /// A candidate's tombstone carries no links (S3): it retired nothing
+    /// while it lived, and must not start now.
+    Forget,
+    /// "Keep my note; take back what learning did": undo, a dismissed
+    /// suggestion. The tombstone carries **no links and no suppressed
+    /// source**, so what the note replaced comes back and every other note
+    /// the same message taught stays learned and recallable.
+    Withdraw,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -958,7 +986,7 @@ impl Partition {
         let Some(kind) = input.kind else {
             return Err(MemoryFilesError::InvalidInput("kind is required".into()));
         };
-        let status = match input.status.unwrap_or(NoteStatus::Active) {
+        let mut status = match input.status.unwrap_or(NoteStatus::Active) {
             NoteStatus::Archived => {
                 return Err(MemoryFilesError::InvalidInput(
                     "a note is not created archived".into(),
@@ -967,6 +995,14 @@ impl Partition {
             s => s,
         };
         let loaded = self.load_with(&state)?;
+        let same_note = |v: &NoteView| {
+            v.note.kind == kind
+                && v.note.title == input.title
+                && v.note.body == input.body
+                && v.note.fact_key == input.fact_key
+                && v.note.aliases == input.aliases
+                && v.note.tags == input.tags
+        };
 
         let mut supersedes = Vec::new();
         if let Some((target, expected)) = &input.supersedes {
@@ -979,25 +1015,55 @@ impl Partition {
                     current_revision: view.revision.clone(),
                 });
             }
-            if view.derived.origin == Origin::User && !actor.is_user_directed() {
+            // S2 (design 09 §3.2, ruling LR9): learning replaces a learned
+            // note outright, and suggests replacing any other — one the user
+            // saved, edited by hand or imported. The one load above decides.
+            if input.replace_policy == ReplacePolicy::SuggestUnlessLearned
+                && view.derived.origin != Origin::ExtractedUser
+            {
+                status = NoteStatus::Candidate;
+            }
+            // S1: a surface the user did not direct may not *replace* a note
+            // the user saved (G2) — but a candidate replaces nothing while it
+            // stays one (design §6), and only a user-directed confirm, bound
+            // to the target's revision (S5), makes it stop being one.
+            if view.derived.origin == Origin::User
+                && !actor.is_user_directed()
+                && status != NoteStatus::Candidate
+            {
                 return Err(authority_conflict(*target, "replace"));
             }
+            // S4: a restated change does not mint a second, identical
+            // suggestion for the same target.
+            if status == NoteStatus::Candidate
+                && let Some(existing) = loaded.views.iter().find(|v| {
+                    v.derived.effective_status == EffectiveStatus::Candidate
+                        && v.note.supersedes == [*target]
+                        && same_note(v)
+                })
+            {
+                return Ok(Created {
+                    id: existing.note.id,
+                    revision: existing.revision.clone(),
+                    origin: existing.derived.origin,
+                    dedup: Dedup::Existing,
+                    superseded: existing.note.supersedes.clone(),
+                    suggestion: true,
+                });
+            }
             supersedes.push(*target);
-        } else if let Some(existing) = loaded.views.iter().find(|v| {
-            v.derived.effective_status == EffectiveStatus::Active
-                && v.note.kind == kind
-                && v.note.title == input.title
-                && v.note.body == input.body
-                && v.note.fact_key == input.fact_key
-                && v.note.aliases == input.aliases
-                && v.note.tags == input.tags
-        }) {
+        } else if let Some(existing) = loaded
+            .views
+            .iter()
+            .find(|v| v.derived.effective_status == EffectiveStatus::Active && same_note(v))
+        {
             return Ok(Created {
                 id: existing.note.id,
                 revision: existing.revision.clone(),
                 origin: existing.derived.origin,
                 dedup: Dedup::Existing,
                 superseded: Vec::new(),
+                suggestion: false,
             });
         }
 
@@ -1031,6 +1097,7 @@ impl Partition {
             revision,
             origin,
             dedup: Dedup::Created,
+            suggestion: status == NoteStatus::Candidate && !supersedes.is_empty(),
             superseded: supersedes,
         })
     }
@@ -1056,8 +1123,13 @@ impl Partition {
             });
         }
         let mut new = view.note.clone();
+        // A suggestion (design 09 §3.1): a candidate that names a note it
+        // would replace. It retires nothing while it stays a candidate, so
+        // every way it could stop being one other than a bound confirm is
+        // closed below (S9, S10).
+        let suggestion = new.status == NoteStatus::Candidate && !new.supersedes.is_empty();
         let origin = match &action {
-            UpdateAction::Confirm => {
+            UpdateAction::Confirm { target_revision } => {
                 if !actor.is_user_directed() {
                     return Err(MemoryFilesError::ConfirmRefused {
                         id: *id,
@@ -1072,10 +1144,41 @@ impl Partition {
                         new.status
                     )));
                 }
+                if suggestion {
+                    // S5: the confirm binds the note it retires, so a target
+                    // edited after the suggestion is never retired unseen.
+                    let [target] = new.supersedes.as_slice() else {
+                        return Err(MemoryFilesError::InvalidInput(format!(
+                            "note {id} names {} notes it would replace; a suggestion replaces one — edit its supersedes list before confirming it",
+                            new.supersedes.len()
+                        )));
+                    };
+                    let Some(target_revision) = target_revision else {
+                        return Err(MemoryFilesError::InvalidInput(format!(
+                            "note {id} would replace note {target}: confirming it needs target_revision, the revision of the note it replaces as you last saw it"
+                        )));
+                    };
+                    let current = loaded
+                        .get(target)
+                        .ok_or(MemoryFilesError::NotFound(*target))?;
+                    if current.revision != *target_revision {
+                        return Err(MemoryFilesError::RevisionConflict {
+                            id: *target,
+                            current_revision: current.revision.clone(),
+                        });
+                    }
+                }
                 new.status = NoteStatus::Active;
                 Origin::User
             }
             UpdateAction::Archive => {
+                // S9: an archived former suggestion's link would count, and
+                // retire its target with the archiving actor's authority.
+                if suggestion {
+                    return Err(MemoryFilesError::InvalidInput(format!(
+                        "note {id} is a suggestion: a suggestion is replaced or kept, not archived — confirm it to replace the note it names, or undo it to keep yours"
+                    )));
+                }
                 if view.derived.origin == Origin::User && !actor.is_user_directed() {
                     return Err(authority_conflict(*id, "archive"));
                 }
@@ -1093,6 +1196,17 @@ impl Partition {
             UpdateAction::Edit(patch) => {
                 if view.derived.origin == Origin::User && !actor.is_user_directed() {
                     return Err(authority_conflict(*id, "edit"));
+                }
+                // S10: the text a confirmation shows is the extractor's, and
+                // an edit here would also re-record an inferred suggestion as
+                // the user's own words.
+                if suggestion && !actor.is_user_directed() {
+                    return Err(MemoryFilesError::AuthorityConflict {
+                        id: *id,
+                        message: format!(
+                            "Note {id} is a suggestion waiting for you, so a tool call may not edit it: open the Memory view in the app, or run `openalpaca memory confirm {id}` or `openalpaca memory undo {id}`."
+                        ),
+                    });
                 }
                 patch.apply(&mut new);
                 if new.serialize() == view.note.serialize() {
@@ -1129,10 +1243,20 @@ impl Partition {
     /// tombstone (with the note's origin, `supersedes` and source ids), then
     /// the file and its `.history`. Each target is its own single-note
     /// mutation. A target with no file answers `not_found` whatever revision
-    /// was sent (§7b P12).
+    /// was sent (§7b P12). [`ForgetMode::Forget`].
     pub fn forget(
         &self,
         targets: &[(NoteId, String)],
+    ) -> Result<Vec<ForgetOutcome>, MemoryFilesError> {
+        self.forget_as(targets, ForgetMode::Forget)
+    }
+
+    /// A forget or a withdrawal (design 09 §3.3): the same single-note
+    /// mutations, tombstone first; `mode` decides what the tombstone keeps.
+    pub fn forget_as(
+        &self,
+        targets: &[(NoteId, String)],
+        mode: ForgetMode,
     ) -> Result<Vec<ForgetOutcome>, MemoryFilesError> {
         let mut state = self.lock();
         self.refuse_if_quarantined(&state)?;
@@ -1155,16 +1279,27 @@ impl Partition {
                 });
                 continue;
             }
+            let (supersedes, suppressed_sources) = match mode {
+                ForgetMode::Forget => (
+                    // S3: a candidate retired nothing while it lived.
+                    if view.note.status == NoteStatus::Candidate {
+                        Vec::new()
+                    } else {
+                        view.note.supersedes.clone()
+                    },
+                    view.note
+                        .sources
+                        .iter()
+                        .map(|s| s.suppression_key())
+                        .collect(),
+                ),
+                ForgetMode::Withdraw => (Vec::new(), Vec::new()),
+            };
             let tombstone = Tombstone {
                 id: *id,
                 origin: view.derived.origin,
-                supersedes: view.note.supersedes.clone(),
-                suppressed_sources: view
-                    .note
-                    .sources
-                    .iter()
-                    .map(|s| s.suppression_key())
-                    .collect(),
+                supersedes,
+                suppressed_sources,
                 forgotten_at: self.now(),
             };
             let path = view.path.clone();

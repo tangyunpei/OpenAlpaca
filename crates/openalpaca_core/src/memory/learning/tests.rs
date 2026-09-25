@@ -2753,8 +2753,8 @@ async fn a_learned_restatement_with_equal_content_is_unchanged() {
 /// §2.5, case 3: the note the key names was never shown to the model — a
 /// change in new words is what the lexical lookup misses — so it is a
 /// change, and against a note the user saved it is a suggestion (MD-11,
-/// G2): the saved note stays exactly as it was. S1 and S2 (L3) write the
-/// suggestion; until then it is decided and counted, never applied.
+/// G2): a candidate of origin `extracted_user` naming the saved note, which
+/// stays exactly as it was (S1, S2).
 #[tokio::test]
 async fn a_change_against_an_unlisted_saved_note_is_a_suggestion() {
     let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
@@ -2773,8 +2773,13 @@ async fn a_change_against_an_unlisted_saved_note_is_a_suggestion() {
         scene.model.prompts()[0]
     );
     assert_eq!(
-        (report.suggestions, report.stored, report.dropped_unchanged),
-        (1, 0, 0),
+        (
+            report.suggestions,
+            report.stored,
+            report.candidates,
+            report.dropped_unchanged
+        ),
+        (1, 1, 1, 0),
         "{report:?}"
     );
     let active = scene.active();
@@ -2784,16 +2789,17 @@ async fn a_change_against_an_unlisted_saved_note_is_a_suggestion() {
         (saved.id, &saved.revision)
     );
     assert_eq!(active[0].origin, Origin::User);
-    assert!(
-        scene.candidates().is_empty(),
-        "nothing is written before L3"
-    );
+    let candidates = scene.candidates();
+    assert_eq!(candidates.len(), 1, "{candidates:?}");
+    assert_eq!(candidates[0].origin, Origin::ExtractedUser);
+    assert_eq!(candidates[0].supersedes, [saved.id]);
 }
 
 /// Ruling LR9 over the one hand edit the stat scan cannot see: a learned
 /// note rewritten by hand at the same size, its mtime put back, is the
 /// user's now (`external`). A change in the user's words with its key is
-/// a suggestion — the edit is never replaced automatically.
+/// a suggestion — written as a candidate naming it — and the edit is never
+/// replaced automatically.
 #[tokio::test]
 async fn a_same_stat_hand_edit_of_a_learned_note_is_never_replaced_automatically() {
     let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
@@ -2852,7 +2858,7 @@ async fn a_same_stat_hand_edit_of_a_learned_note_is_never_replaced_automatically
     );
     assert_eq!(
         (report.suggestions, report.stored, report.replaced),
-        (1, 0, 0),
+        (1, 1, 0),
         "{report:?}"
     );
     let active = scene.active();
@@ -2866,17 +2872,15 @@ async fn a_same_stat_hand_edit_of_a_learned_note_is_never_replaced_automatically
         "{}",
         note.body
     );
-    assert!(
-        scene.candidates().is_empty(),
-        "nothing is written before L3"
-    );
+    let candidates = scene.candidates();
+    assert_eq!(candidates.len(), 1, "{candidates:?}");
+    assert_eq!(candidates[0].supersedes, [learned.id]);
 }
 
 /// §2.5's table, last row, against a note the user saved: an inferred
-/// change is an inferred suggestion. The file layer refuses a candidate
-/// naming a `user` note until S1 (L3), so in L2 it is decided and counted
-/// like a suggestion and never attempted — not counted `failed`, with a
-/// WARN that blames a tool call.
+/// change is an inferred suggestion — S1 lets a candidate name a `user`
+/// note — written as an `extracted_other` candidate, never counted
+/// `failed`, and the saved note stays as it was.
 #[tokio::test]
 async fn an_inferred_change_to_a_saved_note_is_a_suggestion_not_a_failure() {
     let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
@@ -2902,7 +2906,7 @@ async fn an_inferred_change_to_a_saved_note_is_a_suggestion_not_a_failure() {
     );
     assert_eq!(
         (report.suggestions, report.failed, report.stored),
-        (1, 0, 0),
+        (1, 0, 1),
         "{report:?}"
     );
     let active = scene.active();
@@ -2911,10 +2915,10 @@ async fn an_inferred_change_to_a_saved_note_is_a_suggestion_not_a_failure() {
         (active[0].id, &active[0].revision),
         (saved.id, &saved.revision)
     );
-    assert!(
-        scene.candidates().is_empty(),
-        "nothing is written before L3"
-    );
+    let candidates = scene.candidates();
+    assert_eq!(candidates.len(), 1, "{candidates:?}");
+    assert_eq!(candidates[0].origin, Origin::ExtractedOther);
+    assert_eq!(candidates[0].supersedes, [saved.id]);
 }
 
 /// Rulings LR10, LR11: a learned `user.*` fact restated with a new value
@@ -3315,4 +3319,252 @@ fn the_extractor_prompt_matches_its_fixture() {
         "a placeholder was left: {rendered}"
     );
     assert_eq!(rendered, include_str!("extractor_prompt.golden.txt"));
+}
+
+// ── Replacement and suggestions (design 09 §3, slice L3) ────────────────
+
+/// MD-11, the automatic half: a change in the user's words to a **learned**
+/// note replaces it — the new note is active and names it, the old one is
+/// superseded — and *recently learned* lists the replacement with what it
+/// replaced, whose undo brings the old note back.
+#[tokio::test]
+async fn a_learned_statement_replaces_a_learned_note_automatically() {
+    let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
+        "title": "Editor preference",
+        "content": "Since June the user edits with Helix; before that, vim.",
+        "fact_key": "user.editor",
+        "replaces": "n1",
+        "replace_reason": "The user said they switched from vim to Helix.",
+    }))])]);
+    let old = scene.learned(
+        "Editor preference",
+        "The user edits with vim.",
+        Some("user.editor"),
+    );
+    let s = scene.session();
+    scene.turn(
+        &s,
+        "I stopped using vim in June; my editor is Helix now.",
+        "Noted.",
+    );
+    let report = scene.queue.flush_session(&s).await;
+    assert!(
+        scene.model.prompts()[0].contains("n1 key=user.editor origin=learned"),
+        "{}",
+        scene.model.prompts()[0]
+    );
+    assert_eq!(
+        (
+            report.stored,
+            report.active,
+            report.replaced,
+            report.suggestions
+        ),
+        (1, 1, 1, 0),
+        "{report:?}"
+    );
+    let ctx = scene.user_ctx();
+    assert_eq!(
+        scene.read(&ctx, old.id).effective_status,
+        EffectiveStatus::Superseded
+    );
+    let learned = scene.service.recently_learned(&ctx, None, None).unwrap();
+    assert_eq!(learned.len(), 1, "{learned:?}");
+    assert_eq!(learned[0].supersedes, [old.id]);
+
+    let undone = scene
+        .service
+        .undo(&ctx, learned[0].id, &learned[0].revision)
+        .unwrap();
+    assert_eq!(undone.restored, [old.id]);
+    assert_eq!(
+        scene.read(&ctx, old.id).effective_status,
+        EffectiveStatus::Active
+    );
+}
+
+/// MD-11, the suggestion half, and G2: a change in the user's words to a
+/// note the user **saved** is a suggestion — a candidate of origin
+/// `extracted_user` naming it — the saved note is still recalled and the
+/// suggestion is not, and the suggestions listing shows both texts and
+/// the reason.
+#[tokio::test]
+async fn a_learned_statement_against_a_user_note_is_a_suggestion() {
+    let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
+        "title": "Commute",
+        "content": "Since March the user cycles to the office.",
+        "kind": "fact",
+        "fact_key": "user.commute",
+        "replaces": "n1",
+        "replace_reason": "The user said they cycle to the office now.",
+    }))])]);
+    let saved = scene.save("Commute", "The user commutes by bus.", Some("user.commute"));
+    let s = scene.session();
+    scene.turn(
+        &s,
+        "I no longer take the bus; I cycle to the office.",
+        "Noted.",
+    );
+    let report = scene.queue.flush_session(&s).await;
+    assert!(
+        scene.model.prompts()[0].contains("n1 key=user.commute origin=saved-by-you"),
+        "{}",
+        scene.model.prompts()[0]
+    );
+    assert_eq!(
+        (
+            report.stored,
+            report.suggestions,
+            report.active,
+            report.replaced
+        ),
+        (1, 1, 0, 0),
+        "{report:?}"
+    );
+    let ctx = scene.user_ctx();
+    let recalled: Vec<NoteId> = scene
+        .service
+        .recall(
+            &ctx,
+            "How does the user commute to the office by bus?",
+            crate::memory::service::RecallBudget::default(),
+        )
+        .unwrap()
+        .notes
+        .into_iter()
+        .map(|n| n.id)
+        .collect();
+    assert!(recalled.contains(&saved.id), "{recalled:?}");
+    let listed = scene.service.suggestions(&ctx, None).unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    let b = &listed[0];
+    assert!(!recalled.contains(&b.id), "a suggestion is never recalled");
+    assert_eq!((b.origin, b.target.id), (Origin::ExtractedUser, saved.id));
+    assert_eq!(b.knowledge, "Since March the user cycles to the office.");
+    assert_eq!(b.target.excerpt, "The user commutes by bus.");
+    assert_eq!(
+        b.reason.as_deref(),
+        Some("The user said they cycle to the office now.")
+    );
+    assert!(b.observed_at.is_some(), "the cited row's time");
+}
+
+/// Ruling LR9: a note the user edited by hand (`external`, found by the
+/// stat scan) is never replaced automatically — a change to it is a
+/// suggestion, as for a note the user saved.
+#[tokio::test]
+async fn an_external_target_gets_a_suggestion() {
+    let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
+        "title": "Editor preference",
+        "content": "Since June the user edits with Helix.",
+        "fact_key": "user.editor",
+        "replaces": "n1",
+    }))])]);
+    let learned = scene.learned(
+        "Editor preference",
+        "The user edits with vim.",
+        Some("user.editor"),
+    );
+    let ctx = scene.user_ctx();
+    let file = scene
+        .root
+        .path()
+        .join("home/memory/owners")
+        .join(&ctx.owner_key)
+        .join(scene.read(&ctx, learned.id).path);
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("\nI wrote this line myself.\n");
+    std::fs::write(&file, text).unwrap();
+    assert_eq!(
+        scene.service.reconcile_owner(OWNER).unwrap().changes.len(),
+        1
+    );
+    assert_eq!(scene.read(&ctx, learned.id).origin, Origin::External);
+
+    let s = scene.session();
+    scene.turn(
+        &s,
+        "I don't use vim any more, my editor is Helix.",
+        "Noted.",
+    );
+    let report = scene.queue.flush_session(&s).await;
+    assert!(
+        scene.model.prompts()[0].contains("origin=edited-by-hand"),
+        "{}",
+        scene.model.prompts()[0]
+    );
+    assert_eq!((report.suggestions, report.replaced), (1, 0), "{report:?}");
+    assert_eq!(
+        scene.read(&ctx, learned.id).effective_status,
+        EffectiveStatus::Active
+    );
+    assert_eq!(scene.candidates()[0].supersedes, [learned.id]);
+}
+
+/// Ruling LR10 for a suggestion: a saved global `user.*` fact changed in a
+/// project chat is suggested in its target's partition — the global one —
+/// so confirming it replaces the note it names.
+#[tokio::test]
+async fn a_replacement_is_written_in_its_targets_partition() {
+    let (_dir, root) = project();
+    let root_str = root.to_string_lossy().to_string();
+    let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
+        "title": "Work laptop",
+        "content": "The user's work laptop is now a MacBook Pro.",
+        "kind": "fact",
+        "fact_key": "user.laptop",
+        "replaces": "n1",
+    }))])]);
+    let saved = scene.save(
+        "Work laptop",
+        "The user's work laptop is a ThinkPad X1.",
+        Some("user.laptop"),
+    );
+    let s = scene.session();
+    scene.turn_in(
+        &s,
+        "I got a new work laptop: a MacBook Pro.",
+        "Noted.",
+        Some(&root_str),
+    );
+    let report = scene.queue.flush_session(&s).await;
+    assert_eq!(report.suggestions, 1, "{report:?}");
+    let in_project = scene.ctx_in(Some(&root));
+    let listed = scene.service.suggestions(&in_project, None).unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(
+        (listed[0].scope, listed[0].target.id),
+        (NoteScope::Global, saved.id)
+    );
+}
+
+/// Ruling LR11 and design 09 §3.4: an item that carries a key but no
+/// `replaces` targets that key's R9 winner, and a changed value replaces
+/// it — the key group keeps one recallable note, not two.
+#[tokio::test]
+async fn same_key_without_replaces_supersedes_the_key_winner() {
+    let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
+        "title": "Desk",
+        "content": "The user sits on the fourth floor now.",
+        "kind": "fact",
+        "fact_key": "user.desk",
+    }))])]);
+    let old = scene.learned("Desk", "Second floor, by the window.", Some("user.desk"));
+    let s = scene.session();
+    scene.turn(&s, "They moved me upstairs, to level four.", "Noted.");
+    let report = scene.queue.flush_session(&s).await;
+    assert!(
+        !scene.model.prompts()[0].contains("\"Desk\""),
+        "the old note was not listed: {}",
+        scene.model.prompts()[0]
+    );
+    assert_eq!((report.stored, report.replaced), (1, 1), "{report:?}");
+    let ctx = scene.user_ctx();
+    assert_eq!(
+        scene.read(&ctx, old.id).effective_status,
+        EffectiveStatus::Superseded
+    );
+    let active = scene.active();
+    assert_eq!(active.len(), 1, "{active:?}");
+    assert_eq!(active[0].supersedes, [old.id]);
 }

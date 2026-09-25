@@ -2,14 +2,21 @@
 //! (edit / archive / confirm), `forget` and `undo` — under the revision
 //! check, the G2 authority rules and the per-partition writer queue. Each
 //! is one single-note mutation of the file layer; the index follows.
+//!
+//! Learning v2 (design 09 §3.2–§3.3) adds two things here: confirming a
+//! suggestion binds its target's revision (S5) and then dismisses every
+//! other pending suggestion for that target (S6); and `undo` is a
+//! **withdrawal** — the one note goes, its tombstone keeps no link and
+//! suppresses no source, so what it replaced comes back and whatever else
+//! the same message taught stays learned (LR12).
 
 use super::{
     ForgetInput, ForgetItem, ForgetItemStatus, ForgetOutput, MemoryAccessContext, MemoryChange,
-    MemoryError, MemoryService, Retained, UpdateAction, UpdateInput, UpdateOutput,
+    MemoryError, MemoryService, Retained, UpdateAction, UpdateInput, UpdateOutput, WithdrawOutput,
 };
 use openalpaca_storage::memory_files::{
-    self as files, ForgetStatus, MAX_NOTE_BYTES, MAX_TITLE_CHARS, NoteId, NotePatch, Origin,
-    SourceType, is_valid_fact_key,
+    self as files, EffectiveStatus, ForgetMode, ForgetStatus, MAX_NOTE_BYTES, MAX_TITLE_CHARS,
+    NoteId, NotePatch, NoteStatus, NoteView, Origin, Partition, SourceType, is_valid_fact_key,
 };
 
 impl MemoryService {
@@ -27,10 +34,18 @@ impl MemoryService {
             ));
         }
         let resolved = self.resolve(ctx)?;
-        let Some((holder, _)) = Self::find_note(&resolved, &input.id)? else {
+        let Some((holder, before)) = Self::find_note(&resolved, &input.id)? else {
             return Err(MemoryError::NotFound(input.id));
         };
         let store_scope = holder.scope().clone();
+        // The notes a suggestion would replace (design 09 §3.1): read before
+        // the confirm, for S6's dismissals and the result's `superseded`.
+        let suggestion_targets: Vec<NoteId> = match input.action {
+            UpdateAction::Confirm { .. } if before.note.status == NoteStatus::Candidate => {
+                before.note.supersedes.clone()
+            }
+            _ => Vec::new(),
+        };
         let (action, change) = match input.action {
             UpdateAction::Edit(patch) => {
                 let patch = NotePatch {
@@ -71,7 +86,19 @@ impl MemoryService {
                 (files::UpdateAction::Edit(patch), "updated")
             }
             UpdateAction::Archive => (files::UpdateAction::Archive, "archived"),
-            UpdateAction::Confirm => (files::UpdateAction::Confirm, "confirmed"),
+            UpdateAction::Confirm { target_revision } => {
+                if let Some(rev) = &target_revision
+                    && !files::is_revision(rev)
+                {
+                    return Err(MemoryError::invalid(
+                        "target_revision is not a 64-character hex revision",
+                    ));
+                }
+                (
+                    files::UpdateAction::Confirm { target_revision },
+                    "confirmed",
+                )
+            }
         };
         let _write = self
             .slots
@@ -79,6 +106,15 @@ impl MemoryService {
         let partition = Self::open_partition(&store_scope, &ctx.owner_id)?;
         let updated =
             partition.update(&input.id, &input.expected_revision, action, ctx.actor(None))?;
+        // S6: the confirm is written; every other pending suggestion for the
+        // same note is now moot, and each is withdrawn on its own (design
+        // 09 §3.2). A confirm that failed returned above and dismissed
+        // nothing.
+        let dismissed = if suggestion_targets.is_empty() {
+            Vec::new()
+        } else {
+            self.dismiss_others(ctx, &partition, input.id, &suggestion_targets)?
+        };
         self.reindex(&partition, false)?;
         let origin = partition
             .load()?
@@ -101,7 +137,58 @@ impl MemoryService {
             revision: updated.revision,
             status: updated.status,
             change,
+            superseded: suggestion_targets,
+            dismissed,
         })
+    }
+
+    /// S6 (design 09 §3.2): withdraws every pending suggestion in
+    /// `partition` other than `confirmed` that names one of `targets`, each
+    /// as its own single-note mutation after the confirm has been written.
+    /// A withdrawal suppresses nothing, so a dismissed suggestion citing the
+    /// row the confirmed note cites leaves that note recallable. One that
+    /// moved or went since is left alone; the confirm stands whatever
+    /// happens to these.
+    fn dismiss_others(
+        &self,
+        ctx: &MemoryAccessContext,
+        partition: &Partition,
+        confirmed: NoteId,
+        targets: &[NoteId],
+    ) -> Result<Vec<NoteId>, MemoryError> {
+        let others: Vec<(NoteId, String, Origin)> = partition
+            .load()?
+            .views
+            .into_iter()
+            .filter(|v| {
+                v.note.id != confirmed
+                    && v.note.status == NoteStatus::Candidate
+                    && v.note.supersedes.iter().any(|t| targets.contains(t))
+            })
+            .map(|v| (v.note.id, v.revision, v.derived.origin))
+            .collect();
+        let mut dismissed = Vec::new();
+        for (id, revision, origin) in others {
+            match partition.forget_as(&[(id, revision)], ForgetMode::Withdraw) {
+                Ok(out) if out.first().map(|o| &o.status) == Some(&ForgetStatus::Forgotten) => {
+                    self.publish(&MemoryChange {
+                        partition_key: partition.partition_key().to_string(),
+                        note_id: id,
+                        change: "forgotten",
+                        revision: None,
+                        origin,
+                        surface: Some(ctx.surface),
+                    });
+                    dismissed.push(id);
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    note = %id,
+                    "memory: a suggestion made moot by a confirm could not be dismissed: {e}"
+                ),
+            }
+        }
+        Ok(dismissed)
     }
 
     /// `memory_forget` (design §6, *Forget contract*): ids with expected
@@ -190,43 +277,102 @@ impl MemoryService {
         })
     }
 
-    /// `undo` (design §6, *recently learned*): a forget by id and expected
-    /// revision, refused once the origin is no longer `extracted_user`.
+    /// `undo` (design §6 *recently learned*; design 09 §3.3): a
+    /// **withdrawal** by id and expected revision — "keep my note; take back
+    /// what learning did". It accepts a note learned from the user's words
+    /// (`extracted_user`) and any candidate, whatever its origin, which is
+    /// how a suggestion is dismissed (the Memory view's *Keep mine*,
+    /// `openalpaca memory undo`). Anything else — a note the user saved,
+    /// edited or confirmed — is `not_undoable`: forget is the verb for that.
+    ///
+    /// The tombstone keeps no link and suppresses no source, so a replaced
+    /// note comes back — in a chain A ← B ← C, undoing C brings B back and A
+    /// stays superseded by B — and every other note the same message taught
+    /// stays learned and recallable.
     pub fn undo(
         &self,
         ctx: &MemoryAccessContext,
         id: NoteId,
         expected_revision: &str,
-    ) -> Result<ForgetOutput, MemoryError> {
+    ) -> Result<WithdrawOutput, MemoryError> {
         Self::require(ctx.capabilities.forget, "memory_forget")?;
+        if !files::is_revision(expected_revision) {
+            return Err(MemoryError::invalid(
+                "expected_revision is not a 64-character hex revision",
+            ));
+        }
         let resolved = self.resolve(ctx)?;
-        let Some((_, view)) = Self::find_note(&resolved, &id)? else {
+        let Some((holder, view)) = Self::find_note(&resolved, &id)? else {
             return Err(MemoryError::NotFound(id));
         };
-        if view.derived.origin != Origin::ExtractedUser {
+        if view.derived.origin != Origin::ExtractedUser && view.note.status != NoteStatus::Candidate
+        {
             return Err(MemoryError::NotUndoable {
                 id,
                 origin: view.derived.origin,
             });
         }
-        let out = self.forget(
-            ctx,
-            ForgetInput {
-                targets: vec![(id, expected_revision.to_string())],
-                reason: Some("undo".into()),
-            },
-        )?;
-        if let Some(ForgetItem {
-            status: ForgetItemStatus::RevisionConflict { current_revision },
-            ..
-        }) = out.results.first()
-        {
-            return Err(MemoryError::RevisionConflict {
-                id,
-                current_revision: current_revision.clone(),
-            });
+        self.withdraw(ctx, &holder.scope().clone(), &view, expected_revision)
+    }
+
+    /// One withdrawal (design 09 §3.3, ruling LR12) of `view` in the
+    /// partition at `store_scope`, under that partition's writer slot.
+    fn withdraw(
+        &self,
+        ctx: &MemoryAccessContext,
+        store_scope: &openalpaca_storage::store::StoreScope,
+        view: &NoteView,
+        expected_revision: &str,
+    ) -> Result<WithdrawOutput, MemoryError> {
+        let id = view.note.id;
+        let _write = self
+            .slots
+            .begin_write(&Self::slot_key(store_scope, &ctx.owner_key));
+        let partition = Self::open_partition(store_scope, &ctx.owner_id)?;
+        // What this note retires now, so the answer can name what came back.
+        let retired: Vec<NoteId> = partition
+            .load()?
+            .views
+            .iter()
+            .filter(|v| v.derived.superseded_by.contains(&id))
+            .map(|v| v.note.id)
+            .collect();
+        let out =
+            partition.forget_as(&[(id, expected_revision.to_string())], ForgetMode::Withdraw)?;
+        match out.first().map(|o| &o.status) {
+            Some(ForgetStatus::Forgotten) => {}
+            Some(ForgetStatus::RevisionConflict { current_revision }) => {
+                return Err(MemoryError::RevisionConflict {
+                    id,
+                    current_revision: current_revision.clone(),
+                });
+            }
+            Some(ForgetStatus::NotFound) | None => return Err(MemoryError::NotFound(id)),
         }
-        Ok(out)
+        self.reindex(&partition, false)?;
+        let loaded = partition.load()?;
+        let restored = retired
+            .into_iter()
+            .filter(|t| {
+                loaded
+                    .get(t)
+                    .is_some_and(|v| v.derived.effective_status != EffectiveStatus::Superseded)
+            })
+            .collect();
+        let change = MemoryChange {
+            partition_key: partition.partition_key().to_string(),
+            note_id: id,
+            change: "forgotten",
+            revision: None,
+            origin: view.derived.origin,
+            surface: Some(ctx.surface),
+        };
+        self.publish(&change);
+        Ok(WithdrawOutput {
+            id,
+            restored,
+            change,
+        })
     }
 }
 

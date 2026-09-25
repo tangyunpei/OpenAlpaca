@@ -1673,3 +1673,51 @@ fn an_index_built_incrementally_equals_one_rebuilt_from_the_final_records() {
         assert_eq!((w, t), (c, c));
     }
 }
+
+/// Design 09 §3.5 (LR18): the pending suggestions are read from the catalog
+/// — effective candidates whose own `supersedes` names a note, newest
+/// `updated_at` first, of the named partitions only — and `catalog_note`
+/// reads one row whatever its status.
+#[test]
+fn suggestion_rows_are_candidates_that_name_a_note_newest_first() {
+    let index = ready_index();
+    let candidate = |id: &str, updated: &str, supersedes: &[&str]| {
+        let mut r = record(id, "Commute", "by bike");
+        r.status = "candidate".into();
+        r.effective_status = EffectiveStatus::Candidate;
+        r.origin = "extracted_user".into();
+        r.updated_at = updated.into();
+        r.supersedes = supersedes.iter().map(|s| s.to_string()).collect();
+        r
+    };
+    let older = candidate("s1", "2026-09-20T10:00:00Z", &["x"]);
+    let newer = candidate("s2", "2026-09-22T10:00:00Z", &["x"]);
+    let plain = candidate("c1", "2026-09-23T10:00:00Z", &[]);
+    let mut elsewhere = candidate("s3", "2026-09-23T10:00:00Z", &["y"]);
+    elsewhere.partition_key = "proj-q".into();
+    let mut active = record("a1", "Editor", "helix");
+    active.supersedes = vec!["old".into()];
+    let target = record("x", "Commute", "by bus");
+    index
+        .upsert_many(&[older, newer, plain, elsewhere, active, target])
+        .unwrap();
+
+    let ids = |rows: Vec<CatalogNote>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
+    assert_eq!(
+        ids(index.suggestion_rows(&["home-p".into()]).unwrap()),
+        vec!["s2", "s1"]
+    );
+    assert_eq!(
+        ids(index
+            .suggestion_rows(&["home-p".into(), "proj-q".into()])
+            .unwrap()),
+        vec!["s3", "s2", "s1"]
+    );
+    assert!(index.suggestion_rows(&[]).unwrap().is_empty());
+    let row = index.catalog_note("home-p", "x").unwrap().unwrap();
+    assert_eq!(
+        (row.title.as_str(), row.effective_status),
+        ("Commute", EffectiveStatus::Active)
+    );
+    assert!(index.catalog_note("proj-q", "x").unwrap().is_none());
+}

@@ -28,6 +28,7 @@ mod learning;
 mod management;
 mod mutations;
 pub mod recall;
+mod suggestions;
 mod types;
 pub mod wire;
 mod write_slot;
@@ -40,12 +41,14 @@ pub use context::{
 };
 pub use error::MemoryError;
 pub use recall::{TRUST_LABEL, wrap_delivery};
+pub use suggestions::{SUGGESTION_EXCERPT_BYTES, SUGGESTIONS_DEFAULT_LIMIT, SUGGESTIONS_MAX_LIMIT};
 pub use types::{
     ExtractionProvenance, ForgetInput, ForgetItem, ForgetItemStatus, ForgetOutput, Freshness,
     HistoryEntry, KnownNote, LearningView, ListInput, ListItem, ListOutput, MemoryChange,
     MemoryUsed, Patch, ReadInput, ReadOutput, RecallBudget, RecallResult, RecalledNote,
     RecentlyUsedItem, Retained, SearchInput, SearchOutput, SearchResultItem, StoreInput,
-    StoreOutput, UpdateAction, UpdateInput, UpdateOutput, UsedReason,
+    StoreOutput, Suggestion, SuggestionTarget, UpdateAction, UpdateInput, UpdateOutput, UsedReason,
+    WithdrawOutput,
 };
 pub use write_slot::QuiesceGuard;
 
@@ -784,6 +787,7 @@ impl MemoryService {
                     updated_at: view.note.updated_at,
                     created_at: view.note.created_at,
                     pinned: view.note.pinned,
+                    supersedes: view.note.supersedes,
                 });
             }
         }
@@ -810,8 +814,12 @@ impl MemoryService {
         Ok(ListOutput { items, next_cursor })
     }
 
-    /// Recently learned (design §6): active `extracted_user` notes, newest
-    /// `created_at` first, since `since` (default 7 days) and at most `limit`.
+    /// Recently learned (design §6): `extracted_user` notes that automatic
+    /// recall can deliver — effectively active, not a same-key loser, no
+    /// forgotten source (design 09 §3.2, S7) — newest `created_at` first,
+    /// since `since` (default 7 days) and at most `limit`. A learned note that
+    /// silently loses to one the user saved is never used, so it is not
+    /// listed as learned.
     pub fn recently_learned(
         &self,
         ctx: &MemoryAccessContext,
@@ -827,7 +835,7 @@ impl MemoryService {
             let scope = scope_of(p);
             for view in p.load()?.views {
                 if view.derived.origin != Origin::ExtractedUser
-                    || view.derived.effective_status != EffectiveStatus::Active
+                    || !view.derived.recallable()
                     || view.note.created_at < since
                 {
                     continue;
@@ -844,6 +852,7 @@ impl MemoryService {
                     updated_at: view.note.updated_at,
                     created_at: view.note.created_at,
                     pinned: view.note.pinned,
+                    supersedes: view.note.supersedes,
                 });
             }
         }
@@ -1069,6 +1078,7 @@ impl MemoryService {
             origin: created.origin,
             superseded: created.superseded,
             dedup: created.dedup,
+            suggestion: created.suggestion,
             change,
         })
     }
@@ -1278,7 +1288,7 @@ pub(super) fn cut_bytes(text: &str, max: usize) -> (String, bool) {
 
 /// The section headed `heading` (any level): the heading line and the lines
 /// until the next heading of the same or a higher level.
-fn section_of(body: &str, heading: &str) -> Option<String> {
+pub(super) fn section_of(body: &str, heading: &str) -> Option<String> {
     let wanted = heading.trim().trim_start_matches('#').trim();
     let lines: Vec<&str> = body.lines().collect();
     let mut start = None;

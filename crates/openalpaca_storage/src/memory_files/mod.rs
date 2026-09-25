@@ -51,11 +51,11 @@ pub use note::{
     normalize_statement, revision_of,
 };
 pub use partition::{
-    Actor, CrashPoint, Created, Dedup, ForgetOutcome, ForgetStatus, LoadedPartition, MalformedFile,
-    MoveSnapshotState, NoteView, Partition, PartitionHealth, ReconcileChange, ReconcileChangeKind,
-    RepairReport, ScanEntry, SnapshotMove, UpdateAction, Updated, adopt, begin_project_move,
-    classify_move_snapshots, finish_project_move, list_owner_keys, list_snapshots,
-    snapshot_path_for,
+    Actor, CrashPoint, Created, Dedup, ForgetMode, ForgetOutcome, ForgetStatus, LoadedPartition,
+    MalformedFile, MoveSnapshotState, NoteView, Partition, PartitionHealth, ReconcileChange,
+    ReconcileChangeKind, RepairReport, ScanEntry, SnapshotMove, UpdateAction, Updated, adopt,
+    begin_project_move, classify_move_snapshots, finish_project_move, list_owner_keys,
+    list_snapshots, snapshot_path_for,
 };
 pub use snapshot::{
     ControlSnapshot, NoteRecord, Origin, Pending, SNAPSHOT_SCHEMA, SnapshotError, SnapshotScope,

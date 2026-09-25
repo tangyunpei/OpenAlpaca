@@ -851,6 +851,45 @@ impl MemoryIndex {
         Ok(out)
     }
 
+    /// The pending suggestions of these partitions (design 09 §3.5, LR18):
+    /// every effective candidate whose own `supersedes` names a note, newest
+    /// `updated_at` first — read from the catalog, never a partition parse.
+    /// Both origins; the caller verifies each file it lists.
+    pub fn suggestion_rows(&self, partition_keys: &[String]) -> Result<Vec<CatalogNote>> {
+        if partition_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.lock();
+        let sql = format!(
+            "SELECT {CATALOG_COLUMNS} FROM note n
+             WHERE n.partition_key IN ({})
+               AND n.effective_status = 'candidate' AND n.supersedes <> '[]'
+             ORDER BY n.updated_at DESC, n.id ASC",
+            placeholders(partition_keys.len())
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(partition_keys.iter()),
+            catalog_note_from_row,
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(IndexError::from)
+    }
+
+    /// One note's catalog row, whatever its status.
+    pub fn catalog_note(&self, partition_key: &str, id: &str) -> Result<Option<CatalogNote>> {
+        let conn = self.lock();
+        conn.query_row(
+            &format!(
+                "SELECT {CATALOG_COLUMNS} FROM note n WHERE n.partition_key = ?1 AND n.id = ?2"
+            ),
+            params![partition_key, id],
+            catalog_note_from_row,
+        )
+        .optional()
+        .map_err(IndexError::from)
+    }
+
     /// The winner of `fact_key` in one partition (design 03 §3 rule 3, §7c
     /// R9): the effectively active note with that key that is not a
     /// same-key loser. Derivation leaves at most one such note per key and

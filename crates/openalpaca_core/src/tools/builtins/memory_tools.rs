@@ -633,7 +633,9 @@ impl BuiltInTool for MemoryUpdateTool {
                 })
             }
             "archive" => UpdateAction::Archive,
-            "confirm" => UpdateAction::Confirm,
+            "confirm" => UpdateAction::Confirm {
+                target_revision: None,
+            },
             other => {
                 return Err(format!(
                     "invalid_input: `action` must be `edit`, `archive` or `confirm`, got {other:?}"

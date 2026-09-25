@@ -833,7 +833,10 @@ async fn undo_is_refused_once_the_origin_moved() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{json}");
-    assert_eq!(json["status"], "forgotten");
+    // Design 09 §3.3: undo withdraws — nothing it cited is suppressed.
+    assert_eq!(json["status"], "withdrawn");
+    assert_eq!(json["restored"], serde_json::json!([]));
+    assert!(json.get("retained").is_none(), "{json}");
     let (status, _) = split(
         f.api
             .read(

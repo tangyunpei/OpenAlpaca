@@ -134,12 +134,14 @@ pub struct FlushReport {
     pub stored: usize,
     /// Active `extracted_user` notes — the user's own words.
     pub active: usize,
-    /// `extracted_other` candidates.
+    /// Candidates: `extracted_other` notes and suggestions.
     pub candidates: usize,
     /// Among `active`: automatic replacements of a learned note (MD-11).
     pub replaced: usize,
-    /// Changes to a note the user saved: suggestions (MD-11). Decided from
-    /// Learning v2 L2 on, written from L3 on (S1, S2); counted meanwhile.
+    /// Among `candidates`: suggestions (MD-11) — a change in the user's
+    /// words to a note they saved, edited or imported, and an inferred
+    /// change to any note — each naming the note it would replace, which
+    /// stays as it is until the user confirms one.
     pub suggestions: usize,
     /// Items an existing note already held byte for byte.
     pub deduplicated: usize,

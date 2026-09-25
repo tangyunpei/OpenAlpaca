@@ -45,6 +45,7 @@ four query fixtures the plan names for slice 2 (`04-implementation-plan.md`,
 | `22-query-literal-and.json` | slice-2 query fixture: F4's literal-`AND` case | slice 2 |
 | `23-query-cjk-lengths.json` | slice-2 query fixture: CJK queries of 1, 2 and 3+ characters | slice 2 |
 | `24-forgotten-replacement-not-revived.json` | slice-2 query fixture: a forgotten or archived replacement does not revive its predecessor | slice 2 |
+| `25-suggestion-lifecycle.json` | Learning v2 L3 (design 09 §3): a suggestion retires nothing until a confirm bound to its target's revision; an automatic replacement's withdrawal brings the old note back; a suggestion is never archived or edited by a tool call | slice 2 (the file-level loader) |
 
 Rows 05 and 06 are about the database opener, not the memory library; their files
 state the expectation so the matrix is complete, and the loader that runs them is
@@ -221,6 +222,7 @@ A named `MemoryAccessContext` (design §7a), in fixture terms:
 | `owner_id` | a string, or `null` for "no principal" |
 | `workspace` | a fixture path the request names as its workspace (the `x-workspace-path` header / `request_workspace_root`), or `null` = global only. The loader resolves the project root from it by the marker walk; `daemon.cwd` is **never** consulted |
 | `surface` | `user_surface`, `model_tool`, `extraction` |
+| `origin` | `extraction` only: the origin the extractor records — `extracted_user` (the default, the user's own words) or `extracted_other` (assistant or tool output) |
 | `capabilities` | `{ "read", "write", "forget" }` booleans |
 | `unattended` | boolean; default `false`. Not a field of the context — the turn's declaration, which decides whether a `destructive_hint` tool prompts or is refused (design §7, *Capabilities*) |
 | `attribution` | `{ "lane_key", "task_id", "request_id", "source" }`, any of them `null` |
@@ -259,8 +261,9 @@ file's `loads_in` says which slice owns the whole file.
 | `recall` | `{ "message": <the user turn>, "budget_bytes"?: N }` — the automatic per-turn path (design §5 steps 1–8) | service |
 | `read` | the `memory_read` schema | service |
 | `list` | the `memory_list` schema | service |
-| `store` | the `memory_store` schema | service; slice 2 runs the same through `memory_files` with the partition named by `partition` |
-| `update` | the `memory_update` schema | service |
+| `store` | the `memory_store` schema; on an `extraction` context also `status` (`active` \| `candidate`) and `replace_policy` (`direct`, the default, \| `suggest_unless_learned`, design 09 §3.2 S2) | service; slice 2 runs the same through `memory_files` with the partition named by `partition` |
+| `update` | the `memory_update` schema, plus `target_revision` with `action: confirm` — the revision of the note a suggestion replaces (design 09 §3.2 S5) | service |
+| `withdraw` | `{ "id", "expected_revision" }` — undo or a dismissed suggestion: the note goes, its tombstone keeps no link and suppresses no source (design 09 §3.3) | library |
 | `forget` | the `memory_forget` schema, plus `"confirmation": "approved" \| "denied"` for the card an attended turn raises | service |
 | `tool_call` | `{ "tool": <name>, "arguments": <raw JSON as the model sent it> }` — bypasses nothing: the full validation path | service |
 | `extraction` | `{ "typed": <the message as typed>, "assistant_text"?, "tool_output"?, "attachment_text"?, "source": { "type", "id" }, "task_outcome"?: "completed" \| "failed" \| "cancelled" }` | service |
@@ -340,6 +343,8 @@ ordered; `*_unordered` lists are sets.
 | `owner_id_after` | `identity.local_user_id` after a reset |
 | `extraction` | `{ "count": N, "count_lte": N, "notes": [{ "origin", "status", "body_contains" }], "unavailable": bool }` |
 | `dedup` | `"created"` (a new note) or `"existing"` (exact dedup returned the existing id) |
+| `suggestion` | a `store` wrote (or deduplicated to) a suggestion: a candidate naming the note it would replace (design 09 §3.1) |
+| `effective_status` | `{ "<id>": EffectiveStatus }` — the note's derived status (`active`, `superseded`, `archived`, `candidate`) read back through the library after the step |
 
 ### Error classes
 

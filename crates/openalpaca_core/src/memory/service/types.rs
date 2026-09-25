@@ -132,6 +132,10 @@ pub struct StoreOutput {
     pub origin: Origin,
     pub superseded: Vec<NoteId>,
     pub dedup: Dedup,
+    /// The note is a suggestion (design 09 §3.1): a candidate naming the
+    /// note it would replace, which retires nothing until the user confirms
+    /// it.
+    pub suggestion: bool,
     pub change: Option<MemoryChange>,
 }
 
@@ -140,7 +144,12 @@ pub struct StoreOutput {
 pub enum UpdateAction {
     Edit(Patch),
     Archive,
-    Confirm,
+    /// `target_revision`: the revision of the note a suggestion replaces, as
+    /// the confirming user last saw it (design 09 §3.2, S5). Required for a
+    /// candidate that carries `supersedes`; ignored for one that does not.
+    Confirm {
+        target_revision: Option<String>,
+    },
 }
 
 /// `memory_update.patch`: an absent field is untouched; `Some(None)` clears
@@ -171,6 +180,66 @@ pub struct UpdateOutput {
     pub revision: String,
     pub status: NoteStatus,
     pub change: Option<MemoryChange>,
+    /// A confirmed suggestion: the note it now retires (design 09 §3.5).
+    /// Empty for every other update.
+    pub superseded: Vec<NoteId>,
+    /// A confirmed suggestion: the other pending suggestions for the same
+    /// note, each withdrawn after the confirm was written (S6).
+    pub dismissed: Vec<NoteId>,
+}
+
+/// What a withdrawal did (design 09 §3.3, ruling LR12): the one note is
+/// gone — its tombstone keeps no link and suppresses no source — and the
+/// notes it had retired are effective again.
+#[derive(Debug, Clone)]
+pub struct WithdrawOutput {
+    pub id: NoteId,
+    /// The notes this one had superseded that the withdrawal brought back.
+    /// Empty for a suggestion, which retired nothing.
+    pub restored: Vec<NoteId>,
+    pub change: MemoryChange,
+}
+
+/// The note a suggestion would replace (design 09 §3.5), as verified
+/// against its file.
+#[derive(Debug, Clone)]
+pub struct SuggestionTarget {
+    pub id: NoteId,
+    pub revision: String,
+    pub title: String,
+    /// Its `## Knowledge` section (or its body below the title), cut to
+    /// [`super::SUGGESTION_EXCERPT_BYTES`].
+    pub excerpt: String,
+    pub origin: Origin,
+    pub scope: NoteScope,
+}
+
+/// One pending suggestion (`GET /v1/memories/suggestions`, design 09
+/// §3.5): a candidate that names the note it would replace, the newest of
+/// those naming that note.
+#[derive(Debug, Clone)]
+pub struct Suggestion {
+    pub id: NoteId,
+    pub revision: String,
+    pub title: String,
+    /// The suggested text: its `## Knowledge` section — shown beside the
+    /// target's, because a suggestion can merely restate it (§2.5 case 3).
+    pub knowledge: String,
+    /// Why it replaces the target, from its `Replaces …` evidence sentence
+    /// (§2.6); `None` when the note carries none.
+    pub reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+    /// When the evidence was observed: the newest cited row's time.
+    pub observed_at: Option<DateTime<Utc>>,
+    /// `extracted_user` — from the user's words — or `extracted_other`,
+    /// inferred from the conversation.
+    pub origin: Origin,
+    pub scope: NoteScope,
+    pub sources: Vec<NoteSource>,
+    /// How many older pending suggestions name the same target and are not
+    /// listed.
+    pub older_count: usize,
+    pub target: SuggestionTarget,
 }
 
 #[derive(Debug, Clone)]
@@ -273,6 +342,9 @@ pub struct ListItem {
     pub updated_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub pinned: bool,
+    /// The ids its own frontmatter names in `supersedes` (design 09 §3.2,
+    /// S8): what a replacement replaced, or what a suggestion would.
+    pub supersedes: Vec<NoteId>,
 }
 
 #[derive(Debug, Clone)]

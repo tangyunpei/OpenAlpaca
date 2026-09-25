@@ -4,7 +4,8 @@
 
 use super::{
     ForgetItemStatus, ForgetOutput, HistoryEntry, ListItem, ListOutput, ReadOutput,
-    RecentlyUsedItem, SearchOutput, StoreOutput, SyncReport, UpdateOutput, format_ts, source_json,
+    RecentlyUsedItem, SearchOutput, StoreOutput, Suggestion, SyncReport, UpdateOutput,
+    WithdrawOutput, format_ts, source_json,
 };
 use openalpaca_storage::memory_files::{
     Dedup, DoctorReport, NoteId, PartitionHealth, SnapshotScope,
@@ -87,7 +88,8 @@ pub fn read_output_json(out: &ReadOutput) -> Value {
 }
 
 /// One `memory_list` item (design §7a), as the list, `recently-learned`
-/// and the GUI read it.
+/// and the GUI read it — with `supersedes` (design 09 §3.2, S8), so a
+/// recently-learned row can say what it replaced.
 pub fn list_item_json(i: &ListItem) -> Value {
     json!({
         "id": i.id.to_string(),
@@ -101,6 +103,7 @@ pub fn list_item_json(i: &ListItem) -> Value {
         "updated_at": format_ts(i.updated_at),
         "created_at": format_ts(i.created_at),
         "pinned": i.pinned,
+        "supersedes": ids_json(&i.supersedes),
     })
 }
 
@@ -127,12 +130,56 @@ pub fn store_output_json(out: &StoreOutput) -> Value {
     })
 }
 
-/// `memory_update`'s result (design §7a).
+/// `memory_update`'s result (design §7a), with what a confirmed suggestion
+/// retired and dismissed (design 09 §3.5; empty for every other update).
 pub fn update_output_json(out: &UpdateOutput) -> Value {
     json!({
         "id": out.id.to_string(),
         "revision": out.revision,
         "status": out.status.as_str(),
+        "superseded": ids_json(&out.superseded),
+        "dismissed": ids_json(&out.dismissed),
+    })
+}
+
+/// `POST /v1/memories/{id}/undo` (design 09 §3.3): a withdrawal, not a
+/// forget — the answer names what came back, and carries no `retained`,
+/// because nothing the note cited was suppressed.
+pub fn withdraw_output_json(out: &WithdrawOutput) -> Value {
+    json!({
+        "id": out.id.to_string(),
+        "status": "withdrawn",
+        "restored": ids_json(&out.restored),
+    })
+}
+
+/// `GET /v1/memories/suggestions` (design 09 §3.5).
+pub fn suggestions_json(items: &[Suggestion]) -> Value {
+    json!({
+        "items": items
+            .iter()
+            .map(|i| json!({
+                "id": i.id.to_string(),
+                "revision": i.revision,
+                "title": i.title,
+                "knowledge": i.knowledge,
+                "reason": i.reason,
+                "created_at": format_ts(i.created_at),
+                "observed_at": i.observed_at.map(format_ts),
+                "origin": i.origin.as_str(),
+                "scope": i.scope.as_str(),
+                "sources": i.sources.iter().map(source_json).collect::<Vec<_>>(),
+                "older_count": i.older_count,
+                "target": {
+                    "id": i.target.id.to_string(),
+                    "revision": i.target.revision,
+                    "title": i.target.title,
+                    "excerpt": i.target.excerpt,
+                    "origin": i.target.origin.as_str(),
+                    "scope": i.target.scope.as_str(),
+                },
+            }))
+            .collect::<Vec<_>>(),
     })
 }
 

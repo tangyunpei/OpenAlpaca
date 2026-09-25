@@ -542,13 +542,13 @@ pub(crate) enum Plan {
     /// `supersedes` — an automatic replacement, undoable (MD-11).
     Automatic(KnownNote),
     /// The user's words change a note the user saved, edited by hand or
-    /// imported: a suggestion the user confirms (MD-11, G2, ruling LR9).
-    /// Written from Learning v2 L3 on (S1, S2), which lets a candidate name
-    /// a `user` note and writes it as one; in L2 it is counted, not written.
+    /// imported: a suggestion the user confirms (MD-11, G2, ruling LR9) — a
+    /// candidate of origin `extracted_user` naming the note, which the file
+    /// layer writes under `SuggestUnlessLearned` (S1, S2).
     Suggestion(KnownNote),
-    /// Assistant or tool output naming a target: a candidate that
-    /// supersedes nothing until confirmed (MD-2). Against a `user` note it
-    /// waits for S1 (L3) like a suggestion: in L2 it is counted, not written.
+    /// Assistant or tool output naming a target: an inferred suggestion, a
+    /// candidate that supersedes nothing until confirmed in the Memory view
+    /// or the CLI (MD-2, design 09 §4.2 rule 5).
     Inferred(KnownNote),
 }
 
@@ -672,8 +672,9 @@ pub(crate) struct StoreCounts {
     pub dropped_unchanged: usize,
     /// §2.5, *The race*: the target moved between the lookup and the write.
     pub dropped_conflict: usize,
-    /// User-words changes to a saved note, and inferred changes to a
-    /// `user` note: decided, and written from L3 on.
+    /// Among `candidates`: suggestions (MD-11) — a change in the user's
+    /// words to a note they saved, edited or imported, and an inferred
+    /// change to any note — each naming the note it would replace.
     pub suggestions: usize,
     pub failed: usize,
 }
@@ -822,28 +823,13 @@ pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
     }
 
     for (item, plan) in planned {
+        // §2.5's table: the file layer applies it (S1, S2) — an automatic
+        // replacement of a learned note, a suggestion for one the user
+        // saved, edited by hand or imported, and an inferred candidate that
+        // retires nothing whatever it names.
         let target = match &plan {
             Plan::New => None,
-            Plan::Suggestion(t)
-            | Plan::Inferred(
-                t @ KnownNote {
-                    origin: Origin::User,
-                    ..
-                },
-            ) => {
-                // S1 and S2 (L3) let a suggestion be written; until then
-                // the file layer would refuse it for a `user` note and
-                // retire an `external` one outright (LR9), so it waits. An
-                // inferred candidate naming a `user` note waits for S1 too.
-                tracing::debug!(
-                    session_id = %job.session_id,
-                    target = %t.id,
-                    "memory learning: a change to a saved note is a suggestion; not written before L3"
-                );
-                counts.suggestions += 1;
-                continue;
-            }
-            Plan::Automatic(t) | Plan::Inferred(t) => Some(t),
+            Plan::Automatic(t) | Plan::Suggestion(t) | Plan::Inferred(t) => Some(t),
             Plan::Unchanged => continue,
         };
         let provenance = if item.user_words {
@@ -884,15 +870,18 @@ pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
         };
         match job.service.store(&job.ctx, input) {
             Ok(out) if out.dedup == Dedup::Existing => counts.deduplicated += 1,
-            Ok(_) => {
+            Ok(out) => {
                 counts.stored += 1;
-                if item.user_words {
+                if out.suggestion {
+                    counts.candidates += 1;
+                    counts.suggestions += 1;
+                } else if item.user_words {
                     counts.active += 1;
+                    if matches!(plan, Plan::Automatic(_)) {
+                        counts.replaced += 1;
+                    }
                 } else {
                     counts.candidates += 1;
-                }
-                if matches!(plan, Plan::Automatic(_)) {
-                    counts.replaced += 1;
                 }
             }
             // §2.5, *The race*: the target moved or went since the lookup.

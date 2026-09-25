@@ -599,7 +599,9 @@ impl MemoryApi {
                 }
             }
             "archive" => UpdateAction::Archive,
-            "confirm" => UpdateAction::Confirm,
+            "confirm" => UpdateAction::Confirm {
+                target_revision: None,
+            },
             other => {
                 return invalid(format!(
                     "`action` must be `edit`, `archive` or `confirm`, got {other:?}"
@@ -635,7 +637,7 @@ impl MemoryApi {
             .run(headers, move |s, ctx| s.undo(ctx, id, &expected_revision))
             .await
         {
-            Ok(out) => forgotten_one(id, &out),
+            Ok(out) => ok(wire::withdraw_output_json(&out)),
             Err(e) => refusal(e),
         }
     }

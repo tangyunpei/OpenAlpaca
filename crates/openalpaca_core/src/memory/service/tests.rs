@@ -2282,7 +2282,9 @@ fn confirm_is_refused_from_a_tool_call_and_accepted_from_a_user_surface() {
             UpdateInput {
                 id: candidate.id,
                 expected_revision: candidate.revision.clone(),
-                action: UpdateAction::Confirm,
+                action: UpdateAction::Confirm {
+                    target_revision: None,
+                },
                 reason: None,
             },
         )
@@ -2306,7 +2308,9 @@ fn confirm_is_refused_from_a_tool_call_and_accepted_from_a_user_surface() {
             UpdateInput {
                 id: candidate.id,
                 expected_revision: candidate.revision.clone(),
-                action: UpdateAction::Confirm,
+                action: UpdateAction::Confirm {
+                    target_revision: None,
+                },
                 reason: None,
             },
         )
@@ -2326,7 +2330,9 @@ fn confirm_is_refused_from_a_tool_call_and_accepted_from_a_user_surface() {
             UpdateInput {
                 id: candidate.id,
                 expected_revision: confirmed.revision.clone(),
-                action: UpdateAction::Confirm,
+                action: UpdateAction::Confirm {
+                    target_revision: None,
+                },
                 reason: None,
             },
         )
@@ -2560,10 +2566,11 @@ fn forget_takes_ids_with_revisions_and_records_a_tombstone() {
     assert!(!again.retained.transcript);
 }
 
-/// Design §6, *recently learned*: `undo` is a forget by id and revision,
-/// refused once the origin is no longer `extracted_user`.
+/// Design §6, *recently learned*, and design 09 §3.3: `undo` withdraws a
+/// learned note by id and revision, and is refused once the note is the
+/// user's (edited, confirmed or saved by them).
 #[test]
-fn undo_forgets_a_recently_learned_note_and_refuses_once_it_is_the_users() {
+fn undo_withdraws_a_recently_learned_note_and_refuses_once_it_is_the_users() {
     let h = Harness::new();
     let tool = h.tool(ALICE, None);
     let user = h.user(ALICE, None);
@@ -2577,7 +2584,8 @@ fn undo_forgets_a_recently_learned_note_and_refuses_once_it_is_the_users() {
         .service
         .undo(&user, learned.id, &learned.revision)
         .unwrap();
-    assert_eq!(undone.results[0].status, ForgetItemStatus::Forgotten);
+    assert_eq!(undone.id, learned.id);
+    assert!(undone.restored.is_empty());
     assert!(h.list_ids(&user, ListInput::default()).is_empty());
 
     let mine = h.store(&user, "Mine", "# Mine\n\nSaved by hand.\n", NoteKind::Fact);
@@ -3099,7 +3107,9 @@ fn every_service_write_and_a_detected_external_edit_publish_one_memory_changed()
             UpdateInput {
                 id: inferred.id,
                 expected_revision: inferred.revision.clone(),
-                action: UpdateAction::Confirm,
+                action: UpdateAction::Confirm {
+                    target_revision: None,
+                },
                 reason: None,
             },
         )
@@ -3872,14 +3882,10 @@ fn a_replace_policy_is_accepted_on_the_extraction_surface_only() {
 }
 
 // ============================================================================
-// Learning v2 L3 (design 09 §3.3, S7): characterization at HEAD
+// Learning v2 L3 (design 09 §3): withdrawal, S6–S8, suggestions
 // ============================================================================
-//
-// Written against the unchanged service before the withdrawal and S7 land
-// (04 §1); the L3 storage-and-service commit flips each one.
 
-/// A tool-written (`extracted_user`) note with a key and a source, for the
-/// characterizations below.
+/// A tool-written (`extracted_user`) note with a key and a source.
 fn learned_with(
     h: &Harness,
     ctx: &MemoryAccessContext,
@@ -3913,11 +3919,76 @@ fn message_source(id: i64) -> NoteSource {
     }
 }
 
-/// §3.3 at HEAD: undo is a forget, and a forget's tombstone keeps the
-/// replacement's `supersedes` — so undoing an automatic replacement leaves
-/// the note it replaced retired for good.
+fn extractor(h: &Harness) -> MemoryAccessContext {
+    h.ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap()
+}
+
+/// What learning writes for a change it found in the user's words (design
+/// 09 §2.5, §2.6): against a learned note an automatic replacement, against
+/// any other a suggestion.
+fn learned_change(
+    h: &Harness,
+    target: &StoreOutput,
+    title: &str,
+    knowledge: &str,
+    reason: &str,
+    sources: Vec<NoteSource>,
+) -> StoreOutput {
+    h.service
+        .store(
+            &extractor(h),
+            StoreInput {
+                title: title.into(),
+                body: format!(
+                    "# {title}\n\n## Knowledge\n{knowledge}\n\n## Evidence and limits\nFrom what you said on 2026-09-24. Replaces “{title}” (saved by you): {reason}\n"
+                ),
+                kind: Some(NoteKind::Fact),
+                sources,
+                supersedes: Some((target.id, target.revision.clone())),
+                replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+
+fn read_note(h: &Harness, id: NoteId) -> ReadOutput {
+    h.service
+        .read(
+            &h.user(ALICE, None),
+            ReadInput {
+                id,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+
+fn confirm(
+    h: &Harness,
+    id: &StoreOutput,
+    target_revision: Option<&str>,
+) -> Result<UpdateOutput, MemoryError> {
+    h.service.update(
+        &h.user(ALICE, None),
+        UpdateInput {
+            id: id.id,
+            expected_revision: id.revision.clone(),
+            action: UpdateAction::Confirm {
+                target_revision: target_revision.map(str::to_string),
+            },
+            reason: None,
+        },
+    )
+}
+
+/// §3.3 (flipped from `undo_of_a_replacement_leaves_the_old_note_superseded`):
+/// undo withdraws, and a withdrawal keeps no link, so undoing an automatic
+/// replacement brings back the note it replaced — and says so.
 #[test]
-fn undo_of_a_replacement_leaves_the_old_note_superseded() {
+fn undo_brings_the_replaced_note_back() {
     let h = Harness::new();
     let tool = h.tool(ALICE, None);
     let user = h.user(ALICE, None);
@@ -3939,30 +4010,82 @@ fn undo_of_a_replacement_leaves_the_old_note_superseded() {
         Vec::new(),
         Some((a.id, a.revision.clone())),
     );
-    h.service.undo(&user, b.id, &b.revision).unwrap();
-    let old = h
+    assert_eq!(
+        read_note(&h, a.id).effective_status,
+        EffectiveStatus::Superseded
+    );
+    let out = h.service.undo(&user, b.id, &b.revision).unwrap();
+    assert_eq!((out.id, out.restored.as_slice()), (b.id, [a.id].as_slice()));
+    assert_eq!(out.change.change, "forgotten");
+    let old = read_note(&h, a.id);
+    assert_eq!(old.effective_status, EffectiveStatus::Active);
+    assert!(old.superseded_by.is_empty(), "{:?}", old.superseded_by);
+    let recalled = h
         .service
-        .read(
+        .recall(
             &user,
-            ReadInput {
-                id: a.id,
-                ..Default::default()
-            },
+            "Which editor does the user use?",
+            RecallBudget::default(),
         )
         .unwrap();
-    assert_eq!(old.effective_status, EffectiveStatus::Superseded);
-    assert_eq!(old.superseded_by, [b.id]);
+    assert!(recall_ids(&recalled).contains(&a.id));
 }
 
-/// S7 at HEAD (`memory/service/mod.rs:826-829`): recently learned lists an
-/// active `extracted_user` note even when it silently loses its key to a
-/// note the user saved — listed as learned, and never used.
+/// §3.3: in a chain A ← B ← C, undoing C brings B back, and A stays
+/// superseded by B.
 #[test]
-fn recently_learned_lists_a_same_key_loser() {
+fn undo_of_a_chain_revives_one_step() {
     let h = Harness::new();
     let tool = h.tool(ALICE, None);
     let user = h.user(ALICE, None);
-    let learned = learned_with(
+    let a = learned_with(
+        &h,
+        &tool,
+        "Desk",
+        "# Desk\n\nfloor 1\n",
+        None,
+        Vec::new(),
+        None,
+    );
+    let b = learned_with(
+        &h,
+        &tool,
+        "Desk",
+        "# Desk\n\nfloor 2\n",
+        None,
+        Vec::new(),
+        Some((a.id, a.revision.clone())),
+    );
+    let c = learned_with(
+        &h,
+        &tool,
+        "Desk",
+        "# Desk\n\nfloor 3\n",
+        None,
+        Vec::new(),
+        Some((b.id, b.revision.clone())),
+    );
+    let out = h.service.undo(&user, c.id, &c.revision).unwrap();
+    assert_eq!(out.restored, [b.id]);
+    assert_eq!(
+        read_note(&h, b.id).effective_status,
+        EffectiveStatus::Active
+    );
+    let first = read_note(&h, a.id);
+    assert_eq!(first.effective_status, EffectiveStatus::Superseded);
+    assert_eq!(first.superseded_by, [b.id]);
+}
+
+/// S7 (flipped from `recently_learned_lists_a_same_key_loser`): recently
+/// learned lists only what automatic recall can deliver — not a same-key
+/// loser, not a note whose source was forgotten — and each item carries its
+/// `supersedes` (S8).
+#[test]
+fn recently_learned_lists_only_recallable_notes() {
+    let h = Harness::new();
+    let tool = h.tool(ALICE, None);
+    let user = h.user(ALICE, None);
+    let loser = learned_with(
         &h,
         &tool,
         "Editor",
@@ -3983,32 +4106,384 @@ fn recently_learned_lists_a_same_key_loser() {
             },
         )
         .unwrap();
-    let read = h
-        .service
-        .read(
+    let row = h.message_row("I moved to Berlin.");
+    let city = learned_with(
+        &h,
+        &tool,
+        "Home city",
+        "# Home city\n\nBerlin\n",
+        None,
+        vec![message_source(row)],
+        None,
+    );
+    let other = learned_with(
+        &h,
+        &tool,
+        "Office",
+        "# Office\n\nMitte\n",
+        None,
+        vec![message_source(row)],
+        None,
+    );
+    let old = learned_with(
+        &h,
+        &tool,
+        "Desk",
+        "# Desk\n\nfloor 1\n",
+        None,
+        Vec::new(),
+        None,
+    );
+    let new = learned_with(
+        &h,
+        &tool,
+        "Desk",
+        "# Desk\n\nfloor 2\n",
+        None,
+        Vec::new(),
+        Some((old.id, old.revision.clone())),
+    );
+    h.service
+        .forget(
             &user,
-            ReadInput {
-                id: learned.id,
+            ForgetInput {
+                targets: vec![(other.id, other.revision.clone())],
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert!(read_note(&h, city.id).source_forgotten);
+    let listed = h.service.recently_learned(&user, None, None).unwrap();
+    let ids: Vec<NoteId> = listed.iter().map(|i| i.id).collect();
+    assert_eq!(
+        ids,
+        [new.id],
+        "{ids:?} (loser {}, city {})",
+        loser.id,
+        city.id
+    );
+    assert_eq!(listed[0].supersedes, [old.id]);
+}
+
+/// S8: every list item names what its frontmatter supersedes.
+#[test]
+fn list_items_carry_supersedes() {
+    let h = Harness::new();
+    let tool = h.tool(ALICE, None);
+    let user = h.user(ALICE, None);
+    let old = learned_with(
+        &h,
+        &tool,
+        "Desk",
+        "# Desk\n\nfloor 1\n",
+        None,
+        Vec::new(),
+        None,
+    );
+    let new = learned_with(
+        &h,
+        &tool,
+        "Desk",
+        "# Desk\n\nfloor 2\n",
+        None,
+        Vec::new(),
+        Some((old.id, old.revision.clone())),
+    );
+    let items = h
+        .service
+        .list(
+            &user,
+            ListInput {
+                include_history: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .items;
+    let by_id = |id: NoteId| items.iter().find(|i| i.id == id).unwrap();
+    assert_eq!(by_id(new.id).supersedes, [old.id]);
+    assert!(by_id(old.id).supersedes.is_empty());
+    let json = wire::list_item_json(by_id(new.id));
+    assert_eq!(json["supersedes"], serde_json::json!([old.id.to_string()]));
+}
+
+/// §3.3 and LQ2: `undo` dismisses a candidate of either origin — a
+/// suggestion from the user's words, an inferred one, a plain inferred
+/// candidate — and still refuses a note the user saved.
+#[test]
+fn undo_dismisses_a_candidate_of_either_origin() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let saved = h.store(&user, "Commute", "# Commute\n\nbus\n", NoteKind::Fact);
+    let suggestion = learned_change(&h, &saved, "Commute", "bike", "They said so.", Vec::new());
+    let inferred = h
+        .service
+        .store(
+            &extractor(&h),
+            StoreInput {
+                title: "Commute".into(),
+                body: "# Commute\n\nprobably bike\n".into(),
+                kind: Some(NoteKind::Fact),
+                supersedes: Some((saved.id, saved.revision.clone())),
+                replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                provenance: Some(ExtractionProvenance::OtherOutput),
                 ..Default::default()
             },
         )
         .unwrap();
-    assert!(read.conflict, "the learned note is the same-key loser");
-    let listed: Vec<NoteId> = h
+    let plain = h
         .service
-        .recently_learned(&user, None, None)
-        .unwrap()
-        .into_iter()
-        .map(|i| i.id)
-        .collect();
-    assert_eq!(listed, [learned.id]);
+        .store(
+            &extractor(&h),
+            StoreInput {
+                title: "Lunch".into(),
+                body: "# Lunch\n\nnoodles\n".into(),
+                kind: Some(NoteKind::Fact),
+                provenance: Some(ExtractionProvenance::OtherOutput),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(suggestion.suggestion && inferred.suggestion && !plain.suggestion);
+    assert_eq!(
+        (suggestion.origin, inferred.origin),
+        (Origin::ExtractedUser, Origin::ExtractedOther)
+    );
+    for c in [&suggestion, &inferred, &plain] {
+        let out = h.service.undo(&user, c.id, &c.revision).unwrap();
+        assert!(out.restored.is_empty(), "a candidate retired nothing");
+    }
+    assert!(
+        h.list_ids(
+            &user,
+            ListInput {
+                status: Some(NoteStatus::Candidate),
+                ..Default::default()
+            }
+        )
+        .is_empty()
+    );
+    let x = read_note(&h, saved.id);
+    assert_eq!(
+        (x.effective_status, x.revision.as_str()),
+        (EffectiveStatus::Active, saved.revision.as_str())
+    );
+    let err = h
+        .service
+        .undo(&user, saved.id, &saved.revision)
+        .unwrap_err();
+    assert_eq!(err.class(), "not_undoable");
 }
 
-/// §3.3 at HEAD: undo is a forget, and a forget suppresses every message
-/// the note cited — so undoing one learned note silently takes a sibling
-/// that the same message taught out of automatic recall.
+/// S5 through the service: confirming a suggestion needs its target's
+/// revision; a stale one is `revision_conflict` naming the target.
 #[test]
-fn undo_makes_a_sibling_note_source_forgotten() {
+fn confirm_of_a_suggestion_requires_the_target_revision() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let saved = h.store(&user, "Commute", "# Commute\n\nbus\n", NoteKind::Fact);
+    let b = learned_change(&h, &saved, "Commute", "bike", "They said so.", Vec::new());
+    assert_eq!(confirm(&h, &b, None).unwrap_err().class(), "invalid_input");
+    match confirm(&h, &b, Some(&"f".repeat(64))).unwrap_err() {
+        MemoryError::RevisionConflict {
+            id,
+            current_revision,
+        } => assert_eq!((id, current_revision), (saved.id, saved.revision.clone())),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(read_note(&h, b.id).status, NoteStatus::Candidate);
+    let out = confirm(&h, &b, Some(&saved.revision)).unwrap();
+    assert_eq!(out.status, NoteStatus::Active);
+    assert_eq!(out.superseded, [saved.id]);
+    assert_eq!(read_note(&h, b.id).origin, Origin::User);
+    assert_eq!(
+        read_note(&h, saved.id).effective_status,
+        EffectiveStatus::Superseded
+    );
+}
+
+/// S6: confirming a suggestion dismisses every other pending suggestion for
+/// the same target, after the write, and lists them in `dismissed`; a
+/// suggestion for another note is untouched.
+#[test]
+fn confirm_dismisses_the_other_suggestions_for_the_target() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let mut rx = h.bus.subscribe();
+    let saved = h.store(&user, "Commute", "# Commute\n\nbus\n", NoteKind::Fact);
+    let other_target = h.store(&user, "Lunch", "# Lunch\n\nsoup\n", NoteKind::Fact);
+    let b1 = learned_change(&h, &saved, "Commute", "bike", "Said in March.", Vec::new());
+    let b2 = learned_change(
+        &h,
+        &saved,
+        "Commute",
+        "a bicycle",
+        "Said again.",
+        Vec::new(),
+    );
+    let elsewhere = learned_change(
+        &h,
+        &other_target,
+        "Lunch",
+        "noodles",
+        "Said so.",
+        Vec::new(),
+    );
+    while rx.try_recv().is_ok() {}
+
+    let out = confirm(&h, &b1, Some(&saved.revision)).unwrap();
+    assert_eq!(out.dismissed, [b2.id]);
+    assert_eq!(out.superseded, [saved.id]);
+    let candidates = h.list_ids(
+        &user,
+        ListInput {
+            status: Some(NoteStatus::Candidate),
+            ..Default::default()
+        },
+    );
+    assert_eq!(candidates, HashSet::from([elsewhere.id]));
+    let mut forgotten = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let crate::events::SystemEvent::MemoryChanged {
+            note_id, change, ..
+        } = event
+            && change == "forgotten"
+        {
+            forgotten.push(note_id);
+        }
+    }
+    assert_eq!(forgotten, [b2.id.to_string()]);
+}
+
+/// Review C1 of rev 1: a dismissal that suppressed its sources would hide
+/// the note just confirmed whenever the two cite the same row. S6's
+/// dismissals are withdrawals, so the confirmed note stays recallable.
+#[test]
+fn confirming_one_of_two_suggestions_sharing_a_row_keeps_it_recallable() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let row = h.message_row("Since March I cycle to the office.");
+    let saved = h.store(&user, "Commute", "# Commute\n\nbus\n", NoteKind::Fact);
+    let b1 = learned_change(
+        &h,
+        &saved,
+        "Commute",
+        "Since March the user cycles to the office.",
+        "Said in March.",
+        vec![message_source(row)],
+    );
+    let b2 = learned_change(
+        &h,
+        &saved,
+        "Commute",
+        "The user rides a bicycle to the office.",
+        "Said again.",
+        vec![message_source(row)],
+    );
+    let out = confirm(&h, &b1, Some(&saved.revision)).unwrap();
+    assert_eq!(out.dismissed, [b2.id]);
+    let b = read_note(&h, b1.id);
+    assert!(!b.source_forgotten, "the dismissal suppressed nothing");
+    let recalled = h
+        .service
+        .recall(
+            &user,
+            "How does the user get to the office? cycles",
+            RecallBudget::default(),
+        )
+        .unwrap();
+    assert!(recall_ids(&recalled).contains(&b1.id));
+    assert!(!recall_ids(&recalled).contains(&saved.id), "X is retired");
+}
+
+/// Ruling LR12 (flipped from `undo_makes_a_sibling_note_source_forgotten`):
+/// every "reject this change" act withdraws — undo of a replacement, Keep
+/// mine (undo of a suggestion, the act a Deny performs too), and S6's
+/// dismissal — so a sibling note the same message taught stays out of
+/// `source_forgotten` and in automatic recall.
+#[test]
+fn withdrawals_leave_sibling_notes_recallable() {
+    let h = Harness::new();
+    let tool = h.tool(ALICE, None);
+    let user = h.user(ALICE, None);
+    let row = h.message_row("I switched to Helix, I cycle now, and I moved to Berlin.");
+    let city = learned_with(
+        &h,
+        &tool,
+        "Home city",
+        "# Home city\n\nThe user lives in Berlin.\n",
+        None,
+        vec![message_source(row)],
+        None,
+    );
+    let sibling_is_recallable = |act: &str| {
+        let note = read_note(&h, city.id);
+        assert!(!note.source_forgotten, "{act}: the sibling was suppressed");
+        let recalled = h
+            .service
+            .recall(
+                &user,
+                "Where does the user live? Berlin?",
+                RecallBudget::default(),
+            )
+            .unwrap();
+        assert!(recall_ids(&recalled).contains(&city.id), "{act}");
+    };
+
+    // Undo of an automatic replacement.
+    let a = learned_with(
+        &h,
+        &tool,
+        "Editor",
+        "# Editor\n\nvim\n",
+        None,
+        Vec::new(),
+        None,
+    );
+    let b = learned_with(
+        &h,
+        &tool,
+        "Editor",
+        "# Editor\n\nHelix\n",
+        None,
+        vec![message_source(row)],
+        Some((a.id, a.revision.clone())),
+    );
+    h.service.undo(&user, b.id, &b.revision).unwrap();
+    sibling_is_recallable("undo");
+
+    // Keep mine: undo of a suggestion.
+    let saved = h.store(&user, "Commute", "# Commute\n\nbus\n", NoteKind::Fact);
+    let s1 = learned_change(
+        &h,
+        &saved,
+        "Commute",
+        "bike",
+        "Said so.",
+        vec![message_source(row)],
+    );
+    h.service.undo(&user, s1.id, &s1.revision).unwrap();
+    sibling_is_recallable("keep mine");
+
+    // S6: the dismissal a confirm makes.
+    let s2 = learned_change(
+        &h,
+        &saved,
+        "Commute",
+        "bicycle",
+        "Said so.",
+        vec![message_source(row)],
+    );
+    let s3 = learned_change(&h, &saved, "Commute", "a bike", "Said so.", Vec::new());
+    let out = confirm(&h, &s3, Some(&saved.revision)).unwrap();
+    assert_eq!(out.dismissed, [s2.id]);
+    sibling_is_recallable("S6");
+}
+
+/// Fixture 16's reading, unchanged: an explicit forget still suppresses the
+/// message for every note that cites it.
+#[test]
+fn forget_still_suppresses_the_message_for_siblings() {
     let h = Harness::new();
     let tool = h.tool(ALICE, None);
     let user = h.user(ALICE, None);
@@ -4031,21 +4506,16 @@ fn undo_makes_a_sibling_note_source_forgotten() {
         vec![message_source(row)],
         None,
     );
-    h.service.undo(&user, editor.id, &editor.revision).unwrap();
-    let sibling = h
-        .service
-        .read(
+    h.service
+        .forget(
             &user,
-            ReadInput {
-                id: city.id,
-                ..Default::default()
+            ForgetInput {
+                targets: vec![(editor.id, editor.revision.clone())],
+                reason: None,
             },
         )
         .unwrap();
-    assert!(
-        sibling.source_forgotten,
-        "the sibling left automatic recall"
-    );
+    assert!(read_note(&h, city.id).source_forgotten);
     let recalled = h
         .service
         .recall(
@@ -4055,4 +4525,97 @@ fn undo_makes_a_sibling_note_source_forgotten() {
         )
         .unwrap();
     assert!(!recall_ids(&recalled).contains(&city.id));
+}
+
+/// §3.1 row 2 and §3.5: a suggestion is excluded from recall and its target
+/// still recalled; the suggestions listing reads it — the newest of those
+/// naming one note, with both texts, the reason and how many older ones it
+/// hides — and leaves out a suggestion whose target is gone.
+#[test]
+fn suggestions_list_the_newest_per_target_with_both_texts() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let saved = h.store(
+        &h.user(ALICE, None),
+        "Commute",
+        "# Commute\n\n## Knowledge\nThe user takes the bus.\n",
+        NoteKind::Fact,
+    );
+    let older = learned_change(&h, &saved, "Commute", "bike", "Said in March.", Vec::new());
+    // The listing is newest first by the file's `created_at`, to the second.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let newer = learned_change(
+        &h,
+        &saved,
+        "Commute",
+        "Since March the user cycles to the office.",
+        "The user said they switched to cycling in March.",
+        Vec::new(),
+    );
+    let gone = h.store(&user, "Lunch", "# Lunch\n\nsoup\n", NoteKind::Fact);
+    let moot = learned_change(&h, &gone, "Lunch", "noodles", "Said so.", Vec::new());
+    h.service
+        .forget(
+            &user,
+            ForgetInput {
+                targets: vec![(gone.id, gone.revision.clone())],
+                reason: None,
+            },
+        )
+        .unwrap();
+
+    let recalled = h
+        .service
+        .recall(
+            &user,
+            "How does the user commute? bus cycles",
+            RecallBudget::default(),
+        )
+        .unwrap();
+    let ids = recall_ids(&recalled);
+    assert!(ids.contains(&saved.id), "X is still recalled");
+    assert!(!ids.contains(&older.id) && !ids.contains(&newer.id));
+
+    let listed = h.service.suggestions(&user, None).unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?} (moot: {})", moot.id);
+    let s = &listed[0];
+    assert_eq!((s.id, s.older_count), (newer.id, 1));
+    assert_eq!(s.origin, Origin::ExtractedUser);
+    assert_eq!(s.knowledge, "Since March the user cycles to the office.");
+    assert_eq!(
+        s.reason.as_deref(),
+        Some("The user said they switched to cycling in March.")
+    );
+    assert_eq!(
+        (s.target.id, s.target.revision.as_str(), s.target.origin),
+        (saved.id, saved.revision.as_str(), Origin::User)
+    );
+    assert_eq!(s.target.excerpt, "The user takes the bus.");
+    let json = wire::suggestions_json(&listed);
+    assert_eq!(json["items"][0]["target"]["title"], "Commute");
+    assert_eq!(json["items"][0]["older_count"], 1);
+    assert!(h.service.suggestions(&user, Some(0)).is_err());
+    assert!(h.service.suggestions(&user, Some(101)).is_err());
+
+    // Confirmed: nothing is pending any more.
+    confirm(&h, &newer, Some(&saved.revision)).unwrap();
+    assert!(h.service.suggestions(&user, None).unwrap().is_empty());
+}
+
+/// The reason a suggestion shows is its evidence sentence's, and a note
+/// without one has none.
+#[test]
+fn a_replacement_reason_is_read_from_the_evidence_sentence() {
+    let body = "# Editor\n\n## Knowledge\nHelix now.\n\n## Evidence and limits\nFrom what you said on 2026-09-24. Replaces “Editor (old)” (saved by you): The user said they switched in June.\n";
+    assert_eq!(
+        suggestions::replace_reason(body).as_deref(),
+        Some("The user said they switched in June.")
+    );
+    assert_eq!(suggestions::replace_reason("# T\n\nbody\n"), None);
+    assert_eq!(
+        suggestions::replace_reason(
+            "# T\n\n## Evidence and limits\nFrom what you said on 2026-09-24.\n"
+        ),
+        None
+    );
 }

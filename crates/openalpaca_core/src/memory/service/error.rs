@@ -101,7 +101,7 @@ impl fmt::Display for MemoryError {
             }
             Self::NotUndoable { id, origin } => write!(
                 f,
-                "note {id} is no longer undoable: its origin is `{origin}`, not `extracted_user`; forget it instead"
+                "note {id} is not undoable: its origin is `{origin}` — neither learned from your words (`extracted_user`) nor a pending suggestion; forget it instead"
             ),
             Self::Quarantined {
                 partition_key,

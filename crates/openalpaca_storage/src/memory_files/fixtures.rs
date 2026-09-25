@@ -36,6 +36,7 @@ const FILE_LEVEL_FIXTURES: &[&str] = &[
     "16-forget-suppression-and-replacement.json",
     "18-malicious-content-stays-reference-data.json",
     "24-forgotten-replacement-not-revived.json",
+    "25-suggestion-lifecycle.json",
 ];
 
 /// Ops another layer owns; a step with one of these is skipped whole.
@@ -262,8 +263,13 @@ impl Harness {
             let actor = match s(&c["surface"]) {
                 "user_surface" => Actor::UserSurface,
                 "model_tool" => Actor::ModelTool,
+                // The extractor records what it was told (design §7a): the
+                // user's own words unless the context names another origin.
                 "extraction" => Actor::Extraction {
-                    origin: Origin::ExtractedUser,
+                    origin: c["origin"]
+                        .as_str()
+                        .map(|o| Origin::parse(o).unwrap_or_else(|| panic!("origin {o}")))
+                        .unwrap_or(Origin::ExtractedUser),
                 },
                 other => panic!("surface {other}"),
             };
@@ -685,6 +691,27 @@ impl Harness {
                 let ctx = ctx.expect("context");
                 self.run_list(&ctx, input)
             }
+            // Design 09 §3.3: undo and a dismissed suggestion — a forget
+            // whose tombstone keeps no link and suppresses no source.
+            "withdraw" => {
+                let ctx = ctx.expect("context");
+                let id = self.id_of(s(&input["id"]));
+                let rev = self.revision_of_placeholder(s(&input["expected_revision"]));
+                let partitions = self.read_partitions_of(&ctx);
+                let partition = self
+                    .locate(&id)
+                    .map(|(p, _)| p)
+                    .filter(|p| partitions.contains(p))
+                    .unwrap_or_else(|| partitions[0].clone());
+                let outcome = self
+                    .partition(&partition)
+                    .forget_as(&[(id, rev)], ForgetMode::Withdraw)
+                    .unwrap();
+                Outcome {
+                    forget: Some(BTreeMap::from([(id, outcome[0].status.clone())])),
+                    ..Default::default()
+                }
+            }
             "scan" => {
                 for p in self.opened.values() {
                     if p.health() == PartitionHealth::Ready {
@@ -871,6 +898,16 @@ impl Harness {
                 .collect(),
             valid_from: input["valid_from"].as_str().map(parse_time),
             valid_to: input["valid_to"].as_str().map(parse_time),
+            // Learning's own inputs (design 09 §2.5): the status the
+            // extractor asks for and how a `supersedes` is applied (S2).
+            status: input["status"]
+                .as_str()
+                .map(|v| NoteStatus::parse(v).unwrap_or_else(|| panic!("status {v}"))),
+            replace_policy: match input["replace_policy"].as_str() {
+                None | Some("direct") => ReplacePolicy::Direct,
+                Some("suggest_unless_learned") => ReplacePolicy::SuggestUnlessLearned,
+                Some(other) => panic!("replace_policy {other}"),
+            },
             supersedes: input["supersedes"].as_object().map(|sup| {
                 let id = self.id_of(s(&sup["id"]));
                 (
@@ -962,10 +999,16 @@ impl Harness {
         }
     }
 
-    fn update_action(input: &Value) -> UpdateAction {
+    fn update_action(&self, input: &Value) -> UpdateAction {
         match s(&input["action"]) {
             "archive" => UpdateAction::Archive,
-            "confirm" => UpdateAction::Confirm,
+            // S5 (design 09 §3.2): a suggestion's confirm names its target's
+            // revision.
+            "confirm" => UpdateAction::Confirm {
+                target_revision: input["target_revision"]
+                    .as_str()
+                    .map(|v| self.revision_of_placeholder(v)),
+            },
             "edit" => {
                 let patch = &input["patch"];
                 let list = |v: &Value| {
@@ -994,7 +1037,7 @@ impl Harness {
     fn run_update(&mut self, ctx: &Context, input: &Value, label: Option<&str>) -> Outcome {
         let id = self.id_of(s(&input["id"]));
         let expected = self.revision_of_placeholder(s(&input["expected_revision"]));
-        let action = Self::update_action(input);
+        let action = self.update_action(input);
         let partitions = self.read_partitions_of(ctx);
         let Some(partition) = partitions
             .iter()
@@ -1170,7 +1213,7 @@ impl Harness {
             _ => {
                 let rev = self.revision_of_placeholder(s(&inner["expected_revision"]));
                 self.partition(&partition)
-                    .update(&id.unwrap(), &rev, Self::update_action(inner), ctx.actor)
+                    .update(&id.unwrap(), &rev, self.update_action(inner), ctx.actor)
                     .map(|_| ())
             }
         };
@@ -1363,6 +1406,28 @@ impl Harness {
                     let c = outcome.created.as_ref().unwrap();
                     let want: Vec<NoteId> = arr(value).iter().map(|v| self.id_of(s(v))).collect();
                     assert_eq!(c.superseded, want, "{at}: superseded");
+                }
+                "suggestion" => {
+                    let c = outcome
+                        .created
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("{at}: suggestion without a create"));
+                    assert_eq!(c.suggestion, value.as_bool().unwrap(), "{at}: suggestion");
+                }
+                "effective_status" => {
+                    for (id, want) in obj(value) {
+                        let id = self.id_of(id);
+                        assert_eq!(
+                            self.locate(&id)
+                                .unwrap()
+                                .1
+                                .derived
+                                .effective_status
+                                .as_str(),
+                            s(want),
+                            "{at}: effective_status {id}"
+                        );
+                    }
                 }
                 "revision_changed" => {
                     let want = value.as_bool().unwrap();
