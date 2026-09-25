@@ -23,6 +23,11 @@ pub enum Category {
     RejectedFailedActions,
     Abstention,
     SourceConflicts,
+    /// The episode split's questions (`questions-episodes.json`, design 09
+    /// §13.4): what was discussed or decided in a corpus conversation,
+    /// answered from its conversation summary after a learning run. Not a
+    /// held-out category, so not in [`Category::ALL`].
+    Episodes,
 }
 
 impl Category {
@@ -47,6 +52,7 @@ impl Category {
             Category::RejectedFailedActions => "rejected_failed_actions",
             Category::Abstention => "abstention",
             Category::SourceConflicts => "source_conflicts",
+            Category::Episodes => "episodes",
         }
     }
 }
@@ -111,6 +117,29 @@ pub struct Question {
     pub relies_on: Vec<String>,
     #[serde(default)]
     pub expect_abstain: bool,
+}
+
+/// One question of the episode split (`scripts/eval/memory/questions-episodes.json`,
+/// design 09 §13.4): a [`Question`] — the harness asks it as any other, with
+/// `OPENALPACA_MEMORY_EVAL_QUESTIONS` — plus the corpus conversation it asks
+/// about and the turns its gold answer comes from.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EpisodeQuestion {
+    pub id: String,
+    pub category: Category,
+    pub language: Language,
+    pub question: String,
+    pub gold_answer: String,
+    /// Always empty: the answer is a conversation summary, not a gold note.
+    #[serde(default)]
+    pub relies_on: Vec<String>,
+    #[serde(default)]
+    pub expect_abstain: bool,
+    /// The corpus session (`cs-NNN`) the question is about.
+    pub session: String,
+    /// The 0-based turns of that session the gold answer draws on.
+    pub turns: Vec<usize>,
 }
 
 /// The gold notes some non-abstention question relies on: the notes the

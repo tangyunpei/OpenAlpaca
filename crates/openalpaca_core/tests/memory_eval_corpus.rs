@@ -9,13 +9,18 @@
 //! and noise, the questions' language mix, its size, and **no leakage**: no
 //! held-out question shares an 8-word shingle, or a 12-character CJK
 //! shingle, with any turn.
+//!
+//! The same file validates the **episode split** (`questions-episodes.json`,
+//! design 09 §13.4, slice L10c): questions about what a corpus conversation
+//! discussed or decided, answered from its conversation summary after a
+//! learning run.
 
 #[path = "common/eval.rs"]
 mod eval;
 
 use eval::{
-    ChangePair, Corpus, CorpusSession, CorpusTurn, GoldNote, Language, Question, TurnAt, TurnMode,
-    change_pairs, eval_dir, is_cjk, load_json, relied_on,
+    Category, ChangePair, Corpus, CorpusSession, CorpusTurn, EpisodeQuestion, GoldNote, Language,
+    Question, TurnAt, TurnMode, change_pairs, eval_dir, is_cjk, load_json, relied_on,
 };
 use openalpaca_storage::memory_index::query::normalize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -553,4 +558,197 @@ fn suggestion_sessions_carry_the_changes_and_old_note_restatements() {
         old_restatements += usize::from(about_old);
     }
     assert!(old_restatements >= MIN_OLD_NOTE_RESTATEMENTS);
+}
+
+// ─── The episode split (design 09 §13.4, slice L10c) ────────────────────────
+
+/// "About 20 questions".
+const EPISODE_QUESTIONS: std::ops::RangeInclusive<usize> = 15..=25;
+/// The split's language mix, in the spirit of the questions' (en first, then
+/// zh, then mixed): at least this many of each.
+const MIN_EPISODE_LANGUAGE: [(Language, usize); 3] =
+    [(Language::En, 10), (Language::Zh, 3), (Language::Mixed, 1)];
+
+/// What is wrong with an episode split, one sentence per problem; empty when
+/// nothing is. `taken` holds the held-out and tuning ids, which the split's
+/// ids must not reuse.
+fn episode_split_problems(
+    split: &[EpisodeQuestion],
+    corpus: &Corpus,
+    taken: &BTreeSet<String>,
+) -> Vec<String> {
+    let min_turns = openalpaca_core::memory::learning::EPISODE_MIN_USER_TURNS as usize;
+    let mut problems = Vec::new();
+    if !EPISODE_QUESTIONS.contains(&split.len()) {
+        problems.push(format!(
+            "{} questions, not in {EPISODE_QUESTIONS:?}",
+            split.len()
+        ));
+    }
+    let sessions: HashMap<&str, &CorpusSession> =
+        corpus.sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+    let mut ids = BTreeSet::new();
+    let mut asked = BTreeSet::new();
+    for q in split {
+        let at = &q.id;
+        if !q.id.starts_with("eq-") {
+            problems.push(format!("{at}: an episode question's id starts with `eq-`"));
+        }
+        if !ids.insert(q.id.clone()) {
+            problems.push(format!("{at}: duplicate id"));
+        }
+        if taken.contains(&q.id) {
+            problems.push(format!("{at}: already a held-out or tuning id"));
+        }
+        if q.category != Category::Episodes {
+            problems.push(format!("{at}: category is not `episodes`"));
+        }
+        if q.expect_abstain || !q.relies_on.is_empty() {
+            problems.push(format!(
+                "{at}: an episode question relies on no gold note and expects an answer"
+            ));
+        }
+        if q.question.trim().is_empty() || q.gold_answer.trim().is_empty() {
+            problems.push(format!("{at}: an empty question or gold answer"));
+        }
+        if !asked.insert(q.session.clone()) {
+            problems.push(format!("{at}: a second question about {}", q.session));
+        }
+        let Some(session) = sessions.get(q.session.as_str()) else {
+            problems.push(format!("{at}: no corpus session {}", q.session));
+            continue;
+        };
+        // Every corpus turn is a user turn the harness feeds.
+        if session.turns.len() < min_turns {
+            problems.push(format!(
+                "{at}: {} has too few of the user's turns for a summary ({} < {min_turns})",
+                session.id,
+                session.turns.len()
+            ));
+        }
+        if q.language != session.language {
+            problems.push(format!(
+                "{at}: {} is not its conversation's language ({})",
+                q.language.as_str(),
+                session.language.as_str()
+            ));
+        }
+        let mut cited: Vec<usize> = q.turns.clone();
+        cited.sort_unstable();
+        cited.dedup();
+        if cited.is_empty() || cited.len() != q.turns.len() {
+            problems.push(format!("{at}: turns must be distinct and not empty"));
+        }
+        if let Some(t) = cited.iter().find(|t| **t >= session.turns.len()) {
+            problems.push(format!("{at}: {} has no turn {t}", session.id));
+            continue;
+        }
+        if !cited.iter().any(|t| {
+            matches!(
+                session.turns[*t].mode,
+                TurnMode::Noise | TurnMode::Rejection
+            )
+        }) {
+            problems.push(format!(
+                "{at}: cites no noise or rejection turn — a gold note, not a summary, could answer it"
+            ));
+        }
+    }
+    for (language, min) in MIN_EPISODE_LANGUAGE {
+        let n = split.iter().filter(|q| q.language == language).count();
+        if n < min {
+            problems.push(format!(
+                "{n} {} questions, fewer than {min}",
+                language.as_str()
+            ));
+        }
+    }
+    problems
+}
+
+fn episode_split() -> Vec<EpisodeQuestion> {
+    load_json::<Vec<EpisodeQuestion>>(&eval_dir().join("questions-episodes.json")).0
+}
+
+fn taken_question_ids(f: &Fixture) -> BTreeSet<String> {
+    let (tuning, _) = load_json::<Vec<Question>>(&eval_dir().join("questions-tuning.json"));
+    f.heldout
+        .iter()
+        .chain(tuning.iter())
+        .map(|q| q.id.clone())
+        .collect()
+}
+
+/// The split holds what design 09 §13.4 asks of it: about 20 questions of
+/// the `episodes` category about the learning corpus's conversations, one
+/// question a conversation, each conversation long enough to get a summary
+/// (at least `EPISODE_MIN_USER_TURNS` of the user's turns), each question in
+/// its conversation's language and drawing on at least one noise or
+/// rejection turn — what no gold note states, only a summary of the
+/// conversation — and the harness reads it as any question set.
+#[test]
+fn the_episode_question_split_is_well_formed() {
+    let f = fixture();
+    let split = episode_split();
+    let problems = episode_split_problems(&split, &f.corpus, &taken_question_ids(&f));
+    assert!(problems.is_empty(), "{problems:#?}");
+    let (as_questions, _) = load_json::<Vec<Question>>(&eval_dir().join("questions-episodes.json"));
+    assert_eq!(as_questions.len(), split.len());
+    assert!(
+        as_questions
+            .iter()
+            .all(|q| q.category == Category::Episodes && q.relies_on.is_empty()),
+        "the harness reads each as an episode question relying on no gold note"
+    );
+}
+
+/// The validator itself: a planted split with each kind of fault reports
+/// each one — so a green run of the test above means something.
+#[test]
+fn the_episode_split_check_catches_each_planted_fault() {
+    let f = fixture();
+    let good = episode_split();
+    let short = f
+        .corpus
+        .sessions
+        .iter()
+        .find(|s| {
+            s.turns.len() < openalpaca_core::memory::learning::EPISODE_MIN_USER_TURNS as usize
+        })
+        .expect("the corpus has a conversation too short to summarise");
+    let facts_only = f
+        .corpus
+        .sessions
+        .iter()
+        .find(|s| s.turns.len() >= 4 && s.turns.iter().any(|t| t.mode == TurnMode::Explicit))
+        .expect("a session with an explicit turn");
+    let explicit = facts_only
+        .turns
+        .iter()
+        .position(|t| t.mode == TurnMode::Explicit)
+        .unwrap();
+    let mut bad = good[..4].to_vec();
+    bad[1].id = bad[0].id.clone(); // a duplicate id
+    bad[2].session = short.id.clone(); // too short to summarise
+    bad[2].turns = vec![0];
+    bad[3].session = facts_only.id.clone(); // only a gold fact's turn
+    bad[3].turns = vec![explicit];
+    bad[3].language = match facts_only.language {
+        Language::Zh => Language::En,
+        _ => Language::Zh,
+    };
+    let mut taken = BTreeSet::new();
+    taken.insert(bad[0].id.clone());
+    let problems = episode_split_problems(&bad, &f.corpus, &taken);
+    let has = |needle: &str| problems.iter().any(|p| p.contains(needle));
+    for needle in [
+        "questions, not in",
+        "duplicate id",
+        "already a held-out or tuning id",
+        "too few of the user's turns",
+        "not its conversation's language",
+        "no noise or rejection turn",
+    ] {
+        assert!(has(needle), "no `{needle}` in {problems:#?}");
+    }
 }

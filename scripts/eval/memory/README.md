@@ -25,11 +25,12 @@ conversations through the gateway before anything is asked; see
 | `questions-tuning.json` | **150** more, same schema, for iterating on prompts, aliases or ranking. **The gate run never loads it** (it is loaded only through `OPENALPACA_MEMORY_EVAL_QUESTIONS`). |
 | `judge-prompt.md` | The frozen binary judge protocol (CORRECT / INCORRECT). Its SHA-256 is recorded in every report; change it and every report before the change is a different experiment. |
 | `conversations-learning.json` | The learning corpus (design 09 §7.1): **51 sessions, 299 user turns** in story order from October 2025 to September 2026 (32 English, 14 Chinese, 5 mixed — the questions' proportions; 26 with no project, 18 Lantern, 7 Moss). Written from `notes-gold.json` only, never from the held-out questions. Every gold note is stated, 23 only in passing; the 8 change pairs old-then-new (laptop, editor and weekly review changing in a Lantern session after a session with no project); 7 in-turn corrections; 14 restatements (6 of the pairs' old notes); 11 rejections; 55 % noise. `suggestion_sessions` lists the 13 sessions L-S feeds. Each turn: `user`, `states` (gold ids), `mode` (`explicit`, `indirect`, `change`, `correction`, `restate`, `rejection`, `noise`). |
+| `questions-episodes.json` | The **episode split** (design 09 §13.4): **20** questions about what a corpus conversation discussed, decided or left open — one per conversation, each with at least 4 turns, in its language (en 13, zh 5, mixed 2), each drawing on a noise or rejection turn that no gold note states — answered from the conversation summaries an L run writes. The held-out schema (`category` `episodes`, `relies_on` empty) plus `session` and `turns` (0-based) naming what the gold answer comes from. |
 | `coverage-judge-prompt.md` | The frozen coverage protocol (design 09 §7.3): given a gold note and up to five notes a search returned, `MATCH <n>` or `NONE`. Its SHA-256 is recorded in every learning report beside `judge_prompt_sha256`. |
 | `compare.py` | The paired comparison: accuracy per system, the paired difference with its 95 % CI, the discordant-pair rate, per-category point differences, the gate verdict. It prints both reports' judge models first and **refuses two reports graded by different judges** unless `--allow-judge-mismatch`; `--self-test` checks that refusal. |
 | `reports/` | The archived baselines of the deleted engine, measured on 2026-09-24 on a local Ollama as reader and judge: `baseline-A-2026-09-24.json` (13.0 %), `baseline-B-2026-09-24.json` (90.6 %), and their comparison. **B is the comparator** for D and E. |
 | `crates/openalpaca_core/tests/memory_eval.rs` | The runner: a data-validation test and the harness's own tests — the judge guard, the coverage verdict, the learning measures and invariants, a re-judge of a fixture-sized report, a replay of a fixture-sized scratch database, and the gateway feed, forced re-run and L-S confirm on two short sessions, all on an offline stub model (run under `--features live-eval`, no network) — and the `#[ignore]`d live eval. |
-| `crates/openalpaca_core/tests/memory_eval_corpus.rs` | The corpus's validation, in **default CI** with no model and no feature: coverage, the change pairs' order, the counts, the language shares within 5 points, the size, and the leakage check — no held-out question shares an 8-word shingle, or a 12-character Han/kana/Hangul shingle, with any turn. |
+| `crates/openalpaca_core/tests/memory_eval_corpus.rs` | The corpus's validation, in **default CI** with no model and no feature: coverage, the change pairs' order, the counts, the language shares within 5 points, the size, and the leakage check — no held-out question shares an 8-word shingle, or a 12-character Han/kana/Hangul shingle, with any turn. It validates the episode split too, and that the check catches each planted fault. |
 | `crates/openalpaca_core/tests/common/eval.rs` | The data files' types, shared by both test files. |
 
 ## How it works
@@ -283,7 +284,13 @@ as D asks them. The bus is read around every flush and every turn, so the
 report counts the two learning paths apart: `extraction` (the flushes) and
 `model_tool` (the reader's own `memory_store` calls).
 
-- **L** — learning on. After the questions, a **forced re-run**: the first
+- **L** — learning on. At each session's end, after its `switch` flush, L
+  also writes the session's **conversation summaries** (design 09 §13.3:
+  `flush_episodes`, one `episode` note per stretch of at least 4 of the
+  user's turns) — the one deterministic stand-in for the quiet period, the
+  switch and the stop drain. Every fact measure below leaves the summaries
+  out (`learning.learned` and the coverage search skip them); they are
+  dumped apart as `learning.episodes`. After the questions, a **forced re-run**: the first
   learned note still active is forgotten, its session's cursor moved back to
   0, and the session flushed again; a note citing a forgotten row is a
   resurrection. A re-run that could not run, or whose flush made no
@@ -330,7 +337,9 @@ as the spread (minimum, median, maximum) over the live run and the replays.
 |---|---|
 | `learning.turns` | Every fed turn: its corpus place and mode, its user row, the reader's calls, tools and own memory writes |
 | `learning.flushes` | Every flush: its label (`turns`, `switch`, `replay`, `forced_rerun`), latency, the queue's counts per §2.4 outcome, and the notes it wrote |
-| `learning.learned` | The store after the phase, history and candidates included: status, origin, key, aliases, validity, sources, links, knowledge |
+| `learning.episode_flushes` | L: every conversation-summary flush (label `switch`): its calls, the summaries written, tokens, latency and the notes it wrote |
+| `learning.learned` | The store after the phase, history and candidates included: status, origin, key, aliases, validity, sources, links, knowledge — conversation summaries left out |
+| `learning.episodes` | L: the conversation summaries the phase wrote, in the same shape |
 | `learning.coverage` | Per relied-on gold note: a historical search on its title and aliases (at most 5 notes) and the coverage judge's `MATCH <n>` or `NONE`; `share` is the fact coverage |
 | `learning.noise` | Active learned notes no coverage call chose, and the candidates raised |
 | `learning.changed_facts` | The 8 pairs and the 7 corrections, each with its outcome (`new_active_old_superseded`, `new_active_old_same_key_loser`, `both_active_unlinked`, `new_missing`, `old_never_learned`, …) and whether the two notes share a key |
@@ -338,11 +347,28 @@ as the spread (minimum, median, maximum) over the live run and the replays.
 | `learning.aliases`, `learning.fact_keys` | The share of active learned notes with an alias in the other script (CJK against Latin), with any alias, and with a key |
 | `learning.suggestion_check` | L-S: per seeded note, its suggestions and its status before and after the confirm |
 | `learning.invariants` | User notes retired without a confirm, forgotten notes resurrected — both must be 0 — and `forced_rerun_checked`: the re-run forgot a note and its flush made an extraction call and read its session to the end (no `stopped`). For L and a replay a re-run that checked nothing (skipped, no call, or a flush that stopped — an unusable answer, no model) is a violation, never a 0 that reads as a pass. A violation fails the run after the report is written |
-| `learning.cost` | Extraction calls and tokens, flush latency p50/p95, flushes by trigger, memory changes by surface, the reader's feed cost |
+| `learning.cost` | Extraction calls and tokens, flush latency p50/p95, flushes by trigger, the conversation summaries' calls, count and tokens, memory changes by surface, the reader's feed cost |
 
 The proposed targets (coverage ≥ 80 %, changed facts ≥ 12 of 15, other-script
 aliases ≥ 60 %, restatements raising a suggestion or a duplicate ≤ 2, L within
 −10 pp of D′) are read against the median of the four samples, never one run.
+
+**The episode split** (design 09 §13.4, for L8) is answered after a learning
+run: an L run with `OPENALPACA_MEMORY_EVAL_QUESTIONS` naming
+`questions-episodes.json` (an absolute path: the test runs in the crate's
+directory) writes the summaries as its learning phase always
+does, then asks the 20 questions as D asks them — with learning off, so the
+reader finds a summary only through `memory_search` or `memory_timeline`:
+automatic recall never delivers one. `conditions.learning.summaries` records
+that the run wrote them.
+
+```sh
+OPENALPACA_MEMORY_EVAL_SYSTEM=L \
+OPENALPACA_MEMORY_EVAL_QUESTIONS="$PWD/scripts/eval/memory/questions-episodes.json" \
+OPENALPACA_MEMORY_EVAL_REPORT=/tmp/memory-eval/report-L-episodes.json \
+  cargo test -p openalpaca_core --features live-eval \
+  --test memory_eval -- --ignored memory_eval --nocapture
+```
 
 ## The judge
 

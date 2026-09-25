@@ -1370,6 +1370,10 @@ struct LearningConditions {
     /// L: where the scratch database, its project and the transcript map
     /// were kept, for `OPENALPACA_MEMORY_EVAL_LEARN_FROM`.
     scratch_kept: Option<String>,
+    /// L writes each session's conversation summaries at its `switch`
+    /// (design 09 §13.3), for the episode split; the fact measures leave
+    /// them out.
+    summaries: bool,
     coverage_judge_prompt_path: String,
     coverage_judge_prompt_sha256: String,
 }
@@ -2334,6 +2338,61 @@ async fn flush_one(
     record
 }
 
+/// One conversation-summary flush (design 09 §13.3): what
+/// `flush_episodes` reported, its latency and the notes its bus events say
+/// it wrote.
+#[derive(Debug, Clone, Serialize)]
+struct EpisodeRecord {
+    session: String,
+    /// `switch`: a session's end, where the harness stands in for the
+    /// quiet period, the switch and the drain alike.
+    label: &'static str,
+    latency_ms: u64,
+    calls: usize,
+    episodes: usize,
+    input_tokens: u64,
+    output_tokens: u64,
+    stopped: Option<String>,
+    written: Vec<WrittenNote>,
+    events_lagged: u64,
+}
+
+/// `flush_episodes`, with the bus subscribed around it.
+async fn episode_one(
+    queue: &openalpaca_core::memory::learning::LearningQueue,
+    bus: &openalpaca_core::bus::EventBus,
+    session_id: &str,
+    corpus_id: &str,
+    label: &'static str,
+) -> EpisodeRecord {
+    let mut rx = bus.subscribe();
+    let t0 = Instant::now();
+    let report = queue.flush_episodes(session_id).await;
+    let latency_ms = t0.elapsed().as_millis() as u64;
+    let (written, events_lagged) = drain_memory_changes(&mut rx);
+    eprintln!(
+        "memory_eval: summary {corpus_id} ({label}): {} call(s), {} episode(s), {latency_ms} ms{}",
+        report.calls,
+        report.episodes,
+        report
+            .stopped
+            .map(|s| format!(", stopped: {s:?}"))
+            .unwrap_or_default()
+    );
+    EpisodeRecord {
+        session: corpus_id.to_string(),
+        label,
+        latency_ms,
+        calls: report.calls,
+        episodes: report.episodes,
+        input_tokens: report.input_tokens,
+        output_tokens: report.output_tokens,
+        stopped: report.stopped.map(|s| format!("{s:?}")),
+        written,
+        events_lagged,
+    }
+}
+
 /// One fed turn: its corpus place, its user row and what the reader did.
 #[derive(Debug, Serialize)]
 struct TurnRecord {
@@ -2405,12 +2464,16 @@ struct Learner {
     owner_id: String,
     project: PathBuf,
     turns_per_flush: u32,
+    /// Write each session's conversation summaries at its end (design 09
+    /// §13.3): L does, for the episode split.
+    summaries: bool,
 }
 
 #[derive(Default)]
 struct Fed {
     turns: Vec<TurnRecord>,
     flushes: Vec<FlushRecord>,
+    episodes: Vec<EpisodeRecord>,
     transcript: Vec<TranscriptSession>,
     wall_ms: u64,
 }
@@ -2441,7 +2504,14 @@ impl Learner {
             owner_id: owner_id.to_string(),
             project: project.to_path_buf(),
             turns_per_flush,
+            summaries: false,
         }
+    }
+
+    /// Also write each session's conversation summaries at its end.
+    fn with_summaries(mut self, on: bool) -> Self {
+        self.summaries = on;
+        self
     }
 
     fn lane(&self) -> String {
@@ -2452,6 +2522,9 @@ impl Learner {
     /// flush after every `turns_per_flush`-th user turn (`turns`) and at the
     /// session's end (`switch`) — the production triggers, replayed
     /// deterministically. The idle trigger has no stand-in (L1's tests).
+    /// With summaries on, the session's end also writes its conversation
+    /// summaries, after its facts — the quiet period, the switch and the
+    /// drain all come to that one deterministic flush here.
     async fn feed(&self, sessions: &[&CorpusSession], learn: bool) -> Fed {
         use openalpaca_api::events::EventSource;
         use openalpaca_core::events::SystemEvent;
@@ -2589,6 +2662,18 @@ impl Learner {
                     )
                     .await,
                 );
+                if self.summaries {
+                    fed.episodes.push(
+                        episode_one(
+                            &self.queue,
+                            &self.bus,
+                            &created.id,
+                            &session.id,
+                            FLUSH_SWITCH,
+                        )
+                        .await,
+                    );
+                }
             }
             // Each fed turn persisted one user row, in order.
             let user_rows: Vec<i64> = repo
@@ -2732,6 +2817,12 @@ struct LearnedNote {
 }
 
 impl LearnedNote {
+    /// A conversation summary (design 09 §13.3): kept out of the fact
+    /// measures — coverage, noise, restatements, aliases, keys.
+    fn is_summary(&self) -> bool {
+        self.kind == "episode" && self.origin == "extracted_other"
+    }
+
     fn from_read(r: &openalpaca_core::memory::service::ReadOutput) -> Self {
         let text = |key: &str| {
             r.frontmatter
@@ -2896,7 +2987,10 @@ async fn measure_coverage(
                 &c,
                 SearchInput {
                     query: q,
-                    limit: Some(COVERAGE_HITS),
+                    // Conversation summaries are left out below (design 09
+                    // §13.3: they are not facts), so the search reaches past
+                    // them for `COVERAGE_HITS` notes that are.
+                    limit: Some(COVERAGE_HITS * 3),
                     historical: true,
                     ..Default::default()
                 },
@@ -2926,7 +3020,13 @@ async fn measure_coverage(
             }
         };
         let mut texts = Vec::new();
-        for hit in results.iter().take(COVERAGE_HITS) {
+        for hit in results
+            .iter()
+            .filter(|hit| {
+                !openalpaca_storage::memory_files::is_conversation_summary(hit.kind, hit.origin)
+            })
+            .take(COVERAGE_HITS)
+        {
             let id = hit.id.to_string();
             let knowledge = match by_id.get(id.as_str()) {
                 Some(n) => n.knowledge.clone(),
@@ -3322,6 +3422,11 @@ struct LearningCost {
     flush_latency_p50_ms: u64,
     flush_latency_p95_ms: u64,
     flushes_by_trigger: BTreeMap<String, usize>,
+    /// The conversation summaries' calls and tokens (L only).
+    episode_calls: usize,
+    episodes_written: usize,
+    episode_tokens_in: u64,
+    episode_tokens_out: u64,
     /// The two learning paths: `extraction` from the flushes' events,
     /// `model_tool` (the reader's own writes) from the fed turns'.
     memory_changes_by_surface: BTreeMap<String, usize>,
@@ -3331,7 +3436,12 @@ struct LearningCost {
     feed_wall_ms: u64,
 }
 
-fn learning_cost(turns: &[TurnRecord], flushes: &[FlushRecord], feed_wall_ms: u64) -> LearningCost {
+fn learning_cost(
+    turns: &[TurnRecord],
+    flushes: &[FlushRecord],
+    episodes: &[EpisodeRecord],
+    feed_wall_ms: u64,
+) -> LearningCost {
     let mut latencies: Vec<u64> = flushes
         .iter()
         .filter(|f| f.calls > 0)
@@ -3359,6 +3469,10 @@ fn learning_cost(turns: &[TurnRecord], flushes: &[FlushRecord], feed_wall_ms: u6
         flush_latency_p50_ms: percentile(&latencies, 0.50),
         flush_latency_p95_ms: percentile(&latencies, 0.95),
         flushes_by_trigger: by_trigger,
+        episode_calls: episodes.iter().map(|e| e.calls).sum(),
+        episodes_written: episodes.iter().map(|e| e.episodes).sum(),
+        episode_tokens_in: episodes.iter().map(|e| e.input_tokens).sum(),
+        episode_tokens_out: episodes.iter().map(|e| e.output_tokens).sum(),
         memory_changes_by_surface: by_surface,
         reader_llm_calls: turns.iter().map(|t| t.reader_llm_calls).sum(),
         reader_tokens_in: turns.iter().map(|t| t.reader_tokens_in).sum(),
@@ -3403,7 +3517,14 @@ struct SuggestionCheck {
 struct LearningResults {
     turns: Vec<TurnRecord>,
     flushes: Vec<FlushRecord>,
+    /// The conversation summaries' flushes (L only, design 09 §13.3).
+    episode_flushes: Vec<EpisodeRecord>,
+    /// The learned store, conversation summaries left out: what every fact
+    /// measure below reads.
     learned: Vec<LearnedNote>,
+    /// The conversation summaries the learning phase wrote, dumped apart:
+    /// the episode split (`questions-episodes.json`) is answered from them.
+    episodes: Vec<LearnedNote>,
     coverage: Option<CoverageReport>,
     noise: Option<NoiseReport>,
     changed_facts: Vec<ChangedFact>,
@@ -3463,9 +3584,10 @@ async fn measure_learning(
     results: &mut LearningResults,
 ) {
     let (svc, c) = (service.clone(), ctx.clone());
-    results.learned = blocking(move || dump_learned(&svc, &c))
+    let dumped = blocking(move || dump_learned(&svc, &c))
         .await
         .unwrap_or_else(|e| panic!("memory_eval: cannot dump the learned store: {e}"));
+    (results.episodes, results.learned) = dumped.into_iter().partition(LearnedNote::is_summary);
     let gold: Vec<&GoldNote> = notes.iter().filter(|n| relied.contains(&n.id)).collect();
     let coverage = measure_coverage(
         router,
@@ -4057,6 +4179,7 @@ fn learning_conditions(
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned()),
         scratch_kept: None,
+        summaries: false,
         coverage_judge_prompt_path: coverage_path.to_string_lossy().into_owned(),
         coverage_judge_prompt_sha256: coverage_sha256.to_string(),
     }
@@ -4280,6 +4403,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
             if let Scratch::Kept(path) = &scratch {
                 c.scratch_kept = Some(path.to_string_lossy().into_owned());
             }
+            c.summaries = system == System::L;
             if system == System::LS {
                 c.seeded_as_saved_then = LS_SEEDED_AS_SAVED_THEN
                     .iter()
@@ -4330,7 +4454,8 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
             &owner_id,
             &project,
             cfg.orchestrator.learning.turns_per_flush,
-        );
+        )
+        .with_summaries(system == System::L);
         let fed = learner.feed(&fed_sessions, system.learns()).await;
         let t = Transcript {
             schema: 1,
@@ -4342,9 +4467,15 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
         if system == System::L {
             write_json(&scratch.path().join(TRANSCRIPT_FILE), &t);
         }
-        learning.cost = Some(learning_cost(&fed.turns, &fed.flushes, fed.wall_ms));
+        learning.cost = Some(learning_cost(
+            &fed.turns,
+            &fed.flushes,
+            &fed.episodes,
+            fed.wall_ms,
+        ));
         learning.turns = fed.turns;
         learning.flushes = fed.flushes;
+        learning.episode_flushes = fed.episodes;
         transcript = Some(t);
         report.learning = Some(std::mem::take(&mut learning));
         write_report(&settings.report_path, &report);
@@ -4715,6 +4846,7 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
         cost: Some(learning_cost(
             &[],
             &flushes,
+            &[],
             started.elapsed().as_millis() as u64,
         )),
         flushes,
@@ -6338,6 +6470,148 @@ async fn the_gateway_feed_maps_every_turn_and_the_forced_rerun_checks() {
         .filter(|r| prompt_of(r).contains("You are the memory extractor"))
         .count();
     assert_eq!(extractions, 3 + flush.calls, "one call per flush chunk");
+}
+
+/// L's conversation summaries, offline (design 09 §13.3, slice L10c): with
+/// summaries on, each session's end writes its summary after its facts —
+/// the harness's one deterministic stand-in for the quiet period, the switch
+/// and the drain — a session with fewer than four turns gets none, and the
+/// dump keeps the summary apart from the learned notes every fact measure
+/// reads; the cost block counts its calls.
+#[tokio::test(flavor = "multi_thread")]
+async fn l_writes_one_summary_per_long_session_and_keeps_it_out_of_the_fact_measures() {
+    use openalpaca_core::bus::EventBus;
+    use openalpaca_core::memory::learning::{LearningDeps, LearningQueue, QueueMode};
+    use openalpaca_storage::{Database, IdentityRepository};
+
+    let home = tempfile::tempdir().unwrap();
+    let _env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let scratch = tempfile::tempdir().unwrap();
+    let project = scratch_project(scratch.path());
+    let db = Database::open(&scratch.path().join(SCRATCH_DB)).unwrap();
+    let owner = new_owner_id();
+    IdentityRepository::new(&db)
+        .create_global_user(&owner, None)
+        .unwrap();
+    let (router, stub) = stub_router(&[TEST_MODEL], |request| {
+        let prompt = prompt_of(request);
+        if prompt.contains("You are the conversation recorder") {
+            return serde_json::json!({
+                "topic": "Locker numbers",
+                "discussed": "The user's locker numbers this week.",
+                "decided": "",
+                "open": "",
+            })
+            .to_string();
+        }
+        if !prompt.contains("You are the memory extractor") {
+            return "Noted.".to_string();
+        }
+        serde_json::json!({"items": [{
+            "title": "Locker", "content": "The user has a locker.",
+            "kind": "fact", "stated_by": "user", "confidence": 0.9, "rows": [1],
+        }]})
+        .to_string()
+    });
+    let bus = EventBus::default();
+    let cfg = eval_daemon_config(System::L);
+    let daemon_config = Arc::new(arc_swap::ArcSwap::from_pointee(cfg.clone()));
+    let service = Arc::new(MemoryService::open_default(Some(db.clone())).with_bus(bus.clone()));
+    let stack = eval_stack(
+        router.clone(),
+        &db,
+        &bus,
+        Some(&service),
+        daemon_config.clone(),
+    );
+    let queue = LearningQueue::new(
+        LearningDeps {
+            db: db.clone(),
+            router,
+            daemon_config,
+            memory_service: service.clone(),
+        },
+        QueueMode::Manual,
+    );
+    let learner = Learner::new(
+        &stack,
+        &queue,
+        &bus,
+        &db,
+        &owner,
+        &project,
+        cfg.orchestrator.learning.turns_per_flush,
+    )
+    .with_summaries(true);
+    let session = |id: &str, turns: usize| CorpusSession {
+        id: id.to_string(),
+        workspace: None,
+        language: Language::En,
+        narrative_date: "2026-03-02".to_string(),
+        turns: (1..=turns)
+            .map(|i| CorpusTurn {
+                user: format!("Note {id}-{i}: my locker number this week is {i}{i}{i}."),
+                states: Vec::new(),
+                mode: TurnMode::Noise,
+            })
+            .collect(),
+    };
+    let long = session("cs-t11", 5);
+    let short = session("cs-t12", 2);
+    let fed = learner.feed(&[&long, &short], true).await;
+
+    let episodes: Vec<(&str, &str, usize, usize)> = fed
+        .episodes
+        .iter()
+        .map(|e| (e.session.as_str(), e.label, e.calls, e.episodes))
+        .collect();
+    assert_eq!(
+        episodes,
+        [
+            ("cs-t11", FLUSH_SWITCH, 1, 1),
+            ("cs-t12", FLUSH_SWITCH, 0, 0)
+        ],
+        "{:?}",
+        fed.episodes
+    );
+    assert!(
+        fed.episodes[0]
+            .written
+            .iter()
+            .any(|w| w.change == "created" && w.origin == "extracted_other"),
+        "{:?}",
+        fed.episodes[0]
+    );
+    let cost = learning_cost(&fed.turns, &fed.flushes, &fed.episodes, fed.wall_ms);
+    assert_eq!((cost.episode_calls, cost.episodes_written), (1, 1));
+
+    let ctx = service
+        .context(
+            &owner,
+            WorkspaceHint::Root(&project),
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let (summaries, learned): (Vec<LearnedNote>, Vec<LearnedNote>) = dump_learned(&service, &ctx)
+        .unwrap()
+        .into_iter()
+        .partition(LearnedNote::is_summary);
+    assert_eq!(summaries.len(), 1, "{summaries:?}");
+    assert!(
+        summaries[0].title.ends_with(": Locker numbers"),
+        "{:?}",
+        summaries[0].title
+    );
+    assert!(!learned.is_empty());
+    assert!(learned.iter().all(|n| n.kind != "episode"), "{learned:?}");
+    let recorder_calls = stub
+        .requests()
+        .iter()
+        .filter(|r| prompt_of(r).contains("You are the conversation recorder"))
+        .count();
+    assert_eq!(recorder_calls, 1);
 }
 
 /// L-S's own path, offline (review of L7, finding 3): an old note seeded as
