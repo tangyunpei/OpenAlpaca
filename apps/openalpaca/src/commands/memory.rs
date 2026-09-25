@@ -59,6 +59,7 @@ use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use colored::Colorize;
 use openalpaca_core::memory::service::{WorkspaceHint, resolve_project_root, wire};
+use openalpaca_core::utils::text::{is_hidden, one_line};
 use openalpaca_storage::memory_files::{
     self as files, ControlSnapshot, MoveSnapshotState, Note, NoteId, NoteKind, NoteSource,
     NoteStatus, Partition, SourceType,
@@ -632,12 +633,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 let id = api.resolve_id(arg).await?;
                 let current = api.get(&format!("/v1/memories/{id}")).await?;
                 let revision = revision_of(&current)?;
-                println!(
-                    "  {}  {}  (revision {})",
-                    id,
-                    current["title"].as_str().unwrap_or(""),
-                    short(&revision)
-                );
+                println!("{}", forget_line(id, &current, &revision));
                 targets.push((id, revision));
             }
             if !yes && !confirm_forget(targets.len())? {
@@ -795,10 +791,7 @@ impl Api {
                 for item in page["items"].as_array().into_iter().flatten() {
                     let id = item["id"].as_str().unwrap_or("");
                     if id.starts_with(&prefix) && !matches.iter().any(|(m, _)| m == id) {
-                        matches.push((
-                            id.to_string(),
-                            item["title"].as_str().unwrap_or("").to_string(),
-                        ));
+                        matches.push((id.to_string(), shown(&item["title"])));
                     }
                 }
                 cursor = page["next_cursor"].as_str().map(str::to_string);
@@ -934,12 +927,12 @@ pub(crate) fn suggestion_line(item: &Value) -> String {
     };
     let mut line = format!(
         "{id}  replace “{}” ({}) → “{}”  {whence}",
-        target["title"].as_str().unwrap_or(""),
+        shown(&target["title"]),
         target_origin_label(target["origin"].as_str().unwrap_or("")),
-        item["title"].as_str().unwrap_or(""),
+        shown(&item["title"]),
     );
     if let Some(reason) = item["reason"].as_str() {
-        line.push_str(&format!(" — {reason}"));
+        line.push_str(&format!(" — {}", one_line(reason)));
     }
     match item["older_count"].as_u64() {
         Some(0) | None => {}
@@ -962,8 +955,9 @@ impl Confirmed {
         let revision = short(self.out["revision"].as_str().unwrap_or(""));
         let mut lines = vec![match &self.replaced_title {
             Some(title) => format!(
-                "{} Note {id} confirmed (revision {revision}): it now replaces “{title}”, which is kept as history.",
-                "✓".green()
+                "{} Note {id} confirmed (revision {revision}): it now replaces “{}”, which is kept as history.",
+                "✓".green(),
+                one_line(title)
             ),
             None => format!(
                 "{} Note {id} confirmed: {} (revision {revision}).",
@@ -1028,10 +1022,20 @@ pub(crate) async fn confirm_note(api: &Api, id: NoteId) -> Result<Confirmed> {
     })
 }
 
+/// One note `memory forget` is about to forget, before its prompt.
+fn forget_line(id: NoteId, current: &Value, revision: &str) -> String {
+    format!(
+        "  {}  {}  (revision {})",
+        id,
+        shown(&current["title"]),
+        short(revision)
+    )
+}
+
 /// What `undo` says (design 09 §3.3): a suggestion dismissed with the
 /// owner's note kept, or a learned note withdrawn and what came back.
 pub(crate) fn undo_message(id: NoteId, before: &Value, out: &Value) -> String {
-    let title = before["title"].as_str().unwrap_or("");
+    let title = shown(&before["title"]);
     let names_a_note = before["supersedes"]
         .as_array()
         .is_some_and(|t| !t.is_empty());
@@ -1574,6 +1578,39 @@ pub(crate) fn adopt_locally(old_owner_key: &str) -> Result<()> {
 }
 
 // ── Printing ─────────────────────────────────────────────────────
+//
+// A note's words come from the model, from learning or from a hand-edited
+// file, and they are printed raw at a terminal: an ESC sequence in a title
+// can clear or rewrite the screen (or, through OSC, the window title and the
+// clipboard), and a bidi override reorders a line the person decides from.
+// So every title, heading, alias, tag and reason passes through `shown` /
+// `one_line` (the daemon's own approval-card rule), an excerpt line through
+// `excerpt_line`, and `memory show`'s body through `body_text`. `--raw`
+// prints the note file as it is, for redirecting — unchanged.
+
+/// A note's words on one terminal line: whitespace runs as one space, and
+/// no control or format character (`openalpaca_core::utils::text::one_line`).
+fn shown(value: &Value) -> String {
+    one_line(value.as_str().unwrap_or(""))
+}
+
+/// One line of a search excerpt: its own spacing and tabs kept, every other
+/// control or format character dropped.
+fn excerpt_line(line: &str) -> String {
+    line.chars()
+        .filter(|c| *c == '\t' || !is_hidden(*c))
+        .collect()
+}
+
+/// `memory show`'s body: the note's whole text, which the person asked to
+/// read, so its lines, tabs and format characters stay (a joiner or a
+/// right-to-left mark can be content) — only control characters go, C0 and
+/// C1 alike (ESC, CSI, BEL, CR, …), so nothing in it drives the terminal.
+fn body_text(body: &str) -> String {
+    body.chars()
+        .filter(|c| matches!(c, '\n' | '\t') || !c.is_control())
+        .collect()
+}
 
 /// The first 12 characters of a revision — enough to tell two apart.
 fn short(revision: &str) -> String {
@@ -1586,25 +1623,31 @@ fn short_id(id: &NoteId) -> String {
 }
 
 fn print_list(page: &Value) {
+    for line in list_lines(page) {
+        println!("{line}");
+    }
+}
+
+/// What `memory list` prints, line by line.
+fn list_lines(page: &Value) -> Vec<String> {
     let items = page["items"].as_array().cloned().unwrap_or_default();
     if items.is_empty() {
-        println!("{}", "No notes.".dimmed());
-        return;
+        return vec!["No notes.".dimmed().to_string()];
     }
-    println!(
-        "{}",
+    let mut lines = vec![
         format!(
             "{:<8} {:<10} {:<7} {:<10} {:<15} {:<20} TITLE",
             "ID", "KIND", "SCOPE", "STATUS", "ORIGIN", "UPDATED"
         )
         .dimmed()
-    );
+        .to_string(),
+    ];
     for item in &items {
         let status = item["effective_status"]
             .as_str()
             .or(item["status"].as_str())
             .unwrap_or("");
-        println!(
+        lines.push(format!(
             "{:<8} {:<10} {:<7} {:<10} {:<15} {:<20} {}{}",
             item["id"]
                 .as_str()
@@ -1615,17 +1658,18 @@ fn print_list(page: &Value) {
             status,
             item["origin"].as_str().unwrap_or(""),
             item["updated_at"].as_str().unwrap_or(""),
-            item["title"].as_str().unwrap_or(""),
+            shown(&item["title"]),
             if item["pinned"].as_bool().unwrap_or(false) {
                 "  (pinned)"
             } else {
                 ""
             }
-        );
+        ));
     }
     if let Some(hint) = list_more_hint(page) {
-        println!("{}", hint.dimmed());
+        lines.push(hint.dimmed().to_string());
     }
+    lines
 }
 
 /// The line under a list page that has more: names only what `list` can
@@ -1638,9 +1682,17 @@ fn list_more_hint(page: &Value) -> Option<String> {
 }
 
 fn print_search(found: &Value) {
+    for line in search_lines(found) {
+        println!("{line}");
+    }
+}
+
+/// What `memory search` prints, line by line.
+fn search_lines(found: &Value) -> Vec<String> {
+    let mut lines = Vec::new();
     let results = found["results"].as_array().cloned().unwrap_or_default();
     if results.is_empty() {
-        println!("{}", "Nothing matched.".dimmed());
+        lines.push("Nothing matched.".dimmed().to_string());
     }
     for r in &results {
         let flags: Vec<&str> = [
@@ -1657,14 +1709,14 @@ fn print_search(found: &Value) {
         .into_iter()
         .flatten()
         .collect();
-        println!(
+        lines.push(format!(
             "{}  {}  [{}/{}/{}/{}] {}{}",
             r["id"]
                 .as_str()
                 .map(|s| s.chars().take(8).collect::<String>())
                 .unwrap_or_default()
                 .bold(),
-            r["title"].as_str().unwrap_or(""),
+            shown(&r["title"]),
             r["kind"].as_str().unwrap_or(""),
             r["scope"].as_str().unwrap_or(""),
             r["effective_status"].as_str().unwrap_or(""),
@@ -1675,20 +1727,19 @@ fn print_search(found: &Value) {
             } else {
                 format!("  {}", flags.join(", ").yellow())
             }
-        );
+        ));
         let matched: Vec<&str> = r["match"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
             .collect();
-        println!(
-            "{}",
+        lines.push(
             format!(
                 "    {}lines {}-{}, matched on {}",
                 r["heading"]
                     .as_str()
-                    .map(|h| format!("{h} · "))
+                    .map(|h| format!("{} · ", one_line(h)))
                     .unwrap_or_default(),
                 r["line_range"][0],
                 r["line_range"][1],
@@ -1699,27 +1750,35 @@ fn print_search(found: &Value) {
                 }
             )
             .dimmed()
+            .to_string(),
         );
         for line in r["excerpt"].as_str().unwrap_or("").lines() {
-            println!("    {line}");
+            lines.push(format!("    {}", excerpt_line(line)));
         }
     }
     if found["partial"].as_bool().unwrap_or(false) {
-        println!("{}", "(partial: a scan cap was hit)".dimmed());
+        lines.push("(partial: a scan cap was hit)".dimmed().to_string());
     }
     if found["index_state"] == "rebuilding" {
-        println!("{}", "(the search index is rebuilding)".dimmed());
+        lines.push("(the search index is rebuilding)".dimmed().to_string());
+    }
+    lines
+}
+
+fn print_timeline(found: &Value) {
+    for line in timeline_lines(found) {
+        println!("{line}");
     }
 }
 
 /// One row per note, oldest first: date, id, kind, scope, status, title —
 /// the anchor in bold, a note out of recall with its status in yellow.
-fn print_timeline(found: &Value) {
+fn timeline_lines(found: &Value) -> Vec<String> {
     let rows = found["results"].as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
-        println!("{}", "No notes to show.".dimmed());
-        return;
+        return vec!["No notes to show.".dimmed().to_string()];
     }
+    let mut lines = Vec::new();
     for r in &rows {
         let status = r["status"].as_str().unwrap_or("");
         let line = format!(
@@ -1732,25 +1791,35 @@ fn print_timeline(found: &Value) {
             r["kind"].as_str().unwrap_or(""),
             r["scope"].as_str().unwrap_or(""),
             status,
-            r["title"].as_str().unwrap_or(""),
+            shown(&r["title"]),
         );
         if r["reason"] == "anchor" {
-            println!("{}", line.bold());
+            lines.push(line.bold().to_string());
         } else if status != "active" {
-            println!("{}", line.yellow());
+            lines.push(line.yellow().to_string());
         } else {
-            println!("{line}");
+            lines.push(line);
         }
     }
     if found["index_state"] == "rebuilding" {
-        println!("{}", "(the search index is rebuilding)".dimmed());
+        lines.push("(the search index is rebuilding)".dimmed().to_string());
     }
+    lines
 }
 
 fn print_note(note: &Value) {
-    println!("{}", note["title"].as_str().unwrap_or("").bold());
-    println!(
-        "{}",
+    print!("{}", note_text(note));
+}
+
+/// What `memory show` prints: the header lines, a blank line, the body.
+fn note_text(note: &Value) -> String {
+    let mut out = String::new();
+    let mut line = |text: String| {
+        out.push_str(&text);
+        out.push('\n');
+    };
+    line(shown(&note["title"]).bold().to_string());
+    line(
         format!(
             "id {}  revision {}  {}/{}/{}  origin {}  freshness {}",
             note["id"].as_str().unwrap_or(""),
@@ -1762,21 +1831,23 @@ fn print_note(note: &Value) {
             note["freshness"].as_str().unwrap_or(""),
         )
         .dimmed()
+        .to_string(),
     );
     let fm = &note["frontmatter"];
-    let list = |key: &str| -> Vec<&str> {
+    let list = |key: &str| -> Vec<String> {
         fm[key]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
+            .map(one_line)
             .collect()
     };
     let aliases = list("aliases");
     let tags = list("tags");
     let mut facts = Vec::new();
     if let Some(k) = fm["fact_key"].as_str() {
-        facts.push(format!("fact_key {k}"));
+        facts.push(format!("fact_key {}", one_line(k)));
     }
     if !aliases.is_empty() {
         facts.push(format!("aliases {}", aliases.join(", ")));
@@ -1788,7 +1859,7 @@ fn print_note(note: &Value) {
         facts.push("pinned".into());
     }
     if !facts.is_empty() {
-        println!("{}", facts.join("  ").dimmed());
+        line(facts.join("  ").dimmed().to_string());
     }
     let sources: Vec<String> = note["sources"]
         .as_array()
@@ -1803,21 +1874,22 @@ fn print_note(note: &Value) {
         })
         .collect();
     if !sources.is_empty() {
-        println!(
-            "{}",
+        line(
             format!(
                 "sources {} ({})",
                 sources.join(", "),
                 note["sources_status"].as_str().unwrap_or("")
             )
             .dimmed()
+            .to_string(),
         );
     }
     let supersedes = list("supersedes");
     if !supersedes.is_empty() {
-        println!(
-            "{}",
-            format!("supersedes {}", supersedes.join(", ")).dimmed()
+        line(
+            format!("supersedes {}", supersedes.join(", "))
+                .dimmed()
+                .to_string(),
         );
     }
     let superseded_by: Vec<&str> = note["superseded_by"]
@@ -1827,22 +1899,30 @@ fn print_note(note: &Value) {
         .filter_map(Value::as_str)
         .collect();
     if !superseded_by.is_empty() {
-        println!(
-            "{}",
-            format!("superseded by {}", superseded_by.join(", ")).yellow()
+        line(
+            format!("superseded by {}", superseded_by.join(", "))
+                .yellow()
+                .to_string(),
         );
     }
     if note["conflict"].as_bool().unwrap_or(false) {
-        println!("{}", "conflict: see `openalpaca memory doctor`".yellow());
+        line(
+            "conflict: see `openalpaca memory doctor`"
+                .yellow()
+                .to_string(),
+        );
     }
-    println!();
-    print!("{}", note["body"].as_str().unwrap_or(""));
-    if !note["body"].as_str().unwrap_or("").ends_with('\n') {
-        println!();
+    line(String::new());
+    let body = body_text(note["body"].as_str().unwrap_or(""));
+    out.push_str(&body);
+    if !body.ends_with('\n') {
+        out.push('\n');
     }
     if note["truncated"].as_bool().unwrap_or(false) {
-        println!("{}", "(truncated at 32 KiB)".dimmed());
+        out.push_str(&"(truncated at 32 KiB)".dimmed().to_string());
+        out.push('\n');
     }
+    out
 }
 
 fn print_doctor(report: &Value) {

@@ -14,7 +14,8 @@
 //! question. This is the one-line cut for a preview.
 //!
 //! [`one_line`] is what a person reads before acting on it — an approval
-//! card, a list to pick an id from: one line with nothing hidden in it.
+//! card, a list to pick an id from: one line with nothing hidden in it. The
+//! CLI prints note titles through it too.
 
 /// Borrow at most `max_bytes` of `s`, ending on a character boundary.
 ///
@@ -32,7 +33,7 @@ pub(crate) fn byte_prefix(s: &str, max_bytes: usize) -> &str {
 /// the text as stored, in its own order, and a mark would litter the
 /// legitimate uses (an emoji's zero-width joiner, a soft hyphen) on the very
 /// line that must read clearly.
-pub(crate) fn one_line(text: &str) -> String {
+pub fn one_line(text: &str) -> String {
     text.split_whitespace()
         .map(|word| word.replace(is_hidden, ""))
         .filter(|word| !word.is_empty())
@@ -48,7 +49,7 @@ pub(crate) fn one_line(text: &str) -> String {
 /// U+2060–U+2064, U+FEFF), the soft hyphen and the tag characters.
 /// Unicode 16.0's `Cf`, held equal to the `regex` crate's own `\p{Cf}` by
 /// a test.
-pub(crate) fn is_hidden(c: char) -> bool {
+pub fn is_hidden(c: char) -> bool {
     c.is_control()
         || matches!(
             c,

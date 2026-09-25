@@ -688,6 +688,15 @@ Notes:
   daemon holds it, frontmatter and all; `--revision <rev>` reads one of the last
   five revisions the daemon wrote (a hand edit is not one of them) — `--raw` of a
   revision is that revision's file.
+- What a note holds is printed so it cannot drive your terminal. Every title,
+  heading, alias, tag and suggestion reason — in `list`, `search`, `timeline`,
+  `suggestions`, `show`, the lines `confirm`, `undo` and `forget` print, and an
+  ambiguous id's list — is one line with no control character (an escape
+  sequence) and no Unicode format character (a bidi override, a zero-width
+  character). `search`'s excerpt lines drop both kinds too but keep their own
+  spacing and tabs; `show`'s body drops control characters only and keeps its
+  line breaks, tabs and format characters, since it is the note's whole text.
+  `--raw` prints the file unchanged.
 - `add` saves a note **as you**: its origin is `user`, the highest authority, and a
   tool call can never edit, archive or replace it (the model can only *forget* it,
   under the ordinary confirmation card). The body is the last argument, `-` for

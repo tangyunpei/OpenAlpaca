@@ -966,3 +966,153 @@ async fn timeline_asks_the_daemon_for_the_rows_around_its_anchor() {
         ]
     );
 }
+
+// ── What reaches the terminal (residue review finding 3) ─────────────────
+
+/// A title with a screen-clearing escape sequence, a bidi override and a
+/// zero-width space — what a learned or hand-edited note can hold.
+const EVIL: &str = "Evil\u{1b}[2J \u{202e}eltit\u{202c} ti\u{200b}tle";
+/// The same title as it may reach a terminal: the escape and format
+/// characters dropped, the visible text kept in its stored order.
+const SHOWN: &str = "Evil[2J eltit title";
+
+/// No escape sequence from the note and no format character reaches the
+/// text. (The colours `colored` adds are its own escapes, so the check is
+/// for the note's sequence, not for every ESC.)
+fn assert_clean(text: &str) {
+    assert!(!text.contains("\u{1b}[2J"), "an escape sequence: {text:?}");
+    assert!(!text.contains('\u{202e}'), "a bidi override: {text:?}");
+    assert!(!text.contains('\u{202c}'), "a bidi pop: {text:?}");
+    assert!(!text.contains('\u{200b}'), "a zero-width space: {text:?}");
+}
+
+/// The lines a person decides from — a suggestion to confirm or keep, a
+/// note to forget or undo, what a confirm replaced — carry a note's title
+/// and the suggestion's reason with no escape or format character.
+#[test]
+fn the_decision_lines_carry_no_escape_or_format_character() {
+    let item = serde_json::json!({
+        "id": SUGGESTION,
+        "title": EVIL,
+        "reason": format!("Because \u{1b}]0;owned\u{7}{EVIL}"),
+        "origin": "extracted_user",
+        "created_at": "2026-09-25T10:00:00Z",
+        "target": { "id": TARGET, "title": EVIL, "origin": "user" },
+    });
+    let line = suggestion_line(&item);
+    assert_clean(&line);
+    assert!(!line.contains('\u{7}'), "{line:?}");
+    assert!(
+        line.contains(&format!("replace “{SHOWN}” (saved by you) → “{SHOWN}”")),
+        "{line}"
+    );
+
+    let id = NoteId::parse(SUGGESTION).unwrap();
+    let mut before = suggestion_read(&[TARGET]);
+    before["title"] = serde_json::json!(EVIL);
+    let withdrawn = serde_json::json!({ "id": SUGGESTION, "status": "withdrawn", "restored": [] });
+    let undone = undo_message(id, &before, &withdrawn);
+    assert_clean(&undone);
+    assert!(undone.contains(&format!("({SHOWN})")), "{undone}");
+
+    let forget = forget_line(id, &before, OLD_REV);
+    assert_clean(&forget);
+    assert!(forget.contains(SHOWN), "{forget}");
+
+    let confirmed = Confirmed {
+        out: serde_json::json!({ "id": SUGGESTION, "revision": NEW_REV, "status": "active" }),
+        replaced_title: Some(EVIL.to_string()),
+    };
+    for line in confirmed.lines(id) {
+        assert_clean(&line);
+    }
+    assert!(confirmed.lines(id)[0].contains(&format!("“{SHOWN}”")));
+}
+
+/// `memory list`, `memory search` and `memory timeline` print a title per
+/// line, and search an excerpt: none of it carries an escape or format
+/// character. An excerpt keeps its own lines and indentation.
+#[test]
+fn list_search_and_timeline_lines_carry_no_escape_or_format_character() {
+    let row = serde_json::json!({
+        "id": ID, "kind": "fact", "scope": "global", "status": "active",
+        "effective_status": "active", "origin": "user", "updated_at": "2026-09-25T10:00:00Z",
+        "date": "2026-09-25T10:00:00Z", "title": EVIL,
+        "heading": format!("Heading {EVIL}"),
+        "excerpt": format!("first {EVIL}\n\tsecond\u{1b}[31m line\r\n"),
+        "line_range": [3, 4], "match": ["term"], "freshness": "verified",
+    });
+    let listed = list_lines(&serde_json::json!({ "items": [row.clone()] }));
+    for line in &listed {
+        assert_clean(line);
+    }
+    assert!(listed[1].ends_with(SHOWN), "{listed:?}");
+
+    let found = search_lines(&serde_json::json!({ "results": [row.clone()] }));
+    for line in &found {
+        assert_clean(line);
+        assert!(!line.contains("\u{1b}[31m"), "{line:?}");
+        assert!(!line.contains('\r'), "{line:?}");
+    }
+    assert!(found[0].contains(SHOWN), "{found:?}");
+    assert!(found[1].contains(&format!("Heading {SHOWN}")), "{found:?}");
+    assert_eq!(found[2], format!("    first {SHOWN}"), "{found:?}");
+    assert_eq!(found[3], "    \tsecond[31m line", "{found:?}");
+
+    let timeline = timeline_lines(&serde_json::json!({ "results": [row] }));
+    for line in &timeline {
+        assert_clean(line);
+    }
+    assert!(timeline[0].contains(SHOWN), "{timeline:?}");
+}
+
+/// `memory show` prints the title, the facts line and the body. The title
+/// and facts carry no escape or format character; the body — the note's
+/// whole text, which the person asked to read — keeps its format
+/// characters (a joiner or a right-to-left mark can be content) and loses
+/// only its control characters, so no escape sequence reaches the terminal.
+#[test]
+fn show_prints_no_escape_sequence() {
+    let mut note = read_answer();
+    note["title"] = serde_json::json!(EVIL);
+    note["frontmatter"]["aliases"] = serde_json::json!([EVIL]);
+    note["frontmatter"]["tags"] = serde_json::json!([EVIL]);
+    note["body"] = serde_json::json!(format!(
+        "# Build\n\nRun \u{1b}[2Jthe checks\u{9b}31m.\n\u{202e}right-to-left\u{202c}\n"
+    ));
+    let text = note_text(&note);
+    assert!(!text.contains("\u{1b}[2J"), "{text:?}");
+    assert!(!text.contains('\u{9b}'), "a C1 control: {text:?}");
+    let (head, body) = text.split_once("\n\n").unwrap();
+    assert_clean(head);
+    assert!(head.contains(SHOWN), "{head}");
+    assert!(
+        body.ends_with("# Build\n\nRun [2Jthe checks31m.\n\u{202e}right-to-left\u{202c}\n"),
+        "{body:?}"
+    );
+}
+
+/// An ambiguous id prefix lists the notes it matches, one title per line:
+/// with no escape or format character in them.
+#[tokio::test]
+async fn an_ambiguous_prefix_lists_titles_with_no_escape_or_format_character() {
+    let page = serde_json::json!({
+        "items": [
+            { "id": "abcd0001-0000-4000-8000-000000000001", "title": EVIL },
+            { "id": "abcd0002-0000-4000-8000-000000000002", "title": EVIL },
+        ],
+    })
+    .to_string();
+    let empty = serde_json::json!({ "items": [] }).to_string();
+    let (addr, server) = serve(vec![
+        json_answer("200 OK", OLD_REV, &page),
+        json_answer("200 OK", OLD_REV, &empty),
+        json_answer("200 OK", OLD_REV, &empty),
+    ]);
+    let api = Api::for_tests(DaemonClient::for_tests(&format!("http://{addr}"), "token"));
+    let err = api.resolve_id("abcd").await.expect_err("two notes match");
+    let message = format!("{err:#}");
+    assert_clean(&message);
+    assert!(message.contains(&format!("abcd0001-0000-4000-8000-000000000001  {SHOWN}")), "{message}");
+    server.join().expect("the server finishes");
+}
