@@ -1,6 +1,6 @@
 //! Telegram Connector: struct, lifecycle, and trait implementation.
 
-use super::delivery::send_with_retry;
+use super::delivery::send_approval_with_retry;
 use crate::common::{KeyedRateLimiter, format_confirmation_prompt};
 use crate::{Connector, ConnectorError};
 use arc_swap::ArcSwap;
@@ -184,7 +184,7 @@ impl TelegramConnector {
                             format_confirmation_prompt(&tool_name, &tool_arguments, queue_len);
 
                         if let Err(e) =
-                            send_with_retry(&bot, ChatId(chat_id), &prompt).await
+                            send_approval_with_retry(&bot, ChatId(chat_id), &prompt).await
                         {
                             error!(
                                 "Failed to send confirmation prompt to chat {}: {}",

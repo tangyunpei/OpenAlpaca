@@ -168,3 +168,32 @@ fn a_multibyte_argument_block_is_cut_without_panicking() {
     assert!(!prompt.contains("pending)"), "{prompt}");
     assert!(prompt.contains("..."), "the arguments were truncated");
 }
+
+// ── The approval prompt carries no link preview ──────────────────────
+//
+// Telegram draws a card under the first URL in a message: the linked page's
+// own title, description and image. Under an approval prompt that card is
+// the site owner's text inside the message the person decides on.
+
+/// The request the prompt and its acknowledgement are sent with asks
+/// Telegram for no preview; the text is sent as given.
+#[test]
+fn an_approval_message_asks_telegram_for_no_link_preview() {
+    use super::delivery::approval_message;
+    use teloxide::prelude::*;
+    use teloxide::requests::HasPayload;
+
+    let bot = Bot::new("0:test");
+    let text = "Arguments:\n{\n  \"url\": \"https://e.x/a\"\n}";
+
+    let message = approval_message(&bot, ChatId(42), text);
+
+    let sent = serde_json::to_value(message.payload_ref()).unwrap();
+    assert_eq!(sent["text"], text);
+    assert_eq!(sent["chat_id"], 42);
+    assert_eq!(
+        sent["link_preview_options"],
+        serde_json::json!({"is_disabled": true}),
+        "{sent}"
+    );
+}

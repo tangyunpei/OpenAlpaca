@@ -29,6 +29,8 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use twilight_gateway::{EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
+use twilight_http::request::channel::message::CreateMessage;
+use twilight_model::channel::message::MessageFlags;
 use twilight_model::gateway::event::Event;
 
 /// Discord's max message length
@@ -44,8 +46,56 @@ pub fn chunk_message(text: &str) -> Vec<String> {
 /// Send a message with exponential backoff retry (3 attempts: 1s, 2s, 4s).
 pub async fn send_with_retry(
     http: &twilight_http::Client,
-    channel_id: twilight_model::id::Id<twilight_model::id::marker::ChannelMarker>,
+    channel_id: ChannelId,
     text: &str,
+) -> Result<(), String> {
+    send_chunks_with_retry(http, channel_id, text, plain_message).await
+}
+
+/// [`send_with_retry`] for an approval prompt or its acknowledgement: every
+/// chunk is an [`approval_message`].
+async fn send_approval_with_retry(
+    http: &twilight_http::Client,
+    channel_id: ChannelId,
+    text: &str,
+) -> Result<(), String> {
+    send_chunks_with_retry(http, channel_id, text, approval_message).await
+}
+
+type ChannelId = twilight_model::id::Id<twilight_model::id::marker::ChannelMarker>;
+
+/// A message as Discord's defaults show it.
+fn plain_message<'a>(
+    http: &'a twilight_http::Client,
+    channel_id: ChannelId,
+    text: &'a str,
+) -> CreateMessage<'a> {
+    http.create_message(channel_id).content(text)
+}
+
+/// An approval prompt, or the acknowledgement of a reply to one, as a
+/// Discord message: with `SUPPRESS_EMBEDS`, so no link embed under it.
+///
+/// Discord draws an embed under every URL in a message — the linked page's
+/// own title, description and image. In an approval prompt those URLs are
+/// in the tool's arguments, so an embed would put text the site's owner
+/// chose ("Read-only: lists /tmp") inside the message the person decides
+/// on, where no escape reaches it. The model's ordinary answers keep their
+/// embeds.
+fn approval_message<'a>(
+    http: &'a twilight_http::Client,
+    channel_id: ChannelId,
+    text: &'a str,
+) -> CreateMessage<'a> {
+    plain_message(http, channel_id, text).flags(MessageFlags::SUPPRESS_EMBEDS)
+}
+
+/// Each chunk of `text` sent as `message` builds it, with the retries.
+async fn send_chunks_with_retry(
+    http: &twilight_http::Client,
+    channel_id: ChannelId,
+    text: &str,
+    message: for<'a> fn(&'a twilight_http::Client, ChannelId, &'a str) -> CreateMessage<'a>,
 ) -> Result<(), String> {
     let chunks = chunk_message(text);
 
@@ -54,7 +104,7 @@ pub async fn send_with_retry(
         let max_retries = 3;
 
         loop {
-            match http.create_message(channel_id).content(chunk).await {
+            match message(http, channel_id, chunk).await {
                 Ok(_) => break,
                 Err(e) => {
                     attempts += 1;
@@ -316,7 +366,7 @@ impl DiscordConnector {
 
                         let prompt = approval_prompt(&tool_name, &tool_arguments, queue_len);
 
-                        if let Err(e) = send_with_retry(
+                        if let Err(e) = send_approval_with_retry(
                             &http,
                             twilight_model::id::Id::new(channel_id),
                             &prompt,
@@ -379,7 +429,7 @@ impl DiscordConnector {
                 &self.pending_confirmations,
             )
         {
-            if let Err(e) = send_with_retry(http, channel_id, &reply).await {
+            if let Err(e) = send_approval_with_retry(http, channel_id, &reply).await {
                 error!(
                     "Failed to send confirmation acknowledgment to channel {}: {}",
                     channel_id, e
@@ -748,6 +798,41 @@ mod tests {
         assert_eq!(shown, written);
         assert!(sent.contains("\\|\\|curl"), "{sent}");
         assert!(sent.contains("\\<U+202E\\>"), "{sent}");
+    }
+
+    /// Discord draws an embed under every URL in a message: the linked
+    /// page's own title, description and image. Under an approval prompt
+    /// that card is the site owner's text inside the message the person
+    /// decides on, so the prompt and its acknowledgement are sent with
+    /// `SUPPRESS_EMBEDS`; an ordinary message keeps Discord's default.
+    /// (Async only because the client's rate limiter starts a task; nothing
+    /// is sent.)
+    #[tokio::test]
+    async fn an_approval_message_asks_discord_for_no_embeds() {
+        use twilight_http::request::TryIntoRequest;
+
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+        let http = twilight_http::Client::new("test".to_string());
+        let channel = twilight_model::id::Id::new(7);
+        let sent = |message: CreateMessage<'_>| -> serde_json::Value {
+            let request = message.try_into_request().expect("a valid message");
+            serde_json::from_slice(request.body().expect("a JSON body")).unwrap()
+        };
+        let text = "Arguments:\n{\n  \"url\": \"https://e.x/a\"\n}";
+
+        let approval = sent(approval_message(&http, channel, text));
+        assert_eq!(approval["content"], text);
+        assert_eq!(
+            approval["flags"],
+            MessageFlags::SUPPRESS_EMBEDS.bits(),
+            "{approval}"
+        );
+
+        let plain = sent(plain_message(&http, channel, text));
+        assert_eq!(plain["content"], text);
+        assert!(plain.get("flags").is_none(), "{plain}");
     }
 
     /// The acknowledgement names the tool, which is third-party text too.

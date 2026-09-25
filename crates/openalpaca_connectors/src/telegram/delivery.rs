@@ -1,7 +1,10 @@
 //! Message chunking, formatting, and delivery helpers for Telegram.
 
 use std::time::Duration;
+use teloxide::payloads::SendMessage;
 use teloxide::prelude::*;
+use teloxide::requests::JsonRequest;
+use teloxide::types::LinkPreviewOptions;
 use tracing::{error, warn};
 
 /// Telegram's max message length
@@ -18,6 +21,44 @@ pub(super) async fn send_with_retry(
     chat_id: ChatId,
     text: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    send_chunks_with_retry(text, |chunk| bot.send_message(chat_id, chunk)).await
+}
+
+/// [`send_with_retry`] for an approval prompt: every chunk is an
+/// [`approval_message`].
+pub(super) async fn send_approval_with_retry(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    send_chunks_with_retry(text, |chunk| approval_message(bot, chat_id, chunk)).await
+}
+
+/// An approval prompt, or the acknowledgement of a reply to one, as a
+/// Telegram message: with no link preview.
+///
+/// Telegram draws a card under the first URL in a message — the linked
+/// page's own title, description and image. In an approval prompt that URL
+/// is in the tool's arguments, so the card would put text the site's owner
+/// chose ("Read-only: lists /tmp") inside the message the person decides
+/// on, where no escape reaches it. The model's ordinary answers keep their
+/// previews.
+pub(super) fn approval_message(bot: &Bot, chat_id: ChatId, text: &str) -> JsonRequest<SendMessage> {
+    bot.send_message(chat_id, text)
+        .link_preview_options(LinkPreviewOptions {
+            is_disabled: true,
+            url: None,
+            prefer_small_media: false,
+            prefer_large_media: false,
+            show_above_text: false,
+        })
+}
+
+/// Each chunk of `text` sent as `message` builds it, with the retries.
+async fn send_chunks_with_retry(
+    text: &str,
+    message: impl Fn(&str) -> JsonRequest<SendMessage>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let chunks = chunk_message(text);
 
     for chunk in &chunks {
@@ -25,7 +66,7 @@ pub(super) async fn send_with_retry(
         let max_retries = 3;
 
         loop {
-            match bot.send_message(chat_id, chunk).await {
+            match message(chunk).await {
                 Ok(_) => break,
                 Err(e) => {
                     attempts += 1;
