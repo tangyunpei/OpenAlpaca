@@ -199,6 +199,15 @@ fn is_default_ignorable(c: char) -> bool {
 /// order on approval surfaces (an LRO … PDF around the arguments on plain
 /// text, `unicode-bidi: bidi-override` in the GUI) is an owner decision,
 /// not taken.
+///
+/// Nor does it show meaning: the escape makes the code points exact, and a
+/// visible character that looks like another stays as written — U+0430
+/// CYRILLIC SMALL LETTER A for the Latin `a` in a domain, a fullwidth
+/// solidus (U+FF0F) or a division slash (U+2215) for `/` in a path, a
+/// no-break space inside a shell command, which the shell does not split
+/// on — and two tool names a homoglyph apart read alike, in the prompt and
+/// in a reply's acknowledgement. Flagging mixed scripts or confusables is an
+/// owner decision, not taken.
 pub fn escape_hidden(text: &str) -> Escaped {
     escape_hidden_within(text, usize::MAX)
 }
