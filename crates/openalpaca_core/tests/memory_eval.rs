@@ -1459,6 +1459,11 @@ struct Totals {
     /// delivered or listed — the retrieval of an `index` run, where
     /// [`Self::rows_with_every_relied_note_delivered`] asks for the bodies.
     rows_with_every_relied_note_listed_or_delivered: usize,
+    /// Rows with a non-empty `relies_on` whose every relied-on note reached
+    /// the model as more than a title — excerpted, or read with
+    /// `memory_read` (`rows[].relied_notes_read_or_excerpted`): the
+    /// retrieval measure that compares the two recall modes like for like.
+    rows_with_every_relied_note_read_or_excerpted: usize,
     /// The reader's input tokens per question turn (`rows[].reader_tokens_in`,
     /// every round of the turn): mean and median. `null` with no rows.
     reader_tokens_in_mean_per_turn: Option<f64>,
@@ -1541,6 +1546,23 @@ struct Row {
     relied_notes_listed: usize,
     /// `memory_used` entries with reason `index`: the index block's lines.
     index_lines: usize,
+    /// The notes `memory_read` returned with a body in this turn, each once
+    /// (L8-prep review, finding 1; the harness's [`ReadLog`]).
+    memory_reads: Vec<SeenNote>,
+    /// Each `memory_search` and `memory_timeline` call that answered: its
+    /// `detail` (`index`, a title per note; `snippets`, an excerpt) and the
+    /// notes it returned.
+    memory_listings: Vec<MemoryListing>,
+    /// How many of `relies_on` the reader read with `memory_read` in this
+    /// turn: their body came back.
+    relied_notes_read: usize,
+    /// How many of `relies_on` reached the model as more than a title:
+    /// excerpted by the per-turn recall (`recall`, or `pinned`'s whole
+    /// body), read with `memory_read`, or excerpted by a `snippets` search.
+    /// Unlike `relied_notes_delivered`, a title-only row — an index line, a
+    /// search at its default detail, a timeline — never counts, so it
+    /// compares an `index` run and an `excerpts` run like for like.
+    relied_notes_read_or_excerpted: usize,
     /// The model calls the router booked to the main loop during the turn
     /// (its cost tracker's count for the loop's agent id): one per round the
     /// loop ran — each tool round, the answering round, and the answer
@@ -1548,23 +1570,57 @@ struct Row {
     reader_rounds: u64,
 }
 
-/// What one turn's `memory_used` did with the question's relied-on notes;
-/// the rules are [`Row`]'s field by field.
+/// A note a memory read tool returned, named as `memory_used` names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SeenNote {
+    /// The gold id when the note is a seeded one, else the service's id.
+    note: String,
+    gold: bool,
+}
+
+/// One answered `memory_search` or `memory_timeline` call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct MemoryListing {
+    tool: &'static str,
+    detail: &'static str,
+    notes: Vec<SeenNote>,
+}
+
+/// What one turn did with the question's relied-on notes; the rules are
+/// [`Row`]'s field by field.
 #[derive(Debug, PartialEq, Eq)]
 struct Delivery {
     per_turn_fts_hits: usize,
     relied_notes_delivered: usize,
     relied_notes_listed: usize,
     index_lines: usize,
+    relied_notes_read: usize,
+    relied_notes_read_or_excerpted: usize,
 }
 
-/// Count one turn's delivery. A note's content reached the model when any
-/// entry for it has a reason other than `index`; a relied-on note matches a
-/// gold entry only (a note a model stored mid-run has no gold id).
-fn delivery(relies_on: &[String], used: &[UsedNote]) -> Delivery {
+/// Count one turn's delivery from its `memory_used` and what the read tools
+/// returned. A note's content reached the model when any `memory_used` entry
+/// for it has a reason other than `index`; a relied-on note matches a gold
+/// entry only (a note a model stored mid-run has no gold id).
+fn delivery(
+    relies_on: &[String],
+    used: &[UsedNote],
+    reads: &[SeenNote],
+    listings: &[MemoryListing],
+) -> Delivery {
     let entry = |note: &str, content: bool| {
         used.iter()
             .any(|u| u.gold && u.note == note && (u.reason != UsedReason::Index) == content)
+    };
+    let gold = |seen: &SeenNote, note: &str| seen.gold && seen.note == note;
+    let read = |note: &str| reads.iter().any(|r| gold(r, note));
+    let excerpted = |note: &str| {
+        used.iter().any(|u| {
+            u.gold && u.note == note && matches!(u.reason, UsedReason::Recall | UsedReason::Pinned)
+        }) || listings
+            .iter()
+            .filter(|l| l.detail == "snippets")
+            .any(|l| l.notes.iter().any(|n| gold(n, note)))
     };
     Delivery {
         per_turn_fts_hits: used
@@ -1581,6 +1637,11 @@ fn delivery(relies_on: &[String], used: &[UsedNote]) -> Delivery {
         index_lines: used
             .iter()
             .filter(|u| u.reason == UsedReason::Index)
+            .count(),
+        relied_notes_read: relies_on.iter().filter(|r| read(r)).count(),
+        relied_notes_read_or_excerpted: relies_on
+            .iter()
+            .filter(|r| read(r) || excerpted(r))
             .count(),
     }
 }
@@ -1754,6 +1815,12 @@ fn totals(rows: &[Row], judge_cost_usd: f64, wall_ms: u64) -> Totals {
             .filter(|r| {
                 !r.relies_on.is_empty()
                     && r.relied_notes_delivered + r.relied_notes_listed == r.relies_on.len()
+            })
+            .count(),
+        rows_with_every_relied_note_read_or_excerpted: rows
+            .iter()
+            .filter(|r| {
+                !r.relies_on.is_empty() && r.relied_notes_read_or_excerpted == r.relies_on.len()
             })
             .count(),
         reader_tokens_in_mean_per_turn: mean(rows.iter().map(|r| r.reader_tokens_in as f64)),
@@ -2269,6 +2336,156 @@ struct EvalStack {
     orch: Arc<openalpaca_core::orchestrator::Orchestrator>,
     shared: Arc<openalpaca_core::context::SharedContext>,
     lanes: Arc<openalpaca_core::lane::LaneManager>,
+    /// What the memory read tools returned, per request ([`record_reads`]).
+    reads: Arc<ReadLog>,
+}
+
+/// What the memory read tools returned in each request's turn (L8-prep
+/// review, finding 1). `memory_used` records every read tool's delivery as
+/// `tool` and names no tool, so a `memory_read` body and a title-only
+/// search row look alike there; this log tells them apart, harness-side.
+#[derive(Default)]
+struct ReadLog(std::sync::Mutex<HashMap<uuid::Uuid, TurnReads>>);
+
+/// One turn's reads, by the service's note ids.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct TurnReads {
+    /// The notes `memory_read` returned with a body, in call order, each once
+    /// (an id answered `not_found` or `revision_conflict` is not one).
+    read: Vec<String>,
+    /// Each `memory_search` and `memory_timeline` call that answered.
+    listings: Vec<RawListing>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawListing {
+    tool: &'static str,
+    /// `index` (a title per note, no body) or `snippets` (an excerpt per
+    /// note); a timeline is always `index`.
+    detail: &'static str,
+    ids: Vec<String>,
+}
+
+impl ReadLog {
+    /// Record one answered call from its arguments and its result, as the
+    /// reader received them.
+    fn record(
+        &self,
+        request_id: uuid::Uuid,
+        tool: &str,
+        arguments: &serde_json::Value,
+        result: &str,
+    ) {
+        let Ok(result) = serde_json::from_str::<serde_json::Value>(result) else {
+            return;
+        };
+        let ids = |key: &str| -> Vec<String> {
+            result[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|n| n.get("error").is_none())
+                .filter_map(|n| n["id"].as_str().map(str::to_string))
+                .collect()
+        };
+        let mut log = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let turn = log.entry(request_id).or_default();
+        match tool {
+            "memory_read" => {
+                let with_body = result["notes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|n| n.get("error").is_none() && n.get("body").is_some())
+                    .filter_map(|n| n["id"].as_str());
+                for id in with_body {
+                    if !turn.read.iter().any(|r| r == id) {
+                        turn.read.push(id.to_string());
+                    }
+                }
+            }
+            "memory_search" => turn.listings.push(RawListing {
+                tool: "memory_search",
+                detail: match arguments.get("detail").and_then(|d| d.as_str()) {
+                    Some("snippets") => "snippets",
+                    _ => "index",
+                },
+                ids: ids("results"),
+            }),
+            "memory_timeline" => turn.listings.push(RawListing {
+                tool: "memory_timeline",
+                detail: "index",
+                ids: ids("results"),
+            }),
+            _ => {}
+        }
+    }
+
+    /// The turn's reads, removed from the log.
+    fn take(&self, request_id: uuid::Uuid) -> TurnReads {
+        let mut log = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        log.remove(&request_id).unwrap_or_default()
+    }
+}
+
+/// A built-in tool that answers exactly as `inner` does and records, for
+/// the request its context names, what an answered call returned.
+struct ReadRecorder {
+    inner: Arc<dyn openalpaca_core::tools::registry::BuiltInTool>,
+    tool: String,
+    log: Arc<ReadLog>,
+}
+
+#[async_trait::async_trait]
+impl openalpaca_core::tools::registry::BuiltInTool for ReadRecorder {
+    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        self.inner.execute(arguments).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &openalpaca_core::tools::ToolContext,
+    ) -> Result<String, String> {
+        let result = self.inner.execute_with_context(arguments, ctx).await;
+        if let (Ok(text), Some(request_id)) = (&result, ctx.request_id) {
+            self.log.record(request_id, &self.tool, arguments, text);
+        }
+        result
+    }
+
+    async fn confirmation_preview(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &openalpaca_core::tools::ToolContext,
+    ) -> Result<Option<String>, String> {
+        self.inner.confirmation_preview(arguments, ctx).await
+    }
+
+    async fn on_confirmation_denied(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &openalpaca_core::tools::ToolContext,
+    ) -> Option<String> {
+        self.inner.on_confirmation_denied(arguments, ctx).await
+    }
+}
+
+/// `tool` with its built-in backend behind a [`ReadRecorder`]; its name,
+/// definition and every other field are untouched.
+fn record_reads(
+    mut tool: openalpaca_core::tools::registry::RegisteredTool,
+    log: &Arc<ReadLog>,
+) -> openalpaca_core::tools::registry::RegisteredTool {
+    use openalpaca_core::tools::registry::ToolBackend;
+    if let ToolBackend::BuiltIn(inner) = &tool.backend {
+        tool.backend = ToolBackend::BuiltIn(Arc::new(ReadRecorder {
+            inner: inner.clone(),
+            tool: tool.definition.name.clone(),
+            log: log.clone(),
+        }));
+    }
+    tool
 }
 
 fn eval_stack(
@@ -2293,10 +2510,11 @@ fn eval_stack(
     let registry = Arc::new(ToolRegistry::default());
     let sandbox = Arc::new(SandboxManager::with_defaults(registry.clone(), bus.clone()));
     let gate = Arc::new(SecurityGate::new(sandbox));
+    let reads = Arc::new(ReadLog::default());
     if let Some(service) = service {
         for tool in memory_read_tools(service.clone()) {
             registry
-                .register(tool)
+                .register(record_reads(tool, &reads))
                 .expect("register a memory read tool");
         }
     }
@@ -2321,6 +2539,7 @@ fn eval_stack(
         orch,
         shared,
         lanes,
+        reads,
     }
 }
 
@@ -4679,6 +4898,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
         set_learning(&daemon_config, false);
         ask_questions(
             &orch,
+            &stack.reads,
             &bus,
             &router,
             judge_gate.as_mut(),
@@ -5259,6 +5479,7 @@ fn print_learning(l: &LearningResults) {
 #[allow(clippy::too_many_arguments)]
 async fn ask_questions(
     orch: &openalpaca_core::orchestrator::Orchestrator,
+    reads: &ReadLog,
     bus: &openalpaca_core::bus::EventBus,
     router: &openalpaca_llm::LlmRouter,
     mut gate: Option<&mut JudgeGate>,
@@ -5370,7 +5591,28 @@ async fn ask_questions(
                 }
             })
             .collect();
-        let delivered = delivery(&q.relies_on, &memory_used);
+        let seen = |id: String| match gold_by_service_id.get(&id) {
+            Some(gold) => SeenNote {
+                note: gold.clone(),
+                gold: true,
+            },
+            None => SeenNote {
+                note: id,
+                gold: false,
+            },
+        };
+        let turn_reads = reads.take(request_id);
+        let memory_reads: Vec<SeenNote> = turn_reads.read.into_iter().map(seen).collect();
+        let memory_listings: Vec<MemoryListing> = turn_reads
+            .listings
+            .into_iter()
+            .map(|l| MemoryListing {
+                tool: l.tool,
+                detail: l.detail,
+                notes: l.ids.into_iter().map(seen).collect(),
+            })
+            .collect();
+        let delivered = delivery(&q.relies_on, &memory_used, &memory_reads, &memory_listings);
 
         // `handle_message` answers with the turn's text — the daemon's
         // `OrchestratorHandler::handle` calls exactly this and wraps it.
@@ -5415,6 +5657,10 @@ async fn ask_questions(
             relied_notes_delivered: delivered.relied_notes_delivered,
             relied_notes_listed: delivered.relied_notes_listed,
             index_lines: delivered.index_lines,
+            memory_reads,
+            memory_listings,
+            relied_notes_read: delivered.relied_notes_read,
+            relied_notes_read_or_excerpted: delivered.relied_notes_read_or_excerpted,
             reader_rounds,
         };
 
@@ -7121,6 +7367,10 @@ fn quokkaberry_question(id: &str, question: &str) -> Question {
 /// `memory_read` first.
 const OPEN_EVERY_NOTE: &str = "Open every note about quokkaberry.";
 
+/// The question the stub reader answers after one `memory_search` at its
+/// default detail — an index of titles, no body (design 09 §13.1).
+const SEARCH_MY_NOTES: &str = "Search my notes for quokkaberry.";
+
 /// The ids of the index block's lines in a prompt (design 09 §13.2: each
 /// line opens with the note's full id).
 fn listed_ids(prompt: &str) -> Vec<String> {
@@ -7138,8 +7388,9 @@ fn listed_ids(prompt: &str) -> Vec<String> {
 }
 
 /// The question phase as `run_system` runs it for D, on the stub reader,
-/// over the three quokkaberry notes and two questions: one answered from
-/// what the per-turn recall delivered, one after reading the listed notes.
+/// over the three quokkaberry notes and three questions: one answered from
+/// what the per-turn recall delivered, one after reading the listed notes,
+/// one after a title-only `memory_search`.
 async fn quokkaberry_rows(cfg: openalpaca_core::daemon_config::DaemonConfig) -> Vec<Row> {
     use openalpaca_core::bus::EventBus;
     use openalpaca_storage::{Database, IdentityRepository};
@@ -7158,13 +7409,24 @@ async fn quokkaberry_rows(cfg: openalpaca_core::daemon_config::DaemonConfig) -> 
         |_| "Your notes cover a jam recipe, a harvest month and an orchard.".to_string(),
         |request| {
             use openalpaca_llm::Role;
-            let asked = request
-                .messages
-                .iter()
-                .any(|m| m.role == Role::User && m.content.contains(OPEN_EVERY_NOTE));
-            let read = request.messages.iter().any(|m| m.role == Role::Tool);
+            let asked = |question: &str| {
+                request
+                    .messages
+                    .iter()
+                    .any(|m| m.role == Role::User && m.content.contains(question))
+            };
+            if request.messages.iter().any(|m| m.role == Role::Tool) {
+                return Vec::new();
+            }
+            if asked(SEARCH_MY_NOTES) {
+                return vec![openalpaca_llm::ToolCall {
+                    id: "call-search".to_string(),
+                    name: "memory_search".to_string(),
+                    arguments: serde_json::json!({ "query": "quokkaberry" }),
+                }];
+            }
             let ids = listed_ids(&prompt_of(request));
-            if !asked || read || ids.is_empty() {
+            if !asked(OPEN_EVERY_NOTE) || ids.is_empty() {
                 return Vec::new();
             }
             vec![openalpaca_llm::ToolCall {
@@ -7193,11 +7455,13 @@ async fn quokkaberry_rows(cfg: openalpaca_core::daemon_config::DaemonConfig) -> 
     let questions = [
         quokkaberry_question("qb-q1", "What do my notes say about quokkaberry?"),
         quokkaberry_question("qb-q2", OPEN_EVERY_NOTE),
+        quokkaberry_question("qb-q3", SEARCH_MY_NOTES),
     ];
     let mut report = new_report(System::D);
     let out = tempfile::tempdir().unwrap();
     ask_questions(
         &stack.orch,
+        &stack.reads,
         &bus,
         &router,
         None,
@@ -7227,13 +7491,16 @@ fn reasons(row: &Row) -> Vec<(&str, &str)> {
 /// relied-on notes and lists the third (design 09 §13.2). A listed note's
 /// body never reached the model, so it is `listed`, not delivered, and it
 /// is no per-turn hit; read with `memory_read` in the same turn, it is
-/// delivered. Under `excerpts` all three are delivered and nothing is
-/// listed. The totals carry the per-turn cost the two modes are compared on.
+/// delivered and `read`. A title-only `memory_search` row counts as
+/// delivered (the archived meaning) but not as read, which is why
+/// `relied_notes_read_or_excerpted` is the measure that compares the two
+/// modes like for like. Under `excerpts` all three are excerpted and nothing
+/// is listed. The totals carry the per-turn cost the modes are compared on.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_listed_note_is_not_delivered_until_a_tool_reads_it() {
     let rows = quokkaberry_rows(eval_daemon_config(System::D, Some(RecallMode::Index))).await;
-    let [answered, read] = &rows[..] else {
-        panic!("two rows: {rows:?}");
+    let [answered, read, searched] = &rows[..] else {
+        panic!("three rows: {rows:?}");
     };
     let listed: Vec<&str> = answered
         .memory_used
@@ -7249,12 +7516,15 @@ async fn a_listed_note_is_not_delivered_until_a_tool_reads_it() {
             answered.relied_notes_delivered,
             answered.relied_notes_listed,
             answered.index_lines,
+            answered.relied_notes_read,
+            answered.relied_notes_read_or_excerpted,
         ),
-        (2, 2, 1, 1),
+        (2, 2, 1, 1, 0, 2),
         "{:?}",
         reasons(answered)
     );
     assert_eq!(answered.reader_rounds, 1);
+    assert!(answered.memory_reads.is_empty() && answered.memory_listings.is_empty());
 
     assert_eq!(read.tools, ["memory_read"], "{:?}", reasons(read));
     assert!(
@@ -7274,10 +7544,20 @@ async fn a_listed_note_is_not_delivered_until_a_tool_reads_it() {
             read.relied_notes_delivered,
             read.relied_notes_listed,
             read.index_lines,
+            read.relied_notes_read,
+            read.relied_notes_read_or_excerpted,
         ),
-        (2, 3, 0, 1),
+        (2, 3, 0, 1, 1, 3),
         "a tool's read delivers the listed note and is no per-turn hit: {:?}",
         reasons(read)
+    );
+    assert_eq!(
+        read.memory_reads,
+        [SeenNote {
+            note: listed[0].to_string(),
+            gold: true,
+        }],
+        "the body memory_read returned is the listed note's"
     );
     assert_eq!(read.reader_rounds, 2, "the read's round and the answer's");
     assert_eq!(
@@ -7285,15 +7565,39 @@ async fn a_listed_note_is_not_delivered_until_a_tool_reads_it() {
         "one LlmCallCompleted a turn, whatever its rounds"
     );
 
+    assert_eq!(searched.tools, ["memory_search"], "{:?}", reasons(searched));
+    assert_eq!(
+        (
+            searched.per_turn_fts_hits,
+            searched.relied_notes_delivered,
+            searched.relied_notes_listed,
+            searched.index_lines,
+            searched.relied_notes_read,
+            searched.relied_notes_read_or_excerpted,
+        ),
+        (2, 3, 0, 1, 0, 2),
+        "a title-only search row is delivered (archived meaning), not read: {:?}",
+        reasons(searched)
+    );
+    assert!(searched.memory_reads.is_empty());
+    let [listing] = &searched.memory_listings[..] else {
+        panic!("one listing: {:?}", searched.memory_listings);
+    };
+    assert_eq!((listing.tool, listing.detail), ("memory_search", "index"));
+    let mut notes: Vec<&str> = listing.notes.iter().map(|n| n.note.as_str()).collect();
+    notes.sort();
+    assert_eq!(notes, ["qb-0", "qb-1", "qb-2"]);
+
     let t = totals(&rows, 0.0, 0);
-    assert_eq!(t.rows_with_every_relied_note_delivered, 1);
-    assert_eq!(t.rows_with_every_relied_note_listed_or_delivered, 2);
+    assert_eq!(t.rows_with_every_relied_note_delivered, 2);
+    assert_eq!(t.rows_with_every_relied_note_listed_or_delivered, 3);
+    assert_eq!(t.rows_with_every_relied_note_read_or_excerpted, 1);
     // The stub bills 10 input tokens a call: 10 for the answer, 20 for the
-    // read and the answer.
-    assert_eq!(t.reader_tokens_in_mean_per_turn, Some(15.0));
-    assert_eq!(t.reader_tokens_in_median_per_turn, Some(15.0));
-    assert_eq!(t.reader_rounds_mean_per_turn, Some(1.5));
-    assert_eq!(t.tool_calls_mean_per_turn, Some(0.5));
+    // read or the search and the answer.
+    assert_eq!(t.reader_tokens_in_mean_per_turn, Some(50.0 / 3.0));
+    assert_eq!(t.reader_tokens_in_median_per_turn, Some(20.0));
+    assert_eq!(t.reader_rounds_mean_per_turn, Some(5.0 / 3.0));
+    assert_eq!(t.tool_calls_mean_per_turn, Some(2.0 / 3.0));
 
     let rows = quokkaberry_rows(eval_daemon_config(System::D, Some(RecallMode::Excerpts))).await;
     for row in &rows {
@@ -7303,18 +7607,26 @@ async fn a_listed_note_is_not_delivered_until_a_tool_reads_it() {
                 row.relied_notes_delivered,
                 row.relied_notes_listed,
                 row.index_lines,
+                row.relied_notes_read,
+                row.relied_notes_read_or_excerpted,
             ),
-            (3, 3, 0, 0),
+            (3, 3, 0, 0, 0, 3),
             "{}: {:?}",
             row.id,
             reasons(row)
         );
-        assert!(row.tools.is_empty(), "nothing listed, nothing to read");
     }
+    let tools: Vec<&[String]> = rows.iter().map(|r| &r.tools[..]).collect();
+    assert_eq!(
+        tools,
+        [&[][..], &[][..], &["memory_search".to_string()][..]],
+        "nothing listed, nothing to read; the search question still searches"
+    );
     let t = totals(&rows, 0.0, 0);
-    assert_eq!(t.rows_with_every_relied_note_delivered, 2);
-    assert_eq!(t.rows_with_every_relied_note_listed_or_delivered, 2);
-    assert_eq!(t.reader_rounds_mean_per_turn, Some(1.0));
+    assert_eq!(t.rows_with_every_relied_note_delivered, 3);
+    assert_eq!(t.rows_with_every_relied_note_listed_or_delivered, 3);
+    assert_eq!(t.rows_with_every_relied_note_read_or_excerpted, 3);
+    assert_eq!(t.reader_rounds_mean_per_turn, Some(4.0 / 3.0));
 }
 
 fn used(note: &str, gold: bool, reason: UsedReason) -> UsedNote {
@@ -7346,29 +7658,221 @@ fn delivery_is_counted_by_reason() {
         used("c", true, UsedReason::Tool),
         used("e", true, UsedReason::Tool),
     ];
+    // `c` was listed, then read with memory_read; `e` came back from a
+    // title-only search, `f` from a snippets search; `x` was read too, and
+    // is no gold note.
+    let seen = |note: &str, gold: bool| SeenNote {
+        note: note.to_string(),
+        gold,
+    };
+    let reads = [seen("c", true), seen("x", false)];
+    let listings = [
+        MemoryListing {
+            tool: "memory_search",
+            detail: "index",
+            notes: vec![seen("e", true), seen("b", true)],
+        },
+        MemoryListing {
+            tool: "memory_search",
+            detail: "snippets",
+            notes: vec![seen("f", true)],
+        },
+        MemoryListing {
+            tool: "memory_timeline",
+            detail: "index",
+            notes: vec![seen("b", true)],
+        },
+    ];
     assert_eq!(
-        delivery(&relies_on, &memory_used),
+        delivery(&relies_on, &memory_used, &reads, &listings),
         Delivery {
             per_turn_fts_hits: 3,
             relied_notes_delivered: 4,
             relied_notes_listed: 1,
             index_lines: 3,
+            relied_notes_read: 1,
+            // a and d excerpted, c read, f a snippet; b and e titles only.
+            relied_notes_read_or_excerpted: 4,
         }
     );
     assert_eq!(
-        delivery(&[], &[]),
+        delivery(&[], &[], &[], &[]),
         Delivery {
             per_turn_fts_hits: 0,
             relied_notes_delivered: 0,
             relied_notes_listed: 0,
             index_lines: 0,
+            relied_notes_read: 0,
+            relied_notes_read_or_excerpted: 0,
         }
     );
     // A service id that happens to spell a relied-on gold id is not it.
-    assert_eq!(
-        delivery(&relies_on[..1], &[used("a", false, UsedReason::Recall)]).relied_notes_delivered,
-        0
+    let one = &relies_on[..1];
+    let not_gold = delivery(
+        one,
+        &[used("a", false, UsedReason::Recall)],
+        &[seen("a", false)],
+        &[MemoryListing {
+            tool: "memory_search",
+            detail: "snippets",
+            notes: vec![seen("a", false)],
+        }],
     );
+    assert_eq!(
+        (
+            not_gold.relied_notes_delivered,
+            not_gold.relied_notes_read,
+            not_gold.relied_notes_read_or_excerpted
+        ),
+        (0, 0, 0)
+    );
+}
+
+/// The recorder around the memory read tools changes nothing the reader
+/// sees (L8-prep review, finding 1): each wrapped tool has the unwrapped
+/// one's name, definition, capabilities and registration, and answers every
+/// call — hits, a miss, a refusal, a tool it does not record — with the
+/// same result. What it records is what the results say: the notes
+/// `memory_read` returned with a body, and each search or timeline with its
+/// detail and notes; a refused call records nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_read_recorder_changes_nothing_the_reader_sees() {
+    use openalpaca_core::security::policy::Principal;
+    use openalpaca_core::tools::ToolContext;
+    use openalpaca_core::tools::builtins::memory_read_tools;
+    use openalpaca_core::tools::registry::{RegisteredTool, ToolBackend};
+    use openalpaca_storage::{Database, IdentityRepository};
+
+    let home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::home_store(&home.path().canonicalize().unwrap());
+    let scratch = tempfile::tempdir().unwrap();
+    let project = scratch_project(scratch.path());
+    let db = Database::open(&scratch.path().join(SCRATCH_DB)).unwrap();
+    let owner = new_owner_id();
+    IdentityRepository::new(&db)
+        .create_global_user(&owner, None)
+        .unwrap();
+    let service = Arc::new(MemoryService::open_default(Some(db.clone())));
+    let seed = seed_notes(&service, &owner, &project, &quokkaberry_notes());
+    assert_eq!(seed.seeded, 3, "{seed:?}");
+
+    let reads = Arc::new(ReadLog::default());
+    let plain = memory_read_tools(service.clone());
+    let wrapped: Vec<RegisteredTool> = memory_read_tools(service.clone())
+        .into_iter()
+        .map(|tool| record_reads(tool, &reads))
+        .collect();
+    assert_eq!(plain.len(), wrapped.len());
+    for (p, w) in plain.iter().zip(&wrapped) {
+        assert_eq!(
+            serde_json::to_value(&p.definition).unwrap(),
+            serde_json::to_value(&w.definition).unwrap(),
+            "{}",
+            p.definition.name
+        );
+        assert_eq!(p.provides_capabilities, w.provides_capabilities);
+        assert_eq!(p.exempt_from_timeout, w.exempt_from_timeout);
+        assert_eq!(
+            format!("{:?}", p.annotations),
+            format!("{:?}", w.annotations)
+        );
+        assert_eq!((&p.version, &p.author), (&w.version, &w.author));
+        assert!(matches!(w.backend, ToolBackend::BuiltIn(_)));
+    }
+
+    let request_id = uuid::Uuid::new_v4();
+    let ctx = ToolContext {
+        owner_id: Some(owner.clone()),
+        principal: Some(Principal::User {
+            global_id: owner.clone(),
+        }),
+        request_workspace_root: Some(project.to_string_lossy().into_owned()),
+        request_id: Some(request_id),
+        ..Default::default()
+    };
+    let call = |tools: &[RegisteredTool], name: &str, args: &serde_json::Value| {
+        let tool = tools
+            .iter()
+            .find(|t| t.definition.name == name)
+            .unwrap_or_else(|| panic!("no {name}"))
+            .clone();
+        let (args, ctx) = (args.clone(), ctx.clone());
+        async move {
+            match &tool.backend {
+                ToolBackend::BuiltIn(b) => b.execute_with_context(&args, &ctx).await,
+                _ => panic!("{} is not a built-in", tool.definition.name),
+            }
+        }
+    };
+    let ids: Vec<String> = seed.ids.values().cloned().collect();
+    let missing = uuid::Uuid::new_v4().to_string();
+    let calls = [
+        (
+            "memory_search",
+            serde_json::json!({ "query": "quokkaberry" }),
+        ),
+        (
+            "memory_search",
+            serde_json::json!({ "query": "quokkaberry", "detail": "snippets" }),
+        ),
+        (
+            "memory_search",
+            serde_json::json!({ "query": "quokkaberry", "detail": "sideways" }),
+        ),
+        (
+            "memory_timeline",
+            serde_json::json!({ "query": "quokkaberry" }),
+        ),
+        (
+            "memory_read",
+            serde_json::json!({ "ids": [ids[0], missing] }),
+        ),
+        ("memory_list", serde_json::json!({})),
+    ];
+    let mut results = Vec::new();
+    for (name, args) in &calls {
+        let unwrapped = call(&plain, name, args).await;
+        let recorded = call(&wrapped, name, args).await;
+        assert_eq!(unwrapped, recorded, "{name} {args}");
+        results.push(unwrapped);
+    }
+    assert!(results[2].is_err(), "the bad detail is refused");
+    assert!(results.iter().enumerate().all(|(i, r)| i == 2 || r.is_ok()));
+
+    let ids_of = |result: &Result<String, String>, key: &str| -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(result.as_ref().unwrap()).unwrap();
+        v[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n.get("error").is_none())
+            .map(|n| n["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let turn = reads.take(request_id);
+    assert_eq!(turn.read, [ids[0].clone()], "the missing id read nothing");
+    assert_eq!(
+        turn.listings,
+        [
+            RawListing {
+                tool: "memory_search",
+                detail: "index",
+                ids: ids_of(&results[0], "results"),
+            },
+            RawListing {
+                tool: "memory_search",
+                detail: "snippets",
+                ids: ids_of(&results[1], "results"),
+            },
+            RawListing {
+                tool: "memory_timeline",
+                detail: "index",
+                ids: ids_of(&results[3], "results"),
+            },
+        ]
+    );
+    assert_eq!(turn.listings[0].ids.len(), 3);
+    assert!(reads.take(request_id) == TurnReads::default(), "taken once");
 }
 
 /// `OPENALPACA_MEMORY_EVAL_RECALL_MODE`: unset or empty is the config's

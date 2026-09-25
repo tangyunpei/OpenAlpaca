@@ -29,7 +29,7 @@ conversations through the gateway before anything is asked; see
 | `coverage-judge-prompt.md` | The frozen coverage protocol (design 09 §7.3): given a gold note and up to five notes a search returned, `MATCH <n>` or `NONE`. Its SHA-256 is recorded in every learning report beside `judge_prompt_sha256`. |
 | `compare.py` | The paired comparison: accuracy per system, the paired difference with its 95 % CI, the discordant-pair rate, per-category point differences, the gate verdict. It prints both reports' judge models first — with each report's `recall_mode` beside its judge when the report records one — and **refuses two reports graded by different judges** unless `--allow-judge-mismatch`; a recall-mode mismatch is never refused. `--self-test` checks the refusal and the printout. |
 | `reports/` | The archived baselines of the deleted engine, measured on 2026-09-24 on a local Ollama as reader and judge: `baseline-A-2026-09-24.json` (13.0 %), `baseline-B-2026-09-24.json` (90.6 %), and their comparison. **B is the comparator** for D and E. |
-| `crates/openalpaca_core/tests/memory_eval.rs` | The runner: a data-validation test and the harness's own tests — the judge guard, the coverage verdict, the learning measures and invariants, a re-judge of a fixture-sized report, a replay of a fixture-sized scratch database, the gateway feed, forced re-run and L-S confirm on two short sessions, and the recall-mode switch with the listed-versus-delivered counts, all on an offline stub model (run under `--features live-eval`, no network) — and the `#[ignore]`d live eval. |
+| `crates/openalpaca_core/tests/memory_eval.rs` | The runner: a data-validation test and the harness's own tests — the judge guard, the coverage verdict, the learning measures and invariants, a re-judge of a fixture-sized report, a replay of a fixture-sized scratch database, the gateway feed, forced re-run and L-S confirm on two short sessions, and the recall-mode switch with the listed-versus-delivered counts and the read recorder, all on an offline stub model (run under `--features live-eval`, no network) — and the `#[ignore]`d live eval. |
 | `crates/openalpaca_core/tests/memory_eval_corpus.rs` | The corpus's validation, in **default CI** with no model and no feature: coverage, the change pairs' order, the counts, the language shares within 5 points, the size, and the leakage check — no held-out question shares an 8-word shingle, or a 12-character Han/kana/Hangul shingle, with any turn. It validates the episode split too, and that the check catches each planted fault. |
 | `crates/openalpaca_core/tests/common/eval.rs` | The data files' types, shared by both test files. |
 
@@ -40,7 +40,9 @@ own `llm.toml`, a scratch SQLite database in a tempdir, a scratch project
 directory with a `.git` marker as the turn's workspace) and, for D and E, the
 daemon's own memory service (`MemoryService::open_default`, its index cache
 under the scratch store) with the read tools registered the way the daemon
-registers them. It creates one owner (a `global_user` row — the service
+registers them — each behind a recorder that answers exactly as the tool does
+and notes which notes `memory_read` returned with a body and what each
+`memory_search`/`memory_timeline` call returned at which `detail`. It creates one owner (a `global_user` row — the service
 answers for nobody else), stores every gold note through
 `MemoryService::store` on the **user-directed surface** (`UserSurface`: origin
 `user`, status `active` — the call `POST /v1/memories` and
@@ -202,7 +204,11 @@ python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-D-index.json \
   /tmp/memory-eval/report-D-excerpts.json
 # Accuracy is compare.py's; the cost side is each report's totals:
 # reader_tokens_in_mean_per_turn / _median_per_turn, reader_rounds_mean_per_turn,
-# tool_calls_mean_per_turn (see "Reading a report").
+# tool_calls_mean_per_turn (see "Reading a report"). For retrieval, read
+# rows_with_every_relied_note_read_or_excerpted and each row's relied_notes_read:
+# relied_notes_delivered (and its totals) counts a title-only memory_search or
+# memory_timeline row as delivered, so it does not compare the modes like for
+# like; relied_notes_read (a memory_read body) does.
 
 # E (D bounded to two follow-up searches) and none (no memory): the same, with
 # OPENALPACA_MEMORY_EVAL_SYSTEM=E or none and their own report paths.
@@ -251,7 +257,9 @@ and the report's `conditions.recall_mode` (a `none` run and a replay's
 conditions, offline) and that any other value is refused before anything
 else, and — on the stub reader, over three notes a question relies on — that
 an index-listed note counts as `listed`, not delivered, until a `memory_read`
-in the same turn delivers it. The learning evaluation's own tests run beside
+in the same turn delivers it, and a title-only search counts as delivered but
+not as read; and that the recorder around the read tools leaves every name,
+definition and result as the unwrapped tool gives it. The learning evaluation's own tests run beside
 them on an offline stub model — no network, nothing reaches `localhost:11434`: the judge
 guard (an unroutable judge refused; the reader, or its family, accepted and
 recorded; a judge answering as another model caught), the coverage verdict and
@@ -475,7 +483,9 @@ or E report with the archived A and B reports:
   L8's recall-mode comparison (design 09 §13.4):
   `rows_with_every_relied_note_listed_or_delivered` (every relied-on note
   delivered or listed — an `index` run's retrieval, where the field before it
-  asks for the bodies), and the cost per question turn —
+  asks for the bodies), `rows_with_every_relied_note_read_or_excerpted`
+  (every relied-on note excerpted or read — the like-for-like retrieval
+  measure between the two modes), and the cost per question turn —
   `reader_tokens_in_mean_per_turn`, `reader_tokens_in_median_per_turn` (every
   round's input tokens), `reader_rounds_mean_per_turn` (model calls) and
   `tool_calls_mean_per_turn`; `null` with no rows.
@@ -493,7 +503,13 @@ or E report with the archived A and B reports:
   delivered too); new for L8: `relied_notes_listed` (relied-on notes only an
   index line named — no content in that turn; a `tool` entry for the same
   note, a `memory_read` of it above all, makes it delivered),
-  `index_lines` (entries with reason `index`) and
+  `index_lines` (entries with reason `index`), `memory_reads` (the notes
+  `memory_read` returned with a body), `memory_listings` (each
+  `memory_search`/`memory_timeline` call: `tool`, `detail` — `index` or
+  `snippets` — and its `notes`), `relied_notes_read` (relied-on notes whose
+  body `memory_read` returned), `relied_notes_read_or_excerpted` (relied-on
+  notes that reached the model as more than a title: a `recall` or `pinned`
+  entry, a `memory_read` body or a `snippets` excerpt) and
   `reader_rounds` (the model calls the router booked to the main loop in the
   turn, one per round). `reader_llm_calls` counts the main loop's
   `LlmCallCompleted` events, which it publishes **once per turn** with the
