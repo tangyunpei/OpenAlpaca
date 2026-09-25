@@ -205,6 +205,10 @@ pub(super) struct Deps<'a> {
     /// conversation's turns not yet learned go with its messages (LQ4).
     /// `None` when no router was configured at boot.
     pub learning: Option<Arc<openalpaca_core::memory::learning::LearningQueue>>,
+    /// The memory service, for `DELETE`: a deleted conversation's summaries
+    /// are forgotten with it (design 09 §13.3). `None` in a test that has no
+    /// home store.
+    pub memory: Option<Arc<openalpaca_core::memory::service::MemoryService>>,
 }
 
 impl Deps<'_> {
@@ -354,6 +358,7 @@ fn deps(state: &AppState) -> Deps<'_> {
             .map(|service| service.root().to_path_buf()),
         session_log,
         learning: state.gateway.learning().cloned(),
+        memory: Some(state.memory_service.clone()),
     }
 }
 
@@ -779,6 +784,9 @@ pub(super) async fn delete_session(deps: &Deps<'_>, id: &str) -> Response {
         );
     }
 
+    // Read before the rows go: the conversation's summaries are forgotten by
+    // its message ids (design 09 §13.3). A read that fails forgets nothing.
+    let message_ids = deps.repo().message_ids(id).unwrap_or_default();
     match deps.repo().delete_session(id) {
         Ok(true) => {
             remove_session_log(deps, id).await;
@@ -788,11 +796,56 @@ pub(super) async fn delete_session(deps: &Deps<'_>, id: &str) -> Response {
             if let Some(queue) = deps.learning.as_deref() {
                 queue.forget_session(id);
             }
+            forget_conversation_summaries(
+                deps.memory.clone(),
+                deps.owner,
+                session.workspace_id.as_deref(),
+                message_ids,
+            )
+            .await;
             deps.announce(&session.id, &session.lane_key, "deleted");
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => not_found(),
         Err(e) => db_error(e),
+    }
+}
+
+/// Deleting, clearing or purging a conversation forgets its summaries
+/// (design 09 §13.3, LQ4): the `episode` notes of origin `extracted_other`
+/// whose sources all lie among `message_ids` — the conversation's rows, read
+/// before they went — in the owner's home partition and `root`'s. Best
+/// effort: the rows are already gone and the caller's answer stands, so a
+/// failure is one WARN; an owner with no memory (not a `global_user` row)
+/// has nothing to forget.
+pub(crate) async fn forget_conversation_summaries(
+    memory: Option<Arc<openalpaca_core::memory::service::MemoryService>>,
+    owner: &str,
+    root: Option<&str>,
+    message_ids: Vec<i64>,
+) {
+    let Some(memory) = memory else {
+        return;
+    };
+    if message_ids.is_empty() {
+        return;
+    }
+    let owner = owner.to_string();
+    let root = root.map(std::path::PathBuf::from);
+    let forgotten = tokio::task::spawn_blocking(move || {
+        memory.forget_conversation_summaries(&owner, root.as_deref(), &message_ids)
+    })
+    .await;
+    match forgotten {
+        Ok(Ok(0)) | Ok(Err(openalpaca_core::memory::service::MemoryError::NoOwner(_))) => {}
+        Ok(Ok(n)) => tracing::info!(
+            forgotten = n,
+            "forgot the conversation summaries of a deleted conversation"
+        ),
+        Ok(Err(e)) => tracing::warn!(
+            "the conversation is gone, but its summaries could not be forgotten: {e}"
+        ),
+        Err(e) => tracing::warn!("forgetting a deleted conversation's summaries failed: {e}"),
     }
 }
 

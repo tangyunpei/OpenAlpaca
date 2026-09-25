@@ -725,9 +725,18 @@ pub async fn delete_chat_history_handler(
         return Json(ChatDeleteResponse { deleted: 0 }).into_response();
     };
 
+    let cleared = before_history_cleared(&state.db, &session_id);
     match chat_service.clear_history(&session_id) {
         Ok(deleted) => {
-            after_history_cleared(&state.db, state.gateway.learning(), &session_id);
+            after_history_cleared(
+                &state.db,
+                state.gateway.learning(),
+                Some(state.memory_service.clone()),
+                &state.local_user_id,
+                &session_id,
+                cleared,
+            )
+            .await;
             Json(ChatDeleteResponse { deleted }).into_response()
         }
         Err(e) => error_response(
@@ -739,13 +748,39 @@ pub async fn delete_chat_history_handler(
     }
 }
 
+/// What a clear reads before the messages go: their ids and the
+/// conversation's project root — its summaries are forgotten by them
+/// (design 09 §13.3). A read that fails forgets nothing.
+struct ClearedConversation {
+    message_ids: Vec<i64>,
+    root: Option<String>,
+}
+
+fn before_history_cleared(
+    db: &openalpaca_storage::Database,
+    session_id: &str,
+) -> ClearedConversation {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    ClearedConversation {
+        message_ids: repo.message_ids(session_id).unwrap_or_default(),
+        root: repo
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .and_then(|s| s.workspace_id),
+    }
+}
+
 /// What clearing a conversation's messages leaves to tidy. The session row
 /// survives: this empties a conversation, it does not delete one
 /// (`DELETE /v1/sessions/{id}` does).
-fn after_history_cleared(
+async fn after_history_cleared(
     db: &openalpaca_storage::Database,
     learning: Option<&Arc<openalpaca_core::memory::learning::LearningQueue>>,
+    memory: Option<Arc<openalpaca_core::memory::service::MemoryService>>,
+    owner: &str,
     session_id: &str,
+    cleared: ClearedConversation,
 ) {
     // The compactor's summary describes messages that no longer exist.
     let _ =
@@ -756,6 +791,14 @@ fn after_history_cleared(
     if let Some(queue) = learning {
         queue.forget_session(session_id);
     }
+    // Design 09 §13.3: its summaries go with the messages they summarise.
+    crate::routes::sessions::forget_conversation_summaries(
+        memory,
+        owner,
+        cleared.root.as_deref(),
+        cleared.message_ids,
+    )
+    .await;
 }
 
 // ── PUT /v1/chat/messages/:message_id/feedback ────────────────────
@@ -1375,9 +1418,61 @@ mod tests {
         crate::test_util::finish_turn(&queue, "user1:gui", &session);
         assert_eq!(queue.pending_turns(&session), 1);
 
-        after_history_cleared(&db, Some(&queue), &session);
+        after_history_cleared(
+            &db,
+            Some(&queue),
+            None,
+            "user1",
+            &session,
+            before_history_cleared(&db, &session),
+        )
+        .await;
         assert_eq!(queue.pending_turns(&session), 0, "the turns were dropped");
         assert!(!queue.is_due(&session));
+    }
+
+    /// Design 09 §13.3 (LQ4): clearing a conversation also forgets the
+    /// summaries whose sources all lie in it — read before the rows go —
+    /// and nothing it taught.
+    #[tokio::test]
+    async fn clearing_a_conversation_forgets_its_summaries() {
+        let (_dir, db) = sessions_db();
+        let (_home, _guard, memory) = crate::test_util::memory_service(&db, "user1");
+        let repo = openalpaca_storage::ConversationRepository::new(&db);
+        let session = repo
+            .create_session("user1:gui", "gui", None, None)
+            .expect("session")
+            .id;
+        let rows: Vec<i64> = ["Plan the Lisbon trip.", "Sure."]
+            .iter()
+            .map(|text| {
+                repo.insert(&openalpaca_storage::ConversationMessage {
+                    lane_key: "user1:gui".to_string(),
+                    role: "user".to_string(),
+                    content: text.to_string(),
+                    session_id: Some(session.clone()),
+                    ..Default::default()
+                })
+                .expect("message")
+            })
+            .collect();
+        crate::test_util::extracted_note(
+            &memory,
+            "user1",
+            None,
+            "Conversation on 2026-09-20: Lisbon",
+            &rows,
+            true,
+        );
+        crate::test_util::extracted_note(&memory, "user1", None, "Lisbon trip", &rows[..1], false);
+
+        let cleared = before_history_cleared(&db, &session);
+        repo.delete_by_session(&session).expect("clear");
+        after_history_cleared(&db, None, Some(memory.clone()), "user1", &session, cleared).await;
+        assert_eq!(
+            crate::test_util::note_titles(&memory, "user1", None),
+            vec!["Lisbon trip".to_string()]
+        );
     }
 
     // ── Phase 7a: which conversation a chat turn lands in ───────────

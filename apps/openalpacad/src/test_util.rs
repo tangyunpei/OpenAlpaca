@@ -175,3 +175,117 @@ pub(crate) fn finish_turn(
     let guard = queue.turn_started(uuid::Uuid::new_v4(), lane, true);
     guard.attach_session(session_id);
 }
+
+/// A memory service over a temp home store, with `owner` a `global_user`
+/// row; the guard serializes the home store for the test's life. For the
+/// routes that forget a deleted conversation's summaries (design 09 §13.3).
+pub(crate) fn memory_service(
+    db: &openalpaca_storage::Database,
+    owner: &str,
+) -> (
+    tempfile::TempDir,
+    HomeStoreGuard,
+    std::sync::Arc<openalpaca_core::memory::service::MemoryService>,
+) {
+    let home = tempfile::tempdir().expect("home");
+    let store = home
+        .path()
+        .canonicalize()
+        .expect("canonical")
+        .join(".openalpaca");
+    std::fs::create_dir_all(&store).expect("home store");
+    let guard = HomeStoreGuard::set(&store);
+    openalpaca_storage::IdentityRepository::new(db)
+        .create_global_user(owner, None)
+        .expect("owner row");
+    let service = openalpaca_core::memory::service::MemoryService::new(
+        Some(db.clone()),
+        openalpaca_storage::memory_index::MemoryIndex::open_in_memory().expect("index"),
+    );
+    service.rebuild_index().expect("rebuild");
+    (home, guard, std::sync::Arc::new(service))
+}
+
+/// One note through the extractor's surface citing `rows`: a conversation
+/// summary (`episode`, provenance `Summary`) or a note learned from the
+/// user's words.
+pub(crate) fn extracted_note(
+    service: &openalpaca_core::memory::service::MemoryService,
+    owner: &str,
+    root: Option<&std::path::Path>,
+    title: &str,
+    rows: &[i64],
+    summary: bool,
+) -> openalpaca_storage::memory_files::NoteId {
+    use openalpaca_core::memory::service::{
+        Attribution, Capabilities, ExtractionProvenance, StoreInput, Surface, WorkspaceHint,
+    };
+    use openalpaca_storage::memory_files::{NoteKind, NoteSource, SourceType};
+    let ctx = service
+        .context(
+            owner,
+            root.map_or(WorkspaceHint::None, WorkspaceHint::Root),
+            Surface::Extraction,
+            Capabilities::EXTRACTION,
+            Attribution::default(),
+        )
+        .expect("the owner is a global_user row");
+    service
+        .store(
+            &ctx,
+            StoreInput {
+                title: title.to_string(),
+                body: format!("# {title}\n\n## Knowledge\n{title}.\n"),
+                kind: Some(if summary {
+                    NoteKind::Episode
+                } else {
+                    NoteKind::Fact
+                }),
+                sources: rows
+                    .iter()
+                    .map(|id| NoteSource {
+                        kind: SourceType::Message,
+                        id: id.to_string(),
+                        observed_at: None,
+                    })
+                    .collect(),
+                provenance: Some(if summary {
+                    ExtractionProvenance::Summary
+                } else {
+                    ExtractionProvenance::UserWords
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("store the note")
+        .id
+}
+
+/// The titles of the owner's active notes (home partition, and `root`'s).
+pub(crate) fn note_titles(
+    service: &openalpaca_core::memory::service::MemoryService,
+    owner: &str,
+    root: Option<&std::path::Path>,
+) -> Vec<String> {
+    use openalpaca_core::memory::service::{
+        Attribution, Capabilities, ListInput, Surface, WorkspaceHint,
+    };
+    let ctx = service
+        .context(
+            owner,
+            root.map_or(WorkspaceHint::None, WorkspaceHint::Root),
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .expect("owner");
+    let mut titles: Vec<String> = service
+        .list(&ctx, ListInput::default())
+        .expect("list")
+        .items
+        .into_iter()
+        .map(|i| i.title)
+        .collect();
+    titles.sort();
+    titles
+}

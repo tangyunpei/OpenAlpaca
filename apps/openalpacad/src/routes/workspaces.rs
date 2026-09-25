@@ -688,7 +688,7 @@ pub(crate) struct PurgeDeps<'a> {
     /// The memory service: a project known by its memory partition alone is
     /// still a project the `--all` listing names, and one whose memory a
     /// purge keeps.
-    pub memory: &'a MemoryService,
+    pub memory: &'a Arc<MemoryService>,
     /// The home store's `sessions/`, where every session directory lives.
     /// `None` when the store could not be resolved at boot: the rows still go,
     /// and the directories are reported as not removed rather than guessed at.
@@ -762,7 +762,8 @@ fn plan_entries(root: &str, plan: &PurgePlan) -> Vec<serde_json::Value> {
         plan_entry(
             "memory/",
             "this project's memory notes — files, not rows, so a purge of the database \
-             cannot reach them"
+             cannot reach them; only the summaries of the conversations it deletes go with \
+             those conversations"
                 .to_string(),
             "yours — never swept",
             "keep",
@@ -1089,6 +1090,15 @@ pub(crate) async fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest
         if let Some(outcome) = outcomes.get(index) {
             let (dirs, files) = remove_purged_bytes(deps, root, outcome).await;
             announce_purged_sessions(deps, plan, outcome);
+            // Design 09 §13.3 (LQ4): the purged conversations' summaries go
+            // with them — by the message ids the transaction deleted.
+            crate::routes::sessions::forget_conversation_summaries(
+                Some(deps.memory.clone()),
+                deps.owner,
+                Some(root),
+                outcome.message_ids.clone(),
+            )
+            .await;
             project["counts"] = purge_counts_json(&outcome.counts);
             project["removed"] = serde_json::json!({
                 "session_dirs": dirs,

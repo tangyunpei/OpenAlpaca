@@ -53,7 +53,7 @@ struct Fixture {
     log: std::sync::Arc<openalpaca_core::session_log::SessionLogService>,
     /// The memory service the move quiesces and re-keys through, over this
     /// fixture's home store and an in-memory index.
-    memory: MemoryService,
+    memory: std::sync::Arc<MemoryService>,
 }
 
 impl Fixture {
@@ -81,6 +81,7 @@ impl Fixture {
             MemoryIndex::open_in_memory().expect("in-memory index"),
         );
         memory.rebuild_index().expect("rebuild an empty index");
+        let memory = std::sync::Arc::new(memory);
         let sessions_root = home_store.join("sessions");
         std::fs::create_dir_all(&sessions_root).expect("sessions root");
         let log = openalpaca_core::session_log::SessionLogService::new(
@@ -1711,6 +1712,52 @@ async fn a_crash_after_each_move_step_leaves_a_state_doctor_names() {
 // ============================================================================
 // POST /v1/workspaces/purge and the memory partition (plan 3.7)
 // ============================================================================
+
+/// Design 09 §13.3 (LQ4): a real purge deletes conversations, and their
+/// summaries go with them — found by the message ids the transaction
+/// deleted — while every other note of the project stays, and the plan says
+/// so on its `memory/` line, still a `keep`.
+#[tokio::test]
+async fn a_purge_forgets_the_summaries_of_the_conversations_it_deletes() {
+    let f = Fixture::new();
+    let root = f.project("proj");
+    f.session_with_log("s-1", &root);
+    f.message("s-1");
+    let row = f.row_count("SELECT id FROM conversation_messages WHERE session_id = 's-1'");
+    let project = std::path::Path::new(&root);
+    crate::test_util::extracted_note(
+        &f.memory,
+        OWNER,
+        Some(project),
+        "Conversation on 2026-09-20: the build",
+        &[row],
+        true,
+    );
+    f.note(&root, "Release procedure");
+
+    let (status, body) = f.purge(Some(&root), false, true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(action(&body, "memory/"), "keep");
+    assert!(
+        entry(&body, "memory/").unwrap()["holds"]
+            .as_str()
+            .unwrap()
+            .contains("summaries of the conversations it deletes"),
+        "{body}"
+    );
+    assert_eq!(
+        crate::test_util::note_titles(&f.memory, OWNER, Some(project)).len(),
+        2,
+        "a dry run forgets nothing"
+    );
+
+    let (status, body) = f.purge(Some(&root), false, false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        crate::test_util::note_titles(&f.memory, OWNER, Some(project)),
+        vec!["Release procedure".to_string()]
+    );
+}
 
 /// A project the database has no row for is still a project when its memory
 /// partition exists: `--all` lists it (where the `memory` UNION used to),

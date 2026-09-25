@@ -53,6 +53,7 @@ impl Harness {
             sessions_root: Some(self.sessions_root.clone()),
             session_log: Some(self.log.clone()),
             learning: None,
+            memory: None,
         }
     }
 
@@ -1021,6 +1022,53 @@ async fn deleting_drops_the_conversations_unlearned_turns() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert_eq!(queue.pending_turns(&session.id), 0, "turns dropped");
     assert!(!queue.is_due(&session.id));
+}
+
+/// Design 09 §13.3 (LQ4): deleting a conversation also forgets the
+/// summaries whose sources all lie in it — and nothing it taught.
+#[tokio::test]
+async fn deleting_a_conversation_forgets_its_summaries() {
+    let h = Harness::new();
+    let (_home, _guard, memory) = crate::test_util::memory_service(&h.db, OWNER);
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+    let mut rows = Vec::new();
+    for (role, text) in [("user", "Plan the Lisbon trip."), ("assistant", "Sure.")] {
+        rows.push(
+            h.repo()
+                .insert(&ConversationMessage {
+                    lane_key: LANE.to_string(),
+                    role: role.to_string(),
+                    content: text.to_string(),
+                    session_id: Some(session.id.clone()),
+                    ..Default::default()
+                })
+                .expect("message"),
+        );
+    }
+    crate::test_util::extracted_note(
+        &memory,
+        OWNER,
+        None,
+        "Conversation on 2026-09-20: Lisbon",
+        &rows,
+        true,
+    );
+    crate::test_util::extracted_note(&memory, OWNER, None, "Lisbon trip", &rows[..1], false);
+
+    let deps = Deps {
+        memory: Some(memory.clone()),
+        ..h.deps()
+    };
+    let response = delete_session(&deps, &session.id).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        crate::test_util::note_titles(&memory, OWNER, None),
+        vec!["Lisbon trip".to_string()],
+        "the summary went with its conversation; the learned note stayed"
+    );
 }
 
 #[tokio::test]
