@@ -970,6 +970,34 @@ async fn forget_with_text_lists_matches_and_forgets_nothing() {
     assert_eq!(scene.llm.calls(), 0);
 }
 
+/// L4 re-review: a listed title is what the person picks an id by, so it
+/// carries no Unicode *format* character (category Cf) — a bidi override
+/// (U+202E) makes `gpj.exe` read as "exe.jpg", a zero-width character
+/// hides text — in `/memories`, in `/forget <text>`'s matches, or in
+/// `/remember`'s echo.
+#[tokio::test]
+async fn listed_titles_carry_no_format_characters() {
+    let scene = Scene::new();
+    let invoice = scene.save(
+        "Invoice \u{202e}gpj.exe\u{202c}\u{200b}",
+        "The invoice attachment.",
+        NoteKind::Fact,
+    );
+    let format = regex::Regex::new(r"\p{Cf}").unwrap();
+    let line = format!("{}  Invoice gpj.exe  [fact/global]", id8(invoice.id));
+    let listed = scene.say("/memories").await;
+    assert!(!format.is_match(&listed), "{listed:?}");
+    assert!(listed.lines().any(|l| l == line), "{listed}");
+    let matches = scene.say("/forget invoice").await;
+    assert!(!format.is_match(&matches), "{matches:?}");
+    assert!(matches.lines().any(|l| l == line), "{matches}");
+    let saved = scene
+        .say("/remember Receipt \u{2066}\u{202e}fdp.exe\u{202c}\u{2069}")
+        .await;
+    assert!(!format.is_match(&saved), "{saved:?}");
+    assert!(saved.contains("“Receipt fdp.exe”"), "{saved}");
+}
+
 // ── /memories ─────────────────────────────────────────────────────────────
 
 /// `/memories` lists the ten most recently updated active notes — one line

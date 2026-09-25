@@ -27,6 +27,7 @@ use crate::memory::service::{
     MemoryAccessContext, MemoryError, MemoryService, SUGGESTIONS_MAX_LIMIT, SearchInput,
     StoreInput,
 };
+use crate::utils::text::one_line;
 use openalpaca_storage::memory_files::{Dedup, EffectiveStatus, NoteId, NoteKind, NoteScope};
 
 #[cfg(test)]
@@ -458,16 +459,6 @@ fn nothing_matched(text: &str) -> String {
 fn refused(what: &str, e: &MemoryError) -> String {
     let reason = e.to_string();
     format!("{what}: {}.", reason.trim_end_matches('.'))
-}
-
-/// `text` on one line: runs of whitespace as one space and no control
-/// character — a title from a hand-edited file prints raw at a terminal.
-fn one_line(text: &str) -> String {
-    text.split_whitespace()
-        .map(|word| word.replace(char::is_control, ""))
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// `text` cut to at most `max` characters, ending in `…` when it was longer.

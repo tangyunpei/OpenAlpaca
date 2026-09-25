@@ -485,17 +485,13 @@ fn check_revisions(expected_revision: &str, target_revision: &str) -> Result<(),
     Ok(())
 }
 
-/// `text` on one line — runs of whitespace, newlines included, as one space,
-/// and no other control character (the CLI prints this raw at a terminal,
-/// where an ESC sequence could rewrite what the person approves) — cut to
-/// `max` bytes with an ellipsis when it was longer.
+/// `text` on one line — runs of whitespace as one space, no control or
+/// format character ([`crate::utils::text::one_line`]: the CLI prints this
+/// raw at a terminal, where an ESC sequence could rewrite what the person
+/// approves, and a bidi override reorders it anywhere) — cut to `max` bytes
+/// with an ellipsis when it was longer.
 fn one_line(text: &str, max: usize) -> String {
-    let flat = text
-        .split_whitespace()
-        .map(|word| word.replace(char::is_control, ""))
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let flat = crate::utils::text::one_line(text);
     match cut_bytes(&flat, max) {
         (cut, true) => format!("{}…", cut.trim_end()),
         (whole, false) => whole,

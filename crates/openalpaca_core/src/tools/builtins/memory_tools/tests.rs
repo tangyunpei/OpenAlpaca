@@ -1470,6 +1470,76 @@ async fn the_preview_and_the_block_carry_no_control_characters() {
     assert!(line.contains("“Editor[2J choice” (saved by you)"), "{line}");
 }
 
+/// L4 re-review: the card is the one surface where the person decides, and
+/// Unicode *format* characters (category Cf) are invisible — a bidi override
+/// (U+202E) makes `xileH` read as "Helix", an isolate or a zero-width
+/// character hides text. The preview and the `<memory_suggestions>` line
+/// carry none; the line and paragraph separators (U+2028, U+2029) are
+/// spaces like any other whitespace, so the preview keeps its five lines.
+#[tokio::test]
+async fn the_preview_and_the_block_carry_no_format_characters() {
+    use crate::prompt_ctx::sources::memory::memory_suggestions_block;
+    let h = Harness::new();
+    let target = h.user_note(
+        ALICE,
+        "Edi\u{200b}tor\u{ad} \u{202e}choice\u{202c}",
+        "# Editor\n\n## Knowledge\nI use vim\u{2028}for everything.\u{2029}Really.\u{feff}\n",
+    );
+    let row = typed_row(&h, "I switched to Helix.", "2026-06-14 09:30:00");
+    let s = suggestion_for(
+        &h,
+        (target.0, &target.1),
+        "\u{2067}Editor\u{200d} choice\u{2069}",
+        "The user edits with \u{202e}xileH\u{202c}.\u{2060}",
+        &[row],
+        crate::memory::service::ExtractionProvenance::UserWords,
+    );
+    let preview = MemoryConfirmTool::new(h.service.clone())
+        .confirmation_preview(
+            &serde_json::json!({"id": s.id.to_string(), "expected_revision": s.revision, "target_revision": target.1}),
+            &h.tool_ctx(ALICE),
+        )
+        .await
+        .unwrap()
+        .expect("a preview");
+    let format = regex::Regex::new(r"[\p{Cf}\u{2028}\u{2029}]").unwrap();
+    let hidden = |text: &str| -> Vec<char> {
+        format
+            .find_iter(text)
+            .flat_map(|m| m.as_str().chars())
+            .collect()
+    };
+    assert_eq!(hidden(&preview), Vec::<char>::new(), "{preview:?}");
+    assert!(
+        preview.contains("Replace your saved note “Editor choice” with “Editor choice”?"),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("Yours: I use vim for everything. Really."),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("New: The user edits with xileH."),
+        "{preview}"
+    );
+    assert_eq!(preview.lines().count(), 5, "{preview}");
+
+    let mut other = h.tool_ctx(ALICE);
+    other.lane_key = Some(format!("{ALICE}:other"));
+    let block = memory_suggestions_block(h.service.clone(), &other)
+        .await
+        .expect("a block");
+    let line = block
+        .lines()
+        .find(|l| l.contains(&s.id.to_string()))
+        .expect("the suggestion is listed");
+    assert_eq!(hidden(line), Vec::<char>::new(), "{line:?}");
+    assert!(
+        line.contains("“Editor choice” (saved by you) → “Editor choice”"),
+        "{line}"
+    );
+}
+
 /// The turn's own `ModelTool` read context, as the main loop reads with it.
 fn read_ctx(h: &Harness) -> crate::memory::service::MemoryAccessContext {
     h.service
