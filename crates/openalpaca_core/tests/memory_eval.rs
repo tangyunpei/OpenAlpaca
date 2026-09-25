@@ -5386,7 +5386,8 @@ fn print_totals(system: System, t: &Totals) {
     println!(
         "reader: {} calls, {} in / {} out tokens, ${:.4}; judge: {} in / {} out tokens, ${:.4}; \
          latency p50={}ms p95={}ms; memory_search calls={}; rows with per-turn recall hits={}; \
-         rows with every relied-on note delivered={} (listed or delivered={}); memory writes={}; \
+         rows with every relied-on note delivered={} (listed or delivered={}, read or excerpted={}); \
+         memory writes={}; \
          wall {}s\nper turn: input tokens mean={:.0} median={:.0}, model calls mean={:.2}, \
          tool calls mean={:.2}",
         t.reader_llm_calls,
@@ -5402,6 +5403,7 @@ fn print_totals(system: System, t: &Totals) {
         t.rows_with_per_turn_fts_hits,
         t.rows_with_every_relied_note_delivered,
         t.rows_with_every_relied_note_listed_or_delivered,
+        t.rows_with_every_relied_note_read_or_excerpted,
         t.memory_write_calls,
         t.wall_ms / 1000,
         t.reader_tokens_in_mean_per_turn.unwrap_or(0.0),
