@@ -28,7 +28,7 @@ conversations through the gateway before anything is asked; see
 | `coverage-judge-prompt.md` | The frozen coverage protocol (design 09 §7.3): given a gold note and up to five notes a search returned, `MATCH <n>` or `NONE`. Its SHA-256 is recorded in every learning report beside `judge_prompt_sha256`. |
 | `compare.py` | The paired comparison: accuracy per system, the paired difference with its 95 % CI, the discordant-pair rate, per-category point differences, the gate verdict. It prints both reports' judge models first and **refuses two reports graded by different judges** unless `--allow-judge-mismatch`; `--self-test` checks that refusal. |
 | `reports/` | The archived baselines of the deleted engine, measured on 2026-09-24 on a local Ollama as reader and judge: `baseline-A-2026-09-24.json` (13.0 %), `baseline-B-2026-09-24.json` (90.6 %), and their comparison. **B is the comparator** for D and E. |
-| `crates/openalpaca_core/tests/memory_eval.rs` | The runner: a data-validation test and the harness's own tests — the judge guard, the coverage verdict, the learning measures, a re-judge of a fixture-sized report and a replay of a fixture-sized scratch database, all on an offline stub model (run under `--features live-eval`, no network) — and the `#[ignore]`d live eval. |
+| `crates/openalpaca_core/tests/memory_eval.rs` | The runner: a data-validation test and the harness's own tests — the judge guard, the coverage verdict, the learning measures and invariants, a re-judge of a fixture-sized report, a replay of a fixture-sized scratch database, and the gateway feed, forced re-run and L-S confirm on two short sessions, all on an offline stub model (run under `--features live-eval`, no network) — and the `#[ignore]`d live eval. |
 | `crates/openalpaca_core/tests/memory_eval_corpus.rs` | The corpus's validation, in **default CI** with no model and no feature: coverage, the change pairs' order, the counts, the language shares within 5 points, the size, and the leakage check — no held-out question shares an 8-word shingle, or a 12-character Han/kana/Hangul shingle, with any turn. |
 | `crates/openalpaca_core/tests/common/eval.rs` | The data files' types, shared by both test files. |
 
@@ -232,9 +232,16 @@ archive or refuse. The learning evaluation's own tests run beside them on an
 offline stub model — no network, nothing reaches `localhost:11434`: the judge
 guard (an unroutable judge refused; the reader, or its family, accepted and
 recorded; a judge answering as another model caught), the coverage verdict and
-prompt, the change-pair, restatement and alias measures, a re-judge of a
-fixture-sized archived report and a replay of a fixture-sized scratch
-database, both with no reader call. Plain `cargo test -p openalpaca_core` does
+prompt, the change-pair, restatement and alias measures, the invariants
+(a forced re-run that checked nothing fails), the L-S seed set, a re-judge
+of a fixture-sized archived report and a replay of a fixture-sized scratch
+database, both with no reader call — and the live phase's own path: two short
+sessions fed through the gateway as a run builds it (every turn mapped to its
+row, the flushes at the 10th turn and at each session's end, the reader's
+calls read off the bus, then the forced re-run), and L-S's suggestion raised,
+nothing retired, and the user's confirm retiring the old note. The stub
+router's rate limits are lifted, so the tests time the harness, not the
+default 40 000-TPM bucket. Plain `cargo test -p openalpaca_core` does
 not compile this file at all; it compiles and runs `memory_eval_corpus`, the
 corpus's validation.
 

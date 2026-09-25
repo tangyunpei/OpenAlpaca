@@ -2111,6 +2111,68 @@ impl openalpaca_core::gateway::MessageHandler for EvalHandler {
     }
 }
 
+/// The orchestrator as every system builds it: the eval's config, the reader's
+/// loop at its defaults, no skills, and — with a memory service — the service
+/// installed and its read tools registered as the daemon registers them.
+struct EvalStack {
+    orch: Arc<openalpaca_core::orchestrator::Orchestrator>,
+    shared: Arc<openalpaca_core::context::SharedContext>,
+    lanes: Arc<openalpaca_core::lane::LaneManager>,
+}
+
+fn eval_stack(
+    router: Arc<openalpaca_llm::LlmRouter>,
+    db: &openalpaca_storage::Database,
+    bus: &openalpaca_core::bus::EventBus,
+    service: Option<&Arc<MemoryService>>,
+    daemon_config: Arc<arc_swap::ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
+) -> EvalStack {
+    use openalpaca_core::context::SharedContext;
+    use openalpaca_core::lane::LaneManager;
+    use openalpaca_core::middleware::prompt::SystemPersona;
+    use openalpaca_core::orchestrator::{Orchestrator, skill_catalog, skill_router};
+    use openalpaca_core::runner::LoopConfig;
+    use openalpaca_core::security::gate::SecurityGate;
+    use openalpaca_core::security::sandbox::SandboxManager;
+    use openalpaca_core::tools::ToolRegistry;
+    use openalpaca_core::tools::builtins::memory_read_tools;
+
+    let shared = Arc::new(SharedContext::new());
+    let lanes = Arc::new(LaneManager::new());
+    let registry = Arc::new(ToolRegistry::default());
+    let sandbox = Arc::new(SandboxManager::with_defaults(registry.clone(), bus.clone()));
+    let gate = Arc::new(SecurityGate::new(sandbox));
+    if let Some(service) = service {
+        for tool in memory_read_tools(service.clone()) {
+            registry
+                .register(tool)
+                .expect("register a memory read tool");
+        }
+    }
+    let orch = Arc::new(Orchestrator::new(
+        shared.clone(),
+        lanes.clone(),
+        bus.clone(),
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        registry,
+        Some(db.clone()),
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        daemon_config,
+    ));
+    if let Some(service) = service {
+        orch.set_memory_service(service.clone());
+    }
+    EvalStack {
+        orch,
+        shared,
+        lanes,
+    }
+}
+
 /// One note a flush wrote, from its `memory_changed` event.
 #[derive(Debug, Clone, Serialize)]
 struct WrittenNote {
@@ -2350,6 +2412,34 @@ struct Fed {
 }
 
 impl Learner {
+    /// The gateway over `stack`, persisting every turn and feeding `queue`.
+    fn new(
+        stack: &EvalStack,
+        queue: &Arc<openalpaca_core::memory::learning::LearningQueue>,
+        bus: &openalpaca_core::bus::EventBus,
+        db: &openalpaca_storage::Database,
+        owner_id: &str,
+        project: &Path,
+        turns_per_flush: u32,
+    ) -> Self {
+        Self {
+            gateway: openalpaca_core::gateway::Gateway::new(
+                stack.shared.clone(),
+                stack.lanes.clone(),
+                Arc::new(EvalHandler(stack.orch.clone())),
+                bus.clone(),
+                Some(db.clone()),
+            )
+            .with_learning(queue.clone()),
+            queue: queue.clone(),
+            bus: bus.clone(),
+            db: db.clone(),
+            owner_id: owner_id.to_string(),
+            project: project.to_path_buf(),
+            turns_per_flush,
+        }
+    }
+
     fn lane(&self) -> String {
         format!("{}:gui", self.owner_id)
     }
@@ -3973,16 +4063,8 @@ fn learning_conditions(
 async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_llm::LlmRouter>) {
     use arc_swap::ArcSwap;
     use openalpaca_core::bus::EventBus;
-    use openalpaca_core::context::SharedContext;
-    use openalpaca_core::lane::LaneManager;
     use openalpaca_core::memory::learning::{LearningDeps, LearningQueue, QueueMode};
-    use openalpaca_core::middleware::prompt::SystemPersona;
-    use openalpaca_core::orchestrator::{Orchestrator, skill_catalog, skill_router};
     use openalpaca_core::runner::LoopConfig;
-    use openalpaca_core::security::gate::SecurityGate;
-    use openalpaca_core::security::sandbox::SandboxManager;
-    use openalpaca_core::tools::ToolRegistry;
-    use openalpaca_core::tools::builtins::memory_read_tools;
     use openalpaca_storage::IdentityRepository;
 
     let started = Instant::now();
@@ -4049,12 +4131,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
         .expect("create the eval owner");
 
     // ── Orchestrator ────────────────────────────────────────────────────
-    let shared = Arc::new(SharedContext::new());
-    let lanes = Arc::new(LaneManager::new());
     let bus = EventBus::default();
-    let registry = Arc::new(ToolRegistry::default());
-    let sandbox = Arc::new(SandboxManager::with_defaults(registry.clone(), bus.clone()));
-    let gate = Arc::new(SecurityGate::new(sandbox));
     let cfg = eval_daemon_config(system);
     let budget = MainLoopBudget::for_system(system, &cfg.orchestrator.routing);
     let workflow_cap = cfg.orchestrator.routing.max_workflows_per_lane;
@@ -4065,37 +4142,19 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
 
     // Every system with memory: the daemon's own service
     // (`MemoryService::open_default` — the index cache under the scratch
-    // store) and its read tools registered as the daemon registers them.
-    let service = (system != System::NoMemory).then(|| {
-        let service = Arc::new(MemoryService::open_default(Some(db.clone())).with_bus(bus.clone()));
-        for tool in memory_read_tools(service.clone()) {
-            registry
-                .register(tool)
-                .expect("register a memory read tool");
-        }
-        service
-    });
-
-    let loop_config = LoopConfig::default();
-    let reader_max_rounds = loop_config.max_rounds;
-    let reader_max_cost = loop_config.max_cost;
-    let orch = Arc::new(Orchestrator::new(
-        shared.clone(),
-        lanes.clone(),
-        bus.clone(),
-        SystemPersona::default(),
-        Some(router.clone()),
-        loop_config,
-        gate,
-        registry,
-        Some(db.clone()),
-        Arc::new(skill_catalog::SkillCatalog::new()),
-        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+    // store), its read tools registered as the daemon registers them.
+    let service = (system != System::NoMemory)
+        .then(|| Arc::new(MemoryService::open_default(Some(db.clone())).with_bus(bus.clone())));
+    let reader_max_rounds = LoopConfig::default().max_rounds;
+    let reader_max_cost = LoopConfig::default().max_cost;
+    let stack = eval_stack(
+        router.clone(),
+        &db,
+        &bus,
+        service.as_ref(),
         daemon_config.clone(),
-    ));
-    if let Some(service) = &service {
-        orch.set_memory_service(service.clone());
-    }
+    );
+    let orch = stack.orch.clone();
 
     // ── The judge, before any call (design 09 §7.4) ─────────────────────
     let reader = router.effective_default_model();
@@ -4256,22 +4315,15 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
             .unwrap_or_else(|e| panic!("memory_eval: no memory context for {owner_id}: {e}"))
     });
     if let (Some((_, corpus_sha256)), Some(queue)) = (&corpus, &queue) {
-        let learner = Learner {
-            gateway: openalpaca_core::gateway::Gateway::new(
-                shared.clone(),
-                lanes.clone(),
-                Arc::new(EvalHandler(orch.clone())),
-                bus.clone(),
-                Some(db.clone()),
-            )
-            .with_learning(queue.clone()),
-            queue: queue.clone(),
-            bus: bus.clone(),
-            db: db.clone(),
-            owner_id: owner_id.clone(),
-            project: project.clone(),
-            turns_per_flush: cfg.orchestrator.learning.turns_per_flush,
-        };
+        let learner = Learner::new(
+            &stack,
+            queue,
+            &bus,
+            &db,
+            &owner_id,
+            &project,
+            cfg.orchestrator.learning.turns_per_flush,
+        );
         let fed = learner.feed(&fed_sessions, system.learns()).await;
         let t = Transcript {
             schema: 1,
@@ -5167,18 +5219,42 @@ impl openalpaca_llm::LlmProvider for StubModel {
 const TEST_MODEL: &str = "qwen3.8:27b-mlx";
 
 /// A router serving `models` from one stub Ollama provider, the first the
-/// default.
+/// default: `LlmRouter::single_provider`'s shape, with rate limits no test
+/// reaches — at the default 40 000 TPM a fed turn's reader prompt waits
+/// seconds for the bucket, which would time the limiter, not the harness.
 fn stub_router(
     models: &[&str],
     answer: impl Fn(&openalpaca_llm::ChatRequest) -> String + Send + Sync + 'static,
 ) -> (Arc<openalpaca_llm::LlmRouter>, Arc<StubModel>) {
-    use openalpaca_llm::{LlmRouter, ModelInfo, ProviderType};
+    use openalpaca_llm::{
+        ApiKey, CostTracker, KeyPool, LlmRouter, LlmRuntimeConfig, ModelInfo, ModelRegistry,
+        ProviderEntry, ProviderType, RateLimitConfig, SelectionStrategy,
+    };
     let stub = Arc::new(StubModel {
         seen: std::sync::Mutex::new(Vec::new()),
         answer: Box::new(answer),
     });
-    let router =
-        LlmRouter::single_provider(stub.clone(), ProviderType::Ollama, models[0].to_string());
+    let key = ApiKey::new("default".to_string(), ProviderType::Ollama, String::new());
+    let entry = ProviderEntry {
+        provider: stub.clone(),
+        key_pool: Arc::new(arc_swap::ArcSwap::from_pointee(KeyPool::new(
+            vec![key],
+            SelectionStrategy::RoundRobin,
+        ))),
+    };
+    let router = LlmRouter::new_with_runtime(
+        HashMap::from([(ProviderType::Ollama, entry)]),
+        ModelRegistry::with_defaults(),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        models[0].to_string(),
+        LlmRuntimeConfig::default(),
+        RateLimitConfig {
+            default_rpm: 1_000_000,
+            default_tpm: 1_000_000_000,
+            ..Default::default()
+        },
+    );
     for model in models {
         router.model_registry().register(
             model.to_string(),
@@ -6019,4 +6095,391 @@ async fn replay_learns_from_a_fixture_sized_scratch_database_with_no_reader_call
         );
     }
     assert!(!old_project.join(".openalpaca").exists());
+}
+
+/// The live learning phase's own path, offline (review of L7, finding 3):
+/// two corpus sessions fed through the gateway as `run_system` builds it —
+/// one of 11 turns with no project, one of 2 in the scratch project — each
+/// turn persisted and mapped to its user row, the flushes at the 10th turn
+/// and at each session's end, the reader's calls read off the bus, and then
+/// the forced re-run: it forgets a learned note, re-reads its session from
+/// cursor 0 with an extraction call, and brings nothing back.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_gateway_feed_maps_every_turn_and_the_forced_rerun_checks() {
+    use openalpaca_core::bus::EventBus;
+    use openalpaca_core::memory::learning::{LearningDeps, LearningQueue, QueueMode};
+    use openalpaca_storage::{Database, IdentityRepository};
+
+    let home = tempfile::tempdir().unwrap();
+    let _env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let scratch = tempfile::tempdir().unwrap();
+    let project = scratch_project(scratch.path());
+    let db = Database::open(&scratch.path().join(SCRATCH_DB)).unwrap();
+    let owner = new_owner_id();
+    IdentityRepository::new(&db)
+        .create_global_user(&owner, None)
+        .unwrap();
+
+    // The reader answers every turn with no tool call; the extractor keeps
+    // the chunk's first own user row (context rows are numbered first).
+    let (router, stub) = stub_router(&[TEST_MODEL], |request| {
+        let prompt = prompt_of(request);
+        if !prompt.contains("You are the memory extractor") {
+            return "Noted.".to_string();
+        }
+        let conversation = prompt
+            .split("<conversation>")
+            .nth(1)
+            .and_then(|rest| rest.split("</conversation>").next())
+            .unwrap_or_default();
+        let first_own = conversation.lines().find_map(|line| {
+            let (n, rest) = line.strip_prefix('R')?.split_once(' ')?;
+            let (_, text) = rest.strip_prefix("user ")?.split_once(": ")?;
+            Some((n.parse::<u32>().ok()?, text.to_string()))
+        });
+        let Some((n, text)) = first_own else {
+            return r#"{"items": []}"#.to_string();
+        };
+        serde_json::json!({"items": [{
+            "title": text, "content": format!("The user said: {text}"),
+            "kind": "fact", "stated_by": "user", "confidence": 0.9, "rows": [n],
+        }]})
+        .to_string()
+    });
+    let bus = EventBus::default();
+    let cfg = eval_daemon_config(System::L);
+    let daemon_config = Arc::new(arc_swap::ArcSwap::from_pointee(cfg.clone()));
+    let service = Arc::new(MemoryService::open_default(Some(db.clone())).with_bus(bus.clone()));
+    let stack = eval_stack(
+        router.clone(),
+        &db,
+        &bus,
+        Some(&service),
+        daemon_config.clone(),
+    );
+    let queue = LearningQueue::new(
+        LearningDeps {
+            db: db.clone(),
+            router,
+            daemon_config,
+            memory_service: service.clone(),
+        },
+        QueueMode::Manual,
+    );
+    let learner = Learner::new(
+        &stack,
+        &queue,
+        &bus,
+        &db,
+        &owner,
+        &project,
+        cfg.orchestrator.learning.turns_per_flush,
+    );
+    assert_eq!(learner.turns_per_flush, 10, "the production cadence");
+    let session = |id: &str, workspace: Option<eval::Project>, turns: usize| CorpusSession {
+        id: id.to_string(),
+        workspace,
+        language: Language::En,
+        narrative_date: "2026-03-02".to_string(),
+        turns: (1..=turns)
+            .map(|i| CorpusTurn {
+                user: format!("Note {id}-{i}: my locker number this week is {i}{i}{i}."),
+                states: Vec::new(),
+                mode: TurnMode::Explicit,
+            })
+            .collect(),
+    };
+    let long = session("cs-t01", None, 11);
+    let short = session("cs-t02", Some(eval::Project::Lantern), 2);
+    let fed = learner.feed(&[&long, &short], true).await;
+
+    let labels: Vec<(&str, &str)> = fed
+        .flushes
+        .iter()
+        .map(|f| (f.session.as_str(), f.label))
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            ("cs-t01", FLUSH_TURNS),
+            ("cs-t01", FLUSH_SWITCH),
+            ("cs-t02", FLUSH_SWITCH),
+        ]
+    );
+    for f in &fed.flushes {
+        assert_eq!(
+            (f.calls, f.stored, f.active, f.stopped.as_deref()),
+            (1, 1, 1, None),
+            "{f:?}"
+        );
+        assert!(
+            f.written
+                .iter()
+                .any(|w| w.change == "created" && w.surface.as_deref() == Some("extraction")),
+            "the bus saw the flush's write: {f:?}"
+        );
+    }
+    assert_eq!(fed.turns.len(), 13);
+    let rows: Vec<i64> = fed
+        .turns
+        .iter()
+        .map(|t| t.row.unwrap_or_else(|| panic!("no row for {t:?}")))
+        .collect();
+    assert!(
+        rows.windows(2).all(|w| w[0] < w[1]),
+        "one row per turn, in order"
+    );
+    for t in &fed.turns {
+        assert!(!t.is_error, "{t:?}");
+        assert!(
+            t.reader_llm_calls >= 1,
+            "the reader's calls on the bus: {t:?}"
+        );
+        assert_eq!(t.reader_models, [TEST_MODEL], "{t:?}");
+        assert_eq!(t.model_tool_memory_changes, 0, "{t:?}");
+    }
+    let transcript = Transcript {
+        schema: 1,
+        owner_id: owner.clone(),
+        project: project.to_string_lossy().into_owned(),
+        corpus_sha256: "test".to_string(),
+        sessions: fed.transcript,
+    };
+    assert_eq!(transcript.row_of("cs-t01", 10), fed.turns[10].row);
+    assert_eq!(transcript.row_of("cs-t02", 1), fed.turns[12].row);
+
+    let ctx = service
+        .context(
+            &owner,
+            WorkspaceHint::Root(&project),
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let learned = dump_learned(&service, &ctx).unwrap();
+    let cited = |turn: usize| {
+        learned
+            .iter()
+            .find(|n| n.cites_row(rows[turn]))
+            .unwrap_or_else(|| panic!("no note cites turn {turn}: {learned:?}"))
+    };
+    assert_eq!(cited(0).scope, "global", "the first `turns` chunk");
+    assert_eq!(cited(10).scope, "global", "the `switch` chunk after it");
+    assert_eq!(cited(11).scope, "project", "a project turn learns there");
+
+    let rerun = forced_rerun(
+        &queue,
+        &bus,
+        &db,
+        &service,
+        &ctx,
+        &transcript,
+        &fed.flushes,
+        &learned,
+    )
+    .await;
+    assert_eq!(rerun.skipped, None, "{rerun:?}");
+    assert_eq!(rerun.forgotten.as_deref(), Some(cited(0).id.as_str()));
+    assert_eq!(rerun.session.as_deref(), Some("cs-t01"));
+    let flush = rerun.flush.clone().expect("the re-run flushed");
+    assert_eq!(flush.label, FLUSH_FORCED_RERUN);
+    assert!(flush.calls > 0, "it re-read the session: {flush:?}");
+    assert!(flush.dropped_suppressed > 0, "{flush:?}");
+    assert!(rerun.resurrected.is_empty(), "{rerun:?}");
+    let results = LearningResults {
+        forced_rerun: Some(rerun),
+        ..Default::default()
+    };
+    let inv = invariants(&results, true);
+    assert!(inv.forced_rerun_checked && !inv.violated, "{inv:?}");
+
+    let extractions = stub
+        .requests()
+        .iter()
+        .filter(|r| prompt_of(r).contains("You are the memory extractor"))
+        .count();
+    assert_eq!(extractions, 3 + flush.calls, "one call per flush chunk");
+}
+
+/// L-S's own path, offline (review of L7, finding 3): an old note seeded as
+/// the user's own, a change turn fed through the gateway, the extractor's
+/// change raised as a suggestion that retires nothing, and the user-directed
+/// confirm against the target's revision retiring the old note.
+#[tokio::test(flavor = "multi_thread")]
+async fn l_s_raises_a_suggestion_and_the_users_confirm_retires_the_old_note() {
+    use openalpaca_core::bus::EventBus;
+    use openalpaca_core::memory::learning::{LearningDeps, LearningQueue, QueueMode};
+    use openalpaca_storage::{Database, IdentityRepository};
+
+    let home = tempfile::tempdir().unwrap();
+    let _env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let scratch = tempfile::tempdir().unwrap();
+    let project = scratch_project(scratch.path());
+    let db = Database::open(&scratch.path().join(SCRATCH_DB)).unwrap();
+    let owner = new_owner_id();
+    IdentityRepository::new(&db)
+        .create_global_user(&owner, None)
+        .unwrap();
+
+    // The extractor states the change and names the saved note when the
+    // prompt lists it; the reader answers with no tool call.
+    let (router, _stub) = stub_router(&[TEST_MODEL], |request| {
+        let prompt = prompt_of(request);
+        if !prompt.contains("You are the memory extractor") {
+            return "Noted.".to_string();
+        }
+        let section = |tag: &str| {
+            prompt
+                .split(&format!("<{tag}>"))
+                .nth(1)
+                .and_then(|rest| rest.split(&format!("</{tag}>")).next())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let row = section("conversation").lines().find_map(|line| {
+            let (n, rest) = line.strip_prefix('R')?.split_once(' ')?;
+            let text = rest.strip_prefix("user ")?;
+            text.contains("Helix").then(|| n.parse::<u32>().ok())?
+        });
+        let Some(row) = row else {
+            return r#"{"items": []}"#.to_string();
+        };
+        let replaces = section("known_notes").lines().find_map(|line| {
+            let (n, rest) = line.split_once(' ')?;
+            rest.starts_with("key=user.editor ").then(|| n.to_string())
+        });
+        serde_json::json!({"items": [{
+            "title": "Editor: Helix", "kind": "preference", "stated_by": "user",
+            "content": "Since June 2026 the user's editor is Helix; it replaced vim.",
+            "confidence": 0.9, "rows": [row], "fact_key": "user.editor",
+            "replaces": replaces,
+        }]})
+        .to_string()
+    });
+    let bus = EventBus::default();
+    let cfg = eval_daemon_config(System::LS);
+    let daemon_config = Arc::new(arc_swap::ArcSwap::from_pointee(cfg.clone()));
+    let service = Arc::new(MemoryService::open_default(Some(db.clone())).with_bus(bus.clone()));
+
+    let (notes, _) = load_json::<Vec<GoldNote>>(&eval_dir().join("notes-gold.json"));
+    let pairs = change_pairs(&notes).unwrap();
+    let old: Vec<GoldNote> = ls_seed_notes(&notes, &pairs)
+        .into_iter()
+        .filter(|n| n.fact_key.as_deref() == Some("user.editor"))
+        .collect();
+    let seed = {
+        let (service, owner, root) = (service.clone(), owner.clone(), project.clone());
+        blocking(move || seed_notes(&service, &owner, &root, &old)).await
+    };
+    assert_eq!((seed.seeded, seed.failed), (1, 0));
+
+    let stack = eval_stack(
+        router.clone(),
+        &db,
+        &bus,
+        Some(&service),
+        daemon_config.clone(),
+    );
+    let queue = LearningQueue::new(
+        LearningDeps {
+            db: db.clone(),
+            router,
+            daemon_config,
+            memory_service: service.clone(),
+        },
+        QueueMode::Manual,
+    );
+    let learner = Learner::new(
+        &stack,
+        &queue,
+        &bus,
+        &db,
+        &owner,
+        &project,
+        cfg.orchestrator.learning.turns_per_flush,
+    );
+    let editor = pairs
+        .iter()
+        .find(|p| p.fact_key == "user.editor")
+        .expect("the editor pair");
+    let turn = |user: &str, states: &[&str], mode| CorpusTurn {
+        user: user.to_string(),
+        states: states.iter().map(|s| s.to_string()).collect(),
+        mode,
+    };
+    let session = CorpusSession {
+        id: "cs-t03".to_string(),
+        workspace: None,
+        language: Language::En,
+        narrative_date: "2026-06-03".to_string(),
+        turns: vec![
+            turn(
+                "Plain vimrc, no plugin manager, same as ever.",
+                &[&editor.old],
+                TurnMode::Restate,
+            ),
+            turn(
+                "I switched my editor to Helix at the start of June.",
+                &[&editor.new],
+                TurnMode::Change,
+            ),
+        ],
+    };
+    let fed = learner.feed(&[&session], true).await;
+    assert_eq!(fed.flushes.len(), 1);
+    assert_eq!(
+        (fed.flushes[0].suggestions, fed.flushes[0].active),
+        (1, 0),
+        "{:?}",
+        fed.flushes[0]
+    );
+    let transcript = Transcript {
+        schema: 1,
+        owner_id: owner.clone(),
+        project: project.to_string_lossy().into_owned(),
+        corpus_sha256: "test".to_string(),
+        sessions: fed.transcript,
+    };
+    let ctx = service
+        .context(
+            &owner,
+            WorkspaceHint::Root(&project),
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let mut learning = LearningResults::default();
+    let check = suggestion_check(
+        &service,
+        &ctx,
+        &pairs,
+        &seed,
+        &[&session],
+        &transcript,
+        &mut learning,
+    )
+    .await;
+    assert_eq!(check.targets.len(), 1);
+    let target = &check.targets[0];
+    assert_eq!(target.old_gold, editor.old);
+    assert_eq!(target.suggestions, 1, "{check:?}");
+    assert_eq!(target.status_before_confirm, "active", "nothing retired it");
+    assert_eq!(target.confirm_error, None);
+    assert_eq!(target.status_after_confirm.as_deref(), Some("superseded"));
+    assert_eq!(
+        (
+            check.targets_with_a_suggestion,
+            check.suggestions_elsewhere,
+            check.confirmed_and_superseded
+        ),
+        (1, 0, 1)
+    );
+    let restated: Vec<&str> = learning.restatements.iter().map(|r| r.outcome).collect();
+    assert_eq!(restated, ["nothing_written"]);
+    learning.suggestion_check = Some(check);
+    let inv = invariants(&learning, false);
+    assert_eq!(inv.user_notes_retired_without_confirm, 0);
+    assert!(!inv.violated, "{inv:?}");
 }
