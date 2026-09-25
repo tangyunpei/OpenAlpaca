@@ -2602,6 +2602,31 @@ fn the_three_descriptions_teach_search_pick_read() {
     assert_eq!(schema["additionalProperties"], serde_json::json!(false));
 }
 
+/// L4 re-review: what keeps a suggestion from being raised twice is the
+/// lane's raised set (`MemoryService::mark_raised`): once a card was shown,
+/// whatever the answer, the suggestion and every other one for the same
+/// note leave that lane's `<memory_suggestions>` — in any conversation on
+/// it — until the daemon restarts. The description says so, and so tells
+/// the model to raise only what is listed now, not "never in this
+/// conversation", which a model reads as one conversation and the code
+/// does not check.
+#[test]
+fn memory_confirms_description_states_the_lane_rule() {
+    let text = memory_confirm_tool_definition().description;
+    assert!(!text.contains("this conversation"), "{text}");
+    for phrase in [
+        "only for a suggestion listed in <memory_suggestions> on this turn",
+        "whatever the answer",
+        "every other suggestion for the same note",
+        "every conversation on this chat channel",
+        "until OpenAlpaca restarts",
+        "not listed now",
+        "at most once per turn",
+    ] {
+        assert!(text.contains(phrase), "{phrase:?}: {text}");
+    }
+}
+
 /// Design 09 §13.1: a default `memory_search` answers with index rows, which
 /// carry no revision, so neither writer that needs `expected_revision` may
 /// send the model to a plain search for it — only to `memory_read`,

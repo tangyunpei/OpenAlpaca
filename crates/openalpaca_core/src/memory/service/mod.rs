@@ -210,8 +210,10 @@ pub struct MemoryService {
     /// Per lane, the suggestions a `memory_confirm` card was raised for since
     /// the daemon started, and the notes they would replace (design 09 §4.5):
     /// kept out of that lane's `<memory_suggestions>` so a timed-out or
-    /// denied card is not raised again in the same conversation, nor another
-    /// restatement of the same change. In memory only.
+    /// denied card is not raised again on that lane — in any conversation on
+    /// it — nor another restatement of the same change, until the daemon
+    /// restarts. In memory only. `memory_confirm`'s description tells the
+    /// model the same rule: raise only what is listed now.
     raised: Mutex<HashMap<String, HashSet<NoteId>>>,
     /// Where `memory_changed` goes (design §7a): every write the service
     /// makes, whichever surface asked, and every change a reconciliation

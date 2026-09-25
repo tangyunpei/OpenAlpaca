@@ -1020,12 +1020,14 @@ pub fn memory_confirm_tool_definition() -> ToolDefinition {
         name: "memory_confirm".to_string(),
         description: "Ask the user whether one pending suggestion should replace the note it \
             names: the user answers Approve or Deny on a card that shows both texts, written \
-            by OpenAlpaca, not by you. Call it for one suggestion listed in \
-            <memory_suggestions>, with that line's id, revision and replaces_revision, when \
-            the conversation reaches its topic or comes to a natural pause — at most once per \
-            turn, and never for a suggestion already raised in this conversation. Your call \
-            alone changes nothing: only the user's Approve applies it, and a Deny dismisses it \
-            for good. A suggestion inferred from the conversation rather than from the user's \
+            by OpenAlpaca, not by you. Call it only for a suggestion listed in \
+            <memory_suggestions> on this turn, with that line's id, revision and \
+            replaces_revision, when the conversation reaches its topic or comes to a natural \
+            pause — at most once per turn. Once its card has been shown, whatever the answer, \
+            a suggestion and every other suggestion for the same note leave that list, in \
+            every conversation on this chat channel, until OpenAlpaca restarts: never raise \
+            one that is not listed now, even one you saw earlier. Your call alone changes \
+            nothing: only the user's Approve applies it, and a Deny dismisses it for good. A suggestion inferred from the conversation rather than from the user's \
             own words is refused as not_a_suggestion; the user confirms that kind in the \
             app's Memory view or with `openalpaca memory confirm <id>`."
             .to_string(),
