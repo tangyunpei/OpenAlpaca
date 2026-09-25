@@ -1,0 +1,2195 @@
+{
+  "schema": 1,
+  "sessions": [
+    {
+      "id": "cs-001",
+      "workspace": "lantern",
+      "language": "en",
+      "narrative_date": "2025-10-01",
+      "turns": [
+        {
+          "user": "Some context before we dig in: Lantern is the service I work on at Quillpay. It does ledger reconciliation, it's written in Rust, and the repo is github.com/quillpay/lantern. Chinese-speaking colleagues call it 灯笼.",
+          "states": [
+            "9f5fc84b-f5a8-5c09-b4be-c220e989df18"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "It belongs to the Ledger Platform team and it has been running in production since September 2025.",
+          "states": [
+            "9f5fc84b-f5a8-5c09-b4be-c220e989df18"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "What's the idiomatic way to share a config struct between axum handlers?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "When I run Lantern locally it listens on port 8080, so point any curl examples at localhost:8080.",
+          "states": [
+            "d5dc170b-63bd-56f1-b478-16392d64aeee"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Give me a curl command that POSTs a small JSON body to /v1/reconcile.",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Perfect, thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-002",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2025-10-20",
+      "turns": [
+        {
+          "user": "FYI my laptop is a ThinkPad X1 Carbon Gen 9 running Fedora, so give me dnf commands rather than apt ones.",
+          "states": [
+            "17310b78-2539-5802-a542-9aa6380ca979"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "How do I see which kernel version I'm on?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "And how can I find the ten biggest directories under my home folder?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Can I sort that output by size in human-readable units?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Great, that's exactly what I needed.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-003",
+      "workspace": "lantern",
+      "language": "en",
+      "narrative_date": "2025-12-15",
+      "turns": [
+        {
+          "user": "Quick update on my setup: since mid-November 2025 I've been working on a MacBook Air M3 with 16 GB of memory, on macOS. The ThinkPad with Fedora is retired, so assume Apple silicon (arm64) from here on.",
+          "states": [
+            "d812f264-4ab3-5182-972e-919103cffa0e"
+          ],
+          "mode": "change"
+        },
+        {
+          "user": "That already bit me today, 15 December: `cargo nextest run` under Rosetta crashed with SIGILL inside `ring`. I'd installed an x86_64 toolchain by accident.",
+          "states": [
+            "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Switching to the native aarch64-apple-darwin toolchain fixed it. So, for the record, Rosetta isn't supported for Lantern.",
+          "states": [
+            "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Is there a quick way to see which rustup toolchain a directory is using?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "What does SIGILL actually mean at the CPU level?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Makes sense, thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-004",
+      "workspace": null,
+      "language": "zh",
+      "narrative_date": "2026-01-05",
+      "turns": [
+        {
+          "user": "新年快乐！今年第一周，先随便聊两句。",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "以后每周五下午四点我做周回顾，到时候帮我整理一份本周完成事项的清单。",
+          "states": [
+            "55da76c5-8f67-5628-a520-4cd45df14bb7"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "周回顾的清单一般按什么顺序排比较好？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "好的，就这样。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-005",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-01-08",
+      "turns": [
+        {
+          "user": "Hi! Let's get acquainted. I'm Lin Wei, 林薇 in Chinese, and I go by she/her.",
+          "states": [
+            "fbce4294-581d-5cd9-a7be-16a79598e75a"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "In chat, please just call me Wei.",
+          "states": [
+            "fbce4294-581d-5cd9-a7be-16a79598e75a"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "When I give you times, read them in my timezone: I live in Hangzhou, in Xihu district, so it's Asia/Shanghai, UTC+8.",
+          "states": [
+            "589ec820-c3d7-508c-a70a-2d889329a67d"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "My birthday is 14 March 1991, so I'm turning 35 this year.",
+          "states": [
+            "f539564c-231b-5efe-bba6-28955e6df58b"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Work: I'm a backend engineer at Quillpay, a fintech start-up here in Hangzhou. I joined in September 2021.",
+          "states": [
+            "c0489a40-6678-5f2d-98e8-1973ebb7fd57"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "I'm on the Ledger Platform team, and my manager is Priya Raman.",
+          "states": [
+            "c0489a40-6678-5f2d-98e8-1973ebb7fd57"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "So what kinds of things can you help me with day to day?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Cool, let's see how it goes.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-006",
+      "workspace": "lantern",
+      "language": "en",
+      "narrative_date": "2026-01-10",
+      "turns": [
+        {
+          "user": "Can you explain the difference between Arc<Mutex<T>> and Arc<RwLock<T>> for a read-heavy cache?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "For the local examples, keep using localhost:8080. That's still the port Lantern comes up on for me.",
+          "states": [
+            "d5dc170b-63bd-56f1-b478-16392d64aeee"
+          ],
+          "mode": "restate"
+        },
+        {
+          "user": "Write a small health-check handler that returns the build version as JSON.",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "How would I test that handler without starting the whole server?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Nice, the tower::ServiceExt trick is neat.",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Now the compiler says the future is not Send. What usually causes that in an axum handler?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "It was a MutexGuard held across an await, you were right.",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Is tokio::sync::Mutex the right fix, or should I restructure?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "OK, I'll scope the guard in a block instead.",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Can clippy warn me about that pattern in the future?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Great. Last one: how do I make that lint an error in CI only?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Thanks, that's everything for today.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-007",
+      "workspace": null,
+      "language": "mixed",
+      "narrative_date": "2026-01-12",
+      "turns": [
+        {
+          "user": "我在改 résumé 的 experience 部分。2016 到 2021 年我在上海的 Norden Labs 做 data engineer，主要用 Python 和 Spark。How should I phrase that section?",
+          "states": [
+            "f5ae2a6d-4f64-52f4-9145-39da8657e0fe"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Resume 一般写一页还是两页比较好？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "把 'responsible for data pipelines' 改得更具体一点，给我三个版本。",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "第二个版本不错，thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-008",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-01-15",
+      "turns": [
+        {
+          "user": "I want to plan something nice for my partner, Tomas Lindqvist. He's Swedish and works as a UX designer.",
+          "states": [
+            "ba289b57-b950-594d-8dc1-4140b58d85df"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "His birthday is 10 August, and I like to start planning early.",
+          "states": [
+            "ba289b57-b950-594d-8dc1-4140b58d85df"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Whatever we plan can't eat into early mornings though: I walk Mochi (麻糬 at home), my corgi, at seven every day.",
+          "states": [
+            "52f82d00-2f60-5caf-b30b-5c1e9bacd312"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "He's been that strict about it since I adopted him in 2022.",
+          "states": [
+            "52f82d00-2f60-5caf-b30b-5c1e9bacd312"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "Any gift ideas for someone who loves design books and board games?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Thanks, I'll think it over.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-009",
+      "workspace": "moss",
+      "language": "zh",
+      "narrative_date": "2026-01-18",
+      "turns": [
+        {
+          "user": "介绍一下我的个人项目 Moss（苔）：一个用 Python 写的静态站点生成器，专门生成我的中文读书笔记博客 moss.linwei.dev。",
+          "states": [
+            "32e3e248-26e5-5cde-b3f1-b5d09b54690a"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "仓库在本地 ~/code/moss，GitHub 上是 linwei-dev/moss。",
+          "states": [
+            "32e3e248-26e5-5cde-b3f1-b5d09b54690a"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "内容格式是这样的：文章放在 content/notes/*.md，front matter 有 title、date、tags 三个字段，book 可选；slug 用 pypinyin 从标题生成。",
+          "states": [
+            "e4e109a8-4129-5689-b547-cb1901ee63ff"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "图片放在 content/images/，构建时用 Pillow 转成 WebP，最长边不超过 1600 像素。",
+          "states": [
+            "e4e109a8-4129-5689-b547-cb1901ee63ff"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "目前构建输出写到 _site/ 目录里。",
+          "states": [
+            "005e519a-6a01-5e8d-bf96-1492badedcf4"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Python 里怎么最简单地递归找出一个目录下所有的 .md 文件？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "好，明白了，谢谢。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-010",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-01-20",
+      "turns": [
+        {
+          "user": "Editor-wise I'm a vim person: a plain vimrc and no plugin manager at all. Keep any editor tips vim-flavoured.",
+          "states": [
+            "eca96db9-98b9-5def-a63d-c3c39a10ea0e"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Funny story: in October 2025 I tried moving from vim to Neovim with a Lua config. I gave up after two weeks because the plugin churn drove me nuts, and went right back to vim.",
+          "states": [
+            "afb93bd9-af74-52b8-b174-cb205a407802"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "And I want dark mode in every single app, including any screenshots you generate.",
+          "states": [
+            "360fa8e1-b71c-5bf1-afb7-3854794bc0d1"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Gruvbox Dark is my theme in the editor and the terminal, and my coding font is JetBrains Mono at 13 pt.",
+          "states": [
+            "360fa8e1-b71c-5bf1-afb7-3854794bc0d1"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "How do I get vim to show relative line numbers?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "And how do I make that stick in the vimrc?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Nice, thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-011",
+      "workspace": null,
+      "language": "zh",
+      "narrative_date": "2026-01-22",
+      "turns": [
+        {
+          "user": "说一下我的习惯：我只喝茶，不喝咖啡，最喜欢龙井。",
+          "states": [
+            "d412219c-5b71-511e-ad65-41e7c5771387"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "而且下午三点以后任何带咖啡因的饮料都不喝。",
+          "states": [
+            "d412219c-5b71-511e-ad65-41e7c5771387"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "还有语言：平时跟我闲聊用中文；代码评审、技术文档和 commit message 用英文。",
+          "states": [
+            "b897fbe1-ca49-5041-8354-8f376deb884b"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "数字一律写阿拉伯数字。",
+          "states": [
+            "b897fbe1-ca49-5041-8354-8f376deb884b"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "回答要简洁，总结用 bullet list，别用 emoji，代码放在标了语言的代码块里。",
+          "states": [
+            "0d47adbd-f5eb-57c1-b054-9385ff3d6a3c"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "今天杭州好冷，有什么暖和点的午饭推荐吗？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "那家店离西湖远吗？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "哈哈，好主意。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-012",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-01-25",
+      "turns": [
+        {
+          "user": "Commit messages, for every repo I work in: Conventional Commits (feat:, fix:, docs: and so on) with an imperative subject of at most 72 characters.",
+          "states": [
+            "86d3c819-b107-5ef5-a97a-62d76b695298"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "The body is wrapped at 72 columns, and there's no emoji anywhere in the message.",
+          "states": [
+            "86d3c819-b107-5ef5-a97a-62d76b695298"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "For code you write for me: 4-space indentation and a max line width of 100.",
+          "states": [
+            "d20e3d13-3ba2-50a8-9bcc-d1cd509c51f5"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Also trailing commas in multi-line literals, and early returns rather than nested ifs. If a project has its own formatter, the formatter wins.",
+          "states": [
+            "d20e3d13-3ba2-50a8-9bcc-d1cd509c51f5"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "And a standing rule: nothing is ever pushed to main directly, in any repository. Every change, documentation included, goes through a pull request. I pushed to main by accident once in 2025 and never again.",
+          "states": [
+            "f5ec00b0-3491-5a92-940e-607602ab1056"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "When you write repo URLs, use my handle linwei-dev for personal stuff and the quillpay org for work, e.g. github.com/linwei-dev/dotfiles.",
+          "states": [
+            "be63eca1-2428-53ab-be74-0eb068bdfeb3"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "For a small bookmarks app, which database would you reach for?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Not MongoDB, thanks. I stay away from it. Anything new I build goes on PostgreSQL, and I talk to it with psql in the terminal, not a GUI client.",
+          "states": [
+            "110a879c-3608-5272-94ae-f610a9d9d394"
+          ],
+          "mode": "rejection"
+        },
+        {
+          "user": "OK, sketch me a schema for the bookmarks table then.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-013",
+      "workspace": "moss",
+      "language": "zh",
+      "narrative_date": "2026-01-28",
+      "turns": [
+        {
+          "user": "这个月我试了用 Pandoc 给 Moss 做 Markdown 管道，结果全量构建一次要 90 秒，太慢，放弃了。",
+          "states": [
+            "facd99a8-a0bd-55bf-b07c-b8112deb086d"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "现在换成了 markdown-it-py 加 footnote 插件。",
+          "states": [
+            "facd99a8-a0bd-55bf-b07c-b8112deb086d"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "markdown-it-py 的插件是怎么注册的？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "脚注渲染出来的 HTML 大概是什么结构？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "如果我想给脚注加个返回链接呢？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "行，我自己试试。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-014",
+      "workspace": "moss",
+      "language": "en",
+      "narrative_date": "2026-02-01",
+      "turns": [
+        {
+          "user": "Moss targets Python 3.12; the .python-version file in the repo says 3.12.",
+          "states": [
+            "b06901d5-5151-5665-97d6-c899757dd602"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "How do I add pytest as a dev dependency in a uv project? I manage all my Python environments and dependencies with uv, never pip or poetry.",
+          "states": [
+            "cf02620f-5620-5a47-ae88-460fd37f419c"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "And ruff does both my linting and my formatting. Outside Moss, 3.13 is my default interpreter.",
+          "states": [
+            "cf02620f-5620-5a47-ae88-460fd37f419c"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "What's the difference between `uv add --dev` and a dependency group?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "And how do I run a single test file with uv?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "How do I make pytest show print output?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Can I set that in pyproject.toml instead of on the command line?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "What's a good pytest fixture for a temporary content directory?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Does tmp_path get cleaned up automatically?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "And if I want the same directory across a whole test module?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Got it, thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-015",
+      "workspace": "lantern",
+      "language": "en",
+      "narrative_date": "2026-02-05",
+      "turns": [
+        {
+          "user": "Lantern's branch and PR conventions, so you get them right: branches are named lw/<topic>, every PR needs at least one reviewer (usually Priya), and we squash-merge.",
+          "states": [
+            "09ac90e3-aefd-5be8-ba0b-3ae4ec6ad02e"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "The default branch is main. We renamed it from master this month.",
+          "states": [
+            "09ac90e3-aefd-5be8-ba0b-3ae4ec6ad02e"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "This PR touches a database migration, so besides Priya (@priya-r), who's the default reviewer, it needs Chen Bo (@chenbo) too. Reviews come back within one working day. Can you draft the PR description?",
+          "states": [
+            "9e1551ed-5c33-5446-9b39-edd8d76766c9"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "Also, for the release checklist: Lantern releases go out every Wednesday. Sorry, every second Wednesday.",
+          "states": [
+            "dd38b503-c00a-551e-bad9-0690f6988510"
+          ],
+          "mode": "correction"
+        },
+        {
+          "user": "The steps are `just bump <patch|minor>`, then the changelog with `git cliff`, then pushing a vX.Y.Z tag, which triggers the release workflow.",
+          "states": [
+            "dd38b503-c00a-551e-bad9-0690f6988510"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Can you give me a one-liner to deploy Lantern to production straight from my laptop?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "No, scrap that. There is no manual production deploy for Lantern: production only goes out through the GitHub Actions `release` workflow, triggered by a v* tag.",
+          "states": [
+            "45301a3d-e467-598f-ae3a-8539a9780aa8"
+          ],
+          "mode": "rejection"
+        },
+        {
+          "user": "Staging is `just deploy staging`, which needs the VPN and LANTERN_DEPLOY_TOKEN from the 1Password vault \"Lantern-dev\". That token never gets typed into the shell history.",
+          "states": [
+            "45301a3d-e467-598f-ae3a-8539a9780aa8"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "What's a good way to keep a token out of shell history in general?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-016",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-02-10",
+      "turns": [
+        {
+          "user": "I've set a budget for my personal cloud spending: 250 USD a month. No wait, 200 USD a month, across Cloudflare and my one Hetzner VPS, with a warning at 150 USD.",
+          "states": [
+            "f2024d48-d9b4-5704-81b1-1e30289c186b"
+          ],
+          "mode": "correction"
+        },
+        {
+          "user": "Can you suggest a quick dinner recipe for tonight? Nothing with shrimp, crab, lobster or oysters, I have a severe shellfish allergy. Peanuts and tree nuts are totally fine though.",
+          "states": [
+            "add8b06d-fbf9-5904-b384-e3398ff1793c"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "Can I make that with rice noodles instead?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "How long does it keep in the fridge?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Great.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-017",
+      "workspace": null,
+      "language": "zh",
+      "narrative_date": "2026-02-12",
+      "turns": [
+        {
+          "user": "我那把 HHKB Professional Hybrid Type-S 上早就把 Caps Lock 映射成 Ctrl 了，QWERTY 布局用得很顺手；可 MacBook 自带键盘上怎么也把 Caps Lock 改成 Ctrl？",
+          "states": [
+            "40583509-f62c-5781-b93d-c55451845ae1"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "改完要重启吗？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "这周五下午四点照常做周回顾，你到时候把这周做完的事列出来。",
+          "states": [
+            "55da76c5-8f67-5628-a520-4cd45df14bb7"
+          ],
+          "mode": "restate"
+        },
+        {
+          "user": "顺便问一下，番茄工作法一轮一般多长？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "好的。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-018",
+      "workspace": null,
+      "language": "mixed",
+      "narrative_date": "2026-02-20",
+      "turns": [
+        {
+          "user": "Anki 每天大概吃掉我 20 分钟的 review 时间，不过很有用。我在准备 2026 年 12 月的 JLPT N3。",
+          "states": [
+            "3992ba1b-372a-5d49-a95f-aa84e8ba530a"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "每周四晚上还跟 Sato 老师上课。Can you quiz me on five N3 verbs?",
+          "states": [
+            "3992ba1b-372a-5d49-a95f-aa84e8ba530a"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "第三个我答错了，explain the nuance again?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "OK, one more round please.",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "ありがとう！今天就到这。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-019",
+      "workspace": null,
+      "language": "zh",
+      "narrative_date": "2026-02-22",
+      "turns": [
+        {
+          "user": "帮我列个清单：这周日照常去山姆采购一周的东西，农夫山泉、燕麦、无糖酸奶这些老三样，再加点火锅料。",
+          "states": [
+            "d4d77cce-aaee-5fdc-9ebe-65e9603a27e3"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "我开那辆 2018 年的本田飞度去，后备箱不大，东西别列太多。",
+          "states": [
+            "73c3f368-d646-5e3f-845e-b319ed050190"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "下个月我照例回宁波看爸妈，我每个月都回去一次。我妈陈红想要个新电饭煲，我爸林建国说随便，帮我挑个五百块以内的。",
+          "states": [
+            "56daf89a-bb02-51d2-8953-f606e5aff1dd"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "这两个型号哪个更省电？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "行，就买第一个。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-020",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-02-25",
+      "turns": [
+        {
+          "user": "Everyone at work lives in Notion. Would it make sense for me to move my personal notes over there?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Thanks, but no, I'm declining Notion. Privacy and offline access matter more to me, so my notes stay in my Obsidian vault at ~/Vault, with its daily-notes template. Please don't suggest Notion again.",
+          "states": [
+            "61de9275-35d8-51a8-91be-b43bf6430dd5"
+          ],
+          "mode": "rejection"
+        },
+        {
+          "user": "How do I make an Obsidian daily-notes template show the ISO week number?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Nice, that worked.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-021",
+      "workspace": null,
+      "language": "zh",
+      "narrative_date": "2026-03-01",
+      "turns": [
+        {
+          "user": "我现在每周四和周六跑 5 公里。哦不对，是周二和周六。配速大概每公里 6 分 10 秒。",
+          "states": [
+            "b68de6ef-298c-5450-ad04-b1ed1e92535e"
+          ],
+          "mode": "correction"
+        },
+        {
+          "user": "目标是 2026 年 11 月杭州马拉松的半程。",
+          "states": [
+            "b68de6ef-298c-5450-ad04-b1ed1e92535e"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "半马前三个月的训练该怎么加量？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "长距离跑那天吃什么比较好？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "跑完膝盖有点酸，正常吗？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "好，收到。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-022",
+      "workspace": "lantern",
+      "language": "en",
+      "narrative_date": "2026-03-02",
+      "turns": [
+        {
+          "user": "Noting this from the staging .env today: the Lantern staging database is lantern_staging on host pg-staging-1.",
+          "states": [
+            "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Write me a psql one-liner that counts rows per status in the batches table.",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "How do I make psql print that as CSV?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "And write it to a file instead of stdout?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Thanks, that's handy.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-023",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-03-05",
+      "turns": [
+        {
+          "user": "My yearly check-up with Dr. Qian Ming at Zhejiang Provincial People's Hospital is in October again. Since I take no regular medication, what's worth asking about this time?",
+          "states": [
+            "2548ab97-fb4c-5a69-9f94-fbc5706b2bc2"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "Oh, and a reminder for later: my passport expires on 18 March 2027. No, sorry, 18 February 2027.",
+          "states": [
+            "88ed0b78-2b34-5897-be90-41f6a684540c"
+          ],
+          "mode": "correction"
+        },
+        {
+          "user": "I want to start the renewal by November 2026.",
+          "states": [
+            "88ed0b78-2b34-5897-be90-41f6a684540c"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "What documents does a passport renewal usually need?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "OK, thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-024",
+      "workspace": "moss",
+      "language": "en",
+      "narrative_date": "2026-03-08",
+      "turns": [
+        {
+          "user": "Should I add some analytics to Moss to see which reading notes people read?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "No. No analytics on Moss: I rejected Google Analytics and Plausible this month, for reader privacy. And there's no comment system either. Let's keep it that way.",
+          "states": [
+            "e4ba0eee-12e6-5aee-920b-47f45ed2ebf3"
+          ],
+          "mode": "rejection"
+        },
+        {
+          "user": "The RSS feed is at /feed.xml and carries the last 10 posts. Sorry, the last 20.",
+          "states": [
+            "d65b04e6-a55e-5971-a751-6371283030bc"
+          ],
+          "mode": "correction"
+        },
+        {
+          "user": "It's generated by moss/feed.py, and I run it through the W3C feed validator before every deploy.",
+          "states": [
+            "d65b04e6-a55e-5971-a751-6371283030bc"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Should Moss get a dark-mode toggle?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "No toggle. The site has one look: background #f4f1ea, a beige, body text #2b2b2b and links #1f6f5f, which I call moss green.",
+          "states": [
+            "cd688c62-4938-58f7-90df-f8617aafa6a0"
+          ],
+          "mode": "rejection"
+        },
+        {
+          "user": "The font is Source Han Serif (思源宋体).",
+          "states": [
+            "cd688c62-4938-58f7-90df-f8617aafa6a0"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Help me outline my next reading note for Moss, on Ted Chiang's Exhalation. I mostly read science fiction, and he and Liu Cixin are my two favourite authors, so it's going to be a long one.",
+          "states": [
+            "7711906b-b500-5443-b7da-a0ddc8847b62"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "Good outline. Can you make the section titles shorter?",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-025",
+      "workspace": null,
+      "language": "zh",
+      "narrative_date": "2026-03-10",
+      "turns": [
+        {
+          "user": "我一般晚上 23 点睡，不对，是 23:30 睡，早上 6:30 起。",
+          "states": [
+            "261bf869-0284-504a-8d98-50ef319ff350"
+          ],
+          "mode": "correction"
+        },
+        {
+          "user": "所以上午 9:30 之前别给我排会。",
+          "states": [
+            "261bf869-0284-504a-8d98-50ef319ff350"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "编辑器还是老样子：vim 加一个很朴素的 vimrc，插件管理器一个都不装。",
+          "states": [
+            "eca96db9-98b9-5def-a63d-c3c39a10ea0e"
+          ],
+          "mode": "restate"
+        },
+        {
+          "user": "vim 里怎么快速把一段文字按逗号拆成多行？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "好，学会了。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-026",
+      "workspace": "lantern",
+      "language": "en",
+      "narrative_date": "2026-03-12",
+      "turns": [
+        {
+          "user": "Big one for Lantern: as of 10 March 2026 we've switched the database layer from diesel to sqlx, for async support and compile-time checked queries.",
+          "states": [
+            "e49d4a2a-9429-5037-90dd-74e6ed27f2e1"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "The last diesel module went out in PR #188, and new code must not use diesel.",
+          "states": [
+            "e49d4a2a-9429-5037-90dd-74e6ed27f2e1"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "I need a new reversible migration for the partner table. I'll create it with `sqlx migrate add -r add_partner_region`; it lands in migrations/ and I apply it with `sqlx migrate run`. We never edit a migration that's been applied anywhere, we add a new one. Can you write the up and down SQL?",
+          "states": [
+            "80469bd8-a498-53a2-9642-258ad45a7db4"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "Should the region column be an enum type or a text column with a check constraint?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "OK, going with the check constraint.",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "How do I backfill existing rows in the same migration?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Is it safe to do that in one transaction on a big table?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Let's batch it then. Show me a batched UPDATE.",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "How do I write a sqlx query that uses the new column with compile-time checking?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "The macro complains about DATABASE_URL at build time. How do I fix that for CI?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Offline mode it is. Thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-027",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-03-12",
+      "turns": [
+        {
+          "user": "I'm adding my YubiKey 5C as the second factor on a new account, the same way I use it for GitHub and 1Password. The backup key stays at home, and I never use SMS codes. What's the usual flow?",
+          "states": [
+            "583167e2-2a34-5ceb-9c7d-4bfcd8f449fc"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "In fish with the starship prompt, what's the right way to initialise zoxide? I already alias gs to git status.",
+          "states": [
+            "85cfe8aa-1f7c-58c6-ba5a-4b7acb53b923"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "Can you write me a small script that backs up ~/Vault every night? Fish is fine since that's my shell.",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Actually no, not fish. Scripts you write for me should be POSIX sh or bash, even though I use fish interactively.",
+          "states": [
+            "85cfe8aa-1f7c-58c6-ba5a-4b7acb53b923"
+          ],
+          "mode": "rejection"
+        },
+        {
+          "user": "How do I schedule that script with launchd?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Thanks!",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-028",
+      "workspace": "lantern",
+      "language": "mixed",
+      "narrative_date": "2026-03-14",
+      "turns": [
+        {
+          "user": "Lantern 本地起依赖用的是 `docker compose -f compose.dev.yml up -d`（Postgres 16 加一个 fake partner API）。",
+          "states": [
+            "38ddc21d-3106-5690-9738-94e7c19e664a"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "`.env.local` 是 git-ignored 的，里面的 database URL 是 postgres://lantern:lantern@localhost:5433/lantern_dev。但是 app 连不上 DB，where should I start debugging?",
+          "states": [
+            "38ddc21d-3106-5690-9738-94e7c19e664a"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "docker compose ps 显示 postgres 是 healthy 的，next step?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Found it，端口映射写错了。Thanks!",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-029",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-03-20",
+      "turns": [
+        {
+          "user": "Can you put together a playlist for deep-work sessions?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Please not on Spotify, I moved off Spotify this month and I'm on Apple Music now. And keep it lo-fi: that's what I listen to while coding. During meetings I listen to nothing.",
+          "states": [
+            "944b902b-7e38-58db-a0e2-f12322ba7822"
+          ],
+          "mode": "rejection"
+        },
+        {
+          "user": "What's a good way to share an Apple Music playlist with someone on Android?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Can they listen without an account?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Cool.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-030",
+      "workspace": "lantern",
+      "language": "en",
+      "narrative_date": "2026-04-02",
+      "turns": [
+        {
+          "user": "Update your curl examples: as of today, 2 April 2026, Lantern listens on port 8790 locally. We moved it off 8080 so it stops clashing with the partner mock, and the justfile has the new port.",
+          "states": [
+            "35643d2e-a709-5dc4-99e2-d617c485740e"
+          ],
+          "mode": "change"
+        },
+        {
+          "user": "The test reconcile_partial_batch failed again on CI. Should I just add a retry around it?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Actually no, please don't fix it with retries or sleeps. reconcile_partial_batch is flaky because of a timing race; it stays #[ignore]d until issue #212 is fixed.",
+          "states": [
+            "49adb6bf-6ff0-5c3b-acd0-aa8194c9c63b"
+          ],
+          "mode": "rejection"
+        },
+        {
+          "user": "Draft me a Grafana alert rule for Lantern's SLO: /v1/reconcile p95 latency under 120 ms and an error rate under 0.1 %. The dashboards live in the Grafana folder \"Lantern\".",
+          "states": [
+            "b2b5ee9a-7dea-5edc-b93b-7de4535ac8df"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "What evaluation interval would you pick for that alert?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-031",
+      "workspace": "lantern",
+      "language": "zh",
+      "narrative_date": "2026-04-06",
+      "turns": [
+        {
+          "user": "周回顾的时间改了：从这周开始改成每周一上午 9:30，不再是周五下午。",
+          "states": [
+            "28215b64-1fbc-5779-be03-28ff04dadb3c"
+          ],
+          "mode": "change"
+        },
+        {
+          "user": "到时给我一份上周任务的 bullet 摘要，按项目分组，先 Lantern 后 Moss。",
+          "states": [
+            "28215b64-1fbc-5779-be03-28ff04dadb3c"
+          ],
+          "mode": "change"
+        },
+        {
+          "user": "按项目分组的话，没有项目的杂事放哪儿？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "好，就放最后。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-032",
+      "workspace": "lantern",
+      "language": "mixed",
+      "narrative_date": "2026-04-10",
+      "turns": [
+        {
+          "user": "要给 partner acme 轮换 API key 了，partner keys 每 90 天就过期。流程是先跑 `just rotate-key acme`，把新 key 存到 1Password 的 \"Lantern-dev\" vault，再到 #lantern-ops 发个消息。Make it a checklist for me?",
+          "states": [
+            "f46f7a75-7041-5aa9-8344-7b823d624e40"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "还有，Lantern 的日志是 JSON 格式（tracing-subscriber），request_id 必须在所有下游调用里透传。",
+          "states": [
+            "40218f16-724e-5f31-aac5-80f6b6289467"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "本地用 `just logs` 看日志，生产的在 Loki 里。How do I query one request by request_id in Loki?",
+          "states": [
+            "40218f16-724e-5f31-aac5-80f6b6289467"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "PR 上 cargo deny 红了。我们的 ci.yml 跑在 ubuntu-24.04 上，build、nextest、clippy、fmt 和 cargo deny 都要过，cargo deny 红了就不能 merge。What does a RUSTSEC advisory on an unmaintained crate usually require?",
+          "states": [
+            "7b9cf686-abb2-520b-b605-cbdc0a3056a7"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "好，那我先 bump 一下那个 dependency 试试。",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Works now, thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-033",
+      "workspace": "moss",
+      "language": "en",
+      "narrative_date": "2026-04-14",
+      "turns": [
+        {
+          "user": "I'm tempted to replace Jinja2 in Moss with a tiny hand-written template engine. Worth it?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "You know what, no. I've decided against it today: a hand-written template engine isn't worth the maintenance, so Moss keeps Jinja2.",
+          "states": [
+            "1cdfac00-4307-5c20-b98c-d3385fafd85d"
+          ],
+          "mode": "rejection"
+        },
+        {
+          "user": "Keep targeting Python 3.12 for Moss. The .python-version file still says 3.12.",
+          "states": [
+            "b06901d5-5151-5665-97d6-c899757dd602"
+          ],
+          "mode": "restate"
+        },
+        {
+          "user": "When I preview a build I still open the generated files under _site/ directly.",
+          "states": [
+            "005e519a-6a01-5e8d-bf96-1492badedcf4"
+          ],
+          "mode": "restate"
+        },
+        {
+          "user": "How do I add a custom Jinja2 filter that formats dates as 2026-04-14?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-034",
+      "workspace": null,
+      "language": "zh",
+      "narrative_date": "2026-04-21",
+      "turns": [
+        {
+          "user": "4 月 20 号我把那辆飞度卖了。现在每天坐地铁 5 号线上班，从西湖区到滨江区的公司大概 40 分钟。",
+          "states": [
+            "b0c61c22-beaa-5a3d-9c41-931fe42cc1e6"
+          ],
+          "mode": "change"
+        },
+        {
+          "user": "地铁上有什么适合听的中文播客？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "好，下载了两个。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-035",
+      "workspace": "moss",
+      "language": "en",
+      "narrative_date": "2026-05-10",
+      "turns": [
+        {
+          "user": "Changed Moss's build output today, 10 May 2026, in PR #41: it writes to dist/ now instead of _site/, which matches wrangler's default.",
+          "states": [
+            "71b9cde4-585f-5b94-a15d-42cae6c0e230"
+          ],
+          "mode": "change"
+        },
+        {
+          "user": "Updating the README with the new commands: `uv run moss build` writes dist/, `uv run moss serve --port 4000` for the preview, and `uv run pytest -q` for tests.",
+          "states": [
+            "128da25c-f994-5add-907a-1859261d4e82"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "Lint and format are `ruff check .` and `ruff format`. Can you turn all that into a tidy Usage section?",
+          "states": [
+            "128da25c-f994-5add-907a-1859261d4e82"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "And a Deploy section: I deploy from the laptop after `uv run moss build`, with `wrangler pages deploy dist --project-name moss`. DNS is on Cloudflare, and there's no CI for Moss.",
+          "states": [
+            "1f3b13c4-dea3-541e-a64c-20bc1efe058c"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "Should the README have a table of contents at this length?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Fine, leave it out.",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Can you add a short Contributing note? Just that issues are welcome.",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Make the tone a bit friendlier.",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "And a badge for the licence at the top?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Which licence badge service would you use?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "OK, that's the README done. Thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-036",
+      "workspace": "lantern",
+      "language": "en",
+      "narrative_date": "2026-05-12",
+      "turns": [
+        {
+          "user": "Recording a decision from today, 12 May 2026: all money in Lantern is rust_decimal::Decimal. Floating point is forbidden for amounts.",
+          "states": [
+            "30017627-5ab4-52b0-88b8-0643a4c3a408"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "It comes after the rounding incident in batch #4471, and it's written up as ADR-007.",
+          "states": [
+            "30017627-5ab4-52b0-88b8-0643a4c3a408"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "How do I serialise a Decimal as a string in serde so JSON clients don't lose precision?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "And how do I parse it back in a test?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Perfect.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-037",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-05-12",
+      "turns": [
+        {
+          "user": "I replaced the left ear pad on my Sony WH-1000XM5 this month. How do I reset their Bluetooth pairing now?",
+          "states": [
+            "406c9791-ad5a-5131-ab68-caccf7d222fd"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "They still won't show up on my phone. Any other ideas?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "That did it, thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-038",
+      "workspace": "lantern",
+      "language": "en",
+      "narrative_date": "2026-05-20",
+      "turns": [
+        {
+          "user": "ADR-005 is merged, so here's Lantern's outbound retry policy: partner calls retry 3 times with exponential backoff, 200 ms base and a 2 s cap.",
+          "states": [
+            "d67f2bbc-9a4e-54e8-aac9-9142ac41b6ee"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "The idempotency key is the ledger batch id.",
+          "states": [
+            "d67f2bbc-9a4e-54e8-aac9-9142ac41b6ee"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "`op run --env-file=.env.op -- just run` fails with 'item not found'. Background: we never commit secrets in env files, and all the LANTERN_* variables come from the 1Password CLI. What should I check?",
+          "states": [
+            "199c045a-846c-5d2b-a28e-2929e852e9c3"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "Before I push I run what CI runs: `cargo build --workspace`, `cargo nextest run --workspace`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`.",
+          "states": [
+            "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "Then `just run` to smoke-test it; it comes up on 8790. Can you turn that into a pre-push hook?",
+          "states": [
+            "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "The smoke test talks to staging, which is still lantern_staging on pg-staging-1 for now.",
+          "states": [
+            "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f"
+          ],
+          "mode": "restate"
+        },
+        {
+          "user": "Should the hook skip clippy when only docs changed?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "OK, keep it simple then.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-039",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-06-02",
+      "turns": [
+        {
+          "user": "Can you draft a résumé for me for a backend role in Singapore? Today's 2 June 2026, and I'd like a first version by tomorrow.",
+          "states": [
+            "e962bf67-7c00-51c5-b0c2-52184801ad23"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Should I lead with the ledger work or the data engineering years?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "OK, lead with the ledger work.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-040",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-06-03",
+      "turns": [
+        {
+          "user": "About the résumé for the Singapore backend role I asked for yesterday: cancel it, please don't produce one. I've decided to stay at Quillpay through 2027.",
+          "states": [
+            "e962bf67-7c00-51c5-b0c2-52184801ad23"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "Any tips for a good one-on-one with my manager next week?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "What should I avoid bringing up?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Thanks, helpful.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-041",
+      "workspace": "lantern",
+      "language": "en",
+      "narrative_date": "2026-06-03",
+      "turns": [
+        {
+          "user": "Editor news: since the start of June I've switched from vim to Helix (hx). I tried it for two weeks and I'm keeping it.",
+          "states": [
+            "bdda0cb4-a2d7-5ee0-a896-963c2f496427"
+          ],
+          "mode": "change"
+        },
+        {
+          "user": "Default keymap, and the Gruvbox theme.",
+          "states": [
+            "bdda0cb4-a2d7-5ee0-a896-963c2f496427"
+          ],
+          "mode": "change"
+        },
+        {
+          "user": "What's the Helix equivalent of vim's ciw?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "And how do I open the file picker in Helix?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Neat.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-042",
+      "workspace": "lantern",
+      "language": "en",
+      "narrative_date": "2026-06-20",
+      "turns": [
+        {
+          "user": "After this month's infrastructure move, the Lantern staging database is lantern_stg on host pg-staging-2. The runbook was updated today, 20 June 2026.",
+          "states": [
+            "f74fe29a-4800-545e-936c-c95ddb6fbd87"
+          ],
+          "mode": "change"
+        },
+        {
+          "user": "How do I update a pg_service.conf entry to point at the new host?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "And does psql pick that file up automatically?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-043",
+      "workspace": null,
+      "language": "zh",
+      "narrative_date": "2026-07-09",
+      "turns": [
+        {
+          "user": "帮我订一下「绿茶餐厅」这周五晚上两个人的位子。",
+          "states": [
+            "900fe1ee-77ae-5ee8-a693-4751ba634072"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "算了，你这边订不了的话，我自己在大众点评上订好了。",
+          "states": [
+            "900fe1ee-77ae-5ee8-a693-4751ba634072"
+          ],
+          "mode": "indirect"
+        },
+        {
+          "user": "绿茶餐厅有什么必点的菜？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "好，记下了。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-044",
+      "workspace": "lantern",
+      "language": "zh",
+      "narrative_date": "2026-07-15",
+      "turns": [
+        {
+          "user": "Lantern 以后要不要上 Kafka 做事件流？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "不用了。7 月的团队会上 Priya 提过给 Lantern 上 Kafka，团队否决了。",
+          "states": [
+            "62277bc0-ef28-5fd8-bc1b-7f2765c079b3"
+          ],
+          "mode": "rejection"
+        },
+        {
+          "user": "改用 PostgreSQL 的 LISTEN/NOTIFY 加一张 outbox 表，今年之内不再提 Kafka。",
+          "states": [
+            "62277bc0-ef28-5fd8-bc1b-7f2765c079b3"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "outbox 表一般要哪些字段？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "消费端怎么保证不重复处理？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "好，谢谢。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-045",
+      "workspace": "lantern",
+      "language": "zh",
+      "narrative_date": "2026-08-15",
+      "turns": [
+        {
+          "user": "lantern 仓库里有 30 多个已经合并的过期分支，你看怎么处理？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "先别删，今天（8 月 15 号）一个都不要删。我要自己先把分支列表归档，之后再说。",
+          "states": [
+            "3c4b572a-5e6b-5354-8d04-fc62f3e8ad5f"
+          ],
+          "mode": "rejection"
+        },
+        {
+          "user": "怎么导出所有远程分支和它们最后一次提交的日期？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "好，这个命令能用。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-046",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-08-20",
+      "turns": [
+        {
+          "user": "Travel plans: I'll be in Stockholm from 5 to 19 October 2026, visiting Tomas's family.",
+          "states": [
+            "41a08195-90d0-51d6-a92d-3ebda61e1910"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "During that window, please schedule meetings in CET.",
+          "states": [
+            "41a08195-90d0-51d6-a92d-3ebda61e1910"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "What's the weather usually like in Stockholm in early October?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Any day trips from Stockholm you'd recommend?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "How long is the ferry to one of the islands?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "OK, I'll pack a proper coat.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-047",
+      "workspace": "moss",
+      "language": "mixed",
+      "narrative_date": "2026-08-22",
+      "turns": [
+        {
+          "user": "Moss 这个月升级到 Python 3.13 了，.python-version 现在写的是 3.13, as of today, 22 August 2026.",
+          "states": [
+            "7a80315b-555a-55a8-8c79-27b3a23b1615"
+          ],
+          "mode": "change"
+        },
+        {
+          "user": "3.13 里有什么 feature 值得在 Moss 里用？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Free-threading 先不碰了，thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-048",
+      "workspace": "lantern",
+      "language": "zh",
+      "narrative_date": "2026-09-01",
+      "turns": [
+        {
+          "user": "Lantern 的 on-call 排班表出来了：每周一换班，不对，是每周四换班。",
+          "states": [
+            "9cedc3e8-3b90-5439-90c4-27afcb5deac0"
+          ],
+          "mode": "correction"
+        },
+        {
+          "user": "我的轮值周从 2026 年 9 月 24 日和 10 月 22 日开始，告警会从 PagerDuty 转到企业微信。",
+          "states": [
+            "9cedc3e8-3b90-5439-90c4-27afcb5deac0"
+          ],
+          "mode": "explicit"
+        },
+        {
+          "user": "值班前一天有什么要准备的？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "告警太多的时候怎么分优先级？",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "行，照这个清单来。",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-049",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-09-10",
+      "turns": [
+        {
+          "user": "Put tea on the list for the team offsite, not coffee. I stick to tea, Longjing if they have it, and nothing with caffeine after three.",
+          "states": [
+            "d412219c-5b71-511e-ad65-41e7c5771387"
+          ],
+          "mode": "restate"
+        },
+        {
+          "user": "And keep the offsite agenda short: bullets, no emoji.",
+          "states": [
+            "0d47adbd-f5eb-57c1-b054-9385ff3d6a3c"
+          ],
+          "mode": "restate"
+        },
+        {
+          "user": "What's a good icebreaker for a team of eight?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "I'll keep my notes from the offsite in my Obsidian vault, as usual.",
+          "states": [
+            "61de9275-35d8-51a8-91be-b43bf6430dd5"
+          ],
+          "mode": "restate"
+        },
+        {
+          "user": "Thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-050",
+      "workspace": "lantern",
+      "language": "en",
+      "narrative_date": "2026-09-15",
+      "turns": [
+        {
+          "user": "Open a PR for this change, don't push it to main. Same rule as always.",
+          "states": [
+            "f5ec00b0-3491-5a92-940e-607602ab1056"
+          ],
+          "mode": "restate"
+        },
+        {
+          "user": "And make sure the new fee column is a Decimal, not an f64. Amounts are never floating point in Lantern.",
+          "states": [
+            "30017627-5ab4-52b0-88b8-0643a4c3a408"
+          ],
+          "mode": "restate"
+        },
+        {
+          "user": "Write the migration for the fee column.",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "Test it against a local PostgreSQL, like everything else I build.",
+          "states": [
+            "110a879c-3608-5272-94ae-f610a9d9d394"
+          ],
+          "mode": "restate"
+        },
+        {
+          "user": "Looks good, thanks.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    },
+    {
+      "id": "cs-051",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-09-18",
+      "turns": [
+        {
+          "user": "Booking the team dinner: remember I can't have any shellfish, so no seafood place.",
+          "states": [
+            "add8b06d-fbf9-5904-b384-e3398ff1793c"
+          ],
+          "mode": "restate"
+        },
+        {
+          "user": "It's for my Ledger Platform team at Quillpay, eight people.",
+          "states": [
+            "c0489a40-6678-5f2d-98e8-1973ebb7fd57"
+          ],
+          "mode": "restate"
+        },
+        {
+          "user": "Can you suggest three places near Binjiang?",
+          "states": [],
+          "mode": "noise"
+        },
+        {
+          "user": "The second one looks good.",
+          "states": [],
+          "mode": "noise"
+        }
+      ]
+    }
+  ],
+  "suggestion_sessions": [
+    "cs-003",
+    "cs-006",
+    "cs-017",
+    "cs-025",
+    "cs-030",
+    "cs-031",
+    "cs-033",
+    "cs-034",
+    "cs-035",
+    "cs-038",
+    "cs-041",
+    "cs-042",
+    "cs-047"
+  ]
+}

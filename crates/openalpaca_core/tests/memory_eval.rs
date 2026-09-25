@@ -48,8 +48,7 @@ use openalpaca_core::memory::service::{
     WorkspaceHint,
 };
 use openalpaca_storage::memory_files::{Dedup, NoteId, NoteKind, NoteScope};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -91,147 +90,17 @@ const MEMORY_TOOLS: [&str; 6] = [
 const MEMORY_WRITE_TOOLS: [&str; 3] = ["memory_store", "memory_update", "memory_forget"];
 
 // ─── Data files ─────────────────────────────────────────────────────────────
+//
+// The data files' types, the corpus's included (design 09 §7.1), are shared
+// with `tests/memory_eval_corpus.rs`, which runs in default CI.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Category {
-    ExactRecall,
-    Paraphrase,
-    CrossLanguage,
-    ChangedFactsTime,
-    ProjectProcedures,
-    RejectedFailedActions,
-    Abstention,
-    SourceConflicts,
-}
+#[path = "common/eval.rs"]
+mod eval;
 
-impl Category {
-    const ALL: [Category; 8] = [
-        Category::ExactRecall,
-        Category::Paraphrase,
-        Category::CrossLanguage,
-        Category::ChangedFactsTime,
-        Category::ProjectProcedures,
-        Category::RejectedFailedActions,
-        Category::Abstention,
-        Category::SourceConflicts,
-    ];
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Category::ExactRecall => "exact_recall",
-            Category::Paraphrase => "paraphrase",
-            Category::CrossLanguage => "cross_language",
-            Category::ChangedFactsTime => "changed_facts_time",
-            Category::ProjectProcedures => "project_procedures",
-            Category::RejectedFailedActions => "rejected_failed_actions",
-            Category::Abstention => "abstention",
-            Category::SourceConflicts => "source_conflicts",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Language {
-    En,
-    Zh,
-    Mixed,
-}
-
-impl Language {
-    fn as_str(self) -> &'static str {
-        match self {
-            Language::En => "en",
-            Language::Zh => "zh",
-            Language::Mixed => "mixed",
-        }
-    }
-}
-
-/// One gold note, in the shape of design §4's frontmatter plus the two
-/// eval-only fields `project` and `language`.
-#[derive(Debug, Clone, Deserialize)]
-struct GoldNote {
-    id: String,
-    title: String,
-    kind: String,
-    scope: String,
-    #[serde(default)]
-    project: Option<String>,
-    language: Language,
-    #[serde(default)]
-    fact_key: Option<String>,
-    #[serde(default)]
-    aliases: Vec<String>,
-    #[serde(default)]
-    tags: Vec<String>,
-    body: String,
-    #[serde(default)]
-    valid_from: Option<String>,
-    #[serde(default)]
-    valid_to: Option<String>,
-    #[serde(default)]
-    supersedes: Vec<String>,
-    created_at: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct Question {
-    id: String,
-    category: Category,
-    language: Language,
-    question: String,
-    gold_answer: String,
-    #[serde(default)]
-    relies_on: Vec<String>,
-    #[serde(default)]
-    expect_abstain: bool,
-}
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn eval_dir() -> PathBuf {
-    repo_root().join("scripts/eval/memory")
-}
-
-fn read_bytes(path: &Path) -> Vec<u8> {
-    std::fs::read(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(bytes);
-    format!("{:x}", h.finalize())
-}
-
-/// Parse a JSON data file and return it with the SHA-256 of its exact bytes.
-fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> (T, String) {
-    let bytes = read_bytes(path);
-    let parsed = serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("cannot parse {}: {e}", path.display()));
-    (parsed, sha256_hex(&bytes))
-}
-
-fn is_uuid(s: &str) -> bool {
-    uuid::Uuid::parse_str(s).is_ok_and(|u| u.hyphenated().to_string() == s)
-}
-
-fn parse_instant(
-    field: &str,
-    value: &Option<String>,
-) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
-    value
-        .as_deref()
-        .map(|v| {
-            chrono::DateTime::parse_from_rfc3339(v)
-                .map(|t| t.with_timezone(&chrono::Utc))
-                .map_err(|e| format!("{field} {v:?} is not RFC 3339: {e}"))
-        })
-        .transpose()
-}
+use eval::{
+    Category, GoldNote, Language, Question, eval_dir, is_uuid, load_json, parse_instant,
+    read_bytes, repo_root, sha256_hex,
+};
 
 // ─── Seeding through the service ────────────────────────────────────────────
 
