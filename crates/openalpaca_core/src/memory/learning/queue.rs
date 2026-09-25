@@ -990,34 +990,47 @@ impl LearningQueue {
             }
 
             // The owner must be a `global_user` row (design §3): anything
-            // else learns nothing, and its cursor advances.
-            let hint = match &root {
-                Some(r) => WorkspaceHint::Root(r.as_path()),
-                None => WorkspaceHint::None,
+            // else learns nothing, and its cursor advances. The owner check
+            // reads the database, so it runs on the blocking pool (§1.9).
+            let service = self.deps.memory_service.clone();
+            let owner = lane_owner(&session.lane_key).to_string();
+            let attribution = Attribution {
+                lane_key: Some(session.lane_key.clone()),
+                task_id: None,
+                request_id: chunk
+                    .last_request_id()
+                    .and_then(|r| Uuid::parse_str(r).ok()),
+                source: Some(session.source.clone()),
             };
-            let ctx = match self.deps.memory_service.context(
-                lane_owner(&session.lane_key),
-                hint,
-                Surface::Extraction,
-                Capabilities::EXTRACTION,
-                Attribution {
-                    lane_key: Some(session.lane_key.clone()),
-                    task_id: None,
-                    request_id: chunk
-                        .last_request_id()
-                        .and_then(|r| Uuid::parse_str(r).ok()),
-                    source: Some(session.source.clone()),
-                },
-            ) {
-                Ok(ctx) => ctx,
-                Err(MemoryError::NoOwner(_)) => {
+            let context = blocking(move || {
+                let hint = match &root {
+                    Some(r) => WorkspaceHint::Root(r.as_path()),
+                    None => WorkspaceHint::None,
+                };
+                Ok(service.context(
+                    &owner,
+                    hint,
+                    Surface::Extraction,
+                    Capabilities::EXTRACTION,
+                    attribution,
+                ))
+            })
+            .await;
+            let ctx = match context {
+                Ok(Ok(ctx)) => ctx,
+                Ok(Err(MemoryError::NoOwner(_))) => {
                     self.advance(session_id, chunk.through, expected).await;
                     report.chunks += 1;
                     report.skipped_no_owner += 1;
                     continue;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!(session_id, "memory learning: context refused: {e}");
+                    report.stopped = Some(FlushStop::StoreError);
+                    return report;
+                }
+                Err(e) => {
+                    tracing::warn!(session_id, "memory learning: context task failed: {e:#}");
                     report.stopped = Some(FlushStop::StoreError);
                     return report;
                 }
@@ -1162,7 +1175,8 @@ impl LearningQueue {
             report.output_tokens += u64::from(response.usage.output_tokens);
 
             let parsed = extractor::parse_items(&response.content);
-            self.record_usage(&response, latency_ms, parsed.as_ref().err());
+            self.record_usage(&response, latency_ms, parsed.is_err())
+                .await;
             let items = match parsed {
                 Ok(items) => items,
                 Err(why) => {
@@ -1334,43 +1348,52 @@ impl LearningQueue {
     }
 
     /// Records the call like every other internal call (`record_and_log`),
-    /// which is also what the durable daily gates read.
-    fn record_usage(
+    /// which is also what the durable daily gates read — on the blocking
+    /// pool (§1.9), and before the next chunk's gate reads it.
+    async fn record_usage(
         &self,
         response: &openalpaca_llm::ChatResponse,
         latency_ms: i64,
-        parse_error: Option<&String>,
+        parse_failed: bool,
     ) {
-        let model = response.model.as_str();
+        let model = response.model.clone();
         let provider = self
             .deps
             .router
             .model_registry()
-            .resolve_provider(model)
+            .resolve_provider(&model)
             .map(|p| p.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let cost = self.deps.router.cost_tracker.calculate_cost(
-            model,
-            response.usage.input_tokens,
-            response.usage.output_tokens,
-        );
-        let (status, error) = match parse_error {
-            Some(_) => ("error", Some("JSON parse failure")),
-            None => ("success", None),
+        let (input_tokens, output_tokens) =
+            (response.usage.input_tokens, response.usage.output_tokens);
+        let cost =
+            self.deps
+                .router
+                .cost_tracker
+                .calculate_cost(&model, input_tokens, output_tokens);
+        let (status, error) = if parse_failed {
+            ("error", Some("JSON parse failure"))
+        } else {
+            ("success", None)
         };
-        if let Err(e) = LlmUsageRepository::new(&self.deps.db).record_and_log(
-            AGENT_LABEL,
-            None,
-            &provider,
-            model,
-            response.usage.input_tokens as i32,
-            response.usage.output_tokens as i32,
-            cost,
-            latency_ms,
-            status,
-            error,
-        ) {
-            tracing::warn!("Failed to persist memory learning usage: {e}");
+        let db = self.deps.db.clone();
+        if let Err(e) = blocking(move || {
+            LlmUsageRepository::new(&db).record_and_log(
+                AGENT_LABEL,
+                None,
+                &provider,
+                &model,
+                input_tokens as i32,
+                output_tokens as i32,
+                cost,
+                latency_ms,
+                status,
+                error,
+            )
+        })
+        .await
+        {
+            tracing::warn!("Failed to persist memory learning usage: {e:#}");
         }
     }
 }
