@@ -21,14 +21,23 @@ import { useUiStore } from "@/stores/ui";
 import { relativeTime } from "@/views/library/format";
 
 import {
-  CANDIDATE_NOTE,
+  candidateNote,
   freshnessNote,
   originLabel,
   scopeLabel,
   sourceLabel,
 } from "./copy";
 
-export function NoteTab({ note }: { note: MemoryNote }) {
+export interface NoteTabProps {
+  note: MemoryNote;
+  /**
+   * The title of the note a candidate would replace, once read — its copy
+   * then names it (design 09 §3.5); `null` for a candidate that names none.
+   */
+  replaces?: string | null;
+}
+
+export function NoteTab({ note, replaces = null }: NoteTabProps) {
   const focusRun = useUiStore((s) => s.focusRun);
   const openMemory = useUiStore((s) => s.openMemory);
   const freshness = freshnessNote(note.freshness);
@@ -37,7 +46,7 @@ export function NoteTab({ note }: { note: MemoryNote }) {
     <div className="max-w-[660px]">
       {note.effective_status === "candidate" && (
         <p className="mt-0 mb-[14px] rounded-2xl border border-amber-line bg-amber-surface px-[12px] py-[9px] text-base leading-[1.5] text-amber-ink">
-          {CANDIDATE_NOTE}
+          {candidateNote(note.origin, replaces)}
         </p>
       )}
       {note.effective_status === "superseded" && (

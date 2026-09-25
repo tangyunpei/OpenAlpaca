@@ -21,6 +21,7 @@ import type { MemoryFeed } from "@/hooks/useMemories";
 import type {
   MemoryListItem,
   MemorySearchPage,
+  MemorySuggestion,
   NoteScope,
   NoteStatus,
 } from "@/lib/api/memories";
@@ -28,6 +29,7 @@ import type {
 import { MEMORY_EMPTY_COPY, scopeLabel } from "./copy";
 import { MemoryRow, listRow, searchRow } from "./MemoryRow";
 import { RecentlyLearned } from "./RecentlyLearned";
+import { Suggestions } from "./Suggestions";
 
 const STATUS_CHIPS: readonly { status: NoteStatus; label: string }[] = [
   { status: "active", label: "Active" },
@@ -65,10 +67,17 @@ export interface MemoryListProps {
   feed: MemoryFeed;
   /** The search in flight or answered; `null` while the box is empty. */
   search: UseQueryResult<MemorySearchPage> | null;
+  /** Pending suggestions in this scope; `[]` hides the section. */
+  suggestions?: readonly MemorySuggestion[];
+  suggestionPendingId?: string | null;
+  onReplace?: (suggestion: MemorySuggestion) => void;
+  onKeep?: (suggestion: MemorySuggestion) => void;
   /** Recently learned in this scope; `[]` hides the section. */
   learned: readonly MemoryListItem[];
+  /** Titles of the notes the learned rows replaced, by id. */
+  replacedTitles?: ReadonlyMap<string, string>;
   undoPendingId: string | null;
-  onUndo: (item: MemoryListItem) => void;
+  onUndo: (item: MemoryListItem, replaced: string | null) => void;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onAdd: () => void;
@@ -86,7 +95,12 @@ export function MemoryList({
   onQueryChange,
   feed,
   search,
+  suggestions = [],
+  suggestionPendingId = null,
+  onReplace = () => {},
+  onKeep = () => {},
   learned,
+  replacedTitles,
   undoPendingId,
   onUndo,
   selectedId,
@@ -168,10 +182,18 @@ export function MemoryList({
       </div>
 
       <div className="sc min-h-0 flex-1 overflow-y-auto p-[8px]">
+        <Suggestions
+          items={suggestions}
+          pendingId={suggestionPendingId}
+          onReplace={onReplace}
+          onKeep={onKeep}
+          onOpen={onSelect}
+        />
         {learned.length > 0 && (
           <RecentlyLearned
             items={learned}
             pendingId={undoPendingId}
+            replacedTitles={replacedTitles}
             onUndo={onUndo}
             onOpen={onSelect}
           />

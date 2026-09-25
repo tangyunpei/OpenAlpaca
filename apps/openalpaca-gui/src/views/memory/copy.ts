@@ -42,6 +42,85 @@ export const MEMORY_ACTION_CONFLICT =
 export const CANDIDATE_NOTE =
   "Inferred from the conversation, not said by you. It is not used in answers until you confirm it.";
 
+/** What every candidate note ends with. */
+const NOT_USED_YET = "It is not used in answers until you confirm it.";
+
+/**
+ * A candidate's note follows its origin (design 09 §3.5): a suggestion from
+ * the owner's own words says so and names the note it would replace; an
+ * inferred one says it is not the owner's words. `replaces` is the replaced
+ * note's title, `null` when the candidate names none (or it is unknown yet).
+ */
+export function candidateNote(
+  origin: NoteOrigin,
+  replaces: string | null,
+): string {
+  if (origin === "extracted_user") {
+    return replaces === null
+      ? `From what you said. ${NOT_USED_YET}`
+      : `From what you said — would replace “${replaces}”. ${NOT_USED_YET}`;
+  }
+  return replaces === null
+    ? CANDIDATE_NOTE
+    : `Inferred from the conversation, not said by you — would replace “${replaces}”. ${NOT_USED_YET}`;
+}
+
+/** Whose note a suggestion would replace, as its question says it. */
+export function targetOriginLabel(origin: NoteOrigin): string {
+  switch (origin) {
+    case "user":
+      return "saved by you";
+    case "external":
+      return "edited by hand";
+    case "imported":
+      return "imported";
+    case "extracted_user":
+      return "learned";
+    default:
+      return origin;
+  }
+}
+
+/** Design 09 §3.5: “Replace “X” (saved by you) with “B”?” */
+export function suggestionQuestion(
+  target: string,
+  targetOrigin: NoteOrigin,
+  suggested: string,
+): string {
+  return `Replace “${target}” (${targetOriginLabel(targetOrigin)}) with “${suggested}”?`;
+}
+
+/** Where a suggestion came from, and when: “From what you said on 2026-09-24”. */
+export function suggestionWhence(origin: NoteOrigin, when: string): string {
+  const day = when.slice(0, 10);
+  return origin === "extracted_user"
+    ? `From what you said on ${day}`
+    : `Inferred from the conversation on ${day}`;
+}
+
+/** The toast after Replace — the old note stays, as history (design 09 §3.3). */
+export function replacedToast(target: string): string {
+  return `Replaced — “${target}” is kept as history`;
+}
+
+/** The toast after Keep mine. */
+export const KEPT_YOUR_NOTE = "Kept your note";
+
+/**
+ * A recently-learned replacement's row (design 09 §3.5): “Learned from what
+ * you said · replaced “A” · Undo” — these are the words before the button.
+ */
+export function learnedReplacing(replaced: string): string {
+  return `${LEARNED_FROM_YOU} · replaced “${replaced}”`;
+}
+
+/** The toast after undoing a replacement: the note it replaced is back. */
+export function undoneToast(replaced: string | null, title: string): string {
+  return replaced === null
+    ? `Undone — “${title}” is not remembered any more`
+    : `Undone — “${replaced}” is back`;
+}
+
 /** The kept versions are the service's own writes, the last five (design §2). */
 export const HISTORY_NOTE =
   "OpenAlpaca keeps the last five versions it wrote. An edit made outside the app is not kept here.";

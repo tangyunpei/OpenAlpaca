@@ -15,6 +15,7 @@
 import {
   useInfiniteQuery,
   useMutation,
+  useQueries,
   useQuery,
   useQueryClient,
   type UseMutationResult,
@@ -29,6 +30,7 @@ import {
   getMemoryHistory,
   listMemories,
   listRecentlyLearned,
+  listSuggestions,
   searchMemories,
   undoMemory,
   updateMemory,
@@ -39,8 +41,10 @@ import {
   type MemoryRevision,
   type MemorySearchPage,
   type MemoryStoreResult,
+  type MemorySuggestion,
   type MemoryUpdate,
   type MemoryUpdateResult,
+  type MemoryWithdrawn,
   type NoteScope,
   type NoteStatus,
 } from "@/lib/api/memories";
@@ -128,6 +132,19 @@ export function useRecentlyLearned(
   });
 }
 
+/**
+ * `GET /v1/memories/suggestions` — learned changes to notes the owner saved,
+ * waiting for Replace or Keep mine (design 09 §3.5).
+ */
+export function useSuggestions(
+  workspacePath: string | null,
+): UseQueryResult<MemorySuggestion[]> {
+  return useQuery({
+    queryKey: qk.memory.suggestions(workspacePath),
+    queryFn: ({ signal }) => listSuggestions(workspacePath, signal),
+  });
+}
+
 /** `GET /v1/memories/{id}` — the detail, and a chat turn's "notes used". */
 export function useMemoryNote(
   id: string | null,
@@ -138,6 +155,36 @@ export function useMemoryNote(
     queryFn: ({ signal }) => getMemory(id as string, workspacePath, {}, signal),
     enabled: id !== null,
   });
+}
+
+/**
+ * The titles of a few notes by id — what a recently-learned replacement row
+ * names as the note it replaced. Each is the detail read, so it shares that
+ * cache; an id not read yet (or gone) is simply absent from the map.
+ */
+export function useNoteTitles(
+  ids: readonly string[],
+  workspacePath: string | null,
+): ReadonlyMap<string, string> {
+  const results = useQueries({
+    queries: ids.map((id) => ({
+      queryKey: qk.memory.detail(id, workspacePath),
+      queryFn: ({ signal }: { signal: AbortSignal }) =>
+        getMemory(id, workspacePath, {}, signal),
+    })),
+  });
+  const titles = results.map((r) => r.data?.title ?? null);
+  const key = ids.map((id, i) => `${id}=${titles[i] ?? ""}`).join("|");
+  return useMemo(() => {
+    const map = new Map<string, string>();
+    ids.forEach((id, i) => {
+      const title = titles[i];
+      if (typeof title === "string") map.set(id, title);
+    });
+    return map;
+    // `key` is the ids and titles in one string: the map changes exactly
+    // when either does, and not on every render.
+  }, [key]);
 }
 
 /**
@@ -220,14 +267,58 @@ export interface ForgetMemoryVariables {
   revision: string;
 }
 
-/** `POST /v1/memories/{id}/undo` — a learned note, gone in one step. */
+/**
+ * `POST /v1/memories/{id}/undo` — a learned note withdrawn in one step, and
+ * what it replaced back (design 09 §3.3).
+ */
 export function useUndoMemory(
   workspacePath: string | null,
-): UseMutationResult<MemoryForgotten, Error, ForgetMemoryVariables> {
+): UseMutationResult<MemoryWithdrawn, Error, ForgetMemoryVariables> {
   const invalidate = useMemoryInvalidation();
   return useMutation({
     mutationFn: ({ id, revision }: ForgetMemoryVariables) =>
       undoMemory(id, revision, workspacePath),
+    onSettled: invalidate,
+  });
+}
+
+/** A suggestion to confirm: its own revision and its target's (S5). */
+export interface ConfirmSuggestionVariables {
+  suggestion: MemorySuggestion;
+}
+
+/**
+ * Replace: `POST /v1/memories/{id}` with `action: confirm`, the suggestion's
+ * revision as `If-Match` and the target's as `target_revision` — both as
+ * this window read them, so an edit of either since is a `409`.
+ */
+export function useConfirmSuggestion(
+  workspacePath: string | null,
+): UseMutationResult<MemoryUpdateResult, Error, ConfirmSuggestionVariables> {
+  const invalidate = useMemoryInvalidation();
+  return useMutation({
+    mutationFn: ({ suggestion }: ConfirmSuggestionVariables) =>
+      updateMemory(
+        suggestion.id,
+        suggestion.revision,
+        { action: "confirm", target_revision: suggestion.target.revision },
+        workspacePath,
+      ),
+    onSettled: invalidate,
+  });
+}
+
+/**
+ * Keep mine: `POST /v1/memories/{id}/undo` on the suggestion — a withdrawal,
+ * so nothing else the owner said is forgotten with it (design 09 §3.3).
+ */
+export function useDismissSuggestion(
+  workspacePath: string | null,
+): UseMutationResult<MemoryWithdrawn, Error, ConfirmSuggestionVariables> {
+  const invalidate = useMemoryInvalidation();
+  return useMutation({
+    mutationFn: ({ suggestion }: ConfirmSuggestionVariables) =>
+      undoMemory(suggestion.id, suggestion.revision, workspacePath),
     onSettled: invalidate,
   });
 }

@@ -53,6 +53,13 @@ interface FakeNote {
   history: { revision: string; title: string; body: string }[];
   /** The file is longer than the 32 KiB a read serves (external files only). */
   truncated?: boolean;
+  /** The notes this one names in `supersedes` (design 09 §3.2 S8). */
+  supersedes?: string[];
+  /** A suggestion's `## Knowledge`, as the listing serves it. */
+  knowledge?: string;
+  /** A suggestion's reason, from its evidence sentence. */
+  reason?: string | null;
+  observed_at?: string | null;
 }
 
 interface Recorded {
@@ -122,6 +129,7 @@ function listItem(n: FakeNote) {
     updated_at: n.updated_at,
     created_at: n.created_at,
     pinned: false,
+    supersedes: n.supersedes ?? [],
   };
 }
 
@@ -135,7 +143,7 @@ function readOutput(n: FakeNote, kept?: { title: string; body: string }) {
     path: `notes/${n.id}--${n.title.toLowerCase().replace(/\W+/g, "-")}.md`,
     sources: n.sources,
     sources_status: "intact",
-    supersedes: [],
+    supersedes: n.supersedes ?? [],
     superseded_by: [],
     freshness: "verified",
     conflict: false,
@@ -235,6 +243,43 @@ function daemon(url: URL, method: string, headers: Headers, body: unknown) {
       }));
     return json({ results, count: results.length, ...searchShape });
   }
+  if (path === "/v1/memories/suggestions") {
+    // Design 09 §3.5: a pending candidate naming one note that is still
+    // there to replace, with both texts.
+    const seen = visible(headers);
+    const items = seen
+      .filter((n) => n.status === "candidate" && n.supersedes?.length === 1)
+      .flatMap((n) => {
+        const target = seen.find(
+          (t) => t.id === n.supersedes?.[0] && t.status === "active",
+        );
+        if (target === undefined) return [];
+        return [
+          {
+            id: n.id,
+            revision: n.revision,
+            title: n.title,
+            knowledge: n.knowledge ?? n.body,
+            reason: n.reason ?? null,
+            created_at: n.created_at,
+            observed_at: n.observed_at ?? null,
+            origin: n.origin,
+            scope: n.scope,
+            sources: n.sources,
+            older_count: 0,
+            target: {
+              id: target.id,
+              revision: target.revision,
+              title: target.title,
+              excerpt: target.body.trim(),
+              origin: target.origin,
+              scope: target.scope,
+            },
+          },
+        ];
+      });
+    return json({ items });
+  }
   if (path === "/v1/memories/recently-learned") {
     const items = visible(headers)
       .filter((n) => n.origin === "extracted_user" && n.status === "active")
@@ -276,12 +321,17 @@ function daemon(url: URL, method: string, headers: Headers, body: unknown) {
   if (expected === null) {
     return refusal(428, "MEMORY_IF_MATCH_REQUIRED", "send If-Match");
   }
-  // `MemoryService::undo` reads the origin before it compares revisions.
-  if (tail === "/undo" && found.origin !== "extracted_user") {
+  // `MemoryService::undo` reads the origin before it compares revisions; a
+  // candidate of any origin is undoable — that is Keep mine (design 09 §3.3).
+  if (
+    tail === "/undo" &&
+    found.origin !== "extracted_user" &&
+    found.status !== "candidate"
+  ) {
     return refusal(
       409,
       "MEMORY_NOT_UNDOABLE",
-      `note ${id} is no longer undoable: its origin is \`${found.origin}\`, not \`extracted_user\`; forget it instead`,
+      `note ${id} is not undoable: its origin is \`${found.origin}\` — neither learned from your words (\`extracted_user\`) nor a pending suggestion; forget it instead`,
     );
   }
   if (expected !== found.revision) {
@@ -297,8 +347,12 @@ function daemon(url: URL, method: string, headers: Headers, body: unknown) {
     note: RETAINED_NOTE,
   };
   if (tail === "/undo") {
+    // A withdrawal: what the note had replaced is back; a candidate retired
+    // nothing.
     notes = notes.filter((n) => n.id !== id);
-    return json({ id, status: "forgotten", retained });
+    const restored =
+      found.status === "candidate" ? [] : (found.supersedes ?? []);
+    return json({ id, status: "withdrawn", restored });
   }
   if (method === "DELETE") {
     notes = notes.filter((n) => n.id !== id);
@@ -308,6 +362,7 @@ function daemon(url: URL, method: string, headers: Headers, body: unknown) {
   const update = body as {
     action: string;
     patch?: { title?: string; body?: string };
+    target_revision?: string;
     expected_revision?: unknown;
   };
   if (update.expected_revision !== undefined) {
@@ -316,6 +371,36 @@ function daemon(url: URL, method: string, headers: Headers, body: unknown) {
       "MEMORY_INVALID_INPUT",
       "expected_revision is not a body field",
     );
+  }
+  // S5: a suggestion's confirm binds the note it replaces.
+  const targets = found.supersedes ?? [];
+  let dismissed: string[] = [];
+  if (update.action === "confirm" && targets.length > 0) {
+    const target = notes.find((n) => n.id === targets[0]);
+    if (update.target_revision === undefined) {
+      return refusal(400, "MEMORY_INVALID_INPUT", "needs target_revision");
+    }
+    if (target === undefined) {
+      return refusal(404, "MEMORY_NOT_FOUND", `no note ${targets[0] ?? ""}`);
+    }
+    if (target.revision !== update.target_revision) {
+      return refusal(
+        409,
+        "MEMORY_REVISION_CONFLICT",
+        `note ${target.id} is at revision ${target.revision}`,
+      );
+    }
+    // S6: the other suggestions for the same note are dismissed.
+    dismissed = notes
+      .filter(
+        (n) =>
+          n.id !== id &&
+          n.status === "candidate" &&
+          n.supersedes?.[0] === targets[0],
+      )
+      .map((n) => n.id);
+    notes = notes.filter((n) => !dismissed.includes(n.id));
+    target.status = "archived"; // out of the active list: superseded
   }
   found.history.unshift({
     revision: found.revision,
@@ -333,7 +418,13 @@ function daemon(url: URL, method: string, headers: Headers, body: unknown) {
     found.origin = "user";
   }
   found.revision = nextRevision();
-  return json({ id, revision: found.revision, status: found.status });
+  return json({
+    id,
+    revision: found.revision,
+    status: found.status,
+    superseded: update.action === "confirm" ? targets : [],
+    dismissed,
+  });
 }
 
 /** An edit made behind the view's back — another window, or the model. */
@@ -679,7 +770,7 @@ describe("the Memory view", () => {
 
     await waitFor(() =>
       expect(useUiStore.getState().toast).toMatch(
-        /^Could not undo — note n-1 is no longer undoable/,
+        /^Could not undo — note n-1 is not undoable/,
       ),
     );
     expect(sent("POST", "/v1/memories/n-1/undo")).toHaveLength(1);
@@ -980,5 +1071,148 @@ describe("the Memory view", () => {
     expect(
       await screen.findByRole("button", { name: "Written by the model" }),
     ).toBeInTheDocument();
+  });
+
+  // ── Suggestions (Learning v2, design 09 §3.5) ──────────────────────────
+
+  /** A note the owner saved, and a learned change to it waiting for them. */
+  function savedAndSuggested() {
+    const saved = note({
+      id: "n-1",
+      title: "My commute",
+      body: "The user takes the bus.\n",
+    });
+    const suggestion = note({
+      id: "n-2",
+      title: "Commute",
+      body: "# Commute\n\n## Knowledge\nSince March the user cycles.\n",
+      knowledge: "Since March the user cycles.",
+      reason: "The user said they cycle to the office now.",
+      status: "candidate",
+      origin: "extracted_user",
+      observed_at: "2026-09-23T18:02:11Z",
+      supersedes: ["n-1"],
+    });
+    return { saved, suggestion };
+  }
+
+  it("asks about a suggestion with both texts, the reason and whose words", async () => {
+    savedAndSuggested();
+    renderView();
+    const section = await screen.findByRole("region", { name: "Suggestions" });
+    expect(section).toHaveTextContent(
+      "Replace “My commute” (saved by you) with “Commute”?",
+    );
+    expect(section).toHaveTextContent("YoursThe user takes the bus.");
+    expect(section).toHaveTextContent("NewSince March the user cycles.");
+    expect(section).toHaveTextContent(
+      "WhyThe user said they cycle to the office now.",
+    );
+    expect(section).toHaveTextContent("From what you said on 2026-09-23");
+  });
+
+  it("replaces with the suggestion's revision in If-Match and its target's as target_revision", async () => {
+    const { saved, suggestion } = savedAndSuggested();
+    renderView();
+    const user = userEvent.setup();
+    const section = await screen.findByRole("region", { name: "Suggestions" });
+    const [read, target] = [suggestion.revision, saved.revision];
+    await user.click(
+      within(section).getByRole("button", { name: "Replace My commute" }),
+    );
+
+    await waitFor(() =>
+      expect(sent("POST", "/v1/memories/n-2")).toHaveLength(1),
+    );
+    const confirm = sent("POST", "/v1/memories/n-2")[0];
+    expect(confirm?.headers.get("If-Match")).toBe(`"${read}"`);
+    expect(confirm?.body).toEqual({
+      action: "confirm",
+      target_revision: target,
+    });
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        "Replaced — “My commute” is kept as history",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "Suggestions" })).toBeNull(),
+    );
+  });
+
+  it("keeps the owner's note with the undo route — a withdrawal", async () => {
+    const { suggestion } = savedAndSuggested();
+    renderView();
+    const user = userEvent.setup();
+    const section = await screen.findByRole("region", { name: "Suggestions" });
+    await user.click(
+      within(section).getByRole("button", { name: "Keep mine: My commute" }),
+    );
+
+    await waitFor(() =>
+      expect(sent("POST", "/v1/memories/n-2/undo")).toHaveLength(1),
+    );
+    expect(
+      sent("POST", "/v1/memories/n-2/undo")[0]?.headers.get("If-Match"),
+    ).toBe(`"${suggestion.revision}"`);
+    expect(sent("POST", "/v1/memories/n-2")).toHaveLength(0);
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe("Kept your note"),
+    );
+    expect(notes.map((n) => n.id)).toEqual(["n-1"]);
+  });
+
+  it("says a suggestion's candidate copy in the owner's terms, and replaces from the detail", async () => {
+    const { saved } = savedAndSuggested();
+    renderView();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Candidates" }));
+    const list = await screen.findByRole("list", { name: "Notes" });
+    await user.click(
+      await within(list).findByRole("button", { name: "Commute" }),
+    );
+    expect(
+      await screen.findByText(
+        "From what you said — would replace “My commute”. It is not used in answers until you confirm it.",
+      ),
+    ).toBeInTheDocument();
+    const replace = await screen.findByRole("button", { name: "Replace" });
+    await waitFor(() => expect(replace).toBeEnabled());
+    await user.click(replace);
+    await waitFor(() =>
+      expect(sent("POST", "/v1/memories/n-2")).toHaveLength(1),
+    );
+    expect(sent("POST", "/v1/memories/n-2")[0]?.body).toEqual({
+      action: "confirm",
+      target_revision: saved.revision,
+    });
+  });
+
+  it("names what a recently learned replacement replaced, and says it is back after the undo", async () => {
+    note({ id: "n-1", title: "Old editor", status: "archived" });
+    note({
+      id: "n-2",
+      title: "Editor preference",
+      kind: "preference",
+      origin: "extracted_user",
+      supersedes: ["n-1"],
+    });
+    renderView();
+    const user = userEvent.setup();
+    const section = await screen.findByRole("region", {
+      name: "Recently learned",
+    });
+    const row = within(section).getByRole("listitem");
+    await waitFor(() =>
+      expect(row).toHaveTextContent(
+        "Learned from what you said · replaced “Old editor” · Undo",
+      ),
+    );
+    await user.click(
+      within(row).getByRole("button", { name: "Undo Editor preference" }),
+    );
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe("Undone — “Old editor” is back"),
+    );
   });
 });

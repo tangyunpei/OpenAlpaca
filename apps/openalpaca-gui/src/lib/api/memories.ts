@@ -22,6 +22,12 @@
  *  * **The shapes are the daemon's own** (`memory/service/wire.rs`): the list
  *    and search results carry `effective_status` beside the stored `status`,
  *    because *superseded* is derived from links and never written to a file.
+ *
+ * Learning v2 (design 09 §3.5) adds the **suggestions**: a learned change to
+ * a note the owner saved or edited, which replaces nothing until the owner
+ * confirms it. Confirming one sends the replaced note's revision as
+ * `target_revision` beside the suggestion's own `If-Match`; *Keep mine* is
+ * the undo route, a withdrawal that forgets nothing else the owner said.
  */
 
 import { ApiError, apiFetch } from "../http";
@@ -77,6 +83,11 @@ export interface MemoryListItem {
   updated_at: string;
   created_at: string;
   pinned: boolean;
+  /**
+   * The notes this one's frontmatter names in `supersedes` (design 09 §3.2
+   * S8): what a learned replacement replaced, or what a suggestion would.
+   */
+  supersedes: string[];
 }
 
 export interface MemoryListPage {
@@ -173,6 +184,10 @@ export interface MemoryUpdateResult {
   id: string;
   revision: string;
   status: NoteStatus;
+  /** A confirmed suggestion: the note it now replaces. Empty otherwise. */
+  superseded: string[];
+  /** A confirmed suggestion: the other suggestions for that note, dismissed. */
+  dismissed: string[];
 }
 
 /** What a forget did not erase (design §6, *Forget contract*). */
@@ -182,11 +197,55 @@ export interface MemoryRetained {
   note: string;
 }
 
-/** `DELETE …/{id}` and `…/undo` answer the same one-item shape. */
+/** `DELETE …/{id}` answers one forgotten note and what it did not erase. */
 export interface MemoryForgotten {
   id: string;
   status: "forgotten";
   retained: MemoryRetained;
+}
+
+/**
+ * `…/undo` answers a withdrawal (design 09 §3.3): the note is gone, nothing
+ * it cited is suppressed, and the notes it had replaced are back.
+ */
+export interface MemoryWithdrawn {
+  id: string;
+  status: "withdrawn";
+  /** The notes the withdrawn one had replaced, effective again. */
+  restored: string[];
+}
+
+/** The note a suggestion would replace, as the daemon re-read it. */
+export interface MemorySuggestionTarget {
+  id: string;
+  /** Sent back as `target_revision` when the suggestion is confirmed. */
+  revision: string;
+  title: string;
+  /** Its knowledge, cut short — shown beside the suggested text. */
+  excerpt: string;
+  origin: NoteOrigin;
+  scope: NoteScope;
+}
+
+/** One pending suggestion — `GET /v1/memories/suggestions` (design 09 §3.5). */
+export interface MemorySuggestion {
+  id: string;
+  revision: string;
+  title: string;
+  /** The suggested text. */
+  knowledge: string;
+  /** Why it replaces the target, when the note says. */
+  reason: string | null;
+  created_at: string;
+  /** When what it cites was said: the newest cited row's time. */
+  observed_at: string | null;
+  /** `extracted_user` — from what the owner said — or `extracted_other`. */
+  origin: NoteOrigin;
+  scope: NoteScope;
+  sources: MemorySource[];
+  /** Older suggestions for the same note, not listed. */
+  older_count: number;
+  target: MemorySuggestionTarget;
 }
 
 export interface ListMemoriesQuery {
@@ -218,7 +277,15 @@ export interface MemoryPatch {
 export type MemoryUpdate =
   | { action: "edit"; patch: MemoryPatch; reason?: string }
   | { action: "archive"; reason?: string }
-  | { action: "confirm"; reason?: string };
+  | {
+      action: "confirm";
+      /**
+       * A suggestion's: the revision of the note it replaces, as this window
+       * read it (design 09 §3.2 S5) — a note edited since is a `409`.
+       */
+      target_revision?: string;
+      reason?: string;
+    };
 
 /** `POST /v1/memories` — the `memory_store` body. */
 export interface CreateMemoryInput {
@@ -305,6 +372,22 @@ export async function listRecentlyLearned(
   return page.items;
 }
 
+/**
+ * `GET /v1/memories/suggestions` — the pending suggestions, newest first, one
+ * per note they would replace. Both partitions the header allows; the view
+ * narrows by `scope` itself.
+ */
+export async function listSuggestions(
+  workspacePath: string | null,
+  signal?: AbortSignal,
+): Promise<MemorySuggestion[]> {
+  const page = await apiFetch<{ items: MemorySuggestion[] }>(
+    "/v1/memories/suggestions",
+    { signal, headers: headers(workspacePath) },
+  );
+  return page.items;
+}
+
 /** `GET /v1/memories/{id}`, or `?revision=` for one kept `.history` copy. */
 export async function getMemory(
   id: string,
@@ -359,15 +442,16 @@ export async function updateMemory(
 }
 
 /**
- * `POST /v1/memories/{id}/undo` — forget a learned note, refused
- * (`409 MEMORY_NOT_UNDOABLE`) once it is no longer `extracted_user`.
+ * `POST /v1/memories/{id}/undo` — withdraw a learned note (what it replaced
+ * comes back) or dismiss a suggestion (*Keep mine*); refused
+ * (`409 MEMORY_NOT_UNDOABLE`) for a note the owner saved, edited or confirmed.
  */
 export async function undoMemory(
   id: string,
   revision: string,
   workspacePath: string | null,
-): Promise<MemoryForgotten> {
-  return await apiFetch<MemoryForgotten>(`${notePath(id)}/undo`, {
+): Promise<MemoryWithdrawn> {
+  return await apiFetch<MemoryWithdrawn>(`${notePath(id)}/undo`, {
     method: "POST",
     headers: headers(workspacePath, revision),
   });

@@ -179,6 +179,8 @@ export const qk = {
     ) => ["memory", "search", query, workspacePath] as const,
     recentlyLearned: (workspacePath: string | null) =>
       ["memory", "recently-learned", workspacePath] as const,
+    suggestions: (workspacePath: string | null) =>
+      ["memory", "suggestions", workspacePath] as const,
     detail: (id: string, workspacePath: string | null) =>
       ["memory", "detail", id, workspacePath] as const,
     /** One kept `.history` copy — immutable, so it is never stale. */

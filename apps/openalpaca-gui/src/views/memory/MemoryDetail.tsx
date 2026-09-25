@@ -15,7 +15,9 @@
  *
  * Every verb sends the revision this window read, in `If-Match`. A note that
  * moved meanwhile is a `409` and is said as such — never retried with the new
- * revision behind the owner's back.
+ * revision behind the owner's back. A **suggestion** (a candidate naming the
+ * note it would replace, design 09 §3.5) is confirmed with *Replace*, which
+ * also sends the replaced note's revision as read here, as `target_revision`.
  */
 
 import { useState } from "react";
@@ -38,6 +40,7 @@ import { relativeTime } from "@/views/library/format";
 import {
   MEMORY_ACTION_CONFLICT,
   originLabel,
+  replacedToast,
   scopeLabel,
   statusTag,
 } from "./copy";
@@ -92,6 +95,13 @@ export function MemoryDetail({
   const showToast = useUiStore((s) => s.showToast);
 
   const note = useMemoryNote(noteId, workspacePath);
+  // The note a candidate would replace (design 09 §3.5): its title for the
+  // copy, its revision for a Replace.
+  const replacesId =
+    note.data?.status === "candidate"
+      ? (note.data.supersedes[0] ?? null)
+      : null;
+  const target = useMemoryNote(replacesId, workspacePath);
   const update = useUpdateMemory(workspacePath);
   const forget = useForgetMemory(workspacePath);
 
@@ -210,7 +220,7 @@ export function MemoryDetail({
             </div>
 
             <div className="flex shrink-0 gap-[6px]">
-              {status === "candidate" && (
+              {status === "candidate" && replacesId === null && (
                 <Button
                   variant="primarySm"
                   disabled={busy}
@@ -223,6 +233,30 @@ export function MemoryDetail({
                   }
                 >
                   Confirm
+                </Button>
+              )}
+              {status === "candidate" && replacesId !== null && (
+                <Button
+                  variant="primarySm"
+                  disabled={busy || target.data === undefined}
+                  title={
+                    target.error === null
+                      ? undefined
+                      : `The note this would replace cannot be read: ${target.error.message}`
+                  }
+                  onClick={() => {
+                    if (target.data === undefined) return;
+                    send(
+                      {
+                        action: "confirm",
+                        target_revision: target.data.revision,
+                      },
+                      replacedToast(target.data.title),
+                      "replace",
+                    );
+                  }}
+                >
+                  Replace
                 </Button>
               )}
               {status === "active" && (
@@ -269,7 +303,9 @@ export function MemoryDetail({
         </div>
       }
     >
-      {tab === "note" && <NoteTab note={model} />}
+      {tab === "note" && (
+        <NoteTab note={model} replaces={target.data?.title ?? null} />
+      )}
       {tab === "raw" && (
         <RawTab
           note={model}

@@ -626,6 +626,7 @@ openalpaca memory search  <query> [--kind K] [--scope S] [--limit N] [--historic
 openalpaca memory show    <id> [--revision <rev>] [--raw]
 openalpaca memory add     --kind K --title T [--scope S] [--alias A]... [--tag T]... [--fact-key KEY] [--supersedes <id>] [BODY | -]
 openalpaca memory edit    <id>
+openalpaca memory suggestions [--limit N] [--format json]
 openalpaca memory confirm <id>
 openalpaca memory undo    <id>
 openalpaca memory forget  <id>... [--yes]
@@ -693,13 +694,30 @@ Notes:
   ``This note is longer than 32 KiB, so `openalpaca memory edit` would save only its first 32 KiB. Edit the file itself: <path>``
   (the note's file, relative to its partition's directory) and exits 1, having
   sent nothing.
-- `confirm` makes a candidate (something the extractor inferred from assistant or
-  tool output) an active note of yours. It is refused for a note that is not a
-  candidate.
-- `undo` forgets a *recently learned* note — one the extractor wrote from your own
-  words (origin `extracted_user`), which the app lists under "Learned from what you
-  said". Once you have edited such a note it is yours, `undo` is refused
-  (`409 MEMORY_NOT_UNDOABLE`), and `forget` is the verb.
+- `suggestions` lists what learning is waiting on you for. When something you say
+  changes a note **you saved** (or edited by hand), the extractor does not overwrite
+  it: it writes a *suggestion* — a candidate naming the note it would replace, left
+  out of answers until you decide. One line each, newest first, one per note:
+  `<id8>  replace “X” (saved by you) → “B”  from your words, 2026-09-24 — <reason>`,
+  with `(+N older)` when several restatements named the same note, and `inferred
+  from the conversation` for one read out of an answer or a tool's output rather
+  than your own words. A change to a note that was itself *learned* needs no
+  question: it replaces the old note at once, and `undo` brings the old one back.
+- `confirm` makes a candidate an active note of yours. For a suggestion it also
+  reads the note the suggestion would replace and sends that note's current
+  revision with the confirm, so a note you edited after the suggestion was made is
+  a `409`, never retired unseen; then it prints what the suggestion replaced — kept
+  as history, readable with `show` — and any other suggestions for the same note,
+  which the confirm dismissed. It is refused for a note that is not a candidate.
+- `undo` takes back what learning did, and forgets nothing else. On a *recently
+  learned* note — one the extractor wrote from your own words (origin
+  `extracted_user`), which the app lists under "Learned from what you said" — it
+  removes that note, and if the note replaced an older one, the older one is back.
+  On a suggestion (or any candidate) it dismisses it: *keep mine*, and your note
+  stays exactly as it was. Either way it is a withdrawal, not a forget: the message
+  the note came from is not suppressed, so anything else learned from that message
+  stays learned. Once you have edited or confirmed a note it is yours, `undo` is
+  refused (`409 MEMORY_NOT_UNDOABLE`), and `forget` is the verb.
 - `forget` prints the title and revision of every note named, asks once (off a
   terminal it refuses and says to pass `--yes`), then forgets each with the
   revision it printed. A forgotten note's files, history copies and index rows are

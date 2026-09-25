@@ -8,28 +8,38 @@
  * the design offers undo precisely because the owner did not ask for the note,
  * and taking back something nobody asked for should cost one click.
  *
- * Undo is a forget refused (`409 MEMORY_NOT_UNDOABLE`) once the note stopped
- * being `extracted_user` — the owner edited or confirmed it and so made it
- * theirs — and an edit through this app is exactly that, which is also why
- * such a note leaves this list.
+ * Undo is a **withdrawal** (design 09 §3.3), refused (`409
+ * MEMORY_NOT_UNDOABLE`) once the note stopped being `extracted_user` — the
+ * owner edited or confirmed it and so made it theirs — and an edit through
+ * this app is exactly that, which is also why such a note leaves this list.
+ * A withdrawal forgets nothing else the owner said, and a learned note that
+ * **replaced** an older one says so — "Learned from what you said · replaced
+ * “A” · Undo" — because its undo brings that note back.
  */
 
 import { Eyebrow } from "@/components/ui";
 import type { MemoryListItem } from "@/lib/api/memories";
 
-import { LEARNED_FROM_YOU } from "./copy";
+import { LEARNED_FROM_YOU, learnedReplacing } from "./copy";
 
 export interface RecentlyLearnedProps {
   items: readonly MemoryListItem[];
   /** The note an undo is in flight for. */
   pendingId: string | null;
-  onUndo: (item: MemoryListItem) => void;
+  /**
+   * Titles of the notes the rows replaced, by id; a row whose replaced note
+   * is not in it yet says plainly that it was learned.
+   */
+  replacedTitles?: ReadonlyMap<string, string>;
+  /** `replaced` is the title of the note the undo brings back, if any. */
+  onUndo: (item: MemoryListItem, replaced: string | null) => void;
   onOpen: (id: string) => void;
 }
 
 export function RecentlyLearned({
   items,
   pendingId,
+  replacedTitles = new Map(),
   onUndo,
   onOpen,
 }: RecentlyLearnedProps) {
@@ -40,29 +50,39 @@ export function RecentlyLearned({
     >
       <Eyebrow className="mb-[6px]">Recently learned</Eyebrow>
       <ul className="m-0 flex list-none flex-col gap-[7px] p-0">
-        {items.map((item) => (
-          <li key={item.id} className="min-w-0">
-            <button
-              type="button"
-              onClick={() => onOpen(item.id)}
-              className="block max-w-full cursor-pointer truncate border-none bg-transparent p-0 text-left text-base font-medium text-ink hover:underline"
-            >
-              {item.title}
-            </button>
-            <span className="mt-[2px] block font-mono text-2xs-plus text-muted-fg">
-              {LEARNED_FROM_YOU} ·{" "}
+        {items.map((item) => {
+          const replacedId = item.supersedes[0];
+          const replaced =
+            replacedId === undefined
+              ? null
+              : (replacedTitles.get(replacedId) ?? null);
+          return (
+            <li key={item.id} className="min-w-0">
               <button
                 type="button"
-                aria-label={`Undo ${item.title}`}
-                disabled={pendingId === item.id}
-                onClick={() => onUndo(item)}
-                className="cursor-pointer border-none bg-transparent p-0 font-mono text-2xs-plus text-blue underline hover:text-blue-hover disabled:cursor-default disabled:text-faint"
+                onClick={() => onOpen(item.id)}
+                className="block max-w-full cursor-pointer truncate border-none bg-transparent p-0 text-left text-base font-medium text-ink hover:underline"
               >
-                Undo
+                {item.title}
               </button>
-            </span>
-          </li>
-        ))}
+              <span className="mt-[2px] block font-mono text-2xs-plus text-muted-fg">
+                {replaced === null
+                  ? LEARNED_FROM_YOU
+                  : learnedReplacing(replaced)}{" "}
+                ·{" "}
+                <button
+                  type="button"
+                  aria-label={`Undo ${item.title}`}
+                  disabled={pendingId === item.id}
+                  onClick={() => onUndo(item, replaced)}
+                  className="cursor-pointer border-none bg-transparent p-0 font-mono text-2xs-plus text-blue underline hover:text-blue-hover disabled:cursor-default disabled:text-faint"
+                >
+                  Undo
+                </button>
+              </span>
+            </li>
+          );
+        })}
       </ul>
     </section>
   );

@@ -74,6 +74,7 @@
 | GET | `/v1/llm/usage` | `usage.ts` | `apps/openalpaca-gui/src/lib/api/usage.ts` |
 | GET | `/v1/memories/recently-learned` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
 | GET | `/v1/memories/search` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
+| GET | `/v1/memories/suggestions` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
 | GET | `/v1/memories/{id}/history` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
 | POST | `/v1/memories/{id}/undo` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
 | GET | `/v1/memories/{id}` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
@@ -214,8 +215,8 @@
 ### `memories.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/memories.ts`
-- Exported functions: `createMemory`, `forgetMemory`, `getMemory`, `getMemoryHistory`, `listMemories`, `listRecentlyLearned`, `searchMemories`, `undoMemory`, `updateMemory`
-- Endpoints: `GET /v1/memories`, `GET /v1/memories/search`, `GET /v1/memories/recently-learned`, `GET /v1/memories/{id}`, `GET /v1/memories/{id}/history`, `POST /v1/memories`, `POST /v1/memories/{id}`, `POST /v1/memories/{id}/undo`, `DELETE /v1/memories/{id}`
+- Exported functions: `createMemory`, `forgetMemory`, `getMemory`, `getMemoryHistory`, `listMemories`, `listRecentlyLearned`, `listSuggestions`, `searchMemories`, `undoMemory`, `updateMemory`
+- Endpoints: `GET /v1/memories`, `GET /v1/memories/search`, `GET /v1/memories/recently-learned`, `GET /v1/memories/suggestions`, `GET /v1/memories/{id}`, `GET /v1/memories/{id}/history`, `POST /v1/memories`, `POST /v1/memories/{id}`, `POST /v1/memories/{id}/undo`, `DELETE /v1/memories/{id}`
 
 ### `orchestrator.ts`
 

@@ -6,9 +6,11 @@
  * and the body scrolling. The list shows one partition — **Global**, or **This
  * project** once the daemon has resolved the window's project to a root —
  * narrowed by status (active, candidates, archived) or replaced by a search;
- * above it, while nothing is searched, the notes learned from what the owner
- * said, each with its one-step undo. The detail reads one note and is where it
- * is confirmed, edited, archived or forgotten.
+ * above it, while nothing is searched, the **suggestions** — learned changes
+ * to notes the owner saved, each with Replace and Keep mine (design 09 §3.5)
+ * — and the notes learned from what the owner said, each with its one-step
+ * undo. The detail reads one note and is where it is confirmed, edited,
+ * archived or forgotten.
  *
  * Everything here is a user-directed surface (design §4): a write records
  * origin `user`. Nothing polls — `memory_changed` invalidates `["memory"]`.
@@ -18,18 +20,31 @@ import { useState } from "react";
 
 import { useDaemonStatus } from "@/hooks/useConnection";
 import {
+  useConfirmSuggestion,
+  useDismissSuggestion,
   useMemoryFeed,
   useMemorySearch,
+  useNoteTitles,
   useRecentlyLearned,
+  useSuggestions,
   useUndoMemory,
 } from "@/hooks/useMemories";
-import { isMemoryConflict, type MemoryListItem } from "@/lib/api/memories";
+import {
+  isMemoryConflict,
+  type MemoryListItem,
+  type MemorySuggestion,
+} from "@/lib/api/memories";
 import { PANE_DEFAULTS } from "@/stores/pane-widths";
 import { useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
 import { AddNoteForm } from "./AddNoteForm";
-import { MEMORY_ACTION_CONFLICT } from "./copy";
+import {
+  KEPT_YOUR_NOTE,
+  MEMORY_ACTION_CONFLICT,
+  replacedToast,
+  undoneToast,
+} from "./copy";
 import { MemoryDetail, type ForgottenNotice } from "./MemoryDetail";
 import { MemoryList } from "./MemoryList";
 
@@ -74,25 +89,63 @@ export default function MemoryView() {
   const search = useMemorySearch(q, scope, projectPath);
   const learned = useRecentlyLearned(projectPath);
   const undo = useUndoMemory(projectPath);
+  const suggestions = useSuggestions(projectPath);
+  const confirmSuggestion = useConfirmSuggestion(projectPath);
+  const dismissSuggestion = useDismissSuggestion(projectPath);
 
   const learnedHere = (learned.data ?? []).filter(
     (item) => item.scope === scope,
   );
+  const suggestionsHere = (suggestions.data ?? []).filter(
+    (item) => item.scope === scope,
+  );
+  const replacedIds = [
+    ...new Set(learnedHere.flatMap((item) => item.supersedes.slice(0, 1))),
+  ];
+  const replacedTitles = useNoteTitles(replacedIds, projectPath);
 
-  const onUndo = (item: MemoryListItem) => {
+  const refused = (verb: string) => (error: Error) =>
+    showToast(
+      isMemoryConflict(error)
+        ? MEMORY_ACTION_CONFLICT
+        : `Could not ${verb} — ${error.message}`,
+    );
+
+  const onUndo = (item: MemoryListItem, replaced: string | null) => {
     undo.mutate(
       { id: item.id, revision: item.revision },
       {
-        onSuccess: () => showToast(`Forgot “${item.title}”`),
-        onError: (error) =>
-          showToast(
-            isMemoryConflict(error)
-              ? MEMORY_ACTION_CONFLICT
-              : `Could not undo — ${error.message}`,
-          ),
+        onSuccess: () => showToast(undoneToast(replaced, item.title)),
+        onError: refused("undo"),
       },
     );
   };
+
+  const onReplace = (suggestion: MemorySuggestion) => {
+    confirmSuggestion.mutate(
+      { suggestion },
+      {
+        onSuccess: () => showToast(replacedToast(suggestion.target.title)),
+        onError: refused("replace"),
+      },
+    );
+  };
+
+  const onKeep = (suggestion: MemorySuggestion) => {
+    dismissSuggestion.mutate(
+      { suggestion },
+      {
+        onSuccess: () => showToast(KEPT_YOUR_NOTE),
+        onError: refused("keep your note"),
+      },
+    );
+  };
+
+  const suggestionPendingId = confirmSuggestion.isPending
+    ? (confirmSuggestion.variables?.suggestion.id ?? null)
+    : dismissSuggestion.isPending
+      ? (dismissSuggestion.variables?.suggestion.id ?? null)
+      : null;
 
   const select = (id: string) => {
     setAdding(false);
@@ -114,7 +167,12 @@ export default function MemoryView() {
         onQueryChange={setQuery}
         feed={feed}
         search={q === "" ? null : search}
+        suggestions={q === "" && status === "active" ? suggestionsHere : []}
+        suggestionPendingId={suggestionPendingId}
+        onReplace={onReplace}
+        onKeep={onKeep}
         learned={q === "" && status === "active" ? learnedHere : []}
+        replacedTitles={replacedTitles}
         undoPendingId={undo.isPending ? (undo.variables?.id ?? null) : null}
         onUndo={onUndo}
         selectedId={adding ? null : openMemoryId}

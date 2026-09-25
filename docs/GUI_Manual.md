@@ -621,13 +621,31 @@ Two columns, in the Library's shape. The left one, top to bottom:
   rebuilt the results say they came from a slower file scan, and a search that
   stopped at its limit says there may be more.
 - **Active / Candidates / Archived** chips, while nothing is searched.
-  Candidates are what the assistant *inferred* — from its own reply or from a
-  run's output — rather than heard from you: they are not used in answers until
-  you confirm them.
+  Candidates are what is not used in answers until you confirm it: what the
+  assistant *inferred* — from its own reply or from a run's output — rather
+  than heard from you, and the suggestions below.
+- **Suggestions**, first above the active list, when learning is waiting on
+  you. When something you said changes a note **you saved** (or edited by
+  hand), OpenAlpaca does not overwrite it: it asks — *"Replace “X” (saved by
+  you) with “B”?"* — showing your note and the new text side by side (the new
+  one can turn out to say the same thing), why it thinks so, and *"From what
+  you said on <date>"*. **Replace** makes the new note yours and keeps the old
+  one as history (*"Replaced — “X” is kept as history"*); if you edited the old
+  note after the suggestion was made, the Replace is refused rather than
+  retiring your edit unseen. **Keep mine** dismisses the suggestion and leaves
+  your note as it was (*"Kept your note"*). Neither forgets anything else you
+  said in the same message. A suggestion is never used in answers while it
+  waits; one that was only inferred from the conversation says so.
 - **Recently learned**, above the active list: the notes learned in the last
   seven days from what you said, each reading `Learned from what you said ·
-  Undo`. Undo is one click, because you never asked for the note. Once you have
-  edited or confirmed such a note it is yours, and it leaves the list.
+  Undo` — or `Learned from what you said · replaced “A” · Undo` when it replaced
+  an older learned note, which it does without asking because you never saved
+  that one. Undo is one click, because you never asked for the note, and it
+  takes back only that: a replaced note comes back (*"Undone — “A” is back"*),
+  and whatever else the same message taught stays learned. Once you have edited
+  or confirmed such a note it is yours, and it leaves the list. A learned note
+  that would never be used — one a note you saved on the same subject outranks
+  — is not listed as learned.
 - The notes, each with its kind, who wrote it and when, and a tag for a derived
   state (`candidate`, `archived`, `superseded`, `conflict`), and `Add note` in the header (title, kind
   and body, saved to the partition the list shows; a note already there word
@@ -635,8 +653,10 @@ Two columns, in the Library's shape. The left one, top to bottom:
 
 The right column is one note: a pinned head — title, kind, scope, who wrote it,
 when, and tags for a candidate, a conflict or a file changed on disk — with
-`Confirm` (a candidate), `Archive` (an active note) and `Forget`, which arms on
-the first click and forgets on the second; then four tabs:
+`Confirm` (a candidate; `Replace` for a suggestion, which checks the note it
+replaces as above), `Archive` (an active note; a suggestion is replaced or kept,
+never archived) and `Forget`, which arms on the first click and forgets on the
+second; then four tabs:
 
 - **Note** — the Markdown rendered as text elements, never as HTML (a note is a
   file anyone can edit, so a `<script>` in one is just text), and where it came

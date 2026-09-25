@@ -22,6 +22,7 @@ import {
   isMemoryConflict,
   listMemories,
   listRecentlyLearned,
+  listSuggestions,
   searchMemories,
   undoMemory,
   updateMemory,
@@ -167,6 +168,18 @@ describe("reads", () => {
   });
 });
 
+describe("suggestions", () => {
+  it("lists the pending suggestions under the window's project", async () => {
+    reply = () => json({ items: [] });
+    const items = await listSuggestions("/Users/me/repo");
+    const request = only();
+    expect(request.method).toBe("GET");
+    expect(request.url.pathname).toBe("/v1/memories/suggestions");
+    expect(request.headers.get("x-workspace-path")).toBe("/Users/me/repo");
+    expect(items).toEqual([]);
+  });
+});
+
 describe("writes carry the revision in If-Match and nowhere else", () => {
   it("edits with the quoted revision in If-Match and a body with no revision", async () => {
     reply = () => json({ id: ID, revision: "c".repeat(64), status: "active" });
@@ -194,13 +207,39 @@ describe("writes carry the revision in If-Match and nowhere else", () => {
     expect(only().body).toEqual({ action: "confirm" });
   });
 
-  it("undoes by POST …/undo with If-Match", async () => {
-    reply = () => json({ id: ID, status: "forgotten" });
-    await undoMemory(ID, REV, null);
+  it("undoes by POST …/undo with If-Match, and reads the withdrawal back", async () => {
+    reply = () => json({ id: ID, status: "withdrawn", restored: [ID] });
+    const result = await undoMemory(ID, REV, null);
     const request = only();
     expect(request.method).toBe("POST");
     expect(request.url.pathname).toBe(`/v1/memories/${ID}/undo`);
     expect(request.headers.get("If-Match")).toBe(`"${REV}"`);
+    expect(result).toEqual({ id: ID, status: "withdrawn", restored: [ID] });
+  });
+
+  it("confirms a suggestion with its own revision in If-Match and its target's as target_revision", async () => {
+    const target = "b".repeat(64);
+    reply = () =>
+      json({
+        id: ID,
+        revision: "c".repeat(64),
+        status: "active",
+        superseded: ["x"],
+        dismissed: [],
+      });
+    const result = await updateMemory(
+      ID,
+      REV,
+      { action: "confirm", target_revision: target },
+      null,
+    );
+    const request = only();
+    expect(request.headers.get("If-Match")).toBe(`"${REV}"`);
+    expect(request.body).toEqual({
+      action: "confirm",
+      target_revision: target,
+    });
+    expect(result.superseded).toEqual(["x"]);
   });
 
   it("forgets by DELETE with If-Match", async () => {
