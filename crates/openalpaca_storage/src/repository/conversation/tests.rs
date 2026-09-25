@@ -1282,6 +1282,24 @@ fn learning_rows_before_reads_the_newest_rows_at_or_before_an_id() {
     );
 }
 
+/// A suggestion's cited `message` sources, read by id (design 09 §4.2 rule
+/// 5): the rows that still exist, in id order, with the learning columns and
+/// never an attachment's text; an empty list reads nothing.
+#[test]
+fn learning_rows_by_ids_reads_the_cited_rows_that_exist() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.create_session("user:gui", "gui", None, None).unwrap();
+    let a = learning_row(&repo, &session.id, "user", "typed", Some("r1"), None);
+    let b = learning_row(&repo, &session.id, "assistant", "answer", Some("r1"), None);
+    let rows = repo.learning_rows_by_ids(&[b, 999_999, a]).unwrap();
+    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![a, b]);
+    assert_eq!(rows[0].role, "user");
+    assert_eq!(rows[0].request_id.as_deref(), Some("r1"));
+    assert!(rows.iter().all(|r| !r.content.contains("THE ATTACHMENT")));
+    assert!(repo.learning_rows_by_ids(&[]).unwrap().is_empty());
+}
+
 /// The two new columns round-trip through every message read, and stay off
 /// the wire: `GET /v1/chat/history` serializes this struct directly.
 #[test]

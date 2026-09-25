@@ -59,6 +59,13 @@ pub enum ChatStreamEvent {
         request_id: String,
         tool_name: String,
         tool_arguments: serde_json::Value,
+        /// The daemon-authored text of the card (design 09 §4.4); `None` for
+        /// the ordinary card, which shows the literal arguments only.
+        #[serde(default)]
+        preview: Option<String>,
+        /// The approval is good for this call only (design 09 §4.2 rule 2).
+        #[serde(default)]
+        per_call: bool,
     },
     /// T1: the prompt above stopped being pending — answered, timed out or
     /// withdrawn. The twin of `ConfirmationRequested`, and like it, it does

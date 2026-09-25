@@ -136,6 +136,63 @@ pub struct ToolContext {
     /// about it. `None` is not an error: a tool that finds no bus logs at
     /// `debug` and carries on.
     pub event_bus: Option<crate::bus::EventBus>,
+    /// A person approved **this call** on its confirmation card (design 09
+    /// §4.2 rule 1).
+    ///
+    /// A fact only one branch creates:
+    /// [`SandboxManager::execute_tool`](crate::security::sandbox::SandboxManager::execute_tool)
+    /// sets it where the broker returned an answer that approves, and
+    /// overwrites the field on every other path — a cache hit, `auto_approve`,
+    /// a call that needed no card, a context a caller built with it set — so
+    /// a tool that finds it here knows a human clicked Approve for exactly
+    /// these arguments. Nothing a model sends can supply it: tool schemas are
+    /// closed and this struct is never built from arguments.
+    pub human_approval: Option<HumanApproval>,
+    /// A person denied this call on its card (design 09 §4.3): set, under the
+    /// same discipline, only on the context the sandbox hands a tool's
+    /// [`BuiltInTool::on_confirmation_denied`] hook. `None` everywhere else.
+    pub human_denial: Option<HumanDenial>,
+}
+
+/// The fact that a person approved one call on its confirmation card
+/// (design 09 §4.2). Only the core crate constructs one — the sandbox, on
+/// the one branch where a person answered yes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HumanApproval {
+    request_id: String,
+}
+
+impl HumanApproval {
+    pub(crate) fn new(request_id: impl Into<String>) -> Self {
+        Self {
+            request_id: request_id.into(),
+        }
+    }
+
+    /// The confirmation request the person answered.
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+}
+
+/// The fact that a person denied one call on its card (design 09 §4.3).
+/// Constructed only by the sandbox, like [`HumanApproval`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HumanDenial {
+    request_id: String,
+}
+
+impl HumanDenial {
+    pub(crate) fn new(request_id: impl Into<String>) -> Self {
+        Self {
+            request_id: request_id.into(),
+        }
+    }
+
+    /// The confirmation request the person answered.
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
 }
 
 impl ToolContext {
@@ -230,6 +287,31 @@ pub trait BuiltInTool: Send + Sync {
         _ctx: &ToolContext,
     ) -> Result<String, String> {
         self.execute(arguments).await
+    }
+
+    /// What the confirmation card says about this call, written by the
+    /// daemon (design 09 §4.4). The sandbox asks just before it raises a
+    /// card: `Ok(Some(text))` rides the card as its preview, `Ok(None)` — the
+    /// default — raises the ordinary card with the literal arguments, and
+    /// `Err(reason)` refuses the call with **no card**, so a person is never
+    /// asked about something that would be refused after the click.
+    async fn confirmation_preview(
+        &self,
+        _arguments: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    /// Called when a person denied this call on its card (design 09 §4.3),
+    /// with `ctx.human_denial` set. What it returns is added to the refusal
+    /// the model reads. The default does nothing.
+    async fn on_confirmation_denied(
+        &self,
+        _arguments: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Option<String> {
+        None
     }
 }
 
@@ -563,6 +645,47 @@ impl ToolRegistry {
         ctx: &ToolContext,
     ) -> Result<String, String> {
         self.dispatch(tool_name, arguments, Some(ctx)).await
+    }
+
+    /// The builtin behind `tool_name`, for the confirmation hooks below.
+    /// Only a builtin has them; every other backend answers the defaults.
+    fn builtin(&self, tool_name: &str) -> Option<Arc<dyn BuiltInTool>> {
+        self.tools
+            .get(tool_name)
+            .and_then(|entry| match &entry.backend {
+                ToolBackend::BuiltIn(handler) => Some(handler.clone()),
+                _ => None,
+            })
+    }
+
+    /// [`BuiltInTool::confirmation_preview`] of the tool registered as
+    /// `tool_name` (design 09 §4.4); `Ok(None)` for anything that is not a
+    /// builtin, or not registered.
+    pub async fn confirmation_preview(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<Option<String>, String> {
+        match self.builtin(tool_name) {
+            Some(handler) => handler.confirmation_preview(arguments, ctx).await,
+            None => Ok(None),
+        }
+    }
+
+    /// [`BuiltInTool::on_confirmation_denied`] of the tool registered as
+    /// `tool_name` (design 09 §4.3); `None` for anything that is not a
+    /// builtin.
+    pub async fn on_confirmation_denied(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Option<String> {
+        match self.builtin(tool_name) {
+            Some(handler) => handler.on_confirmation_denied(arguments, ctx).await,
+            None => None,
+        }
     }
 
     /// The single dispatch path — **and the single place the extension gate

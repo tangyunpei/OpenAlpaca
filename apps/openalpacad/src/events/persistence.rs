@@ -682,6 +682,52 @@ mod tests {
         );
     }
 
+    /// Design 09 §4.4 and 03 §6's forget contract: a `memory_confirm` card's
+    /// preview carries note titles and text, and a note forgotten later must
+    /// not survive in the audit log — so the `event_log` row keeps ids only,
+    /// while the live event every client hears carries the preview and
+    /// `per_call`.
+    #[test]
+    fn the_preview_never_reaches_event_log() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+        let mut live = eb.subscribe();
+        let preview = "Replace your saved note “Salary band” with “Salary band”?\nYours: 95k.";
+        eb.tool_confirmation_requested(
+            "req-1",
+            "orchestrator",
+            "memory_confirm",
+            &serde_json::json!({"id": "s", "expected_revision": "r", "target_revision": "t"}),
+            Some("stream-1"),
+            Some("u:gui"),
+            None,
+            Some(preview),
+            true,
+        );
+
+        match live.try_recv().expect("the live event") {
+            ServerEvent::ToolConfirmationRequested {
+                preview: sent,
+                per_call,
+                ..
+            } => {
+                assert_eq!(sent.as_deref(), Some(preview));
+                assert!(per_call);
+            }
+            other => panic!("Expected ToolConfirmationRequested, got {other:?}"),
+        }
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.event_type == "tool_confirmation_requested")
+            .expect("the request is audited");
+        let persisted = serde_json::to_string(&(&row.detail, &row.result)).unwrap();
+        assert!(!persisted.contains("Salary band"), "{persisted}");
+        assert!(!persisted.contains("95k"), "{persisted}");
+        assert!(!persisted.contains("preview"), "{persisted}");
+        assert_eq!(row.detail.as_ref().unwrap()["request_id"], "req-1");
+    }
+
     /// A loose artifact still logs; it simply has no agent column to fill.
     #[test]
     fn a_loose_artifact_logs_without_an_agent() {
@@ -779,6 +825,8 @@ mod tests {
             None,
             None,
             Some("t-1"),
+            None,
+            false,
         );
         eb.workflow_steered("t-1", "junpei:cli");
         eb.workflow_started("t-1", "junpei:cli", "A run");

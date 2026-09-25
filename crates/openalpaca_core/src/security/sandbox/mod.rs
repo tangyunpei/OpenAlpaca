@@ -14,7 +14,7 @@ use crate::security::confirmation::{
 };
 use crate::security::sanitizer::InputSanitizer;
 use crate::tools::extensions::is_withheld_refusal;
-use crate::tools::registry::ToolContext;
+use crate::tools::registry::{HumanApproval, HumanDenial, ToolContext};
 use crate::tools::ToolRegistry;
 use chrono::Utc;
 use openalpaca_llm::ToolCall;
@@ -267,11 +267,20 @@ impl SandboxManager {
         //    hints; otherwise we derive the set from `destructive_hint=true` tools.
         let args_hash = crate::security::confirmation::hash_canonical_args(&tool_call.arguments);
         let confirmation_set = effective_confirmation_set(policy, &self.registry);
+        // Design 09 §4.2 rule 2 (LR14): a per-call tool always asks — whatever
+        // list the policy carries — and neither the approval cache nor
+        // `auto_approve` answers for it: approving everything blindly must
+        // never mint a `user` note.
+        let per_call = crate::tools::builtins::approval_is_per_call(&tool_call.name);
+        // Rule 1: the fact that a person approved this call. Created on the
+        // one branch below where the broker returned an approving answer and
+        // on no other, and written over whatever the caller's context held.
+        let mut human_approval: Option<HumanApproval> = None;
 
-        if confirmation_set.iter().any(|t| t == &tool_call.name) {
+        if per_call || confirmation_set.iter().any(|t| t == &tool_call.name) {
             // Check the approval cache first — a prior user approval (this session)
             // can bypass the prompt when scoped to these args or the whole tool.
-            if self.approval_cache.is_approved(&tool_call.name, args_hash) {
+            if !per_call && self.approval_cache.is_approved(&tool_call.name, args_hash) {
                 tracing::debug!(
                     agent_id,
                     tool = %tool_call.name,
@@ -279,7 +288,7 @@ impl SandboxManager {
                     "Invocation pre-approved (cache hit)"
                 );
                 // Fall through to circuit breaker + execution.
-            } else if policy.auto_approve {
+            } else if !per_call && policy.auto_approve {
                 tracing::info!(
                     agent_id,
                     tool = %tool_call.name,
@@ -339,6 +348,21 @@ impl SandboxManager {
                 );
                 return Err(reason);
             } else if let Some(ref broker) = self.confirmation_broker {
+                // Design 09 §4.4: what the card says, written by the daemon
+                // from the tool's own read. A refusal here raises **no card**:
+                // a person is never asked about a call that would be refused
+                // after the click.
+                let preview = self
+                    .registry
+                    .confirmation_preview(&tool_call.name, &tool_call.arguments, &disciplined(ctx))
+                    .await
+                    .inspect_err(|reason| {
+                        tracing::info!(
+                            agent_id,
+                            tool = %tool_call.name,
+                            "Tool refused before its confirmation card: {reason}"
+                        );
+                    })?;
                 let request_id = uuid::Uuid::new_v4().to_string();
                 let request = ConfirmationRequest {
                     request_id: request_id.clone(),
@@ -352,6 +376,8 @@ impl SandboxManager {
                     // actually waiting on this prompt.
                     task_id: ctx.task_id.clone(),
                     agent_instance_id: ctx.agent_instance_id.clone(),
+                    preview: preview.clone(),
+                    per_call,
                     timestamp: Utc::now(),
                 };
 
@@ -368,6 +394,8 @@ impl SandboxManager {
                     stream_id: policy.stream_id.clone(),
                     lane_key: policy.lane_key.clone(),
                     task_id: ctx.task_id.clone(),
+                    preview,
+                    per_call,
                     timestamp: Utc::now(),
                 });
                 let timeout_secs = policy.confirmation_timeout_secs.unwrap_or(300);
@@ -400,18 +428,43 @@ impl SandboxManager {
                 match resolution {
                     ConfirmationResolution::Answered(resp) if resp.approved => {
                         tracing::info!(agent_id, tool = %tool_call.name, "Tool approved by user");
-                        // Record the approval so subsequent invocations skip the prompt.
-                        // Default to TheseArgs (safest) when the caller omits a scope.
-                        let scope = resp.approval_scope.unwrap_or(
-                            crate::security::confirmation::ApprovalScope::TheseArgs,
-                        );
-                        self.approval_cache
-                            .record(&tool_call.name, args_hash, scope);
+                        // Design 09 §4.2 rule 1: the one branch where a person
+                        // answered yes, and so the one place the fact is made.
+                        human_approval = Some(HumanApproval::new(request_id.clone()));
+                        if per_call {
+                            // LR14: good for this call only, whatever scope
+                            // the answer carried — never recorded.
+                            tracing::debug!(
+                                tool = %tool_call.name,
+                                "Per-call approval: not recorded in the approval cache"
+                            );
+                        } else {
+                            // Record the approval so subsequent invocations skip the prompt.
+                            // Default to TheseArgs (safest) when the caller omits a scope.
+                            let scope = resp.approval_scope.unwrap_or(
+                                crate::security::confirmation::ApprovalScope::TheseArgs,
+                            );
+                            self.approval_cache
+                                .record(&tool_call.name, args_hash, scope);
+                        }
                         // Fall through to circuit breaker + execution
                     }
                     ConfirmationResolution::Answered(_) => {
-                        let reason = format!("Tool '{}' denied by user", tool_call.name);
+                        let mut reason = format!("Tool '{}' denied by user", tool_call.name);
                         tracing::info!(agent_id, tool = %tool_call.name, "Tool denied by user");
+                        // Design 09 §4.3: the tool may act on the person's No
+                        // (a suggestion is dismissed) — told so by a fact
+                        // made here, under rule 1's discipline.
+                        let mut denied = disciplined(ctx);
+                        denied.human_denial = Some(HumanDenial::new(request_id.clone()));
+                        if let Some(note) = self
+                            .registry
+                            .on_confirmation_denied(&tool_call.name, &tool_call.arguments, &denied)
+                            .await
+                        {
+                            reason.push_str(". ");
+                            reason.push_str(&note);
+                        }
                         return Err(reason);
                     }
                     ConfirmationResolution::Cancelled => {
@@ -464,11 +517,16 @@ impl SandboxManager {
         // here is keyed on the tool name — the sandbox hands out the bus, the
         // tool decides whether it has anything to say. A caller that already
         // supplied one keeps it.
+        //
+        // It is also where the approval fact is written, **always** (design
+        // 09 §4.2 rule 1): the sandbox's own answer from step 3 or nothing, so
+        // a context a caller built with the field set arrives with `None`.
         let ctx_owned = {
-            let mut owned = ctx.clone();
+            let mut owned = disciplined(ctx);
             if owned.event_bus.is_none() {
                 owned.event_bus = Some(self.bus.clone());
             }
+            owned.human_approval = human_approval;
             owned
         };
 
@@ -617,6 +675,18 @@ impl SandboxManager {
     pub(crate) fn approval_cache(&self) -> &crate::security::confirmation::ApprovalCache {
         &self.approval_cache
     }
+}
+
+/// A copy of `ctx` with neither person-fact set (design 09 §4.2 rule 1).
+///
+/// Every context the sandbox hands onward — to a preview hook, to a denial
+/// hook, to the tool itself — starts from this, and only the sandbox then
+/// adds the one fact it made. A caller cannot pass one through.
+fn disciplined(ctx: &ToolContext) -> ToolContext {
+    let mut out = ctx.clone();
+    out.human_approval = None;
+    out.human_denial = None;
+    out
 }
 
 /// Compute the effective confirmation set for a policy.

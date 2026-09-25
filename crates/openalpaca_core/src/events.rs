@@ -347,6 +347,13 @@ pub enum SystemEvent {
         /// The run that is waiting on this prompt (GAP-10), or `None` outside
         /// one — the same attribution §4.4's derived `blocked` lane uses.
         task_id: Option<String>,
+        /// The daemon-authored text the card shows above the arguments
+        /// (design 09 §4.4), or `None` for the ordinary card. Never persisted:
+        /// the `event_log` row keeps ids only.
+        preview: Option<String>,
+        /// The approval is good for this call only (design 09 §4.2 rule 2):
+        /// no client offers *Always allow* for it.
+        per_call: bool,
         timestamp: DateTime<Utc>,
     },
     /// A pending tool confirmation stopped being pending (T1).

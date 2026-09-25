@@ -245,6 +245,16 @@ pub enum ServerEvent {
         lane_key: Option<String>,
         /// The run waiting on this prompt (GAP-10), or `null` outside one.
         task_id: Option<String>,
+        /// What the card says about the call, written by the daemon from the
+        /// tool's own read (design 09 §4.4) — shown above the literal
+        /// arguments, never the model's text. `null` for the ordinary card.
+        /// Live only: the `event_log` row keeps ids only.
+        #[serde(default)]
+        preview: Option<String>,
+        /// The approval is good for this one call only (design 09 §4.2 rule
+        /// 2): offer no *Always allow* — the daemon ignores the scope anyway.
+        #[serde(default)]
+        per_call: bool,
         ts: DateTime<Utc>,
         instance_id: String,
     },

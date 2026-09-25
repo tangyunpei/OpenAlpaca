@@ -23,9 +23,10 @@ mod web_search;
 pub use invoke_skill::{invoke_skill_tool_definition, InvokeSkillTool};
 pub use main_loop::{main_loop_relay_guidance, main_loop_tool_set, MainLoopToolSet};
 pub use memory_tools::{
-    MemoryForgetTool, MemoryStoreTool, MemoryUpdateTool, memory_forget_tool_definition,
-    memory_list_tool_definition, memory_read_tool_definition, memory_read_tools,
-    memory_search_tool_definition, memory_store_tool_definition, memory_update_tool_definition,
+    MemoryConfirmTool, MemoryForgetTool, MemoryStoreTool, MemoryUpdateTool,
+    memory_confirm_tool_definition, memory_forget_tool_definition, memory_list_tool_definition,
+    memory_read_tool_definition, memory_read_tools, memory_search_tool_definition,
+    memory_store_tool_definition, memory_update_tool_definition,
 };
 pub use start_workflow::{start_workflow_tool_definition, StartWorkflowTool};
 pub use steer_workflow::{steer_workflow_tool_definition, SteerWorkflowTool};
@@ -592,11 +593,27 @@ pub(crate) fn annotations_for_builtin(name: &str) -> Option<openalpaca_mcp::Tool
         // Design §7, *Capabilities*: the two memory tools that prompt;
         // `memory_store` deliberately carries none — a plain save never
         // prompts, and a tool-issued supersede is bounded by authority.
+        // Design 09 §4.1: `memory_confirm` prompts on an attended turn and is
+        // refused on an unattended one, like the other two.
         "file_write" | "workspace_write" | "artifact_write" | "update_persona"
-        | "memory_forget" | "memory_update" => Some(destructive_local_annotations()),
+        | "memory_forget" | "memory_update" | "memory_confirm" => {
+            Some(destructive_local_annotations())
+        }
         "shell_execute" | "send" => Some(destructive_open_world_annotations()),
         _ => None,
     }
+}
+
+/// Whether a person's approval of this tool is good for **one call only**
+/// (design 09 §4.2 rule 2, ruling LR14): true only for `memory_confirm`,
+/// whose Approve is what mints a `user` note (G2).
+///
+/// For such a tool the sandbox always raises the card — it skips the
+/// approval cache and `auto_approve`, and never records an approval — and
+/// the card says so (`per_call`), so no client offers *Always allow*.
+/// Static per tool name, like every annotation (design 03 §7).
+pub fn approval_is_per_call(name: &str) -> bool {
+    name == "memory_confirm"
 }
 
 fn read_only_annotations() -> openalpaca_mcp::ToolAnnotations {

@@ -75,6 +75,8 @@ mod confirmation {
             lane_key: Some("global1:discord".to_string()),
             task_id: None,
             agent_instance_id: None,
+            preview: None,
+            per_call: false,
             timestamp: chrono::Utc::now(),
         }
     }

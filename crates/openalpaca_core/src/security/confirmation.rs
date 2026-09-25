@@ -30,6 +30,14 @@ pub struct ConfirmationRequest {
     pub task_id: Option<String>,
     /// The runtime agent instance whose lane is waiting.
     pub agent_instance_id: Option<String>,
+    /// What the card says about the call, written by the daemon from the
+    /// tool's own read (design 09 §4.4) — never the model's text. `None`
+    /// for the ordinary card, which shows the literal arguments.
+    pub preview: Option<String>,
+    /// The approval is good for this one call only (design 09 §4.2 rule 2):
+    /// a client offers no *Always allow*, and the sandbox would ignore the
+    /// scope anyway.
+    pub per_call: bool,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -264,6 +272,8 @@ mod tests {
             lane_key: None,
             task_id: None,
             agent_instance_id: None,
+            preview: None,
+            per_call: false,
             timestamp: Utc::now(),
         }
     }

@@ -590,6 +590,8 @@ async fn busy_counts_live_runs_pending_prompts_and_connected_clients() {
         lane_key: None,
         task_id: Some("running".to_string()),
         agent_instance_id: None,
+        preview: None,
+        per_call: false,
         timestamp: Utc::now(),
     });
 

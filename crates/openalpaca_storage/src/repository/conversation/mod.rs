@@ -357,6 +357,31 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
+    /// The rows with these ids that still exist, in id order, reading only
+    /// [`LearningRow`]'s columns — how a suggestion's cited `message` sources
+    /// are told apart into rows the user typed and everything else (design 09
+    /// §4.2 rule 5), through the primary key.
+    pub fn learning_rows_by_ids(&self, ids: &[i64]) -> Result<Vec<LearningRow>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.db.with_connection(|conn| {
+            let marks = vec!["?"; ids.len()].join(", ");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {LEARNING_COLUMNS} FROM conversation_messages
+                 WHERE id IN ({marks})
+                 ORDER BY id ASC",
+            ))?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params_from_iter(ids.iter()),
+                    Self::row_to_learning_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
     /// Delete all messages for a lane. Returns the number of deleted rows.
     pub fn delete_by_lane(&self, lane_key: &str) -> Result<u64> {
         self.db.with_connection(|conn| {

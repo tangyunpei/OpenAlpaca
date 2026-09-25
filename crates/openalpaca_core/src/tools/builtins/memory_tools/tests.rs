@@ -25,6 +25,7 @@ const BOB_KEY: &str = "5c357145f3a583c080c9f1d8ee520e71";
 struct Harness {
     _env: HomeStoreGuard,
     root: tempfile::TempDir,
+    db: Database,
     service: Arc<MemoryService>,
 }
 
@@ -38,12 +39,13 @@ impl Harness {
         let identities = IdentityRepository::new(&db);
         identities.create_global_user(ALICE, None).unwrap();
         identities.create_global_user(BOB, None).unwrap();
-        let service = MemoryService::new(Some(db), MemoryIndex::open_in_memory().unwrap());
+        let service = MemoryService::new(Some(db.clone()), MemoryIndex::open_in_memory().unwrap());
         service.rebuild_index().unwrap();
         let service = Arc::new(service);
         Self {
             _env: env,
             root,
+            db,
             service,
         }
     }
@@ -739,11 +741,13 @@ fn inferred_candidate(h: &Harness) -> crate::memory::service::StoreOutput {
         .unwrap()
 }
 
-/// Design 09 §4.1, the wasted click: a `memory_update` confirm raises the
-/// ordinary card on an attended turn, and only after the person approves
-/// does the service refuse it — the click was for nothing.
+/// Design 09 §4.1 (flipped from
+/// `an_approved_memory_update_confirm_is_refused_after_the_click`): a
+/// `memory_update` confirm is refused **before** any card — at HEAD the card
+/// went out, the person approved, and only then did the service refuse, so
+/// the click was for nothing.
 #[tokio::test]
-async fn an_approved_memory_update_confirm_is_refused_after_the_click() {
+async fn a_memory_update_confirm_is_refused_before_any_card() {
     let h = Harness::new();
     let candidate = inferred_candidate(&h);
     let broker = Arc::new(crate::security::confirmation::ConfirmationBroker::new());
@@ -751,25 +755,6 @@ async fn an_approved_memory_update_confirm_is_refused_after_the_click() {
     let mut rx = bus.subscribe();
     let mut sandbox = SandboxManager::with_defaults(writer_registry(&h), bus);
     sandbox.set_confirmation_broker(broker.clone());
-    let answering = broker.clone();
-    let clicked = tokio::spawn(async move {
-        for _ in 0..200 {
-            if let Some(id) = answering.pending_keys().first().cloned() {
-                answering
-                    .respond(
-                        &id,
-                        crate::security::confirmation::ConfirmationResponse {
-                            approved: true,
-                            approval_scope: None,
-                        },
-                    )
-                    .unwrap();
-                return true;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        false
-    });
     let call = ToolCall {
         id: "tc".into(),
         name: "memory_update".into(),
@@ -780,13 +765,641 @@ async fn an_approved_memory_update_confirm_is_refused_after_the_click() {
         .await
         .unwrap_err();
     assert!(err.starts_with("confirm_refused"), "{err}");
-    assert!(clicked.await.unwrap(), "a card was raised and answered");
+    assert!(err.contains("Memory view"), "{err}");
     assert!(
-        std::iter::from_fn(|| rx.try_recv().ok()).any(|e| matches!(
+        err.contains(&format!("openalpaca memory confirm {}", candidate.id)),
+        "{err}"
+    );
+    assert_eq!(broker.pending_count(), 0, "no card was raised");
+    assert!(
+        !std::iter::from_fn(|| rx.try_recv().ok()).any(|e| matches!(
             e,
             crate::events::SystemEvent::ToolConfirmationRequested { .. }
         )),
-        "the card went out before the refusal"
+        "no card went out"
+    );
+    // Every other action still raises the ordinary card with the literal
+    // arguments (here: nobody answers, so it times out).
+    let (id, rev) = h.user_note(ALICE, "Favourite colour", "# Favourite colour\n\nGreen.\n");
+    let mut policy = sandbox_policy(false);
+    policy.confirmation_timeout_secs = Some(1);
+    let archive = ToolCall {
+        id: "tc".into(),
+        name: "memory_update".into(),
+        arguments: serde_json::json!({"id": id.to_string(), "expected_revision": rev, "action": "archive"}),
+    };
+    let err = sandbox
+        .execute_tool(&archive, &policy, &h.tool_ctx(ALICE))
+        .await
+        .unwrap_err();
+    assert!(err.contains("timed out"), "{err}");
+}
+
+// ============================================================================
+// memory_confirm (design 09 §4, MD-12)
+// ============================================================================
+
+/// A user row a GUI turn wrote (design 09 §1.2's *user-authored* row).
+fn typed_row(h: &Harness, text: &str, created_at: &str) -> i64 {
+    h.db.with_connection(|c| {
+        c.execute(
+            "INSERT INTO conversation_messages (lane_key, role, content, source, request_id, created_at)
+             VALUES ('u_example_alice:gui', 'user', ?1, 'gui', ?2, ?3)",
+            [text, uuid::Uuid::new_v4().to_string().as_str(), created_at],
+        )?;
+        Ok(c.last_insert_rowid())
+    })
+    .unwrap()
+}
+
+/// The assistant's answer to a turn — cited, but not the user's words.
+fn reply_row(h: &Harness, text: &str) -> i64 {
+    h.db.with_connection(|c| {
+        c.execute(
+            "INSERT INTO conversation_messages (lane_key, role, content, source, request_id)
+             VALUES ('u_example_alice:gui', 'assistant', ?1, 'gui', ?2)",
+            [text, uuid::Uuid::new_v4().to_string().as_str()],
+        )?;
+        Ok(c.last_insert_rowid())
+    })
+    .unwrap()
+}
+
+fn message(id: i64) -> NoteSource {
+    NoteSource {
+        kind: SourceType::Message,
+        id: id.to_string(),
+        observed_at: None,
+    }
+}
+
+/// What learning writes for a change it found against a note the user
+/// saved (design 09 §2.5, §3.1): a suggestion — a candidate naming it.
+fn suggestion_for(
+    h: &Harness,
+    target: (NoteId, &str),
+    title: &str,
+    knowledge: &str,
+    rows: &[i64],
+    provenance: crate::memory::service::ExtractionProvenance,
+) -> crate::memory::service::StoreOutput {
+    let extractor = h
+        .service
+        .context(
+            ALICE,
+            WorkspaceHint::None,
+            Surface::Extraction,
+            Capabilities::EXTRACTION,
+            Attribution::default(),
+        )
+        .unwrap();
+    h.service
+        .store(
+            &extractor,
+            StoreInput {
+                title: title.into(),
+                body: format!(
+                    "# {title}\n\n## Knowledge\n{knowledge}\n\n## Evidence and limits\nFrom what you said. Replaces “{title}” (saved by you): the user said they switched.\n"
+                ),
+                kind: Some(NoteKind::Preference),
+                sources: rows.iter().map(|r| message(*r)).collect(),
+                supersedes: Some((target.0, target.1.to_string())),
+                replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                provenance: Some(provenance),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+
+/// The saved note, a typed row, and the suggestion learning made of it.
+struct Pending {
+    target: (NoteId, String),
+    row: i64,
+    suggestion: crate::memory::service::StoreOutput,
+}
+
+fn pending(h: &Harness) -> Pending {
+    let target = h.user_note(
+        ALICE,
+        "Editor preference",
+        "# Editor preference\n\n## Knowledge\nI use vim for everything.\n",
+    );
+    let row = typed_row(
+        h,
+        "I switched from vim to Helix in June.",
+        "2026-06-14 09:30:00",
+    );
+    let suggestion = suggestion_for(
+        h,
+        (target.0, &target.1),
+        "Editor preference",
+        "Since June 2026 the user edits with Helix; before that, vim.",
+        &[row],
+        crate::memory::service::ExtractionProvenance::UserWords,
+    );
+    Pending {
+        target,
+        row,
+        suggestion,
+    }
+}
+
+fn confirm_args(p: &Pending) -> serde_json::Value {
+    serde_json::json!({
+        "id": p.suggestion.id.to_string(),
+        "expected_revision": p.suggestion.revision,
+        "target_revision": p.target.1,
+    })
+}
+
+/// The main loop's registry with `memory_confirm` registered as
+/// `MainLoopToolSet::register_into` registers it.
+fn confirm_registry(h: &Harness) -> Arc<ToolRegistry> {
+    let registry = writer_registry(h);
+    registry
+        .register(RegisteredTool {
+            annotations: annotations_for_builtin("memory_confirm"),
+            definition: memory_confirm_tool_definition(),
+            backend: ToolBackend::BuiltIn(Arc::new(MemoryConfirmTool::new(h.service.clone()))),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            version: "test".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    for tool in memory_read_tools(h.service.clone()) {
+        registry.register(tool).unwrap();
+    }
+    registry
+}
+
+/// Answers the first card that appears with `approved`, returning what it
+/// carried; `None` when no card appeared within two seconds.
+fn answer_first_card(
+    broker: &Arc<crate::security::confirmation::ConfirmationBroker>,
+    approved: bool,
+    scope: Option<crate::security::confirmation::ApprovalScope>,
+) -> tokio::task::JoinHandle<Option<crate::security::confirmation::ConfirmationRequest>> {
+    let broker = broker.clone();
+    tokio::spawn(async move {
+        for _ in 0..200 {
+            if let Some(request) = broker.pending_requests().into_iter().next() {
+                broker
+                    .respond(
+                        &request.request_id,
+                        crate::security::confirmation::ConfirmationResponse {
+                            approved,
+                            approval_scope: scope,
+                        },
+                    )
+                    .unwrap();
+                return Some(request);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        None
+    })
+}
+
+fn read_json(h: &Harness, id: NoteId) -> Result<serde_json::Value, MemoryError> {
+    let user = h
+        .service
+        .context(
+            ALICE,
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    h.service
+        .read(
+            &user,
+            ReadInput {
+                id,
+                expected_revision: None,
+                section: None,
+            },
+        )
+        .map(|out| wire::read_output_json(&out))
+}
+
+/// Design 09 §4.2 end to end, and G2: the model's call raises a card, the
+/// person's Approve on it is the one thing that confirms, and the confirm is
+/// a user-directed act — origin `user`, `memory_changed.surface` `"user"` —
+/// that retires the note it replaces.
+#[tokio::test]
+async fn an_approved_memory_confirm_records_origin_user() {
+    let h = Harness::new();
+    let bus = EventBus::default();
+    let p = pending(&h);
+    let service = Arc::new(
+        MemoryService::new(Some(h.db.clone()), MemoryIndex::open_in_memory().unwrap())
+            .with_bus(bus.clone()),
+    );
+    service.rebuild_index().unwrap();
+    let h = Harness { service, ..h };
+    let mut rx = bus.subscribe();
+    let broker = Arc::new(crate::security::confirmation::ConfirmationBroker::new());
+    let mut sandbox = SandboxManager::with_defaults(confirm_registry(&h), bus);
+    sandbox.set_confirmation_broker(broker.clone());
+    let card = answer_first_card(&broker, true, None);
+    let call = ToolCall {
+        id: "tc".into(),
+        name: "memory_confirm".into(),
+        arguments: confirm_args(&p),
+    };
+    let out = sandbox
+        .execute_tool(&call, &sandbox_policy(false), &h.tool_ctx(ALICE))
+        .await
+        .unwrap();
+    let out: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(out["status"], "active");
+    assert_eq!(
+        out["superseded"],
+        serde_json::json!([p.target.0.to_string()])
+    );
+    let card = card.await.unwrap().expect("a card was raised");
+    assert!(card.per_call);
+    assert!(card.preview.is_some());
+
+    let confirmed = read_json(&h, p.suggestion.id).unwrap();
+    assert_eq!(confirmed["origin"], "user");
+    assert_eq!(confirmed["status"], "active");
+    let target = read_json(&h, p.target.0).unwrap();
+    assert_eq!(
+        target["superseded_by"],
+        serde_json::json!([p.suggestion.id.to_string()])
+    );
+    let changed: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|e| match e {
+            crate::events::SystemEvent::MemoryChanged {
+                note_id,
+                change,
+                surface,
+                ..
+            } => Some((note_id, change, surface)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        changed
+            .iter()
+            .any(|(id, change, surface)| id == &p.suggestion.id.to_string()
+                && change == "confirmed"
+                && surface.as_deref() == Some("user")),
+        "{changed:?}"
+    );
+}
+
+/// Rule 6 (design 09 §4.2), G2: without the approval fact the tool answers
+/// `approval_required` and writes nothing — the model saying yes is not a
+/// person clicking Approve.
+#[tokio::test]
+async fn without_an_approval_the_tool_answers_approval_required() {
+    let h = Harness::new();
+    let p = pending(&h);
+    let tool = MemoryConfirmTool::new(h.service.clone());
+    let err = h.call(&tool, ALICE, confirm_args(&p)).await.unwrap_err();
+    assert!(err.starts_with("approval_required"), "{err}");
+    let still = read_json(&h, p.suggestion.id).unwrap();
+    assert_eq!(still["status"], "candidate");
+    assert_eq!(still["origin"], "extracted_user");
+    assert_eq!(
+        read_json(&h, p.target.0).unwrap()["effective_status"],
+        "active"
+    );
+}
+
+/// Design 09 §4.3 (owner answer LQ2) and the Deny case of
+/// `withdrawals_leave_sibling_notes_recallable`: a Deny dismisses the
+/// suggestion durably — a withdrawal, as *Keep mine* is — so the note it
+/// would have replaced is untouched and a sibling note the same message
+/// taught stays learned and recallable.
+#[tokio::test]
+async fn deny_dismisses_the_suggestion_and_leaves_the_target() {
+    let h = Harness::new();
+    let p = pending(&h);
+    let tool_ctx = h
+        .service
+        .context(
+            ALICE,
+            WorkspaceHint::None,
+            Surface::ModelTool,
+            Capabilities::READ_WRITE,
+            Attribution::default(),
+        )
+        .unwrap();
+    let sibling = h
+        .service
+        .store(
+            &tool_ctx,
+            StoreInput {
+                title: "Home city".into(),
+                body: "# Home city\n\nThe user moved to Berlin.\n".into(),
+                kind: Some(NoteKind::Fact),
+                sources: vec![message(p.row)],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let broker = Arc::new(crate::security::confirmation::ConfirmationBroker::new());
+    let mut sandbox = SandboxManager::with_defaults(confirm_registry(&h), EventBus::default());
+    sandbox.set_confirmation_broker(broker.clone());
+    let card = answer_first_card(&broker, false, None);
+    let call = ToolCall {
+        id: "tc".into(),
+        name: "memory_confirm".into(),
+        arguments: confirm_args(&p),
+    };
+    let err = sandbox
+        .execute_tool(&call, &sandbox_policy(false), &h.tool_ctx(ALICE))
+        .await
+        .unwrap_err();
+    assert!(card.await.unwrap().is_some(), "a card was raised");
+    assert!(err.contains("denied by user"), "{err}");
+    assert!(
+        err.contains("the suggestion was dismissed. Do not raise it again."),
+        "{err}"
+    );
+    assert!(
+        read_json(&h, p.suggestion.id).unwrap_err().class() == "not_found",
+        "the suggestion is gone for good"
+    );
+    let target = read_json(&h, p.target.0).unwrap();
+    assert_eq!(target["revision"], p.target.1);
+    assert_eq!(target["effective_status"], "active");
+    let sibling = read_json(&h, sibling.id).unwrap();
+    assert_eq!(sibling["effective_status"], "active");
+    assert_eq!(sibling["sources_status"], "intact", "{sibling}");
+}
+
+/// Design 09 §4.3: a card nobody answers leaves the suggestion as it is.
+#[tokio::test]
+async fn timeout_leaves_the_suggestion() {
+    let h = Harness::new();
+    let p = pending(&h);
+    let broker = Arc::new(crate::security::confirmation::ConfirmationBroker::new());
+    let mut sandbox = SandboxManager::with_defaults(confirm_registry(&h), EventBus::default());
+    sandbox.set_confirmation_broker(broker.clone());
+    let mut policy = sandbox_policy(false);
+    policy.confirmation_timeout_secs = Some(1);
+    let call = ToolCall {
+        id: "tc".into(),
+        name: "memory_confirm".into(),
+        arguments: confirm_args(&p),
+    };
+    let err = sandbox
+        .execute_tool(&call, &policy, &h.tool_ctx(ALICE))
+        .await
+        .unwrap_err();
+    assert!(err.contains("timed out"), "{err}");
+    let still = read_json(&h, p.suggestion.id).unwrap();
+    assert_eq!(still["status"], "candidate");
+    assert_eq!(still["revision"], p.suggestion.revision);
+    assert_eq!(
+        read_json(&h, p.target.0).unwrap()["effective_status"],
+        "active"
+    );
+}
+
+/// Design 09 §4.4, S5: a target the model names at a revision it no longer
+/// has raises **no card** — the refusal comes before anyone is asked.
+#[tokio::test]
+async fn a_stale_target_revision_raises_no_card() {
+    let h = Harness::new();
+    let p = pending(&h);
+    let broker = Arc::new(crate::security::confirmation::ConfirmationBroker::new());
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+    let mut sandbox = SandboxManager::with_defaults(confirm_registry(&h), bus);
+    sandbox.set_confirmation_broker(broker.clone());
+    let mut args = confirm_args(&p);
+    args["target_revision"] = serde_json::json!("f".repeat(64));
+    let call = ToolCall {
+        id: "tc".into(),
+        name: "memory_confirm".into(),
+        arguments: args,
+    };
+    let err = sandbox
+        .execute_tool(&call, &sandbox_policy(false), &h.tool_ctx(ALICE))
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("revision_conflict"), "{err}");
+    assert!(
+        err.contains(&p.target.1),
+        "the current revision is named: {err}"
+    );
+    assert_eq!(broker.pending_count(), 0);
+    assert!(
+        !std::iter::from_fn(|| rx.try_recv().ok()).any(|e| matches!(
+            e,
+            crate::events::SystemEvent::ToolConfirmationRequested { .. }
+        )),
+        "no card went out"
+    );
+    assert_eq!(
+        read_json(&h, p.suggestion.id).unwrap()["status"],
+        "candidate"
+    );
+}
+
+/// Design 09 §4.2 rule 5 (review finding C5): a suggestion inferred from the
+/// conversation (`extracted_other`) is never a card's — the tool and its
+/// preview both refuse it as `not_a_suggestion`, naming the Memory view and
+/// the CLI, even with an approval in hand; so is one whose only citation is
+/// the assistant's reply.
+#[tokio::test]
+async fn an_inferred_suggestion_is_not_a_suggestion_in_chat() {
+    let h = Harness::new();
+    let target = h.user_note(
+        ALICE,
+        "Staging host",
+        "# Staging host\n\n## Knowledge\nstaging-1.\n",
+    );
+    let reply = reply_row(&h, "Staging moved to staging-2, according to the tool.");
+    let inferred = suggestion_for(
+        &h,
+        (target.0, &target.1),
+        "Staging host",
+        "staging-2.",
+        &[reply],
+        crate::memory::service::ExtractionProvenance::OtherOutput,
+    );
+    let tool = MemoryConfirmTool::new(h.service.clone());
+    let args = serde_json::json!({
+        "id": inferred.id.to_string(),
+        "expected_revision": inferred.revision,
+        "target_revision": target.1,
+    });
+    let mut approved = h.tool_ctx(ALICE);
+    approved.human_approval = Some(crate::tools::registry::HumanApproval::new("card-1"));
+    let err = tool
+        .execute_with_context(&args, &approved)
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("not_a_suggestion"), "{err}");
+    assert!(err.contains("inferred from the conversation"), "{err}");
+    assert!(
+        err.contains("Memory view")
+            && err.contains(&format!("openalpaca memory confirm {}", inferred.id)),
+        "{err}"
+    );
+    let err = tool
+        .confirmation_preview(&args, &h.tool_ctx(ALICE))
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("not_a_suggestion"), "{err}");
+    assert_eq!(read_json(&h, inferred.id).unwrap()["status"], "candidate");
+    assert_eq!(
+        read_json(&h, target.0).unwrap()["effective_status"],
+        "active"
+    );
+}
+
+/// Design 09 §4.4: the date on the card is the `created_at` of the newest
+/// row **the user typed** among the suggestion's citations — never fixed
+/// text, never the assistant's reply cited beside it.
+#[tokio::test]
+async fn the_preview_date_comes_from_the_cited_user_row() {
+    let h = Harness::new();
+    let target = h.user_note(
+        ALICE,
+        "Commute",
+        "# Commute\n\n## Knowledge\nI take the bus.\n",
+    );
+    let older = typed_row(&h, "I cycle to work now.", "2026-03-02 08:00:00");
+    let newer = typed_row(&h, "Still cycling every day.", "2026-04-11 18:45:10");
+    let reply = reply_row(&h, "Noted — cycling it is.");
+    h.db.with_connection(|c| {
+        c.execute(
+            "UPDATE conversation_messages SET created_at = '2026-05-30 12:00:00' WHERE id = ?1",
+            [reply],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let s = suggestion_for(
+        &h,
+        (target.0, &target.1),
+        "Commute",
+        "The user cycles to work.",
+        &[older, reply, newer],
+        crate::memory::service::ExtractionProvenance::UserWords,
+    );
+    let preview = MemoryConfirmTool::new(h.service.clone())
+        .confirmation_preview(
+            &serde_json::json!({"id": s.id.to_string(), "expected_revision": s.revision, "target_revision": target.1}),
+            &h.tool_ctx(ALICE),
+        )
+        .await
+        .unwrap()
+        .expect("a preview");
+    assert!(
+        preview.contains("(from what you said on 2026-04-11)"),
+        "{preview}"
+    );
+    assert!(!preview.contains("2026-05-30"), "{preview}");
+}
+
+/// Design 09 §4.4: the card's text is the daemon's — read from the notes,
+/// never an argument the model wrote — says both texts and who wrote the
+/// one it replaces, and is at most 1 KiB however long the notes are.
+#[tokio::test]
+async fn the_preview_is_daemon_authored_and_bounded() {
+    let h = Harness::new();
+    let p = pending(&h);
+    let tool = MemoryConfirmTool::new(h.service.clone());
+    let preview = tool
+        .confirmation_preview(&confirm_args(&p), &h.tool_ctx(ALICE))
+        .await
+        .unwrap()
+        .expect("a preview");
+    assert_eq!(
+        preview,
+        "Replace your saved note “Editor preference” with “Editor preference”?\n\
+         Yours: I use vim for everything.\n\
+         New: Since June 2026 the user edits with Helix; before that, vim.\n\
+         Why: the user said they switched. (from what you said on 2026-06-14)\n\
+         Your note is kept as history in the Memory view."
+    );
+
+    // Long notes are cut, and the whole stays within the bound.
+    let long = "word ".repeat(2000);
+    let target = h.user_note(
+        ALICE,
+        &format!("A very long title {}", "x".repeat(150)),
+        &format!("# Long\n\n## Knowledge\n{long}\n"),
+    );
+    let row = typed_row(&h, "Replace it.", "2026-09-24 10:00:00");
+    let s = suggestion_for(
+        &h,
+        (target.0, &target.1),
+        &format!("Another long title {}", "y".repeat(150)),
+        &long,
+        &[row],
+        crate::memory::service::ExtractionProvenance::UserWords,
+    );
+    let preview = tool
+        .confirmation_preview(
+            &serde_json::json!({"id": s.id.to_string(), "expected_revision": s.revision, "target_revision": target.1}),
+            &h.tool_ctx(ALICE),
+        )
+        .await
+        .unwrap()
+        .expect("a preview");
+    assert!(
+        preview.len() <= crate::memory::service::PREVIEW_MAX_BYTES,
+        "{} bytes",
+        preview.len()
+    );
+    assert!(
+        preview.starts_with("Replace your saved note “A very long title"),
+        "{preview}"
+    );
+    assert!(preview.contains('…'), "{preview}");
+    assert!(
+        preview.contains("(from what you said on 2026-09-24)"),
+        "{preview}"
+    );
+}
+
+/// Design 09 §4.1: a `memory_update` confirm of a suggestion from the user's
+/// words names `memory_confirm` on a turn that offers it — an attended `gui`
+/// turn — and the Memory view anywhere else, so the model is never pointed
+/// at a tool it does not have.
+#[tokio::test]
+async fn a_memory_update_confirm_of_a_suggestion_names_memory_confirm_in_chat() {
+    let h = Harness::new();
+    let p = pending(&h);
+    let update = MemoryUpdateTool::new(h.service.clone());
+    let args = serde_json::json!({"id": p.suggestion.id.to_string(), "expected_revision": p.suggestion.revision, "action": "confirm"});
+    let err = update
+        .confirmation_preview(&args, &h.tool_ctx(ALICE))
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("confirm_refused"), "{err}");
+    assert!(err.contains("memory_confirm"), "{err}");
+    let mut telegram = h.tool_ctx(ALICE);
+    telegram.source = Some("telegram".into());
+    telegram.lane_key = Some(format!("{ALICE}:telegram"));
+    let err = update
+        .confirmation_preview(&args, &telegram)
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("confirm_refused"), "{err}");
+    assert!(!err.contains("memory_confirm"), "{err}");
+    assert!(err.contains("Memory view"), "{err}");
+    // An edit or an archive raises the ordinary card, with no preview.
+    let archive = serde_json::json!({"id": p.target.0.to_string(), "expected_revision": p.target.1, "action": "archive"});
+    assert_eq!(
+        update
+            .confirmation_preview(&archive, &h.tool_ctx(ALICE))
+            .await
+            .unwrap(),
+        None
     );
 }
 

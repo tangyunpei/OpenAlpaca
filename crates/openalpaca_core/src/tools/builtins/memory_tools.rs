@@ -658,6 +658,212 @@ impl BuiltInTool for MemoryUpdateTool {
         let out = blocking(move || service.update(&access, input).map_err(refuse)).await?;
         Ok(wire::update_output_json(&out).to_string())
     }
+
+    /// Design 09 §4.1: `confirm` is refused from a tool call, so it is
+    /// refused **before** the card — a person is no longer asked to approve
+    /// something the service would then refuse. The refusal names
+    /// `memory_confirm` for a suggestion from the user's own words on a turn
+    /// that offers it (an attended `gui` turn, §4.1), and the Memory view
+    /// otherwise. Every other action raises the ordinary card.
+    async fn confirmation_preview(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<Option<String>, String> {
+        if arguments.get("action").and_then(|a| a.as_str()) != Some("confirm") {
+            return Ok(None);
+        }
+        let Some(id) = arguments
+            .get("id")
+            .and_then(|v| v.as_str())
+            .and_then(|v| NoteId::parse(v).ok())
+        else {
+            return Err("invalid_input: `id` must be a note id (a hyphenated UUID)".to_string());
+        };
+        let service = self.service.clone();
+        let in_chat = ctx.source.as_deref() == Some(IN_CHAT_SOURCE)
+            && match service.context_for_tool(ctx, Capabilities::READ_ONLY) {
+                Ok(access) => blocking(move || Ok(service.is_in_chat_suggestion(&access, id)))
+                    .await
+                    .unwrap_or(false),
+                Err(_) => false,
+            };
+        let message = if in_chat {
+            format!(
+                "Note {id} is a suggestion from the user's own words, and confirming it is the user's act, not a tool call's: call memory_confirm with its id, its revision and the revision of the note it replaces, and the user answers on the card."
+            )
+        } else {
+            format!(
+                "Confirming a remembered candidate is done by you, not by me: open the Memory view in the app, or run `openalpaca memory confirm {id}`."
+            )
+        };
+        Err(refuse(MemoryError::ConfirmRefused { id, message }))
+    }
+}
+
+// ============================================================================
+// memory_confirm (design 09 §4, MD-12)
+// ============================================================================
+
+/// The derived source of the GUI's and the CLI's chat turns
+/// (`chat/service.rs`, `EventSource::Gui`): the only turns `memory_confirm`
+/// is offered on (design 09 §4.1, ruling LR13).
+pub(crate) const IN_CHAT_SOURCE: &str = "gui";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmArgs {
+    id: String,
+    expected_revision: String,
+    target_revision: String,
+}
+
+/// `memory_confirm`: the assistant raises one suggestion from the user's own
+/// words, and the person answers on the card (design 09 §4). The model's
+/// call alone changes nothing: the confirm runs only with the approval fact
+/// the sandbox makes when a person clicked Approve for **this** call (§4.2
+/// rule 1), and a Deny dismisses the suggestion for good (§4.3, LQ2).
+/// Constructed per request, only on attended `gui` main-loop turns.
+pub struct MemoryConfirmTool {
+    service: Arc<MemoryService>,
+}
+
+impl MemoryConfirmTool {
+    pub fn new(service: Arc<MemoryService>) -> Self {
+        Self { service }
+    }
+
+    fn parse(arguments: &serde_json::Value) -> Result<(NoteId, String, String), String> {
+        let args: ConfirmArgs = parse("memory_confirm", arguments)?;
+        Ok((
+            parse_id("id", &args.id)?,
+            args.expected_revision,
+            args.target_revision,
+        ))
+    }
+}
+
+#[async_trait]
+impl BuiltInTool for MemoryConfirmTool {
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err("memory_confirm requires execution context — use execute_with_context".to_string())
+    }
+
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        let (id, expected_revision, target_revision) = Self::parse(arguments)?;
+        // Rule 6: the model saying yes changes nothing.
+        let Some(approval) = ctx.human_approval.clone() else {
+            return Err(refuse(MemoryError::ApprovalRequired { id }));
+        };
+        let service = self.service.clone();
+        let access = service
+            .context_for_tool(ctx, Capabilities::READ_WRITE)
+            .map_err(refuse)?;
+        let out = blocking(move || {
+            service
+                .confirm_suggestion(&access, &approval, id, &expected_revision, &target_revision)
+                .map_err(refuse)
+        })
+        .await?;
+        Ok(wire::update_output_json(&out).to_string())
+    }
+
+    /// The card's text (design 09 §4.4), read from the notes at the named
+    /// revisions — never the model's words. A suggestion that is not from
+    /// the user's own words, or whose notes moved, is refused here, before
+    /// any card. A preview that renders marks the suggestion raised on this
+    /// lane (§4.5).
+    async fn confirmation_preview(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<Option<String>, String> {
+        let (id, expected_revision, target_revision) = Self::parse(arguments)?;
+        let service = self.service.clone();
+        let access = service
+            .context_for_tool(ctx, Capabilities::READ_ONLY)
+            .map_err(refuse)?;
+        let lane = ctx.lane_key.clone();
+        let text = blocking(move || {
+            let text = service
+                .suggestion_preview(&access, id, &expected_revision, &target_revision)
+                .map_err(refuse)?;
+            if let Some(lane) = &lane {
+                service.mark_raised(lane, id);
+            }
+            Ok(text)
+        })
+        .await?;
+        Ok(Some(text))
+    }
+
+    /// A Deny (design 09 §4.3, LQ2): the suggestion is withdrawn, as *Keep
+    /// mine* withdraws it; the note it would have replaced is untouched.
+    async fn on_confirmation_denied(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Option<String> {
+        let (id, expected_revision, _) = Self::parse(arguments).ok()?;
+        let denial = ctx.human_denial.clone()?;
+        let service = self.service.clone();
+        let access = service
+            .context_for_tool(ctx, Capabilities::READ_WRITE)
+            .ok()?;
+        let dismissed = blocking(move || {
+            service
+                .dismiss_suggestion(&access, &denial, id, &expected_revision)
+                .map_err(refuse)
+        })
+        .await;
+        Some(match dismissed {
+            Ok(_) => {
+                "The user declined; the suggestion was dismissed. Do not raise it again."
+                    .to_string()
+            }
+            Err(e) => {
+                tracing::warn!(note = %id, "memory: a denied suggestion could not be dismissed: {e}");
+                format!(
+                    "The user declined; the suggestion was left as it is ({e}). Do not raise it again."
+                )
+            }
+        })
+    }
+}
+
+pub fn memory_confirm_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "memory_confirm".to_string(),
+        description: "Ask the user whether one pending suggestion should replace the note it \
+            names: the user answers Approve or Deny on a card that shows both texts, written \
+            by OpenAlpaca, not by you. Call it for one suggestion listed in \
+            <memory_suggestions>, with that line's id, revision and replaces_revision, when \
+            the conversation reaches its topic or comes to a natural pause — at most once per \
+            turn, and never for a suggestion already raised in this conversation. Your call \
+            alone changes nothing: only the user's Approve applies it, and a Deny dismisses it \
+            for good. A suggestion inferred from the conversation rather than from the user's \
+            own words is refused as not_a_suggestion; the user confirms that kind in the \
+            app's Memory view or with `openalpaca memory confirm <id>`."
+            .to_string(),
+        parameters: closed_schema(
+            serde_json::json!({
+                "id": { "type": "string", "description": "The suggestion's id, from <memory_suggestions>" },
+                "expected_revision": { "type": "string", "description": "The suggestion's 64-hex revision, as listed" },
+                "target_revision": { "type": "string", "description": "The 64-hex revision of the note it replaces (replaces_revision), as listed" }
+            }),
+            &["id", "expected_revision", "target_revision"],
+        ),
+        strict: Some(true),
+        input_examples: Some(vec![serde_json::json!({
+            "id": "55e811b6-3220-4758-a47b-034bd1023f38",
+            "expected_revision": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "target_revision": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+        })]),
+    }
 }
 
 pub fn memory_update_tool_definition() -> ToolDefinition {

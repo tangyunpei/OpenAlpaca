@@ -24,6 +24,7 @@
 
 mod context;
 mod error;
+mod in_chat;
 mod learning;
 mod management;
 mod mutations;
@@ -40,6 +41,7 @@ pub use context::{
     Attribution, Capabilities, MemoryAccessContext, Surface, WorkspaceHint, resolve_project_root,
 };
 pub use error::MemoryError;
+pub use in_chat::PREVIEW_MAX_BYTES;
 pub use recall::{TRUST_LABEL, wrap_delivery};
 pub use suggestions::{SUGGESTION_EXCERPT_BYTES, SUGGESTIONS_DEFAULT_LIMIT, SUGGESTIONS_MAX_LIMIT};
 pub use types::{
@@ -167,6 +169,11 @@ pub struct MemoryService {
     /// `memory_used` (design §7a), taken once by the bridge. Oldest first,
     /// bounded by [`USED_REQUESTS_CAPACITY`].
     used_by_request: Mutex<VecDeque<(uuid::Uuid, Vec<MemoryUsed>)>>,
+    /// Per lane, the suggestions a `memory_confirm` card was raised for since
+    /// the daemon started (design 09 §4.5): kept out of that lane's
+    /// `<memory_suggestions>` so a timed-out or denied card is not raised
+    /// again in the same conversation. In memory only.
+    raised: Mutex<HashMap<String, HashSet<NoteId>>>,
     /// Where `memory_changed` goes (design §7a): every write the service
     /// makes, whichever surface asked, and every change a reconciliation
     /// scan detects. `None` in a test that has no bus; the daemon attaches
@@ -200,6 +207,7 @@ impl MemoryService {
             last_scans: Mutex::new(HashMap::new()),
             ring: Mutex::new(VecDeque::with_capacity(RING_CAPACITY)),
             used_by_request: Mutex::new(VecDeque::new()),
+            raised: Mutex::new(HashMap::new()),
             bus: None,
         }
     }

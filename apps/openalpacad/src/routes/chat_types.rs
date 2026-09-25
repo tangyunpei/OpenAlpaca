@@ -178,6 +178,12 @@ pub struct PendingConfirmation {
     /// The agent template that asked.
     pub agent_id: String,
     pub lane_key: Option<String>,
+    /// The daemon-authored text of the card (design 09 §4.4), `null` for the
+    /// ordinary card — so a card restored after a reload says what the live
+    /// one said. Like `tool_arguments`, served by this unscoped read (T22).
+    pub preview: Option<String>,
+    /// The approval is good for this call only: no *Always allow*.
+    pub per_call: bool,
     /// When the prompt was raised, RFC 3339.
     pub raised_at: String,
 }

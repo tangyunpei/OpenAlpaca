@@ -36,6 +36,16 @@ pub enum MemoryError {
     ConfirmRefused { id: NoteId, message: String },
     /// `not_undoable` (design §6): the origin is no longer `extracted_user`.
     NotUndoable { id: NoteId, origin: Origin },
+    /// `not_a_suggestion` (design 09 §4.2 rule 5): `memory_confirm` names a
+    /// note that is not a suggestion learned from the user's own words — not
+    /// a candidate naming a note it replaces, inferred from the conversation
+    /// (`extracted_other`), or citing no row the user typed. Confirmable, if
+    /// at all, only in the Memory view or the CLI.
+    NotASuggestion { id: NoteId, message: String },
+    /// `approval_required` (design 09 §4.2 rule 6): `memory_confirm` ran
+    /// without a person's Approve on its card for this call. Nothing is
+    /// written.
+    ApprovalRequired { id: NoteId },
     /// `quarantined` (design §2): the partition's snapshot is missing or
     /// invalid; only `doctor --repair` lifts it.
     Quarantined {
@@ -61,6 +71,8 @@ impl MemoryError {
             Self::AuthorityConflict { .. } => "authority_conflict",
             Self::ConfirmRefused { .. } => "confirm_refused",
             Self::NotUndoable { .. } => "not_undoable",
+            Self::NotASuggestion { .. } => "not_a_suggestion",
+            Self::ApprovalRequired { .. } => "approval_required",
             Self::Quarantined { .. } => "quarantined",
             Self::WritePending { .. } => "fixture:write_pending",
             Self::Internal(_) => "io",
@@ -96,9 +108,13 @@ impl fmt::Display for MemoryError {
                 f,
                 "note {id} changed since it was read: current revision is {current_revision}"
             ),
-            Self::AuthorityConflict { message, .. } | Self::ConfirmRefused { message, .. } => {
-                f.write_str(message)
-            }
+            Self::AuthorityConflict { message, .. }
+            | Self::ConfirmRefused { message, .. }
+            | Self::NotASuggestion { message, .. } => f.write_str(message),
+            Self::ApprovalRequired { id } => write!(
+                f,
+                "note {id} was not confirmed: only the user's Approve on the confirmation card for this call confirms a suggestion, and there was none. Nothing was written."
+            ),
             Self::NotUndoable { id, origin } => write!(
                 f,
                 "note {id} is not undoable: its origin is `{origin}` — neither learned from your words (`extracted_user`) nor a pending suggestion; forget it instead"

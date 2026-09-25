@@ -999,7 +999,12 @@ fn refusal(e: MemoryError) -> Response {
             "MEMORY_AUTHORITY_CONFLICT",
             e.to_string(),
         ),
-        MemoryError::ConfirmRefused { .. } => api_error(
+        // The two in-chat refusals (design 09 §4.2) are `memory_confirm`'s,
+        // a tool's, and never a route's; they read as the confirm refusal
+        // they are.
+        MemoryError::ConfirmRefused { .. }
+        | MemoryError::NotASuggestion { .. }
+        | MemoryError::ApprovalRequired { .. } => api_error(
             StatusCode::CONFLICT,
             "MEMORY_CONFIRM_REFUSED",
             e.to_string(),

@@ -327,7 +327,7 @@ impl MemoryService {
 
     /// One withdrawal (design 09 §3.3, ruling LR12) of `view` in the
     /// partition at `store_scope`, under that partition's writer slot.
-    fn withdraw(
+    pub(super) fn withdraw(
         &self,
         ctx: &MemoryAccessContext,
         store_scope: &openalpaca_storage::store::StoreScope,

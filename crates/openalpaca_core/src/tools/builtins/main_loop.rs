@@ -6,7 +6,9 @@
 //!   `memory_update`, `memory_forget` (design §7: only the main conversation
 //!   writes), plus the globally-registered read surface `memory_search`,
 //!   `memory_read`, `memory_list` (definitions only — their backends already
-//!   live in the shared registry).
+//!   live in the shared registry). On an attended turn of the GUI's or the
+//!   CLI's chat, `memory_confirm` too (design 09 §4.1): the assistant raises a
+//!   suggestion, and the person's card answers it.
 //! - **Extension tools** (tool/skill wiring, Chunk 2): every MCP-bridged
 //!   (`<server>__<tool>`) and plugin-provided (`<plugin>::<tool>`) tool in the
 //!   global registry whose extension is enabled (definitions only — backends
@@ -34,8 +36,9 @@ use std::sync::Arc;
 
 use super::invoke_skill::{InvokeSkillTool, invoke_skill_tool_definition};
 use super::memory_tools::{
-    MemoryForgetTool, MemoryStoreTool, MemoryUpdateTool, memory_forget_tool_definition,
-    memory_store_tool_definition, memory_update_tool_definition,
+    IN_CHAT_SOURCE, MemoryConfirmTool, MemoryForgetTool, MemoryStoreTool, MemoryUpdateTool,
+    memory_confirm_tool_definition, memory_forget_tool_definition, memory_store_tool_definition,
+    memory_update_tool_definition,
 };
 use super::start_workflow::{StartWorkflowTool, start_workflow_tool_definition};
 use super::steer_workflow::{SteerWorkflowTool, steer_workflow_tool_definition};
@@ -56,6 +59,9 @@ pub struct MainLoopToolSet {
     /// Present only when the workflow-aware tools were included; kept for
     /// result-cell readback (the turn's `steered` flag).
     pub steer_workflow: Option<Arc<SteerWorkflowTool>>,
+    /// `memory_confirm` is on this turn's surface (design 09 §4.1), so the
+    /// turn may be told what is waiting in `<memory_suggestions>` (§4.5).
+    pub memory_confirm_offered: bool,
 }
 
 impl MainLoopToolSet {
@@ -141,6 +147,7 @@ pub fn main_loop_tool_set(
 ) -> MainLoopToolSet {
     let mut definitions: Vec<ToolDefinition> = Vec::new();
     let mut instances: Vec<(ToolDefinition, Arc<dyn BuiltInTool>)> = Vec::new();
+    let mut memory_confirm_offered = false;
 
     // ── Always-core set ─────────────────────────────────────────────────
     let start_workflow = Arc::new(StartWorkflowTool::new(
@@ -184,8 +191,23 @@ pub fn main_loop_tool_set(
         definitions.push(forget_def.clone());
         instances.push((
             forget_def,
-            Arc::new(MemoryForgetTool::new(service)) as Arc<dyn BuiltInTool>,
+            Arc::new(MemoryForgetTool::new(service.clone())) as Arc<dyn BuiltInTool>,
         ));
+
+        // Design 09 §4.1 (ruling LR13): `memory_confirm` only where a person
+        // can answer its card on a user-directed channel — an attended turn
+        // of the GUI's or the CLI's chat. Never on a connector lane (its
+        // `/yes` is keyed by chat, not sender), an unattended turn, the
+        // skill tier, the lead or a subagent, none of which build this set.
+        if !unattended && ctx.source.as_deref() == Some(IN_CHAT_SOURCE) {
+            let confirm_def = memory_confirm_tool_definition();
+            definitions.push(confirm_def.clone());
+            instances.push((
+                confirm_def,
+                Arc::new(MemoryConfirmTool::new(service)) as Arc<dyn BuiltInTool>,
+            ));
+            memory_confirm_offered = true;
+        }
     }
 
     // The memory read surface is globally registered (`memory_read_tools`,
@@ -285,6 +307,7 @@ pub fn main_loop_tool_set(
         instances,
         start_workflow,
         steer_workflow,
+        memory_confirm_offered,
     }
 }
 
@@ -783,6 +806,99 @@ mod tests {
         let per_request = (*registry).clone();
         set.register_into(&per_request);
         assert!(per_request.get("invoke_skill").is_some());
+    }
+
+    /// Design 09 §4.1 (ruling LR13): `memory_confirm` is on the surface of an
+    /// attended turn of the GUI's or the CLI's chat (`source == "gui"`) and on
+    /// no other — not a connector lane, whose `/yes` is keyed by chat rather
+    /// than sender (G2), and not an unattended turn, where nobody can answer.
+    /// Where it is offered it prompts, like the other destructive writers.
+    #[test]
+    fn memory_confirm_is_absent_on_connector_and_unattended_surfaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+        let service = Arc::new(crate::memory::service::MemoryService::new(
+            Some(db.clone()),
+            openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+        ));
+        let surface = |source: &str, unattended: bool| {
+            let (shared, dispatcher, bus, registry) = setup();
+            let set = main_loop_tool_set(
+                dispatcher,
+                shared,
+                bus,
+                &RoutingConfig::default(),
+                Some(db.clone()),
+                Some(service.clone()),
+                Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+                Arc::new(SkillCatalog::new()),
+                None,
+                1.0,
+                &registry,
+                &format!("user1:{source}"),
+                &ToolContext {
+                    owner_id: Some("user1".to_string()),
+                    lane_key: Some(format!("user1:{source}")),
+                    source: Some(source.to_string()),
+                    ..Default::default()
+                },
+                unattended,
+            );
+            let offered = names(&set.definitions).contains(&"memory_confirm");
+            let instance = set
+                .instances
+                .iter()
+                .any(|(def, _)| def.name == "memory_confirm");
+            assert_eq!(offered, instance, "{source}/{unattended}");
+            assert_eq!(offered, set.memory_confirm_offered, "{source}/{unattended}");
+            (offered, set, registry)
+        };
+        let (offered, set, registry) = surface("gui", false);
+        assert!(offered, "an attended GUI/CLI chat turn offers it");
+        let per_request = (*registry).clone();
+        set.register_into(&per_request);
+        let policy = SandboxPolicy {
+            agent_id: crate::orchestrator::MAIN_LOOP_AGENT_ID.to_string(),
+            allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 60,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        };
+        assert!(
+            effective_confirmation_set(&policy, &per_request)
+                .contains(&"memory_confirm".to_string())
+        );
+        for (source, unattended) in [
+            ("gui", true),
+            ("telegram", false),
+            ("discord", false),
+            ("imessage", false),
+            ("internal", false),
+            ("cli", false),
+        ] {
+            assert!(
+                !surface(source, unattended).0,
+                "{source} (unattended: {unattended}) must not offer memory_confirm"
+            );
+        }
+        // Without a memory service, nothing memory is offered at all.
+        let (shared, dispatcher, bus, registry) = setup();
+        let set = build(
+            shared,
+            dispatcher,
+            bus,
+            &registry,
+            &routing(false),
+            None,
+            "user1:gui",
+        );
+        assert!(!set.memory_confirm_offered);
     }
 
     use crate::security::sandbox::effective_confirmation_set;

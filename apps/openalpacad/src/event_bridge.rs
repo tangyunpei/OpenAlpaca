@@ -425,6 +425,8 @@ pub fn spawn_event_bridge(
                     ref stream_id,
                     ref lane_key,
                     ref task_id,
+                    ref preview,
+                    per_call,
                     ..
                 } => {
                     tracing::info!(
@@ -439,6 +441,8 @@ pub fn spawn_event_bridge(
                         stream_id.as_deref(),
                         lane_key.as_deref(),
                         task_id.as_deref(),
+                        preview.as_deref(),
+                        per_call,
                     );
                     // 2. Forward to SSE chat stream (CLI + GUI active chat)
                     if let (Some(csm), Some(sid)) = (&chat_streams, &stream_id) {
@@ -448,6 +452,8 @@ pub fn spawn_event_bridge(
                                 request_id,
                                 tool_name,
                                 tool_arguments: tool_arguments.clone(),
+                                preview: preview.clone(),
+                                per_call,
                             },
                         );
                     }
@@ -1139,6 +1145,8 @@ mod tests {
             stream_id: None,
             lane_key: None,
             task_id: Some("t-1".into()),
+            preview: None,
+            per_call: false,
             timestamp: chrono::Utc::now(),
         });
         match recv_event(&mut rx).await {

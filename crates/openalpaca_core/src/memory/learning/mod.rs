@@ -147,3 +147,16 @@ pub fn is_slash_turn(content: &str) -> bool {
 pub fn is_user_authored_turn(source: &str, content: &str) -> bool {
     source != INTERNAL_SOURCE && !is_slash_turn(content)
 }
+
+/// Whether a stored row is **user-authored** in the window's sense (design
+/// §1.2): a user row a turn wrote (`request_id` set), not the assistant's
+/// own follow-up text, not a `/slash` turn, and at most 8 KiB — a longer one
+/// may be quoted text (ruling LR21). A suggestion is confirmable in chat only
+/// when it cites at least one such row (design 09 §4.2 rule 5).
+pub fn is_user_authored_row(row: &openalpaca_storage::LearningRow) -> bool {
+    row.role == "user"
+        && row.request_id.is_some()
+        && row.source.as_deref() != Some(INTERNAL_SOURCE)
+        && !is_slash_turn(&row.content)
+        && row.content.len() <= LONG_USER_ROW_BYTES
+}

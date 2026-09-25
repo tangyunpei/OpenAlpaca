@@ -421,6 +421,8 @@ impl EventBroadcaster {
         stream_id: Option<&str>,
         lane_key: Option<&str>,
         task_id: Option<&str>,
+        preview: Option<&str>,
+        per_call: bool,
     ) {
         let event = ServerEvent::ToolConfirmationRequested {
             request_id: request_id.to_string(),
@@ -430,6 +432,8 @@ impl EventBroadcaster {
             stream_id: stream_id.map(|s| s.to_string()),
             lane_key: lane_key.map(|s| s.to_string()),
             task_id: task_id.map(|t| t.to_string()),
+            preview: preview.map(|p| p.to_string()),
+            per_call,
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };

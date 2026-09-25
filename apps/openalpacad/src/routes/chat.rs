@@ -601,16 +601,22 @@ fn sse_frame(event: &openalpaca_core::chat::ChatStreamEvent) -> (&'static str, S
             "error",
             serde_json::json!({ "message": message }).to_string(),
         ),
+        // Design 09 §4.4: the daemon-authored `preview` (`null` for the
+        // ordinary card) and `per_call` (no *Always allow*) ride the frame.
         E::ConfirmationRequested {
             request_id,
             tool_name,
             tool_arguments,
+            preview,
+            per_call,
         } => (
             "confirmation_requested",
             serde_json::json!({
                 "request_id": request_id,
                 "tool_name": tool_name,
                 "tool_arguments": tool_arguments,
+                "preview": preview,
+                "per_call": per_call,
             })
             .to_string(),
         ),
@@ -876,6 +882,8 @@ fn pending_confirmations(
                 task_id: r.task_id,
                 agent_id: r.agent_id,
                 lane_key: r.lane_key,
+                preview: r.preview,
+                per_call: r.per_call,
                 raised_at: r.timestamp.to_rfc3339(),
             })
             .collect(),
@@ -1292,6 +1300,38 @@ mod tests {
         assert_eq!(name, "delta");
         let parsed: serde_json::Value = serde_json::from_str(&data).unwrap();
         assert_eq!(parsed["content"], "Paris");
+    }
+
+    /// Design 09 §4.4: the `confirmation_requested` frame carries the
+    /// daemon-authored `preview` and `per_call`, so the GUI's card and the
+    /// CLI's inline prompt can show the text and drop *Always allow*; the
+    /// ordinary card says `null` and `false`.
+    #[test]
+    fn the_sse_frame_carries_preview_and_per_call() {
+        use openalpaca_core::chat::ChatStreamEvent as E;
+        let (name, data) = sse_frame(&E::ConfirmationRequested {
+            request_id: "req-1".to_string(),
+            tool_name: "memory_confirm".to_string(),
+            tool_arguments: serde_json::json!({"id": "s"}),
+            preview: Some("Replace your saved note “A” with “B”?".to_string()),
+            per_call: true,
+        });
+        assert_eq!(name, "confirmation_requested");
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(parsed["preview"], "Replace your saved note “A” with “B”?");
+        assert_eq!(parsed["per_call"], true);
+        assert_eq!(parsed["tool_arguments"]["id"], "s");
+
+        let (_, data) = sse_frame(&E::ConfirmationRequested {
+            request_id: "req-2".to_string(),
+            tool_name: "memory_forget".to_string(),
+            tool_arguments: serde_json::json!({}),
+            preview: None,
+            per_call: false,
+        });
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(parsed["preview"], serde_json::Value::Null);
+        assert_eq!(parsed["per_call"], false);
     }
 
     #[test]
@@ -1879,6 +1919,8 @@ mod tests {
             lane_key: Some("user1:gui".to_string()),
             task_id: Some("task-1".to_string()),
             agent_instance_id: Some("lead_agent::abcd1234".to_string()),
+            preview: None,
+            per_call: false,
             timestamp: at,
         }
     }
@@ -1912,6 +1954,27 @@ mod tests {
         assert_eq!(first.agent_id, "lead_agent");
         assert_eq!(first.lane_key.as_deref(), Some("user1:gui"));
         assert_eq!(first.raised_at, base.to_rfc3339());
+        assert_eq!(first.preview, None);
+        assert!(!first.per_call);
+    }
+
+    /// Design 09 §4.4: a card restored from the pending list after a reload
+    /// says what the live one said — the preview and `per_call` ride along.
+    #[test]
+    fn a_pending_confirmation_carries_its_preview_and_per_call() {
+        let broker = openalpaca_core::security::confirmation::ConfirmationBroker::new();
+        let _rx = broker.request(
+            &openalpaca_core::security::confirmation::ConfirmationRequest {
+                tool_name: "memory_confirm".to_string(),
+                preview: Some("Replace your saved note “A” with “B”?".to_string()),
+                per_call: true,
+                ..raised("req-1", "memory_confirm", chrono::Utc::now())
+            },
+        );
+        let body = pending_confirmations(Some(&broker));
+        let json = serde_json::to_value(&body.confirmations[0]).unwrap();
+        assert_eq!(json["preview"], "Replace your saved note “A” with “B”?");
+        assert_eq!(json["per_call"], true);
     }
 
     /// Answered is gone: this is the pending set, never a history.
