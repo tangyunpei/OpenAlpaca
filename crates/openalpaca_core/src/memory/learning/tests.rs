@@ -1108,6 +1108,9 @@ async fn a_flush_that_finds_its_session_gone_writes_nothing() {
     let report = scene.queue.flush_session(&s).await;
     assert_eq!(report.stopped, Some(FlushStop::SessionGone), "{report:?}");
     assert_eq!(report.stored, 0);
+    // Not even attempted: the session check comes before the store loop,
+    // not only `verify_sources` refusing each deleted row.
+    assert_eq!(report.failed, 0, "no write was attempted: {report:?}");
     assert!(scene.active().is_empty());
 }
 
