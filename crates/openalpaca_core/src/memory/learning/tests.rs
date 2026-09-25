@@ -1245,6 +1245,38 @@ async fn a_chunk_never_mixes_roots() {
     );
 }
 
+/// A turn whose project directory was deleted before learning reached it is
+/// skipped with no call, and the directory stays deleted: learning never
+/// re-creates a project — or its `.openalpaca/` store — the user removed.
+/// Its turns are dropped the way a deleted conversation's are (LQ4).
+#[tokio::test]
+async fn a_turn_whose_project_directory_is_gone_is_skipped() {
+    let (dir, root) = project();
+    let scene = Scene::new(vec![items(&[item(
+        "Project fact",
+        "The project ships on Tuesdays.",
+        "fact",
+        "user",
+        &[1],
+    )])]);
+    let s = scene.session();
+    let (_, answer) = scene.turn_in(
+        &s,
+        "This project ships on Tuesdays.",
+        "Noted.",
+        Some(&root.to_string_lossy()),
+    );
+    drop(dir);
+    assert!(!root.exists());
+
+    let report = scene.queue.flush_session(&s).await;
+    assert!(!root.exists(), "learning re-created the deleted project");
+    assert_eq!(scene.model.calls(), 0, "no call: nowhere to write");
+    assert_eq!(report.stopped, None, "{report:?}");
+    assert_eq!(report.skipped_root_gone, 1, "{report:?}");
+    assert_eq!(scene.cursor(&s), answer, "the cursor moved past its turns");
+}
+
 // ── Long text (§1.2, §1.6, ruling LR21) ─────────────────────────────────
 
 /// MD-10: messages are no longer cut to 800 characters — the tail of a

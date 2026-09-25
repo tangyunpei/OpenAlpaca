@@ -155,6 +155,9 @@ pub struct FlushReport {
     pub skipped_no_owner: usize,
     /// Chunks advanced past after `MAX_ATTEMPTS` unusable answers.
     pub skipped_unusable: usize,
+    /// Chunks whose project directory no longer exists: advanced past with
+    /// no call, and the directory is not re-created.
+    pub skipped_root_gone: usize,
     pub stopped: Option<FlushStop>,
 }
 
@@ -830,6 +833,7 @@ impl LearningQueue {
             skipped_short = report.skipped_short,
             skipped_no_owner = report.skipped_no_owner,
             skipped_unusable = report.skipped_unusable,
+            skipped_root_gone = report.skipped_root_gone,
             input_tokens = report.input_tokens,
             output_tokens = report.output_tokens,
             stopped = ?report.stopped,
@@ -952,9 +956,28 @@ impl LearningQueue {
                 continue;
             }
 
+            // A project directory deleted since the turn is not re-created:
+            // a note write would bring it back with a fresh `.openalpaca/`
+            // store. Its turns are dropped, as a deleted conversation's are
+            // (LQ4), and the cursor moves past them.
+            let root = chunk.root.as_ref().map(PathBuf::from);
+            if let Some(r) = &root
+                && !tokio::fs::metadata(r).await.is_ok_and(|m| m.is_dir())
+            {
+                tracing::info!(
+                    session_id,
+                    first_row = expected + 1,
+                    last_row = chunk.through,
+                    "memory learning skipped rows whose project directory no longer exists"
+                );
+                self.advance(session_id, chunk.through, expected).await;
+                report.chunks += 1;
+                report.skipped_root_gone += 1;
+                continue;
+            }
+
             // The owner must be a `global_user` row (design §3): anything
             // else learns nothing, and its cursor advances.
-            let root = chunk.root.as_ref().map(PathBuf::from);
             let hint = match &root {
                 Some(r) => WorkspaceHint::Root(r.as_path()),
                 None => WorkspaceHint::None,
