@@ -1050,9 +1050,10 @@ pub fn memory_update_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "memory_update".to_string(),
         description: "Edit or archive one memory note by id and the revision you read \
-            (memory_search or memory_read gives both); a changed revision is a conflict and \
-            nothing is written. `edit` applies a `patch` to the named fields and keeps the \
-            rest byte for byte; `archive` retires the note from recall. A note the user saved \
+            (memory_read gives both, as do memory_list and memory_search with \
+            `detail: \"snippets\"`); a changed revision is a conflict and nothing is written. \
+            `edit` applies a `patch` to the named fields and keeps the rest byte for byte; \
+            `archive` retires the note from recall. A note the user saved \
             themselves cannot be edited or archived from here. `confirm` (making a candidate \
             active) is the user's own act and is refused here — tell the user to confirm it \
             in the app's Memory view or with `openalpaca memory confirm <id>`. Asks the user \
@@ -1160,11 +1161,12 @@ pub fn memory_forget_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "memory_forget".to_string(),
         description: "Forget memory notes the user asked to forget: each target is a note id \
-            with the revision you read (from memory_search or memory_read), never a search \
-            phrase — find and name the exact notes first, and resolve any ambiguity with the \
-            user before calling. Removes the notes, their history and their index rows, and \
-            says what remains elsewhere (the transcript messages they cited are not \
-            erased). Asks the user for confirmation before it runs."
+            with the revision you read (memory_read gives both, as do memory_list and \
+            memory_search with `detail: \"snippets\"`), never a search phrase — find and name \
+            the exact notes first, and resolve any ambiguity with the user before calling. \
+            Removes the notes, their history and their index rows, and says what remains \
+            elsewhere (the transcript messages they cited are not erased). Asks the user for \
+            confirmation before it runs."
             .to_string(),
         parameters: closed_schema(
             serde_json::json!({

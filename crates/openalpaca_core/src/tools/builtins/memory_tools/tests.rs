@@ -2531,3 +2531,28 @@ fn the_three_descriptions_teach_search_pick_read() {
     }
     assert_eq!(schema["additionalProperties"], serde_json::json!(false));
 }
+
+/// Design 09 §13.1: a default `memory_search` answers with index rows, which
+/// carry no revision, so neither writer that needs `expected_revision` may
+/// send the model to a plain search for it — only to `memory_read`,
+/// `memory_list` or a search asked for `snippets`.
+#[test]
+fn neither_writer_says_a_plain_search_supplies_the_revision() {
+    for (name, text) in [
+        ("memory_update", memory_update_tool_definition().description),
+        ("memory_forget", memory_forget_tool_definition().description),
+    ] {
+        assert!(
+            text.contains("memory_read") && text.contains("memory_list"),
+            "{name}: {text}"
+        );
+        for (at, _) in text.match_indices("memory_search") {
+            let clause = &text[at..];
+            let end = clause.find([')', ';', ',']).unwrap_or(clause.len());
+            assert!(
+                clause[..end].contains("snippets"),
+                "{name} names a plain memory_search as the revision's source: {text}"
+            );
+        }
+    }
+}
