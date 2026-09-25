@@ -342,11 +342,11 @@ setting that approves tools automatically, never does. **Deny** dismisses the
 suggestion for good, as **Keep mine** does, and nothing else you said is
 forgotten. There is **no `Always allow`** on this card: each answer is for that
 one suggestion. A card nobody answers leaves the suggestion waiting in the
-Memory view, and the assistant does not raise it again in the same conversation.
-Only a suggestion from your own words is ever raised in chat — one OpenAlpaca
-inferred from its own replies or a tool's output waits in the Memory view —
-and only in the app's and the CLI's chat, never on Telegram, Discord or
-iMessage.
+Memory view, and it is not raised again in the app's or the CLI's chat until the
+daemon restarts. Only a suggestion from your own words is ever raised in chat —
+one OpenAlpaca inferred from its own replies or a tool's output waits in the
+Memory view — and only in the app's and the CLI's chat, never on Telegram,
+Discord or iMessage.
 
 **Attaching files.** Three ways in, all the same path: the `Attach` button
 left of the model button opens a file picker, you can paste an image into the

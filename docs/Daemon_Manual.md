@@ -717,9 +717,11 @@ the main conversation also has `memory_confirm {id, expected_revision,
 target_revision}`, and that turn's memory message ends with a
 `<memory_suggestions>` block: up to three pending suggestions from your own
 words, newest first, one line each with both ids and both revisions, read from
-the index (no note file is parsed for it), leaving out what was already raised
-in this conversation since the daemon started. The call raises the ordinary
-card with a preview the **daemon** wrote from the notes — which note, your
+the index (no note file is parsed for it), leaving out a suggestion already
+raised on that lane since the daemon started, and any other suggestion for the
+note it would replace — the lane is `{owner}:gui`, which every app and CLI chat
+conversation of that owner shares. The call raises the ordinary card with a
+preview the **daemon** wrote from the notes — which note, your
 text, the new text, why, the date of the newest message you typed that it
 cites — and `per_call: true`. Only a person's **Approve** on that card, for
 that call, confirms it: the confirm is then a user-directed write (origin
