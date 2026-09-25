@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::memory_files::{
-    NoteId, NoteKind, NoteScope, NoteSource, NoteStatus, SourceType,
+    NoteId, NoteKind, NoteScope, NoteSource, NoteStatus, ReplacePolicy, SourceType,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -490,6 +490,9 @@ impl BuiltInTool for MemoryStoreTool {
                 .supersedes
                 .map(|s| Ok::<_, String>((parse_id("supersedes.id", &s.id)?, s.expected_revision)))
                 .transpose()?,
+            // Learning's own (design 09 §2.5): never from a tool call.
+            observed_at: None,
+            replace_policy: ReplacePolicy::Direct,
             provenance: None,
         };
         let service = self.service.clone();

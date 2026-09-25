@@ -4,6 +4,7 @@
 use chrono::{DateTime, Utc};
 use openalpaca_storage::memory_files::{
     Dedup, EffectiveStatus, NoteId, NoteKind, NoteScope, NoteSource, NoteStatus, Origin,
+    ReplacePolicy,
 };
 use openalpaca_storage::memory_index::{IndexState, MatchReason};
 
@@ -31,10 +32,17 @@ pub struct StoreInput {
     pub fact_key: Option<String>,
     /// Verified against the database; an unknown id is refused.
     pub sources: Vec<NoteSource>,
+    /// When the evidence was observed — for a learned note, the time of its
+    /// newest cited row (design 09 §2.5). Accepted on the `Extraction`
+    /// surface only.
+    pub observed_at: Option<DateTime<Utc>>,
     pub valid_from: Option<DateTime<Utc>>,
     pub valid_to: Option<DateTime<Utc>>,
     /// `{id, expected_revision}` of the note this one replaces (design §6).
     pub supersedes: Option<(NoteId, String)>,
+    /// How `supersedes` is applied (design 09 §3.2, S2). Anything but the
+    /// default is accepted on the `Extraction` surface only.
+    pub replace_policy: ReplacePolicy,
     /// Required on the `Extraction` surface, refused on every other.
     pub provenance: Option<ExtractionProvenance>,
 }

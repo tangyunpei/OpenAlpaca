@@ -54,7 +54,7 @@ use openalpaca_storage::Database;
 use openalpaca_storage::memory_files::{
     self as files, Dedup, EffectiveStatus, LoadedPartition, MAX_LIST_ENTRIES, MAX_NOTE_BYTES,
     MAX_SOURCES, MAX_TITLE_CHARS, MemoryFilesError, NewNote, NoteId, NoteScope, NoteSource,
-    NoteStatus, NoteView, Origin, Partition, PartitionHealth, ScanEntry, SourceType,
+    NoteStatus, NoteView, Origin, Partition, PartitionHealth, ReplacePolicy, ScanEntry, SourceType,
     is_valid_fact_key,
 };
 use openalpaca_storage::memory_index::{
@@ -941,6 +941,13 @@ impl MemoryService {
         {
             return Err(MemoryError::invalid("valid_to is before valid_from"));
         }
+        if ctx.surface != Surface::Extraction
+            && (input.observed_at.is_some() || input.replace_policy != ReplacePolicy::Direct)
+        {
+            return Err(MemoryError::invalid(
+                "observed_at and a replace policy are set by the extractor only",
+            ));
+        }
         match (ctx.surface, input.provenance) {
             (Surface::Extraction, None) => {
                 return Err(MemoryError::invalid(
@@ -1032,10 +1039,11 @@ impl MemoryService {
             tags: input.tags,
             fact_key: input.fact_key,
             sources: input.sources,
-            observed_at: None,
+            observed_at: input.observed_at,
             valid_from: input.valid_from,
             valid_to: input.valid_to,
             supersedes: input.supersedes,
+            replace_policy: input.replace_policy,
         };
         let _write = self
             .slots

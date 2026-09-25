@@ -1160,6 +1160,22 @@ fn emit_opt_ts(ts: Option<DateTime<Utc>>) -> String {
 // Write inputs
 // ============================================================================
 
+/// How a create that names a `supersedes` target treats it (design 09
+/// §3.2, S2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReplacePolicy {
+    /// The supersede is applied as asked, under G2's authority check
+    /// (design §4): every save, tool call and user-directed edit.
+    #[default]
+    Direct,
+    /// Learning's (design 09 §2.5): a replacement of a learned
+    /// (`extracted_user`) target stands; any other target gets a
+    /// *suggestion* — the note is written as a candidate, which retires
+    /// nothing until the user confirms it. Carried from Learning v2 L2 on;
+    /// the file layer honours it from L3 (S2).
+    SuggestUnlessLearned,
+}
+
 /// What a `memory_store` carries into the file layer (design §7a). The
 /// partition, the actor and the clock are supplied beside it.
 #[derive(Debug, Clone, Default)]
@@ -1179,6 +1195,8 @@ pub struct NewNote {
     pub valid_to: Option<DateTime<Utc>>,
     /// `{id, expected_revision}` of the note this one replaces (design §6).
     pub supersedes: Option<(NoteId, String)>,
+    /// How `supersedes` is applied (design 09 §3.2, S2).
+    pub replace_policy: ReplacePolicy,
 }
 
 /// A `memory_update edit` patch (design §7a): an absent field is untouched;

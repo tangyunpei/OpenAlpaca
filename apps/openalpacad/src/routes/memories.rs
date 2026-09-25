@@ -46,7 +46,7 @@ use openalpaca_core::memory::service::{
     UpdateInput, WorkspaceHint, wire,
 };
 use openalpaca_storage::memory_files::{
-    Dedup, NoteId, NoteKind, NoteScope, NoteSource, NoteStatus, SourceType,
+    Dedup, NoteId, NoteKind, NoteScope, NoteSource, NoteStatus, ReplacePolicy, SourceType,
 };
 use serde::Deserialize;
 use std::path::Path;
@@ -868,6 +868,9 @@ fn store_input(body: CreateMemoryBody) -> Result<StoreInput, Refusal> {
             .map(|v| parse_ts("valid_to", v))
             .transpose()?,
         supersedes,
+        // Learning's own (design 09 §2.5): never from a route.
+        observed_at: None,
+        replace_policy: ReplacePolicy::Direct,
         provenance: None,
     })
 }

@@ -3743,3 +3743,81 @@ fn learning_key_targets_look_in_the_project_first_then_home() {
     assert_eq!(targets["lantern.db"].scope, NoteScope::Project);
     assert!(!targets.contains_key("user.none"));
 }
+
+/// Design 09 §2.5: a learned note records when its evidence was said —
+/// `observed_at`, which R9 reads among notes of equal authority. Only the
+/// extractor may set it; a tool or the user's own save cannot.
+#[test]
+fn observed_at_is_accepted_on_the_extraction_surface_only() {
+    let h = Harness::new();
+    let row = h.message_row("I edit with Helix now.");
+    let observed: chrono::DateTime<Utc> = "2026-09-20T10:02:11Z".parse().unwrap();
+    let input = |provenance: Option<ExtractionProvenance>| StoreInput {
+        title: "Editor preference".into(),
+        body: "# Editor preference\n\n## Knowledge\nThe user edits with Helix.\n".into(),
+        kind: Some(NoteKind::Preference),
+        sources: vec![NoteSource {
+            kind: SourceType::Message,
+            id: row.to_string(),
+            observed_at: Some(observed),
+        }],
+        observed_at: Some(observed),
+        provenance,
+        ..Default::default()
+    };
+    for ctx in [h.tool(ALICE, None), h.user(ALICE, None)] {
+        let err = h.service.store(&ctx, input(None)).unwrap_err();
+        assert_eq!(err.class(), "invalid_input", "{err}");
+    }
+    let extraction = h
+        .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap();
+    let out = h
+        .service
+        .store(&extraction, input(Some(ExtractionProvenance::UserWords)))
+        .unwrap();
+    let note = h
+        .service
+        .read(
+            &h.user(ALICE, None),
+            ReadInput {
+                id: out.id,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        note.frontmatter["observed_at"],
+        serde_json::json!("2026-09-20T10:02:11Z")
+    );
+}
+
+/// `ReplacePolicy::SuggestUnlessLearned` is learning's (design 09 §3.2
+/// S2): a tool or a user-directed save that sends it is refused.
+#[test]
+fn a_replace_policy_is_accepted_on_the_extraction_surface_only() {
+    let h = Harness::new();
+    let input = || StoreInput {
+        title: "Anything".into(),
+        body: "# Anything\n\nbody\n".into(),
+        kind: Some(NoteKind::Fact),
+        replace_policy: ReplacePolicy::SuggestUnlessLearned,
+        ..Default::default()
+    };
+    for ctx in [h.tool(ALICE, None), h.user(ALICE, None)] {
+        let err = h.service.store(&ctx, input()).unwrap_err();
+        assert_eq!(err.class(), "invalid_input", "{err}");
+    }
+    let extraction = h
+        .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap();
+    h.service
+        .store(
+            &extraction,
+            StoreInput {
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..input()
+            },
+        )
+        .unwrap();
+}
