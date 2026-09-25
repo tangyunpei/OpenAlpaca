@@ -113,7 +113,7 @@ impl MemoryService {
         let dismissed = if suggestion_targets.is_empty() {
             Vec::new()
         } else {
-            self.dismiss_others(ctx, &partition, input.id, &suggestion_targets)?
+            self.dismiss_others(ctx, &partition, input.id, &suggestion_targets)
         };
         self.reindex(&partition, false)?;
         let origin = partition
@@ -148,16 +148,26 @@ impl MemoryService {
     /// A withdrawal suppresses nothing, so a dismissed suggestion citing the
     /// row the confirmed note cites leaves that note recallable. One that
     /// moved or went since is left alone; the confirm stands whatever
-    /// happens to these.
+    /// happens to these, so nothing here fails it — a partition that cannot
+    /// be re-read dismisses nothing and says so in the log.
     fn dismiss_others(
         &self,
         ctx: &MemoryAccessContext,
         partition: &Partition,
         confirmed: NoteId,
         targets: &[NoteId],
-    ) -> Result<Vec<NoteId>, MemoryError> {
-        let others: Vec<(NoteId, String, Origin)> = partition
-            .load()?
+    ) -> Vec<NoteId> {
+        let loaded = match partition.load() {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                tracing::warn!(
+                    note = %confirmed,
+                    "memory: the suggestions a confirm made moot were not dismissed, because the partition could not be re-read: {e}"
+                );
+                return Vec::new();
+            }
+        };
+        let others: Vec<(NoteId, String, Origin)> = loaded
             .views
             .into_iter()
             .filter(|v| {
@@ -188,7 +198,7 @@ impl MemoryService {
                 ),
             }
         }
-        Ok(dismissed)
+        dismissed
     }
 
     /// `memory_forget` (design §6, *Forget contract*): ids with expected
