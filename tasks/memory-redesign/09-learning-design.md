@@ -1369,6 +1369,54 @@ These are design revisions. Each is folded into 03 by the slice that implements 
 | §7 *Capabilities* (line 359) | "No agent template changes" becomes "all nine templates name `memory_read`, and `to_subagent` grants it ambiently to internal templates unless denied; a plugin-contributed template gets it only by naming it" | L5 |
 | §5 step 8, the header; §7a `memory_search` result | `valid_from`, `valid_to` and `timing=upcoming` in the header; `valid_from` and `valid_to` on search results | L5 |
 
+## 12. Chat memory commands (MD-13, slice L9)
+
+> **Owner, 2026-09-24 (MD-13):** add direct chat commands `/remember`, `/forget` and `/memories`, handled by the daemon with **no model involved**, like `/status` and `/tasks`. Because the human typed them, `/remember` saves with origin **`user`** — the in-chat equivalent of the Memory view. Offered only on attended app/CLI turns. No memory *skill* (SKILL.md) is added.
+
+**Why this is G2-safe.** G2 forbids a *model* tool call from minting origin `user`. These commands never reach a model: the deterministic tier (`orchestrator/intent/mod.rs`, parsed before skills and before the main loop; `orchestrator/handlers.rs`) executes them and answers with a fixed template. The text that becomes the note is exactly what the human typed on an attended turn. The user-directed surfaces of 03 §4 therefore gain one member — *a deterministic memory command typed on an attended app or CLI chat turn* — and 03 §7a's `MemoryAccessContext` table gains that row with `surface: UserSurface`.
+
+### 12.1 The commands
+
+| Command | Behaviour | Reply (deterministic) |
+|---|---|---|
+| `/remember [--kind <k>] [--global \| --project] <text>` | Stores a note through `MemoryService` with `surface: UserSurface`, origin `user`. `kind` defaults to `fact` (the six kinds of §4 are accepted); the scope defaults by kind (03 §3 rule 2) against the request's marker-found project root; `--global` / `--project` override (`--project` with no project root is `invalid_input`, §7b P1). Title: the first line, cut at 80 characters on a char boundary; body: the whole text. Exact dedup answers the existing id (§7b P8). | `Saved as a note you wrote: “<title>” (<id8>, <scope>). It is used from your next message.` — or the refusal's own sentence. |
+| `/forget <id-or-prefix>` | Resolves a **unique** id prefix (at least 8 hex characters) among the notes this request can read; fetches the current revision; forgets it (tombstone-first, §6). An ambiguous prefix lists the matches and forgets nothing. | `Forgot “<title>” (<id8>).` followed by the service's retained-copies sentence. |
+| `/forget <text>` (not an id-shaped token) | Runs `search` (limit 5, active notes) and **forgets nothing**. | The matches as `<id8>  <title>  [<kind>/<scope>]` lines, then `Send /forget <id> to forget one.` — or `Nothing matched “<text>”.` |
+| `/memories` | The 10 most recently updated active notes this request can read, and the number of pending suggestions (L3). | One line per note as above; `N suggestions are waiting in the Memory view.` when N > 0. |
+| `/memories <query>` | `search` (limit 8, active notes). | One line per hit with its match reason; `Nothing matched “<query>”.` |
+
+Output is bounded (at most 10 lines of notes, each line at most 160 characters). No note body is printed beyond the title; `/memories` is a pointer, not a reader (`memory_read` and the Memory view read).
+
+### 12.2 Where they run, and where they refuse
+
+- **Attended app/CLI turns only** (`unattended == false`, lane source `gui` or `cli`). A connector turn (Telegram, Discord, iMessage), a scheduled skill, a follow-up and `/v1/command process` get: `Memory commands work in the OpenAlpaca app and the CLI.` — deterministic, nothing written. (Same boundary as `memory_confirm`, §4.3; the iMessage non-owner defect is why connectors are excluded.)
+- **No owner** (`Principal::System`) or **no memory service**: `Memory is not available here.`
+- **Attachments** on a memory-command turn are skipped with a reason (`skip_turn_attachments`, as the other deterministic arms do).
+- **Learning** never reads these rows: the transcript window already leaves out user rows starting with `/` together with their answer (§1.2).
+
+### 12.3 Parsing and reserved names
+
+- `IntentParser` gains `Intent::MemoryCommand { verb: Remember | Forget | Memories, args: String }`, parsed after task control and before skill matching; the command word is case-insensitive and must be followed by whitespace or end of input (`/remembering` is not a command). The args are kept **verbatim** (not lower-cased).
+- `/remember`, `/forget` and `/memories` become **reserved slash names**: a skill whose name is one of them is not reachable by slash (the skill loader logs one WARN naming it at load), and `create-skill` refuses those names.
+- `intent_type()` gains `"memory_command"` for telemetry.
+
+### 12.4 Plan row L9
+
+| Slice | What lands | Depends on | Size |
+|---|---|---|---|
+| **L9** | `Intent::MemoryCommand` and its parser; `orchestrator/memory_commands.rs` (the three handlers over `MemoryService` with a `UserSurface` context built from the attended turn); the refusals of §12.2; reserved names in the skill loader and `create-skill`; `memory_changed` published by the service as for any write; docs | L3 (suggestion count), L5 (none) | S–M |
+
+**Files:** `crates/openalpaca_core/src/orchestrator/intent/{mod.rs,tests.rs}`, `orchestrator/handlers.rs`, `orchestrator/memory_commands.rs` (new) + tests, `memory/service/context.rs` (the new constructor), the skill loader and `config/skills/create-skill/`, `docs/CLI_Manual.md` (chat commands), `docs/GUI_Manual.md`, `docs/Daemon_Manual.md` (the deterministic tier), 03 §4/§7a (the new user-directed surface and table row).
+
+**Evidence (tests first):**
+- the parse table: each verb, case, verbatim args, `/remembering` not a command, a skill named `remember` not reached by slash;
+- `/remember …` on an attended GUI turn writes one note with origin `user` and `surface: UserSurface`, **with zero model calls** (a scripted provider that fails the test if called);
+- `--kind`, `--global`, `--project`, and `--project` with no root refused `invalid_input`;
+- the same command on a connector turn, an unattended turn and a `System`-principal turn writes nothing and answers the refusal sentence;
+- `/forget <id8>` forgets exactly that note (tombstone present, file gone); `/forget <ambiguous prefix>` and `/forget <text>` forget nothing and list matches;
+- `/memories` and `/memories <query>` are bounded and print no body;
+- one `memory_changed` per write; the rows are not in the next learning window.
+
 ## Revision log
 
 - **rev 3.4 (2026-09-24), L2's review fixed (from `388ed329`, one commit per finding: two tests that pin guards no test covered — LR9's same-stat hand edit read as `external`, rule 13's target clause — a broken doc link, and the change below).** One fix changes what rev 3.3 recorded:
@@ -1391,6 +1439,7 @@ These are design revisions. Each is folded into 03 by the slice that implements 
   - **A bad-output hold backs off too** (60 s doubling), like §1.4's other holds; attempts are logged at INFO and only the skip at WARN, which is the "one WARN" of `three_invalid_outputs_skip_the_chunk_with_one_warn`.
   - **An automatic flush that made no progress does not restart at once.** A cap, the rate headroom, a busy daemon or a yield leaves the session due for the next sweep; restarting at the end of the flush looped (found by a revert experiment, pinned by `a_flush_that_made_no_progress_waits_for_the_next_sweep`).
   - **Details.** The sweeper reads each watched session with `get_session` (N small) rather than one `IN (…)` query, which also finds a deleted session and forgets it (LQ4, covering the workspace purge); `DELETE /v1/sessions/{id}` and `DELETE /v1/chat/history` forget at once. `extract_min_content_len` counts the user's own rows only, so a chunk of assistant-written follow-ups alone is advanced past with no call. A turn landing in another session of its lane marks the session it left due (the gateway sees R48's project switch first).
+- **rev 4 (2026-09-24):** §12 adds MD-13 — `/remember`, `/forget`, `/memories` as deterministic, model-free chat commands on attended app/CLI turns, `/remember` minting origin `user` — and plan row L9.
 - **rev 3 (2026-09-24):** the owner answered LQ1–LQ4; LQ1 (the reader judges, marked) rewrites §7.4 and the L7 guard tests from refusal to recording; the test model is `qwen3.8:27b-mlx`.
 - **rev 1 (2026-09-24):** initial design and plan for Learning v2, written for MD-10–MD-12, the adopted scope and the recommended answers to LQ1–LQ4. It is grounded in three read-only surveys at `bdfcf272`/`55a1dc4c`, whose citations are restated here, and it adds rulings LR1–LR16.
 - **rev 2 (2026-09-24):** applies a review of rev 1: 17 correctness findings (C1–C17) and 12 buildability findings (B1–B12). Each was checked against the code at `55a1dc4c`. All 29 are accepted, two of them in part (B1, B11); no finding is rejected whole. Rulings LR17–LR21 are added, and LR1, LR3, LR5, LR7, LR11–LR13 and LR15 are revised.
