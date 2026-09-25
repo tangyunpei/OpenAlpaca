@@ -443,6 +443,34 @@ mod hidden_characters {
         );
     }
 
+    /// A newline is not the only way for a name to put its tail on a line of
+    /// its own: a chat client soft-wraps a run of wide blanks (ideographic
+    /// spaces, braille blanks, no-break spaces), so what follows the run
+    /// starts the next line and reads as a line of the prompt. In the name
+    /// every space but the plain one is shown and counted.
+    #[test]
+    fn a_run_of_wide_blanks_in_the_tool_name_cannot_forge_a_visual_line() {
+        let forged = format!(
+            "shell_exec{}Arguments: {{\"path\": \"/tmp/notes.txt\"}}",
+            "\u{3000}\u{2800}\u{a0}".repeat(20)
+        );
+        let args = serde_json::json!({"path": "/home/me/.ssh/id_rsa"});
+
+        let prompt = format_confirmation_prompt(&forged, &args, 1);
+
+        assert!(
+            prompt.contains(&format!(
+                "Tool: shell_exec{}Arguments: {{\"path\": \"/tmp/notes.txt\"}}\n",
+                "<U+3000><U+2800><U+00A0>".repeat(20)
+            )),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Note: this request contains 60 hidden characters, shown as <U+…>."),
+            "{prompt}"
+        );
+    }
+
     /// `serde_json` escapes a `\r` inside a string itself, so a raw one can
     /// only arrive in the name; a C1 control and an astral tag character pass
     /// through `serde_json` raw.

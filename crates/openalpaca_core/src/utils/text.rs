@@ -27,12 +27,12 @@
 //! suggestion's `preview`, sanitized by the daemon before any surface sees
 //! it), and the escape is for the values beside it that decide what runs.
 //! A one-line field — the tool's name, the agent's id — takes
-//! [`escape_hidden_line`], which shows a newline and a tab as well: the
-//! pretty-printed arguments are laid out in lines, a name is not. The GUI
-//! mirrors the escape from one shared table,
-//! `apps/openalpaca-gui/src/lib/hidden-chars.json`, which a test here holds
-//! equal to [`needs_escape`] and [`needs_escape_in_line`] over every scalar
-//! value.
+//! [`escape_hidden_line`], which shows a newline, a tab and every other
+//! space but the plain one as well: the pretty-printed arguments are laid
+//! out in lines, a name is not. The GUI mirrors the escape from one shared
+//! table, `apps/openalpaca-gui/src/lib/hidden-chars.json`, which a test here
+//! holds equal to [`needs_escape`] and [`needs_escape_in_line`] over every
+//! scalar value.
 
 /// Borrow at most `max_bytes` of `s`, ending on a character boundary.
 ///
@@ -209,19 +209,32 @@ pub fn escape_hidden_within(text: &str, max_bytes: usize) -> Escaped {
 }
 
 /// A character a **one-line** field shows as `<U+XXXX>`: every
-/// [`needs_escape`] character, and `\n` and `\t` too. A tool's name or an
+/// [`needs_escape`] character, every whitespace character but the plain
+/// space U+0020 — `\n` and `\t`, the no-break spaces (U+00A0, U+202F), the
+/// Ogham, math and ideographic spaces (U+1680, U+205F, U+3000) and the
+/// typographic ones (U+2000–U+200A) — and U+2800 BRAILLE PATTERN BLANK,
+/// which draws as a space and wraps like a letter. A tool's name or an
 /// agent's id has no layout of its own — its line is the surface's — and an
 /// MCP `<server>__<tool>` or plugin `<plugin>::<tool>` name is any string its
-/// third party lists, so a newline in it would print forged lines (a benign
-/// `Arguments:` block, a `/yes` line) above the real ones.
+/// third party lists: a newline in it would print forged lines (a benign
+/// `Arguments:` block, a `/yes` line) above the real ones, and a run of wide
+/// blanks, which a chat client soft-wraps, would start its tail on a visual
+/// line of its own. No real name or id carries any of them.
+///
+/// The plain space stays, runs of it included, and that is residue: a run
+/// of plain spaces wraps the same way, so a name can still end in what
+/// looks like one extra line of the prompt (about one, in the 256 bytes a
+/// name may have), with the real lines directly under it. Showing a run of
+/// plain spaces would be a rule about neighbours, not a set; it is an owner
+/// decision, not taken.
 pub fn needs_escape_in_line(c: char) -> bool {
-    c == '\n' || c == '\t' || needs_escape(c)
+    needs_escape(c) || (c.is_whitespace() && c != ' ') || c == '\u{2800}'
 }
 
 /// [`escape_hidden`] for a one-line field — a tool name, an agent id: every
-/// [`needs_escape_in_line`] character written as `<U+XXXX>`, newlines and
-/// tabs included (`<U+000A>`, `<U+0009>`), and counted in the same
-/// [`hidden_notice`].
+/// [`needs_escape_in_line`] character written as `<U+XXXX>`, newlines, tabs
+/// and wide blanks included (`<U+000A>`, `<U+0009>`, `<U+3000>`), and
+/// counted in the same [`hidden_notice`].
 pub fn escape_hidden_line(text: &str) -> Escaped {
     escape_where(text, usize::MAX, needs_escape_in_line)
 }
@@ -301,20 +314,27 @@ mod tests {
         }
     }
 
-    /// A one-line field's set is the escape's, plus the newline and the tab —
-    /// the layout characters a field with no layout of its own must show.
+    /// A one-line field's set is the escape's, plus every Unicode space but
+    /// the plain one (`White_Space` by the `regex` crate's tables: the
+    /// newline and the tab, the no-break and ideographic spaces, …) and the
+    /// braille blank, which draws as a space and wraps like a letter.
     #[test]
-    fn needs_escape_in_line_is_needs_escape_plus_newline_and_tab() {
+    fn needs_escape_in_line_is_needs_escape_plus_every_space_but_the_plain_one() {
+        let space = regex::Regex::new(r"^\p{White_Space}$").unwrap();
+        let mut buf = [0u8; 4];
         for c in every_char() {
-            let expected = needs_escape(c) || c == '\n' || c == '\t';
+            let expected = needs_escape(c)
+                || (space.is_match(c.encode_utf8(&mut buf)) && c != ' ')
+                || c == '\u{2800}';
             assert_eq!(needs_escape_in_line(c), expected, "U+{:04X}", c as u32);
         }
     }
 
     /// A newline in a tool name is how a third-party name forges whole
-    /// prompt lines; in a one-line field it is shown, not laid out.
+    /// prompt lines, and a run of wide blanks how it forges a wrapped one;
+    /// in a one-line field both are shown, not laid out.
     #[test]
-    fn escape_hidden_line_shows_newline_and_tab_as_code_points() {
+    fn escape_hidden_line_shows_newline_tab_and_wide_blanks_as_code_points() {
         // (input, shown, hidden)
         let cases: &[(&str, &str, usize)] = &[
             ("", "", 0),
@@ -326,6 +346,21 @@ mod tests {
             ),
             ("a\tb\r\u{202e}", "a<U+0009>b<U+000D><U+202E>", 3),
             ("x\u{fe00}y\u{2028}", "x<U+FE00>y<U+2028>", 2),
+            // Wide blanks push the rest of a name onto a line of its own
+            // where a chat client wraps: shown, not laid out.
+            (
+                "shell_exec\u{3000}\u{3000}Arguments: {}",
+                "shell_exec<U+3000><U+3000>Arguments: {}",
+                2,
+            ),
+            (
+                "a\u{a0}b\u{2800}c\u{2003}d\u{202f}e",
+                "a<U+00A0>b<U+2800>c<U+2003>d<U+202F>e",
+                4,
+            ),
+            // The plain space stays, runs of it included (the residue
+            // `needs_escape_in_line` records).
+            ("files::write two  spaces", "files::write two  spaces", 0),
         ];
         for (input, shown, hidden) in cases {
             assert_eq!(
@@ -553,31 +588,42 @@ mod tests {
         }
     }
 
-    /// The GUI's one-line set is its `ranges` plus `line_adds`, held to
+    /// The GUI's one-line set is its `ranges` plus `line_adds` (ranges of
+    /// the same shape, sorted, disjoint and outside `ranges`), held to
     /// [`needs_escape_in_line`] over every scalar value.
     #[test]
     fn needs_escape_in_line_is_the_gui_table() {
         let table = gui_table();
-        let hex = |value: &serde_json::Value| {
-            let hex = value.as_str().expect("a code point is a hex string");
-            u32::from_str_radix(hex, 16).expect("a code point is hex")
+        let ranges_of = |key: &str| -> Vec<(u32, u32)> {
+            let hex = |value: &serde_json::Value| {
+                let hex = value.as_str().expect("a range bound is a hex string");
+                u32::from_str_radix(hex, 16).expect("a range bound is hex")
+            };
+            table[key]
+                .as_array()
+                .unwrap_or_else(|| panic!("{key} is an array"))
+                .iter()
+                .map(|range| (hex(&range[0]), hex(&range[1])))
+                .collect()
         };
-        let ranges: Vec<(u32, u32)> = table["ranges"]
-            .as_array()
-            .expect("ranges is an array")
-            .iter()
-            .map(|range| (hex(&range[0]), hex(&range[1])))
-            .collect();
-        let adds: Vec<u32> = table["line_adds"]
-            .as_array()
-            .expect("line_adds is an array")
-            .iter()
-            .map(hex)
-            .collect();
+        let ranges = ranges_of("ranges");
+        let adds = ranges_of("line_adds");
+        for pair in adds.windows(2) {
+            assert!(
+                pair[0].0 <= pair[0].1 && pair[0].1 < pair[1].0,
+                "line_adds must be sorted and disjoint: {pair:X?}"
+            );
+        }
+        let within = |set: &[(u32, u32)], code: u32| {
+            set.iter().any(|&(from, to)| (from..=to).contains(&code))
+        };
         for c in every_char() {
             let code = c as u32;
-            let listed = adds.contains(&code)
-                || ranges.iter().any(|&(from, to)| (from..=to).contains(&code));
+            assert!(
+                !(within(&ranges, code) && within(&adds, code)),
+                "U+{code:04X} is in both ranges and line_adds"
+            );
+            let listed = within(&ranges, code) || within(&adds, code);
             assert_eq!(needs_escape_in_line(c), listed, "U+{code:04X}");
         }
     }

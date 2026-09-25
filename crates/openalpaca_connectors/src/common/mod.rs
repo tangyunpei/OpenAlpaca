@@ -94,9 +94,12 @@ const PROMPT_ARGUMENTS_BYTES: usize = 500;
 /// escaped before the cut so the cut never splits an escape, and one notice
 /// line under the arguments counts them, those the cut left out included.
 /// The name is one line, so it goes through [`escape_hidden_line`], which
-/// shows a newline or a tab in it too: a name must not print lines of its
-/// own. Display only: `tool_arguments` is borrowed, and a reply is matched
-/// by request id, not by anything shown here.
+/// also shows a newline, a tab and every other space but the plain one: a
+/// name cannot break the prompt's lines, nor wrap its tail onto a line of
+/// its own with a run of wide blanks. A run of plain spaces can still wrap
+/// it there — residue, recorded at [`escape_hidden_line`]'s predicate.
+/// Display only: `tool_arguments` is borrowed, and a reply is matched by
+/// request id, not by anything shown here.
 ///
 /// [`escape_hidden`]: openalpaca_core::utils::text::escape_hidden
 /// [`escape_hidden_line`]: openalpaca_core::utils::text::escape_hidden_line
