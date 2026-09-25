@@ -55,8 +55,13 @@ export function MemoryUsedNote({ items, onOpen }: MemoryUsedNoteProps) {
         Notes used in this answer
       </p>
       <ul className="m-0 list-none p-0">
-        {items.map((entry) => (
-          <li key={entry.id} className="text-base-plus text-secondary">
+        {/* One id can come twice — listed by the recall, then opened with
+            memory_read — so the key is the row, not the note. */}
+        {items.map((entry, index) => (
+          <li
+            key={`${entry.id}:${entry.reason}:${index}`}
+            className="text-base-plus text-secondary"
+          >
             <button
               type="button"
               onClick={() => onOpen(entry.id)}
