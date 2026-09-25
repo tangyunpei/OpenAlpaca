@@ -39,6 +39,9 @@ min_recent_messages = 4
 [orchestrator.costs]
 extract_every_n_turns = 5
 extract_max_daily_cost_usd = 0.25
+# Memory-extraction model calls per UTC day (0 = no cap). The cost cap above
+# never binds on a $0 local model; this does.
+extract_max_calls_per_day = 200
 extract_min_content_len = 20
 # Memory notes one chat turn's extraction may write at most; the model's items
 # past this count are dropped and counted, never stored (design §4).
@@ -57,6 +60,18 @@ msg_trunc_chars = 1500
 prompt_recent_messages = 40
 summary_max_chars = 4000
 summary_min_new_older_messages = 12
+# An extracted memory item the model rates below this is dropped and counted;
+# the number itself is never stored (0.0-1.0).
+memory_confidence_threshold = 0.65
+
+[orchestrator.learning]
+# Learn from conversations in the background: every turn is queued, and a
+# conversation's new turns are extracted together when it has been idle
+# `idle_secs` (0 = never on idle), when `turns_per_flush` new turns have
+# accumulated, when you switch conversations, and before the daemon stops.
+enabled = true
+idle_secs = 120
+turns_per_flush = 10
 
 [orchestrator.prompt_budgets]
 identity_budget = 300

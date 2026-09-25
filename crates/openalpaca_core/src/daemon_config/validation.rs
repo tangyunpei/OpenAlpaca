@@ -84,6 +84,25 @@ impl DaemonConfig {
             100,
             "task_extract_max_items_per_run",
         );
+        clamp_val(
+            &mut self.orchestrator.costs.extract_max_calls_per_day,
+            0,
+            10000,
+            "extract_max_calls_per_day",
+        );
+        // ── Orchestrator > Learning (Learning v2, design 09 §1.10) ──
+        clamp_val(
+            &mut self.orchestrator.learning.idle_secs,
+            0,
+            3600,
+            "learning.idle_secs",
+        );
+        clamp_val(
+            &mut self.orchestrator.learning.turns_per_flush,
+            1,
+            100,
+            "learning.turns_per_flush",
+        );
         // ── Orchestrator > Prompt Budgets ──
         clamp_val(
             &mut self.orchestrator.prompt_budgets.identity_budget,

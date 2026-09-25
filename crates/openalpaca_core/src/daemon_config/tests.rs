@@ -608,3 +608,68 @@ task_extract_max_items_per_run = 5000
     assert_eq!(config.orchestrator.costs.extract_max_items_per_turn, 1);
     assert_eq!(config.orchestrator.costs.task_extract_max_items_per_run, 100);
 }
+
+// ── Learning v2's keys (design 09 §1.10) ─────────────────────────────
+
+/// MD-10's two numbers, the off switch and the daily call cap: 120 s of
+/// quiet, 10 new turns, learning on, and 200 extraction calls a UTC day —
+/// the same from the struct default and from an empty file.
+#[test]
+fn learning_keys_default_to_on_120s_10_turns_and_200_calls() {
+    for config in [DaemonConfig::default(), toml::from_str("").unwrap()] {
+        assert!(config.orchestrator.learning.enabled);
+        assert_eq!(config.orchestrator.learning.idle_secs, 120);
+        assert_eq!(config.orchestrator.learning.turns_per_flush, 10);
+        assert_eq!(config.orchestrator.costs.extract_max_calls_per_day, 200);
+    }
+}
+
+/// A partial `[orchestrator.learning]` table keeps the defaults of the keys
+/// it does not name (named serde defaults, never a bool's `false`).
+#[test]
+fn a_partial_learning_table_keeps_the_other_defaults() {
+    let config: DaemonConfig = toml::from_str(
+        r#"
+[orchestrator.learning]
+idle_secs = 0
+"#,
+    )
+    .unwrap();
+    assert!(config.orchestrator.learning.enabled);
+    assert_eq!(
+        config.orchestrator.learning.idle_secs, 0,
+        "0 switches the idle trigger off"
+    );
+    assert_eq!(config.orchestrator.learning.turns_per_flush, 10);
+}
+
+/// The registry's ranges: `idle_secs` 0..=3600, `turns_per_flush` 1..=100,
+/// `extract_max_calls_per_day` 0..=10000 (0 = no cap).
+#[test]
+fn learning_keys_are_clamped() {
+    let mut config: DaemonConfig = toml::from_str(
+        r#"
+[orchestrator.learning]
+idle_secs = 99999
+turns_per_flush = 0
+
+[orchestrator.costs]
+extract_max_calls_per_day = 20000
+"#,
+    )
+    .unwrap();
+    config.validate();
+    assert_eq!(config.orchestrator.learning.idle_secs, 3600);
+    assert_eq!(config.orchestrator.learning.turns_per_flush, 1);
+    assert_eq!(config.orchestrator.costs.extract_max_calls_per_day, 10000);
+
+    let mut high: DaemonConfig = toml::from_str(
+        r#"
+[orchestrator.learning]
+turns_per_flush = 1000
+"#,
+    )
+    .unwrap();
+    high.validate();
+    assert_eq!(high.orchestrator.learning.turns_per_flush, 100);
+}

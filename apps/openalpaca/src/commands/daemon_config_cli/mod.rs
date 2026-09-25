@@ -147,6 +147,32 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["orchestrator", "costs"],
         field: "task_extract_max_items_per_run",
     },
+    // Orchestrator: Learning v2 (design 09 §1.10)
+    TomlMapping {
+        schema_key: "daemon.orchestrator.learning.enabled",
+        section: &["orchestrator", "learning"],
+        field: "enabled",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.learning.idle_secs",
+        section: &["orchestrator", "learning"],
+        field: "idle_secs",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.learning.turns_per_flush",
+        section: &["orchestrator", "learning"],
+        field: "turns_per_flush",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.extract_max_calls_per_day",
+        section: &["orchestrator", "costs"],
+        field: "extract_max_calls_per_day",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.memory_confidence_threshold",
+        section: &["orchestrator", "memory"],
+        field: "memory_confidence_threshold",
+    },
     // Execution: Agent Defaults (cont.)
     TomlMapping {
         schema_key: "daemon.execution.max_tools_per_round",

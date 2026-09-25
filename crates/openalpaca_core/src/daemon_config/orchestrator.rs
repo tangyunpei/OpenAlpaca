@@ -9,6 +9,56 @@ pub struct OrchestratorConfig {
     pub prompt_budgets: PromptBudgetsConfig,
     pub routing: RoutingConfig,
     pub sessions: SessionsConfig,
+    pub learning: LearningConfig,
+}
+
+/// Background learning's cadence (`[orchestrator.learning]`, Learning v2,
+/// design 09 §1.10, owner decision MD-10).
+///
+/// Every turn is queued; a session's unlearned turns are extracted together
+/// when it has been idle about two minutes, when ten new turns have
+/// accumulated, when the user switches conversations, and before the daemon
+/// stops. Only MD-10's two numbers and the off switch are keys: the byte
+/// budget, the chunk and retry bounds and the quiet period are engineering
+/// constants (`memory::learning`), not owner-facing choices.
+///
+/// Named `#[serde(default = "...")]` functions shared with `Default`, as in
+/// [`RoutingConfig`], so a partial table cannot default `enabled` to `false`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearningConfig {
+    /// The off switch. `false` queues nothing and flushes nothing; the
+    /// evaluation's question phase uses it.
+    #[serde(default = "default_learning_enabled")]
+    pub enabled: bool,
+    /// MD-10's "idle about 2 minutes": a session with unlearned turns whose
+    /// last turn is this old becomes due. `0` switches the idle trigger off.
+    /// Range 0..=3600.
+    #[serde(default = "default_learning_idle_secs")]
+    pub idle_secs: u64,
+    /// MD-10's "10 new turns": the Nth user-authored turn since the cursor
+    /// makes the session due at once. Range 1..=100.
+    #[serde(default = "default_learning_turns_per_flush")]
+    pub turns_per_flush: u32,
+}
+
+fn default_learning_enabled() -> bool {
+    true
+}
+fn default_learning_idle_secs() -> u64 {
+    120
+}
+fn default_learning_turns_per_flush() -> u32 {
+    10
+}
+
+impl Default for LearningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_learning_enabled(),
+            idle_secs: default_learning_idle_secs(),
+            turns_per_flush: default_learning_turns_per_flush(),
+        }
+    }
 }
 
 /// Session event log limits (`[orchestrator.sessions]`, plan §5.4).
@@ -251,6 +301,11 @@ pub struct CostsConfig {
     pub extract_max_items_per_turn: usize,
     /// Notes one task run's extraction may write at most (design §4: 10).
     pub task_extract_max_items_per_run: usize,
+    /// Chat-learning extraction calls per UTC day (Learning v2, design 09
+    /// §1.8), read durably from `llm_usage_daily`. This is what bounds a $0
+    /// local model, where the cost cap never binds. `0` = no cap. Range
+    /// 0..=10000.
+    pub extract_max_calls_per_day: u32,
     /// Model ID for background summary generation (e.g. claude-haiku-4-5-20251001).
     /// If None, falls back to the router's default model.
     #[serde(default)]
@@ -273,6 +328,7 @@ impl Default for CostsConfig {
             task_extract_min_content_len: 100,
             extract_max_items_per_turn: 5,
             task_extract_max_items_per_run: 10,
+            extract_max_calls_per_day: 200,
             summary_model: None,
             extraction_model: None,
         }

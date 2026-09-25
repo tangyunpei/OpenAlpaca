@@ -318,9 +318,10 @@ impl<'a> ConversationRepository<'a> {
                  LIMIT ?3",
             ))?;
             let rows = stmt
-                .query_map(rusqlite::params![session_id, after_id, limit], |row| {
-                    Self::row_to_learning_row(row)
-                })?
+                .query_map(
+                    rusqlite::params![session_id, after_id, limit],
+                    Self::row_to_learning_row,
+                )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
         })
@@ -349,7 +350,7 @@ impl<'a> ConversationRepository<'a> {
             let rows = stmt
                 .query_map(
                     rusqlite::params![session_id, at_or_before_id, limit],
-                    |row| Self::row_to_learning_row(row),
+                    Self::row_to_learning_row,
                 )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)

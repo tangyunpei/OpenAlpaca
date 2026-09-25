@@ -97,8 +97,23 @@ fn test_daemon_keys_in_category() {
     // simulated-chunking keys the real chat stream retired (S1), plus the 2
     // extraction count keys (memory redesign, plan 3.4), less the 8 keys of
     // the deleted SQL memory engine — the two supersession thresholds, the
-    // four decay knobs and the two embedding-indexer knobs (plan 3.6).
-    assert_eq!(keys.len(), 43);
+    // four decay knobs and the two embedding-indexer knobs (plan 3.6), plus
+    // Learning v2's five (design 09 §1.10: the three
+    // `[orchestrator.learning]` keys, `extract_max_calls_per_day`, and the
+    // `memory_confidence_threshold` row it never had).
+    assert_eq!(keys.len(), 48);
+    for key in [
+        "daemon.orchestrator.learning.enabled",
+        "daemon.orchestrator.learning.idle_secs",
+        "daemon.orchestrator.learning.turns_per_flush",
+        "daemon.orchestrator.extract_max_calls_per_day",
+        "daemon.orchestrator.memory_confidence_threshold",
+    ] {
+        assert!(
+            keys.iter().any(|d| d.key == key),
+            "{key} has no registry row"
+        );
+    }
     assert!(
         keys.iter()
             .any(|d| d.key == "daemon.execution.artifacts.max_artifact_bytes")
@@ -364,6 +379,16 @@ fn test_validate_new_daemon_keys() {
 
     // Orchestrator keys
     assert!(validate("daemon.orchestrator.summary_min_new_older_messages", "12").is_ok());
+    // Learning v2 (design 09 §1.10)
+    assert!(validate("daemon.orchestrator.learning.enabled", "false").is_ok());
+    assert!(validate("daemon.orchestrator.learning.idle_secs", "0").is_ok());
+    assert!(validate("daemon.orchestrator.learning.idle_secs", "3601").is_err());
+    assert!(validate("daemon.orchestrator.learning.turns_per_flush", "0").is_err());
+    assert!(validate("daemon.orchestrator.learning.turns_per_flush", "100").is_ok());
+    assert!(validate("daemon.orchestrator.extract_max_calls_per_day", "0").is_ok());
+    assert!(validate("daemon.orchestrator.extract_max_calls_per_day", "10001").is_err());
+    assert!(validate("daemon.orchestrator.memory_confidence_threshold", "0.65").is_ok());
+    assert!(validate("daemon.orchestrator.memory_confidence_threshold", "1.5").is_err());
     assert!(validate("daemon.orchestrator.extract_every_n_turns", "5").is_ok());
 
     // Execution keys

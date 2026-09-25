@@ -84,3 +84,41 @@ fn test_find_mapping_extraction_count_keys() {
     assert_eq!(per_run.section, &["orchestrator", "costs"]);
     assert_eq!(per_run.field, "task_extract_max_items_per_run");
 }
+
+/// Learning v2 (design 09 §1.10): the three `[orchestrator.learning]` keys,
+/// the daily call cap beside the cost caps, and the confidence floor under
+/// `[orchestrator.memory]`, where `DaemonConfig` reads it.
+#[test]
+fn test_find_mapping_learning_keys() {
+    for (key, section, field) in [
+        (
+            "daemon.orchestrator.learning.enabled",
+            &["orchestrator", "learning"],
+            "enabled",
+        ),
+        (
+            "daemon.orchestrator.learning.idle_secs",
+            &["orchestrator", "learning"],
+            "idle_secs",
+        ),
+        (
+            "daemon.orchestrator.learning.turns_per_flush",
+            &["orchestrator", "learning"],
+            "turns_per_flush",
+        ),
+        (
+            "daemon.orchestrator.extract_max_calls_per_day",
+            &["orchestrator", "costs"],
+            "extract_max_calls_per_day",
+        ),
+        (
+            "daemon.orchestrator.memory_confidence_threshold",
+            &["orchestrator", "memory"],
+            "memory_confidence_threshold",
+        ),
+    ] {
+        let mapping = find_mapping(key).unwrap_or_else(|| panic!("{key} has no mapping"));
+        assert_eq!(mapping.section, section, "{key}");
+        assert_eq!(mapping.field, field, "{key}");
+    }
+}
