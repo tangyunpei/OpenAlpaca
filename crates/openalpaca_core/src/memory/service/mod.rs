@@ -35,6 +35,8 @@ pub mod wire;
 mod write_slot;
 
 #[cfg(test)]
+mod bench;
+#[cfg(test)]
 mod tests;
 
 pub use context::{
@@ -61,9 +63,9 @@ use chrono::{DateTime, Utc};
 use openalpaca_storage::Database;
 use openalpaca_storage::memory_files::{
     self as files, Dedup, EffectiveStatus, LoadedPartition, MAX_LIST_ENTRIES, MAX_NOTE_BYTES,
-    MAX_SOURCES, MAX_TITLE_CHARS, MemoryFilesError, NewNote, NoteId, NoteScope, NoteSource,
-    NoteStatus, NoteView, Origin, Partition, PartitionHealth, ReplacePolicy, ScanEntry, SourceType,
-    is_valid_fact_key,
+    MAX_SOURCES, MAX_TITLE_CHARS, MemoryFilesError, NewNote, NoteId, NoteParseCache, NoteScope,
+    NoteSource, NoteStatus, NoteView, Origin, Partition, PartitionHealth, ReplacePolicy, ScanEntry,
+    SourceType, is_valid_fact_key,
 };
 use openalpaca_storage::memory_index::{
     self as index, FileStat, IndexRecord, IndexState, MemoryIndex,
@@ -71,7 +73,7 @@ use openalpaca_storage::memory_index::{
 use openalpaca_storage::store::StoreScope;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use write_slot::WriteSlots;
@@ -174,6 +176,9 @@ pub struct MemoryService {
     /// mtime, size or inode changed is re-hashed). A tick whose scan
     /// matches re-parses and re-indexes nothing.
     last_scans: Mutex<HashMap<String, Vec<ScanEntry>>>,
+    /// The parsed notes and control snapshots of the partitions this
+    /// service reads (design 09 §6.3), handed to every partition it opens.
+    parse_cache: Arc<NoteParseCache>,
     ring: Mutex<VecDeque<RecentlyUsedItem>>,
     /// Per request, what it delivered so far in delivery order — the turn's
     /// `memory_used` (design §7a), taken once by the bridge. Oldest first,
@@ -216,11 +221,25 @@ impl MemoryService {
             slots: WriteSlots::default(),
             fingerprints: Mutex::new(HashMap::new()),
             last_scans: Mutex::new(HashMap::new()),
+            parse_cache: Arc::new(NoteParseCache::default()),
             ring: Mutex::new(VecDeque::with_capacity(RING_CAPACITY)),
             used_by_request: Mutex::new(VecDeque::new()),
             raised: Mutex::new(HashMap::new()),
             bus: None,
         }
+    }
+
+    /// Replaces the parse cache (design 09 §6.3) — a bench measures with
+    /// `NoteParseCache::new(0)`, which caches nothing; a test injects its
+    /// stat function. Before the first use of the service.
+    pub fn with_parse_cache(mut self, cache: NoteParseCache) -> Self {
+        self.parse_cache = Arc::new(cache);
+        self
+    }
+
+    /// The parse cache every partition this service opens reads through.
+    pub fn parse_cache(&self) -> &NoteParseCache {
+        &self.parse_cache
     }
 
     /// Attaches the bus every `memory_changed` is published on (design
@@ -351,8 +370,18 @@ impl MemoryService {
     // Partitions (design §3 rule 1)
     // ------------------------------------------------------------------------
 
-    fn open_partition(scope: &StoreScope, owner_id: &str) -> Result<Partition, MemoryError> {
-        Partition::open(scope, owner_id).map_err(MemoryError::from)
+    /// Opens a partition through the service's parse cache (design 09
+    /// §6.3), so an unchanged note file is not read again.
+    fn open_partition(&self, scope: &StoreScope, owner_id: &str) -> Result<Partition, MemoryError> {
+        self.open_cached(scope, owner_id).map_err(MemoryError::from)
+    }
+
+    fn open_cached(
+        &self,
+        scope: &StoreScope,
+        owner_id: &str,
+    ) -> Result<Partition, MemoryFilesError> {
+        Partition::open_cached(scope, owner_id, &self.parse_cache)
     }
 
     /// The owner's home partition and, when the request resolved a project
@@ -361,11 +390,11 @@ impl MemoryService {
     /// partition with one WARN naming the component, and the request falls
     /// back to the global partition (design §3 rule 1).
     pub(super) fn resolve(&self, ctx: &MemoryAccessContext) -> Result<Resolved, MemoryError> {
-        let home = Self::open_partition(&StoreScope::Home, &ctx.owner_id)?;
+        let home = self.open_partition(&StoreScope::Home, &ctx.owner_id)?;
         let project = match &ctx.project_root {
             None => None,
             Some(root) => {
-                match Partition::open(&StoreScope::Project(root.clone()), &ctx.owner_id) {
+                match self.open_cached(&StoreScope::Project(root.clone()), &ctx.owner_id) {
                     Ok(p) => Some(p),
                     Err(MemoryFilesError::PathRefused { component, reason }) => {
                         tracing::warn!(
@@ -418,9 +447,10 @@ impl MemoryService {
     /// Design §3, *Workspace move*, step 5: deletes the old-key snapshots and
     /// clears `moved_from` on their twins ([`files::finish_project_move`]),
     /// then drops the old keys' rows from the index and this process's
-    /// fingerprints — the moved partition is re-indexed under its new key on
-    /// its first use, like any partition the index has no rows for. The
-    /// caller releases the hold by dropping its guard.
+    /// fingerprints, scans and parse cache entries (design 09 §6.3) — the
+    /// moved partition is re-indexed under its new key on its first use,
+    /// like any partition the index has no rows for. The caller releases the
+    /// hold by dropping its guard.
     pub fn finish_project_move(&self, mv: ProjectMove) -> Result<(), MemoryError> {
         files::finish_project_move(&mv.moves, Utc::now())?;
         let mut fingerprints = self.fingerprints.lock().unwrap_or_else(|e| e.into_inner());
@@ -429,6 +459,7 @@ impl MemoryService {
             self.index.remove_partition(&m.old_key)?;
             fingerprints.remove(&m.old_key);
             last_scans.remove(&m.old_key);
+            self.parse_cache.evict_partition(&m.old_key);
         }
         Ok(())
     }
@@ -652,6 +683,8 @@ impl MemoryService {
     /// Rebuilds the whole cache from every partition a control snapshot
     /// names (a fresh or recreated index). Best effort per partition.
     pub fn rebuild_index(&self) -> Result<(), MemoryError> {
+        // Everything is read again from the disk, as on a fresh start.
+        self.parse_cache.clear();
         let mut records: Vec<IndexRecord> = Vec::new();
         let mut opened: Vec<Partition> = Vec::new();
         for (path, parsed) in files::list_snapshots()? {
@@ -671,7 +704,7 @@ impl MemoryService {
                     StoreScope::Project(project.to_path_buf())
                 }
             };
-            match Partition::open(&scope, &snapshot.owner_id) {
+            match self.open_cached(&scope, &snapshot.owner_id) {
                 Ok(p) => opened.push(p),
                 Err(e) => tracing::warn!(
                     partition = %snapshot.partition_key,
@@ -1114,7 +1147,7 @@ impl MemoryService {
         let _write = self
             .slots
             .begin_write(&Self::slot_key(&store_scope, &ctx.owner_key));
-        let partition = Self::open_partition(&store_scope, &ctx.owner_id)?;
+        let partition = self.open_partition(&store_scope, &ctx.owner_id)?;
         let (created, view) = partition.create_viewed(new, actor)?;
         self.reindex_view(&partition, &view, false)?;
         let change = (created.dedup == Dedup::Created).then(|| MemoryChange {
@@ -1158,7 +1191,7 @@ impl MemoryService {
             let _write = self
                 .slots
                 .begin_write(&Self::slot_key(p.scope(), &ctx.owner_key));
-            let fresh = Self::open_partition(p.scope(), &ctx.owner_id)?;
+            let fresh = self.open_partition(p.scope(), &ctx.owner_id)?;
             let (found, view) = fresh.reconcile_viewed()?;
             scanned += view.scan.len();
             for change in found {

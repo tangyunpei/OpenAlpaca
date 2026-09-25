@@ -5050,3 +5050,107 @@ fn learning_view_parses_no_partition() {
         view.keys
     );
 }
+
+// ============================================================================
+// The parse cache through the service (design 09 §6.3)
+// ============================================================================
+
+fn file_reads() -> u64 {
+    openalpaca_storage::memory_files::note_file_reads_on_this_thread()
+}
+
+/// The harness with a parse cache that trusts a file at its first read (no
+/// racy window), so a test need not wait for its own writes to settle.
+fn cached_harness() -> Harness {
+    let mut h = Harness::new();
+    h.service = MemoryService::new(Some(h.db.clone()), MemoryIndex::open_in_memory().unwrap())
+        .with_bus(h.bus.clone())
+        .with_parse_cache(
+            openalpaca_storage::memory_files::NoteParseCache::default()
+                .with_racy_window(std::time::Duration::ZERO),
+        );
+    h.service.rebuild_index().unwrap();
+    h
+}
+
+/// Design 09 §6.3: every partition the service opens reads through its
+/// cache — a listing of a partition nothing changed reads no note file, a
+/// hand edit is read again, alone, and served.
+#[test]
+fn the_service_reads_an_unchanged_partition_through_its_cache() {
+    let h = cached_harness();
+    let user = h.user(ALICE, None);
+    let notes = ten_notes(&h, &user);
+    h.list_ids(&user, ListInput::default());
+    let before = file_reads();
+    let listed = h.list_ids(&user, ListInput::default());
+    assert_eq!(file_reads() - before, 0, "nothing changed, nothing read");
+    assert_eq!(listed.len(), 10);
+
+    let file = note_file_for(&h.home_notes_dir(ALICE_KEY), notes[4].id).unwrap();
+    let mut bytes = fs::read(&file).unwrap();
+    bytes.extend_from_slice(b"\nEdited by hand.\n");
+    fs::write(&file, &bytes).unwrap();
+    let before = file_reads();
+    let read = h
+        .service
+        .read(
+            &user,
+            ReadInput {
+                id: notes[4].id,
+                expected_revision: None,
+                section: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(file_reads() - before, 1);
+    assert!(read.body.contains("Edited by hand."));
+    assert_eq!(read.origin, Origin::External);
+}
+
+/// Design 09 §6.3, *Invalidation*: a workspace move evicts the old key's
+/// entries wherever the fingerprints and scans are evicted, and an index
+/// rebuild empties the cache.
+#[test]
+fn a_workspace_move_evicts_the_old_keys() {
+    let h = cached_harness();
+    let old = h.workspace("old", Some(".openalpaca"));
+    let new = h.root.path().join("ws").join("new");
+    let at_old = h.user(ALICE, Some(&old));
+    h.store(
+        &at_old,
+        "Release step",
+        "# Release step\n\nTag, then run the release script.\n",
+        NoteKind::Procedure,
+    );
+    h.list_ids(&at_old, ListInput::default());
+    let old_key = h
+        .snapshot(&StoreScope::Project(old.clone()), ALICE)
+        .unwrap()
+        .partition_key;
+    assert_eq!(h.service.parse_cache().cached_files(&old_key), Some(1));
+
+    let mv = h.service.begin_project_move(&old, &new).unwrap();
+    fs::create_dir_all(&new).unwrap();
+    fs::rename(old.join(".openalpaca"), new.join(".openalpaca")).unwrap();
+    h.service.finish_project_move(mv).unwrap();
+    assert_eq!(h.service.parse_cache().cached_files(&old_key), None);
+
+    let new = new.canonicalize().unwrap();
+    let at_new = h.user(ALICE, Some(&new));
+    assert_eq!(h.list_ids(&at_new, ListInput::default()).len(), 1);
+    let new_key = h
+        .snapshot(&StoreScope::Project(new.clone()), ALICE)
+        .unwrap()
+        .partition_key;
+    assert_ne!(new_key, old_key);
+    assert_eq!(h.service.parse_cache().cached_files(&new_key), Some(1));
+
+    // A rebuild reads every partition from the disk again.
+    let before = file_reads();
+    h.service.rebuild_index().unwrap();
+    assert_eq!(file_reads() - before, 1, "the one note, read again");
+    let cache = h.service.parse_cache();
+    assert_eq!(cache.cached_files(&old_key), None);
+    assert_eq!(cache.cached_files(&new_key), Some(1));
+}

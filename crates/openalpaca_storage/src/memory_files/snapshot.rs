@@ -15,6 +15,31 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Bumped by every [`ControlSnapshot::save`] of this process, after the file
+/// is in place: a cached snapshot is bound to the generation it was read or
+/// saved at, so a save through any partition handle — cached or not —
+/// retires it (design 09 §6.3).
+static SAVE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// The current save generation (design 09 §6.3).
+pub(super) fn save_generation() -> u64 {
+    SAVE_GENERATION.load(Ordering::SeqCst)
+}
+
+thread_local! {
+    /// How many snapshot files this thread has read and parsed. Read by
+    /// tests only.
+    static LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The control snapshots this thread has read from disk and parsed — a
+/// test-only counter like [`super::whole_parses_on_this_thread`].
+#[doc(hidden)]
+pub fn snapshot_loads_on_this_thread() -> u64 {
+    LOADS.with(|n| n.get())
+}
 
 /// Who recorded a note (design §4), with the five strictly ordered ranks:
 /// `user` > `extracted_user` > `imported` > `external` > `extracted_other`.
@@ -194,6 +219,7 @@ impl ControlSnapshot {
 
     /// Reads a snapshot file. `Ok(None)` when absent.
     pub fn load(path: &Path) -> Result<Option<Self>, SnapshotError> {
+        LOADS.with(|n| n.set(n.get() + 1));
         let bytes = match read_if_exists(path) {
             Ok(Some(b)) => b,
             Ok(None) => return Ok(None),
@@ -254,7 +280,9 @@ impl ControlSnapshot {
             create_private_dir(dir)?;
         }
         write_atomic_private(path, self.to_json().as_bytes())
-            .with_context(|| format!("Failed to write control snapshot {}", path.display()))
+            .with_context(|| format!("Failed to write control snapshot {}", path.display()))?;
+        SAVE_GENERATION.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Keeps the snapshot bounded (design §6): duplicate source-suppression

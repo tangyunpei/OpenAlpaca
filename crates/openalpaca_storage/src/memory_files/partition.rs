@@ -14,6 +14,7 @@
 //! mutation after a named step with the disk exactly as it was.
 
 use super::authority::{Conflict, Derivation, DerivedNote, EffectiveStatus, NoteInput, derive};
+use super::cache::{FileEntry, NoteParseCache, ParsedNote, StatKey};
 use super::fsx::{
     ComponentState, canonical_string_lenient, create_private_dir, fsync_dir, read_regular_nofollow,
     real_directory_state, remove_dir_all_if_exists, remove_file_if_exists, write_atomic_private,
@@ -21,6 +22,7 @@ use super::fsx::{
 use super::note::{NewNote, Note, NoteId, NotePatch, NoteStatus, ReplacePolicy, to_second};
 use super::snapshot::{
     ControlSnapshot, NoteRecord, Origin, Pending, SnapshotError, SnapshotScope, Tombstone,
+    save_generation,
 };
 use super::{
     CONTROL_DIR, HISTORY_DIR, HISTORY_KEEP, MemoryFilesError, NAVIGATION_FILE, NOTES_DIR,
@@ -47,13 +49,18 @@ thread_local! {
     /// How many `notes/` stat scans this thread has made (design 09 §6.3).
     /// Read by tests only.
     static SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// How many note files this thread has read from disk (design 09 §6.3).
+    /// Read by tests only.
+    static FILE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// The whole-partition parses (every note file read and parsed) this thread
-/// has made so far. A test-only counter: a caller on the reply path proves
-/// it parses no partition by reading it before and after (design 09 §4.5,
+/// The whole-partition reads this thread has made so far — every note
+/// file listed and served, parsed now or taken from the parse cache (design
+/// 09 §6.3; [`note_file_reads_on_this_thread`] counts the files actually
+/// read). A test-only counter: a caller on the reply path proves it reads
+/// no partition by reading it before and after (design 09 §4.5,
 /// `pending_suggestions_parses_no_partition`). One thread-local increment
-/// per parse, so a test is not disturbed by others running in parallel.
+/// per read, so a test is not disturbed by others running in parallel.
 #[doc(hidden)]
 pub fn whole_parses_on_this_thread() -> u64 {
     WHOLE_PARSES.with(|n| n.get())
@@ -64,6 +71,21 @@ pub fn whole_parses_on_this_thread() -> u64 {
 #[doc(hidden)]
 pub fn scans_on_this_thread() -> u64 {
     SCANS.with(|n| n.get())
+}
+
+/// The note files this thread has read from disk so far — a whole
+/// partition read counts every file the parse cache did not vouch for, and
+/// a mutation's re-read of the file it checks counts one (design 09 §6.3).
+/// A test-only counter like [`whole_parses_on_this_thread`].
+#[doc(hidden)]
+pub fn note_file_reads_on_this_thread() -> u64 {
+    FILE_READS.with(|n| n.get())
+}
+
+/// Reads one note file, counted.
+fn read_note_file(path: &Path) -> Result<Vec<u8>> {
+    FILE_READS.with(|n| n.set(n.get() + 1));
+    read_regular_nofollow(path)
 }
 
 // ============================================================================
@@ -303,7 +325,7 @@ pub enum CrashPoint {
 #[derive(Debug, Clone, Default)]
 struct Parsed {
     scan: Vec<ScanEntry>,
-    notes: Vec<(ScanEntry, Note, String)>,
+    notes: Vec<(ScanEntry, Arc<ParsedNote>)>,
     malformed: Vec<MalformedFile>,
     duplicates: Vec<(NoteId, Vec<PathBuf>)>,
 }
@@ -312,8 +334,11 @@ impl Parsed {
     /// Re-derives the duplicate ids from the parsed notes.
     fn find_duplicates(&mut self) {
         let mut by_id: BTreeMap<NoteId, Vec<PathBuf>> = BTreeMap::new();
-        for (entry, note, _) in &self.notes {
-            by_id.entry(note.id).or_default().push(entry.path.clone());
+        for (entry, parsed) in &self.notes {
+            by_id
+                .entry(parsed.note.id)
+                .or_default()
+                .push(entry.path.clone());
         }
         self.duplicates = by_id
             .into_iter()
@@ -324,7 +349,7 @@ impl Parsed {
     /// Forgets every file at one of `paths`: gone from the disk.
     fn drop_paths(&mut self, paths: &HashSet<PathBuf>) {
         self.scan.retain(|e| !paths.contains(&e.path));
-        self.notes.retain(|(e, _, _)| !paths.contains(&e.path));
+        self.notes.retain(|(e, _)| !paths.contains(&e.path));
         self.malformed.retain(|m| !paths.contains(&m.path));
         self.find_duplicates();
     }
@@ -332,24 +357,33 @@ impl Parsed {
     /// Records the file this process just wrote — `bytes` at `entry` —
     /// replacing whatever was at `replaced` (the file written over, and
     /// under a retitle the name it moved from). The bytes are classified
-    /// exactly as a read of the file would classify them.
-    fn put(&mut self, replaced: &HashSet<PathBuf>, entry: ScanEntry, bytes: &[u8]) {
+    /// exactly as a read of the file would classify them; the note, when
+    /// they are one, is returned.
+    fn put(
+        &mut self,
+        replaced: &HashSet<PathBuf>,
+        entry: ScanEntry,
+        bytes: &[u8],
+    ) -> Option<Arc<ParsedNote>> {
         self.scan.retain(|e| !replaced.contains(&e.path));
-        self.notes.retain(|(e, _, _)| !replaced.contains(&e.path));
+        self.notes.retain(|(e, _)| !replaced.contains(&e.path));
         self.malformed.retain(|m| !replaced.contains(&m.path));
-        match classify(&entry, Ok(bytes.to_vec())) {
-            Ok((note, revision)) => {
-                self.notes.push((entry.clone(), note, revision));
+        let written = match classify(&entry, Ok(bytes.to_vec())) {
+            Ok(parsed) => {
+                self.notes.push((entry.clone(), Arc::clone(&parsed)));
                 self.notes.sort_by(|a, b| a.0.file_name.cmp(&b.0.file_name));
+                Some(parsed)
             }
             Err(file) => {
                 self.malformed.push(file);
                 self.malformed.sort_by(|a, b| a.path.cmp(&b.path));
+                None
             }
-        }
+        };
         self.scan.push(entry);
         self.scan.sort_by(|a, b| a.file_name.cmp(&b.file_name));
         self.find_duplicates();
+        written
     }
 }
 
@@ -378,7 +412,7 @@ fn scan_entry(path: PathBuf, file_name: String, meta: &fs::Metadata) -> ScanEntr
 fn classify(
     entry: &ScanEntry,
     read: Result<Vec<u8>, String>,
-) -> Result<(Note, String), MalformedFile> {
+) -> Result<Arc<ParsedNote>, MalformedFile> {
     let malformed = |reason: String| MalformedFile {
         path: entry.path.clone(),
         reason,
@@ -394,7 +428,7 @@ fn classify(
         )));
     }
     let revision = super::sha256_hex(&bytes);
-    Ok((note, revision))
+    Ok(Arc::new(ParsedNote { note, revision }))
 }
 
 /// What a forget has done so far: each target's outcome, the files it
@@ -404,12 +438,15 @@ struct ForgetProgress {
     outcomes: Vec<ForgetOutcome>,
     removed: HashSet<PathBuf>,
     forgotten: HashSet<NoteId>,
+    /// The save generation of the last snapshot save, for the cache.
+    saved: Option<u64>,
 }
 
 struct State {
     /// `None` until the first write lays the partition out, or while
-    /// quarantined.
-    snapshot: Option<ControlSnapshot>,
+    /// quarantined. Shared with the parse cache until a mutation changes it
+    /// (`Arc::make_mut`).
+    snapshot: Option<Arc<ControlSnapshot>>,
     quarantine: Option<String>,
 }
 
@@ -428,6 +465,9 @@ pub struct Partition {
     snapshot_path: PathBuf,
     state: Mutex<State>,
     clock: Clock,
+    /// The service's parse cache (design 09 §6.3), when it opened this
+    /// partition; `None` reads every file every time.
+    cache: Option<Arc<NoteParseCache>>,
     #[cfg(test)]
     crash: Mutex<Option<CrashPoint>>,
 }
@@ -482,7 +522,31 @@ impl Partition {
     /// A project partition whose `memory/` exists gets its `.gitignore`
     /// re-asserted (MD-7). A valid snapshot runs recovery (design §6).
     pub fn open(scope: &StoreScope, owner_id: &str) -> Result<Self, MemoryFilesError> {
-        Self::open_inner(scope, owner_id, owner_key(owner_id), OpenMode::ReadWrite)
+        Self::open_inner(
+            scope,
+            owner_id,
+            owner_key(owner_id),
+            OpenMode::ReadWrite,
+            None,
+        )
+    }
+
+    /// [`Partition::open`] through the service's parse cache (design 09
+    /// §6.3): the snapshot and every unchanged note file are taken from
+    /// `cache` instead of being read and parsed again, and this partition's
+    /// own writes keep the cache current.
+    pub fn open_cached(
+        scope: &StoreScope,
+        owner_id: &str,
+        cache: &Arc<NoteParseCache>,
+    ) -> Result<Self, MemoryFilesError> {
+        Self::open_inner(
+            scope,
+            owner_id,
+            owner_key(owner_id),
+            OpenMode::ReadWrite,
+            Some(Arc::clone(cache)),
+        )
     }
 
     /// Opens a partition **by owner key**, for reading only: the path checks
@@ -502,7 +566,7 @@ impl Partition {
                 "`{owner_key}` is not an owner key (32 lowercase hex characters)"
             )));
         }
-        Self::open_inner(scope, "", owner_key.to_string(), OpenMode::ReadOnly)
+        Self::open_inner(scope, "", owner_key.to_string(), OpenMode::ReadOnly, None)
     }
 
     fn open_inner(
@@ -510,6 +574,7 @@ impl Partition {
         owner_id: &str,
         key: String,
         mode: OpenMode,
+        cache: Option<Arc<NoteParseCache>>,
     ) -> Result<Self, MemoryFilesError> {
         let store = store_root(scope)?;
         let memory_dir = store.join(ContentKind::Memory.dir_name());
@@ -572,6 +637,7 @@ impl Partition {
                 quarantine: None,
             }),
             clock: Arc::new(now_seconds),
+            cache,
             #[cfg(test)]
             crash: Mutex::new(None),
         };
@@ -580,7 +646,7 @@ impl Partition {
             partition.assert_gitignore()?;
         }
 
-        let loaded = match ControlSnapshot::load(&partition.snapshot_path) {
+        let loaded = match partition.load_snapshot() {
             Ok(Some(snapshot)) => match snapshot.check_binding(
                 &partition_key,
                 &partition.owner_key,
@@ -651,6 +717,91 @@ impl Partition {
     }
 
     // ------------------------------------------------------------------------
+    // The control snapshot, through the parse cache (design 09 §6.3)
+    // ------------------------------------------------------------------------
+
+    /// The snapshot file, parsed — or, through a cache, the parse this
+    /// process last read or saved, while the file's stat is unchanged and no
+    /// save came since. A file read from disk is cached once its stat has
+    /// settled (the racy window, as for notes).
+    fn load_snapshot(&self) -> Result<Option<Arc<ControlSnapshot>>, SnapshotError> {
+        let Some(cache) = &self.cache else {
+            return ControlSnapshot::load(&self.snapshot_path).map(|s| s.map(Arc::new));
+        };
+        let generation = save_generation();
+        let taken = SystemTime::now();
+        let stat = StatKey::lstat(&self.snapshot_path);
+        if let Some(stat) = stat
+            && let Some(hit) = cache.snapshot(
+                &self.partition_key,
+                &self.notes_dir,
+                &self.snapshot_path,
+                stat,
+                generation,
+            )
+        {
+            return Ok(Some(hit));
+        }
+        let loaded = ControlSnapshot::load(&self.snapshot_path)?.map(Arc::new);
+        if let (Some(snapshot), Some(stat)) = (&loaded, stat)
+            && cache.settled(&stat, taken)
+        {
+            cache.put_snapshot(
+                &self.partition_key,
+                &self.notes_dir,
+                &self.snapshot_path,
+                stat,
+                generation,
+                Arc::clone(snapshot),
+            );
+        }
+        Ok(loaded)
+    }
+
+    /// The snapshot a mutation changes: unshared from the cache first.
+    fn snapshot_mut(state: &mut State) -> &mut ControlSnapshot {
+        Arc::make_mut(state.snapshot.as_mut().expect("a laid-out partition"))
+    }
+
+    /// Saves `snapshot` to the partition's file. Returns the save generation
+    /// it was written at when no other save of this process came in between
+    /// — the only one [`Partition::remember_snapshot`] may record it under.
+    fn save_snapshot(
+        &self,
+        snapshot: &mut Arc<ControlSnapshot>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<u64>, MemoryFilesError> {
+        let before = save_generation();
+        Arc::make_mut(snapshot).save(&self.snapshot_path, now)?;
+        Ok((save_generation() == before + 1).then_some(before + 1))
+    }
+
+    /// Records `state`'s snapshot in the cache as saved at `generation` —
+    /// once, after a mutation's last save, so a mutation's own saves do not
+    /// each unshare it again. Skipped when another save has come since.
+    fn remember_snapshot(&self, state: &State, generation: Option<u64>) {
+        let (Some(cache), Some(generation), Some(snapshot)) =
+            (&self.cache, generation, &state.snapshot)
+        else {
+            return;
+        };
+        let Some(stat) = StatKey::lstat(&self.snapshot_path) else {
+            return;
+        };
+        if save_generation() != generation {
+            return;
+        }
+        cache.put_snapshot(
+            &self.partition_key,
+            &self.notes_dir,
+            &self.snapshot_path,
+            stat,
+            generation,
+            Arc::clone(snapshot),
+        );
+    }
+
+    // ------------------------------------------------------------------------
     // Accessors
     // ------------------------------------------------------------------------
 
@@ -701,7 +852,7 @@ impl Partition {
 
     /// A copy of the control snapshot, when the partition has one.
     pub fn snapshot(&self) -> Option<ControlSnapshot> {
-        self.lock().snapshot.clone()
+        self.lock().snapshot.as_deref().cloned()
     }
 
     // ------------------------------------------------------------------------
@@ -771,19 +922,20 @@ impl Partition {
         create_private_dir(&self.root)?;
         create_private_dir(&self.notes_dir)?;
         create_private_dir(&self.history_dir)?;
-        let mut snapshot = ControlSnapshot::new(
+        let mut snapshot = Arc::new(ControlSnapshot::new(
             &self.partition_key,
             self.scope_kind,
             &self.owner_key,
             &self.owner_id,
             &self.root_canonical,
             self.now(),
-        );
+        ));
         // `state/` itself is the store's and is created 0700 by the store,
         // never by the snapshot's `create_dir_all` with the umask default.
         state_dir()?;
-        snapshot.save(&self.snapshot_path, self.now())?;
+        let saved = self.save_snapshot(&mut snapshot, self.now())?;
         state.snapshot = Some(snapshot);
+        self.remember_snapshot(state, saved);
         self.write_navigation(&[]);
         Ok(())
     }
@@ -802,6 +954,12 @@ impl Partition {
     /// Lists `notes/*.md`: regular files only — no hidden or temp names, no
     /// links, no directories — with the facts a stat scan compares.
     pub fn scan(&self) -> Result<Vec<ScanEntry>> {
+        Ok(self.scan_keyed()?.into_iter().map(|(e, _)| e).collect())
+    }
+
+    /// [`Partition::scan`], each entry with the stat identity the parse
+    /// cache compares — from the same `lstat`.
+    fn scan_keyed(&self) -> Result<Vec<(ScanEntry, StatKey)>> {
         SCANS.with(|n| n.set(n.get() + 1));
         let entries = match fs::read_dir(&self.notes_dir) {
             Ok(e) => e,
@@ -826,35 +984,103 @@ impl Partition {
             if !meta.file_type().is_file() {
                 continue;
             }
-            out.push(scan_entry(path, file_name, &meta));
+            out.push((scan_entry(path, file_name, &meta), StatKey::of(&meta)));
         }
-        out.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+        out.sort_by(|a, b| a.0.file_name.cmp(&b.0.file_name));
         Ok(out)
     }
 
-    /// The scan entry of one file this process just wrote.
-    fn scan_one(&self, path: &Path) -> Result<ScanEntry> {
+    /// The scan entry of one file this process just wrote, and its stat
+    /// identity.
+    fn scan_one(&self, path: &Path) -> Result<(ScanEntry, StatKey)> {
         let meta = fs::symlink_metadata(path)
             .with_context(|| format!("Failed to stat {}", path.display()))?;
         let file_name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        Ok(scan_entry(path.to_path_buf(), file_name, &meta))
+        Ok((
+            scan_entry(path.to_path_buf(), file_name, &meta),
+            StatKey::of(&meta),
+        ))
     }
 
     /// Scans and parses every file: the parsed notes (one per file), the
-    /// malformed files and the duplicate ids.
+    /// malformed files and the duplicate ids. Through the parse cache
+    /// (design 09 §6.3), a file whose stat identity is the cached one is not
+    /// read — or, while that stat is within the racy window, is read and
+    /// re-hashed but not parsed again — and what this read found replaces
+    /// the partition's entries when it differs from them.
     fn parse_all(&self) -> Result<Parsed> {
         WHOLE_PARSES.with(|n| n.set(n.get() + 1));
-        let scan = self.scan()?;
-        let mut parsed = Vec::new();
+        let taken = SystemTime::now();
+        let keyed = self.scan_keyed()?;
+        let cache = self.cache.as_deref();
+        let cached = cache.and_then(|c| c.files(&self.partition_key, &self.notes_dir));
+        let mut scan = Vec::with_capacity(keyed.len());
+        let mut parsed = Vec::with_capacity(keyed.len());
         let mut malformed = Vec::new();
-        for entry in &scan {
-            let read = read_regular_nofollow(&entry.path).map_err(|e| format!("{e:#}"));
-            match classify(entry, read) {
-                Ok((note, revision)) => parsed.push((entry.clone(), note, revision)),
+        // Beside each parsed note, the key and trust the cache would hold it
+        // under; `changed` and `kept` say whether that differs from `cached`.
+        let mut keys: Vec<Option<(StatKey, bool)>> = Vec::with_capacity(keyed.len());
+        let mut changed = false;
+        let mut kept = 0usize;
+        for (entry, scanned) in keyed {
+            let key = cache.and_then(|c| c.key(&entry.path, Some(scanned)));
+            let hit = match (&cached, key) {
+                (Some(files), Some(key)) => files.get(&entry.file_name).filter(|e| e.stat == key),
+                _ => None,
+            };
+            let (found, trusted) = match hit {
+                Some(hit) if hit.trusted => {
+                    kept += 1;
+                    (Ok(Arc::clone(&hit.parsed)), true)
+                }
+                _ => {
+                    let read = read_note_file(&entry.path);
+                    let settled = match (cache, key) {
+                        (Some(c), Some(key)) => c.settled(&key, taken),
+                        _ => false,
+                    };
+                    // A racy entry whose bytes still hash to it is reused,
+                    // not parsed again.
+                    let reuse = match (&read, hit) {
+                        (Ok(bytes), Some(hit))
+                            if super::sha256_hex(bytes) == hit.parsed.revision =>
+                        {
+                            Some(Arc::clone(&hit.parsed))
+                        }
+                        _ => None,
+                    };
+                    let unchanged = reuse.is_some() && !settled;
+                    let found = match reuse {
+                        Some(parsed) => Ok(parsed),
+                        None => classify(&entry, read.map_err(|e| format!("{e:#}"))),
+                    };
+                    if unchanged {
+                        kept += 1;
+                    } else if found.is_ok() {
+                        // New, promoted or replaced. (A file that is no note
+                        // is never cached; its old entry, if any, is counted
+                        // gone below.)
+                        changed = true;
+                    }
+                    (found, settled)
+                }
+            };
+            match found {
+                Ok(note) => {
+                    parsed.push((entry.clone(), note));
+                    keys.push(key.map(|key| (key, trusted)));
+                }
                 Err(file) => malformed.push(file),
+            }
+            scan.push(entry);
+        }
+        if let Some(cache) = cache {
+            let vanished = cached.as_ref().is_some_and(|files| files.len() != kept);
+            if changed || vanished || cached.is_none() {
+                self.store_parsed(cache, &parsed, &keys);
             }
         }
         let mut out = Parsed {
@@ -865,6 +1091,36 @@ impl Partition {
         };
         out.find_duplicates();
         Ok(out)
+    }
+
+    /// Replaces the partition's cache entries with what a read found — or
+    /// leaves the partition uncached when it would not fit under the cap,
+    /// which is decided before any entry is built.
+    fn store_parsed(
+        &self,
+        cache: &NoteParseCache,
+        parsed: &[(ScanEntry, Arc<ParsedNote>)],
+        keys: &[Option<(StatKey, bool)>],
+    ) {
+        let entries: Vec<(&str, FileEntry)> = parsed
+            .iter()
+            .zip(keys)
+            .filter_map(|((entry, note), key)| {
+                let (stat, trusted) = (*key)?;
+                Some((
+                    entry.file_name.as_str(),
+                    FileEntry::new(&entry.file_name, stat, Arc::clone(note), trusted),
+                ))
+            })
+            .collect();
+        let bytes: usize = entries.iter().map(|(_, e)| e.bytes).sum();
+        let files = (bytes <= cache.capacity()).then(|| {
+            entries
+                .into_iter()
+                .map(|(name, entry)| (name.to_string(), entry))
+                .collect()
+        });
+        cache.store_files(&self.partition_key, &self.notes_dir, files);
     }
 
     fn load_with(&self, state: &State) -> Result<LoadedPartition, MemoryFilesError> {
@@ -879,18 +1135,55 @@ impl Partition {
         Ok((parsed, loaded))
     }
 
+    /// The invariant of the parse cache (design 09 §6.3): **a mutation
+    /// re-reads and re-hashes each file it checks a revision against,
+    /// before the check.** A view whose bytes are no longer the file's — a
+    /// cached parse a same-stat edit slipped past, or an edit that raced
+    /// this read — is dropped from the cache and the partition read again,
+    /// so the check compares against the bytes on disk and a write never
+    /// replaces an edit it did not see. A file that cannot be read any more
+    /// counts as changed.
+    fn recheck(
+        &self,
+        state: &State,
+        parsed: &mut Parsed,
+        loaded: &mut LoadedPartition,
+        ids: &[NoteId],
+    ) -> Result<(), MemoryFilesError> {
+        let mut stale: Vec<String> = Vec::new();
+        for id in ids {
+            let Some(view) = loaded.get(id) else {
+                continue;
+            };
+            let current = read_note_file(&view.path)
+                .ok()
+                .map(|bytes| super::sha256_hex(&bytes));
+            if current.as_deref() != Some(view.revision.as_str()) {
+                stale.push(view.file_name.clone());
+            }
+        }
+        if stale.is_empty() {
+            return Ok(());
+        }
+        if let Some(cache) = &self.cache {
+            cache.remove_files(&self.partition_key, &self.notes_dir, &stale);
+        }
+        (*parsed, *loaded) = self.load_parsed(state)?;
+        Ok(())
+    }
+
     /// The derivation over what was read (design §6): every servable note
     /// with its derived facts, under the snapshot as it stands in `state`.
     fn derive_view(&self, parsed: &Parsed, state: &State) -> LoadedPartition {
         let dup_ids: HashSet<NoteId> = parsed.duplicates.iter().map(|(id, _)| *id).collect();
-        let unique: Vec<&(ScanEntry, Note, String)> = parsed
+        let unique: Vec<&(ScanEntry, Arc<ParsedNote>)> = parsed
             .notes
             .iter()
-            .filter(|(_, note, _)| !dup_ids.contains(&note.id))
+            .filter(|(_, p)| !dup_ids.contains(&p.note.id))
             .collect();
         let empty;
         let (snapshot, unverified) = match (&state.snapshot, &state.quarantine) {
-            (Some(s), None) => (s, false),
+            (Some(s), None) => (&**s, false),
             _ => {
                 empty = ControlSnapshot::new(
                     &self.partition_key,
@@ -905,7 +1198,10 @@ impl Partition {
         };
         let inputs: Vec<NoteInput<'_>> = unique
             .iter()
-            .map(|(_, note, revision)| NoteInput { note, revision })
+            .map(|(_, p)| NoteInput {
+                note: &p.note,
+                revision: &p.revision,
+            })
             .collect();
         let Derivation {
             mut notes,
@@ -913,10 +1209,10 @@ impl Partition {
         } = derive(&inputs, snapshot);
         let views = unique
             .into_iter()
-            .map(|(entry, note, revision)| NoteView {
-                derived: notes.remove(&note.id).expect("derived for every input"),
-                note: note.clone(),
-                revision: revision.clone(),
+            .map(|(entry, p)| NoteView {
+                derived: notes.remove(&p.note.id).expect("derived for every input"),
+                note: p.note.clone(),
+                revision: p.revision.clone(),
                 path: entry.path.clone(),
                 file_name: entry.file_name.clone(),
                 unverified,
@@ -1048,16 +1344,15 @@ impl Partition {
         self.ensure_laid_out(state)?;
         let bytes = note.serialize();
         let to_rev = super::sha256_hex(bytes.as_bytes());
-        let snapshot = state.snapshot.as_mut().expect("laid out");
 
         // Step 1: the single pending field.
-        snapshot.pending = Some(Pending {
+        Self::snapshot_mut(state).pending = Some(Pending {
             id: note.id,
             from_rev,
             to_rev: to_rev.clone(),
             origin,
         });
-        snapshot.save(&self.snapshot_path, self.now())?;
+        self.save_snapshot(state.snapshot.as_mut().expect("laid out"), self.now())?;
         self.crash_check(CrashPoint::WriteAfter1)?;
 
         // Step 2a: the new bytes into `.history` before the note's rename.
@@ -1085,22 +1380,43 @@ impl Partition {
         self.crash_check(CrashPoint::WriteAfter2)?;
 
         // Step 3: record the revision and origin, clear pending.
-        snapshot.notes.insert(
-            note.id,
-            NoteRecord {
-                revision: to_rev.clone(),
-                origin,
-                written_at: self.now(),
-            },
-        );
+        let record = NoteRecord {
+            revision: to_rev.clone(),
+            origin,
+            written_at: self.now(),
+        };
+        let snapshot = Self::snapshot_mut(state);
+        snapshot.notes.insert(note.id, record);
         snapshot.pending = None;
-        snapshot.save(&self.snapshot_path, self.now())?;
+        let saved = self.save_snapshot(state.snapshot.as_mut().expect("laid out"), self.now())?;
+        self.remember_snapshot(state, saved);
         self.crash_check(CrashPoint::WriteAfter3)?;
 
         // Step 4: navigation (the index and the event are the caller's),
-        // from what was read plus what was written.
+        // from what was read plus what was written — and the parse cache,
+        // which takes the written file untrusted: the next read re-hashes
+        // it (design 09 §6.3).
+        let (entry, stat) = self.scan_one(&target)?;
+        let file_name = entry.file_name.clone();
+        let mut replaced_names = Vec::new();
+        if write_to != target
+            && let Some(name) = write_to.file_name()
+        {
+            replaced_names.push(name.to_string_lossy().into_owned());
+        }
         let replaced: HashSet<PathBuf> = [write_to, target.clone()].into_iter().collect();
-        parsed.put(&replaced, self.scan_one(&target)?, bytes.as_bytes());
+        let written = parsed.put(&replaced, entry, bytes.as_bytes());
+        if let (Some(cache), Some(written)) = (&self.cache, written)
+            && let Some(stat) = cache.key(&target, Some(stat))
+        {
+            cache.put_file(
+                &self.partition_key,
+                &self.notes_dir,
+                &replaced_names,
+                &file_name,
+                FileEntry::new(&file_name, stat, written, false),
+            );
+        }
         let view = self.derive_view(parsed, state);
         self.write_navigation(&view.views);
         Ok((to_rev, view))
@@ -1134,7 +1450,10 @@ impl Partition {
             }
             s => s,
         };
-        let (mut parsed, loaded) = self.load_parsed(&state)?;
+        let (mut parsed, mut loaded) = self.load_parsed(&state)?;
+        if let Some((target, _)) = &input.supersedes {
+            self.recheck(&state, &mut parsed, &mut loaded, &[*target])?;
+        }
         let same_note = |v: &NoteView| {
             v.note.kind == kind
                 && v.note.title == input.title
@@ -1272,7 +1591,17 @@ impl Partition {
     ) -> Result<(Updated, LoadedPartition), MemoryFilesError> {
         let mut state = self.lock();
         self.refuse_if_quarantined(&state)?;
-        let (mut parsed, loaded) = self.load_parsed(&state)?;
+        let (mut parsed, mut loaded) = self.load_parsed(&state)?;
+        self.recheck(&state, &mut parsed, &mut loaded, &[*id])?;
+        if matches!(action, UpdateAction::Confirm { .. }) {
+            // The note a confirmed suggestion retires is bound by revision
+            // too (S5): re-read it before that check as well.
+            let targets = loaded
+                .get(id)
+                .map(|v| v.note.supersedes.clone())
+                .unwrap_or_default();
+            self.recheck(&state, &mut parsed, &mut loaded, &targets)?;
+        }
         let view = loaded.get(id).ok_or(MemoryFilesError::NotFound(*id))?;
         if view.revision != expected_revision {
             return Err(MemoryFilesError::RevisionConflict {
@@ -1453,9 +1782,23 @@ impl Partition {
     ) -> Result<(Vec<ForgetOutcome>, LoadedPartition), MemoryFilesError> {
         let mut state = self.lock();
         self.refuse_if_quarantined(&state)?;
-        let (mut parsed, loaded) = self.load_parsed(&state)?;
+        let (mut parsed, mut loaded) = self.load_parsed(&state)?;
+        let ids: Vec<NoteId> = targets.iter().map(|(id, _)| *id).collect();
+        self.recheck(&state, &mut parsed, &mut loaded, &ids)?;
         let mut done = ForgetProgress::default();
         let result = self.forget_each(&mut state, &parsed, &loaded, targets, mode, &mut done);
+        self.remember_snapshot(&state, done.saved);
+        if let Some(cache) = &self.cache
+            && !done.removed.is_empty()
+        {
+            let names: Vec<String> = done
+                .removed
+                .iter()
+                .filter_map(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .collect();
+            cache.remove_files(&self.partition_key, &self.notes_dir, &names);
+        }
         if done.forgotten.is_empty() {
             return result.map(|()| (done.outcomes, loaded));
         }
@@ -1481,6 +1824,7 @@ impl Partition {
             outcomes,
             removed,
             forgotten,
+            saved,
         } = done;
         for (id, expected) in targets {
             let view = if forgotten.contains(id) {
@@ -1527,12 +1871,14 @@ impl Partition {
                 suppressed_sources,
                 forgotten_at: self.now(),
             };
-            let snapshot = state.snapshot.as_mut().expect("not quarantined, has notes");
-
             // Step 1: the tombstone, durable before anything is deleted.
+            let snapshot = Self::snapshot_mut(state);
             snapshot.tombstones.push(tombstone);
             snapshot.notes.remove(id);
-            snapshot.save(&self.snapshot_path, self.now())?;
+            *saved = self.save_snapshot(
+                state.snapshot.as_mut().expect("not quarantined, has notes"),
+                self.now(),
+            )?;
             self.crash_check(CrashPoint::ForgetAfter1)?;
 
             // Step 2: the file (every file with that id) and its history.
@@ -1571,12 +1917,17 @@ impl Partition {
     /// field, then deletes any tombstoned file still on disk. Idempotent.
     fn recover(&self) -> Result<(), MemoryFilesError> {
         let mut state = self.lock();
-        let Some(snapshot) = state.snapshot.as_mut() else {
+        let Some(current) = state.snapshot.as_ref() else {
             return Ok(());
         };
+        // Read the snapshot first and unshare it (`Arc::make_mut`) only when
+        // there is something to record: most opens have nothing to recover.
+        let pending = current.pending.clone();
+        let tombstoned: Vec<NoteId> = current.tombstones.iter().map(|t| t.id).collect();
         let mut changed = false;
+        let mut records: Vec<(NoteId, NoteRecord)> = Vec::new();
 
-        if let Some(pending) = snapshot.pending.take() {
+        if let Some(pending) = &pending {
             changed = true;
             let files: Vec<(PathBuf, String)> = self
                 .scan()?
@@ -1609,14 +1960,14 @@ impl Partition {
                         let _ = fs::rename(path, &target);
                     }
                 }
-                snapshot.notes.insert(
+                records.push((
                     pending.id,
                     NoteRecord {
-                        revision: pending.to_rev,
+                        revision: pending.to_rev.clone(),
                         origin: pending.origin,
                         written_at: self.now(),
                     },
-                );
+                ));
             } else if files.is_empty() || all_at_from {
                 // Step 2 never landed: clear pending; the `.history` copy of
                 // `to_rev` is bounded and harmless.
@@ -1624,20 +1975,19 @@ impl Partition {
                 // An external edit raced the write: the note is `external` at
                 // whatever the file holds; the service's own bytes are in
                 // `.history`.
-                snapshot.notes.insert(
+                records.push((
                     pending.id,
                     NoteRecord {
                         revision: hash.clone(),
                         origin: Origin::External,
                         written_at: self.now(),
                     },
-                );
+                ));
             }
         }
 
         // Forget row: a tombstoned id whose file still exists is deleted.
         // One listing of `notes/` serves every tombstone.
-        let tombstoned: Vec<NoteId> = snapshot.tombstones.iter().map(|t| t.id).collect();
         if !tombstoned.is_empty() {
             let ids: HashSet<NoteId> = tombstoned.iter().copied().collect();
             for entry in self.scan()? {
@@ -1647,18 +1997,35 @@ impl Partition {
                 }
             }
         }
+        let mut still_recorded = Vec::new();
         for id in tombstoned {
             let dir = self.history_dir.join(id.to_string());
             if remove_dir_all_if_exists(&dir)? {
                 changed = true;
             }
-            if snapshot.notes.remove(&id).is_some() {
+            let recorded = records.iter().any(|(r, _)| *r == id)
+                || state
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|s| s.notes.contains_key(&id));
+            if recorded {
+                still_recorded.push(id);
                 changed = true;
             }
         }
 
         if changed {
-            snapshot.save(&self.snapshot_path, self.now())?;
+            let snapshot = Self::snapshot_mut(&mut state);
+            snapshot.pending = None;
+            for (id, record) in records {
+                snapshot.notes.insert(id, record);
+            }
+            for id in still_recorded {
+                snapshot.notes.remove(&id);
+            }
+            let saved =
+                self.save_snapshot(state.snapshot.as_mut().expect("checked above"), self.now())?;
+            self.remember_snapshot(&state, saved);
             self.refresh_navigation(&state);
         }
         Ok(())
@@ -1702,52 +2069,28 @@ impl Partition {
         let present: HashSet<NoteId> = parsed.scan.iter().filter_map(|e| e.id).collect();
         let duplicated: HashSet<NoteId> = parsed.duplicates.iter().map(|(id, _)| *id).collect();
         let now = self.now();
-        let snapshot = state.snapshot.as_mut().expect("checked");
+        let recorded = state.snapshot.as_ref().expect("checked");
         let mut changes = Vec::new();
         for view in &loaded.views {
             let id = view.note.id;
-            match snapshot.notes.get(&id) {
-                Some(record) if record.revision == view.revision => {}
-                Some(_) => {
-                    snapshot.notes.insert(
-                        id,
-                        NoteRecord {
-                            revision: view.revision.clone(),
-                            origin: Origin::External,
-                            written_at: now,
-                        },
-                    );
-                    changes.push(ReconcileChange {
-                        id,
-                        kind: ReconcileChangeKind::Modified,
-                        revision: Some(view.revision.clone()),
-                    });
-                }
-                None => {
-                    snapshot.notes.insert(
-                        id,
-                        NoteRecord {
-                            revision: view.revision.clone(),
-                            origin: Origin::External,
-                            written_at: now,
-                        },
-                    );
-                    changes.push(ReconcileChange {
-                        id,
-                        kind: ReconcileChangeKind::Added,
-                        revision: Some(view.revision.clone()),
-                    });
-                }
-            }
+            let kind = match recorded.notes.get(&id) {
+                Some(record) if record.revision == view.revision => continue,
+                Some(_) => ReconcileChangeKind::Modified,
+                None => ReconcileChangeKind::Added,
+            };
+            changes.push(ReconcileChange {
+                id,
+                kind,
+                revision: Some(view.revision.clone()),
+            });
         }
-        let gone: Vec<NoteId> = snapshot
+        let gone: Vec<NoteId> = recorded
             .notes
             .keys()
             .filter(|id| !served.contains(id) && !present.contains(id) && !duplicated.contains(id))
             .copied()
             .collect();
         for id in gone {
-            snapshot.notes.remove(&id);
             changes.push(ReconcileChange {
                 id,
                 kind: ReconcileChangeKind::Removed,
@@ -1757,7 +2100,27 @@ impl Partition {
         if changes.is_empty() {
             return Ok((changes, loaded));
         }
-        snapshot.save(&self.snapshot_path, now)?;
+        // Only now is the snapshot unshared from the cache and changed.
+        let snapshot = Self::snapshot_mut(&mut state);
+        for change in &changes {
+            match &change.revision {
+                Some(revision) => {
+                    snapshot.notes.insert(
+                        change.id,
+                        NoteRecord {
+                            revision: revision.clone(),
+                            origin: Origin::External,
+                            written_at: now,
+                        },
+                    );
+                }
+                None => {
+                    snapshot.notes.remove(&change.id);
+                }
+            }
+        }
+        let saved = self.save_snapshot(state.snapshot.as_mut().expect("checked"), now)?;
+        self.remember_snapshot(&state, saved);
         let view = self.derive_view(&parsed, &state);
         self.write_navigation(&view.views);
         Ok((changes, view))
@@ -1869,11 +2232,11 @@ impl Partition {
             created_at,
         );
         snapshot.repaired_at = Some(now);
-        for (_, note, revision) in &parsed {
+        for (_, p) in &parsed {
             snapshot.notes.insert(
-                note.id,
+                p.note.id,
                 NoteRecord {
-                    revision: revision.clone(),
+                    revision: p.revision.clone(),
                     origin: Origin::External,
                     written_at: now,
                 },
@@ -1881,9 +2244,11 @@ impl Partition {
         }
         create_private_dir(&self.history_dir)?;
         state_dir()?; // `state/` private before the snapshot's parent is made
-        snapshot.save(&self.snapshot_path, now)?;
+        let mut snapshot = Arc::new(snapshot);
+        let saved = self.save_snapshot(&mut snapshot, now)?;
         state.snapshot = Some(snapshot);
         state.quarantine = None;
+        self.remember_snapshot(&state, saved);
         self.refresh_navigation(&state);
         Ok(RepairReport {
             partition_key: self.partition_key.clone(),

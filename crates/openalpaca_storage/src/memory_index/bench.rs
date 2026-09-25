@@ -1,8 +1,13 @@
 //! The slice-2 bench (plan: "10K notes, warm p95 at or under 50 ms including
-//! file verification"). `#[ignore]`d; run with
-//! `cargo test --release -p openalpaca_storage -- --ignored bench_ --nocapture`.
+//! file verification") and design 09 §6.4's 100K runs, one body
+//! ([`run_bench`]) for all of them. `#[ignore]`d; run with
+//! `cargo test --release -p openalpaca_storage -- --ignored bench_ --nocapture`
+//! (one of them: `-- --ignored --exact memory_index::bench::<name>`). The
+//! process's peak memory is measured from outside, so the compile is not
+//! counted: `/usr/bin/time -l target/release/deps/openalpaca_storage-<hash>
+//! --ignored bench_search_100k --nocapture`.
 //!
-//! 10 000 synthetic notes averaging about 1 KiB — English prose, a few
+//! The average mix ([`Mix::Average`]): synthetic notes averaging about 1 KiB — English prose, a few
 //! percent of large notes up to 16 KiB, a fifth in Chinese — are written as
 //! files under a temp directory, indexed, then searched with 200 queries of
 //! the shapes the fixtures use (natural questions, bare terms, identifiers,
@@ -14,7 +19,11 @@
 //! revision (design §5 step 7 is the caller's; the bench pays for it here so
 //! the number means what the plan asks). Prints build time, cache size, and
 //! p50/p95/max of the search-plus-verification latency; asserts only that
-//! every query found something and every hit verified.
+//! every query found something and every hit verified. The learned mix
+//! ([`Mix::Learned`], design 09 §6.4) draws 70 % of its notes at 200–400 B —
+//! the shape of a learned note's body (§2.6) — and the rest as the average
+//! mix does. Every run also prints the cache's `dbstat` breakdown by table
+//! and index, the empty-query rate and the machine.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -24,7 +33,6 @@ use tempfile::TempDir;
 
 use super::*;
 
-const NOTES: usize = 10_000;
 const QUERIES: usize = 200;
 const WARMUP: usize = 20;
 
@@ -197,18 +205,80 @@ fn hex(digest: impl AsRef<[u8]>) -> String {
     digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Builds the corpus on disk and the records that describe it.
-fn build_corpus(root: &Path, rng: &mut Rng, vocab: &Vocabulary) -> Vec<IndexRecord> {
+/// The note sizes a corpus is drawn from (design 09 §6.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mix {
+    /// The slice-2 corpus: about 1 KiB on average, a fifth in Chinese, a
+    /// few percent large.
+    Average,
+    /// 70 % of the notes at 200–400 B in a learned note's shape — a
+    /// `## Knowledge` section and a one-line `## Evidence and limits` — a
+    /// fifth of those in Chinese; the other 30 % as [`Mix::Average`].
+    Learned,
+}
+
+/// A learned note's body (design 09 §2.6): the knowledge in a sentence or
+/// two, then where it came from, about `target` bytes.
+fn learned_body(
+    rng: &mut Rng,
+    vocab: &Vocabulary,
+    title: &str,
+    target: usize,
+    cjk: bool,
+) -> String {
+    let head = format!("# {title}\n\n## Knowledge\n");
+    let evidence = format!(
+        "\n\n## Evidence and limits\nFrom what you said on 2026-09-{:02}.\n",
+        1 + rng.below(28)
+    );
+    let mut knowledge = String::new();
+    while head.len() + knowledge.len() + evidence.len() < target {
+        if cjk {
+            let n = 4 + rng.below(8);
+            let sentence: String = (0..n).map(|_| rng.pick(CJK_WORDS)).collect();
+            knowledge.push_str(&sentence);
+            knowledge.push('。');
+        } else {
+            if !knowledge.is_empty() {
+                knowledge.push(' ');
+            }
+            knowledge.push_str(&english_sentence(rng, vocab));
+        }
+    }
+    format!("{head}{knowledge}{evidence}")
+}
+
+/// Builds a corpus of `n` notes of `mix` on disk and the records that
+/// describe it. The average mix of 10 000 notes is the slice-2 corpus, draw
+/// for draw.
+fn build_corpus(
+    root: &Path,
+    rng: &mut Rng,
+    vocab: &Vocabulary,
+    n: usize,
+    mix: Mix,
+) -> Vec<IndexRecord> {
     std::fs::create_dir_all(root.join("notes")).unwrap();
-    let mut records = Vec::with_capacity(NOTES);
-    for i in 0..NOTES {
+    let mut records = Vec::with_capacity(n);
+    for i in 0..n {
         let id = format!(
             "{:08x}-0000-4000-8000-{:012x}",
             i,
             rng.next() & 0xffff_ffff_ffff
         );
-        let roll = rng.below(100);
-        let (title, body, kind) = if roll < 20 {
+        let learned = mix == Mix::Learned && rng.below(100) < 70;
+        let roll = if learned { 0 } else { rng.below(100) };
+        let (title, body, kind) = if learned {
+            let cjk = rng.below(5) == 0;
+            let title = if cjk {
+                (0..2).map(|_| rng.pick(CJK_WORDS)).collect()
+            } else {
+                format!("{} {}", vocab.word(rng), vocab.word(rng))
+            };
+            let target = 200 + rng.below(100);
+            let body = learned_body(rng, vocab, &title, target, cjk);
+            (title, body, "preference")
+        } else if roll < 20 {
             let title: String = (0..2).map(|_| rng.pick(CJK_WORDS)).collect();
             let target = 400 + rng.below(1100);
             (title.clone(), cjk_body(rng, &title, target), "preference")
@@ -335,15 +405,54 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
     sorted[idx.min(sorted.len() - 1)]
 }
 
-#[test]
-#[ignore = "bench: cargo test --release -p openalpaca_storage -- --ignored bench_ --nocapture"]
-fn bench_search_10k_notes_with_verification() {
+/// What the machine is, for a bench report (design 09 §6.4).
+fn machine() -> String {
+    let host = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(0);
+    format!(
+        "{host}, {}/{}, {threads} threads available",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
+/// The cache's pages by table and index (`dbstat`, compiled into the
+/// bundled SQLite), largest first, in MiB.
+fn dbstat(index: &MemoryIndex) -> Vec<(String, f64)> {
+    let conn = index.lock();
+    let rows = conn
+        .prepare("SELECT name, SUM(pgsize) FROM dbstat GROUP BY name ORDER BY 2 DESC")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as f64 / MIB))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+        });
+    match rows {
+        Ok(rows) => rows,
+        Err(e) => vec![(format!("dbstat unavailable: {e}"), 0.0)],
+    }
+}
+
+const MIB: f64 = 1024.0 * 1024.0;
+
+/// One bench run: `n` notes of `mix` written, indexed and searched with
+/// 200 queries, every hit verified against its file (design 09 §6.4).
+fn run_bench(name: &str, n: usize, mix: Mix) {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let vocab = Vocabulary::new(&mut rng);
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("partition");
-    let records = build_corpus(&root, &mut rng, &vocab);
+    let records = build_corpus(&root, &mut rng, &vocab, n, mix);
     let total_bytes: usize = records.iter().map(|r| r.body.len()).sum();
+    let small = records.iter().filter(|r| r.body.len() <= 400).count();
 
     let cache = dir.path().join("state").join("cache").join(INDEX_FILE_NAME);
     let index = MemoryIndex::open(&cache).unwrap();
@@ -354,6 +463,7 @@ fn bench_search_10k_notes_with_verification() {
         + std::fs::metadata(format!("{}-wal", cache.display()))
             .map(|m| m.len())
             .unwrap_or(0);
+    let pages = dbstat(&index);
 
     let partitions = vec![
         "home-bench".to_string(),
@@ -404,25 +514,33 @@ fn bench_search_10k_notes_with_verification() {
     let s50 = percentile(&search_only, 0.50);
     let s95 = percentile(&search_only, 0.95);
 
-    println!("bench_search_10k_notes_with_verification");
+    println!("{name}");
+    println!("  machine: {}", machine());
     println!(
-        "  corpus: {} notes, {} body bytes ({} B avg), {} chunks",
+        "  corpus: {} notes ({mix:?} mix, {} at 400 B or less), {} body bytes ({} B avg), {} chunks",
         report.notes,
+        small,
         total_bytes,
         total_bytes / report.notes.max(1),
         report.chunks
     );
     println!(
-        "  build: {:.3} s; cache file {} MiB",
+        "  build: {:.3} s; cache file {:.1} MiB ({:.1}x the body bytes)",
         build.as_secs_f64(),
-        cache_bytes as f64 / (1024.0 * 1024.0)
+        cache_bytes as f64 / MIB,
+        cache_bytes as f64 / total_bytes.max(1) as f64
     );
+    println!("  dbstat (MiB by table and index):");
+    for (name, mib) in &pages {
+        println!("    {mib:>9.2}  {name}");
+    }
     println!(
-        "  {} queries, limit 8: {} hits ({:.2} avg), {} empty, {} partial, {} verified",
+        "  {} queries, limit 8: {} hits ({:.2} avg), {} empty ({:.1} %), {} partial, {} verified",
         QUERIES,
         hits_total,
         hits_total as f64 / QUERIES as f64,
         empty,
+        empty as f64 * 100.0 / QUERIES as f64,
         partial,
         verified
     );
@@ -441,5 +559,71 @@ fn bench_search_10k_notes_with_verification() {
     assert!(
         empty < QUERIES / 4,
         "{empty} of {QUERIES} queries found nothing; the corpus or the queries are off"
+    );
+}
+
+#[test]
+#[ignore = "bench: cargo test --release -p openalpaca_storage -- --ignored bench_ --nocapture"]
+fn bench_search_10k_notes_with_verification() {
+    run_bench(
+        "bench_search_10k_notes_with_verification",
+        10_000,
+        Mix::Average,
+    );
+}
+
+/// Design 09 §6.4: the average mix at 100 000 notes.
+#[test]
+#[ignore = "bench: cargo test --release -p openalpaca_storage -- --ignored bench_search_100k --nocapture"]
+fn bench_search_100k_notes_with_verification() {
+    run_bench(
+        "bench_search_100k_notes_with_verification",
+        100_000,
+        Mix::Average,
+    );
+}
+
+/// Design 09 §6.4: the learned mix at 100 000 notes.
+#[test]
+#[ignore = "bench: cargo test --release -p openalpaca_storage -- --ignored bench_search_100k --nocapture"]
+fn bench_search_100k_learned_notes_with_verification() {
+    run_bench(
+        "bench_search_100k_learned_notes_with_verification",
+        100_000,
+        Mix::Learned,
+    );
+}
+
+/// The corpus generator itself (not a bench, so it runs in CI): the average
+/// mix draws exactly what the slice-2 generator drew, so the 10K numbers
+/// stay comparable; the learned mix keeps 70 % of its notes small.
+#[test]
+fn the_bench_corpus_mixes_have_their_shapes() {
+    let dir = TempDir::new().unwrap();
+    let sizes = |mix: Mix| {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let vocab = Vocabulary::new(&mut rng);
+        let root = dir.path().join(format!("{mix:?}"));
+        let records = build_corpus(&root, &mut rng, &vocab, 400, mix);
+        assert_eq!(records.len(), 400);
+        for record in &records {
+            let file = std::fs::read(root.join(&record.relative_path)).unwrap();
+            assert_eq!(hex(Sha256::digest(&file)), record.revision);
+        }
+        let small = records.iter().filter(|r| r.body.len() <= 400).count();
+        (small, records[0].id.clone(), records[0].body.len())
+    };
+    let (average_small, first_id, first_len) = sizes(Mix::Average);
+    assert!(
+        average_small < 40,
+        "{average_small} small notes in the average mix"
+    );
+    // The slice-2 generator's first note, draw for draw.
+    assert_eq!(first_id, "00000000-0000-4000-8000-1f8d40d96f36");
+    assert_eq!(first_len, 1164);
+    let (learned_small, ..) = sizes(Mix::Learned);
+    assert!(
+        (260..=300).contains(&learned_small),
+        "{learned_small} of 400 notes at 400 B or less in the learned mix"
     );
 }

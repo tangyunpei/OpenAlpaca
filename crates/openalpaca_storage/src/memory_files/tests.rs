@@ -4540,14 +4540,21 @@ fn the_view_a_mutation_returns_is_a_fresh_read() {
         .create_viewed(
             NewNote {
                 fact_key: Some("user.editor".into()),
-                ..new_note("Editor (learned)", "# Editor\n\nhelix\n", NoteKind::Preference)
+                ..new_note(
+                    "Editor (learned)",
+                    "# Editor\n\nhelix\n",
+                    NoteKind::Preference,
+                )
             },
             Actor::Extraction {
                 origin: Origin::ExtractedUser,
             },
         )
         .unwrap();
-    fresh(&view, "a same-key create beside a malformed file and a duplicate");
+    fresh(
+        &view,
+        "a same-key create beside a malformed file and a duplicate",
+    );
     let (_, view) = p
         .create_viewed(
             new_note("Editor", "# Editor\n\nvim\n", NoteKind::Preference),
@@ -4622,7 +4629,11 @@ fn the_view_a_mutation_returns_is_a_fresh_read() {
         )
         .unwrap();
     assert_eq!(outcomes[0].status, ForgetStatus::Forgotten);
-    assert_eq!(outcomes[1].status, ForgetStatus::NotFound, "a duplicate is not served");
+    assert_eq!(
+        outcomes[1].status,
+        ForgetStatus::NotFound,
+        "a duplicate is not served"
+    );
     fresh(&view, "a withdrawal that brings its target back");
     assert_eq!(effective(&p, &editor.id), EffectiveStatus::Active);
     let path = file_for(&p, &editor.id).unwrap();
@@ -4635,4 +4646,417 @@ fn the_view_a_mutation_returns_is_a_fresh_read() {
     let (changes, view) = p.reconcile_viewed().unwrap();
     assert!(changes.is_empty());
     fresh(&view, "a quiet reconcile");
+}
+
+// ============================================================================
+// The parse cache (design 09 §6.3)
+// ============================================================================
+
+fn reads() -> u64 {
+    note_file_reads_on_this_thread()
+}
+
+/// The real `lstat`, with the change time moved an hour back: a file whose
+/// stat is read through it has settled at once, so a test need not wait out
+/// the racy window before the cache trusts it. Equal files still compare
+/// equal; a changed file still compares changed.
+fn settled_stat(path: &Path) -> Option<StatKey> {
+    StatKey::lstat(path).map(|key| StatKey {
+        ctime_ns: key.ctime_ns - 3_600_000_000_000,
+        ..key
+    })
+}
+
+/// A cache of `capacity` bytes whose stats have all settled.
+fn settled_cache(capacity: usize) -> Arc<NoteParseCache> {
+    Arc::new(NoteParseCache::new(capacity).with_stat(settled_stat))
+}
+
+impl Sandbox {
+    fn open_home_cached(&self, owner: &str, cache: &Arc<NoteParseCache>) -> Partition {
+        Partition::open_cached(&StoreScope::Home, owner, cache)
+            .unwrap()
+            .with_clock(self.clock())
+    }
+}
+
+/// Five notes created through `p`.
+fn five_notes(p: &Partition) -> Vec<Created> {
+    (0..5)
+        .map(|i| {
+            p.create(
+                new_note(
+                    &format!("Note {i}"),
+                    &format!("# Note {i}\n\nThe user likes item {i}.\n"),
+                    NoteKind::Preference,
+                ),
+                Actor::UserSurface,
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+/// Design 09 §6.3: a read of a partition nothing changed reads no note file
+/// — every parse comes from the cache, and the view is the one a read of
+/// the files gives. Each create read the partition through the cache and
+/// put its own file in untrusted, which the next read re-hashed: after five
+/// creates only the last file is left to re-hash.
+#[test]
+fn a_cache_hit_skips_the_read() {
+    let sb = Sandbox::new();
+    let cache = settled_cache(NOTE_PARSE_CACHE_BYTES);
+    let p = sb.open_home_cached(ALICE, &cache);
+    five_notes(&p);
+    let before = reads();
+    let first = p.load().unwrap();
+    assert_eq!(reads() - before, 1, "the last write is re-hashed once");
+    let before = reads();
+    let second = p.load().unwrap();
+    assert_eq!(reads() - before, 0, "a hit reads nothing");
+    assert_eq!(view_digest(&first), view_digest(&second));
+    let uncached = sb.open_home(ALICE).load().unwrap();
+    assert_eq!(view_digest(&second), view_digest(&uncached));
+    assert_eq!(cache.cached_files(p.partition_key()), Some(5));
+    assert!(cache.cached_bytes() > 0);
+    // Another handle of the same partition shares the cache.
+    let before = reads();
+    sb.open_home_cached(ALICE, &cache).load().unwrap();
+    assert_eq!(reads() - before, 0);
+}
+
+/// Design 09 §6.3, the racy window: a file whose stat was read within the
+/// window of its last change cannot vouch for its bytes — the same
+/// timestamp tick could hold a second edit — so every read re-hashes it,
+/// serving the cached parse only while the bytes still hash to it; once the
+/// stat is older than the window, the entry is trusted and read no more.
+#[test]
+fn a_file_changed_within_the_racy_window_is_re_hashed_until_it_settles() {
+    let sb = Sandbox::new();
+    let never = Arc::new(
+        NoteParseCache::new(NOTE_PARSE_CACHE_BYTES)
+            .with_racy_window(std::time::Duration::from_secs(3600)),
+    );
+    let p = sb.open_home_cached(ALICE, &never);
+    let notes = five_notes(&p);
+    p.load().unwrap();
+    let before = reads();
+    let again = p.load().unwrap();
+    assert_eq!(
+        reads() - before,
+        5,
+        "never settled: re-hashed on every read"
+    );
+    assert_eq!(
+        view_digest(&again),
+        view_digest(&sb.open_home(ALICE).load().unwrap())
+    );
+    let path = file_for(&p, &notes[2].id).unwrap();
+    let mut bytes = read_file(&path);
+    bytes.extend_from_slice(b"\nEdited by hand.\n");
+    std::fs::write(&path, &bytes).unwrap();
+    let view = p.load().unwrap();
+    assert_eq!(
+        view.get(&notes[2].id).unwrap().revision,
+        revision_of(&bytes)
+    );
+
+    let at_once = Arc::new(
+        NoteParseCache::new(NOTE_PARSE_CACHE_BYTES).with_racy_window(std::time::Duration::ZERO),
+    );
+    let p = sb.open_home_cached(ALICE, &at_once);
+    let before = reads();
+    p.load().unwrap();
+    assert_eq!(reads() - before, 5);
+    let before = reads();
+    p.load().unwrap();
+    assert_eq!(reads() - before, 0, "settled: trusted");
+}
+
+/// Design 09 §6.3, *Service writes update the cache directly*: an edit puts
+/// the written file in place of the old parse, a retitle drops the old file
+/// name, a forget drops the file — and the next read serves what was written.
+#[test]
+fn a_service_write_updates_the_cache() {
+    let sb = Sandbox::new();
+    let cache = settled_cache(NOTE_PARSE_CACHE_BYTES);
+    let p = sb.open_home_cached(ALICE, &cache);
+    let notes = five_notes(&p);
+    p.load().unwrap();
+    let key = p.partition_key().to_string();
+    assert_eq!(cache.cached_files(&key), Some(5));
+
+    let edited = p
+        .update(
+            &notes[0].id,
+            &notes[0].revision,
+            edit_body("# Note 0\n\nThe user likes item zero.\n"),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let before = reads();
+    let view = p.load().unwrap();
+    assert_eq!(reads() - before, 1, "only the written file is re-hashed");
+    let note = view.get(&notes[0].id).unwrap();
+    assert_eq!(note.revision, edited.revision);
+    assert!(note.note.body.contains("item zero"));
+
+    let retitled = p
+        .update(
+            &notes[1].id,
+            &notes[1].revision,
+            UpdateAction::Edit(NotePatch {
+                title: Some("Renamed".into()),
+                ..Default::default()
+            }),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert_eq!(cache.cached_files(&key), Some(5), "the old name is gone");
+    let view = p.load().unwrap();
+    assert_eq!(view.get(&notes[1].id).unwrap().revision, retitled.revision);
+    assert!(
+        view.get(&notes[1].id)
+            .unwrap()
+            .file_name
+            .contains("renamed")
+    );
+
+    p.forget(&[(notes[2].id, notes[2].revision.clone())])
+        .unwrap();
+    assert_eq!(cache.cached_files(&key), Some(4));
+    let before = reads();
+    let view = p.load().unwrap();
+    assert_eq!(reads() - before, 0, "nothing left to re-hash");
+    assert!(view.get(&notes[2].id).is_none());
+    assert_eq!(view.views.len(), 4);
+}
+
+/// Design 09 §6.3, *External edits show up as a stat mismatch*: a hand edit
+/// is read again, alone.
+#[test]
+fn an_external_edit_invalidates_one_entry() {
+    let sb = Sandbox::new();
+    let cache = settled_cache(NOTE_PARSE_CACHE_BYTES);
+    let p = sb.open_home_cached(ALICE, &cache);
+    let notes = five_notes(&p);
+    p.load().unwrap();
+    let path = file_for(&p, &notes[3].id).unwrap();
+    let mut bytes = read_file(&path);
+    bytes.extend_from_slice(b"\nEdited by hand.\n");
+    std::fs::write(&path, &bytes).unwrap();
+    let before = reads();
+    let view = p.load().unwrap();
+    assert_eq!(reads() - before, 1);
+    let edited = view.get(&notes[3].id).unwrap();
+    assert_eq!(edited.revision, revision_of(&bytes));
+    assert_eq!(edited.derived.origin, Origin::External);
+    assert!(edited.note.body.contains("Edited by hand."));
+    let before = reads();
+    p.load().unwrap();
+    assert_eq!(reads() - before, 0, "the re-read is cached in turn");
+    // A file that is no note is never cached — it is read every time — and
+    // costs the notes nothing.
+    std::fs::write(p.notes_dir().join("not-a-note.md"), b"garbage").unwrap();
+    for _ in 0..2 {
+        let before = reads();
+        let view = p.load().unwrap();
+        assert_eq!(reads() - before, 1);
+        assert_eq!(view.malformed.len(), 1);
+    }
+    assert_eq!(cache.cached_files(p.partition_key()), Some(5));
+}
+
+/// Design 09 §6.3, the invariant: a hand edit the stat cannot see — here the
+/// injected stat function keeps reporting the key from before it — leaves
+/// the cache serving the old parse, and a mutation still refuses to write
+/// over it, because it re-reads and re-hashes the file it checks. Fails
+/// with `Partition::recheck` reduced to `Ok(())`.
+#[test]
+fn a_same_stat_external_edit_is_never_overwritten() {
+    let sb = Sandbox::new();
+    let frozen: Arc<std::sync::Mutex<Option<(PathBuf, StatKey)>>> = Arc::default();
+    let pinned = Arc::clone(&frozen);
+    let cache = Arc::new(NoteParseCache::new(NOTE_PARSE_CACHE_BYTES).with_stat(
+        move |path: &Path| {
+            if let Some((p, key)) = pinned.lock().unwrap().as_ref()
+                && p == path
+            {
+                return Some(*key);
+            }
+            settled_stat(path)
+        },
+    ));
+    let p = sb.open_home_cached(ALICE, &cache);
+    let editor = p
+        .create(
+            new_note(
+                "Editor",
+                "# Editor\n\nThe user edits with vim.\n",
+                NoteKind::Preference,
+            ),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let other = p
+        .create(
+            new_note(
+                "Shell",
+                "# Shell\n\nThe user runs zsh.\n",
+                NoteKind::Preference,
+            ),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    p.load().unwrap();
+    for created in [&editor, &other] {
+        let path = file_for(&p, &created.id).unwrap();
+        let text = String::from_utf8(read_file(&path)).unwrap();
+        let rewritten = text.replacen("vim.", "VIM.", 1).replacen("zsh.", "ZSH.", 1);
+        assert_eq!(rewritten.len(), text.len(), "a same-size rewrite");
+        *frozen.lock().unwrap() = None;
+        let key = settled_stat(&path).unwrap();
+        std::fs::write(&path, &rewritten).unwrap();
+        *frozen.lock().unwrap() = Some((path.clone(), key));
+
+        let stale = p.load().unwrap();
+        assert_eq!(
+            stale.get(&created.id).unwrap().revision,
+            created.revision,
+            "the stat cannot see the edit, so the cache serves the old parse"
+        );
+        let current = revision_of(rewritten.as_bytes());
+        let refused = if created.id == editor.id {
+            p.update(
+                &created.id,
+                &created.revision,
+                edit_body("# Editor\n\nThe user edits with helix.\n"),
+                Actor::UserSurface,
+            )
+            .map(|_| ())
+        } else {
+            match p.forget(&[(created.id, created.revision.clone())]) {
+                Ok(outcomes) => match &outcomes[0].status {
+                    ForgetStatus::RevisionConflict { current_revision } => {
+                        Err(MemoryFilesError::RevisionConflict {
+                            id: created.id,
+                            current_revision: current_revision.clone(),
+                        })
+                    }
+                    _ => Ok(()),
+                },
+                Err(e) => Err(e),
+            }
+        };
+        match refused {
+            Err(MemoryFilesError::RevisionConflict {
+                current_revision, ..
+            }) => assert_eq!(current_revision, current),
+            other => panic!("a write over an unseen edit: {other:?}"),
+        }
+        assert_eq!(
+            read_file(&path),
+            rewritten.as_bytes(),
+            "the hand edit is on disk, untouched"
+        );
+        let fresh = p.load().unwrap();
+        assert_eq!(fresh.get(&created.id).unwrap().revision, current);
+    }
+}
+
+/// Design 09 §6.3, *Bound*: all or nothing per partition — one that would
+/// not fit is read whole every time, as without a cache — and the least
+/// recently used partition makes room for another.
+#[test]
+fn a_partition_over_the_cap_is_parsed_uncached() {
+    let sb = Sandbox::new();
+    let small = settled_cache(1024);
+    let p = sb.open_home_cached(ALICE, &small);
+    five_notes(&p);
+    p.load().unwrap();
+    let before = reads();
+    p.load().unwrap();
+    assert_eq!(reads() - before, 5, "over the cap: every file, every read");
+    assert_eq!(small.cached_files(p.partition_key()), None);
+    assert_eq!(small.cached_bytes(), 0);
+
+    // Room for one partition of five notes, not two.
+    let probe = settled_cache(NOTE_PARSE_CACHE_BYTES);
+    let home = sb.open_home_cached(ALICE, &probe);
+    home.load().unwrap();
+    let one = probe.cached_bytes();
+    assert!(one > 0);
+    let cache = settled_cache(one + one / 2);
+    let home = sb.open_home_cached(ALICE, &cache);
+    let project = Partition::open_cached(&sb.project_scope(), ALICE, &cache)
+        .unwrap()
+        .with_clock(sb.clock());
+    five_notes(&project);
+    home.load().unwrap();
+    home.load().unwrap();
+    assert_eq!(cache.cached_files(home.partition_key()), Some(5));
+    project.load().unwrap();
+    project.load().unwrap();
+    assert_eq!(cache.cached_files(project.partition_key()), Some(5));
+    assert_eq!(
+        cache.cached_files(home.partition_key()),
+        None,
+        "the least recently used partition was evicted"
+    );
+    assert!(cache.cached_bytes() <= cache.capacity());
+    let before = reads();
+    home.load().unwrap();
+    assert_eq!(reads() - before, 5, "an evicted partition is read again");
+
+    // A cache of capacity 0 holds nothing at all.
+    let off = settled_cache(0);
+    let p = sb.open_home_cached(ALICE, &off);
+    p.load().unwrap();
+    let before = reads();
+    p.load().unwrap();
+    assert_eq!(reads() - before, 5);
+    assert_eq!(off.cached_bytes(), 0);
+}
+
+/// Design 09 §6.3, *Snapshot*: an open takes the parsed snapshot from the
+/// cache while the file is unchanged and no save of this process came since;
+/// a save through a handle without the cache, or a file replaced behind the
+/// service's back, is read again.
+#[test]
+fn a_cached_snapshot_is_read_again_after_a_save_or_a_replacement() {
+    let sb = Sandbox::new();
+    let cache = Arc::new(
+        NoteParseCache::new(NOTE_PARSE_CACHE_BYTES).with_racy_window(std::time::Duration::ZERO),
+    );
+    let p = sb.open_home_cached(ALICE, &cache);
+    five_notes(&p);
+    let loads = snapshot_loads_on_this_thread;
+    let before = loads();
+    let reopened = sb.open_home_cached(ALICE, &cache);
+    assert_eq!(loads() - before, 0, "the snapshot this process saved");
+    assert_eq!(reopened.snapshot(), p.snapshot());
+
+    // A save through a handle that has no cache retires the entry.
+    sb.open_home(ALICE)
+        .create(
+            new_note("Uncached", "# Uncached\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let before = loads();
+    let reopened = sb.open_home_cached(ALICE, &cache);
+    assert_eq!(loads() - before, 1);
+    assert_eq!(reopened.snapshot().unwrap().notes.len(), 6);
+    let before = loads();
+    sb.open_home_cached(ALICE, &cache);
+    assert_eq!(loads() - before, 0, "read from disk once, then cached");
+
+    // A replacement behind the service's back is a stat mismatch.
+    let path = p.snapshot_path().to_path_buf();
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push('\n');
+    std::fs::write(&path, text).unwrap();
+    let before = loads();
+    sb.open_home_cached(ALICE, &cache);
+    assert_eq!(loads() - before, 1);
 }

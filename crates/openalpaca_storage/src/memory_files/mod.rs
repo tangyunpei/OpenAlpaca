@@ -19,7 +19,11 @@
 //!   a partition's notes and snapshot ([`derive`], design §6, §7b P3/P4/P6);
 //! - the management operations: the read-only `doctor` scan ([`doctor`]),
 //!   `doctor --repair` ([`Partition::repair`]) and [`adopt`] (design §6,
-//!   *Management operations*).
+//!   *Management operations*);
+//! - the parse cache ([`NoteParseCache`], design 09 §6.3): the parsed notes
+//!   and control snapshots a service keeps between reads, valid while each
+//!   file's stat identity is unchanged, bounded by
+//!   [`NOTE_PARSE_CACHE_BYTES`] — handed to [`Partition::open_cached`].
 //!
 //! It has no LLM, no network and no dependency on the search index: the index
 //! is `memory_index`, which takes pre-computed records, and the service that
@@ -30,6 +34,7 @@
 //! `OPENALPACA_HOME_STORE`) or from an explicit project root.
 
 mod authority;
+mod cache;
 mod doctor;
 mod fsx;
 mod note;
@@ -44,6 +49,9 @@ mod tests;
 pub use authority::{
     Conflict, ConflictKind, Derivation, DerivedNote, EffectiveStatus, NoteInput, derive,
 };
+pub use cache::{
+    NOTE_PARSE_CACHE_BYTES, NoteParseCache, RACY_WINDOW, RACY_WINDOW_COARSE, StatFn, StatKey,
+};
 pub use doctor::{DoctorReport, MoveSnapshotReport, PartitionReport, RefusedPartition, doctor};
 pub use note::{
     NewNote, Note, NoteId, NoteKind, NoteParseError, NotePatch, NoteScope, NoteSource, NoteStatus,
@@ -55,11 +63,12 @@ pub use partition::{
     MalformedFile, MoveSnapshotState, NoteView, Partition, PartitionHealth, ReconcileChange,
     ReconcileChangeKind, RepairReport, ScanEntry, SnapshotMove, UpdateAction, Updated, adopt,
     begin_project_move, classify_move_snapshots, finish_project_move, list_owner_keys,
-    list_snapshots, scans_on_this_thread, snapshot_path_for, whole_parses_on_this_thread,
+    list_snapshots, note_file_reads_on_this_thread, scans_on_this_thread, snapshot_path_for,
+    whole_parses_on_this_thread,
 };
 pub use snapshot::{
     ControlSnapshot, NoteRecord, Origin, Pending, SNAPSHOT_SCHEMA, SnapshotError, SnapshotScope,
-    Tombstone,
+    Tombstone, snapshot_loads_on_this_thread,
 };
 
 use sha2::{Digest, Sha256};

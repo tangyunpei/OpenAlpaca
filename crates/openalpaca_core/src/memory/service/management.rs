@@ -128,7 +128,7 @@ impl MemoryService {
         let mut changes = Vec::new();
         for scope in &scopes {
             let _write = self.slots.begin_write(&Self::slot_key(scope, &owner_key));
-            let partition = match files::Partition::open(scope, owner_id) {
+            let partition = match self.open_cached(scope, owner_id) {
                 Ok(p) => p,
                 Err(files::MemoryFilesError::PathRefused { component, reason }) => {
                     tracing::debug!(

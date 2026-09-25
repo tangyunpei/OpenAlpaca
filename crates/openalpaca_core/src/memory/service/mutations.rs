@@ -104,7 +104,7 @@ impl MemoryService {
         let _write = self
             .slots
             .begin_write(&Self::slot_key(&store_scope, &ctx.owner_key));
-        let partition = Self::open_partition(&store_scope, &ctx.owner_id)?;
+        let partition = self.open_partition(&store_scope, &ctx.owner_id)?;
         let (updated, mut view) = partition.update_viewed(
             &input.id,
             &input.expected_revision,
@@ -242,7 +242,7 @@ impl MemoryService {
             let _write = self
                 .slots
                 .begin_write(&Self::slot_key(&store_scope, &ctx.owner_key));
-            let partition = Self::open_partition(&store_scope, &ctx.owner_id)?;
+            let partition = self.open_partition(&store_scope, &ctx.owner_id)?;
             let (outcomes, after) =
                 partition.forget_viewed(&[(*id, expected.clone())], ForgetMode::Forget)?;
             for outcome in outcomes {
@@ -345,7 +345,7 @@ impl MemoryService {
         let _write = self
             .slots
             .begin_write(&Self::slot_key(store_scope, &ctx.owner_key));
-        let partition = Self::open_partition(store_scope, &ctx.owner_id)?;
+        let partition = self.open_partition(store_scope, &ctx.owner_id)?;
         // What this note retires now, so the answer can name what came back.
         let retired: Vec<NoteId> = partition
             .load()?
