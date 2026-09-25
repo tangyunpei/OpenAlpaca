@@ -1159,6 +1159,62 @@ mod tests {
         cancel.cancel();
     }
 
+    /// Design 09 §4.4: a memory card's daemon-authored `preview` and its
+    /// `per_call` flag reach both channels the card goes out on — the
+    /// WebSocket frame and the turn's SSE stream — so the person approves the
+    /// text, not three opaque ids.
+    #[tokio::test]
+    async fn a_card_bridges_its_preview_and_per_call_on_both_channels() {
+        let bus = EventBus::new(16);
+        let eb = EventBroadcaster::new(16, "test-instance".to_string(), None);
+        let mut rx = eb.subscribe();
+        let streams = Arc::new(ChatStreamManager::new());
+        let (stream_id, mut sse, _sink) = streams.create_stream("u:gui");
+        let cancel = CancellationToken::new();
+        spawn_event_bridge(eb, &bus, Some(streams.clone()), cancel.clone());
+
+        let preview = "Replace your saved note “Editor” with “Editor”?";
+        bus.publish(SystemEvent::ToolConfirmationRequested {
+            request_id: "req-9".into(),
+            agent_id: "orchestrator".into(),
+            tool_name: "memory_confirm".into(),
+            tool_arguments: serde_json::json!({}),
+            stream_id: Some(stream_id),
+            lane_key: Some("u:gui".into()),
+            task_id: None,
+            preview: Some(preview.into()),
+            per_call: true,
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ToolConfirmationRequested {
+                preview: got,
+                per_call,
+                ..
+            } => {
+                assert_eq!(got.as_deref(), Some(preview));
+                assert!(per_call);
+            }
+            other => panic!("Expected ToolConfirmationRequested, got {other:?}"),
+        }
+        let frame = tokio::time::timeout(Duration::from_secs(2), sse.recv())
+            .await
+            .expect("timed out waiting for the SSE frame")
+            .expect("stream closed");
+        match frame {
+            openalpaca_core::chat::ChatStreamEvent::ConfirmationRequested {
+                preview: got,
+                per_call,
+                ..
+            } => {
+                assert_eq!(got.as_deref(), Some(preview));
+                assert!(per_call);
+            }
+            other => panic!("Expected ConfirmationRequested, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
     /// A frame from outside any run bridges with `task_id: None` — the bridge
     /// never invents attribution.
     #[tokio::test]
