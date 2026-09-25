@@ -168,6 +168,49 @@ mod confirmation {
         );
     }
 
+    /// A request the broker no longer holds (it timed out, or was answered
+    /// elsewhere) still takes a reply off the chat's queue, but the
+    /// acknowledgement names no tool: it has none to name, and it must never
+    /// borrow the name of the request still waiting behind it.
+    #[test]
+    fn a_reply_to_a_request_the_broker_no_longer_holds_names_no_tool() {
+        let broker = ConfirmationBroker::new();
+        let pending: DashMap<u64, VecDeque<String>> = DashMap::new();
+
+        pending
+            .entry(5u64)
+            .or_default()
+            .push_back("gone".to_string());
+        let reply = intercept_confirmation_reply("/yes", &5u64, &broker, &pending).unwrap();
+        assert_eq!(reply, "Approved. Tool execution will proceed.");
+
+        pending
+            .entry(5u64)
+            .or_default()
+            .push_back("gone".to_string());
+        let reply = intercept_confirmation_reply("/no", &5u64, &broker, &pending).unwrap();
+        assert_eq!(reply, "Denied. Tool execution has been cancelled.");
+
+        let mut held = broker.request(&named_request("req-2", "file_read"));
+        pending
+            .entry(5u64)
+            .or_default()
+            .extend(["gone".to_string(), "req-2".to_string()]);
+        let reply = intercept_confirmation_reply("/yes", &5u64, &broker, &pending).unwrap();
+        assert_eq!(
+            reply,
+            "Approved. Tool execution will proceed.\n\
+             (1 more pending — reply /yes or /no)"
+        );
+        assert!(held.try_recv().is_err(), "req-2 still waits");
+        let reply = intercept_confirmation_reply("/no", &5u64, &broker, &pending).unwrap();
+        assert_eq!(
+            reply,
+            "Denied: file_read. Tool execution has been cancelled."
+        );
+        assert!(!held.try_recv().unwrap().approved);
+    }
+
     #[test]
     fn test_format_confirmation_prompt_truncates_long_args_on_char_boundary() {
         // Multi-byte chars straddling the 500-byte cut must not panic
