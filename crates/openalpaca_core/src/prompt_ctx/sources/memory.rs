@@ -12,8 +12,8 @@
 //! a lane never reads the previous turn's notes back out of the cache.
 
 use crate::memory::service::{
-    Attribution, Capabilities, MemoryError, MemoryService, MemoryUsed, RecallBudget, Surface,
-    WorkspaceHint, wrap_delivery,
+    Attribution, Capabilities, MemoryError, MemoryService, MemoryUsed, PendingSuggestion,
+    RECALL_TOTAL_BYTES, RecallBudget, Surface, WorkspaceHint, wrap_delivery,
 };
 use crate::prompt_ctx::section::{
     ContextBundle, ContextKey, ContextKind, ContextSection, InjectionMode, SectionPriority,
@@ -158,8 +158,30 @@ impl MemoryTurn {
 /// `None` when it kept none. Rendered here, not in Layer 3, so it is never
 /// cached by query text.
 pub fn memory_turn(bundle: &ContextBundle) -> Option<MemoryTurn> {
-    let sections: Vec<&ContextSection> = bundle.memory_sections().collect();
-    if sections.is_empty() {
+    memory_turn_with(bundle, None)
+}
+
+/// [`memory_turn`], with a `<memory_suggestions>` block after the notes
+/// (design 09 §4.5): delivered in the same quoted-data wrapper under the
+/// trust label, and counted against the same 8 KiB — the lowest-ranked
+/// recalled notes give way to it, and `used` names only what stayed.
+pub fn memory_turn_with(bundle: &ContextBundle, suggestions: Option<&str>) -> Option<MemoryTurn> {
+    let mut sections: Vec<&ContextSection> = bundle.memory_sections().collect();
+    if let Some(block) = suggestions {
+        while !sections.is_empty()
+            && wrap_delivery(
+                sections
+                    .iter()
+                    .map(|s| s.content.as_str())
+                    .chain(std::iter::once(block)),
+            )
+            .len()
+                > RECALL_TOTAL_BYTES
+        {
+            sections.pop();
+        }
+    }
+    if sections.is_empty() && suggestions.is_none() {
         return None;
     }
     let used = sections
@@ -169,8 +191,82 @@ pub fn memory_turn(bundle: &ContextBundle) -> Option<MemoryTurn> {
             _ => None,
         })
         .collect();
-    let content = wrap_delivery(sections.iter().map(|s| s.content.as_str()));
+    let content = wrap_delivery(
+        sections
+            .iter()
+            .map(|s| s.content.as_str())
+            .chain(suggestions),
+    );
     Some(MemoryTurn { content, used })
+}
+
+/// How many pending suggestions one turn is told about (design 09 §4.5).
+pub const SUGGESTIONS_LISTED: usize = 3;
+
+/// The most a `<memory_suggestions>` block carries (design 09 §4.5; 1 KiB
+/// in the design, which one full line — two UUIDs and two 64-hex revisions,
+/// 331 bytes before its titles — cannot fit three times: see the design's
+/// revision log).
+pub const SUGGESTIONS_BLOCK_MAX_BYTES: usize = 1536;
+
+const SUGGESTIONS_OPEN: &str = "<memory_suggestions>\n";
+const SUGGESTIONS_CLOSE: &str = "</memory_suggestions>\n";
+
+/// The `<memory_suggestions>` block for `items`, newest first, as many lines
+/// as fit [`SUGGESTIONS_BLOCK_MAX_BYTES`] up to [`SUGGESTIONS_LISTED`];
+/// `None` when there is nothing to list. It carries no instruction: when to
+/// call `memory_confirm` is in that tool's description, because
+/// instructions inside quoted data are ignored by design.
+pub fn render_memory_suggestions(items: &[PendingSuggestion]) -> Option<String> {
+    let mut body = String::new();
+    let fixed = SUGGESTIONS_OPEN.len() + SUGGESTIONS_CLOSE.len();
+    for item in items.iter().take(SUGGESTIONS_LISTED) {
+        let line = item.render();
+        if fixed + body.len() + line.len() > SUGGESTIONS_BLOCK_MAX_BYTES {
+            break;
+        }
+        body.push_str(&line);
+    }
+    (!body.is_empty()).then(|| format!("{SUGGESTIONS_OPEN}{body}{SUGGESTIONS_CLOSE}"))
+}
+
+/// The block for one main-loop turn that offers `memory_confirm` (design 09
+/// §4.5): read with the turn's own `ModelTool` read context, the
+/// suggestions already raised on its lane left out. Any failure — no owner,
+/// a refused context, an index error — leaves the turn without the block,
+/// never without an answer.
+pub async fn memory_suggestions_block(
+    service: Arc<MemoryService>,
+    ctx: &crate::tools::registry::ToolContext,
+) -> Option<String> {
+    let access = match service.context_for_tool(ctx, Capabilities::READ_ONLY) {
+        Ok(access) => access,
+        Err(MemoryError::NoOwner(_)) => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, "memory suggestions: context refused");
+            return None;
+        }
+    };
+    let raised = ctx
+        .lane_key
+        .as_deref()
+        .map(|lane| service.raised_on(lane))
+        .unwrap_or_default();
+    let listed = tokio::task::spawn_blocking(move || {
+        service.pending_suggestions(&access, SUGGESTIONS_LISTED, &raised)
+    })
+    .await;
+    match listed {
+        Ok(Ok(items)) => render_memory_suggestions(&items),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "memory suggestions could not be read; the turn runs without them");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "memory suggestions did not complete; the turn runs without them");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -350,6 +446,87 @@ mod tests {
                 .is_empty()
         );
         assert!(memory_turn(&ContextBundle::empty()).is_none());
+    }
+
+    fn section(id: u128, content: String) -> ContextSection {
+        ContextSection {
+            source: SOURCE_NAME,
+            kind: ContextKind::Memory,
+            token_estimate: content.len() / 4,
+            content,
+            priority: SectionPriority::Normal,
+            relevance: 1.0,
+            key: ContextKey::Memory(MemoryUsed {
+                id: openalpaca_storage::memory_files::NoteId::parse(&format!(
+                    "00000000-0000-4000-8000-{id:012x}"
+                ))
+                .unwrap(),
+                revision: "a".repeat(64),
+                reason: crate::memory::service::UsedReason::Recall,
+            }),
+            injection: InjectionMode::UserMessage {
+                tag: "memory_context".to_string(),
+                trust: TrustLevel::Untrusted,
+            },
+        }
+    }
+
+    /// Design 09 §4.5: `<memory_suggestions>` rides the memory message, under
+    /// the trust label, after the notes — and counts against the same 8 KiB:
+    /// the lowest-ranked recalled note gives way, and `used` names only the
+    /// notes that stayed. Without a block the turn is exactly `memory_turn`'s.
+    #[test]
+    fn the_suggestions_block_counts_against_the_memory_budget() {
+        let sections = vec![
+            section(
+                1,
+                format!("[memory id=1]\n{}\n[/memory]\n", "a".repeat(3000)),
+            ),
+            section(
+                2,
+                format!("[memory id=2]\n{}\n[/memory]\n", "b".repeat(3000)),
+            ),
+            section(
+                3,
+                format!("[memory id=3]\n{}\n[/memory]\n", "c".repeat(1500)),
+            ),
+        ];
+        let bundle = ContextBundle {
+            total_tokens: sections.iter().map(|s| s.token_estimate).sum(),
+            sections,
+            available_budget: 8192,
+        };
+        let plain = memory_turn(&bundle).unwrap();
+        assert_eq!(plain.used.len(), 3);
+        assert!(plain.content.len() <= RECALL_TOTAL_BYTES);
+        assert_eq!(memory_turn_with(&bundle, None), Some(plain.clone()));
+
+        let block = format!(
+            "<memory_suggestions>\n{}\n</memory_suggestions>\n",
+            "s".repeat(1200)
+        );
+        let turn = memory_turn_with(&bundle, Some(&block)).unwrap();
+        assert!(
+            turn.content.len() <= RECALL_TOTAL_BYTES,
+            "{}",
+            turn.content.len()
+        );
+        assert_eq!(turn.used.len(), 2, "the lowest-ranked note gave way");
+        assert_eq!(turn.used, plain.used[..2].to_vec());
+        assert!(turn.content.starts_with("<memory_context>\n"));
+        assert!(turn.content.contains(crate::memory::service::TRUST_LABEL));
+        assert!(
+            turn.content
+                .ends_with(&format!("{block}</memory_context>\n")),
+            "after the notes, inside the wrapper"
+        );
+        assert!(!turn.content.contains("ccc"));
+
+        // With nothing recalled, the block alone is the turn's memory message.
+        let alone = memory_turn_with(&ContextBundle::empty(), Some(&block)).unwrap();
+        assert!(alone.used.is_empty());
+        assert!(alone.content.contains(&block));
+        assert!(memory_turn_with(&ContextBundle::empty(), None).is_none());
     }
 
     /// A subagent's package (`ContextManager::distill` → `to_bundle`) keys

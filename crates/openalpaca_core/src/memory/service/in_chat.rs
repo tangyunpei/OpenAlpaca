@@ -15,6 +15,7 @@
 //! model wrote; a Deny withdraws the suggestion (§4.3, LQ2) exactly as the
 //! Memory view's *Keep mine* does.
 
+use super::recall::{Verified, verify};
 use super::{
     Capabilities, MemoryAccessContext, MemoryError, MemoryService, Surface, UpdateAction,
     UpdateInput, UpdateOutput, WithdrawOutput, cut_bytes,
@@ -22,9 +23,10 @@ use super::{
 use crate::tools::registry::{HumanApproval, HumanDenial};
 use openalpaca_storage::ConversationRepository;
 use openalpaca_storage::memory_files::{
-    self as files, EffectiveStatus, Note, NoteId, NoteStatus, NoteView, Origin, SourceType,
-    knowledge_text,
+    self as files, EffectiveStatus, Note, NoteId, NoteStatus, NoteView, Origin, Partition,
+    PartitionHealth, SourceType, knowledge_text,
 };
+use std::collections::HashSet;
 
 /// The most the card's preview carries (design 09 §4.4).
 pub const PREVIEW_MAX_BYTES: usize = 1024;
@@ -32,6 +34,63 @@ pub const PREVIEW_MAX_BYTES: usize = 1024;
 const PREVIEW_TITLE_BYTES: usize = 80;
 const PREVIEW_TEXT_BYTES: usize = 260;
 const PREVIEW_REASON_BYTES: usize = 160;
+
+/// At most this many suggestions are re-read for one `<memory_suggestions>`
+/// block (design 09 §4.5).
+pub const PENDING_SUGGESTIONS_READ_MAX: usize = 10;
+
+/// The card's text for one `memory_confirm` call and the note it replaces
+/// (design 09 §4.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuggestionPreview {
+    pub text: String,
+    pub target: NoteId,
+}
+
+/// One suggestion a turn offering `memory_confirm` is told about (design 09
+/// §4.5): what the tool needs — both ids and revisions — and what the line
+/// says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSuggestion {
+    pub id: NoteId,
+    pub revision: String,
+    pub title: String,
+    /// The note it would replace, at its current revision.
+    pub target: NoteId,
+    pub target_revision: String,
+    pub target_title: String,
+    pub target_origin: Origin,
+    /// `YYYY-MM-DD` of the newest row the user typed that it cites.
+    pub said_on: String,
+}
+
+impl PendingSuggestion {
+    /// The line `<memory_suggestions>` carries (design 09 §4.5): the ids and
+    /// revisions `memory_confirm` takes, then both titles and the date,
+    /// titles cut to [`SUGGESTION_LINE_TITLE_BYTES`]. Data, not an
+    /// instruction — when to call is in the tool's description.
+    pub fn render(&self) -> String {
+        let who = match self.target_origin {
+            Origin::User => "saved by you",
+            Origin::External => "edited by you",
+            Origin::Imported => "imported by you",
+            _ => "learned earlier",
+        };
+        format!(
+            "[memory-suggestion id={} revision={} replaces={} replaces_revision={}] “{}” ({who}) → “{}” (from what you said on {})\n",
+            self.id,
+            self.revision,
+            self.target,
+            self.target_revision,
+            one_line(&self.target_title, SUGGESTION_LINE_TITLE_BYTES),
+            one_line(&self.title, SUGGESTION_LINE_TITLE_BYTES),
+            self.said_on,
+        )
+    }
+}
+
+/// A title on a `<memory_suggestions>` line keeps at most this much.
+pub const SUGGESTION_LINE_TITLE_BYTES: usize = 60;
 
 /// What makes a note confirmable in chat, read once (§4.2 rule 5).
 pub(super) struct InChatSuggestion {
@@ -124,7 +183,7 @@ impl MemoryService {
         id: NoteId,
         expected_revision: &str,
         target_revision: &str,
-    ) -> Result<String, MemoryError> {
+    ) -> Result<SuggestionPreview, MemoryError> {
         Self::require(ctx.capabilities.read, "memory_read")?;
         check_revisions(expected_revision, target_revision)?;
         let resolved = self.resolve(ctx)?;
@@ -154,7 +213,127 @@ impl MemoryService {
                 suggestion.target, target.derived.effective_status
             )));
         }
-        Ok(render_preview(target, &view.note, &suggestion.said_on))
+        Ok(SuggestionPreview {
+            text: render_preview(target, &view.note, &suggestion.said_on),
+            target: suggestion.target,
+        })
+    }
+
+    /// The pending suggestions a turn that offers `memory_confirm` is told
+    /// about (design 09 §4.5): suggestions from the user's own words
+    /// (§4.2 rule 5) whose target is still in force, newest first, one per
+    /// target, at most `limit`, leaving out any whose id or target is in
+    /// `skip` — what was already raised on this lane.
+    ///
+    /// **On the reply path, so it reads the index, not the partitions**
+    /// (ruling LR18): the candidates come from the index's `supersedes`
+    /// column, and only the listed files — each suggestion and its target —
+    /// are re-read and re-hashed, as recall does, at most
+    /// [`PENDING_SUGGESTIONS_READ_MAX`] suggestions per call. A partition is
+    /// re-parsed only when its stat scan or a re-read finds it changed. Not a
+    /// recall: nothing is recorded as used.
+    pub fn pending_suggestions(
+        &self,
+        ctx: &MemoryAccessContext,
+        limit: usize,
+        skip: &HashSet<NoteId>,
+    ) -> Result<Vec<PendingSuggestion>, MemoryError> {
+        Self::require(ctx.capabilities.read, "memory_read")?;
+        let resolved = self.resolve(ctx)?;
+        let partitions: Vec<&Partition> = resolved
+            .all()
+            .into_iter()
+            .filter(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)))
+            .collect();
+        for p in &partitions {
+            self.touch(p)?;
+        }
+        let keys: Vec<String> = partitions
+            .iter()
+            .map(|p| p.partition_key().to_string())
+            .collect();
+        let mut out: Vec<PendingSuggestion> = Vec::new();
+        let mut dirty: HashSet<String> = HashSet::new();
+        let mut seen_targets: HashSet<(String, String)> = HashSet::new();
+        let mut read = 0usize;
+        for row in self.index.suggestion_rows(&keys)? {
+            if out.len() >= limit || read >= PENDING_SUGGESTIONS_READ_MAX {
+                break;
+            }
+            // Rule 5's first cut, from the index alone: an inferred
+            // suggestion is never listed here.
+            if row.origin != Origin::ExtractedUser.as_str() {
+                continue;
+            }
+            let [target] = row.supersedes.as_slice() else {
+                continue;
+            };
+            let (Ok(id), Ok(target_id)) = (NoteId::parse(&row.id), NoteId::parse(target)) else {
+                continue;
+            };
+            // Newest first, so the first row per target is the one listed;
+            // a target already raised keeps its older restatements out too.
+            if !seen_targets.insert((row.partition_key.clone(), target.clone()))
+                || skip.contains(&id)
+                || skip.contains(&target_id)
+            {
+                continue;
+            }
+            let Some(p) = partitions
+                .iter()
+                .copied()
+                .find(|p| p.partition_key() == row.partition_key)
+            else {
+                continue;
+            };
+            read += 1;
+            let Some(target) = super::suggestions::verified_target(self, p, target, &mut dirty)?
+            else {
+                continue;
+            };
+            let (note, revision) = match verify(p, &row.relative_path, id, &row.revision) {
+                Verified::Fresh {
+                    note,
+                    revision,
+                    stale,
+                    ..
+                } => {
+                    if stale {
+                        // Changed behind the service's back: `external`, not
+                        // the user's words as learning wrote them.
+                        dirty.insert(p.partition_key().to_string());
+                        continue;
+                    }
+                    (*note, revision)
+                }
+                Verified::Gone => {
+                    dirty.insert(p.partition_key().to_string());
+                    continue;
+                }
+            };
+            if note.status != NoteStatus::Candidate || note.supersedes != [target.id] {
+                continue;
+            }
+            let Some(said_on) = self.newest_user_row_date(&note)? else {
+                continue;
+            };
+            out.push(PendingSuggestion {
+                id,
+                revision,
+                title: note.title,
+                target: target.id,
+                target_revision: target.revision,
+                target_title: target.title,
+                target_origin: target.origin,
+                said_on,
+            });
+        }
+        for key in dirty {
+            if let Some(p) = partitions.iter().find(|p| p.partition_key() == key) {
+                self.reindex(p, true)?;
+            }
+        }
+        Ok(out)
     }
 
     /// Whether `id` is a suggestion from the user's own words — what
@@ -266,19 +445,22 @@ impl MemoryService {
         })
     }
 
-    /// Records that `id` was raised on `lane_key`'s card (design 09 §4.5):
-    /// it is not listed in that lane's `<memory_suggestions>` again until
-    /// the daemon restarts, whatever the answer was.
-    pub fn mark_raised(&self, lane_key: &str, id: NoteId) {
+    /// Records that a card was raised on `lane_key` for suggestion `id`,
+    /// which would replace `target` (design 09 §4.5): neither it nor another
+    /// suggestion for the same note is listed in that lane's
+    /// `<memory_suggestions>` again until the daemon restarts, whatever the
+    /// answer was.
+    pub fn mark_raised(&self, lane_key: &str, id: NoteId, target: NoteId) {
         self.raised
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .entry(lane_key.to_string())
             .or_default()
-            .insert(id);
+            .extend([id, target]);
     }
 
-    /// The suggestions raised on `lane_key` since the daemon started.
+    /// The suggestions raised on `lane_key` since the daemon started, and the
+    /// notes they would replace — what [`Self::pending_suggestions`] skips.
     pub fn raised_on(&self, lane_key: &str) -> std::collections::HashSet<NoteId> {
         self.raised
             .lock()

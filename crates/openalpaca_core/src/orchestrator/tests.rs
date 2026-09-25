@@ -7152,6 +7152,142 @@ async fn the_skill_tier_recalls_the_natural_question_fixture_through_the_service
     assert!(orch.take_memory_used(request_id).is_empty(), "taken once");
 }
 
+/// **Design 09 §4.5 (MD-12).** A suggestion learned from the user's words
+/// is waiting: an attended turn of the GUI's or the CLI's chat
+/// (`source == "gui"`) is offered `memory_confirm` and told about the
+/// suggestion in `<memory_suggestions>`, inside the memory message; a
+/// connector's turn and an unattended one get neither — the tool is not on
+/// their surface, so they are not told about something they cannot raise.
+#[tokio::test]
+async fn memory_suggestions_reach_only_an_attended_gui_turn() {
+    use crate::memory::service::{
+        Attribution, Capabilities, ExtractionProvenance, StoreInput, Surface, WorkspaceHint,
+    };
+    use openalpaca_storage::memory_files::{NoteKind, NoteSource, ReplacePolicy, SourceType};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let row = db
+        .with_connection(|c| {
+            c.execute(
+                "INSERT INTO conversation_messages (lane_key, role, content, source, request_id, created_at)
+                 VALUES ('user1:gui', 'user', 'I switched to Helix.', 'gui', 'req-typed', '2026-09-20 09:00:00')",
+                [],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+        .unwrap();
+    let extractor = scene
+        .service
+        .context(
+            "user1",
+            WorkspaceHint::None,
+            Surface::Extraction,
+            Capabilities::EXTRACTION,
+            Attribution::default(),
+        )
+        .unwrap();
+    let suggestion = scene
+        .service
+        .store(
+            &extractor,
+            StoreInput {
+                title: "Editor preference".into(),
+                body: "# Editor preference\n\n## Knowledge\nThe user edits with Helix.\n".into(),
+                kind: Some(NoteKind::Preference),
+                sources: vec![NoteSource {
+                    kind: SourceType::Message,
+                    id: row.to_string(),
+                    observed_at: None,
+                }],
+                supersedes: Some((scene.vim.id, scene.vim.revision.clone())),
+                replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "noted",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+
+    let send = |source: &'static str, unattended: bool| {
+        let orch = &orch;
+        async move {
+            orch.handle_message(HandleRequest {
+                request_id: Uuid::new_v4(),
+                source: source.to_string(),
+                content: "what editor do I prefer?".to_string(),
+                principal: Principal::User {
+                    global_id: "user1".to_string(),
+                },
+                scope: Scope::Global,
+                lane_key: format!("user1:{source}"),
+                workspace_path: None,
+                stream_id: None,
+                model_override: None,
+                unattended,
+                turn_sink: None,
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let told = |request: &ChatRequest| {
+        memory_messages(request)
+            .iter()
+            .any(|m| m.contains("<memory_suggestions>"))
+    };
+    let offered = |request: &ChatRequest| request.tools.iter().any(|t| t.name == "memory_confirm");
+
+    send("gui", false).await;
+    {
+        let reqs = requests.lock().unwrap();
+        let blocks = memory_messages(&reqs[0]);
+        assert_eq!(blocks.len(), 1, "one memory message per turn");
+        let block = &blocks[0];
+        assert!(block.contains("<memory_suggestions>"), "{block}");
+        assert!(
+            block.contains(&format!(
+                "[memory-suggestion id={} revision={} replaces={} replaces_revision={}]",
+                suggestion.id, suggestion.revision, scene.vim.id, scene.vim.revision
+            )),
+            "{block}"
+        );
+        assert!(
+            block.contains("(from what you said on 2026-09-20)"),
+            "{block}"
+        );
+        // The notes come first, the suggestions after them, one wrapper.
+        assert!(
+            block.find("User prefers vim").unwrap() < block.find("<memory_suggestions>").unwrap(),
+            "{block}"
+        );
+        assert!(offered(&reqs[0]));
+    }
+
+    send("telegram", false).await;
+    send("gui", true).await;
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 3);
+    for (name, request) in [("telegram", &reqs[1]), ("unattended gui", &reqs[2])] {
+        assert!(!told(request), "{name}: no <memory_suggestions>");
+        assert!(!offered(request), "{name}: no memory_confirm");
+        assert!(
+            memory_messages(request)
+                .iter()
+                .any(|m| m.contains("User prefers vim")),
+            "{name}: recall is unchanged"
+        );
+    }
+}
+
 /// **Plan 3.3.** The same question twice on the same lane, a note stored in
 /// between: the second turn's request carries both notes. Layer 3 is a
 /// per-lane cache keyed by query text, and the memory delivery is built

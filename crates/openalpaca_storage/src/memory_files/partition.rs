@@ -40,6 +40,22 @@ use std::time::SystemTime;
 
 type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
+thread_local! {
+    /// How many whole-partition parses this thread has made — the cost
+    /// design 09 §4.5 keeps off the reply path. Read by tests only.
+    static WHOLE_PARSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The whole-partition parses (every note file read and parsed) this thread
+/// has made so far. A test-only counter: a caller on the reply path proves
+/// it parses no partition by reading it before and after (design 09 §4.5,
+/// `pending_suggestions_parses_no_partition`). One thread-local increment
+/// per parse, so a test is not disturbed by others running in parallel.
+#[doc(hidden)]
+pub fn whole_parses_on_this_thread() -> u64 {
+    WHOLE_PARSES.with(|n| n.get())
+}
+
 // ============================================================================
 // Who is writing
 // ============================================================================
@@ -714,6 +730,7 @@ impl Partition {
         Vec<MalformedFile>,
         Vec<(NoteId, Vec<PathBuf>)>,
     )> {
+        WHOLE_PARSES.with(|n| n.set(n.get() + 1));
         let mut parsed = Vec::new();
         let mut malformed = Vec::new();
         for entry in self.scan()? {

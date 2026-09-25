@@ -1209,8 +1209,8 @@ async fn a_stale_target_revision_raises_no_card() {
 /// Design 09 §4.2 rule 5 (review finding C5): a suggestion inferred from the
 /// conversation (`extracted_other`) is never a card's — the tool and its
 /// preview both refuse it as `not_a_suggestion`, naming the Memory view and
-/// the CLI, even with an approval in hand; so is one whose only citation is
-/// the assistant's reply.
+/// the CLI, even with an approval in hand, and even though it cites a row
+/// the user typed beside the assistant's answer.
 #[tokio::test]
 async fn an_inferred_suggestion_is_not_a_suggestion_in_chat() {
     let h = Harness::new();
@@ -1219,13 +1219,16 @@ async fn an_inferred_suggestion_is_not_a_suggestion_in_chat() {
         "Staging host",
         "# Staging host\n\n## Knowledge\nstaging-1.\n",
     );
+    // It cites the user's question and the assistant's answer (LR3): a
+    // row the user typed is among its citations, and it is still inferred.
+    let asked = typed_row(&h, "Where is staging?", "2026-09-24 10:00:00");
     let reply = reply_row(&h, "Staging moved to staging-2, according to the tool.");
     let inferred = suggestion_for(
         &h,
         (target.0, &target.1),
         "Staging host",
         "staging-2.",
-        &[reply],
+        &[asked, reply],
         crate::memory::service::ExtractionProvenance::OtherOutput,
     );
     let tool = MemoryConfirmTool::new(h.service.clone());
@@ -1252,6 +1255,12 @@ async fn an_inferred_suggestion_is_not_a_suggestion_in_chat() {
         .await
         .unwrap_err();
     assert!(err.starts_with("not_a_suggestion"), "{err}");
+    // …and `<memory_suggestions>` never lists it (§4.5).
+    let listed = h
+        .service
+        .pending_suggestions(&read_ctx(&h), 3, &Default::default())
+        .unwrap();
+    assert!(listed.is_empty(), "{listed:?}");
     assert_eq!(read_json(&h, inferred.id).unwrap()["status"], "candidate");
     assert_eq!(
         read_json(&h, target.0).unwrap()["effective_status"],
@@ -1364,6 +1373,158 @@ async fn the_preview_is_daemon_authored_and_bounded() {
         preview.contains("(from what you said on 2026-09-24)"),
         "{preview}"
     );
+}
+
+/// The turn's own `ModelTool` read context, as the main loop reads with it.
+fn read_ctx(h: &Harness) -> crate::memory::service::MemoryAccessContext {
+    h.service
+        .context_for_tool(&h.tool_ctx(ALICE), Capabilities::READ_ONLY)
+        .unwrap()
+}
+
+/// Four saved notes, each with a suggestion from the user's words, oldest
+/// first — and an inferred one, newest of all.
+fn five_suggestions(h: &Harness) -> Vec<crate::memory::service::StoreOutput> {
+    let mut out = Vec::new();
+    for (i, topic) in ["Editor", "Shell", "Commute", "Desk"]
+        .into_iter()
+        .enumerate()
+    {
+        let target = h.user_note(
+            ALICE,
+            topic,
+            &format!("# {topic}\n\n## Knowledge\nThe old {topic}.\n"),
+        );
+        let row = typed_row(
+            h,
+            &format!("My {topic} changed."),
+            &format!("2026-09-2{i} 10:00:00"),
+        );
+        out.push(suggestion_for(
+            h,
+            (target.0, &target.1),
+            topic,
+            &format!("The new {topic}."),
+            &[row],
+            crate::memory::service::ExtractionProvenance::UserWords,
+        ));
+        // `created_at`/`updated_at` are whole seconds: keep the order strict.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    // Inferred (LR3): it cites the user's question *and* the assistant's
+    // answer, so it is not the user's words — though a row the user typed
+    // is among its citations.
+    let target = h.user_note(ALICE, "Staging", "# Staging\n\n## Knowledge\nstaging-1\n");
+    let asked = typed_row(h, "Where is staging now?", "2026-09-24 10:00:00");
+    let reply = reply_row(h, "Staging is staging-2 now.");
+    out.push(suggestion_for(
+        h,
+        (target.0, &target.1),
+        "Staging",
+        "staging-2",
+        &[asked, reply],
+        crate::memory::service::ExtractionProvenance::OtherOutput,
+    ));
+    out
+}
+
+/// Design 09 §4.5: the block lists at most three suggestions from the
+/// user's own words, newest first, one line each with both ids and both
+/// revisions — never the inferred one — within its bound; a suggestion
+/// already raised on this lane is left out, and so is the note it would
+/// replace, so a later restatement of the same change is not raised either.
+#[tokio::test]
+async fn memory_suggestions_block_lists_three_and_skips_raised_ones() {
+    use crate::prompt_ctx::sources::memory::{
+        SUGGESTIONS_BLOCK_MAX_BYTES, memory_suggestions_block,
+    };
+    let h = Harness::new();
+    let all = five_suggestions(&h);
+    let (editor, shell, commute, desk) = (&all[0], &all[1], &all[2], &all[3]);
+
+    let block = memory_suggestions_block(h.service.clone(), &h.tool_ctx(ALICE))
+        .await
+        .expect("three are waiting");
+    assert!(
+        block.len() <= SUGGESTIONS_BLOCK_MAX_BYTES,
+        "{}",
+        block.len()
+    );
+    let lines: Vec<&str> = block.lines().collect();
+    assert_eq!(lines.first(), Some(&"<memory_suggestions>"));
+    assert_eq!(lines.last(), Some(&"</memory_suggestions>"));
+    let listed: Vec<&str> = lines[1..lines.len() - 1].to_vec();
+    assert_eq!(listed.len(), 3, "{block}");
+    for (line, s) in listed.iter().zip([desk, commute, shell]) {
+        assert!(
+            line.starts_with(&format!(
+                "[memory-suggestion id={} revision={} replaces=",
+                s.id, s.revision
+            )),
+            "{line}"
+        );
+    }
+    assert!(listed[0].contains("replaces_revision="), "{}", listed[0]);
+    assert!(
+        listed[0].ends_with("“Desk” (saved by you) → “Desk” (from what you said on 2026-09-23)"),
+        "{}",
+        listed[0]
+    );
+    assert!(!block.contains(&editor.id.to_string()), "the fourth waits");
+    assert!(
+        !block.contains(&all[4].id.to_string()),
+        "never the inferred one"
+    );
+
+    // The newest was raised on this lane: it and its target are skipped, and
+    // the oldest takes the third place.
+    let desk_target = read_json(&h, desk.id).unwrap()["supersedes"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    h.service.mark_raised(
+        &format!("{ALICE}:gui"),
+        desk.id,
+        NoteId::parse(&desk_target).unwrap(),
+    );
+    let block = memory_suggestions_block(h.service.clone(), &h.tool_ctx(ALICE))
+        .await
+        .unwrap();
+    assert!(!block.contains(&desk.id.to_string()), "{block}");
+    assert!(!block.contains(&desk_target), "{block}");
+    assert!(block.contains(&editor.id.to_string()), "{block}");
+    // Another lane was not asked, and still hears about it.
+    let mut other = h.tool_ctx(ALICE);
+    other.lane_key = Some(format!("{ALICE}:other"));
+    let block = memory_suggestions_block(h.service.clone(), &other)
+        .await
+        .unwrap();
+    assert!(block.contains(&desk.id.to_string()), "{block}");
+    // Nothing is recorded as used: a listing is not a recall.
+    assert!(h.service.recently_used(10).is_empty());
+}
+
+/// Design 09 §4.5 (review finding C13, ruling LR18): the block is read on
+/// every attended GUI turn, so it reads the index and the listed files, and
+/// parses no partition.
+#[test]
+fn pending_suggestions_parses_no_partition() {
+    let h = Harness::new();
+    five_suggestions(&h);
+    let ctx = read_ctx(&h);
+    let before = openalpaca_storage::memory_files::whole_parses_on_this_thread();
+    let listed = h
+        .service
+        .pending_suggestions(&ctx, 3, &Default::default())
+        .unwrap();
+    let after = openalpaca_storage::memory_files::whole_parses_on_this_thread();
+    assert_eq!(listed.len(), 3);
+    assert_eq!(after - before, 0, "a whole partition was parsed");
+    // The counter counts: a list (which loads the partition) moves it.
+    h.service
+        .list(&ctx, crate::memory::service::ListInput::default())
+        .unwrap();
+    assert!(openalpaca_storage::memory_files::whole_parses_on_this_thread() > after);
 }
 
 /// Design 09 §4.1: a `memory_update` confirm of a suggestion from the user's

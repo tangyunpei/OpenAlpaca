@@ -121,7 +121,7 @@ impl MemoryService {
 
 /// The note a suggestion names, re-read: `None` when it is gone or no longer
 /// effectively active — nothing is left to replace.
-fn verified_target(
+pub(super) fn verified_target(
     service: &MemoryService,
     p: &Partition,
     id: &str,

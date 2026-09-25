@@ -538,10 +538,24 @@ impl Orchestrator {
             reserved_tokens: 0,
         };
         let bundle = self.context_manager.resolve(&ctx_request).await;
+        // Design 09 §4.5: a turn that offers `memory_confirm` — an attended
+        // GUI/CLI chat turn, never a connector's — is told which suggestions
+        // are waiting, read from the index with the turn's own read context.
+        let suggestions_block = match (&main_loop_set, self.memory_service()) {
+            (Some(set), Some(service)) if set.memory_confirm_offered => {
+                crate::prompt_ctx::sources::memory::memory_suggestions_block(service, &tool_ctx)
+                    .await
+            }
+            _ => None,
+        };
         // Design §5: the memory delivery is per turn and outside the cached
         // layer — rendered from the sections the manager kept, appended after
-        // compose (below) and reported as this turn's `memory_used`.
-        let memory_turn = crate::prompt_ctx::sources::memory::memory_turn(&bundle);
+        // compose (below) and reported as this turn's `memory_used`. The
+        // suggestions ride the same message and the same 8 KiB.
+        let memory_turn = crate::prompt_ctx::sources::memory::memory_turn_with(
+            &bundle,
+            suggestions_block.as_deref(),
+        );
 
         let dynamic_context_input = DynamicContextInput {
             context_bundle: Arc::new(bundle),

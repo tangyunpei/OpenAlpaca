@@ -788,17 +788,17 @@ impl BuiltInTool for MemoryConfirmTool {
             .context_for_tool(ctx, Capabilities::READ_ONLY)
             .map_err(refuse)?;
         let lane = ctx.lane_key.clone();
-        let text = blocking(move || {
-            let text = service
+        let preview = blocking(move || {
+            let preview = service
                 .suggestion_preview(&access, id, &expected_revision, &target_revision)
                 .map_err(refuse)?;
             if let Some(lane) = &lane {
-                service.mark_raised(lane, id);
+                service.mark_raised(lane, id, preview.target);
             }
-            Ok(text)
+            Ok(preview)
         })
         .await?;
-        Ok(Some(text))
+        Ok(Some(preview.text))
     }
 
     /// A Deny (design 09 §4.3, LQ2): the suggestion is withdrawn, as *Keep

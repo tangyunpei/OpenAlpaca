@@ -41,7 +41,10 @@ pub use context::{
     Attribution, Capabilities, MemoryAccessContext, Surface, WorkspaceHint, resolve_project_root,
 };
 pub use error::MemoryError;
-pub use in_chat::PREVIEW_MAX_BYTES;
+pub use in_chat::{
+    PENDING_SUGGESTIONS_READ_MAX, PREVIEW_MAX_BYTES, PendingSuggestion,
+    SUGGESTION_LINE_TITLE_BYTES, SuggestionPreview,
+};
 pub use recall::{TRUST_LABEL, wrap_delivery};
 pub use suggestions::{SUGGESTION_EXCERPT_BYTES, SUGGESTIONS_DEFAULT_LIMIT, SUGGESTIONS_MAX_LIMIT};
 pub use types::{
@@ -170,9 +173,10 @@ pub struct MemoryService {
     /// bounded by [`USED_REQUESTS_CAPACITY`].
     used_by_request: Mutex<VecDeque<(uuid::Uuid, Vec<MemoryUsed>)>>,
     /// Per lane, the suggestions a `memory_confirm` card was raised for since
-    /// the daemon started (design 09 §4.5): kept out of that lane's
-    /// `<memory_suggestions>` so a timed-out or denied card is not raised
-    /// again in the same conversation. In memory only.
+    /// the daemon started, and the notes they would replace (design 09 §4.5):
+    /// kept out of that lane's `<memory_suggestions>` so a timed-out or
+    /// denied card is not raised again in the same conversation, nor another
+    /// restatement of the same change. In memory only.
     raised: Mutex<HashMap<String, HashSet<NoteId>>>,
     /// Where `memory_changed` goes (design §7a): every write the service
     /// makes, whichever surface asked, and every change a reconciliation

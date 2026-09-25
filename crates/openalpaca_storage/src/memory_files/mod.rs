@@ -55,7 +55,7 @@ pub use partition::{
     MalformedFile, MoveSnapshotState, NoteView, Partition, PartitionHealth, ReconcileChange,
     ReconcileChangeKind, RepairReport, ScanEntry, SnapshotMove, UpdateAction, Updated, adopt,
     begin_project_move, classify_move_snapshots, finish_project_move, list_owner_keys,
-    list_snapshots, snapshot_path_for,
+    list_snapshots, snapshot_path_for, whole_parses_on_this_thread,
 };
 pub use snapshot::{
     ControlSnapshot, NoteRecord, Origin, Pending, SNAPSHOT_SCHEMA, SnapshotError, SnapshotScope,
