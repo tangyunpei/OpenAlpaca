@@ -50,7 +50,7 @@ pub struct StoreInput {
 /// One note background learning may show the extractor, or check an item
 /// against (design 09 §2.3): read from the index and verified against its
 /// file. Built by [`super::MemoryService::learning_view`] and
-/// [`super::MemoryService::learning_key_target`] only.
+/// [`super::MemoryService::learning_key_targets`] only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnownNote {
     pub id: NoteId,
