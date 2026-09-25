@@ -624,7 +624,9 @@ the command line. Every verb but the two local ones goes through the daemon's
 
 ```bash
 openalpaca memory list    [--kind K] [--status S] [--scope global|project] [--history] [--candidates] [--limit N] [--format json]
-openalpaca memory search  <query> [--kind K] [--scope S] [--limit N] [--historical] [--as-of RFC3339] [--format json]
+openalpaca memory search  <query> [--kind K] [--scope S] [--limit N] [--historical] [--as-of RFC3339]
+                          [--since DATE] [--until DATE] [--order relevance|newest|oldest] [--format json]
+openalpaca memory timeline <id> | --query Q | --date DATE  [--before N] [--after N] [--format json]
 openalpaca memory show    <id> [--revision <rev>] [--raw]
 openalpaca memory add     --kind K --title T [--scope S] [--alias A]... [--tag T]... [--fact-key KEY] [--supersedes <id>] [BODY | -]
 openalpaca memory edit    <id>
@@ -664,7 +666,21 @@ Notes:
   range the excerpt came from, why it matched, and its freshness — and a result
   flagged `conflict` or `same-key loser` is one `doctor` also names. Candidates are
   never returned. `--historical` includes superseded, archived and ended-window
-  notes; `--as-of` evaluates validity at that instant.
+  notes; `--as-of` evaluates validity at that instant. `--limit` is 1–50, default 10.
+  `--since` and `--until` keep notes *dated* in that range, both ends inclusive — a
+  note's date is when what it records was observed (a learned note carries the
+  time of the message it came from), else when it was first saved; each takes an
+  RFC 3339 instant or a date `YYYY-MM-DD`, which is that whole UTC day. `--order
+  newest|oldest` sorts by that date instead of by relevance.
+- `timeline` shows what surrounds a note in time — the notes dated just before and
+  just after it, oldest first — around exactly one of a note (its id or a unique
+  prefix), the best match of `--query`, or `--date` (an instant, or a `YYYY-MM-DD`
+  from its start). `--before` and `--after` take 0–20 (default 5). Unlike `search`
+  it lists notes that no longer reach a chat — superseded, archived, or whose
+  validity window has ended — with that status in the STATUS column (in yellow);
+  the anchor is in bold. Candidates are never listed, and a timeline is not drawn
+  around one. It is the model's `memory_timeline` over `GET
+  /v1/memories/timeline`.
 - `show` prints the note with its provenance; `--raw` prints the note *file* as the
   daemon holds it, frontmatter and all; `--revision <rev>` reads one of the last
   five revisions the daemon wrote (a hand edit is not one of them) — `--raw` of a

@@ -699,9 +699,34 @@ note is replaced only by an explicit `supersedes`, and forgotten only by a
 forget. `USER.md` is not written by any of this — see [Persona](#persona).
 
 The model's tools are the same service with less authority. `memory_search`,
-`memory_read` and `memory_list` are registered for every agent granted
-`memory_read`; `memory_store`, `memory_update` and `memory_forget` are offered to
-the main conversation alone. A tool call records origin `extracted_user` at most,
+`memory_read`, `memory_list` and `memory_timeline` are registered for every
+agent granted `memory_read`; `memory_store`, `memory_update` and `memory_forget`
+are offered to the main conversation alone.
+
+**The read tools are layered**: filter first, fetch later. `memory_search`
+answers an **index** by default — one row per note, `{id, date, kind, scope,
+status, title, reason, size, conflict}`, no body — where `date` is when the
+note's evidence was observed, else when it was first saved, `reason` is how it
+matched, and `size` is its approximate token count (body bytes ÷ 4);
+`detail: "snippets"` gives the cited excerpts instead. It also takes
+`date_from` and `date_to` (inclusive, on that date; RFC 3339, or `YYYY-MM-DD`
+as that whole UTC day) and `order_by` (`relevance`, the default, `newest` or
+`oldest`), and `limit` is 1–50, default 10. `memory_read` takes `ids`, 1–10 in
+one call, and answers every note in the order asked, each with its revision
+and provenance; the bodies share the one 32 KiB read budget — a short one is
+never cut to make room, a cut one says `truncated` — and an id no note of
+yours has (another owner's note reads the same) answers `{id, error:
+"not_found"}` in its place. `expected_revision` and `section` go with a single
+id. `memory_timeline` shows what surrounds a note in time: around exactly one
+of `anchor` (a note id), `query` (its first hit, superseded and archived notes
+included) or `date` (an instant), the nearest `before` and `after` notes
+(default 5, at most 20 each), in date order, as index rows whose `reason` says
+`before`, `anchor` or `after`. Unlike a search it lists notes that have left
+recall — superseded, archived or with an ended validity window — marked by
+`status`; a candidate (a suggestion included) is never listed, and a timeline
+is not drawn around one. The main conversation's system prompt says the same
+in one line. Search hits, timeline rows and read notes are all reported as
+`memory_used` with reason `tool`. A tool call records origin `extracted_user` at most,
 never `user`; it cannot confirm a candidate, it cannot edit, archive or
 replace a note you wrote, and it cannot edit a suggestion (the text you are
 asked about stays the extractor's). No surface archives a suggestion — it is
@@ -789,7 +814,8 @@ addressed. Bodies and queries are closed objects — an unknown key is a `400`.
 | Method and path | Purpose |
 |---|---|
 | `GET /v1/memories` | List notes: `kind`, `status` (default `active`), `scope`, `include_history`, `include_candidates`, `limit` (1–100, default 50) and `cursor`. Answers `{items, next_cursor}`, each item with `supersedes` (the ids it names as replaced); a cursor is valid for the filter set that issued it, and one from another filter set is `400 MEMORY_INVALID_INPUT`. |
-| `GET /v1/memories/search` | Literal search: `q` (1–512 chars), `kind`, `scope`, `limit` (1–20, default 8), `historical`, `as_of`. Answers cited results with `freshness`, `conflict`, `same_key_loser`, `sources_status`, plus `partial` and `index_state`. Candidates are never returned. |
+| `GET /v1/memories/search` | Literal search: `q` (1–512 chars), `kind`, `scope`, `limit` (1–50, default 10), `historical`, `as_of`, and the model tool's `date_from`, `date_to` (inclusive, on the note's date — observed, else first saved; RFC 3339 or `YYYY-MM-DD`) and `order_by` (`relevance`, `newest`, `oldest`). `detail` defaults to `snippets` here: cited results with `freshness`, `conflict`, `same_key_loser`, `sources_status`; `detail=index` answers the tool's index rows. Either way with `count`, `partial` and `index_state`. Candidates are never returned. |
+| `GET /v1/memories/timeline` | `memory_timeline`: around exactly one of `anchor` (a note id), `q` (its first hit) or `date` (RFC 3339 or `YYYY-MM-DD`), the nearest `before` and `after` notes (0–20, default 5), in date order. Answers `{anchor, results, count, index_state}` — `anchor` is `{id}`, `{date}` or null when `q` matched nothing — with index rows whose `reason` is `before`, `anchor` or `after`, superseded, archived and ended notes marked by `status`, candidates never listed. An unknown anchor is `404`; no anchor, two, or a side over 20 is `400`. |
 | `GET /v1/memories/recently-learned` | The extractor's `extracted_user` notes that recall would use, newest first, each with `supersedes` (what it replaced) — `since` (RFC 3339, or a window like `7d`, `24h`, `30m`; default 7 days) and `limit`. A note that is not in force, loses its `fact_key` to another note, or cites a message a forget suppressed is not listed. An edit through this surface re-records a note as `user` and it leaves the list. |
 | `GET /v1/memories/suggestions` | The pending suggestions, newest first — `limit` (1–100, default 20). Each item: `id`, `revision`, `title`, `knowledge` (the suggested text), `reason`, `created_at`, `observed_at` (the cited message's time), `origin`, `scope`, `sources`, `older_count`, and `target: {id, revision, title, excerpt, origin, scope}` — the note it would replace, as read now. Where several name one note only the newest is listed, and `older_count` counts the rest. A suggestion whose note is gone or no longer in force is not listed (undo still dismisses it). Records nothing. |
 | `GET /v1/memories/recently-used` | The in-memory ring of notes delivered to a model since the daemon started (`limit`, default 50, max 200): `{id, revision, reason, delivered_at, lane_key, task_id}`. Cleared at restart. |
@@ -958,7 +984,7 @@ The `done` payload:
 | `duration_ms` | yes | Wall-clock time of the turn. |
 | `attachments_used` | no | Ids of the turn's files that the model's request really carried. |
 | `attachments_skipped` | no | `[{"id", "reason"}]` — the turn's files that did not reach the model, each with a sentence saying why. |
-| `memory_used` | no | `[{"id", "revision", "reason"}]` — the memory notes the turn delivered to the model: `reason` is `pinned` or `recall` for the automatic per-turn recall, `tool` for a note the model fetched itself through `memory_search` or `memory_read`. Live only: nothing persists it, and `GET /v1/chat/history` does not serve it. |
+| `memory_used` | no | `[{"id", "revision", "reason"}]` — the memory notes the turn delivered to the model: `reason` is `pinned` or `recall` for the automatic per-turn recall, `tool` for a note the model fetched itself through `memory_search`, `memory_timeline` or `memory_read` (an index row counts: its title reached the model). Live only: nothing persists it, and `GET /v1/chat/history` does not serve it. |
 | `delegation` | no | `{"task_id", "title"}` when the turn started a background workflow, so a client can track the run without parsing prose. |
 
 Optional fields are omitted when they are empty.

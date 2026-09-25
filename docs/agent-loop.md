@@ -107,7 +107,9 @@ lead-agent workflow does not use this line; it has its own fallback (see
 coordination tools (`spawn_subagent`, `spawn_subagents_batch` when
 enabled, `check_subagent_status`, `wait_for_subagents`, plus
 `post_update` + `queue_followup` under steering) + workspace tools +
-`memory_search`, plus `artifact_write` and `read_result` when the lead's
+the memory reads `memory_search`, `memory_read` and `memory_timeline` (a
+search answers an index, so the read that follows it comes with it), plus
+`artifact_write` and `read_result` when the lead's
 own template declares those capabilities (the shipped `lead_agent`
 template does), unioned with the same extension set as the main loop —
 every installed MCP-bridged (`<server>__<tool>`) and plugin-provided
@@ -209,8 +211,10 @@ the base picks (keyword-suggested tools under
 unioned with a per-request set —
 `start_workflow`, `task_status`, `memory_store` + `memory_update` +
 `memory_forget` (when the daemon has a memory service), the
-globally-registered `memory_search`, `memory_read` and `memory_list`
-definitions,
+globally-registered `memory_search`, `memory_read`, `memory_list` and
+`memory_timeline` definitions (and, with them, one `<memory_rules>` line in
+the system prompt: search returns an index, pick ids, read only those,
+several at once),
 `read_result` (only when the daemon has both a session log and a
 database — the one case where a result can spill, see
 [Tool Results and the Spill](#tool-results-and-the-spill)), every
