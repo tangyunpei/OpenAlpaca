@@ -444,6 +444,17 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         sensitive: false,
         backend: ConfigBackend::DaemonToml,
     },
+    // -- Daemon: Orchestrator – index-first recall (design 09 §13.2) --
+    ConfigKeyDef {
+        key: "daemon.orchestrator.recall_mode",
+        kind: ConfigKind::Enum(&["index", "excerpts"]),
+        default: Some("index"),
+        description: "Each turn's memory recall: index (pinned notes, the top 2 as excerpts, up to 8 more listed one line each for memory_read) or excerpts (up to 8 excerpts); both within 8 KiB",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
     // -- Daemon: Orchestrator – Background Models --
     ConfigKeyDef {
         key: "daemon.orchestrator.summary_model",

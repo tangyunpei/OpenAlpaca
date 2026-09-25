@@ -62,6 +62,11 @@ summary_min_new_older_messages = 12
 # An extracted memory item the model rates below this is dropped and counted;
 # the number itself is never stored (0.0-1.0).
 memory_confidence_threshold = 0.65
+# What each turn's automatic memory recall sends the model, within 8 KiB:
+# "index" sends the pinned notes, the top 2 matches as excerpts and up to 8
+# more as one-line entries the model can open with memory_read; "excerpts"
+# sends up to 8 matches as excerpts.
+recall_mode = "index"
 
 [orchestrator.learning]
 # Learn from conversations in the background: every turn is queued, and a

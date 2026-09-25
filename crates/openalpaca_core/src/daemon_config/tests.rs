@@ -676,3 +676,45 @@ turns_per_flush = 1000
     high.validate();
     assert_eq!(high.orchestrator.learning.turns_per_flush, 100);
 }
+
+// ── Index-first recall (design 09 §13.2, MD-15) ──────────────────────
+
+/// `[orchestrator.memory] recall_mode` is `index` unless the file says
+/// otherwise — from the struct default, an empty file and a memory table
+/// that does not name it — and `excerpts` is the other value. Both survive a
+/// round trip; a value the key does not have fails the file like any other
+/// mistyped key.
+#[test]
+fn recall_mode_defaults_to_index_and_reads_excerpts() {
+    for config in [
+        DaemonConfig::default(),
+        toml::from_str("").unwrap(),
+        toml::from_str("[orchestrator.memory]\nprompt_recent_messages = 40\n").unwrap(),
+    ] {
+        assert_eq!(config.orchestrator.memory.recall_mode, RecallMode::Index);
+    }
+    let config: DaemonConfig =
+        toml::from_str("[orchestrator.memory]\nrecall_mode = \"excerpts\"\n").unwrap();
+    assert_eq!(config.orchestrator.memory.recall_mode, RecallMode::Excerpts);
+    let round: DaemonConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+    assert_eq!(round.orchestrator.memory.recall_mode, RecallMode::Excerpts);
+    assert!(
+        toml::to_string(&DaemonConfig::default())
+            .unwrap()
+            .contains("recall_mode = \"index\"")
+    );
+    assert!(
+        toml::from_str::<DaemonConfig>("[orchestrator.memory]\nrecall_mode = \"snippets\"\n")
+            .is_err()
+    );
+}
+
+/// The shipped `config/daemon.toml` names the key with its default, and the
+/// whole file still parses.
+#[test]
+fn the_shipped_daemon_toml_names_recall_mode_index() {
+    let shipped = include_str!("../../../../config/daemon.toml");
+    assert!(shipped.contains("\nrecall_mode = \"index\"\n"), "{shipped}");
+    let config: DaemonConfig = toml::from_str(shipped).unwrap();
+    assert_eq!(config.orchestrator.memory.recall_mode, RecallMode::Index);
+}

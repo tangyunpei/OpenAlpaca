@@ -264,6 +264,9 @@ pub struct MemoryConfig {
     /// scores under this is dropped and counted; the number is never stored.
     /// Range: 0.0–1.0.
     pub memory_confidence_threshold: f64,
+    /// How each turn's automatic recall delivers what it finds (design 09
+    /// §13.2, MD-15): `index` (the default) or `excerpts`.
+    pub recall_mode: RecallMode,
 }
 
 impl Default for MemoryConfig {
@@ -274,6 +277,32 @@ impl Default for MemoryConfig {
             summary_max_chars: 4000,
             msg_trunc_chars: 1500,
             memory_confidence_threshold: 0.65,
+            recall_mode: RecallMode::default(),
+        }
+    }
+}
+
+/// `[orchestrator.memory] recall_mode` (design 09 §13.2, MD-15): what the
+/// automatic per-turn recall puts in front of the model, always inside the
+/// same 8 KiB and always as quoted reference data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecallMode {
+    /// The pinned notes, the top 2 recalled notes as excerpts, then up to 8
+    /// further notes listed one line each, for the model to read with
+    /// `memory_read` — the owner-adopted default.
+    #[default]
+    Index,
+    /// The pinned notes and up to 8 recalled notes, every one as an excerpt:
+    /// the delivery before index-first recall.
+    Excerpts,
+}
+
+impl RecallMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecallMode::Index => "index",
+            RecallMode::Excerpts => "excerpts",
         }
     }
 }

@@ -168,6 +168,12 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["orchestrator", "memory"],
         field: "memory_confidence_threshold",
     },
+    // Orchestrator: index-first recall (design 09 §13.2)
+    TomlMapping {
+        schema_key: "daemon.orchestrator.recall_mode",
+        section: &["orchestrator", "memory"],
+        field: "recall_mode",
+    },
     // Execution: Agent Defaults (cont.)
     TomlMapping {
         schema_key: "daemon.execution.max_tools_per_round",

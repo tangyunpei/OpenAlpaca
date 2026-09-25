@@ -123,3 +123,13 @@ fn test_find_mapping_learning_keys() {
         assert_eq!(mapping.field, field, "{key}");
     }
 }
+
+/// Index-first recall (design 09 §13.2): `recall_mode` lives in
+/// `[orchestrator.memory]`, where `DaemonConfig` reads it.
+#[test]
+fn test_find_mapping_recall_mode() {
+    let mapping = find_mapping("daemon.orchestrator.recall_mode")
+        .expect("daemon.orchestrator.recall_mode has a mapping");
+    assert_eq!(mapping.section, &["orchestrator", "memory"]);
+    assert_eq!(mapping.field, "recall_mode");
+}

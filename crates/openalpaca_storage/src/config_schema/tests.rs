@@ -101,8 +101,9 @@ fn test_daemon_keys_in_category() {
     // Learning v2's five (design 09 §1.10: the three
     // `[orchestrator.learning]` keys, `extract_max_calls_per_day`, and the
     // `memory_confidence_threshold` row it never had), less
-    // `extract_every_n_turns`, which Learning v2's cadence replaced.
-    assert_eq!(keys.len(), 47);
+    // `extract_every_n_turns`, which Learning v2's cadence replaced, plus
+    // index-first recall's `recall_mode` (design 09 §13.2).
+    assert_eq!(keys.len(), 48);
     assert!(
         !keys
             .iter()
@@ -114,6 +115,7 @@ fn test_daemon_keys_in_category() {
         "daemon.orchestrator.learning.turns_per_flush",
         "daemon.orchestrator.extract_max_calls_per_day",
         "daemon.orchestrator.memory_confidence_threshold",
+        "daemon.orchestrator.recall_mode",
     ] {
         assert!(
             keys.iter().any(|d| d.key == key),
@@ -397,6 +399,18 @@ fn test_validate_new_daemon_keys() {
     assert!(validate("daemon.orchestrator.memory_confidence_threshold", "1.5").is_err());
     assert!(validate("daemon.orchestrator.extract_max_items_per_call", "12").is_ok());
     assert!(validate("daemon.orchestrator.extract_max_items_per_call", "51").is_err());
+    // Index-first recall (design 09 §13.2): two values, `index` the default.
+    assert!(validate("daemon.orchestrator.recall_mode", "index").is_ok());
+    assert!(validate("daemon.orchestrator.recall_mode", "excerpts").is_ok());
+    assert!(validate("daemon.orchestrator.recall_mode", "snippets").is_err());
+    assert_eq!(
+        normalize("daemon.orchestrator.recall_mode", "EXCERPTS"),
+        "excerpts"
+    );
+    assert_eq!(
+        lookup("daemon.orchestrator.recall_mode").and_then(|d| d.default),
+        Some("index")
+    );
 
     // Execution keys
     assert!(validate("daemon.execution.max_tools_per_round", "5").is_ok());
