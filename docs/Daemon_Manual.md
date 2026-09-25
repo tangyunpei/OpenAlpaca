@@ -126,12 +126,15 @@ root is the human's:
    resuming it under its own id exists behind `[orchestrator.routing]
    resume_enabled`, which is **off** by default.
 9. Bootstrap persona documents (SOUL/USER/IDENTITY/BOOTSTRAP) if missing.
-10. Open the memory service — its search index at `state/cache/memory-index-v1.sqlite` is checked, and rebuilt from the note files when it is missing, damaged or of another version — then start the orchestrator, wake manager, plugin manager, MCP clients, connectors, hot reload, background workers (the 30 s memory reconciliation among them) and the HTTP router.
+10. Open the memory service — its search index at `state/cache/memory-index-v1.sqlite` is checked, and rebuilt from the note files when it is missing, damaged or of another version — then start the orchestrator, the learning queue, wake manager, plugin manager, MCP clients, connectors, hot reload, background workers (the 30 s memory reconciliation and the 15 s learning sweeper among them) and the HTTP router. Thirty seconds after start, the learning queue's boot catch-up looks for conversations with turns not yet learned (see [Memory](#memory)).
 
 Shutdown can be initiated by a signal (SIGINT/SIGTERM) or by `POST
 /v1/command {"command":"shutdown"}`; both converge on one cancellation. The
 daemon then stops accepting connections and waits for in-flight responses to
-finish, after which it runs its shutdown tail in this order: flush the cost
+finish, after which it runs its shutdown tail in this order: learn what is
+pending, for at most 3 seconds (the learning drain — what it does not finish,
+the next start learns); stop the background jobs — conversation summaries, a
+finished run's task extraction and learning — within 3 seconds; flush the cost
 tracker to the database; flush every session log; close every MCP connection
 and kill every plugin child; stop the connectors; stop the wake scheduler and
 file watchers; remove `discovery.json`.
@@ -310,9 +313,10 @@ otherwise the conservative cloud fallback still applies.
 |---|---|---|
 | One chat turn, or one subagent | $1 | `[execution.agent_defaults] max_cost` |
 | One workflow's lead agent | $5 | `[execution.lead_agent_defaults] max_cost` |
-| Memory extraction, per day | $0.25 | `[orchestrator.costs] extract_max_daily_cost_usd` |
+| Learning from conversations, per UTC day | $0.25 | `[orchestrator.costs] extract_max_daily_cost_usd` |
+| Learning from conversations, calls per UTC day | 200 (`0` = no cap) | `[orchestrator.costs] extract_max_calls_per_day` |
 | Conversation summaries, per day | $0.50 | `[orchestrator.costs] summary_max_daily_cost_usd` |
-| Task-output extraction, per day | $0.50 | `[orchestrator.costs] task_extract_max_daily_cost_usd` |
+| Task-output extraction, per UTC day | $0.50 | `[orchestrator.costs] task_extract_max_daily_cost_usd` |
 
 An agent template's `max_cost_per_task` replaces the default for that agent.
 Seven of the nine shipped templates set one: `lead_agent` sets `3.0`, so a
@@ -320,14 +324,19 @@ stock install caps a workflow's lead at $3, not $5, and the subagent templates
 range from `0.25` (`explore_agent`) to `5.0` (`general_agent`). `system_agent`
 and `writing_agent` set none and run at the $1 default.
 
-There is no overall daily budget for turns or workflows. Only the three
-background jobs in the table carry a daily ceiling: a job whose running spend
-has passed it is skipped. That running total is kept in memory and is seeded
-from today's usage rows when the daemon starts. The two memory jobs are
-bounded by count as well: `[orchestrator.costs] extract_max_items_per_turn`
-(default 5) notes from one chat turn and `task_extract_max_items_per_run`
-(default 10) candidates from one run; the items past the count are dropped and
-counted, never stored.
+There is no overall daily budget for turns or workflows. Only the background
+jobs in the table carry a daily ceiling. The two memory jobs read today's calls
+and spend from the usage table (`llm_usage_daily`) for the **UTC** date, so
+their day starts at 00:00 UTC whatever the daemon's uptime. The call cap is
+what bounds a local model, where the cost cap never binds at price `0`. A
+capped learning window is not dropped: it waits, with one `INFO` per
+conversation per day, and is learned once the cap no longer binds. The summary
+job's ceiling is still a running total kept in memory from the daemon's start,
+seeded from today's usage rows. The two memory jobs are bounded by count as
+well: `[orchestrator.costs] extract_max_items_per_call` (default 12, fewer when
+the extraction model's output budget is small) notes from one learning call and
+`task_extract_max_items_per_run` (default 10) candidates from one run; the
+items past the count are dropped and counted, never stored.
 
 An agent template's `max_cost_per_task` overrides the first two rows (the
 shipped `lead_agent` template sets `3.0`). At price `0` none of the caps bite.
@@ -628,18 +637,58 @@ names what it delivered (`memory_used`, below). A workflow's lead gets the same
 recall once at its start. Search is literal: every term of three or more
 characters is matched as a whole word and as a substring, a one- or
 two-character query (a short Chinese word) goes through a bounded scan, and
-nothing asks a model. After a chat turn the daemon asks the conversation model what durable
-facts the **message as typed** carried (never an attachment's text): what you
+nothing asks a model.
+
+**Learning from conversations** happens in the background and never delays a
+reply. Every turn is queued, and a conversation's turns not yet learned are
+extracted together:
+
+- when it has been idle about two minutes (`[orchestrator.learning]
+  idle_secs`, default 120; `0` turns this trigger off);
+- when 10 of your turns have accumulated (`turns_per_flush`, default 10);
+- when you switch to another conversation — "New chat", reopening an older
+  one, or a turn in another project;
+- before the daemon stops, for at most 3 seconds; what that does not finish is
+  learned 30 seconds after the next start, so nothing is lost.
+
+A learning call starts only after 20 seconds with no chat turn in flight, one
+at a time on the whole daemon. On a local model a chat turn that starts cancels
+it — the model serves your reply alone, and learning retries later — and on a
+cloud model with a key it starts only when half of that key's rate budget would
+remain for chat.
+
+Learning reads the stored conversation: the messages **as typed** — never an
+attachment's extracted text — and the answers, in chunks sized to the
+extraction model's context window (a long message is no longer cut to 800
+characters; one over 8 KiB keeps its first 6 KiB and last 2 KiB). Each message
+learns into the project its own turn named, or into the global partition when
+it named none, whatever project the conversation was later bound to. What you
 said in your own words becomes an active note learned from you (origin
-`extracted_user`, listed as *recently learned* with a one-step undo), and what
-was inferred from the reply or from a run's output becomes a **candidate**,
-kept out of recall until you confirm it. At most
-`[orchestrator.costs] extract_max_items_per_turn` (5) notes per turn and
-`task_extract_max_items_per_run` (10) candidates per run are written, on top of
-the daily cost ceilings; a failed or cancelled run produces nothing. Nothing is
-pruned by age and nothing is replaced because it looks similar: a note is
-replaced only by an explicit `supersedes`, and forgotten only by a forget.
-`USER.md` is not written by any of this — see [Persona](#persona).
+`extracted_user`, listed as *recently learned* with a one-step undo). What was
+inferred from an answer, from a follow-up the assistant queued for itself, from
+a message over 8 KiB (which may quote other text — a piped email, a pasted
+page) or from a run's output becomes a **candidate**, kept out of recall until
+you confirm it. Every learned note cites the messages it came from, and a
+message you forgot a note from is never learned from again. Slash commands and
+their answers, extension notices, workflow updates and completion reports are
+not read.
+
+At most `[orchestrator.costs] extract_max_items_per_call` (12) notes per
+learning call and `task_extract_max_items_per_run` (10) candidates per run are
+written, on top of the daily ceilings in [Cost](#cost); an item the model rates
+under `[orchestrator.memory] memory_confidence_threshold` (0.65) is dropped. A
+failed or cancelled run produces nothing. Learning waits, and loses nothing,
+while no model can answer (one `WARN` when that starts, one `INFO` when it
+ends, with retries backing off from 1 minute to 1 hour), while a memory
+partition is quarantined, and while a daily cap binds; an answer the model
+cannot give in the expected shape three times running is skipped, with one
+`WARN` naming the conversation and the messages. Deleting or clearing a
+conversation drops its turns not yet learned. `[orchestrator.learning] enabled
+= false` switches learning off.
+
+Nothing is pruned by age and nothing is replaced because it looks similar: a
+note is replaced only by an explicit `supersedes`, and forgotten only by a
+forget. `USER.md` is not written by any of this — see [Persona](#persona).
 
 The model's tools are the same service with less authority. `memory_search`,
 `memory_read` and `memory_list` are registered for every agent granted
@@ -1063,6 +1112,8 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 
 - heartbeat event emitter
 - memory reconciliation (fixed 30 s interval): a stat scan of every memory partition the owner's control snapshots know; a note file edited, added or removed behind the daemon's back is re-recorded as `external`, the search index follows, and each finding is one `memory_changed` frame
+- learning sweeper (fixed 15 s interval): a conversation with turns not yet learned becomes due once it has been idle `[orchestrator.learning] idle_secs` or is no longer its lane's active conversation, and a due one is learned once no chat turn has been in flight for 20 s (see [Memory](#memory))
+- learning boot catch-up (once, 30 s after start): every conversation with turns not yet learned is due
 - file-processing worker and asset cleanup (upload governance)
 - telemetry cleanup (fixed daily interval)
 - chat-stream cleanup (stale SSE streams)
@@ -1070,7 +1121,7 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 ## Storage Model
 
 - SQLite location is resolved by `openalpaca_storage::store::database_path()` — `~/.openalpaca/state/openalpaca.db`. Every path in the layout comes from that module; no crate joins a literal directory name onto a store root.
-- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`. The unreleased chain is consolidated into `crates/openalpaca_storage/src/migrations/001_baseline.sql`, which initializes schema version **43** directly and needs nothing beyond SQLite itself — no extension is loaded. Every older schema is refused rather than upgraded, 42 included; the next migration version is 44. `GET /v1/status` reports the version the open database is actually at.
+- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`. The unreleased chain is consolidated into `crates/openalpaca_storage/src/migrations/001_baseline.sql`, which initializes schema version **43** directly and needs nothing beyond SQLite itself — no extension is loaded. Migration **44** (`044_learning.sql`) follows it: it adds the turn's id and project root to each stored message (`conversation_messages.request_id`, `workspace_root`) and the `learning_cursor` table — how far learning has read each conversation — seeded at every existing conversation's newest message, so conversations from before it are not re-learned. A fresh database opens at 44 and a 43 database is upgraded in place; every schema older than 43 is refused rather than upgraded, 42 included, and the next migration version is 45. A build from before 44 refuses a database at 44, so keep a copy of `state/openalpaca.db` before the first start of a build that migrates it if you may go back. `GET /v1/status` reports the version the open database is actually at.
 - Memory is **not** in the database. The notes are Markdown files under `memory/` (see the runtime paths at the top of this manual), each partition's revisions, origins and tombstones are one JSON control snapshot under `state/memory-control/`, and the search index is a separate, disposable SQLite file, `state/cache/memory-index-v1.sqlite`. A backup of your memory is the `memory/` directories **and** `state/memory-control/`; the index can always be rebuilt. See [Memory](#memory).
 - **If your database is refused.** No migration runs — the old schema and its rows are left exactly as they were — and the message names the absolute path of the file. It comes in two wordings:
   - `Unsupported legacy schema version 42: this build starts at schema version 43 and cannot read a database from before the memory redesign — its memory storage was replaced.` A complete, working database from the build before memory moved to files. It is not converted: the message names `openalpaca config reset --factory`, lists everything that reset removes (every task, message, session record and memory row, `llm.toml` with its API keys and keychain entries, `daemon.toml` back to defaults) and what survives, and says a build from before the memory redesign still opens the file. The whole procedure — keeping a copy first, reconnecting a model, reviewing `USER.md` — is [Installation Manual → Switching to the Markdown Memory Build](Installation_Manual.md#switching-to-the-markdown-memory-build).
