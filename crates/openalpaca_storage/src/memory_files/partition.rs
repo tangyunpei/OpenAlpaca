@@ -52,6 +52,17 @@ thread_local! {
     /// How many note files this thread has read from disk (design 09 §6.3).
     /// Read by tests only.
     static FILE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Tests: which snapshot save of this thread fails, counting the next
+    /// as 1; 0 fails none ([`fail_snapshot_save`]).
+    #[cfg(test)]
+    static FAILING_SAVE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests: the `n`th snapshot save this thread makes from now (1: the next)
+/// fails before anything is written, as a disk that refused the file would.
+#[cfg(test)]
+pub(super) fn fail_snapshot_save(n: u32) {
+    FAILING_SAVE.with(|c| c.set(n));
 }
 
 /// The whole-partition reads this thread has made so far — every note
@@ -771,6 +782,12 @@ impl Partition {
         snapshot: &mut Arc<ControlSnapshot>,
         now: DateTime<Utc>,
     ) -> Result<Option<u64>, MemoryFilesError> {
+        #[cfg(test)]
+        if FAILING_SAVE.with(|c| c.replace(c.get().saturating_sub(1)) == 1) {
+            return Err(MemoryFilesError::Io(anyhow::anyhow!(
+                "injected snapshot save failure"
+            )));
+        }
         let before = save_generation();
         Arc::make_mut(snapshot).save(&self.snapshot_path, now)?;
         Ok((save_generation() == before + 1).then_some(before + 1))
@@ -1875,6 +1892,9 @@ impl Partition {
             let snapshot = Self::snapshot_mut(state);
             snapshot.tombstones.push(tombstone);
             snapshot.notes.remove(id);
+            // A save that fails leaves no earlier target's generation behind
+            // to cache this target's unsaved tombstone under.
+            *saved = None;
             *saved = self.save_snapshot(
                 state.snapshot.as_mut().expect("not quarantined, has notes"),
                 self.now(),

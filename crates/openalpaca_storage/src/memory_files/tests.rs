@@ -5060,3 +5060,49 @@ fn a_cached_snapshot_is_read_again_after_a_save_or_a_replacement() {
     sb.open_home_cached(ALICE, &cache);
     assert_eq!(loads() - before, 1);
 }
+
+/// Design 09 §6.3, *Snapshot*: a forget of two notes whose second snapshot
+/// save fails caches no snapshot — neither the one holding the second
+/// note's unsaved tombstone under the first save's generation, nor any
+/// other — so a cached open keeps the note whose forget failed, as an
+/// uncached open does. Fails without `forget_each` clearing the generation
+/// it remembers before each save.
+#[test]
+fn a_forget_whose_save_fails_caches_no_snapshot() {
+    let sb = Sandbox::new();
+    let cache = settled_cache(NOTE_PARSE_CACHE_BYTES);
+    let p = sb.open_home_cached(ALICE, &cache);
+    let notes = five_notes(&p);
+    super::partition::fail_snapshot_save(2);
+    let failed = p.forget(&[
+        (notes[0].id, notes[0].revision.clone()),
+        (notes[1].id, notes[1].revision.clone()),
+    ]);
+    assert!(
+        matches!(failed, Err(MemoryFilesError::Io(_))),
+        "the second target's save failed: {failed:?}"
+    );
+    let on_disk = ControlSnapshot::load(p.snapshot_path()).unwrap().unwrap();
+    let tombstoned = |s: &ControlSnapshot, id: &NoteId| s.tombstones.iter().any(|t| t.id == *id);
+    assert!(
+        tombstoned(&on_disk, &notes[0].id),
+        "the first forget landed"
+    );
+    assert!(!tombstoned(&on_disk, &notes[1].id), "the second never did");
+
+    let reopened = sb.open_home_cached(ALICE, &cache);
+    assert!(
+        !tombstoned(&reopened.snapshot().unwrap(), &notes[1].id),
+        "a cached open reads no tombstone the disk does not hold"
+    );
+    assert!(
+        file_for(&reopened, &notes[1].id).is_some(),
+        "a cached open keeps note 1, whose forget failed"
+    );
+    let uncached = sb.open_home(ALICE);
+    assert!(file_for(&uncached, &notes[1].id).is_some());
+    assert_eq!(
+        view_digest(&reopened.load().unwrap()),
+        view_digest(&uncached.load().unwrap())
+    );
+}
