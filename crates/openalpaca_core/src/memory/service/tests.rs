@@ -4880,3 +4880,160 @@ fn a_replacement_reason_is_read_from_the_evidence_sentence() {
         None
     );
 }
+
+// ============================================================================
+// What an operation costs in whole-partition reads (design 09 §6.3)
+// ============================================================================
+
+fn parses() -> u64 {
+    openalpaca_storage::memory_files::whole_parses_on_this_thread()
+}
+
+fn records_built() -> u64 {
+    RECORDS_BUILT.with(|n| n.get())
+}
+
+/// Ten notes in Alice's home partition, the index caught up with them.
+fn ten_notes(h: &Harness, ctx: &MemoryAccessContext) -> Vec<StoreOutput> {
+    (0..10)
+        .map(|i| {
+            h.store(
+                ctx,
+                &format!("Note {i}"),
+                &format!("# Note {i}\n\nFact {i}.\n"),
+                NoteKind::Fact,
+            )
+        })
+        .collect()
+}
+
+/// Design 09 §6.3 quick win 3, at HEAD: a store reads the whole partition
+/// three times — the create's check, `MEMORY.md`, the re-index.
+#[test]
+fn a_store_parses_the_partition_three_times() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    ten_notes(&h, &user);
+    let before = parses();
+    h.store(&user, "Another", "# Another\n\nMore.\n", NoteKind::Fact);
+    assert_eq!(parses() - before, 3);
+}
+
+/// Design 09 §6.3 quick win 3, at HEAD: an edit reads the whole partition
+/// five times — finding the note, the update's check, `MEMORY.md`, the
+/// re-index and the origin read back for the event.
+#[test]
+fn an_update_parses_the_partition_five_times() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let notes = ten_notes(&h, &user);
+    let before = parses();
+    h.service
+        .update(
+            &user,
+            UpdateInput {
+                id: notes[3].id,
+                expected_revision: notes[3].revision.clone(),
+                action: UpdateAction::Edit(Patch {
+                    body: Some("# Note 3\n\nFact three, revised.\n".into()),
+                    ..Default::default()
+                }),
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(parses() - before, 5);
+}
+
+/// Design 09 §6.3 quick win 2, at HEAD: a forget of twenty notes reads the
+/// whole partition four times per target.
+#[test]
+fn a_twenty_target_forget_parses_the_partition_eighty_times() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let notes: Vec<StoreOutput> = (0..25)
+        .map(|i| {
+            h.store(
+                &user,
+                &format!("Note {i}"),
+                &format!("# Note {i}\n"),
+                NoteKind::Fact,
+            )
+        })
+        .collect();
+    let targets: Vec<(NoteId, String)> = notes
+        .iter()
+        .take(20)
+        .map(|n| (n.id, n.revision.clone()))
+        .collect();
+    let before = parses();
+    let out = h
+        .service
+        .forget(
+            &user,
+            ForgetInput {
+                targets,
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(parses() - before, 80);
+    assert!(
+        out.results
+            .iter()
+            .all(|r| r.status == ForgetItemStatus::Forgotten)
+    );
+    assert_eq!(
+        h.list_ids(&user, ListInput::default()),
+        notes[20..].iter().map(|n| n.id).collect()
+    );
+}
+
+/// Design 09 §6.3 quick win 4, at HEAD: the re-index after a store builds an
+/// index record — a copy of the body — for every note of the partition.
+#[test]
+fn a_store_builds_an_index_record_for_every_note() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    ten_notes(&h, &user);
+    let before = records_built();
+    h.store(&user, "Another", "# Another\n\nMore.\n", NoteKind::Fact);
+    assert_eq!(records_built() - before, 11);
+}
+
+/// Design 09 §6.3 quick win 5 (landed with §2.3's lookup, ruling LR18): the
+/// known-notes lookup takes its keys, its window's notes and its search from
+/// the index and re-reads only the files it lists — it parses no partition.
+#[test]
+fn learning_view_parses_no_partition() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    ten_notes(&h, &user);
+    h.service
+        .store(
+            &user,
+            StoreInput {
+                title: "Editor preference".into(),
+                body: "# Editor preference\n\nThe user edits with vim.\n".into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("user.editor".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let extraction = h
+        .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap();
+    let before = parses();
+    let view = h
+        .service
+        .learning_view(&extraction, &["which editor do I use".to_string()], &[])
+        .unwrap();
+    assert_eq!(parses() - before, 0);
+    assert!(view.notes.iter().any(|n| n.title == "Editor preference"));
+    assert!(
+        view.keys.iter().any(|k| k == "user.editor"),
+        "{:?}",
+        view.keys
+    );
+}

@@ -44,6 +44,9 @@ thread_local! {
     /// How many whole-partition parses this thread has made — the cost
     /// design 09 §4.5 keeps off the reply path. Read by tests only.
     static WHOLE_PARSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// How many `notes/` stat scans this thread has made (design 09 §6.3).
+    /// Read by tests only.
+    static SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The whole-partition parses (every note file read and parsed) this thread
@@ -54,6 +57,13 @@ thread_local! {
 #[doc(hidden)]
 pub fn whole_parses_on_this_thread() -> u64 {
     WHOLE_PARSES.with(|n| n.get())
+}
+
+/// The `notes/` stat scans ([`Partition::scan`]) this thread has made so
+/// far — a test-only counter like [`whole_parses_on_this_thread`].
+#[doc(hidden)]
+pub fn scans_on_this_thread() -> u64 {
+    SCANS.with(|n| n.get())
 }
 
 // ============================================================================
@@ -677,6 +687,7 @@ impl Partition {
     /// Lists `notes/*.md`: regular files only — no hidden or temp names, no
     /// links, no directories — with the facts a stat scan compares.
     pub fn scan(&self) -> Result<Vec<ScanEntry>> {
+        SCANS.with(|n| n.set(n.get() + 1));
         let entries = match fs::read_dir(&self.notes_dir) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

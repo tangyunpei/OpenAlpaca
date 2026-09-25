@@ -4323,3 +4323,151 @@ fn a_suggestion_stays_out_of_the_key_group_until_it_is_confirmed() {
     let confirmed = loaded.get(&b.id).unwrap();
     assert!(confirmed.derived.recallable() && !confirmed.derived.conflict);
 }
+
+// ============================================================================
+// What a partition costs to read (design 09 §6.3)
+// ============================================================================
+
+/// `n` notes written straight to disk and recorded the way `doctor --repair`
+/// records a directory — every one `external` at its current hash — so a
+/// large partition is seeded in one pass, not through `n` creates (each of
+/// which reads the whole partition). Ids are `<i>-0000-4000-8000-<i>`; one
+/// note in ten carries a `fact_key`.
+fn seeded_partition(sb: &Sandbox, n: usize) -> (Partition, Vec<Note>) {
+    let p = sb.open_home(ALICE);
+    p.initialize().unwrap();
+    let base = Note::parse(EXAMPLE.as_bytes()).unwrap();
+    let mut notes = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut note = base.clone();
+        note.id = NoteId::parse(&format!("{i:08x}-0000-4000-8000-{i:012x}")).unwrap();
+        note.title = format!("Seeded note {i}");
+        note.body = format!("# Seeded note {i}\n\n## Knowledge\nFact number {i}.\n");
+        note.fact_key = (i % 10 == 0).then(|| format!("seed.k{i}"));
+        note.aliases.clear();
+        note.sources.clear();
+        std::fs::write(p.notes_dir().join(note.file_name()), note.serialize()).unwrap();
+        notes.push(note);
+    }
+    std::fs::remove_file(p.snapshot_path()).unwrap();
+    let p = sb.open_home(ALICE);
+    assert!(matches!(p.health(), PartitionHealth::Quarantined(_)));
+    let report = p.repair(&owner_key(ALICE)).unwrap();
+    assert_eq!(report.notes_recorded, n);
+    (p, notes)
+}
+
+/// Quick win 1 (design 09 §6.3) changes how `reconcile` finds a vanished
+/// note, not what it finds: on 10 000 notes, an edit, a deletion and a new
+/// file are each reported once, while a note whose file is now malformed or
+/// duplicated — still on disk under its id — is not reported gone.
+#[test]
+fn reconcile_outputs_are_unchanged_on_a_10k_partition() {
+    let sb = Sandbox::new();
+    let (p, notes) = seeded_partition(&sb, 10_000);
+    assert!(p.reconcile().unwrap().is_empty());
+    let path_of = |note: &Note| p.notes_dir().join(note.file_name());
+
+    let mut expected = Vec::new();
+    for note in &notes[0..5] {
+        let mut bytes = read_file(&path_of(note));
+        bytes.extend_from_slice(b"\nEdited by hand.\n");
+        std::fs::write(path_of(note), &bytes).unwrap();
+        expected.push(ReconcileChange {
+            id: note.id,
+            kind: ReconcileChangeKind::Modified,
+            revision: Some(revision_of(&bytes)),
+        });
+    }
+    for note in &notes[100..105] {
+        std::fs::remove_file(path_of(note)).unwrap();
+        expected.push(ReconcileChange {
+            id: note.id,
+            kind: ReconcileChangeKind::Removed,
+            revision: None,
+        });
+    }
+    for i in 0..5 {
+        let mut note = notes[0].clone();
+        note.id = NoteId::new();
+        note.title = format!("Hand-written {i}");
+        note.body = format!("# Hand-written {i}\n");
+        std::fs::write(path_of(&note), note.serialize()).unwrap();
+        expected.push(ReconcileChange {
+            id: note.id,
+            kind: ReconcileChangeKind::Added,
+            revision: Some(note.revision()),
+        });
+    }
+    // Still on disk under their ids, so not gone — and not served either.
+    std::fs::write(path_of(&notes[200]), b"not a note").unwrap();
+    std::fs::copy(
+        path_of(&notes[300]),
+        p.notes_dir().join(format!("{}--copy.md", notes[300].id)),
+    )
+    .unwrap();
+
+    let mut changes = p.reconcile().unwrap();
+    changes.sort_by_key(|c| c.id);
+    expected.sort_by_key(|c| c.id);
+    assert_eq!(changes, expected);
+    let snapshot = p.snapshot().unwrap();
+    assert_eq!(snapshot.notes.len(), 10_000);
+    assert!(snapshot.notes.contains_key(&notes[200].id));
+    assert!(snapshot.notes.contains_key(&notes[300].id));
+    assert!(!snapshot.notes.contains_key(&notes[100].id));
+    assert!(p.reconcile().unwrap().is_empty(), "a second scan is silent");
+}
+
+/// Twenty-five notes created through `p`, and the first twenty as forget
+/// targets.
+fn twenty_of_twenty_five(p: &Partition) -> Vec<(NoteId, String)> {
+    let created: Vec<Created> = (0..25)
+        .map(|i| {
+            p.create(
+                new_note(
+                    &format!("Note {i}"),
+                    &format!("# Note {i}\n"),
+                    NoteKind::Fact,
+                ),
+                Actor::UserSurface,
+            )
+            .unwrap()
+        })
+        .collect();
+    created
+        .into_iter()
+        .take(20)
+        .map(|c| (c.id, c.revision))
+        .collect()
+}
+
+/// Design 09 §6.3 quick win 2, at HEAD: a forget of twenty notes reads the
+/// whole partition twice per target — once for the revision check, once
+/// for `MEMORY.md`.
+#[test]
+fn a_twenty_target_forget_parses_twice_per_target() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let targets = twenty_of_twenty_five(&p);
+    let before = whole_parses_on_this_thread();
+    let outcomes = p.forget(&targets).unwrap();
+    let parses = whole_parses_on_this_thread() - before;
+    assert!(outcomes.iter().all(|o| o.status == ForgetStatus::Forgotten));
+    assert_eq!(parses, 40);
+}
+
+/// Recovery at open deletes a tombstoned note's leftover file. At HEAD it
+/// lists `notes/` once per tombstone to look for one.
+#[test]
+fn opening_a_partition_scans_its_notes_once_per_tombstone() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let targets = twenty_of_twenty_five(&p);
+    p.forget(&targets).unwrap();
+    assert_eq!(p.snapshot().unwrap().tombstones.len(), 20);
+    let before = scans_on_this_thread();
+    let reopened = sb.open_home(ALICE);
+    assert_eq!(scans_on_this_thread() - before, 20);
+    assert_eq!(reopened.load().unwrap().views.len(), 5);
+}

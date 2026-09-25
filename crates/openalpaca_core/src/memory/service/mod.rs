@@ -94,6 +94,13 @@ pub const USED_REQUESTS_CAPACITY: usize = 256;
 pub const LIST_DEFAULT_LIMIT: usize = 50;
 pub const LIST_MAX_LIMIT: usize = 100;
 
+#[cfg(test)]
+thread_local! {
+    /// How many `IndexRecord`s this thread has built — each one a copy of a
+    /// note's body (design 09 §6.3 quick win 4). Read by tests only.
+    pub(super) static RECORDS_BUILT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// What a workspace move carries from step 2 to step 5 (design §3): the
 /// snapshots [`MemoryService::begin_project_move`] re-keyed, for
 /// [`MemoryService::finish_project_move`].
@@ -500,6 +507,11 @@ impl MemoryService {
                     return false;
                 }
                 true
+            })
+            .map(|v| {
+                #[cfg(test)]
+                RECORDS_BUILT.with(|n| n.set(n.get() + 1));
+                v
             })
             .map(|v| IndexRecord {
                 id: v.note.id.to_string(),
