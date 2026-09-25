@@ -1307,7 +1307,7 @@ fn openai_strict_accepts(schema: &serde_json::Value) -> Result<(), String> {
         for (key, value) in node {
             let belongs = match key.as_str() {
                 "type" | "description" | "title" | "enum" | "const" | "anyOf" => true,
-                "$ref" => node.keys().all(|k| k == "$ref" || k == "description"),
+                "$ref" => node.len() == 1,
                 "$defs" | "definitions" => path == "$",
                 "properties" | "required" | "additionalProperties" => is("object"),
                 "items" | "minItems" | "maxItems" => is("array"),
@@ -1507,6 +1507,9 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
             serde_json::json!({ "v": { "$ref": "#/$defs/n", "title": "N" } }),
         )),
         closed(serde_json::json!({ "v": { "type": "string", "format": "uri" } })),
+        with_defs(closed(
+            serde_json::json!({ "v": { "$ref": "#/$defs/n", "description": "N" } }),
+        )),
     ];
     let accepted = [
         closed(serde_json::json!({
@@ -1515,9 +1518,7 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
             "count": { "type": "integer", "minimum": 0, "maximum": 9 },
             "tags": { "type": "array", "items": { "type": "string" }, "maxItems": 5 },
         })),
-        with_defs(closed(
-            serde_json::json!({ "v": { "$ref": "#/$defs/n", "description": "N" } }),
-        )),
+        with_defs(closed(serde_json::json!({ "v": { "$ref": "#/$defs/n" } }))),
     ];
     for (schema, compliant) in refused
         .into_iter()

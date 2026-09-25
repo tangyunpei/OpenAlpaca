@@ -90,8 +90,9 @@ fn place_of(keyword: &str) -> Option<Place> {
 /// node is a JSON object that declares a known type (or is an `enum`, a
 /// `const`, an `anyOf` or a local `$ref`) and carries only keywords from
 /// the documented list, each where it applies (`place_of`):
-/// `type`, `description`, `title`, `enum`, `const`, `anyOf`; `$ref` — alone,
-/// or beside a `description` — naming `#`, `#/$defs/<name>` or
+/// `type`, `description`, `title`, `enum`, `const`, `anyOf`; `$ref` —
+/// alone, with no sibling keyword (OpenAI's own strict-schema helper unravels
+/// a `$ref` that has one, a `description` included) — naming `#`, `#/$defs/<name>` or
 /// `#/definitions/<name>`, with `$defs`/`definitions` at the root;
 /// `properties`, `required` and `additionalProperties` on an object, which
 /// must be closed (`additionalProperties: false`) and require exactly its
@@ -165,7 +166,7 @@ impl Walk<'_> {
             }
         }
         if let Some(reference) = node.get("$ref")
-            && (node.keys().any(|k| k != "$ref" && k != "description") || !self.resolves(reference))
+            && (node.len() != 1 || !self.resolves(reference))
         {
             return false;
         }
@@ -328,7 +329,7 @@ mod tests {
             },
             "tags": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 5 },
             "fixed": { "const": "v1" },
-            "node": { "$ref": "#/definitions/node", "description": "The node" },
+            "node": { "$ref": "#/definitions/node" },
         }));
         schema["definitions"] = json!({ "node": closed(json!({})) });
         assert!(strict_mode_compatible(&schema), "{schema}");
@@ -464,9 +465,15 @@ mod tests {
             }),
             closed(json!({ "v": { "type": "string", "default": "x" } })),
             closed(json!({ "v": { "type": "string", "x-internal": true } })),
-            // A `$ref` with a sibling other than `description`.
+            // A `$ref` with any sibling keyword, a `description` included.
             {
                 let mut schema = closed(json!({ "v": { "$ref": "#/$defs/n", "title": "N" } }));
+                schema["$defs"] = json!({ "n": closed(json!({})) });
+                schema
+            },
+            {
+                let mut schema =
+                    closed(json!({ "v": { "$ref": "#/$defs/n", "description": "N" } }));
                 schema["$defs"] = json!({ "n": closed(json!({})) });
                 schema
             },
