@@ -777,12 +777,6 @@ fn target_origin_label(origin: &str) -> &str {
 pub(crate) fn suggestion_line(item: &Value) -> String {
     let id: String = item["id"].as_str().unwrap_or("").chars().take(8).collect();
     let target = &item["target"];
-    let whence = match item["origin"].as_str() {
-        Some("extracted_user") => "from your words",
-        Some("extracted_other") => "inferred from the conversation",
-        Some(other) => other,
-        None => "",
-    };
     let date: String = item["observed_at"]
         .as_str()
         .or(item["created_at"].as_str())
@@ -790,8 +784,19 @@ pub(crate) fn suggestion_line(item: &Value) -> String {
         .chars()
         .take(10)
         .collect();
+    // A suggestion whose own text changed after learning wrote it says who
+    // wrote the words now, and when it was suggested.
+    let whence = match item["origin"].as_str() {
+        Some("extracted_user") => format!("from your words, {date}"),
+        Some("extracted_other") => format!("inferred from the conversation, {date}"),
+        Some("user") => format!("edited by you, suggested {date}"),
+        Some("external") => format!("edited outside OpenAlpaca, suggested {date}"),
+        Some("imported") => format!("imported, suggested {date}"),
+        Some(other) => format!("{other}, {date}"),
+        None => date,
+    };
     let mut line = format!(
-        "{id}  replace “{}” ({}) → “{}”  {whence}, {date}",
+        "{id}  replace “{}” ({}) → “{}”  {whence}",
         target["title"].as_str().unwrap_or(""),
         target_origin_label(target["origin"].as_str().unwrap_or("")),
         item["title"].as_str().unwrap_or(""),

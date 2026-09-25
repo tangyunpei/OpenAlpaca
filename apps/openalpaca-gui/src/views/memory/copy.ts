@@ -90,12 +90,34 @@ export function suggestionQuestion(
   return `Replace “${target}” (${targetOriginLabel(targetOrigin)}) with “${suggested}”?`;
 }
 
-/** Where a suggestion came from, and when: “From what you said on 2026-09-24”. */
+/**
+ * The label beside the text a suggestion would replace: “Yours” only when
+ * the owner wrote it — saved, edited by hand or imported — and “Current”
+ * for a note learning wrote.
+ */
+export function targetTextLabel(origin: NoteOrigin): string {
+  return origin === "user" || origin === "external" || origin === "imported"
+    ? "Yours"
+    : "Current";
+}
+
+/**
+ * Where a suggestion came from, and when: “From what you said on
+ * 2026-09-24”. A suggestion whose own text changed after learning wrote it
+ * says who wrote the words now, and when it was suggested.
+ */
 export function suggestionWhence(origin: NoteOrigin, when: string): string {
   const day = when.slice(0, 10);
-  return origin === "extracted_user"
-    ? `From what you said on ${day}`
-    : `Inferred from the conversation on ${day}`;
+  switch (origin) {
+    case "extracted_user":
+      return `From what you said on ${day}`;
+    case "extracted_other":
+      return `Inferred from the conversation on ${day}`;
+    case "user":
+      return `Edited by you · suggested on ${day}`;
+    default:
+      return `${originLabel(origin)} · suggested on ${day}`;
+  }
 }
 
 /** The toast after Replace — the old note stays, as history (design 09 §3.3). */

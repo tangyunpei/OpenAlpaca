@@ -1111,6 +1111,64 @@ describe("the Memory view", () => {
     expect(section).toHaveTextContent("From what you said on 2026-09-23");
   });
 
+  it("labels a suggestion's texts by who wrote them", async () => {
+    // An inferred change to a learned note: the note it replaces is not the
+    // owner's own words.
+    note({
+      id: "n-1",
+      title: "Editor",
+      body: "The user uses vim.\n",
+      origin: "extracted_user",
+    });
+    note({
+      id: "n-2",
+      title: "Editor change",
+      knowledge: "The user uses Helix.",
+      status: "candidate",
+      origin: "extracted_other",
+      observed_at: "2026-09-22T09:00:00Z",
+      supersedes: ["n-1"],
+    });
+    // Suggestions whose own text changed after learning wrote them.
+    note({ id: "n-3", title: "Commute", body: "The user takes the bus.\n" });
+    note({
+      id: "n-4",
+      title: "Commute change",
+      knowledge: "The user cycles.",
+      status: "candidate",
+      origin: "user",
+      observed_at: "2026-09-23T18:02:11Z",
+      supersedes: ["n-3"],
+    });
+    note({ id: "n-5", title: "Lunch", body: "Noodles.\n" });
+    note({
+      id: "n-6",
+      title: "Lunch change",
+      knowledge: "Rice.",
+      status: "candidate",
+      origin: "external",
+      observed_at: "2026-09-21T12:00:00Z",
+      supersedes: ["n-5"],
+    });
+    renderView();
+    const section = await screen.findByRole("region", { name: "Suggestions" });
+    const [inferred, edited, external] =
+      within(section).getAllByRole("listitem");
+    expect(inferred).toHaveTextContent(
+      "Replace “Editor” (learned) with “Editor change”?",
+    );
+    expect(inferred).toHaveTextContent("CurrentThe user uses vim.");
+    expect(inferred).not.toHaveTextContent("Yours");
+    expect(inferred).toHaveTextContent(
+      "Inferred from the conversation on 2026-09-22",
+    );
+    expect(edited).toHaveTextContent("YoursThe user takes the bus.");
+    expect(edited).toHaveTextContent("Edited by you · suggested on 2026-09-23");
+    expect(external).toHaveTextContent(
+      "Edited outside OpenAlpaca · suggested on 2026-09-21",
+    );
+  });
+
   it("replaces with the suggestion's revision in If-Match and its target's as target_revision", async () => {
     const { saved, suggestion } = savedAndSuggested();
     renderView();

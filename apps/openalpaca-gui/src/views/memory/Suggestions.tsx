@@ -23,7 +23,7 @@
 import { Button, Eyebrow } from "@/components/ui";
 import type { MemorySuggestion } from "@/lib/api/memories";
 
-import { suggestionQuestion, suggestionWhence } from "./copy";
+import { suggestionQuestion, suggestionWhence, targetTextLabel } from "./copy";
 
 export interface SuggestionsProps {
   items: readonly MemorySuggestion[];
@@ -88,7 +88,9 @@ function SuggestionRow({
         {suggestionQuestion(item.target.title, item.target.origin, item.title)}
       </button>
       <dl className="m-0 mt-[4px] grid grid-cols-[auto_1fr] gap-x-[8px] gap-y-[2px]">
-        <dt className="font-mono text-2xs-plus text-muted-fg">Yours</dt>
+        <dt className="font-mono text-2xs-plus text-muted-fg">
+          {targetTextLabel(item.target.origin)}
+        </dt>
         <dd className="m-0 min-w-0 break-words text-secondary">
           {item.target.excerpt}
         </dd>

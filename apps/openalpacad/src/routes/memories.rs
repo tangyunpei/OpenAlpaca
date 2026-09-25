@@ -709,9 +709,10 @@ impl MemoryApi {
     }
 }
 
-/// The single-target answer of `DELETE` and `undo`: the forget result's one
-/// item as a status code — `409` with the current revision as `ETag` when
-/// the note moved, `404` when it is gone.
+/// The single-target answer of `DELETE`: the forget result's one item as a
+/// status code — `409` with the current revision as `ETag` when the note
+/// moved, `404` when it is gone. (`undo` answers a withdrawal instead,
+/// [`wire::withdraw_output_json`].)
 fn forgotten_one(id: NoteId, out: &openalpaca_core::memory::service::ForgetOutput) -> Response {
     match out.results.first().map(|r| &r.status) {
         Some(ForgetItemStatus::Forgotten) => ok(serde_json::json!({

@@ -690,6 +690,41 @@ fn a_suggestion_line_names_both_notes_whose_words_and_why() {
     );
 }
 
+/// A suggestion's own text can change after learning wrote it — the owner
+/// edited it (origin `user`), or its file was edited outside OpenAlpaca
+/// (`external`) or imported — and the line then says who wrote the words
+/// and when it was suggested, never the daemon's raw origin word.
+#[test]
+fn a_suggestion_line_says_who_wrote_an_edited_suggestion() {
+    let item = serde_json::json!({
+        "id": SUGGESTION,
+        "title": "Commute",
+        "reason": null,
+        "origin": "user",
+        "created_at": "2026-09-25T10:00:00Z",
+        "observed_at": "2026-09-24T18:02:11Z",
+        "older_count": 0,
+        "target": { "id": TARGET, "title": "My commute", "origin": "user" },
+    });
+    let line = |origin: &str| {
+        let mut item = item.clone();
+        item["origin"] = serde_json::json!(origin);
+        suggestion_line(&item)
+    };
+    assert_eq!(
+        line("user"),
+        "b1c2d3e4  replace “My commute” (saved by you) → “Commute”  edited by you, suggested 2026-09-24"
+    );
+    assert_eq!(
+        line("external"),
+        "b1c2d3e4  replace “My commute” (saved by you) → “Commute”  edited outside OpenAlpaca, suggested 2026-09-24"
+    );
+    assert_eq!(
+        line("imported"),
+        "b1c2d3e4  replace “My commute” (saved by you) → “Commute”  imported, suggested 2026-09-24"
+    );
+}
+
 /// S5 from the CLI: `confirm` of a suggestion fetches the note it replaces
 /// and sends that note's current revision as `target_revision`, beside the
 /// suggestion's own as `If-Match`, and reports what it replaced and
