@@ -1574,6 +1574,55 @@ fn recall_leaves_out_a_pinned_note_whose_window_has_ended() {
     assert_eq!(pinned, vec![planned.id]);
 }
 
+/// Design 09 §6.1, characterization at HEAD: a note whose window has not
+/// begun by the index clock is recalled — it is current knowledge (design
+/// §4 *Times*) — and its header says nothing about the window, so the model
+/// cannot tell a plan from the present. The index clock is pinned months
+/// before the wall clock, so only the index can call this window upcoming.
+#[test]
+fn an_upcoming_note_renders_no_window() {
+    let at = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    let now = at("2026-01-10T12:00:00Z");
+    let h = Harness::with_index(
+        MemoryIndex::open_in_memory()
+            .unwrap()
+            .with_clock(move || now),
+    );
+    let planned = h
+        .service
+        .store(
+            &h.user(ALICE, None),
+            StoreInput {
+                title: "Lisbon trip".into(),
+                body: "# Lisbon trip\n\nThe user travels to Lisbon for a conference in March.\n"
+                    .into(),
+                kind: Some(NoteKind::Episode),
+                valid_from: Some(at("2026-03-01T00:00:00Z")),
+                valid_to: Some(at("2026-04-01T00:00:00Z")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let recalled = h
+        .service
+        .recall(
+            &h.tool(ALICE, None),
+            "when is my conference trip?",
+            RecallBudget::default(),
+        )
+        .unwrap();
+    assert_eq!(recall_ids(&recalled), HashSet::from([planned.id]));
+    let rendered = recalled.notes[0].render();
+    let header = rendered.lines().next().unwrap();
+    assert!(!header.contains("valid_from="), "{header}");
+    assert!(!header.contains("valid_to="), "{header}");
+    assert!(!header.contains("timing="), "{header}");
+}
+
 /// Fixture 13: read-after-write, and freshness by verification before any
 /// scan — an external edit is served from the fresh file and marked stale,
 /// a deleted file is never served, and a scan brings the snapshot and the

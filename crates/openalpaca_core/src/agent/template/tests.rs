@@ -336,3 +336,42 @@ fn every_shipped_template_grants_read_result() {
     }
     assert!(seen >= 9, "every shipped template was checked, not {seen}");
 }
+
+/// Design 09 §5, characterization at HEAD: three shipped templates —
+/// writing, research and system — do not name `memory_read`, and nothing
+/// grants it to them on the way to a subagent, so those subagents cannot
+/// search the owner's memory.
+#[test]
+fn writing_research_and_system_lack_memory_read() {
+    use crate::security::capabilities::{Allowlist, CapabilityManager};
+
+    let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents");
+    for id in ["writing_agent", "research_agent", "system_agent"] {
+        let path = agents.join(format!("{id}.md"));
+        let body = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_agent_markdown(&body)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+        assert!(
+            !doc.frontmatter
+                .capabilities
+                .iter()
+                .any(|c| c == "memory_read"),
+            "{id} names memory_read"
+        );
+        let agent = doc.to_subagent("a1", "task-1");
+        assert!(
+            !agent.capabilities.iter().any(|c| c.name == "memory_read"),
+            "{id} resolves memory tools"
+        );
+        assert!(
+            CapabilityManager::check_agent_capability(
+                &agent.id,
+                "memory_read",
+                &Allowlist::from_agent_constraints(&agent.constraints),
+                &agent.constraints.denied_capabilities,
+            )
+            .is_err(),
+            "{id} is admitted memory_read"
+        );
+    }
+}
