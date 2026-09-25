@@ -1,8 +1,8 @@
 # OpenAlpaca Markdown memory: audit, research and replacement proposal
 
-**Date:** 2026-09-23. **Status: design and plan at rev 3.** The owner answered MD-1…MD-9 and instructed that the old memory system be removed completely. The written design awaits the owner's review, and nothing is implemented.
+**Status (2026-09-25):** design [03](03-design.md) rev 7.1, plan [04](04-implementation-plan.md) rev 4.5 and the Learning v2 design and plan [09](09-learning-design.md) rev 3.23, on branch `feat/markdown-memory` (unpushed; database baseline **43**, head **45**). The owner answered MD-1…MD-16 (03 §0) and LQ1–LQ4 (09 §10); LQ5–LQ10 are pending. **Implemented:** slices 0–3 of plan 04 (the old SQL/vector engine removed completely; Markdown notes, control snapshots and a disposable FTS5 index behind `MemoryService`) and Learning v2's slices L1–L7, L9 and L10a–L10c plus its residue slice (09's status line has every range). **In progress:** slice 4 — [08](08-evaluation-report.md) is its draft evaluation report (D measured, the gate passed; the post-fix D′/E′ runs are pending) — and Learning v2's evaluation, L8, which is running; its report will be `10-learning-evaluation.md` (not written yet). `CLAUDE.md`'s *Current Work* has what remains.
 
-**Source inspected:** `7561f152712c01912436ad04a6fd57974be2bcab` (rev 1). The review re-verified everything at `0d490847`; only `tasks/lessons.md` differs. Branch `chore/deps-upgrade-and-simplify`, database baseline **42**. This deliverable changes documentation only. No live memory store was read, migrated or deleted.
+**Originally (rev 1–3, 2026-09-23):** the source inspected was `7561f152712c01912436ad04a6fd57974be2bcab` (rev 1), and the review re-verified everything at `0d490847`, on branch `chore/deps-upgrade-and-simplify` with database baseline **42**. That deliverable changed documentation only, and no live memory store was read, migrated or deleted. The sections below from *Recommendation* on are that deliverable's text.
 
 ## Recommendation
 
@@ -27,12 +27,16 @@ No model is needed to create, read, search, edit, forget or rebuild memory. Opti
 | [1. Current-code audit](01-code-audit.md) | End-to-end storage/retrieval/extraction map, findings F1–F8, dependency analysis, retained boundaries (rev 1; corrections in 05/06a) |
 | [2a. Modern framework research](02-framework-research.md) | Mem0/OpenMemory, Letta/MemFS vs MemGPT, Graphiti/Zep, LongMemEval, LoCoMo and LongMemEval-V2 |
 | [2b. Markdown/filesystem research](02-filesystem-research.md) | Claude Code, the Anthropic memory tool, OpenClaw, QMD, A-MEM, filesystem and instruction-growth studies, lexical limits |
-| [3. Proposed architecture](03-design.md) **rev 3** | §0 owner decisions MD-1…MD-9; layout; owner keys; scope and partition rules; note format and authority; read path; single-file mutations with derived supersession; forget; tools/API/CLI/GUI; modules |
-| [4. Implementation and evaluation plan](04-implementation-plan.md) **rev 3** | Slices 0–4 (a stop-data-loss slice first), tests-first commit table with the GUI in the cutover, refuse-and-reset switch-over, complete removal map with a completeness search, evaluation with a stated sample size, sequencing and risks |
+| [3. Proposed architecture](03-design.md) **rev 7.1** | §0 owner decisions MD-1…MD-16; §7a the frozen contracts, Learning v2 folded in at rev 7; layout; owner keys; scope and partition rules; note format and authority; read path; single-file mutations with derived supersession; forget; tools/API/CLI/GUI; modules |
+| [4. Implementation and evaluation plan](04-implementation-plan.md) **rev 4.5** | Slices 0–4 (a stop-data-loss slice first), tests-first commit table with the GUI in the cutover, refuse-and-reset switch-over, complete removal map with a completeness search, evaluation with a stated sample size, sequencing and risks |
 | [5. Review](05-review.md) | What the independent verification found, and what changed from rev 1 to rev 2 |
 | [6a](06a-evidence-audit-verification.md) · [6b](06b-evidence-embedding-inventory.md) · [6c](06c-evidence-identity-scope-learning.md) · [6d](06d-evidence-vec0-spike.md) | Evidence: 53 audit claims re-verified · every embedding consumer · owners, workspaces, audience and learning · the stub-`vec0` retirement spike |
+| [7. Audit of rev 3](07-audit-gaps.md) | The 49 verified gaps G1–G49 in design and plan rev 3 that rev 4 applied, and the three owner decisions they raised (G2, G30, G38) |
+| [8. Evaluation report](08-evaluation-report.md) **draft** | Plan slice 4: baselines A and B, system D measured against B (the gate passed), the hard invariants, gates and footprint; the post-fix D′/E′ runs pending |
+| [9. Learning v2](09-learning-design.md) **rev 3.23** | Design and plan for MD-10…MD-16: cadence and the learning queue, richer extraction, replacement and suggestions, in-chat confirmation, `memory_read` for every agent, caches, the learning evaluation, chat memory commands, layered tools, index-first recall and episode notes; slices L1–L10c, owner questions LQ1–LQ10, and every implementer's deviations in the revision log |
+| 10. Learning evaluation | *Not written yet:* `10-learning-evaluation.md` will hold L8's results (09 §7.5, §13.4) |
 
-Start with design §0 for the answered decisions and the review for what changed; use the audit, research and evidence appendices to inspect the grounds. Product documentation and repositories were checked live on the date above, and benchmark reproduction must pin exact versions. Proposed modules, routes, schema fields and timings are future contracts, not current app features.
+Start with design §0 for the answered decisions and the review for what changed; use the audit, research and evidence appendices to inspect the grounds. Product documentation and repositories were checked live on the date above, and benchmark reproduction must pin exact versions. The modules, routes, schema fields and timings proposed here were future contracts when this was written; they are now built, and the code and 03 §7a are the reference.
 
 ## Most consequential findings
 
