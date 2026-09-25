@@ -828,6 +828,59 @@ describe("ChatView — tool confirmation (§3.14, §3.16a)", () => {
     );
   });
 
+  /**
+   * Design 09 §4.4 (MD-12): `memory_confirm`'s card shows the daemon's own
+   * text above the literal arguments, labelled as OpenAlpaca's, and — its
+   * approval being good for this call only — offers no *Always allow*.
+   */
+  it("shows the daemon's preview and no Always allow on a per-call card", async () => {
+    renderChat();
+    const source = await sendMessage("I switched to Helix");
+    const preview =
+      "Replace your saved note “Editor” with “Editor”?\nYours: vim.\nNew: Helix.";
+    await act(async () => {
+      source.emit("confirmation_requested", {
+        request_id: "req-9",
+        tool_name: "memory_confirm",
+        tool_arguments: {
+          id: "s",
+          expected_revision: "r",
+          target_revision: "t",
+        },
+        preview,
+        per_call: true,
+      });
+    });
+
+    expect(
+      screen.getByText("Confirmation required · memory_confirm"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("From OpenAlpaca")).toBeInTheDocument();
+    expect(
+      screen.getByText((_, node) => node?.textContent === preview),
+    ).toBeInTheDocument();
+    // The literal arguments stay available beneath it.
+    expect(screen.getByText(/"target_revision"/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Always allow" })).toBeNull();
+    expect(screen.getByRole("button", { name: /Approve/ })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+    await waitFor(() => {
+      const posted = requests.find((request) =>
+        request.url.includes("/v1/chat/confirmations/req-9"),
+      );
+      expect(posted?.body).toEqual({ approved: true });
+    });
+  });
+
+  it("shows no preview label on the ordinary card", async () => {
+    await block();
+    expect(screen.queryByText("From OpenAlpaca")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Always allow" }),
+    ).toBeInTheDocument();
+  });
+
   it("approves on Enter and denies on Escape while blocked (§4.5)", async () => {
     await block();
 
@@ -998,6 +1051,39 @@ describe("ChatView — pending confirmations seeded from the daemon (S9)", () =>
       expect(posted?.method).toBe("POST");
       expect(posted?.body).toEqual({ approved: true });
     });
+  });
+
+  /**
+   * Design 09 §4.4: a `memory_confirm` card restored after a reload says what
+   * the live one said — the daemon's preview — and still offers no *Always
+   * allow*.
+   */
+  it("restores a per-call card with its preview", async () => {
+    pendingConfirmationRows = [
+      pendingRow({
+        request_id: "req-memory",
+        tool_name: "memory_confirm",
+        tool_arguments: {
+          id: "s",
+          expected_revision: "r",
+          target_revision: "t",
+        },
+        task_id: null,
+        agent_id: "orchestrator",
+        lane_key: "user:gui",
+        preview: "Replace your saved note “Editor” with “Editor”?",
+        per_call: true,
+      }),
+    ];
+    renderChat();
+
+    expect(
+      await screen.findByText("Confirmation required · memory_confirm"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Replace your saved note “Editor” with “Editor”?"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Always allow" })).toBeNull();
   });
 
   /**

@@ -288,6 +288,11 @@ export interface ChatSession {
   blocked: boolean;
   /** The tool the daemon is waiting on, if any. */
   pendingToolName: string | null;
+  /**
+   * Its approval is good for this call only (design 09 §4.2): the composer
+   * offers no *Always allow*, and `alwaysAllow` does nothing.
+   */
+  pendingPerCall: boolean;
   /** The run holding that confirmation — `null` when it cannot be resolved. */
   blockedRunId: string | null;
   answering: boolean;
@@ -716,6 +721,8 @@ export function useChatSession(): ChatSession {
         request_id: row.request_id,
         tool_name: row.tool_name,
         tool_arguments: row.tool_arguments,
+        preview: row.preview ?? null,
+        per_call: row.per_call === true,
       });
     }
     setConfirmationMeta((current) => {
@@ -877,6 +884,8 @@ export function useChatSession(): ChatSession {
           requestId: request.request_id,
           toolName: request.tool_name,
           toolArguments: request.tool_arguments,
+          preview: request.preview ?? null,
+          perCall: request.per_call === true,
           agentName:
             agentId === null
               ? null
@@ -1270,6 +1279,9 @@ export function useChatSession(): ChatSession {
   const approve = useCallback(() => answer("approved"), [answer]);
   const deny = useCallback(() => answer("denied"), [answer]);
   const alwaysAllow = useCallback(() => {
+    // A per-call card has no *Always allow* (design 09 §4.2): the daemon
+    // would ignore the scope, and a toast saying otherwise would be a lie.
+    if (firstConfirmation?.perCall === true) return;
     const toolName = firstConfirmation?.toolName ?? null;
     answer("approved", "entire_tool");
     // §4.4's own copy — the daemon now caches `EntireTool` for the rest of
@@ -1302,6 +1314,7 @@ export function useChatSession(): ChatSession {
 
     blocked: stream.blocked,
     pendingToolName: firstConfirmation?.toolName ?? null,
+    pendingPerCall: firstConfirmation?.perCall ?? false,
     blockedRunId,
     answering: stream.respond.isPending,
     approve,

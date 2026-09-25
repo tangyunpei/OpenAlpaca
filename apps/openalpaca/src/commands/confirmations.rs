@@ -99,6 +99,14 @@ pub struct PendingPrompt {
     pub agent_id: String,
     #[serde(default)]
     pub lane_key: Option<String>,
+    /// The daemon-authored text of the card (design 09 §4.4), for
+    /// `memory_confirm`; absent for the ordinary card.
+    #[serde(default)]
+    pub preview: Option<String>,
+    /// The approval is good for this one call only: `--entire-tool` is
+    /// refused for it.
+    #[serde(default)]
+    pub per_call: bool,
     pub raised_at: String,
 }
 
@@ -172,7 +180,44 @@ async fn list(format: OutputFormat) -> Result<()> {
         }
     }
     print_list(&prompts, format);
+    if matches!(format, OutputFormat::Table) {
+        for block in preview_blocks(&prompts) {
+            println!();
+            println!("{block}");
+        }
+    }
     Ok(())
+}
+
+/// Under the table, what each card with a daemon-authored preview says
+/// (design 09 §4.4) — the table has no room for it, and without it a
+/// `memory_confirm` row is three opaque ids.
+fn preview_blocks(prompts: &[PendingPrompt]) -> Vec<String> {
+    prompts
+        .iter()
+        .filter_map(|prompt| {
+            let preview = prompt.preview.as_deref().filter(|p| !p.is_empty())?;
+            Some(format!(
+                "{} — from OpenAlpaca:\n{}",
+                prompt.request_id,
+                crate::chat_stream::indent(preview)
+            ))
+        })
+        .collect()
+}
+
+/// `--entire-tool` on a prompt whose approval is good for one call only
+/// (design 09 §4.2 rule 2): refused here, before anything is sent — the
+/// daemon would ignore the scope, and "every later call" would be untrue.
+fn refuse_entire_tool(request_id: &str, prompt: Option<&PendingPrompt>) -> Result<()> {
+    match prompt {
+        Some(prompt) if prompt.per_call => bail!(
+            "`{}` asks about one call only, so --entire-tool does not apply to it: run \
+             `openalpaca tasks confirmations approve {request_id}` without it. Nothing was answered.",
+            prompt.tool_name
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// The body `POST /v1/chat/confirmations/{request_id}` takes.
@@ -228,6 +273,14 @@ fn refusal_line(request_id: &str, error: &str) -> String {
 
 async fn answer(request_id: &str, approved: bool, entire_tool: bool) -> Result<()> {
     let client = DaemonClient::connect()?;
+    if approved && entire_tool {
+        let page: PendingPrompts = client.get("/v1/chat/confirmations").await?;
+        let prompts = pending_prompts(page);
+        refuse_entire_tool(
+            request_id,
+            prompts.iter().find(|p| p.request_id == request_id),
+        )?;
+    }
     match client
         .post_raw(&answer_path(request_id), &answer_body(approved, entire_tool))
         .await
@@ -257,6 +310,12 @@ struct ConfirmationFrame {
     agent_id: Option<String>,
     #[serde(default)]
     task_id: Option<String>,
+    /// The daemon-authored text of the card (design 09 §4.4).
+    #[serde(default)]
+    preview: Option<String>,
+    /// The approval is good for this call only: no `[a]lways`.
+    #[serde(default)]
+    per_call: bool,
 }
 
 /// The frame this socket message is, or `None` for every other event.
@@ -282,6 +341,12 @@ fn prompt_block(frame: &ConfirmationFrame) -> String {
         out.push_str(&format!("\n  agent: {agent_id}"));
     }
     out.push_str(&format!("\n  id:    {}", frame.request_id));
+    if let Some(preview) = frame.preview.as_deref().filter(|p| !p.is_empty()) {
+        out.push_str(&format!(
+            "\n  from OpenAlpaca:\n{}",
+            crate::chat_stream::indent(&crate::chat_stream::indent(preview))
+        ));
+    }
     if !frame.tool_arguments.is_null() {
         out.push_str(&format!(
             "\n  args:  {}",
@@ -328,7 +393,7 @@ async fn watch() -> Result<()> {
                     let Some(frame) = confirmation_frame(&text) else { continue };
                     println!();
                     println!("{}", prompt_block(&frame).yellow().bold());
-                    let (approved, entire_tool) = ask();
+                    let (approved, entire_tool) = ask(frame.per_call);
                     match client
                         .post_raw(
                             &answer_path(&frame.request_id),
@@ -366,23 +431,34 @@ async fn watch() -> Result<()> {
     Ok(())
 }
 
-/// The three answers, read from the terminal. Anything else is a denial —
-/// fail-closed is the rule, and a typo must never widen anything.
-fn ask() -> (bool, bool) {
+/// The answers, read from the terminal. Anything else is a denial —
+/// fail-closed is the rule, and a typo must never widen anything. A per-call
+/// prompt (design 09 §4.2) offers no `[a]lways`.
+fn ask(per_call: bool) -> (bool, bool) {
     tokio::task::block_in_place(|| {
-        print!("Allow? [y]es / [a]lways this tool / [N]o ");
+        print!("{}", ask_line(per_call));
         std::io::stdout().flush().ok();
         let mut input = String::new();
         std::io::stdin().read_line(&mut input).ok();
-        read_answer(&input)
+        read_answer(&input, per_call)
     })
 }
 
-/// `(approved, entire_tool)` for what was typed.
-fn read_answer(input: &str) -> (bool, bool) {
+fn ask_line(per_call: bool) -> &'static str {
+    if per_call {
+        "Allow this one call? [y]es / [N]o "
+    } else {
+        "Allow? [y]es / [a]lways this tool / [N]o "
+    }
+}
+
+/// `(approved, entire_tool)` for what was typed. On a per-call prompt
+/// "always" was never offered, so it is not a yes — it denies, like any
+/// other word.
+fn read_answer(input: &str, per_call: bool) -> (bool, bool) {
     match input.trim().to_lowercase().as_str() {
         "y" | "yes" => (true, false),
-        "a" | "always" => (true, true),
+        "a" | "always" if !per_call => (true, true),
         _ => (false, false),
     }
 }
@@ -521,13 +597,21 @@ mod tests {
     /// only an explicit "always" widens.
     #[test]
     fn only_a_deliberate_yes_approves() {
-        assert_eq!(read_answer("y\n"), (true, false));
-        assert_eq!(read_answer("YES\n"), (true, false));
-        assert_eq!(read_answer("a\n"), (true, true));
-        assert_eq!(read_answer("always\n"), (true, true));
-        assert_eq!(read_answer("n\n"), (false, false));
-        assert_eq!(read_answer("\n"), (false, false), "Enter alone denies");
-        assert_eq!(read_answer("yolo\n"), (false, false), "a typo denies");
+        assert_eq!(read_answer("y\n", false), (true, false));
+        assert_eq!(read_answer("YES\n", false), (true, false));
+        assert_eq!(read_answer("a\n", false), (true, true));
+        assert_eq!(read_answer("always\n", false), (true, true));
+        assert_eq!(read_answer("n\n", false), (false, false));
+        assert_eq!(
+            read_answer("\n", false),
+            (false, false),
+            "Enter alone denies"
+        );
+        assert_eq!(
+            read_answer("yolo\n", false),
+            (false, false),
+            "a typo denies"
+        );
     }
 
     /// An id the daemon is not holding is three ordinary situations, not an
@@ -591,5 +675,99 @@ mod tests {
         assert!(block.contains("task-1"), "{block}");
         assert!(block.contains("req-1"), "{block}");
         assert!(block.contains("notes.md"), "{block}");
+    }
+
+    /// Design 09 §4.2 rule 2: a per-call prompt refuses `--entire-tool`
+    /// before anything is sent; an ordinary prompt, or one the listing no
+    /// longer holds, is left to the daemon as before.
+    #[test]
+    fn entire_tool_is_refused_for_a_per_call_prompt() {
+        let prompts = pending_prompts(page(serde_json::json!([
+            {
+                "request_id": "req-memory",
+                "tool_name": "memory_confirm",
+                "tool_arguments": {"id": "s"},
+                "agent_id": "orchestrator",
+                "lane_key": "alice:gui",
+                "preview": "Replace your saved note “Editor” with “Editor”?",
+                "per_call": true,
+                "raised_at": "2026-09-24T10:00:00+00:00"
+            },
+            {
+                "request_id": "req-shell",
+                "tool_name": "shell_execute",
+                "agent_id": "orchestrator",
+                "raised_at": "2026-09-24T10:00:01+00:00"
+            }
+        ])));
+        assert!(prompts[0].per_call);
+        assert_eq!(
+            prompts[0].preview.as_deref(),
+            Some("Replace your saved note “Editor” with “Editor”?")
+        );
+        assert!(!prompts[1].per_call, "absent means false");
+
+        let err = refuse_entire_tool("req-memory", Some(&prompts[0])).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("--entire-tool"), "{err}");
+        assert!(err.contains("approve req-memory"), "{err}");
+        assert!(err.contains("Nothing was answered"), "{err}");
+        assert!(refuse_entire_tool("req-shell", Some(&prompts[1])).is_ok());
+        assert!(refuse_entire_tool("req-gone", None).is_ok());
+    }
+
+    /// Design 09 §4.4: `list` prints each card's preview under the table,
+    /// and only the cards that have one.
+    #[test]
+    fn the_listing_prints_what_a_per_call_card_says() {
+        let prompts = pending_prompts(page(serde_json::json!([
+            {
+                "request_id": "req-memory",
+                "tool_name": "memory_confirm",
+                "agent_id": "orchestrator",
+                "preview": "Replace your saved note “Editor” with “Editor”?\nYours: vim.",
+                "per_call": true,
+                "raised_at": "2026-09-24T10:00:00+00:00"
+            },
+            {
+                "request_id": "req-shell",
+                "tool_name": "shell_execute",
+                "agent_id": "orchestrator",
+                "raised_at": "2026-09-24T10:00:01+00:00"
+            }
+        ])));
+        assert_eq!(
+            preview_blocks(&prompts),
+            vec![
+                "req-memory — from OpenAlpaca:\n  Replace your saved note “Editor” with “Editor”?\n  Yours: vim."
+                    .to_string()
+            ]
+        );
+    }
+
+    /// Design 09 §4.2, §4.4 on `watch`: a per-call prompt shows the preview
+    /// before the arguments, offers no `[a]lways`, and reads "always" as the
+    /// denial it is there — fail-closed.
+    #[test]
+    fn watch_shows_the_preview_and_offers_no_always_for_a_per_call_prompt() {
+        colored::control::set_override(false);
+        let frame = confirmation_frame(
+            r#"{"type":"tool_confirmation_requested","request_id":"req-9","agent_id":"orchestrator",
+                "tool_name":"memory_confirm","tool_arguments":{"id":"s"},
+                "preview":"Replace your saved note “Editor” with “Editor”?","per_call":true}"#,
+        )
+        .expect("a prompt");
+        assert!(frame.per_call);
+        let block = prompt_block(&frame);
+        let preview_at = block.find("Replace your saved note").expect("the preview");
+        let args_at = block.find("args:").expect("the arguments stay");
+        assert!(preview_at < args_at, "{block}");
+        assert!(block.contains("from OpenAlpaca"), "{block}");
+        assert!(!ask_line(true).contains("always"));
+        assert!(ask_line(false).contains("[a]lways"));
+        assert_eq!(read_answer("a\n", true), (false, false));
+        assert_eq!(read_answer("always\n", true), (false, false));
+        assert_eq!(read_answer("y\n", true), (true, false));
+        assert_eq!(read_answer("a\n", false), (true, true));
     }
 }

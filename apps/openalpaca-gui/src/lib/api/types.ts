@@ -297,6 +297,14 @@ export interface PendingConfirmation {
   task_id: string | null;
   agent_id: string;
   lane_key: string | null;
+  /**
+   * The daemon-authored text of the card (design 09 §4.4), `null` for the
+   * ordinary card — so a card restored after a reload says what the live one
+   * said. Absent from an older daemon.
+   */
+  preview?: string | null;
+  /** The approval is good for this call only: no *Always allow*. */
+  per_call?: boolean;
   /** RFC 3339, from the daemon's own clock. */
   raised_at: string;
 }

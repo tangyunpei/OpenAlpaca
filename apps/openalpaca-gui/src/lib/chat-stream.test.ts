@@ -429,6 +429,8 @@ describe("attachChatStream", () => {
       }),
     );
 
+    // A frame from a daemon that sends no `preview`/`per_call` reads as the
+    // ordinary card.
     expect(actions.at(-1)).toEqual({
       type: "confirmation",
       request: {
@@ -436,6 +438,31 @@ describe("attachChatStream", () => {
         tool_name: "shell_execute",
         tool_arguments: {},
         stream_id: "s1",
+        preview: null,
+        per_call: false,
+      },
+    });
+
+    // Design 09 §4.4: the daemon's preview and `per_call` ride along.
+    fake.emit(
+      "confirmation_requested",
+      JSON.stringify({
+        request_id: "r2",
+        tool_name: "memory_confirm",
+        tool_arguments: { id: "s" },
+        preview: "Replace your saved note “A” with “B”?",
+        per_call: true,
+      }),
+    );
+    expect(actions.at(-1)).toEqual({
+      type: "confirmation",
+      request: {
+        request_id: "r2",
+        tool_name: "memory_confirm",
+        tool_arguments: { id: "s" },
+        stream_id: "s1",
+        preview: "Replace your saved note “A” with “B”?",
+        per_call: true,
       },
     });
   });

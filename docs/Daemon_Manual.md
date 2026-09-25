@@ -707,7 +707,31 @@ replace a note you wrote, and it cannot edit a suggestion (the text you are
 asked about stays the extractor's). No surface archives a suggestion — it is
 replaced or kept. `memory_update` and `memory_forget` raise the ordinary
 confirmation card, and an unattended turn (a scheduled skill, a piped
-`openalpaca chat`) is refused them outright.
+`openalpaca chat`) is refused them outright. `memory_update` with `action:
+confirm` is refused **before** any card, since nothing the model does confirms
+a candidate.
+
+**Confirming a suggestion in chat** (`memory_confirm`). On an attended turn of
+the app's or the CLI's chat — never a connector's, never an unattended one —
+the main conversation also has `memory_confirm {id, expected_revision,
+target_revision}`, and that turn's memory message ends with a
+`<memory_suggestions>` block: up to three pending suggestions from your own
+words, newest first, one line each with both ids and both revisions, read from
+the index (no note file is parsed for it), leaving out what was already raised
+in this conversation since the daemon started. The call raises the ordinary
+card with a preview the **daemon** wrote from the notes — which note, your
+text, the new text, why, the date of the newest message you typed that it
+cites — and `per_call: true`. Only a person's **Approve** on that card, for
+that call, confirms it: the confirm is then a user-directed write (origin
+`user`, `memory_changed.surface` `"user"`), bound to the replaced note's
+revision, and it dismisses the other suggestions for the same note. The model
+calling the tool without that answer gets `approval_required` and nothing is
+written; `[security] auto_approve_confirmations` and an earlier *Always allow*
+do not answer this card, and it is never cached. **Deny** withdraws the
+suggestion for good (as `POST /v1/memories/{id}/undo` does); a timeout leaves
+it waiting in the Memory view. A suggestion inferred from the conversation
+rather than your words, or citing no message you typed, is `not_a_suggestion`
+here — it is confirmed only through the routes below.
 
 The routes below reach the memory notes (Markdown files under the home store's
 `memory/` and a project's `.openalpaca/memory/`) through the one memory service
@@ -1029,13 +1053,25 @@ every later call of that tool. `[security] auto_approve_confirmations = true` sk
 the prompts altogether and writes a `tool_auto_approved` audit row per call. It
 is meant for development and testing, and is off by default.
 
+**Per-call prompts.** A request may carry `per_call: true` — only
+`memory_confirm` does (see [Memory](#memory) above): its approval covers that
+one call. The daemon always asks for it, whatever `auto_approve_confirmations`
+or an earlier approval says, never records its approval, and ignores an
+`approval_scope`. A request may also carry `preview`: text the daemon wrote
+from the tool's own read, never the model's, which a client shows above the
+literal `tool_arguments` (`null` for an ordinary prompt). A tool can refuse a
+call **before** its card is raised — `memory_confirm` does for a suggestion
+that moved, and `memory_update` for any `confirm` — and then no prompt is
+emitted at all.
+
 `GET /v1/chat/confirmations` lists the prompts **still waiting**, oldest first:
-`{request_id, tool_name, tool_arguments, task_id, agent_id, lane_key,
-raised_at}` (RFC 3339). It answers an empty list, not an error, when the daemon
+`{request_id, tool_name, tool_arguments, task_id, agent_id, lane_key, preview,
+per_call, raised_at}` (RFC 3339). It answers an empty list, not an error, when the daemon
 has no confirmation broker. It is a snapshot — an entry can be answered a
 moment later — and it is not filtered by owner. It carries each prompt's
-`tool_arguments`, which the persisted `tool_confirmation_requested` event does
-not. Whether the list should be owner-scoped or redact those arguments is an
+`tool_arguments` and `preview` — for `memory_confirm`, note titles and text —
+which the persisted `tool_confirmation_requested` event does not: its
+`event_log` row keeps ids only, so a note forgotten later leaves no copy there. Whether the list should be owner-scoped or redact those arguments is an
 open owner decision (T22 in [`tasks/api-fix-plan.md`](../tasks/api-fix-plan.md)
 §0). `openalpaca tasks confirmations list|watch|approve|deny` is the CLI over
 these two routes.
@@ -1061,7 +1097,9 @@ timeout. It is a declaration, never an approval: nothing is pre-allowed by it.
 Confirmation prompts also reach connector channels. When the originating lane
 belongs to Telegram, iMessage or Discord, the connector sends the prompt into
 the conversation and the user replies `/yes` (or `/y`) to approve, `/no` (or
-`/n`) to deny. Multiple pending confirmations in one conversation are answered
+`/n`) to deny. (A connector's `/yes` is keyed by chat, not by sender, so it is
+not a user-directed answer: `memory_confirm` is never offered on a connector's
+lane, and a suggestion is never raised there.) Multiple pending confirmations in one conversation are answered
 in FIFO order.
 
 ## Event Taxonomy
@@ -1094,7 +1132,8 @@ list is the whole union. Every frame also carries `ts` and `instance_id`.
   (`request_id`, `agent_id`, `tool_name`, `outcome`, `stream_id`, `lane_key`,
   `task_id`) — sent for every way a prompt stops being pending, with `outcome`
   one of `approved`, `denied`, `timed_out`, `cancelled`. The persisted row keeps
-  the outcome in its `result` field
+  the outcome in its `result` field. The request also carries `preview` (the
+  daemon-authored card text, or `null`) and `per_call`; neither is persisted
 - `llm_call_completed`, `skill_catalog_updated`, `soul_updated`
 - `skill_invocation_started`, `skill_completed`, `skill_failed`
 - `extension_state_changed` (an MCP server or plugin changed state), `extension_capability_withheld` (a surface asked for a tool a disabled extension owns), `extension_capability_withdrawn` (a disable/crash took tools away, with the affected templates, skills and cron skills)

@@ -633,3 +633,34 @@ fn a_reasonless_entry_still_names_the_attachment() {
         vec!["Attachment img-1 did not reach the model".to_string()]
     );
 }
+
+/// Design 09 §4.4: the inline `[y/N]` prompt prints the daemon-authored
+/// preview first, labelled as OpenAlpaca's own text, and the literal
+/// arguments after it; the ordinary card prints the arguments alone.
+#[test]
+fn the_inline_prompt_prints_the_preview_before_the_arguments() {
+    let frame = serde_json::json!({
+        "request_id": "req-1",
+        "tool_name": "memory_confirm",
+        "tool_arguments": {"id": "s", "expected_revision": "r", "target_revision": "t"},
+        "preview": "Replace your saved note “Editor” with “Editor”?\nYours: vim.",
+        "per_call": true,
+    });
+    let (preview, arguments) = confirmation_details(&frame);
+    assert_eq!(
+        preview.as_deref(),
+        Some("From OpenAlpaca:\n  Replace your saved note “Editor” with “Editor”?\n  Yours: vim.")
+    );
+    assert!(arguments.unwrap().contains("\"target_revision\": \"t\""));
+
+    let ordinary = serde_json::json!({
+        "request_id": "req-2",
+        "tool_name": "memory_forget",
+        "tool_arguments": {"targets": []},
+        "preview": null,
+        "per_call": false,
+    });
+    let (preview, arguments) = confirmation_details(&ordinary);
+    assert_eq!(preview, None);
+    assert!(arguments.unwrap().starts_with("Arguments: "));
+}

@@ -203,6 +203,10 @@ export function useChatStream(
             // Which turn raised it, so a terminal frame can retire this
             // window's own prompts and leave another client's alone (R1).
             stream_id: event.stream_id,
+            // Design 09 §4.4: the daemon's own text for the card, and
+            // whether the approval is good for this call only.
+            preview: event.preview ?? null,
+            per_call: event.per_call === true,
           },
         });
       }),

@@ -433,6 +433,32 @@ async fn stream_sse_events(
     Ok(StreamResult::Response(state.usage))
 }
 
+/// What the inline prompt prints under its headline (design 09 §4.4): the
+/// daemon-authored preview first, labelled as OpenAlpaca's own text, then the
+/// literal arguments, which stay. Either may be absent.
+pub(crate) fn confirmation_details(frame: &serde_json::Value) -> (Option<String>, Option<String>) {
+    let preview = frame["preview"]
+        .as_str()
+        .filter(|p| !p.is_empty())
+        .map(|p| format!("From OpenAlpaca:\n{}", indent(p)));
+    let args = &frame["tool_arguments"];
+    let arguments = (!args.is_null()).then(|| {
+        format!(
+            "Arguments: {}",
+            serde_json::to_string_pretty(args).unwrap_or_default()
+        )
+    });
+    (preview, arguments)
+}
+
+/// Every line of `text`, two spaces in.
+pub(crate) fn indent(text: &str) -> String {
+    text.lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Check if an SSE event is a tool confirmation request.
 fn is_confirmation_event(event_text: &str) -> bool {
     event_text
@@ -457,7 +483,6 @@ async fn handle_confirmation_prompt(client: &DaemonClient, event_text: &str) -> 
     let parsed: serde_json::Value = serde_json::from_str(&data)?;
     let request_id = parsed["request_id"].as_str().unwrap_or("");
     let tool_name = parsed["tool_name"].as_str().unwrap_or("");
-    let args = &parsed["tool_arguments"];
 
     println!();
     println!(
@@ -466,12 +491,12 @@ async fn handle_confirmation_prompt(client: &DaemonClient, event_text: &str) -> 
             .yellow()
             .bold()
     );
-    if !args.is_null() {
-        println!(
-            "{}",
-            format!("Arguments: {}", serde_json::to_string_pretty(args).unwrap_or_default())
-                .dimmed()
-        );
+    let (preview, arguments) = confirmation_details(&parsed);
+    if let Some(preview) = preview {
+        println!("{preview}");
+    }
+    if let Some(arguments) = arguments {
+        println!("{}", arguments.dimmed());
     }
 
     let approved = tokio::task::block_in_place(|| {

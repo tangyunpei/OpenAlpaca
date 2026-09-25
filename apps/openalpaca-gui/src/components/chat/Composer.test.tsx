@@ -149,6 +149,21 @@ describe("Composer — blocked state (§3.16a)", () => {
     expect(props.onAlwaysAllow).toHaveBeenCalledTimes(1);
   });
 
+  /** Design 09 §4.2: a per-call approval has no *Always allow*. */
+  it("offers no Always allow for a per-call approval", () => {
+    const props = setup({
+      blocked: true,
+      pendingToolName: "memory_confirm",
+      perCall: true,
+      onApprove: vi.fn(),
+      onDeny: vi.fn(),
+      onAlwaysAllow: vi.fn(),
+    });
+    expect(screen.queryByRole("button", { name: "Always allow" })).toBeNull();
+    screen.getByRole("button", { name: /Approve/ }).click();
+    expect(props.onApprove).toHaveBeenCalledTimes(1);
+  });
+
   it("disables the three answers while one is in flight", () => {
     setup({ blocked: true, answering: true });
     expect(screen.getByRole("button", { name: /Approve/ })).toBeDisabled();

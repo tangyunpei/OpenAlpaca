@@ -267,9 +267,11 @@ A tool on the confirm list suspends its run and asks. In the GUI the card is the
   - Prompts that were already waiting when `watch` started are not replayed; `list` shows those.
   - Ctrl+C leaves every unanswered prompt exactly as it was.
 - `approve` / `deny` answer one by id. `approve --entire-tool` allows every later call of that tool for the rest of the session. An id the daemon is not holding — it was answered already, it timed out, or the daemon restarted — is said plainly and changes nothing.
+- A **per-call** prompt — `memory_confirm`, the assistant asking whether a suggestion should replace a note you saved (see [`memory`](#memory)) — is good for that one call only: `approve --entire-tool` is refused before anything is sent, and `watch` asks `Allow this one call? [y]es / [N]o`, where `a` denies like any other word. `deny` dismisses the suggestion for good, as `openalpaca memory undo` does.
 - `list` shows the prompts a run is **waiting on right now**, oldest first, read from `GET /v1/chat/confirmations`. The table is `REQUEST_ID`, `TOOL`, `RUN` (`-` for a prompt raised by a chat turn rather than a run) and `RAISED`.
   - It is a snapshot, not a subscription: a prompt answered or timed out since the read is refused by id, plainly, and nothing is changed.
   - It is **unscoped**: it lists what the whole daemon is waiting on, not only your own runs. Each row carries the tool's arguments — `--format json` hands them on; the table does not print them. On a single-owner machine that is the same list either way.
+  - A prompt whose card carries a daemon-authored **preview** (`memory_confirm`'s: which note, your text, the new text, why, and when you said it) is printed under the table as `<request_id> — from OpenAlpaca:` followed by the preview; `--format json` carries it as `preview`, beside `per_call`. `watch` prints it in the prompt block, before the arguments.
 
 A prompt is never auto-approved, and `--entire-tool` (or `a` in `watch`) is the only thing that widens one. An unanswered prompt times out on the daemon as a refusal (`confirmation_timeout_secs` under `[execution.agent_defaults]` in `daemon.toml`, default 300 s). A one-shot or piped `chat` turn declares that it *cannot* answer, and its confirm-listed tools are refused immediately rather than waiting — see [Approval prompts](#approval-prompts).
 
@@ -879,7 +881,8 @@ Both:
 
 A tool on the confirm list suspends the turn and asks before it runs.
 
-- **With a terminal on both stdin and stdout** — the REPL, or a `--message` typed at a prompt — the confirmation arrives on the stream the CLI is reading and it asks inline: `Allow execution? [y/N]`. `y` or `yes` approves; anything else denies.
+- **With a terminal on both stdin and stdout** — the REPL, or a `--message` typed at a prompt — the confirmation arrives on the stream the CLI is reading and it asks inline: `Allow execution? [y/N]`. `y` or `yes` approves; anything else denies. When the daemon wrote a preview for the card, it is printed first, under `From OpenAlpaca:`, and the JSON arguments after it.
+- **A suggestion raised in chat.** On such a turn the assistant may ask whether a suggestion from your own words should replace a note you saved — the tool `memory_confirm`, at most one per turn. The preview says which note, your text, the new text and when you said it. `y` makes the new note yours, exactly as `openalpaca memory confirm` does; anything else denies, and a denial dismisses the suggestion for good, as `openalpaca memory undo` does. Nothing but your answer confirms it: the model's own say-so, or `[security] auto_approve_confirmations`, never does. A one-shot or piped turn is never offered the tool.
 - **Otherwise the turn declares `unattended: true`** on `POST /v1/chat`: `openalpaca chat --message q > answer.txt`, `... | jq`, `openalpaca chat < question.txt`, a cron line, a CI step. Nobody could answer there, so the daemon **refuses** the confirm-listed tool at once and tells the model where it can be approved, instead of waiting out `confirmation_timeout_secs` (default 300 s) *per tool call*.
 - It is a declaration, not an approval: nothing is auto-allowed.
 - Nothing is approved by leaving, either: a prompt left unanswered times out on the daemon as a refusal.

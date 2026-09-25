@@ -324,6 +324,7 @@ export default function ChatView({
           onApprove={session.approve}
           onDeny={session.deny}
           onAlwaysAllow={session.alwaysAllow}
+          perCall={session.pendingPerCall}
           value={session.draft}
           onChange={session.setDraft}
           onSend={session.send}

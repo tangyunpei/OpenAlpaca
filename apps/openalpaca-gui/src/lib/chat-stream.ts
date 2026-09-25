@@ -103,6 +103,17 @@ export interface ChatConfirmationRequest {
    * another client's main-loop prompt looks exactly like this one's.
    */
   stream_id?: string | null;
+  /**
+   * What the card says about the call, written by the daemon from the tool's
+   * own read (design 09 §4.4) — shown above the literal arguments, never the
+   * model's text. `null`/absent for the ordinary card.
+   */
+  preview?: string | null;
+  /**
+   * The approval is good for this one call only (design 09 §4.2): offer no
+   * *Always allow*. Absent from an older daemon, which means `false`.
+   */
+  per_call?: boolean;
 }
 
 /**
@@ -416,6 +427,8 @@ export function attachChatStream(
         // The frame does not name a stream and does not have to: it *is* this
         // one (R1).
         stream_id: streamId,
+        preview: typeof payload.preview === "string" ? payload.preview : null,
+        per_call: payload.per_call === true,
       },
     });
     // Deliberately does NOT close — the same stream continues after the

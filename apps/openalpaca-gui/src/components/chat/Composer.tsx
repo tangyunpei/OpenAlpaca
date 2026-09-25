@@ -88,7 +88,12 @@ export interface ComposerProps {
   onApprove?: () => void;
   onDeny?: () => void;
   onAlwaysAllow?: () => void;
-  /** Disables the three answers while the POST is in flight. */
+  /**
+   * The pending approval is good for this one call only (design 09 §4.2 —
+   * `memory_confirm`'s card): *Always allow* is not offered.
+   */
+  perCall?: boolean;
+  /** Disables the answers while the POST is in flight. */
   answering?: boolean;
 
   // ── normal state ──────────────────────────────────────────────────────────
@@ -201,6 +206,7 @@ export function Composer(props: ComposerProps) {
     onApprove,
     onDeny,
     onAlwaysAllow,
+    perCall = false,
     answering = false,
     value,
     onChange,
@@ -259,7 +265,8 @@ export function Composer(props: ComposerProps) {
           </div>
 
           {/* Wraps for the same reason the composer's own row does (T2): three
-              answers side by side do not fit a half-screen window. */}
+              answers side by side do not fit a half-screen window. A per-call
+              card has two. */}
           <div className="flex flex-wrap items-center gap-[8px] rounded-3xl border border-red bg-raised p-[8px] shadow-alert">
             <Button
               variant="primaryBlock"
@@ -288,19 +295,21 @@ export function Composer(props: ComposerProps) {
                 esc
               </span>
             </button>
-            <button
-              type="button"
-              disabled={answering}
-              onClick={onAlwaysAllow}
-              className={cn(
-                "cursor-pointer rounded-lg border-none bg-transparent px-[13px] py-[11px] text-base leading-[normal] text-tertiary",
-                "transition-colors duration-[120ms] hover:text-ink",
-                "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
-                "disabled:pointer-events-none disabled:opacity-55",
-              )}
-            >
-              Always allow
-            </button>
+            {!perCall && (
+              <button
+                type="button"
+                disabled={answering}
+                onClick={onAlwaysAllow}
+                className={cn(
+                  "cursor-pointer rounded-lg border-none bg-transparent px-[13px] py-[11px] text-base leading-[normal] text-tertiary",
+                  "transition-colors duration-[120ms] hover:text-ink",
+                  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
+                  "disabled:pointer-events-none disabled:opacity-55",
+                )}
+              >
+                Always allow
+              </button>
+            )}
           </div>
 
           <HintRow left="composer paused until answered" spend={spend} />

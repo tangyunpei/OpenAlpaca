@@ -476,6 +476,8 @@ describe("buildTranscript", () => {
             requestId: "req-1",
             toolName: "shell_execute",
             toolArguments: { command: "cargo tree" },
+            preview: null,
+            perCall: false,
             agentName: "review_agent",
             at: "2026-08-31T14:27:00Z",
           },

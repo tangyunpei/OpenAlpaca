@@ -328,6 +328,26 @@ chat turn, the workflow's lead, or the one subagent that raised the prompt.
 It is not remembered beyond that, and one agent's approval does not cover
 another's.
 
+**A suggestion raised in chat.** When learning is waiting on a change to a
+note you saved (see *Suggestions* under the Memory view), the assistant may
+ask you about it in the conversation — at most one per turn, when the topic
+comes up or the conversation pauses. It uses the same card, headed
+`Confirmation required · memory_confirm`, and the card's text is
+OpenAlpaca's, not the model's: under a `From OpenAlpaca` label it reads
+*"Replace your saved note “X” with “B”?"*, then your text, the new text, why,
+the date you said it, and that your note is kept as history. The literal
+arguments (three ids) stay below it. **Approve** makes the new note yours —
+exactly as **Replace** in the Memory view does; the model saying yes, or any
+setting that approves tools automatically, never does. **Deny** dismisses the
+suggestion for good, as **Keep mine** does, and nothing else you said is
+forgotten. There is **no `Always allow`** on this card: each answer is for that
+one suggestion. A card nobody answers leaves the suggestion waiting in the
+Memory view, and the assistant does not raise it again in the same conversation.
+Only a suggestion from your own words is ever raised in chat — one OpenAlpaca
+inferred from its own replies or a tool's output waits in the Memory view —
+and only in the app's and the CLI's chat, never on Telegram, Discord or
+iMessage.
+
 **Attaching files.** Three ways in, all the same path: the `Attach` button
 left of the model button opens a file picker, you can paste an image into the
 textarea, and you can drop files on the composer (there is no drop zone — the

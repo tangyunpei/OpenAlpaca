@@ -84,6 +84,10 @@ export interface ConfirmationEntry {
   requestId: string;
   toolName: string;
   toolArguments: unknown;
+  /** The daemon's own text for the card (design 09 §4.4); `null` for none. */
+  preview: string | null;
+  /** The approval is good for this call only: no *Always allow* (§4.2). */
+  perCall: boolean;
   /** From the WS twin of the SSE frame, which carries `agent_id`. */
   agentName: string | null;
   at: string;

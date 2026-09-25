@@ -137,6 +137,7 @@ export function Transcript({ items, dense }: TranscriptProps) {
                 key={item.key}
                 toolName={item.entry.toolName}
                 toolArguments={item.entry.toolArguments}
+                preview={item.entry.preview}
                 agentName={item.entry.agentName}
               />
             );

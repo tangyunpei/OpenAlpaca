@@ -850,6 +850,8 @@ Maps to SSE `confirmation_requested {request_id, tool_name, tool_arguments}`.
 
 _Shipped:_ the note's subject is whoever raised the prompt — the agent template's display name (from `GET /v1/agent-templates`, so it reads the same live and after a reload) for a workflow's prompt, and `Alpaca` for the main loop, whose `agent_id` is `orchestrator`. The banner is held against the **conversation**, not the turn's stream: a workflow's prompt arrives on the WS after its turn's `done`, and `GET /v1/chat/confirmations` seeds the cards on load and on reconnect (API_MAP §4.1).
 
+_Shipped (Learning v2, design 09 §4.4):_ the one exception to "the literal argument, never summarised" is a **daemon-authored preview, never the model's text**. The frame's optional `preview` (SSE `confirmation_requested`, the WS twin and `GET /v1/chat/confirmations`) is drawn between the eyebrow and the command box: a mono eyebrow `From OpenAlpaca` (`9.5px; color:#6E6A61; uppercase`) over the text (`12.5px; color:#1E1D1B; line-height:1.5; white-space:pre-wrap`). The command box with the literal arguments stays below it. Today only `memory_confirm` carries one — "Replace your saved note “X” with “B”? / Yours: … / New: … / Why: … (from what you said on <date>) / Your note is kept as history in the Memory view." — because its arguments are three opaque ids. A card with no preview is drawn exactly as before.
+
 ### 3.15 `ResolutionRow` (after approve/deny)
 
 ```
@@ -886,6 +888,8 @@ Outer region: `flex-shrink:0; border-top:1px solid #E2DDD3; background:#F5F2EC; 
 3. **Hint row** — `display:flex; justify-content:space-between; margin-top:9px`, both mono `10px; color:#A39D91`: left `composer paused until answered`, right `{spend} today`.
 
 The textarea is **not rendered** while blocked — the action bar replaces it entirely.
+
+_Shipped (design 09 §4.2):_ a card whose frame says `per_call: true` — `memory_confirm`, whose Approve is what makes a suggestion the user's own note — draws **no `Always allow`**: that approval is good for one call only, and the daemon ignores the scope anyway. Approve and Deny are unchanged; a Deny dismisses the suggestion for good.
 
 #### (b) Normal state
 

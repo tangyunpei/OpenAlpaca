@@ -65,7 +65,10 @@ export type ServerEvent =
   | { type: "skill_invocation_started"; request_id: string; skill_id: string; query_preview: string; ts: string; instance_id: string; _id: number }
   | { type: "skill_completed"; request_id: string; skill_id: string; duration_ms: number; output_preview: string; ts: string; instance_id: string; _id: number }
   | { type: "skill_failed"; request_id: string; skill_id: string; error: string; ts: string; instance_id: string; _id: number }
-  | { type: "tool_confirmation_requested"; request_id: string; agent_id: string; tool_name: string; tool_arguments: unknown; stream_id: string | null; lane_key: string | null; task_id: string | null; ts: string; instance_id: string; _id: number }
+  // `preview` is the daemon-authored text of the card and `per_call` says the
+  // approval is good for this call only (design 09 §4.2, §4.4); both are
+  // absent from an older daemon.
+  | { type: "tool_confirmation_requested"; request_id: string; agent_id: string; tool_name: string; tool_arguments: unknown; stream_id: string | null; lane_key: string | null; task_id: string | null; preview?: string | null; per_call?: boolean; ts: string; instance_id: string; _id: number }
   // T1. The twin of the frame above, sent for every way a prompt stops being
   // pending — including the two nobody answered (`timed_out`, `cancelled`).
   // Before it existed a prompt that ran out its 300 s clock produced nothing
