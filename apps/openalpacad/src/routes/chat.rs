@@ -1616,7 +1616,13 @@ mod tests {
         workspace: Option<&str>,
     ) -> openalpaca_core::gateway::persistence::PersistedUserMessage {
         openalpaca_core::gateway::persistence::GatewayPersistence::new(db.clone())
-            .persist_user_message("user1:gui", "carry on", "gui", root(workspace).as_deref())
+            .persist_user_message(
+                "user1:gui",
+                "carry on",
+                "gui",
+                root(workspace).as_deref(),
+                None,
+            )
             .expect("persist the user message")
     }
 

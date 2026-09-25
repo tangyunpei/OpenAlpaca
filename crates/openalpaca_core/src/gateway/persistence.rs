@@ -113,12 +113,19 @@ impl GatewayPersistence {
     ///
     /// The resolved id comes back to the caller so the assistant half of the
     /// same turn can be pinned to it — see [`PersistedUserMessage`].
+    ///
+    /// `request_id` is the turn's id and `workspace_path` its canonical root;
+    /// both are written on the row (migration 044, design 09 §1.3) — the id
+    /// marks the row as a turn's, and the root is the project this row
+    /// learns into, whatever the session's binding says. `None` for a row no
+    /// turn wrote.
     pub fn persist_user_message(
         &self,
         lane_key: &str,
         content: &str,
         source: &str,
         workspace_path: Option<&str>,
+        request_id: Option<uuid::Uuid>,
     ) -> Result<PersistedUserMessage> {
         let repo = ConversationRepository::new(&self.db);
         let session = self.resolve_turn_session(&repo, lane_key, source, workspace_path)?;
@@ -128,6 +135,8 @@ impl GatewayPersistence {
             content: content.to_string(),
             source: Some(source.to_string()),
             session_id: Some(session.id.clone()),
+            request_id: request_id.map(|id| id.to_string()),
+            workspace_root: workspace_path.map(str::to_string),
             ..Default::default()
         })?;
         repo.increment_message_count_for_session(&session.id)?;
@@ -138,7 +147,8 @@ impl GatewayPersistence {
         })
     }
 
-    /// Persist a user message with file attachments.
+    /// Persist a user message with file attachments. `request_id` and
+    /// `workspace_path` as for [`Self::persist_user_message`].
     pub fn persist_user_message_with_attachments(
         &self,
         lane_key: &str,
@@ -146,6 +156,7 @@ impl GatewayPersistence {
         source: &str,
         workspace_path: Option<&str>,
         attachments: &[ResolvedAttachment],
+        request_id: Option<uuid::Uuid>,
     ) -> Result<PersistedUserMessage> {
         let repo = ConversationRepository::new(&self.db);
         let session = self.resolve_turn_session(&repo, lane_key, source, workspace_path)?;
@@ -204,6 +215,8 @@ impl GatewayPersistence {
             content: content.to_string(),
             source: Some(source.to_string()),
             session_id: Some(session.id.clone()),
+            request_id: request_id.map(|id| id.to_string()),
+            workspace_root: workspace_path.map(str::to_string),
             ..Default::default()
         };
 
@@ -262,6 +275,10 @@ impl GatewayPersistence {
     /// real numbers (G4). `None` on the non-LLM paths — a slash command spent
     /// no tokens, which is a different fact from "spent none that we counted",
     /// and the column stays NULL so a client can tell them apart.
+    ///
+    /// `request_id` is the turn's id (migration 044): the answer carries the
+    /// same id as its question, which is how learning pairs them. It never
+    /// carries a root — an answer learns under its question's.
     pub fn persist_assistant_message(
         &self,
         lane_key: &str,
@@ -269,6 +286,7 @@ impl GatewayPersistence {
         duration_ms: Option<i64>,
         source: &str,
         session_id: Option<&str>,
+        request_id: Option<uuid::Uuid>,
     ) -> Result<i64> {
         let content = result.content.as_str();
         if content.trim().is_empty() {
@@ -287,6 +305,7 @@ impl GatewayPersistence {
             duration_ms,
             task_id: result.delegation.as_ref().map(|d| d.task_id.clone()),
             session_id: session_id.map(str::to_string),
+            request_id: request_id.map(|id| id.to_string()),
             ..Default::default()
         })?;
         match session_id {
@@ -337,7 +356,14 @@ mod tests {
         let persistence = GatewayPersistence::new(db.clone());
 
         let id = persistence
-            .persist_user_message_with_attachments("user1:gui", "", "gui", None, &[sample_attachment()])
+            .persist_user_message_with_attachments(
+                "user1:gui",
+                "",
+                "gui",
+                None,
+                &[sample_attachment()],
+                None,
+            )
             .expect("persist message");
         assert!(id.message_id > 0);
 
@@ -376,6 +402,7 @@ mod tests {
                 "gui",
                 None,
                 &[sample_attachment()],
+                None,
             )
             .expect("persist message");
         assert!(id.message_id > 0);
@@ -415,6 +442,7 @@ mod tests {
                 &[sample_attachment_with_text(
                     "Candidate has 5 years experience",
                 )],
+                None,
             )
             .expect("persist message");
         assert!(id.message_id > 0);
@@ -468,6 +496,7 @@ mod tests {
                 Some(1234),
                 "gui",
                 None,
+                None,
             )
             .expect("persist assistant message");
         assert!(id > 0);
@@ -495,6 +524,7 @@ mod tests {
                 &super::super::HandleResult::text("3 tasks are running".to_string()),
                 None,
                 "cli",
+                None,
                 None,
             )
             .expect("persist assistant message");
@@ -524,6 +554,7 @@ mod tests {
                 None,
                 "gui",
                 None,
+                None,
             )
             .expect("an empty answer is not an error");
         assert_eq!(empty, 0, "nothing was written");
@@ -535,6 +566,7 @@ mod tests {
                 &super::super::HandleResult::text(line.to_string()),
                 None,
                 "gui",
+                None,
                 None,
             )
             .expect("persist assistant message");

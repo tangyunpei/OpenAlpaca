@@ -6463,6 +6463,7 @@ async fn an_attachment_turn_is_not_replayed_as_its_own_history() {
             "cli",
             None,
             std::slice::from_ref(&attachment),
+            None,
         )
         .expect("the gateway persists the user half first");
 

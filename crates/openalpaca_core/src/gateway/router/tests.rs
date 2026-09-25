@@ -1076,3 +1076,184 @@ async fn a_turn_that_says_nothing_is_attended() {
     let seen = seen.lock().unwrap();
     assert!(!seen[0].unattended);
 }
+
+// ── Learning v2: the turn's id, its root, and the queue's hook (design 09 §1.3, §1.5) ──
+
+fn learning_turn(content: &str, workspace_path: Option<String>) -> GatewayRequest {
+    GatewayRequest {
+        source: EventSource::Gui {
+            connection_id: "user1".to_string(),
+        },
+        content: content.to_string(),
+        principal: Principal::User {
+            global_id: "user1".to_string(),
+        },
+        scope: Scope::Global,
+        attachments: Vec::new(),
+        workspace_path,
+        stream_id: None,
+        lane_override: None,
+        model_override: None,
+        unattended: false,
+        turn_sink: None,
+    }
+}
+
+/// Migration 044: both halves of a turn carry the gateway's request id, and
+/// the user half carries the canonical root the turn named — NULL when it
+/// named none. A row a turn did not write (a completion report, a notice)
+/// is what keeps NULL, and learning reads that as "not a turn".
+#[tokio::test]
+async fn the_gateway_stamps_the_turn_id_on_both_halves_and_the_root_on_the_user_half() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(StubHandler),
+        EventBus::default(),
+        Some(db.clone()),
+    );
+    let project = project_dir();
+    gw.handle_event(learning_turn("in a project", Some(project_path(&project))))
+        .await;
+    gw.handle_event(learning_turn("no project named", None))
+        .await;
+
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let rows = repo.list_by_lane("user1:gui", 50, 0).unwrap();
+    assert_eq!(rows.len(), 4);
+    let root = crate::memory::scope_context::MemoryScopeContext::for_request(Some(&project_path(
+        &project,
+    )))
+    .request_workspace_root;
+    assert!(root.is_some());
+
+    let first_turn = rows[0]
+        .request_id
+        .clone()
+        .expect("the user half has the turn id");
+    assert_eq!(rows[1].request_id.as_deref(), Some(first_turn.as_str()));
+    assert_eq!(rows[0].workspace_root, root, "the user half names its root");
+    assert_eq!(
+        rows[1].workspace_root, None,
+        "an answer learns under its question's root"
+    );
+
+    let second_turn = rows[2].request_id.clone().expect("every turn has an id");
+    assert_ne!(second_turn, first_turn);
+    assert_eq!(rows[3].request_id.as_deref(), Some(second_turn.as_str()));
+    assert_eq!(
+        rows[2].workspace_root, None,
+        "a turn that named no project stores none"
+    );
+}
+
+/// Reports what the learning queue says about the turn it is handling.
+struct InFlightProbe {
+    queue: Arc<crate::memory::learning::LearningQueue>,
+    seen: std::sync::Mutex<Vec<(bool, Option<String>)>>,
+}
+
+#[async_trait]
+impl MessageHandler for InFlightProbe {
+    async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+        self.seen.lock().unwrap().push((
+            self.queue.is_in_flight(request.request_id),
+            self.queue.in_flight_session(request.request_id),
+        ));
+        Ok(HandleResult::text("ok".to_string()))
+    }
+}
+
+/// Design §1.5: the turn is in the queue's in-flight set, attached to its
+/// session, for the whole time its handler runs; it leaves the set once the
+/// answer is written, and only a user-authored turn is counted — a `/slash`
+/// turn and the assistant's own follow-up text are not.
+#[tokio::test]
+async fn a_turn_is_in_flight_from_before_its_row_until_after_its_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let queue =
+        crate::memory::learning::LearningQueue::new(crate::memory::learning::QueueMode::Manual);
+    let probe = Arc::new(InFlightProbe {
+        queue: queue.clone(),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        probe.clone(),
+        EventBus::default(),
+        Some(db.clone()),
+    )
+    .with_learning(queue.clone());
+
+    gw.handle_event(learning_turn("I prefer vim for editing.", None))
+        .await;
+    let session = openalpaca_storage::ConversationRepository::new(&db)
+        .active_session_id("user1:gui")
+        .unwrap()
+        .expect("the turn opened a session");
+    assert_eq!(
+        probe.seen.lock().unwrap().clone(),
+        vec![(true, Some(session.clone()))],
+        "in flight, attached to its session, while the handler ran"
+    );
+    assert_eq!(
+        queue.in_flight_count(),
+        0,
+        "gone once the answer is written"
+    );
+    assert_eq!(queue.pending_turns(&session), 1);
+
+    gw.handle_event(learning_turn("/status", None)).await;
+    assert_eq!(
+        queue.pending_turns(&session),
+        1,
+        "a /slash turn is not counted"
+    );
+
+    let followup = GatewayRequest {
+        source: EventSource::Internal,
+        lane_override: Some("user1:gui".to_string()),
+        ..learning_turn("Next, set up the editor.", None)
+    };
+    gw.handle_event(followup).await;
+    assert_eq!(
+        queue.pending_turns(&session),
+        1,
+        "the assistant's own follow-up text is not a user turn"
+    );
+    assert_eq!(queue.in_flight_count(), 0);
+}
+
+/// A turn whose handler fails still leaves the in-flight set: the guard
+/// runs on every exit, not only after an answer.
+#[tokio::test]
+async fn a_failed_turn_leaves_the_in_flight_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let queue =
+        crate::memory::learning::LearningQueue::new(crate::memory::learning::QueueMode::Manual);
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(FailHandler),
+        EventBus::default(),
+        Some(db.clone()),
+    )
+    .with_learning(queue.clone());
+    let resp = gw.handle_event(learning_turn("this one fails", None)).await;
+    assert!(resp.is_error);
+    assert_eq!(queue.in_flight_count(), 0);
+    let session = openalpaca_storage::ConversationRepository::new(&db)
+        .active_session_id("user1:gui")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        queue.pending_turns(&session),
+        1,
+        "its question is still in the window"
+    );
+}

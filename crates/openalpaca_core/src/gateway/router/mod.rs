@@ -2,6 +2,7 @@ use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::gateway::persistence::GatewayPersistence;
 use crate::lane::{LaneKey, LaneManager};
+use crate::memory::learning::LearningQueue;
 use crate::memory::service::MemoryUsed;
 use crate::security::policy::{Principal, Scope};
 use async_trait::async_trait;
@@ -243,6 +244,9 @@ pub struct Gateway {
     pub handler: Arc<dyn MessageHandler>,
     pub bus: EventBus,
     persistence: Option<GatewayPersistence>,
+    /// Learning v2 (design 09 §1.5): the queue every persisted turn is fed
+    /// to. `None` learns nothing — every gateway but the daemon's own.
+    learning: Option<Arc<LearningQueue>>,
 }
 
 impl Gateway {
@@ -260,7 +264,20 @@ impl Gateway {
             handler,
             bus,
             persistence,
+            learning: None,
         }
+    }
+
+    /// Feeds every turn this gateway persists to `queue` (design 09 §1.5).
+    /// The daemon sets it on its one production gateway.
+    pub fn with_learning(mut self, queue: Arc<LearningQueue>) -> Self {
+        self.learning = Some(queue);
+        self
+    }
+
+    /// The learning queue this gateway feeds, if any.
+    pub fn learning(&self) -> Option<&Arc<LearningQueue>> {
+        self.learning.as_ref()
     }
 
     /// Handle an inbound event from any source.
@@ -291,6 +308,20 @@ impl Gateway {
         let lane = self.lane_manager.get_or_create_conversation(key.clone());
 
         let request_id = Uuid::new_v4();
+
+        // Learning v2 (design 09 §1.5): the turn is in flight from here, before
+        // its user row exists, so a flush reading the window meanwhile stops
+        // before the row rather than learning a turn whose answer has not
+        // landed. The guard's drop — after the assistant row is written, or on
+        // any earlier exit — ends it. Three in-memory updates in all: the
+        // reply path does no learning work.
+        let turn_guard = self.learning.as_ref().map(|queue| {
+            queue.turn_started(
+                request_id,
+                &lane_key_str,
+                crate::memory::learning::is_user_authored_turn(&source_name, &req.content),
+            )
+        });
 
         // Record message on the lane
         lane.record_message();
@@ -324,7 +355,13 @@ impl Gateway {
                 .request_workspace_root;
             let workspace_path = workspace_root.as_deref();
             let persisted = if req.attachments.is_empty() {
-                p.persist_user_message(&lane_key_str, &req.content, &source_name, workspace_path)
+                p.persist_user_message(
+                    &lane_key_str,
+                    &req.content,
+                    &source_name,
+                    workspace_path,
+                    Some(request_id),
+                )
             } else {
                 p.persist_user_message_with_attachments(
                     &lane_key_str,
@@ -332,10 +369,14 @@ impl Gateway {
                     &source_name,
                     workspace_path,
                     &req.attachments,
+                    Some(request_id),
                 )
             };
             match persisted {
                 Ok(turn) => {
+                    if let Some(guard) = &turn_guard {
+                        guard.attach_session(&turn.session_id);
+                    }
                     // §5.1: the turn's project was not this lane's session's
                     // project, so a new conversation was opened for it. Say so,
                     // the way `POST /v1/sessions` does — a second window's
@@ -422,6 +463,7 @@ impl Gateway {
                         &source_name,
                         // §5.1: the session this turn resolved when it began.
                         turn_session.as_deref(),
+                        Some(request_id),
                     ) {
                         Ok(message_id) if message_id > 0 => {
                             if let Err(e) = openalpaca_storage::SkillExecutionRepository::new(p.db())
