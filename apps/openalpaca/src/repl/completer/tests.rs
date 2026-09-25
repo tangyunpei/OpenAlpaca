@@ -61,3 +61,13 @@ fn test_hint_exact() {
 fn test_hint_non_slash() {
     assert_eq!(hint("hello"), None);
 }
+
+/// The chat memory commands the daemon answers (design 09 §12) complete like
+/// the other forwarded daemon commands.
+#[test]
+fn test_complete_memory_commands() {
+    assert_eq!(complete("/rem"), vec!["/remember".to_string()]);
+    assert_eq!(complete("/f"), vec!["/forget".to_string()]);
+    assert_eq!(complete("/mem"), vec!["/memories".to_string()]);
+    assert_eq!(hint("/memo"), Some("ries".to_string()));
+}

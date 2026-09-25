@@ -18,8 +18,9 @@ pub enum SlashCommand {
     Verbose,
     /// Not a client-side command: forward the whole line to the daemon as a
     /// chat message. Covers the daemon's chat-level commands (`/status`,
-    /// `/tasks`, `/steer`, `/cancel`, `/pause`, `/resume`) and any unknown
-    /// slash command, which may be a skill invocation only the daemon knows.
+    /// `/tasks`, `/steer`, `/cancel`, `/pause`, `/resume`, and the memory
+    /// commands `/remember`, `/forget`, `/memories`) and any unknown slash
+    /// command, which may be a skill invocation only the daemon knows.
     Forward,
 }
 
@@ -102,6 +103,18 @@ fn print_help() {
     println!(
         "  {} — Control a workflow (bare form targets active ones)",
         "/cancel|/pause|/resume [id]".bold()
+    );
+    println!(
+        "  {} — Save a note as yours",
+        "/remember [--kind K] [--global|--project] <text>".bold()
+    );
+    println!(
+        "  {} — Forget a note by id, or list the ones that match",
+        "/forget <id>|<words>".bold()
+    );
+    println!(
+        "  {} — Your recent notes, or the ones that match",
+        "/memories [words]".bold()
     );
     println!(
         "  {}",

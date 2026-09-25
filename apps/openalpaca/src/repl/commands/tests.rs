@@ -72,6 +72,11 @@ fn test_known_daemon_commands_forward() {
         "/cancel abc123",
         "/pause",
         "/resume abc123",
+        // The chat memory commands (design 09 §12): the daemon answers them.
+        "/remember I prefer tabs",
+        "/forget 1a2b3c4d",
+        "/memories",
+        "/memories deploy",
     ] {
         assert!(
             SlashCommand::parse(cmd).is_forward(),
