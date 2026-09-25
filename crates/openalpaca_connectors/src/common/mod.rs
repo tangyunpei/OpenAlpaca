@@ -72,26 +72,41 @@ pub enum LinkResult {
     InvalidToken,
 }
 
+/// How much of the pretty-printed, escaped arguments a chat prompt shows.
+const PROMPT_ARGUMENTS_BYTES: usize = 500;
+
 /// Format the confirmation prompt sent to a chat platform when a
-/// confirm-listed tool awaits interactive approval.
+/// confirm-listed tool awaits interactive approval — the one prompt Telegram,
+/// Discord and iMessage all send: the tool name, the arguments cut to
+/// [`PROMPT_ARGUMENTS_BYTES`], the `/yes` / `/no` instructions and a queue
+/// position hint.
 ///
-/// Mirrors the Telegram connector's prompt format (tool name, truncated
-/// arguments, `/yes` / `/no` instructions, queue position hint).
+/// The name and the arguments are what the person approves, and both come
+/// from outside OpenAlpaca (an MCP `<server>__<tool>` or plugin
+/// `<plugin>::<tool>` name, model-written arguments), so every hidden
+/// character in them — a bidi override, a zero-width character, a C1
+/// control — is shown as `<U+XXXX>` by [`escape_hidden`], escaped before the
+/// cut so the cut never splits an escape, and one notice line under the
+/// arguments counts them, those the cut left out included. Display only:
+/// `tool_arguments` is borrowed, and a reply is matched by request id, not
+/// by anything shown here.
+///
+/// [`escape_hidden`]: openalpaca_core::utils::text::escape_hidden
 pub fn format_confirmation_prompt(
     tool_name: &str,
     tool_arguments: &serde_json::Value,
     queue_len: usize,
 ) -> String {
-    // Format arguments for display (truncate if too long)
-    let args_display = {
-        let s = serde_json::to_string_pretty(tool_arguments)
-            .unwrap_or_else(|_| tool_arguments.to_string());
-        if s.len() > 500 {
-            format!("{}...", &s[..s.floor_char_boundary(500)])
-        } else {
-            s
-        }
-    };
+    use openalpaca_core::utils::text::{escape_hidden, escape_hidden_within, hidden_notice};
+
+    let name = escape_hidden(tool_name);
+    let pretty =
+        serde_json::to_string_pretty(tool_arguments).unwrap_or_else(|_| tool_arguments.to_string());
+    let args = escape_hidden_within(&pretty, PROMPT_ARGUMENTS_BYTES);
+    let ellipsis = if args.cut { "..." } else { "" };
+    let notice = hidden_notice(name.hidden + args.hidden)
+        .map(|line| format!("\n{line}"))
+        .unwrap_or_default();
 
     let queue_info = if queue_len > 1 {
         format!(" (1 of {} pending)", queue_len)
@@ -101,9 +116,11 @@ pub fn format_confirmation_prompt(
 
     format!(
         "A tool requires your confirmation before executing{queue_info}:\n\n\
-         Tool: {tool_name}\n\
-         Arguments:\n{args_display}\n\n\
-         Reply /yes or /no to approve or deny."
+         Tool: {name}\n\
+         Arguments:\n{args}{ellipsis}{notice}\n\n\
+         Reply /yes or /no to approve or deny.",
+        name = name.text,
+        args = args.text,
     )
 }
 

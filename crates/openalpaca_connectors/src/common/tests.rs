@@ -192,6 +192,173 @@ mod confirmation {
     }
 }
 
+// --- Hidden characters in the confirmation prompt ------------------------
+//
+// The prompt is where the person decides, and the tool's name and arguments
+// are third-party and model text: a bidi override (U+202E), a zero-width
+// character or a C1 control in them can make the prompt read differently
+// from what runs. Every such character is shown as `<U+XXXX>` and counted in
+// one notice line under the arguments (`openalpaca_core::utils::text`).
+
+mod hidden_characters {
+    use super::super::format_confirmation_prompt;
+    use openalpaca_core::utils::text::needs_escape;
+
+    /// The prompt carries no character a person cannot see, the layout's own
+    /// newlines apart.
+    fn assert_nothing_hidden(prompt: &str) {
+        let raw: Vec<String> = prompt
+            .chars()
+            .filter(|&c| needs_escape(c))
+            .map(|c| format!("U+{:04X}", c as u32))
+            .collect();
+        assert!(
+            raw.is_empty(),
+            "raw hidden characters {raw:?} in {prompt:?}"
+        );
+    }
+
+    #[test]
+    fn an_override_and_a_zero_width_space_in_the_arguments_are_shown_escaped() {
+        let args = serde_json::json!({"path": "/srv/allow\u{200b}ed/\u{202e}hs.txt"});
+
+        let prompt = format_confirmation_prompt("file_write", &args, 1);
+
+        assert_nothing_hidden(&prompt);
+        assert!(
+            prompt.contains("\"path\": \"/srv/allow<U+200B>ed/<U+202E>hs.txt\""),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "}\nNote: this request contains 2 hidden characters, shown as <U+…>.\n\n\
+                 Reply /yes or /no"
+            ),
+            "the notice sits directly under the arguments: {prompt}"
+        );
+    }
+
+    /// An MCP `<server>__<tool>` or plugin `<plugin>::<tool>` name comes from
+    /// a third party, so it is escaped and counted like the arguments.
+    #[test]
+    fn a_hidden_character_in_the_tool_name_is_shown_escaped_and_counted() {
+        let args = serde_json::json!({"q": "a\u{9b}b"});
+
+        let prompt = format_confirmation_prompt("files\u{202e}__write\u{200b}", &args, 1);
+
+        assert_nothing_hidden(&prompt);
+        assert!(
+            prompt.contains("Tool: files<U+202E>__write<U+200B>\n"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("\"q\": \"a<U+009B>b\""), "{prompt}");
+        assert!(
+            prompt.contains("Note: this request contains 3 hidden characters, shown as <U+…>."),
+            "the notice counts the name and the arguments: {prompt}"
+        );
+    }
+
+    /// `serde_json` escapes a `\r` inside a string itself, so a raw one can
+    /// only arrive in the name; a C1 control and an astral tag character pass
+    /// through `serde_json` raw.
+    #[test]
+    fn a_carriage_return_a_c1_control_and_a_tag_character_are_escaped() {
+        let args = serde_json::json!({"cmd": "echo \u{9b}31mred\u{e0041}"});
+
+        let prompt = format_confirmation_prompt("shell_exec\r", &args, 1);
+
+        assert_nothing_hidden(&prompt);
+        assert!(prompt.contains("Tool: shell_exec<U+000D>\n"), "{prompt}");
+        assert!(
+            prompt.contains("\"cmd\": \"echo <U+009B>31mred<U+E0041>\""),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Note: this request contains 3 hidden characters, shown as <U+…>."),
+            "{prompt}"
+        );
+    }
+
+    /// The whole prompt, to pin the layout: the pretty-printed arguments keep
+    /// their structural newlines and indentation, the notice is one line
+    /// directly under them, and nothing else moves.
+    #[test]
+    fn the_arguments_keep_their_json_layout_and_the_notice_follows_them() {
+        let args = serde_json::json!({"cmd": "ls \u{202e}", "cwd": "/tmp"});
+
+        let prompt = format_confirmation_prompt("shell_exec", &args, 2);
+
+        assert_eq!(
+            prompt,
+            "A tool requires your confirmation before executing (1 of 2 pending):\n\n\
+             Tool: shell_exec\n\
+             Arguments:\n\
+             {\n  \"cmd\": \"ls <U+202E>\",\n  \"cwd\": \"/tmp\"\n}\n\
+             Note: this request contains 1 hidden character, shown as <U+…>.\n\n\
+             Reply /yes or /no to approve or deny."
+        );
+    }
+
+    /// Nothing hidden, no notice: the prompt is exactly what it was.
+    #[test]
+    fn there_is_no_notice_when_nothing_was_escaped() {
+        let args = serde_json::json!({"cmd": "ls"});
+
+        let prompt = format_confirmation_prompt("shell_exec", &args, 1);
+
+        assert_eq!(
+            prompt,
+            "A tool requires your confirmation before executing:\n\n\
+             Tool: shell_exec\n\
+             Arguments:\n\
+             {\n  \"cmd\": \"ls\"\n}\n\n\
+             Reply /yes or /no to approve or deny."
+        );
+    }
+
+    /// The 500-byte cut comes after escaping and never splits an escape: an
+    /// override whose `<U+202E>` would straddle byte 500 is left out whole.
+    /// The notice still counts the five zero-width spaces the cut left out.
+    #[test]
+    fn the_500_byte_cut_never_splits_an_escape_and_the_notice_counts_what_it_cut() {
+        // `{\n  "a": "` is 10 bytes, so the escape would span bytes 496..504.
+        let head = "x".repeat(486);
+        let args = serde_json::json!({
+            "a": format!("{head}\u{202e}tail{}", "\u{200b}".repeat(5)),
+        });
+        assert_eq!(
+            serde_json::to_string_pretty(&args)
+                .unwrap()
+                .find('\u{202e}'),
+            Some(496)
+        );
+
+        let prompt = format_confirmation_prompt("t", &args, 1);
+
+        assert_nothing_hidden(&prompt);
+        assert!(
+            prompt.contains(&format!(
+                "Arguments:\n{{\n  \"a\": \"{head}...\n\
+                 Note: this request contains 6 hidden characters, shown as <U+…>.\n\n"
+            )),
+            "{prompt}"
+        );
+    }
+
+    /// Display only: the prompt borrows the arguments and the tool is handed
+    /// the value it was always handed, hidden characters and all.
+    #[test]
+    fn the_arguments_the_tool_receives_are_unchanged() {
+        let args = serde_json::json!({"path": "a\u{202e}b\u{200b}"});
+        let before = args.clone();
+
+        let _ = format_confirmation_prompt("file_write\u{200b}", &args, 1);
+
+        assert_eq!(args, before);
+        assert_eq!(args["path"], "a\u{202e}b\u{200b}");
+    }
+}
+
 // --- The shared upload writer (D2) ---------------------------------------
 //
 // `store_attachment` owns validation and the `ResolvedAttachment` shape and
