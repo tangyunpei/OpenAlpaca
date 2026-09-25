@@ -1468,8 +1468,8 @@ struct Totals {
     /// every round of the turn): mean and median. `null` with no rows.
     reader_tokens_in_mean_per_turn: Option<f64>,
     reader_tokens_in_median_per_turn: Option<f64>,
-    /// The reader's model calls per question turn (`rows[].reader_rounds`):
-    /// one per round, so 1 is a turn answered with no tool round.
+    /// The reader's model calls per question turn (`rows[].reader_rounds`,
+    /// ≈ its rounds): 1 is a turn answered with no tool round.
     reader_rounds_mean_per_turn: Option<f64>,
     /// The main loop's tool calls per question turn (`rows[].tools`).
     tool_calls_mean_per_turn: Option<f64>,
@@ -1563,10 +1563,14 @@ struct Row {
     /// search at its default detail, a timeline — never counts, so it
     /// compares an `index` run and an `excerpts` run like for like.
     relied_notes_read_or_excerpted: usize,
-    /// The model calls the router booked to the main loop during the turn
-    /// (its cost tracker's count for the loop's agent id): one per round the
-    /// loop ran — each tool round, the answering round, and the answer
-    /// guard's corrective round when it grants one.
+    /// The model calls the router booked to the main loop in the turn
+    /// (≈ its rounds): the cost tracker's count for the loop's agent id,
+    /// read before and after the turn. A tool round, the answering round,
+    /// the answer guard's corrective round and a max-tokens continuation
+    /// each add one (the loop counts every response as a round); an in-loop
+    /// compaction call adds one that is no round. A call that failed and was
+    /// retried is missing — the loop counts it against its rounds, but the
+    /// router books a response, not an attempt.
     reader_rounds: u64,
 }
 

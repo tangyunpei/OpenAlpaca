@@ -487,7 +487,7 @@ or E report with the archived A and B reports:
   (every relied-on note excerpted or read — the like-for-like retrieval
   measure between the two modes), and the cost per question turn —
   `reader_tokens_in_mean_per_turn`, `reader_tokens_in_median_per_turn` (every
-  round's input tokens), `reader_rounds_mean_per_turn` (model calls) and
+  round's input tokens), `reader_rounds_mean_per_turn` (model calls, ≈ rounds) and
   `tool_calls_mean_per_turn`; `null` with no rows.
 - `rows`: one per question — the question, gold and actual answer, the judge's
   verdict and raw reply, latency, `ack_ms`, the routing `mode`, reader LLM
@@ -511,7 +511,11 @@ or E report with the archived A and B reports:
   notes that reached the model as more than a title: a `recall` or `pinned`
   entry, a `memory_read` body or a `snippets` excerpt) and
   `reader_rounds` (the model calls the router booked to the main loop in the
-  turn, one per round). `reader_llm_calls` counts the main loop's
+  turn, ≈ its rounds: a tool round, the answering round, the answer guard's
+  corrective round and a max-tokens continuation each add one, and an in-loop
+  compaction call adds one that is no round; a call that failed and was
+  retried is missing, since the router books responses, not attempts).
+  `reader_llm_calls` counts the main loop's
   `LlmCallCompleted` events, which it publishes **once per turn** with the
   whole turn's tokens — it is 1 on every answered row, the archived reports'
   included, whatever the rounds; read `reader_rounds` for those.
