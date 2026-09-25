@@ -853,12 +853,14 @@ command, and the text written is exactly what was typed.
 Every write is the service's own, so it is announced as one `memory_changed`
 (`surface: "user"`) like any other; an exact duplicate writes nothing and
 announces nothing. A connector turn (Telegram, Discord, iMessage), an
-unattended one, a scheduled skill, a follow-up and a `/v1/command process`
-turn are answered `Memory commands work in the OpenAlpaca app and the CLI.`;
-a turn with no owner (`Principal::System`, an unlinked identity) or a daemon
-with no memory service, `Memory is not available here.` — and nothing is read
-or written. The turn's attachments are reported skipped. Learning never reads
-these turns: it leaves out every `/`-line and its answer.
+unattended one (a piped `openalpaca chat`), a scheduled skill, a follow-up
+and a `/v1/command process` turn are answered ``Memory commands work only in
+the OpenAlpaca app's chat, or in `openalpaca chat` run at a terminal — not with
+its input or output piped.``; a turn with no owner (`Principal::System`, an
+unlinked identity) or a daemon with no memory service, `Memory is not
+available here.` — and nothing is read or written. The turn's attachments are
+reported skipped. Learning never reads these turns: it leaves out every
+`/`-line and its answer.
 
 The routes below reach the memory notes (Markdown files under the home store's
 `memory/` and a project's `.openalpaca/memory/`) through the one memory service

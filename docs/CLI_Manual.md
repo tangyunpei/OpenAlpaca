@@ -960,7 +960,7 @@ Alpaca: Forgot “I review diffs in a split view” (3f9a1c2d). The note files, 
 
 - A line is `<id>  <title>  [<kind>/<scope>]`, at most 160 characters, and at most 10 notes are listed. No note's body is printed: `openalpaca memory show <id>` reads one.
 - A forget here is a forget like `openalpaca memory forget`, with no second prompt — typing the id is the say-so: the note file, its history and its index rows go, and the answer says what it leaves behind (conversation messages and session logs are separate data).
-- **Only where you can read the answer.** The commands work in the REPL and in a `--message` typed at a terminal. A piped or redirected `openalpaca chat` is unattended (see [Approval prompts](#approval-prompts)), and the daemon answers `Memory commands work in the OpenAlpaca app and the CLI.` and changes nothing — as it does on a connector (Telegram, Discord, iMessage) and for a scheduled skill.
+- **Only where you can read the answer.** The commands work in the REPL and in a `--message` typed at a terminal. A piped or redirected `openalpaca chat` is unattended (see [Approval prompts](#approval-prompts)), and the daemon answers ``Memory commands work only in the OpenAlpaca app's chat, or in `openalpaca chat` run at a terminal — not with its input or output piped.`` and changes nothing — as it does on a connector (Telegram, Discord, iMessage) and for a scheduled skill.
 - A memory command's answer is not learned from: learning leaves out every `/`-line and its answer.
 - The three names are reserved: a skill whose slash command is `/remember`, `/forget` or `/memories` is not reached by it (the daemon logs one warning naming the skill when it loads it).
 

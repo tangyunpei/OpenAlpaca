@@ -34,8 +34,11 @@ use openalpaca_storage::memory_files::{Dedup, EffectiveStatus, NoteId, NoteKind,
 mod tests;
 
 /// The answer on every turn that is not an attended turn of the app's or the
-/// CLI's chat (design 09 §12.2).
-pub(super) const NOT_HERE: &str = "Memory commands work in the OpenAlpaca app and the CLI.";
+/// CLI's chat (design 09 §12.2). It names the requirement itself — the
+/// app's chat, or the CLI at a terminal — because a piped `openalpaca chat`
+/// is refused too, and "work in the CLI" would contradict itself there.
+pub(super) const NOT_HERE: &str = "Memory commands work only in the OpenAlpaca app's chat, or in \
+     `openalpaca chat` run at a terminal — not with its input or output piped.";
 /// The answer on a turn with no owner (`Principal::System`, an id that is no
 /// `global_user` row) and on a daemon with no memory service (§12.2).
 pub(super) const UNAVAILABLE: &str = "Memory is not available here.";

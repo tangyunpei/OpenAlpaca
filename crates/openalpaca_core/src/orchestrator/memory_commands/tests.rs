@@ -752,6 +752,29 @@ async fn memory_commands_are_refused_off_an_attended_app_or_cli_turn() {
     assert_eq!(scene.llm.calls(), 0);
 }
 
+/// L9 review: a piped `openalpaca chat` is an unattended turn of the CLI's
+/// own chat, so its refusal names what is missing — a terminal — instead of
+/// telling a CLI user that the commands work "in the CLI". The same
+/// sentence still answers a connector's turn.
+#[tokio::test]
+async fn a_piped_cli_turn_is_told_that_the_commands_need_a_terminal() {
+    let scene = Scene::new();
+    let expected = "Memory commands work only in the OpenAlpaca app's chat, or in \
+                    `openalpaca chat` run at a terminal — not with its input or output piped.";
+    for (source, unattended) in [("gui", true), ("telegram", false)] {
+        let reply = scene
+            .say_as(HandleRequest {
+                source: source.to_string(),
+                principal: owner(),
+                unattended,
+                lane_key: format!("{OWNER}:{source}"),
+                ..turn("/memories")
+            })
+            .await;
+        assert_eq!(reply, expected, "{source} (unattended: {unattended})");
+    }
+}
+
 /// A daemon with no memory service answers the same sentence as a turn with
 /// no owner.
 #[tokio::test]
