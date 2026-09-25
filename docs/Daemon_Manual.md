@@ -1245,7 +1245,10 @@ the conversation and the user replies `/yes` (or `/y`) to approve, `/no` (or
 `/n`) to deny. (A connector's `/yes` is keyed by chat, not by sender, so it is
 not a user-directed answer: `memory_confirm` is never offered on a connector's
 lane, and a suggestion is never raised there.) Multiple pending confirmations in one conversation are answered
-in FIFO order.
+in FIFO order: a prompt sent while others wait says its place and that a reply
+answers the oldest first (`2 of 2 pending; each /yes or /no answers the oldest
+first`), and the acknowledgement names the tool it approved or denied
+(`Approved: shell_exec. Tool execution will proceed.`).
 
 ## Event Taxonomy
 

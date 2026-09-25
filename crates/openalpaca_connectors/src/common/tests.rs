@@ -91,10 +91,81 @@ mod confirmation {
         assert!(!prompt.contains("pending"));
     }
 
+    /// Every listener pushes the request to the back of the chat's queue and
+    /// passes the queue's length, so a prompt that arrives while two others
+    /// wait is the third — and a reply answers the oldest, not this one.
     #[test]
-    fn test_format_confirmation_prompt_queue_hint() {
+    fn a_queued_prompt_says_its_place_and_that_a_reply_answers_the_oldest_first() {
         let prompt = format_confirmation_prompt("shell_exec", &serde_json::json!({}), 3);
-        assert!(prompt.contains("(1 of 3 pending)"));
+        assert!(
+            prompt.starts_with(
+                "A tool requires your confirmation before executing \
+                 (3 of 3 pending; each /yes or /no answers the oldest first):\n"
+            ),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("1 of 3"), "{prompt}");
+    }
+
+    fn named_request(request_id: &str, tool_name: &str) -> ConfirmationRequest {
+        ConfirmationRequest {
+            tool_name: tool_name.to_string(),
+            ..make_request(request_id)
+        }
+    }
+
+    /// A reply answers the oldest prompt, which may not be the one on screen:
+    /// the acknowledgement names the tool it approved or denied, so a person
+    /// who answered the wrong one can see it.
+    #[test]
+    fn the_reply_names_the_tool_it_answered() {
+        let broker = ConfirmationBroker::new();
+        let mut first = broker.request(&named_request("req-1", "shell_exec"));
+        let mut second = broker.request(&named_request("req-2", "file_read"));
+        let pending: DashMap<u64, VecDeque<String>> = DashMap::new();
+        pending
+            .entry(5u64)
+            .or_default()
+            .extend(["req-1".to_string(), "req-2".to_string()]);
+
+        let reply = intercept_confirmation_reply("/yes", &5u64, &broker, &pending).unwrap();
+        assert_eq!(
+            reply,
+            "Approved: shell_exec. Tool execution will proceed.\n\
+             (1 more pending — reply /yes or /no)"
+        );
+        assert!(
+            first.try_recv().unwrap().approved,
+            "req-1 was the one answered"
+        );
+        assert!(second.try_recv().is_err(), "req-2 still waits");
+
+        let reply = intercept_confirmation_reply("/no", &5u64, &broker, &pending).unwrap();
+        assert_eq!(
+            reply,
+            "Denied: file_read. Tool execution has been cancelled."
+        );
+        assert!(!second.try_recv().unwrap().approved);
+    }
+
+    /// The name in the acknowledgement is the same third-party text as in the
+    /// prompt, so it is escaped the same way — on one line.
+    #[test]
+    fn the_reply_shows_hidden_characters_in_the_tool_name_escaped() {
+        let broker = ConfirmationBroker::new();
+        let _rx = broker.request(&named_request("req-1", "files\u{202e}\n__write\u{200b}"));
+        let pending: DashMap<u64, VecDeque<String>> = DashMap::new();
+        pending
+            .entry(5u64)
+            .or_default()
+            .push_back("req-1".to_string());
+
+        let reply = intercept_confirmation_reply("/y", &5u64, &broker, &pending).unwrap();
+
+        assert_eq!(
+            reply,
+            "Approved: files<U+202E><U+000A>__write<U+200B>. Tool execution will proceed."
+        );
     }
 
     #[test]
@@ -361,7 +432,8 @@ mod hidden_characters {
 
         assert_eq!(
             prompt,
-            "A tool requires your confirmation before executing (1 of 2 pending):\n\n\
+            "A tool requires your confirmation before executing \
+             (2 of 2 pending; each /yes or /no answers the oldest first):\n\n\
              Tool: shell_exec\n\
              Arguments:\n\
              {\n  \"cmd\": \"ls <U+202E>\",\n  \"cwd\": \"/tmp\"\n}\n\

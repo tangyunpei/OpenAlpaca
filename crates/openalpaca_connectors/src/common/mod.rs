@@ -79,7 +79,12 @@ const PROMPT_ARGUMENTS_BYTES: usize = 500;
 /// confirm-listed tool awaits interactive approval — the one prompt Telegram,
 /// Discord and iMessage all send: the tool name, the arguments cut to
 /// `PROMPT_ARGUMENTS_BYTES` (500 bytes), the `/yes` / `/no` instructions
-/// and a queue position hint.
+/// and, when others wait before it, its place in the chat's queue.
+///
+/// `queue_len` is the queue's length with this request just pushed to its
+/// back, so it is also this prompt's place. A reply answers the **oldest**
+/// waiting request, not the prompt last on screen, so a queued prompt says
+/// both: `(2 of 2 pending; each /yes or /no answers the oldest first)`.
 ///
 /// The name and the arguments are what the person approves, and both come
 /// from outside OpenAlpaca (an MCP `<server>__<tool>` or plugin
@@ -112,7 +117,7 @@ pub fn format_confirmation_prompt(
         .unwrap_or_default();
 
     let queue_info = if queue_len > 1 {
-        format!(" (1 of {} pending)", queue_len)
+        format!(" ({queue_len} of {queue_len} pending; each /yes or /no answers the oldest first)")
     } else {
         String::new()
     };
@@ -133,6 +138,15 @@ pub fn format_confirmation_prompt(
 /// request for the conversation (FIFO), delivers the decision to the
 /// [`ConfirmationBroker`](openalpaca_core::security::confirmation::ConfirmationBroker),
 /// and returns the acknowledgment text to send back to the chat.
+///
+/// The oldest request need not be the prompt last on screen, so the
+/// acknowledgement names the tool it answered (`Approved: shell_exec. …`),
+/// escaped on one line like the prompt's name
+/// (`openalpaca_core::utils::text::escape_hidden_line`). It carries no
+/// notice line: it repeats a name the prompt already showed and counted.
+/// When the broker no longer holds the request (it timed out), the
+/// acknowledgement names no tool. Which request a reply answers is
+/// unchanged: the oldest, by request id.
 ///
 /// Returns `None` when the text is not a confirmation command or the
 /// conversation has no pending confirmation — the caller should fall
@@ -158,22 +172,26 @@ where
 
     let approved = matches!(text_lower.as_str(), "/yes" | "/y");
     let remaining = pending.get(key).map(|q| q.len()).unwrap_or(0);
-    let reply = if approved {
-        if remaining > 0 {
+    let tool = broker
+        .pending_requests()
+        .into_iter()
+        .find(|request| request.request_id == request_id)
+        .map(|request| {
             format!(
-                "Approved. Tool execution will proceed.\n({} more pending — reply /yes or /no)",
-                remaining
+                ": {}",
+                openalpaca_core::utils::text::escape_hidden_line(&request.tool_name).text
             )
-        } else {
-            "Approved. Tool execution will proceed.".to_string()
-        }
-    } else if remaining > 0 {
-        format!(
-            "Denied. Tool execution has been cancelled.\n({} more pending — reply /yes or /no)",
-            remaining
-        )
+        })
+        .unwrap_or_default();
+    let answered = if approved {
+        format!("Approved{tool}. Tool execution will proceed.")
     } else {
-        "Denied. Tool execution has been cancelled.".to_string()
+        format!("Denied{tool}. Tool execution has been cancelled.")
+    };
+    let reply = if remaining > 0 {
+        format!("{answered}\n({remaining} more pending — reply /yes or /no)")
+    } else {
+        answered
     };
 
     match broker.respond(
