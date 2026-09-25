@@ -432,8 +432,10 @@ without it.
 
 **"Notes used in this answer."** When the daemon handed the model any of your
 memory notes for a turn, a muted note under the answer lists them by title,
-each marked `recalled` (found for the question automatically), `pinned`, or
-`looked up` (the model searched or read it itself), and each opens in the
+each marked `recalled` (found for the question automatically), `pinned`,
+`listed` (found automatically too, but named to the model in one line without
+its text, for it to open if it needed it), or `looked up` (the model searched
+or read it itself), and each opens in the
 Memory view — so a note that steered an answer the wrong way is one click from
 being corrected or forgotten. It comes from the turn's `done` frame
 (`memory_used`) and, like the skipped-attachment note, it is **live only**:

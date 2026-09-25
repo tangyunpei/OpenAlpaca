@@ -1711,8 +1711,9 @@ lane_key, preview, per_call, raised_at }] }`, oldest first (a restored card show
    - `done` — `{ content, model, tokens_in, tokens_out, duration_ms, attachments_used?, attachments_skipped?, memory_used?, delegation? }`.
      `content` is the **full** text (not the tail) — prefer it over the accumulated
      deltas as the source of truth. `attachments_used`, `attachments_skipped`,
-     `memory_used` (`[{ id, revision, reason: "pinned" | "recall" | "tool" }]`, the
-     memory notes the turn delivered — live only, never served by the history route)
+     `memory_used` (`[{ id, revision, reason: "pinned" | "recall" | "index" | "tool" }]`,
+     the memory notes the turn delivered — `index` one the recall only listed, by
+     title, without its text — live only, never served by the history route)
      and `delegation` are omitted entirely when absent
      (`skip_serializing_if = "Option::is_none"`), and the SSE payload strips the serde
      `"event"` tag (`done_event_data`). `attachments_skipped: [{ id, reason }]` (U3) is

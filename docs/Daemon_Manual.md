@@ -630,11 +630,20 @@ while the other kinds default to the project. Only a real user owns memory: a
 unlinked connector identity have no partition, recall nothing and write nothing.
 
 Every turn of the main loop and of a file-based skill gets an automatic recall
-— pinned notes, then the notes a keyword search of the message finds, at most
-8 notes and 8 KiB, each re-read and re-hashed before it is sent, delivered as
+— pinned notes, then the notes a keyword search of the message finds, each
+re-read and re-hashed before it is sent, all within 8 KiB and delivered as
 quoted reference data rather than instructions — and the turn's `done` frame
-names what it delivered (`memory_used`, below). A workflow's lead gets the same
-recall once at its start. Search is literal: every term of three or more
+names what it delivered (`memory_used`, below). `[orchestrator.memory]
+recall_mode` says how the matches are delivered. `index` (the default) sends
+the top 2 as excerpts and lists up to 8 more one line each — `<id> <date>
+<kind> “<title>” — <reason>`, the date and the reason as a `memory_search`
+index row writes them — under the line `More notes that may be relevant
+(read with memory_read):`, so the model opens only the ones it needs; a
+listed note is reported with reason `index`. `excerpts` sends up to 8 notes,
+pinned ones included, each as an excerpt. A match too large to excerpt within
+the budget is listed instead. The key is read on every turn, so a reloaded
+`daemon.toml` applies to the next one. A workflow's lead gets the same recall,
+in the same mode, once at its start. Search is literal: every term of three or more
 characters is matched as a whole word and as a substring, a one- or
 two-character query (a short Chinese word) goes through a bounded scan, and
 nothing asks a model.
@@ -818,7 +827,7 @@ addressed. Bodies and queries are closed objects — an unknown key is a `400`.
 | `GET /v1/memories/timeline` | `memory_timeline`: around exactly one of `anchor` (a note id), `q` (its first hit) or `date` (RFC 3339 or `YYYY-MM-DD`), the nearest `before` and `after` notes (0–20, default 5), in date order. Answers `{anchor, results, count, index_state}` — `anchor` is `{id}`, `{date}` or null when `q` matched nothing — with index rows whose `reason` is `before`, `anchor` or `after`, superseded, archived and ended notes marked by `status`, candidates never listed. An unknown anchor is `404`; no anchor, two, or a side over 20 is `400`. |
 | `GET /v1/memories/recently-learned` | The extractor's `extracted_user` notes that recall would use, newest first, each with `supersedes` (what it replaced) — `since` (RFC 3339, or a window like `7d`, `24h`, `30m`; default 7 days) and `limit`. A note that is not in force, loses its `fact_key` to another note, or cites a message a forget suppressed is not listed. An edit through this surface re-records a note as `user` and it leaves the list. |
 | `GET /v1/memories/suggestions` | The pending suggestions, newest first — `limit` (1–100, default 20). Each item: `id`, `revision`, `title`, `knowledge` (the suggested text), `reason`, `created_at`, `observed_at` (the cited message's time), `origin`, `scope`, `sources`, `older_count`, and `target: {id, revision, title, excerpt, origin, scope}` — the note it would replace, as read now. Where several name one note only the newest is listed, and `older_count` counts the rest. A suggestion whose note is gone or no longer in force is not listed (undo still dismisses it). Records nothing. |
-| `GET /v1/memories/recently-used` | The in-memory ring of notes delivered to a model since the daemon started (`limit`, default 50, max 200): `{id, revision, reason, delivered_at, lane_key, task_id}`. Cleared at restart. |
+| `GET /v1/memories/recently-used` | The in-memory ring of notes delivered to a model since the daemon started (`limit`, default 50, max 200): `{id, revision, reason, delivered_at, lane_key, task_id}`, `reason` as in `memory_used` — a note the recall only listed is recorded `index`, not as delivered. Cleared at restart. |
 | `GET /v1/memories/doctor` | The read-only report: every partition with its health, counts, malformed files, duplicate ids and conflicts, other owners' partitions as orphans, and stale/abandoned/orphaned move snapshots. Changes nothing. |
 | `POST /v1/memories` | Save a note: `title`, `body`, `kind`, and optionally `scope`, `aliases`, `tags`, `fact_key`, `sources` (`[{type: message\|task, id}]`, verified against the database), `valid_from`, `valid_to`, and `supersedes: {id, expected_revision}` to replace a note. `201` with the `memory_store` result and `ETag`; an exact duplicate is `200` with the existing id and `dedup: existing`; a moved `supersedes` target is `409`. |
 | `POST /v1/memories/forget` | Forget several: `{targets: [{id, expected_revision}], reason?}`, per-id status plus what is retained. |
@@ -984,7 +993,7 @@ The `done` payload:
 | `duration_ms` | yes | Wall-clock time of the turn. |
 | `attachments_used` | no | Ids of the turn's files that the model's request really carried. |
 | `attachments_skipped` | no | `[{"id", "reason"}]` — the turn's files that did not reach the model, each with a sentence saying why. |
-| `memory_used` | no | `[{"id", "revision", "reason"}]` — the memory notes the turn delivered to the model: `reason` is `pinned` or `recall` for the automatic per-turn recall, `tool` for a note the model fetched itself through `memory_search`, `memory_timeline` or `memory_read` (an index row counts: its title reached the model). Live only: nothing persists it, and `GET /v1/chat/history` does not serve it. |
+| `memory_used` | no | `[{"id", "revision", "reason"}]` — the memory notes the turn delivered to the model: `reason` is `pinned` or `recall` for the automatic per-turn recall, `index` for a note it only listed in its index block (`recall_mode = "index"`: the line reached the model, the body did not), `tool` for a note the model fetched itself through `memory_search`, `memory_timeline` or `memory_read` (an index row counts: its title reached the model). Live only: nothing persists it, and `GET /v1/chat/history` does not serve it. |
 | `delegation` | no | `{"task_id", "title"}` when the turn started a background workflow, so a client can track the run without parsing prose. |
 
 Optional fields are omitted when they are empty.
