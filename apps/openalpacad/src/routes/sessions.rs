@@ -840,12 +840,12 @@ pub(crate) async fn forget_conversation_summaries(
         Ok(Ok(0)) | Ok(Err(openalpaca_core::memory::service::MemoryError::NoOwner(_))) => {}
         Ok(Ok(n)) => tracing::info!(
             forgotten = n,
-            "forgot the conversation summaries of a deleted conversation"
+            "forgot the episode notes of a deleted conversation"
         ),
         Ok(Err(e)) => tracing::warn!(
-            "the conversation is gone, but its summaries could not be forgotten: {e}"
+            "the conversation is gone, but its episode notes could not be forgotten: {e}"
         ),
-        Err(e) => tracing::warn!("forgetting a deleted conversation's summaries failed: {e}"),
+        Err(e) => tracing::warn!("forgetting a deleted conversation's episode notes failed: {e}"),
     }
 }
 

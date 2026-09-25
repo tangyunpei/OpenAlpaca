@@ -762,8 +762,8 @@ fn plan_entries(root: &str, plan: &PurgePlan) -> Vec<serde_json::Value> {
         plan_entry(
             "memory/",
             "this project's memory notes — files, not rows, so a purge of the database \
-             cannot reach them; only the summaries of the conversations it deletes go with \
-             those conversations"
+             cannot reach them; only the episode notes summarising the conversations it \
+             deletes go with those conversations"
                 .to_string(),
             "yours — never swept",
             "keep",

@@ -1742,7 +1742,7 @@ async fn a_purge_forgets_the_summaries_of_the_conversations_it_deletes() {
         entry(&body, "memory/").unwrap()["holds"]
             .as_str()
             .unwrap()
-            .contains("summaries of the conversations it deletes"),
+            .contains("episode notes summarising the conversations it"),
         "{body}"
     );
     assert_eq!(

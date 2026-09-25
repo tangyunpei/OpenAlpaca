@@ -1674,7 +1674,7 @@ impl LearningQueue {
                     input_tokens = report.input_tokens,
                     output_tokens = report.output_tokens,
                     stopped = ?report.stopped,
-                    "conversation summary finished"
+                    "memory learning: episode notes finished"
                 );
             };
         }
@@ -1722,7 +1722,7 @@ impl LearningQueue {
                 Err(e) => {
                     tracing::warn!(
                         session_id,
-                        "conversation summary: the window could not be read: {e:#}"
+                        "memory learning: an episode note's window could not be read: {e:#}"
                     );
                     report.stopped = Some(FlushStop::StoreError);
                     return report;
@@ -1820,14 +1820,17 @@ impl LearningQueue {
                     return report;
                 }
                 Ok(Err(e)) => {
-                    tracing::warn!(session_id, "conversation summary: the lookup failed: {e}");
+                    tracing::warn!(
+                        session_id,
+                        "memory learning: an episode note's lookup failed: {e}"
+                    );
                     report.stopped = Some(FlushStop::StoreError);
                     return report;
                 }
                 Err(e) => {
                     tracing::warn!(
                         session_id,
-                        "conversation summary: the lookup task failed: {e}"
+                        "memory learning: an episode note's lookup task failed: {e}"
                     );
                     report.stopped = Some(FlushStop::StoreError);
                     return report;
@@ -1966,7 +1969,10 @@ impl LearningQueue {
                     return report;
                 }
                 StoreEnd::Held(why) => {
-                    tracing::warn!(session_id, "conversation summary holds the window: {why}");
+                    tracing::warn!(
+                        session_id,
+                        "memory learning holds an episode note's window: {why}"
+                    );
                     report.stopped = Some(FlushStop::StoreError);
                     return report;
                 }
@@ -2000,7 +2006,7 @@ impl LearningQueue {
             tracing::info!(
                 session_id,
                 attempts,
-                "conversation summary: the model's answer was unusable, retrying later: {error}"
+                "memory learning: the model's episode note was unusable, retrying later: {error}"
             );
             report.stopped = Some(FlushStop::BadOutput);
             return false;
@@ -2011,7 +2017,7 @@ impl LearningQueue {
             first_row = first,
             last_row = chunk.through,
             attempts,
-            "conversation summary skipped rows {first}..={} after {attempts} unusable answers: {error}",
+            "memory learning skipped rows {first}..={} for an episode note after {attempts} unusable answers: {error}",
             chunk.through
         );
         self.advance_episode(session_id, chunk.through, expected)
@@ -2034,7 +2040,7 @@ impl LearningQueue {
         {
             tracing::warn!(
                 session_id,
-                "conversation summary: the episode cursor did not move: {e:#}"
+                "memory learning: the episode cursor did not move: {e:#}"
             );
         }
     }
