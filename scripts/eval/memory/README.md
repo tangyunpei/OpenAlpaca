@@ -235,7 +235,7 @@ Optional variables:
 | `OPENALPACA_MEMORY_EVAL_SESSIONS` | L, L0, L-S: feed only the first N corpus sessions — a smoke run. Recorded (`conditions.learning.session_limit`). |
 | `OPENALPACA_MEMORY_EVAL_LEARN_FROM` | With `SYSTEM=L`: **replay** the learning phase of the L run whose scratch directory this names. See below. |
 | `OPENALPACA_MEMORY_EVAL_REJUDGE` | An archived report to **re-judge**; `SYSTEM` is then not needed, and neither is a store. See below. |
-| `OPENALPACA_MEMORY_EVAL_RECALL_MODE` | `index` or `excerpts`: the `[orchestrator.memory] recall_mode` every system of the run recalls in (design 09 §13.2) — D, E, the learning systems' questions, a replay. Unset: the config's default, `index`. Any other value refuses the run before any model call, naming the two. Recorded (`conditions.recall_mode`). |
+| `OPENALPACA_MEMORY_EVAL_RECALL_MODE` | `index` or `excerpts`: the `[orchestrator.memory] recall_mode` of the run (design 09 §13.2). D, E and the learning systems' questions recall in it; a replay (no questions) or a `none` run (no memory service) records it only. Unset: the config's default, `index`. Any other value refuses the run before any model call, naming the two. Recorded (`conditions.recall_mode`). |
 
 The data-validation and harness unit tests run without any of this:
 
