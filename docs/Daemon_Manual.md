@@ -728,9 +728,9 @@ The note is titled `Conversation on <YYYY-MM-DD>: <topic>`, the date its last
 turn's; its `## Knowledge` holds at most 1 KiB of prose — `Discussed: …`,
 `Decided: …`, `Left open: …` — in the conversation's language; `observed_at`
 is its last turn's time, and it cites the conversation's messages (all of
-them up to eight, else eight spread from the first to the last). It has no
-`fact_key` and replaces nothing. It is the assistant's own wording, so its
-origin is `extracted_other`, but it is **active**: `memory_search`,
+them up to eight, else eight spread from the first to the last). It is
+written with no `fact_key` and replaces nothing. It is the assistant's own
+wording, so its origin is `extracted_other`, but it is **active**: `memory_search`,
 `memory_timeline`, `memory_list`, the routes below and the Memory view find
 it. **Automatic recall never delivers one** — not as an excerpt, not in the
 index block, not to a workflow's lead — and learning never shows one to the
@@ -738,8 +738,11 @@ extractor: it reaches a model only when the model or you look for it (a note
 you pinned is delivered, as every pinned note is). An episode you saved
 yourself, or one learned from what you said, is an ordinary note and is
 recalled as any other. The assistant's own edit or archive of an episode note
-(`memory_update`) leaves it an episode note; an edit you make makes it your
-note, recalled as any other.
+(`memory_update`) leaves it an episode note, and a `fact_key` that edit adds
+counts for nothing in learning: the key is not offered to the extractor, and
+something you say later under it is learned as usual rather than proposed as a
+replacement for the episode note. An edit you make makes it your note,
+recalled as any other.
 
 Forgetting an episode note — the Memory view, `/forget`, `memory_forget`,
 `DELETE /v1/memories/{id}` — forgets that note and nothing else: unlike any
