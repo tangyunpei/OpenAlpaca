@@ -3088,6 +3088,105 @@ async fn a_lead_run_is_primed_with_its_memory_once_and_its_profile_once() {
     assert_eq!(ring[0].lane_key.as_deref(), Some("user-1:cli"));
 }
 
+/// The lead's opening memory message on `scene` for "write the status
+/// reports", through the real run under `config`.
+async fn lead_opening_memory(scene: &LeadMemoryScene, config: DaemonConfig) -> String {
+    let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
+    let daemon_config = Arc::new(ArcSwap::from_pointee(config));
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "write the status reports",
+        scripted_router(provider.clone()),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        Some(scene.service.clone()),
+        None,
+        "task-1",
+        LEAD_OWNER,
+        "user-1:cli",
+        "cli",
+        &daemon_config,
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+    )
+    .await;
+    assert!(result.success);
+    let seen = provider.seen_messages.lock().unwrap();
+    let message = &seen[0][1];
+    assert!(
+        message.content.starts_with("<memory_context>\n"),
+        "{}",
+        message.content
+    );
+    message.content.clone()
+}
+
+/// End to end, the lead reads `[orchestrator.memory] recall_mode` from the
+/// daemon config it is started with (L10b review, finding 3): three notes
+/// match, so the two modes differ — the default `index` primes the run with
+/// the index block's header, `excerpts` without it.
+#[tokio::test]
+async fn a_lead_run_is_primed_in_the_configured_recall_mode() {
+    use crate::memory::service::{INDEX_BLOCK_HEADER, StoreInput};
+    use openalpaca_storage::memory_files::NoteKind;
+
+    let scene = lead_memory_scene();
+    let owner = scene
+        .service
+        .context(
+            LEAD_OWNER,
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    for (title, body) in [
+        (
+            "Status report format",
+            "# Status report format\n\nStatus reports lead with the blockers.\n",
+        ),
+        (
+            "Status report audience",
+            "# Status report audience\n\nStatus reports go to the whole team.\n",
+        ),
+    ] {
+        scene
+            .service
+            .store(
+                &owner,
+                StoreInput {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: Some(NoteKind::Preference),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    let index = lead_opening_memory(&scene, DaemonConfig::default()).await;
+    assert_eq!(index.matches(INDEX_BLOCK_HEADER).count(), 1, "{index}");
+
+    let mut config = DaemonConfig::default();
+    config.orchestrator.memory.recall_mode = RecallMode::Excerpts;
+    let excerpts = lead_opening_memory(&scene, config).await;
+    assert!(!excerpts.contains(INDEX_BLOCK_HEADER), "{excerpts}");
+    assert_eq!(excerpts.matches("[/memory]\n").count(), 3, "{excerpts}");
+}
+
 // ── Design 09 §6.2: a subagent's notes reach *recently used* ──────────
 
 /// A provider for a lead that spawns one worker, and a worker that searches
