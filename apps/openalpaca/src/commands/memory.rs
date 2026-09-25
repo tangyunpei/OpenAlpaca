@@ -8,6 +8,7 @@
 //! openalpaca memory add     --kind K --title T [--scope S] [--alias A]... [--tag T]... [--fact-key KEY]
 //!                           [--supersedes <id>] [BODY | -]       body: the argument, stdin ("-"), or $EDITOR
 //! openalpaca memory edit    <id>                                  GET → $EDITOR → POST with the fetched revision
+//! openalpaca memory suggestions [--limit N]
 //! openalpaca memory confirm <id>
 //! openalpaca memory undo    <id>
 //! openalpaca memory forget  <id>... [--yes]
@@ -29,6 +30,13 @@
 //! these verbs report, never a silent overwrite. On `edit`'s `409` the
 //! edited text is **kept** in a named temp file, because an editor session
 //! is work.
+//!
+//! **Suggestions** (Learning v2, design 09 §3.5): `suggestions` lists the
+//! learned changes to notes you saved that wait for you; `confirm` of one
+//! also fetches the note it replaces and sends that note's revision as
+//! `target_revision`, so a note edited since is a `409`, never retired
+//! unseen; `undo` of one dismisses it (*Keep mine*) — a withdrawal that
+//! forgets nothing else you said.
 //!
 //! `doctor --repair` and `adopt` are local: they take the daemon's singleton
 //! lock the way `config reset --factory` does and refuse while a daemon
@@ -216,14 +224,25 @@ pub enum MemoryCommands {
         #[command(flatten)]
         at: ScopeArgs,
     },
-    /// Confirm a candidate: it becomes active, and yours
+    /// List pending suggestions: learned changes to notes you saved, waiting for you
+    Suggestions {
+        /// Maximum number of suggestions (1-100)
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        /// Output format
+        #[arg(long, value_enum, default_value = "table")]
+        format: OutputFormat,
+        #[command(flatten)]
+        at: ScopeArgs,
+    },
+    /// Confirm a candidate: it becomes active, and yours (a suggestion replaces the note it names)
     Confirm {
         /// The note id (a unique prefix will do)
         id: String,
         #[command(flatten)]
         at: ScopeArgs,
     },
-    /// Undo a recently learned note (one the extractor wrote from your words)
+    /// Undo a recently learned note, or dismiss a suggestion and keep your note
     Undo {
         /// The note id (a unique prefix will do)
         id: String,
@@ -484,30 +503,39 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 }
             }
         }
+        MemoryCommands::Suggestions { limit, format, at } => {
+            let api = Api::connect(&at)?;
+            let page = api
+                .get(&format!("/v1/memories/suggestions?limit={limit}"))
+                .await?;
+            match format {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&page)?),
+                OutputFormat::Table => {
+                    let items = page["items"].as_array().cloned().unwrap_or_default();
+                    if items.is_empty() {
+                        println!("{}", "No suggestions waiting.".dimmed());
+                    }
+                    for item in &items {
+                        println!("{}", suggestion_line(item));
+                    }
+                    if !items.is_empty() {
+                        println!(
+                            "{}",
+                            "Replace: openalpaca memory confirm <id>   Keep yours: openalpaca memory undo <id>"
+                                .dimmed()
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
         MemoryCommands::Confirm { id, at } => {
             let api = Api::connect(&at)?;
             let id = api.resolve_id(&id).await?;
-            let current = api.get(&format!("/v1/memories/{id}")).await?;
-            let revision = revision_of(&current)?;
-            let response = api
-                .send(
-                    Method::POST,
-                    &format!("/v1/memories/{id}"),
-                    Some(&revision),
-                    Some(&json!({ "action": "confirm" })),
-                )
-                .await?;
-            if response.status().as_u16() != 200 {
-                return Err(error_from_response(response).await);
+            let confirmed = confirm_note(&api, id).await?;
+            for line in confirmed.lines(id) {
+                println!("{line}");
             }
-            let out: Value = response.json().await?;
-            println!(
-                "{} Note {} confirmed: {} (revision {}).",
-                "✓".green(),
-                id,
-                out["status"].as_str().unwrap_or("active"),
-                short(out["revision"].as_str().unwrap_or(""))
-            );
             Ok(())
         }
         MemoryCommands::Undo { id, at } => {
@@ -526,12 +554,8 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             if response.status().as_u16() != 200 {
                 return Err(error_from_response(response).await);
             }
-            println!(
-                "{} Note {} ({}) forgotten.",
-                "✓".green(),
-                id,
-                current["title"].as_str().unwrap_or("")
-            );
+            let out: Value = response.json().await?;
+            println!("{} {}", "✓".green(), undo_message(id, &current, &out));
             Ok(())
         }
         MemoryCommands::Forget { ids, yes, at } => {
@@ -730,6 +754,157 @@ impl Api {
                     listed.join("\n")
                 )
             }
+        }
+    }
+}
+
+// ── suggestions, confirm, undo ───────────────────────────────────
+
+/// Whose note a suggestion would replace, in the owner's words.
+fn target_origin_label(origin: &str) -> &str {
+    match origin {
+        "user" => "saved by you",
+        "extracted_user" => "learned",
+        "external" => "edited by hand",
+        "imported" => "imported",
+        "extracted_other" => "inferred",
+        other => other,
+    }
+}
+
+/// One `openalpaca memory suggestions` line (design 09 §3.5):
+/// `<id8>  replace “X” (saved by you) → “B”  from your words, 2026-09-24 — <reason>`.
+pub(crate) fn suggestion_line(item: &Value) -> String {
+    let id: String = item["id"].as_str().unwrap_or("").chars().take(8).collect();
+    let target = &item["target"];
+    let whence = match item["origin"].as_str() {
+        Some("extracted_user") => "from your words",
+        Some("extracted_other") => "inferred from the conversation",
+        Some(other) => other,
+        None => "",
+    };
+    let date: String = item["observed_at"]
+        .as_str()
+        .or(item["created_at"].as_str())
+        .unwrap_or("")
+        .chars()
+        .take(10)
+        .collect();
+    let mut line = format!(
+        "{id}  replace “{}” ({}) → “{}”  {whence}, {date}",
+        target["title"].as_str().unwrap_or(""),
+        target_origin_label(target["origin"].as_str().unwrap_or("")),
+        item["title"].as_str().unwrap_or(""),
+    );
+    if let Some(reason) = item["reason"].as_str() {
+        line.push_str(&format!(" — {reason}"));
+    }
+    match item["older_count"].as_u64() {
+        Some(0) | None => {}
+        Some(n) => line.push_str(&format!("  (+{n} older)")),
+    }
+    line
+}
+
+/// What `confirm` did: the daemon's answer and, for a suggestion, the
+/// title of the note it replaced.
+#[derive(Debug)]
+pub(crate) struct Confirmed {
+    pub out: Value,
+    pub replaced_title: Option<String>,
+}
+
+impl Confirmed {
+    /// What `openalpaca memory confirm` prints.
+    pub(crate) fn lines(&self, id: NoteId) -> Vec<String> {
+        let revision = short(self.out["revision"].as_str().unwrap_or(""));
+        let mut lines = vec![match &self.replaced_title {
+            Some(title) => format!(
+                "{} Note {id} confirmed (revision {revision}): it now replaces “{title}”, which is kept as history.",
+                "✓".green()
+            ),
+            None => format!(
+                "{} Note {id} confirmed: {} (revision {revision}).",
+                "✓".green(),
+                self.out["status"].as_str().unwrap_or("active"),
+            ),
+        }];
+        let dismissed: Vec<String> = self.out["dismissed"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|d| d.chars().take(8).collect())
+            .collect();
+        if !dismissed.is_empty() {
+            lines.push(format!(
+                "  Dismissed {} other suggestion(s) for the same note: {}",
+                dismissed.len(),
+                dismissed.join(", ")
+            ));
+        }
+        lines
+    }
+}
+
+/// `confirm` (design 09 §3.5, S5): the candidate's revision as `If-Match`
+/// and, when it names a note it would replace, that note's current revision
+/// as `target_revision` — fetched now, so a note edited since the listing
+/// is a visible `409`, never retired unseen.
+pub(crate) async fn confirm_note(api: &Api, id: NoteId) -> Result<Confirmed> {
+    let current = api.get(&format!("/v1/memories/{id}")).await?;
+    let revision = revision_of(&current)?;
+    let mut body = json!({ "action": "confirm" });
+    let mut replaced_title = None;
+    if let Some(target) = current["supersedes"]
+        .as_array()
+        .and_then(|t| t.first())
+        .and_then(Value::as_str)
+    {
+        let target = api.get(&format!("/v1/memories/{target}")).await?;
+        body["target_revision"] = Value::String(revision_of(&target)?);
+        replaced_title = target["title"].as_str().map(str::to_string);
+    }
+    let response = api
+        .send(
+            Method::POST,
+            &format!("/v1/memories/{id}"),
+            Some(&revision),
+            Some(&body),
+        )
+        .await?;
+    if response.status().as_u16() != 200 {
+        return Err(error_from_response(response).await);
+    }
+    let out: Value = response
+        .json()
+        .await
+        .context("POST /v1/memories/{id}: unreadable body")?;
+    Ok(Confirmed {
+        out,
+        replaced_title,
+    })
+}
+
+/// What `undo` says (design 09 §3.3): a suggestion dismissed with the
+/// owner's note kept, or a learned note withdrawn and what came back.
+pub(crate) fn undo_message(id: NoteId, before: &Value, out: &Value) -> String {
+    let title = before["title"].as_str().unwrap_or("");
+    let names_a_note = before["supersedes"]
+        .as_array()
+        .is_some_and(|t| !t.is_empty());
+    if before["status"] == "candidate" {
+        if names_a_note {
+            format!("Suggestion {id} ({title}) dismissed; your note is kept as it is.")
+        } else {
+            format!("Candidate {id} ({title}) dismissed.")
+        }
+    } else {
+        let restored = out["restored"].as_array().map(Vec::len).unwrap_or(0);
+        if restored > 0 {
+            format!("Note {id} ({title}) undone; the note it replaced is back.")
+        } else {
+            format!("Note {id} ({title}) undone.")
         }
     }
 }

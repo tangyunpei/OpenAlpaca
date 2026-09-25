@@ -193,6 +193,7 @@ fn update_body(action: &str, body: Option<&str>) -> UpdateMemoryBody {
             ..PatchBody::default()
         }),
         reason: None,
+        target_revision: None,
         expected_revision: None,
     }
 }
@@ -1110,4 +1111,196 @@ async fn the_doctor_and_recently_used_answer_their_shapes() {
     let (_, json) = split(f.api.recently_used(RecentlyUsedQuery { limit: Some(1) })).await;
     assert_eq!(json["items"].as_array().unwrap().len(), 1);
     assert_eq!(json["items"][0]["id"], editor.to_string());
+}
+
+// ── Suggestions (Learning v2, design 09 §3.5) ─────────────────────────
+
+impl Fixture {
+    /// What learning writes for a change in the user's words to a note the
+    /// user saved: a suggestion naming it (design 09 §2.5, S2).
+    fn suggestion(&self, target: NoteId, target_revision: &str, knowledge: &str) -> NoteId {
+        let ctx = self
+            .api
+            .service
+            .context(
+                OWNER,
+                WorkspaceHint::None,
+                Surface::Extraction,
+                Capabilities::EXTRACTION,
+                Attribution::default(),
+            )
+            .unwrap();
+        let out = self
+            .api
+            .service
+            .store(
+                &ctx,
+                StoreInput {
+                    title: "Commute".into(),
+                    body: format!(
+                        "# Commute\n\n## Knowledge\n{knowledge}\n\n## Evidence and limits\nFrom what you said on 2026-09-24. Replaces “Commute” (saved by you): The user said so.\n"
+                    ),
+                    kind: Some(NoteKind::Fact),
+                    supersedes: Some((target, target_revision.to_string())),
+                    replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                    provenance: Some(ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(out.suggestion);
+        out.id
+    }
+
+    async fn confirm(
+        &self,
+        id: NoteId,
+        revision: &str,
+        target_revision: Option<&str>,
+    ) -> (StatusCode, serde_json::Value, Option<String>) {
+        let mut body = update_body("confirm", None);
+        body.target_revision = target_revision.map(str::to_string);
+        let response = self
+            .api
+            .update(&Self::with_if_match(revision), &id.to_string(), body)
+            .await;
+        let etag = etag_of(&response);
+        let (status, json) = split(response).await;
+        (status, json, etag)
+    }
+
+    async fn revision_of(&self, id: NoteId) -> String {
+        let (status, json) = split(
+            self.api
+                .read(
+                    &Self::headers(),
+                    &id.to_string(),
+                    ReadMemoryQuery::default(),
+                )
+                .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        json["revision"].as_str().unwrap().to_string()
+    }
+}
+
+/// `GET /v1/memories/suggestions` lists the pending suggestion with both
+/// texts and its target; `confirm` without `target_revision` is `400`, with
+/// a target that moved is `409` carrying the target's revision as `ETag`,
+/// with the current one `200` naming what it replaced and dismissed; and a
+/// `target_revision` on any other action is `400`.
+#[tokio::test]
+async fn suggestions_are_listed_and_a_confirm_binds_the_target_revision() {
+    let f = Fixture::new();
+    let (x, x_rev) = f
+        .create("Commute", "# Commute\n\n## Knowledge\nBus.\n", "fact")
+        .await;
+    let first = f.suggestion(x, &x_rev, "Bike.");
+    let second = f.suggestion(x, &x_rev, "A bicycle.");
+
+    let (status, json) = split(
+        f.api
+            .suggestions(&Fixture::headers(), SuggestionsQuery::default())
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "one per target: {json}");
+    assert_eq!(items[0]["older_count"], 1);
+    assert_eq!(items[0]["origin"], "extracted_user");
+    assert_eq!(items[0]["reason"], "The user said so.");
+    assert_eq!(items[0]["target"]["id"], x.to_string());
+    assert_eq!(items[0]["target"]["revision"], x_rev.as_str());
+    assert_eq!(items[0]["target"]["excerpt"], "Bus.");
+    assert_eq!(items[0]["target"]["origin"], "user");
+    let (status, json) = split(
+        f.api
+            .suggestions(&Fixture::headers(), SuggestionsQuery { limit: Some(101) })
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+
+    let first_rev = f.revision_of(first).await;
+    let (status, json, _) = f.confirm(first, &first_rev, None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(code(&json), "MEMORY_INVALID_INPUT");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("target_revision")
+    );
+
+    let mut archive = update_body("archive", None);
+    archive.target_revision = Some(x_rev.clone());
+    let (status, json) = split(
+        f.api
+            .update(
+                &Fixture::with_if_match(&first_rev),
+                &first.to_string(),
+                archive,
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+
+    // The target moves: its new revision comes back as `ETag`.
+    let (status, edited) = split(
+        f.api
+            .update(
+                &Fixture::with_if_match(&x_rev),
+                &x.to_string(),
+                update_body("edit", Some("# Commute\n\n## Knowledge\nBus, line 42.\n")),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    let moved = edited["revision"].as_str().unwrap().to_string();
+    let (status, json, etag) = f.confirm(first, &first_rev, Some(&x_rev)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(code(&json), "MEMORY_REVISION_CONFLICT");
+    assert_eq!(etag.as_deref(), Some(moved.as_str()));
+
+    let (status, json, _) = f.confirm(first, &first_rev, Some(&moved)).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["status"], "active");
+    assert_eq!(json["superseded"], serde_json::json!([x.to_string()]));
+    assert_eq!(json["dismissed"], serde_json::json!([second.to_string()]));
+    let (_, json) = split(
+        f.api
+            .suggestions(&Fixture::headers(), SuggestionsQuery::default())
+            .await,
+    )
+    .await;
+    assert_eq!(json["items"], serde_json::json!([]));
+}
+
+/// Design 09 §3.3: `undo` dismisses a candidate of any origin — *Keep
+/// mine* — as a withdrawal, and the note it named stays exactly as it was.
+#[tokio::test]
+async fn undo_dismisses_a_candidate() {
+    let f = Fixture::new();
+    let (x, x_rev) = f.create("Commute", "# Commute\n\nBus.\n", "fact").await;
+    let suggestion = f.suggestion(x, &x_rev, "Bike.");
+    let (inferred, inferred_rev) = f.candidate("Lunch", "# Lunch\n\nnoodles\n");
+    for (id, rev) in [
+        (suggestion, f.revision_of(suggestion).await),
+        (inferred, inferred_rev),
+    ] {
+        let (status, json) = split(
+            f.api
+                .undo(&Fixture::with_if_match(&rev), &id.to_string())
+                .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["status"], "withdrawn");
+        assert_eq!(json["restored"], serde_json::json!([]));
+    }
+    assert_eq!(f.revision_of(x).await, x_rev);
 }

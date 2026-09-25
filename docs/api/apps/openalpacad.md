@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 119.
+- Total documented method/path endpoints: 120.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -87,6 +87,7 @@
 | GET | `/v1/memories/recently-learned` | `bearer` | `recently_learned_memories_handler` | - | `memories::RecentlyLearnedQuery` | `apps/openalpacad/src/routes/memories.rs` |
 | GET | `/v1/memories/recently-used` | `bearer` | `recently_used_memories_handler` | - | `memories::RecentlyUsedQuery` | `apps/openalpacad/src/routes/memories.rs` |
 | GET | `/v1/memories/search` | `bearer` | `search_memories_handler` | - | `memories::SearchMemoriesQuery` | `apps/openalpacad/src/routes/memories.rs` |
+| GET | `/v1/memories/suggestions` | `bearer` | `suggestions_memories_handler` | - | `memories::SuggestionsQuery` | `apps/openalpacad/src/routes/memories.rs` |
 | POST | `/v1/memories/sync` | `bearer` | `sync_memories_handler` | - | - | `apps/openalpacad/src/routes/memories.rs` |
 | GET | `/v1/memories/{id}` | `bearer` | `get_memory_handler` | - | `memories::ReadMemoryQuery` | `apps/openalpacad/src/routes/memories.rs` |
 | POST | `/v1/memories/{id}` | `bearer` | `update_memory_handler` | `memories::UpdateMemoryBody` | - | `apps/openalpacad/src/routes/memories.rs` |
@@ -496,6 +497,15 @@
 | `historical` | `bool` |
 | `as_of` | `Option<String>` |
 
+### `memories::SuggestionsQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/memories.rs`
+
+| Field | Type |
+|---|---|
+| `limit` | `Option<usize>` |
+
 ### `memories::UpdateMemoryBody`
 
 - Kind: `struct`
@@ -506,6 +516,7 @@
 | `action` | `String` |
 | `patch` | `Option<PatchBody>` |
 | `reason` | `Option<String>` |
+| `target_revision` | `Option<String>` |
 | `expected_revision` | `Option<serde_json::Value>` |
 
 ### `orchestrator_latency::AggregateParams`

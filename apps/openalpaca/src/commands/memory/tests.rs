@@ -613,3 +613,175 @@ fn the_list_hint_names_only_what_list_can_take() {
         "and the flag really does not exist"
     );
 }
+
+// ── Suggestions, confirm and undo (Learning v2, design 09 §3.5) ─────────
+
+const SUGGESTION: &str = "b1c2d3e4-0000-4000-8000-000000000001";
+const TARGET: &str = "a1b2c3d4-0000-4000-8000-000000000002";
+const TARGET_REV: &str = "4444444444444444444444444444444444444444444444444444444444444444";
+
+fn suggestion_read(supersedes: &[&str]) -> serde_json::Value {
+    let mut read = read_answer();
+    read["id"] = serde_json::json!(SUGGESTION);
+    read["title"] = serde_json::json!("Commute");
+    read["status"] = serde_json::json!("candidate");
+    read["origin"] = serde_json::json!("extracted_user");
+    read["supersedes"] = serde_json::json!(supersedes);
+    read
+}
+
+fn target_read() -> serde_json::Value {
+    let mut read = read_answer();
+    read["id"] = serde_json::json!(TARGET);
+    read["revision"] = serde_json::json!(TARGET_REV);
+    read["title"] = serde_json::json!("My commute");
+    read
+}
+
+fn post_body(request: &str) -> serde_json::Value {
+    let start = request.find("\r\n\r\n").unwrap() + 4;
+    serde_json::from_str(&request[start..]).unwrap()
+}
+
+#[test]
+fn the_suggestions_verb_parses() {
+    assert!(matches!(
+        parse(&["suggestions", "--limit", "5", "--global"]),
+        Ok(MemoryCommands::Suggestions {
+            limit: 5,
+            at: ScopeArgs { global: true, .. },
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse(&["suggestions"]),
+        Ok(MemoryCommands::Suggestions { limit: 20, .. })
+    ));
+}
+
+/// Design 09 §3.5's line: `<id8>  replace “X” (saved by you) → “B”  from
+/// your words, <date> — <reason>`, the older ones counted; an inferred one
+/// says so.
+#[test]
+fn a_suggestion_line_names_both_notes_whose_words_and_why() {
+    let item = serde_json::json!({
+        "id": SUGGESTION,
+        "title": "Commute",
+        "reason": "The user said they cycle now.",
+        "origin": "extracted_user",
+        "created_at": "2026-09-25T10:00:00Z",
+        "observed_at": "2026-09-24T18:02:11Z",
+        "older_count": 2,
+        "target": { "id": TARGET, "title": "My commute", "origin": "user" },
+    });
+    assert_eq!(
+        suggestion_line(&item),
+        "b1c2d3e4  replace “My commute” (saved by you) → “Commute”  from your words, 2026-09-24 — The user said they cycle now.  (+2 older)"
+    );
+    let mut inferred = item.clone();
+    inferred["origin"] = serde_json::json!("extracted_other");
+    inferred["observed_at"] = serde_json::Value::Null;
+    inferred["reason"] = serde_json::Value::Null;
+    inferred["older_count"] = serde_json::json!(0);
+    inferred["target"]["origin"] = serde_json::json!("external");
+    assert_eq!(
+        suggestion_line(&inferred),
+        "b1c2d3e4  replace “My commute” (edited by hand) → “Commute”  inferred from the conversation, 2026-09-25"
+    );
+}
+
+/// S5 from the CLI: `confirm` of a suggestion fetches the note it replaces
+/// and sends that note's current revision as `target_revision`, beside the
+/// suggestion's own as `If-Match`, and reports what it replaced and
+/// dismissed.
+#[tokio::test]
+async fn confirm_of_a_suggestion_sends_the_targets_revision() {
+    let confirmed = serde_json::json!({
+        "id": SUGGESTION,
+        "revision": NEW_REV,
+        "status": "active",
+        "superseded": [TARGET],
+        "dismissed": ["c0ffee00-0000-4000-8000-000000000003"],
+    });
+    let (addr, server) = serve(vec![
+        json_answer("200 OK", OLD_REV, &suggestion_read(&[TARGET]).to_string()),
+        json_answer("200 OK", TARGET_REV, &target_read().to_string()),
+        json_answer("200 OK", NEW_REV, &confirmed.to_string()),
+    ]);
+    let api = Api::for_tests(DaemonClient::for_tests(&format!("http://{addr}"), "token"));
+    let id = NoteId::parse(SUGGESTION).unwrap();
+    let out = confirm_note(&api, id).await.expect("the confirm runs");
+    assert_eq!(out.replaced_title.as_deref(), Some("My commute"));
+    let lines = out.lines(id);
+    assert!(lines[0].contains("now replaces “My commute”"), "{lines:?}");
+    assert!(
+        lines[1].contains("Dismissed 1 other suggestion") && lines[1].contains("c0ffee00"),
+        "{lines:?}"
+    );
+
+    let requests = server.join().expect("the server finishes");
+    assert!(requests[0].starts_with(&format!("GET /v1/memories/{SUGGESTION} ")));
+    assert!(requests[1].starts_with(&format!("GET /v1/memories/{TARGET} ")));
+    let post = &requests[2];
+    assert!(
+        post.starts_with(&format!("POST /v1/memories/{SUGGESTION} ")),
+        "{post}"
+    );
+    assert!(
+        post.to_ascii_lowercase()
+            .contains(&format!("if-match: \"{OLD_REV}\"")),
+        "{post}"
+    );
+    let body = post_body(post);
+    assert_eq!(body["action"], "confirm");
+    assert_eq!(body["target_revision"], TARGET_REV);
+}
+
+/// A candidate that names no note confirms as before: no second read, no
+/// `target_revision`.
+#[tokio::test]
+async fn confirm_of_a_plain_candidate_sends_no_target_revision() {
+    let confirmed = serde_json::json!({
+        "id": SUGGESTION,
+        "revision": NEW_REV,
+        "status": "active",
+        "superseded": [],
+        "dismissed": [],
+    });
+    let (addr, server) = serve(vec![
+        json_answer("200 OK", OLD_REV, &suggestion_read(&[]).to_string()),
+        json_answer("200 OK", NEW_REV, &confirmed.to_string()),
+    ]);
+    let api = Api::for_tests(DaemonClient::for_tests(&format!("http://{addr}"), "token"));
+    let id = NoteId::parse(SUGGESTION).unwrap();
+    let out = confirm_note(&api, id).await.expect("the confirm runs");
+    assert!(out.replaced_title.is_none());
+    assert_eq!(out.lines(id).len(), 1);
+    let requests = server.join().expect("the server finishes");
+    assert_eq!(requests.len(), 2);
+    let body = post_body(&requests[1]);
+    assert!(body.get("target_revision").is_none(), "{body}");
+}
+
+/// Design 09 §3.3: `undo` of a suggestion says the owner's note is kept;
+/// of a learned replacement, that the note it replaced is back.
+#[test]
+fn undo_says_what_a_withdrawal_did() {
+    let id = NoteId::parse(SUGGESTION).unwrap();
+    let withdrawn = serde_json::json!({ "id": SUGGESTION, "status": "withdrawn", "restored": [] });
+    assert_eq!(
+        undo_message(id, &suggestion_read(&[TARGET]), &withdrawn),
+        format!("Suggestion {SUGGESTION} (Commute) dismissed; your note is kept as it is.")
+    );
+    let mut learned = suggestion_read(&[TARGET]);
+    learned["status"] = serde_json::json!("active");
+    let back = serde_json::json!({ "id": SUGGESTION, "status": "withdrawn", "restored": [TARGET] });
+    assert_eq!(
+        undo_message(id, &learned, &back),
+        format!("Note {SUGGESTION} (Commute) undone; the note it replaced is back.")
+    );
+    assert_eq!(
+        undo_message(id, &suggestion_read(&[]), &withdrawn),
+        format!("Candidate {SUGGESTION} (Commute) dismissed.")
+    );
+}

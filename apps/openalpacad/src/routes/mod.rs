@@ -102,8 +102,8 @@ pub use memories::{
     create_memory_handler, delete_memory_handler, forget_memories_handler,
     get_memory_handler, get_memory_history_handler, list_memories_handler,
     memory_doctor_handler, recently_learned_memories_handler,
-    recently_used_memories_handler, search_memories_handler, sync_memories_handler,
-    undo_memory_handler, update_memory_handler,
+    recently_used_memories_handler, search_memories_handler, suggestions_memories_handler,
+    sync_memories_handler, undo_memory_handler, update_memory_handler,
 };
 pub use skills::{list_skills_handler, skill_health_handler};
 pub use status::status_handler;

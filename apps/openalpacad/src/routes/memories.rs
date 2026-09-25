@@ -2,7 +2,7 @@
 //! §7 *Surfaces*, §7a *`/v1/memories` and `/v1/persona/user`*; owner
 //! decisions G2 and G30; plan 3.8).
 //!
-//! Thirteen routes over one [`MemoryService`], every one under the bearer
+//! Fourteen routes over one [`MemoryService`], every one under the bearer
 //! middleware and in the shared `api_error` envelope. The owner is the
 //! daemon's `local_user_id`; the project is the `x-workspace-path` header
 //! resolved by the same marker walk a chat turn uses (absent → the global
@@ -20,6 +20,14 @@
 //! takes its targets' revisions in the body by contract, one per id; a
 //! create's `supersedes.expected_revision` is the *target's* revision.) A
 //! successful read or write answers `ETag: "<revision>"`.
+//!
+//! **Suggestions** (Learning v2, design 09 §3.5): `GET
+//! /v1/memories/suggestions` lists the pending ones; `confirm` of a
+//! suggestion takes the replaced note's revision as `target_revision` in
+//! the body — like a create's `supersedes.expected_revision`, it is the
+//! *other* note's — and answers `superseded` and `dismissed`; `undo`
+//! withdraws a learned note or dismisses any candidate (*Keep mine*),
+//! answering `status: "withdrawn"` and what came back as `restored`.
 //!
 //! Error codes (design §7a): `MEMORY_NOT_FOUND` 404, `MEMORY_REVISION_CONFLICT`
 //! 409, `MEMORY_QUARANTINED` 409, `MEMORY_NOT_UNDOABLE` 409,
@@ -95,6 +103,14 @@ pub struct SearchMemoriesQuery {
 pub struct RecentlyLearnedQuery {
     /// RFC 3339, or a window such as `7d`, `24h`, `30m`; default 7 days.
     pub since: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// `GET /v1/memories/suggestions` (design 09 §3.5).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuggestionsQuery {
+    /// Default 20, at most 100.
     pub limit: Option<usize>,
 }
 
@@ -187,6 +203,10 @@ pub struct UpdateMemoryBody {
     pub action: String,
     pub patch: Option<PatchBody>,
     pub reason: Option<String>,
+    /// With `confirm` only: the revision of the note a suggestion replaces,
+    /// as the caller last saw it (design 09 §3.2, S5) — required for a
+    /// suggestion, so a note edited since is a `409`, never retired unseen.
+    pub target_revision: Option<String>,
     /// Refused: the revision is `If-Match`, never a body field.
     #[serde(default)]
     pub expected_revision: Option<serde_json::Value>,
@@ -276,6 +296,18 @@ pub async fn recently_used_memories_handler(
 ) -> Response {
     match query {
         Ok(Query(q)) => api(&state).recently_used(q),
+        Err(e) => bad_query(e),
+    }
+}
+
+/// `GET /v1/memories/suggestions`.
+pub async fn suggestions_memories_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    query: Result<Query<SuggestionsQuery>, QueryRejection>,
+) -> Response {
+    match query {
+        Ok(Query(q)) => api(&state).suggestions(&headers, q).await,
         Err(e) => bad_query(e),
     }
 }
@@ -463,6 +495,17 @@ impl MemoryApi {
         }
     }
 
+    async fn suggestions(&self, headers: &HeaderMap, q: SuggestionsQuery) -> Response {
+        let limit = q.limit;
+        match self
+            .run(headers, move |s, ctx| s.suggestions(ctx, limit))
+            .await
+        {
+            Ok(items) => ok(wire::suggestions_json(&items)),
+            Err(e) => refusal(e),
+        }
+    }
+
     fn recently_used(&self, q: RecentlyUsedQuery) -> Response {
         let items = self.service.recently_used(q.limit.unwrap_or(50));
         ok(wire::recently_used_json(&items))
@@ -588,6 +631,7 @@ impl MemoryApi {
             return r.into_response();
         }
         let patch_given = body.patch.is_some();
+        let target_given = body.target_revision.is_some();
         let action = match body.action.as_str() {
             "edit" => {
                 let Some(p) = body.patch else {
@@ -600,7 +644,7 @@ impl MemoryApi {
             }
             "archive" => UpdateAction::Archive,
             "confirm" => UpdateAction::Confirm {
-                target_revision: None,
+                target_revision: body.target_revision,
             },
             other => {
                 return invalid(format!(
@@ -611,6 +655,9 @@ impl MemoryApi {
         };
         if !matches!(action, UpdateAction::Edit(_)) && patch_given {
             return invalid("`patch` goes with `edit` only").into_response();
+        }
+        if target_given && !matches!(action, UpdateAction::Confirm { .. }) {
+            return invalid("`target_revision` goes with `confirm` only").into_response();
         }
         let input = UpdateInput {
             id,

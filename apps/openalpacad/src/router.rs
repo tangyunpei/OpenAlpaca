@@ -331,6 +331,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/memories/doctor",
             get(crate::routes::memory_doctor_handler),
         )
+        // Learning v2 (design 09 §3.5): the pending suggestions — a learned
+        // change to a note the user saved, waiting for Replace or Keep mine.
+        .route(
+            "/v1/memories/suggestions",
+            get(crate::routes::suggestions_memories_handler),
+        )
         .route(
             "/v1/memories/forget",
             post(crate::routes::forget_memories_handler),
