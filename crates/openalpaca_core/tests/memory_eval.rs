@@ -296,6 +296,77 @@ fn seed_notes(
     out
 }
 
+/// Four of the change pairs' old gold notes are written in hindsight — "Until
+/// June 2026 …", "Replaced by Helix", a `valid_to` — because the gold set
+/// records a history. L-S seeds them as the user would have saved them at
+/// the time instead (review of L7, finding 2): a saved note that already
+/// records its own change lets a correct extractor read the change turn as a
+/// restatement of it (§2.5), which would count against MD-11. Per note: the
+/// gold id, its key, and the present-tense title and body; everything else
+/// is the gold note's, with no `valid_to`.
+const LS_SEEDED_AS_SAVED_THEN: [(&str, &str, &str, &str); 4] = [
+    (
+        "eca96db9-98b9-5def-a63d-c3c39a10ea0e",
+        "user.editor",
+        "Editor: vim",
+        "## Knowledge\nLin Wei's editor is vim, with a plain vimrc and no plugin manager.\n\
+         ## Evidence and limits\nStated by the user.\n\
+         ## Recheck when\nShe mentions switching editors.",
+    ),
+    (
+        "17310b78-2539-5802-a542-9aa6380ca979",
+        "user.laptop",
+        "Laptop: ThinkPad X1 Carbon on Fedora",
+        "## Knowledge\nLin Wei's laptop is a ThinkPad X1 Carbon Gen 9 running Fedora.\n\
+         ## Evidence and limits\nStated by the user.\n\
+         ## Recheck when\nShe mentions a new machine.",
+    ),
+    (
+        "73c3f368-d646-5e3f-845e-b319ed050190",
+        "user.commute",
+        "开一辆本田飞度",
+        "## Knowledge\n林薇开一辆 2018 年的本田飞度。\n\
+         ## Evidence and limits\n用户说的。\n\
+         ## Recheck when\n她换车或不再开车。",
+    ),
+    (
+        "005e519a-6a01-5e8d-bf96-1492badedcf4",
+        "moss.output_dir",
+        "Moss output directory: _site",
+        "## Knowledge\nMoss writes its build output to `_site/`.\n\
+         ## Evidence and limits\nStated by the user.\n\
+         ## Recheck when\nThe build tool changes.",
+    ),
+];
+
+/// The notes L-S seeds (design 09 §7.2): the change pairs' old notes, in
+/// file order, the four in [`LS_SEEDED_AS_SAVED_THEN`] as the user saved
+/// them then.
+fn ls_seed_notes(notes: &[GoldNote], pairs: &[ChangePair]) -> Vec<GoldNote> {
+    let old: BTreeSet<&str> = pairs.iter().map(|p| p.old.as_str()).collect();
+    notes
+        .iter()
+        .filter(|n| old.contains(n.id.as_str()))
+        .map(|n| {
+            let mut n = n.clone();
+            if let Some((_, key, title, body)) =
+                LS_SEEDED_AS_SAVED_THEN.iter().find(|(id, ..)| *id == n.id)
+            {
+                assert_eq!(
+                    n.fact_key.as_deref(),
+                    Some(*key),
+                    "memory_eval: the gold note {} changed key",
+                    n.id
+                );
+                n.title = title.to_string();
+                n.body = body.to_string();
+                n.valid_to = None;
+            }
+            n
+        })
+        .collect()
+}
+
 /// Always runs under `cargo test --features live-eval` (no model, no
 /// network, no keys): the set v0 must load and be structurally sound — and
 /// storable by the service as it is — so a bad edit is caught long before a
@@ -688,6 +759,65 @@ fn a_gold_note_maps_to_the_store_input_field_by_field() {
     );
     note.kind = "memo".to_string();
     assert!(store_input_for(&note, &stored).is_err(), "unknown kind");
+}
+
+/// L-S seeds the change pairs' old notes as the user would have saved them
+/// then: a seeded note that already records its own change (a `valid_to`,
+/// "until June 2026", "replaced by Helix") lets a correct extractor read the
+/// change turn as a restatement of it (§2.5: a listed saved target with no
+/// `replaces` is `unchanged`), so the "8 suggestions" would measure the
+/// seeding, not MD-11. Each keeps the gold note's id, kind, scope, key,
+/// aliases and tags, and stores as it is.
+#[test]
+fn l_s_seeds_the_old_notes_as_the_user_saved_them_then() {
+    let (notes, _) = load_json::<Vec<GoldNote>>(&eval_dir().join("notes-gold.json"));
+    let pairs = change_pairs(&notes).unwrap();
+    let gold: HashMap<&str, &GoldNote> = notes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let seeded = ls_seed_notes(&notes, &pairs);
+    assert_eq!(seeded.len(), 8, "the 8 pairs' old notes");
+    for n in &seeded {
+        let g = gold[n.id.as_str()];
+        assert!(pairs.iter().any(|p| p.old == n.id), "{}", n.id);
+        assert_eq!(
+            (&n.kind, &n.scope, &n.project),
+            (&g.kind, &g.scope, &g.project),
+            "{}",
+            n.id
+        );
+        assert_eq!(
+            (&n.fact_key, &n.aliases, &n.tags),
+            (&g.fact_key, &g.aliases, &g.tags),
+            "{}",
+            n.id
+        );
+        assert_eq!(n.valid_to, None, "{} records its own end", n.id);
+        let text = format!("{}\n{}", n.title, n.body).to_lowercase();
+        for hindsight in ["until", "replaced", "historical", "以前", "卖掉", "历史"] {
+            assert!(
+                !text.contains(hindsight),
+                "{} ({:?}) is written in hindsight: {hindsight:?}",
+                n.id,
+                n.fact_key
+            );
+        }
+        let input = store_input_for(n, &BTreeMap::new()).expect("storable as it is");
+        assert!(input.body.starts_with("## Knowledge\n"), "{}", n.id);
+    }
+    // Only the hindsight notes are rewritten; the other four are the gold
+    // text, and every rewritten one is seeded.
+    let rewritten: BTreeSet<&str> = seeded
+        .iter()
+        .filter(|n| n.body != gold[n.id.as_str()].body)
+        .map(|n| n.id.as_str())
+        .collect();
+    let listed: BTreeSet<&str> = LS_SEEDED_AS_SAVED_THEN.iter().map(|(id, ..)| *id).collect();
+    assert_eq!(rewritten, listed);
+    let hindsight: BTreeSet<&str> = seeded
+        .iter()
+        .filter(|n| gold[n.id.as_str()].valid_to.is_some())
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(hindsight, listed, "the four with a gold `valid_to`");
 }
 
 // ─── Settings ───────────────────────────────────────────────────────────────
@@ -1227,6 +1357,10 @@ struct LearningConditions {
     unattended: bool,
     /// L-S: the change pairs' old notes seeded as the user's own.
     seeded_old_notes: usize,
+    /// L-S: the old notes seeded as the user saved them then — a
+    /// present-tense title and body, no `valid_to` — instead of the gold
+    /// note's hindsight text (`LS_SEEDED_AS_SAVED_THEN`).
+    seeded_as_saved_then: Vec<String>,
     /// A replay: the L run's kept scratch directory it learned from.
     replayed_from: Option<String>,
     /// L: where the scratch database, its project and the transcript map
@@ -3822,6 +3956,7 @@ fn learning_conditions(
         learning_during_questions: false,
         unattended: true,
         seeded_old_notes,
+        seeded_as_saved_then: Vec::new(),
         replayed_from: settings
             .learn_from
             .as_ref()
@@ -3974,14 +4109,9 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
     // ── Seed through the service: every gold note for D and E, the change
     //    pairs' old notes for L-S, nothing for the others ────────────────
     let pairs = change_pairs(&notes).unwrap_or_else(|e| panic!("memory_eval: {e}"));
-    let old_ids: BTreeSet<String> = pairs.iter().map(|p| p.old.clone()).collect();
     let to_seed: Vec<GoldNote> = match system {
         System::D | System::E => notes.clone(),
-        System::LS => notes
-            .iter()
-            .filter(|n| old_ids.contains(&n.id))
-            .cloned()
-            .collect(),
+        System::LS => ls_seed_notes(&notes, &pairs),
         System::NoMemory | System::L | System::L0 => Vec::new(),
     };
     let seed = match &service {
@@ -4083,6 +4213,12 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
             );
             if let Scratch::Kept(path) = &scratch {
                 c.scratch_kept = Some(path.to_string_lossy().into_owned());
+            }
+            if system == System::LS {
+                c.seeded_as_saved_then = LS_SEEDED_AS_SAVED_THEN
+                    .iter()
+                    .map(|(id, ..)| id.to_string())
+                    .collect();
             }
             c
         }),

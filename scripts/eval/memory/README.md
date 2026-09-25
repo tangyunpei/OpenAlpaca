@@ -78,7 +78,7 @@ Systems (`OPENALPACA_MEMORY_EVAL_SYSTEM`):
 | `E` | **D bounded to design §5**: the per-turn recall plus at most two model-directed follow-up searches | D with the main loop's existing tool budget narrowed: `main_loop_max_rounds = 3`, `main_loop_max_tools_per_round = 1` |
 | `L` | **Conversations in, learning on** (design 09 §7.2): the notes the extractor learned from the corpus, then the service as D runs it | Nothing seeded; the corpus fed through the gateway with a manual learning queue, flushed after every 10th user turn of a session and at its end; the questions then asked as D asks them, learning off |
 | `L0` | **Conversations in, learning off**: only what the reader's own `memory_store` calls kept | L with no flush |
-| `L-S` | No questions: the **MD-11/MD-12 check** | The change pairs' 8 old notes seeded as the user's own, the suggestion sessions fed with learning on, each suggestion confirmed through the user-directed confirm |
+| `L-S` | No questions: the **MD-11/MD-12 check** | The change pairs' 8 old notes seeded as the user's own — as saved at the time, see below — the suggestion sessions fed with learning on, each suggestion confirmed through the user-directed confirm |
 | `A` `B` | The deleted engine: per-turn FTS; the `memory_search` tool path with E5 vectors | **Archived** (`reports/`). Selecting either refuses before any call and names the archived file. |
 | `C` | One bounded `MEMORY.md` | Never built; selecting it refuses. |
 
@@ -284,6 +284,13 @@ report counts the two learning paths apart: `extraction` (the flushes) and
 - **L0** — the same feed, never flushed: only the reader's own writes learn.
 - **L-S** — the change pairs' 8 old notes seeded as the user's own, then only
   `suggestion_sessions` (the 8 changes and the old notes' restatements).
+  Four of those gold notes are written in hindsight ("Until June 2026 …",
+  "Replaced by Helix", a `valid_to`: editor, laptop, commute, Moss's output
+  directory), and a saved note that already records its own change lets a
+  correct extractor read the change turn as a restatement of it. L-S seeds
+  those four as the user would have saved them then — a present-tense title
+  and body, no `valid_to` — and records their ids
+  (`conditions.learning.seeded_as_saved_then`).
   Expected: 8 suggestions naming the right notes, 0 of the user's notes
   retired. Each listed suggestion is then confirmed through the service's
   user-directed confirm with its `target_revision`, and each old note must end
