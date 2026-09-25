@@ -641,8 +641,12 @@ index row writes them — under the line `More notes that may be relevant
 (read with memory_read):`, so the model opens only the ones it needs; a
 listed note is reported with reason `index`, and a match too large to
 excerpt within the budget is listed instead. `excerpts` sends up to 8 notes,
-pinned ones included, each as an excerpt. The key is read on every turn, so a
-reloaded `daemon.toml` applies to the next one. A workflow's lead gets the same
+pinned ones included, each as an excerpt. A file-based skill's turn is recalled
+in `excerpts` whatever the key says unless the skill can call `memory_read`
+(its `requires_capabilities` or, without them, its `tools.allow` names it) —
+none of the shipped skills can, and a list it cannot open would only take the
+room of excerpts. The key is read on every turn, so a reloaded `daemon.toml`
+applies to the next one. A workflow's lead gets the same
 recall, in the same mode, once at its start. Search is literal: every term of
 three or more characters is matched as a whole word and as a substring, a
 one- or two-character query (a short Chinese word) goes through a bounded

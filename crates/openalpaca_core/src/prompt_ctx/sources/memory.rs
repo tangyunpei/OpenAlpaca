@@ -11,7 +11,7 @@
 //! skips `ContextKind::Memory` for the same reason, so a repeated question on
 //! a lane never reads the previous turn's notes back out of the cache.
 
-use crate::daemon_config::DaemonConfig;
+use crate::daemon_config::{DaemonConfig, RecallMode};
 use crate::memory::service::{
     Attribution, Capabilities, MemoryError, MemoryService, MemoryUsed, PendingSuggestion,
     RECALL_TOTAL_BYTES, RecallBudget, Surface, UsedReason, WorkspaceHint, render_delivery,
@@ -20,7 +20,7 @@ use crate::prompt_ctx::section::{
     ContextBundle, ContextKey, ContextKind, ContextSection, InjectionMode, SectionPriority,
     TrustLevel,
 };
-use crate::prompt_ctx::sources::{ContextRequest, ContextSource};
+use crate::prompt_ctx::sources::{ContextRequest, ContextSource, ExecutionPath};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -102,8 +102,15 @@ impl ContextSource for MemorySource {
             }
         };
         let query = request.query.clone();
-        let budget =
-            RecallBudget::for_mode(self.daemon_config.load().orchestrator.memory.recall_mode);
+        // The index block tells the model to read with `memory_read`; a
+        // skill turn that cannot call it gets excerpts (L10b review 1).
+        let mode = match &request.path {
+            ExecutionPath::SkillInvocation { .. } if !skill_can_read_memory(request) => {
+                RecallMode::Excerpts
+            }
+            _ => self.daemon_config.load().orchestrator.memory.recall_mode,
+        };
+        let budget = RecallBudget::for_mode(mode);
         let recalled =
             tokio::task::spawn_blocking(move || service.recall(&ctx, &query, budget)).await;
         let result = match recalled {
@@ -147,6 +154,25 @@ impl ContextSource for MemorySource {
             })
             .collect()
     }
+}
+
+/// Whether the skill a skill-path request invokes can call `memory_read`.
+/// The skill tier offers a file-based skill exactly the tools its frontmatter
+/// resolves (`orchestrator/skill/invocation.rs`): `requires_capabilities`
+/// when it names any, else `tools.allow`, less `tools.deny`. No skill
+/// document offers nothing.
+fn skill_can_read_memory(request: &ContextRequest) -> bool {
+    const TOOL: &str = "memory_read";
+    let Some(skill) = request.skill.as_deref() else {
+        return false;
+    };
+    let front = &skill.frontmatter;
+    let granted = if front.requires_capabilities.is_empty() {
+        &front.tools.allow
+    } else {
+        &front.requires_capabilities
+    };
+    granted.iter().any(|name| name == TOOL) && !front.tools.deny.iter().any(|name| name == TOOL)
 }
 
 /// What a turn appends for memory after compose, outside the cached layer.
@@ -772,10 +798,12 @@ mod tests {
     /// The golden question's turn on [`golden_scene`], through the source
     /// and the renderer the main loop and the skill tier use.
     async fn golden_turn(scene: &Scene) -> MemoryTurn {
-        let sections = scene
-            .source
-            .resolve(&request(GOLDEN_QUERY, Some(ALICE)))
-            .await;
+        golden_turn_for(scene, &request(GOLDEN_QUERY, Some(ALICE))).await
+    }
+
+    /// [`golden_turn`] for a given request.
+    async fn golden_turn_for(scene: &Scene, request: &ContextRequest) -> MemoryTurn {
+        let sections = scene.source.resolve(request).await;
         let bundle = ContextBundle {
             total_tokens: sections.iter().map(|s| s.token_estimate).sum(),
             sections,
@@ -825,6 +853,81 @@ mod tests {
         let (head, _) = golden.split_once(INDEX_BLOCK_HEADER).unwrap();
         assert!(excerpts.starts_with(head), "{head}");
         assert!(turn.content.len() <= RECALL_TOTAL_BYTES);
+    }
+
+    /// The golden question as a file-based skill's turn: the skill path,
+    /// carrying the skill's frontmatter as the skill tier does
+    /// (`orchestrator/skill/invocation.rs`).
+    fn skill_request(
+        requires_capabilities: &[&str],
+        allow: &[&str],
+        deny: &[&str],
+    ) -> ContextRequest {
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut frontmatter = crate::middleware::skill::types::SkillFrontmatter {
+            name: "Explain code".into(),
+            description: "Explain a piece of code".into(),
+            requires_capabilities: names(requires_capabilities),
+            ..Default::default()
+        };
+        frontmatter.tools.allow = names(allow);
+        frontmatter.tools.deny = names(deny);
+        ContextRequest {
+            path: ExecutionPath::SkillInvocation {
+                skill_id: "explain-code".into(),
+            },
+            skill: Some(Arc::new(crate::middleware::skill::types::SkillDocument {
+                frontmatter,
+                body: String::new(),
+                sections: Default::default(),
+            })),
+            ..request(GOLDEN_QUERY, Some(ALICE))
+        }
+    }
+
+    /// **A skill that cannot call `memory_read` gets the excerpts delivery**
+    /// (L10b review, finding 1). The skill tier offers a file-based skill
+    /// exactly the tools its frontmatter resolves — `requires_capabilities`
+    /// when it names any, else `tools.allow`, less `tools.deny` — and every
+    /// shipped skill names only `file_read` or `shell_execute`: under the
+    /// default `index` such a turn would get two excerpts and a block headed
+    /// "read with memory_read" it cannot follow. It gets today's bytes
+    /// instead; a skill that can call `memory_read` follows the key.
+    #[tokio::test]
+    async fn a_skill_that_cannot_call_memory_read_gets_the_excerpts_delivery() {
+        let scene = golden_scene();
+        assert_eq!(
+            scene.config.load().orchestrator.memory.recall_mode,
+            RecallMode::Index,
+            "index is the default"
+        );
+        let excerpts = include_str!("memory_recall_excerpts.golden.txt");
+        let index = include_str!("memory_recall_index.golden.txt");
+
+        // `/explain-code`'s own shape, and a skill that denies the tool.
+        for request in [
+            skill_request(&["file_read"], &["file_read"], &[]),
+            skill_request(&["memory_read"], &[], &["memory_read"]),
+            // `tools.allow` is not read when `requires_capabilities` names
+            // anything.
+            skill_request(&["file_read"], &["memory_read"], &[]),
+        ] {
+            let turn = golden_turn_for(&scene, &request).await;
+            assert!(!turn.content.contains(INDEX_BLOCK_HEADER));
+            assert_eq!(golden_text(&turn), excerpts);
+        }
+        // The skill path with no skill document offers no `memory_read`.
+        let mut bare = skill_request(&[], &[], &[]);
+        bare.skill = None;
+        assert_eq!(golden_text(&golden_turn_for(&scene, &bare).await), excerpts);
+
+        // A skill that can call it: by capability, or by the legacy name.
+        for request in [
+            skill_request(&["memory_read"], &[], &[]),
+            skill_request(&[], &["memory_read"], &[]),
+        ] {
+            assert_eq!(golden_text(&golden_turn_for(&scene, &request).await), index);
+        }
     }
 
     fn keyed(id: u128, reason: UsedReason, content: &str) -> ContextSection {
