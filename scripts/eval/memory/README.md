@@ -27,9 +27,9 @@ conversations through the gateway before anything is asked; see
 | `conversations-learning.json` | The learning corpus (design 09 §7.1): **51 sessions, 299 user turns** in story order from October 2025 to September 2026 (32 English, 14 Chinese, 5 mixed — the questions' proportions; 26 with no project, 18 Lantern, 7 Moss). Written from `notes-gold.json` only, never from the held-out questions. Every gold note is stated, 23 only in passing; the 8 change pairs old-then-new (laptop, editor and weekly review changing in a Lantern session after a session with no project); 7 in-turn corrections; 14 restatements (6 of the pairs' old notes); 11 rejections; 55 % noise. `suggestion_sessions` lists the 13 sessions L-S feeds. Each turn: `user`, `states` (gold ids), `mode` (`explicit`, `indirect`, `change`, `correction`, `restate`, `rejection`, `noise`). |
 | `questions-episodes.json` | The **episode split** (design 09 §13.4): **20** questions about what a corpus conversation discussed, decided or left open — one per conversation, each with at least 4 turns, in its language (en 13, zh 5, mixed 2), each drawing on a noise or rejection turn that no gold note states — answered from the conversation summaries an L run writes. The held-out schema (`category` `episodes`, `relies_on` empty) plus `session` and `turns` (0-based) naming what the gold answer comes from. |
 | `coverage-judge-prompt.md` | The frozen coverage protocol (design 09 §7.3): given a gold note and up to five notes a search returned, `MATCH <n>` or `NONE`. Its SHA-256 is recorded in every learning report beside `judge_prompt_sha256`. |
-| `compare.py` | The paired comparison: accuracy per system, the paired difference with its 95 % CI, the discordant-pair rate, per-category point differences, the gate verdict. It prints both reports' judge models first and **refuses two reports graded by different judges** unless `--allow-judge-mismatch`; `--self-test` checks that refusal. |
+| `compare.py` | The paired comparison: accuracy per system, the paired difference with its 95 % CI, the discordant-pair rate, per-category point differences, the gate verdict. It prints both reports' judge models first — with each report's `recall_mode` beside its judge when the report records one — and **refuses two reports graded by different judges** unless `--allow-judge-mismatch`; a recall-mode mismatch is never refused. `--self-test` checks the refusal and the printout. |
 | `reports/` | The archived baselines of the deleted engine, measured on 2026-09-24 on a local Ollama as reader and judge: `baseline-A-2026-09-24.json` (13.0 %), `baseline-B-2026-09-24.json` (90.6 %), and their comparison. **B is the comparator** for D and E. |
-| `crates/openalpaca_core/tests/memory_eval.rs` | The runner: a data-validation test and the harness's own tests — the judge guard, the coverage verdict, the learning measures and invariants, a re-judge of a fixture-sized report, a replay of a fixture-sized scratch database, and the gateway feed, forced re-run and L-S confirm on two short sessions, all on an offline stub model (run under `--features live-eval`, no network) — and the `#[ignore]`d live eval. |
+| `crates/openalpaca_core/tests/memory_eval.rs` | The runner: a data-validation test and the harness's own tests — the judge guard, the coverage verdict, the learning measures and invariants, a re-judge of a fixture-sized report, a replay of a fixture-sized scratch database, the gateway feed, forced re-run and L-S confirm on two short sessions, and the recall-mode switch with the listed-versus-delivered counts, all on an offline stub model (run under `--features live-eval`, no network) — and the `#[ignore]`d live eval. |
 | `crates/openalpaca_core/tests/memory_eval_corpus.rs` | The corpus's validation, in **default CI** with no model and no feature: coverage, the change pairs' order, the counts, the language shares within 5 points, the size, and the leakage check — no held-out question shares an 8-word shingle, or a 12-character Han/kana/Hangul shingle, with any turn. It validates the episode split too, and that the check catches each planted fault. |
 | `crates/openalpaca_core/tests/common/eval.rs` | The data files' types, shared by both test files. |
 
@@ -189,6 +189,21 @@ OPENALPACA_MEMORY_EVAL_SYSTEM=D OPENALPACA_MEMORY_EVAL_REPORT=/tmp/memory-eval/r
   cargo test -p openalpaca_core --features live-eval \
   --test memory_eval -- --ignored memory_eval --nocapture
 
+# D in both recall modes (design 09 §13.4): the same D run once per
+# [orchestrator.memory] recall_mode — the report records the one used in
+# conditions.recall_mode — then the two compared on the same judge.
+for mode in excerpts index; do
+  OPENALPACA_MEMORY_EVAL_SYSTEM=D OPENALPACA_MEMORY_EVAL_RECALL_MODE=$mode \
+  OPENALPACA_MEMORY_EVAL_REPORT=/tmp/memory-eval/report-D-$mode.json \
+    cargo test -p openalpaca_core --features live-eval \
+    --test memory_eval -- --ignored memory_eval --nocapture
+done
+python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-D-index.json \
+  /tmp/memory-eval/report-D-excerpts.json
+# Accuracy is compare.py's; the cost side is each report's totals:
+# reader_tokens_in_mean_per_turn / _median_per_turn, reader_rounds_mean_per_turn,
+# tool_calls_mean_per_turn (see "Reading a report").
+
 # E (D bounded to two follow-up searches) and none (no memory): the same, with
 # OPENALPACA_MEMORY_EVAL_SYSTEM=E or none and their own report paths.
 
@@ -199,7 +214,7 @@ python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-D.json \
   scripts/eval/memory/reports/baseline-B-2026-09-24.json
 python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-D.json \
   scripts/eval/memory/reports/baseline-A-2026-09-24.json --margin -10
-python3 scripts/eval/memory/compare.py --self-test   # the judge-mismatch refusal
+python3 scripts/eval/memory/compare.py --self-test   # the judge refusal, the recall-mode printout
 ```
 
 Optional variables:
@@ -214,6 +229,7 @@ Optional variables:
 | `OPENALPACA_MEMORY_EVAL_SESSIONS` | L, L0, L-S: feed only the first N corpus sessions — a smoke run. Recorded (`conditions.learning.session_limit`). |
 | `OPENALPACA_MEMORY_EVAL_LEARN_FROM` | With `SYSTEM=L`: **replay** the learning phase of the L run whose scratch directory this names. See below. |
 | `OPENALPACA_MEMORY_EVAL_REJUDGE` | An archived report to **re-judge**; `SYSTEM` is then not needed, and neither is a store. See below. |
+| `OPENALPACA_MEMORY_EVAL_RECALL_MODE` | `index` or `excerpts`: the `[orchestrator.memory] recall_mode` every system of the run recalls in (design 09 §13.2) — D, E, the learning systems' questions, a replay. Unset: the config's default, `index`. Any other value refuses the run before any model call, naming the two. Recorded (`conditions.recall_mode`). |
 
 The data-validation and harness unit tests run without any of this:
 
@@ -229,8 +245,14 @@ chronological and stores a replaced note first, that every note maps to a
 store input in that order, that every `relies_on` resolves, that the two
 splits share no id, that the judge prompt still carries its five placeholders,
 that E's caps express the two-search bound, and that A, B and C point at their
-archive or refuse. The learning evaluation's own tests run beside them on an
-offline stub model — no network, nothing reaches `localhost:11434`: the judge
+archive or refuse. For L8's recall-mode comparison (design 09 §13.4) they
+check that `OPENALPACA_MEMORY_EVAL_RECALL_MODE` reaches every system's config
+and the report's `conditions.recall_mode` (a `none` run and a replay's
+conditions, offline) and that any other value is refused before anything
+else, and — on the stub reader, over three notes a question relies on — that
+an index-listed note counts as `listed`, not delivered, until a `memory_read`
+in the same turn delivers it. The learning evaluation's own tests run beside
+them on an offline stub model — no network, nothing reaches `localhost:11434`: the judge
 guard (an unroutable judge refused; the reader, or its family, accepted and
 recorded; a judge answering as another model caught), the coverage verdict and
 prompt, the change-pair, restatement and alias measures, the invariants
@@ -449,14 +471,34 @@ or E report with the archived A and B reports:
   `accuracy`, `by_category`, `by_language`, reader and judge tokens and cost,
   the models that answered, `memory_search_calls`,
   `rows_with_per_turn_fts_hits`, latency p50/p95/mean/max and wall time; new:
-  `rows_with_every_relied_note_delivered` and `memory_write_calls`.
+  `rows_with_every_relied_note_delivered` and `memory_write_calls`; new for
+  L8's recall-mode comparison (design 09 §13.4):
+  `rows_with_every_relied_note_listed_or_delivered` (every relied-on note
+  delivered or listed — an `index` run's retrieval, where the field before it
+  asks for the bodies), and the cost per question turn —
+  `reader_tokens_in_mean_per_turn`, `reader_tokens_in_median_per_turn` (every
+  round's input tokens), `reader_rounds_mean_per_turn` (model calls) and
+  `tool_calls_mean_per_turn`; `null` with no rows.
 - `rows`: one per question — the question, gold and actual answer, the judge's
   verdict and raw reply, latency, `ack_ms`, the routing `mode`, reader LLM
   calls/tokens/cost, the tools called, `memory_search_calls`,
   `per_turn_fts_hits` (for A, the old FTS query's result count; from D on, the
-  notes the per-turn recall delivered); new: `memory_used` (`note` — the gold
-  id when it is a seeded note —, `gold`, `reason`) and
-  `relied_notes_delivered`.
+  notes the per-turn recall delivered **with their content** — reason `recall`
+  or `pinned`, never an index line or a tool's fetch); new: `memory_used`
+  (`note` — the gold id when it is a seeded note —, `gold`, `reason`: `pinned`,
+  `recall`, `index` or `tool`) and `relied_notes_delivered` (relied-on notes
+  whose content reached the model: any reason but `index`, the meaning of the
+  archived reports; `tool` is any read tool's, so a `memory_search` or
+  `memory_timeline` index row, which carries a title and no body, counts as
+  delivered too); new for L8: `relied_notes_listed` (relied-on notes only an
+  index line named — no content in that turn; a `tool` entry for the same
+  note, a `memory_read` of it above all, makes it delivered),
+  `index_lines` (entries with reason `index`) and
+  `reader_rounds` (the model calls the router booked to the main loop in the
+  turn, one per round). `reader_llm_calls` counts the main loop's
+  `LlmCallCompleted` events, which it publishes **once per turn** with the
+  whole turn's tokens — it is 1 on every answered row, the archived reports'
+  included, whatever the rounds; read `reader_rounds` for those.
 - New with the learning evaluation: `conditions.judge_model`,
   `judge_is_reader`, `judge_same_family`, `judge_is_extractor`, and
   `conditions.learning` (the corpus and its hash, what was fed, the flush
