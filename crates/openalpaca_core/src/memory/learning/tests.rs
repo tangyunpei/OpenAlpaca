@@ -3044,6 +3044,75 @@ async fn a_rerun_never_duplicates_an_inferred_candidate() {
     assert_eq!(scene.candidates().len(), 1);
 }
 
+/// Rule 13's target clause (§1.4(b)): a re-run whose answer rewords an
+/// inferred item — new title, new content, the same key — is held by this
+/// window's candidate that already names the same target. Identity alone
+/// would not hold it (the content differs), and exact dedup never applies
+/// to an item with a target, so without the clause it would be a second
+/// inferred suggestion for one note.
+#[tokio::test]
+async fn a_rerun_rewording_an_inferred_replacement_is_already_learned() {
+    let inferred = |title: &str, content: &str| {
+        items(&[full_item(serde_json::json!({
+            "title": title,
+            "content": content,
+            "stated_by": "assistant",
+            "rows": [2],
+            "fact_key": "user.editor",
+        }))])
+    };
+    let scene = Scene::new(vec![
+        inferred(
+            "Editor preference",
+            "The user probably edits with Helix now.",
+        ),
+        inferred("Editor", "It looks like the user moved from vim to Helix."),
+    ]);
+    let target = scene.learned(
+        "Editor preference",
+        "The user edits with vim.",
+        Some("user.editor"),
+    );
+    let s = scene.session();
+    let (_, answer) = scene.turn(
+        &s,
+        "Can you set up my editor config?",
+        "Here is a Helix config, since you seem to use Helix now.",
+    );
+    scene.queue.set_store_hooks(StoreHooks {
+        skip_advance: true,
+        ..StoreHooks::default()
+    });
+    let first = scene.queue.flush_session(&s).await;
+    assert_eq!((first.stored, first.candidates), (1, 1), "{first:?}");
+    let candidates = scene.candidates();
+    assert_eq!(candidates.len(), 1, "{candidates:?}");
+    let candidate = candidates[0].id;
+    assert_eq!(
+        scene.read(&scene.user_ctx(), candidate).supersedes,
+        vec![target.id]
+    );
+
+    scene.queue.set_store_hooks(StoreHooks::default());
+    let rerun = scene.queue.flush_session(&s).await;
+    assert_eq!(
+        (rerun.dropped_already_learned, rerun.stored),
+        (1, 0),
+        "{rerun:?}"
+    );
+    let candidates = scene.candidates();
+    assert_eq!(
+        candidates.iter().map(|c| c.id).collect::<Vec<_>>(),
+        vec![candidate],
+        "one inferred suggestion for the one target"
+    );
+    assert_eq!(
+        scene.active().into_iter().map(|i| i.id).collect::<Vec<_>>(),
+        vec![target.id]
+    );
+    assert_eq!(scene.cursor(&s), answer);
+}
+
 /// §2.6: the body follows design 03 §4's sections. `## Knowledge` holds
 /// exactly the item's content; `## Evidence and limits` says whose words
 /// it was and when.
