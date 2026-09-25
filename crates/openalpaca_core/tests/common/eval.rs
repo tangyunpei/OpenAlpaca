@@ -295,6 +295,25 @@ impl Corpus {
     }
 }
 
+// ─── Scripts ────────────────────────────────────────────────────────────────
+
+/// Han, kana and Hangul: the scripts in which a whole sentence is one
+/// whitespace token, so a word check cannot see them (the corpus's leakage
+/// check), and the script an alias is in (the learning report's alias share).
+pub fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x3400..=0x4DBF      // CJK Unified Ideographs Extension A
+        | 0x4E00..=0x9FFF    // CJK Unified Ideographs
+        | 0xF900..=0xFAFF    // CJK Compatibility Ideographs
+        | 0x20000..=0x3134F  // Extensions B–G
+        | 0x3040..=0x309F    // Hiragana
+        | 0x30A0..=0x30FF    // Katakana
+        | 0x31F0..=0x31FF    // Katakana Phonetic Extensions
+        | 0x1100..=0x11FF    // Hangul Jamo
+        | 0x3130..=0x318F    // Hangul Compatibility Jamo
+        | 0xAC00..=0xD7AF) // Hangul Syllables
+}
+
 // ─── Files ──────────────────────────────────────────────────────────────────
 
 pub fn repo_root() -> PathBuf {

@@ -2402,6 +2402,74 @@ async fn the_sweeper_starts_a_due_session_once_the_daemon_is_quiet() {
     assert!(!scene.queue.is_due(&s), "learned");
 }
 
+// ── The evaluation harness's mode (design 09 §7.2, slice L7) ────────────
+
+/// `flush_session` is the harness's deterministic stand-in for the
+/// triggers: it learns the session's whole window now — every chunk, past
+/// the automatic flush's chunk budget — although a turn ended a moment ago
+/// and an automatic flush would wait for quiet.
+#[tokio::test]
+async fn flush_session_runs_to_the_last_row_without_the_quiet_rule() {
+    let (_dir, root) = project();
+    let root = root.to_string_lossy().into_owned();
+    let scene = Scene::new(vec![]);
+    let s = scene.session();
+    // A chunk never mixes roots, so alternating them makes one chunk a turn:
+    // more chunks than an automatic flush runs.
+    let turns = MAX_CHUNKS_PER_FLUSH + 2;
+    let mut last = 0;
+    for i in 0..turns {
+        let at = (i % 2 == 1).then_some(root.as_str());
+        (_, last) = scene.turn_in(
+            &s,
+            &format!("Fact {i}: I keep my notes in plain text."),
+            "ok",
+            at,
+        );
+    }
+    // A turn just finished: the daemon is not quiet for another 20 s.
+    scene.finish_turn(&s, true);
+    let automatic = scene.queue.flush_automatic(&s).await;
+    assert_eq!(automatic.stopped, Some(FlushStop::Busy), "{automatic:?}");
+    assert_eq!(scene.model.calls(), 0);
+
+    let report = scene.queue.flush_session(&s).await;
+    assert_eq!(report.stopped, None, "{report:?}");
+    assert_eq!(report.chunks, turns, "{report:?}");
+    assert_eq!(report.calls, turns);
+    assert_eq!(
+        scene.cursor(&s),
+        last,
+        "the window is learned to its last row"
+    );
+}
+
+/// In `Manual` mode nothing starts a flush on its own — not the 10-turn
+/// trigger, not the sweeper, not the boot catch-up — so the harness alone
+/// decides what is learned when. Only an explicit flush learns.
+#[tokio::test]
+async fn a_manual_queue_never_flushes_on_its_own() {
+    let scene = Scene::new(vec![items(&[vim_item(&[1])])]);
+    assert_eq!(scene.queue.mode(), QueueMode::Manual);
+    scene.no_quiet_period();
+    let s = scene.session();
+    let (_, answer) = scene.turn(&s, PREF, "Noted.");
+    for _ in 0..10 {
+        scene.finish_turn(&s, true);
+    }
+    assert!(scene.queue.is_due(&s), "the 10-turn trigger fired");
+    scene.queue.sweep().await;
+    scene.queue.catch_up().await;
+    scene.queue.wait_idle().await;
+    assert_eq!(scene.model.calls(), 0, "nothing flushed on its own");
+    assert_eq!(scene.cursor(&s), 0);
+
+    scene.queue.flush_session(&s).await;
+    assert_eq!(scene.model.calls(), 1);
+    assert_eq!(scene.cursor(&s), answer);
+    assert_eq!(scene.titles(), vec!["Editor preference".to_string()]);
+}
+
 /// A flush that stops without progress — a cap, the rate headroom, a busy
 /// daemon — waits for the next sweep instead of restarting at once: a
 /// capped session is tried once per tick, not in a loop.

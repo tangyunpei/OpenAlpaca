@@ -15,7 +15,7 @@ mod eval;
 
 use eval::{
     ChangePair, Corpus, CorpusSession, CorpusTurn, GoldNote, Language, Question, TurnAt, TurnMode,
-    change_pairs, eval_dir, load_json, relied_on,
+    change_pairs, eval_dir, is_cjk, load_json, relied_on,
 };
 use openalpaca_storage::memory_index::query::normalize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -73,22 +73,6 @@ fn words(text: &str) -> Vec<String> {
         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
         .filter(|w| !w.is_empty())
         .collect()
-}
-
-/// Han, kana and Hangul — the scripts in which a whole sentence is one
-/// whitespace token, so the word check cannot see them.
-fn is_cjk(c: char) -> bool {
-    matches!(c as u32,
-        0x3400..=0x4DBF      // CJK Unified Ideographs Extension A
-        | 0x4E00..=0x9FFF    // CJK Unified Ideographs
-        | 0xF900..=0xFAFF    // CJK Compatibility Ideographs
-        | 0x20000..=0x3134F  // Extensions B–G
-        | 0x3040..=0x309F    // Hiragana
-        | 0x30A0..=0x30FF    // Katakana
-        | 0x31F0..=0x31FF    // Katakana Phonetic Extensions
-        | 0x1100..=0x11FF    // Hangul Jamo
-        | 0x3130..=0x318F    // Hangul Compatibility Jamo
-        | 0xAC00..=0xD7AF) // Hangul Syllables
 }
 
 /// A text's CJK characters for the 12-character check, normalised as the
