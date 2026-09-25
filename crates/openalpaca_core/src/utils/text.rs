@@ -164,7 +164,9 @@ fn is_default_ignorable(c: char) -> bool {
 /// character written as `<U+XXXX>` — uppercase hex, zero-padded to at least
 /// four digits (`<U+202E>`, `<U+009B>`, `<U+E0041>`) — and everything else as
 /// it is, right-to-left letters included. Put [`hidden_notice`] of the count
-/// under it.
+/// under it. On a plain-text surface a value that literally contains the
+/// eight characters `<U+202E>` looks the same as an escape; the notice counts
+/// only real escapes, so its count is what tells the two apart.
 ///
 /// Escaped, not dropped as [`one_line`] drops them: what an approval prompt
 /// shows is what will run, and a value with its hidden characters taken out
