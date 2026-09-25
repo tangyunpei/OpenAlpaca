@@ -6,7 +6,7 @@
 
 - DB path resolver: `openalpaca_storage::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
-- Registered migrations: 2
+- Registered migrations: 3
 
 ## Tables
 
@@ -256,7 +256,7 @@ unattended INTEGER NOT NULL DEFAULT 0
 
 ### `learning_cursor` (table)
 
-Source migration: `044_learning.sql`
+Source migration: `045_episodes.sql`
 
 ```sql
 session_id TEXT PRIMARY KEY
@@ -264,6 +264,7 @@ extracted_through INTEGER NOT NULL DEFAULT 0
 attempts INTEGER NOT NULL DEFAULT 0
 last_error TEXT
 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+episode_through INTEGER NOT NULL DEFAULT 0
 ```
 
 ### `link_token` (table)

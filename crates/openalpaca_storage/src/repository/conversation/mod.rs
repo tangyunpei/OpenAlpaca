@@ -382,6 +382,19 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
+    /// Every message id one session holds, in id order. Deleting or clearing
+    /// a conversation reads them first: its conversation summaries are the
+    /// notes whose sources all lie among them (design 09 §13.3).
+    pub fn message_ids(&self, session_id: &str) -> Result<Vec<i64>> {
+        self.db.with_connection(|conn| {
+            let ids = conn
+                .prepare("SELECT id FROM conversation_messages WHERE session_id = ?1 ORDER BY id")?
+                .query_map([session_id], |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(ids)
+        })
+    }
+
     /// Delete all messages for a lane. Returns the number of deleted rows.
     pub fn delete_by_lane(&self, lane_key: &str) -> Result<u64> {
         self.db.with_connection(|conn| {

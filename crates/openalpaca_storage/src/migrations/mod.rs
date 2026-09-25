@@ -12,7 +12,7 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-/// Migrations in execution order. Future schema changes start at version 45.
+/// Migrations in execution order. Future schema changes start at version 46.
 ///
 /// Each file ends by registering its own version (`run_migrations` executes a
 /// migration's SQL and nothing else). A fresh database runs all of them and
@@ -30,6 +30,15 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 44,
         name: "learning",
         sql: include_str!("044_learning.sql"),
+    },
+    // Conversation summaries (tasks/memory-redesign/09 §13.3):
+    // `learning_cursor.episode_through`, the last message a session's
+    // `episode` notes have summarised, seeded at each existing session's
+    // newest message.
+    Migration {
+        version: 45,
+        name: "episodes",
+        sql: include_str!("045_episodes.sql"),
     },
 ];
 

@@ -1346,3 +1346,20 @@ fn deleting_a_session_deletes_its_cursor() {
         .unwrap();
     assert_eq!(rows, vec![keep.id]);
 }
+
+/// Deleting or clearing a conversation forgets its summaries (design 09
+/// §13.3): what the route reads first is every message id the session
+/// holds, in id order — and no other session's.
+#[test]
+fn message_ids_lists_every_row_of_one_session() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.create_session("user:gui", "gui", None, None).unwrap();
+    let other = repo.create_session("user:cli", "cli", None, None).unwrap();
+    let a = learning_row(&repo, &session.id, "user", "typed", Some("r1"), None);
+    learning_row(&repo, &other.id, "user", "elsewhere", Some("r2"), None);
+    let b = learning_row(&repo, &session.id, "assistant", "answer", Some("r1"), None);
+    let c = learning_row(&repo, &session.id, "assistant", "a notice", None, None);
+    assert_eq!(repo.message_ids(&session.id).unwrap(), vec![a, b, c]);
+    assert!(repo.message_ids("no-such-session").unwrap().is_empty());
+}

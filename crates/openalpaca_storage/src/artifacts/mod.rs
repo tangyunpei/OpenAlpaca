@@ -735,6 +735,10 @@ pub struct PurgeOutcome {
     pub session_ids: Vec<String>,
     /// `storage_path` of every upload row that went.
     pub upload_paths: Vec<String>,
+    /// Every message id the transaction deleted, in id order: the route
+    /// forgets the purged conversations' summaries by them (design 09
+    /// §13.3), and they are gone from the database once this is read.
+    pub message_ids: Vec<i64>,
 }
 
 /// What one [`ArtifactStore::verify`] pass found.
@@ -1857,6 +1861,17 @@ impl<'a> ArtifactStore<'a> {
             };
             // Every statement below binds the same one parameter.
             let bind = rusqlite::params![root];
+            let mut message_ids: Vec<i64> = Vec::new();
+            {
+                let mut stmt = tx.prepare(
+                    "SELECT id FROM conversation_messages
+                      WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)
+                      ORDER BY id",
+                )?;
+                for id in stmt.query_map(bind, |row| row.get::<_, i64>(0))? {
+                    message_ids.push(id?);
+                }
+            }
 
             // Session-keyed rows first: the sub-selects below read `session`,
             // so its own rows go last of the group.
@@ -1944,6 +1959,7 @@ impl<'a> ArtifactStore<'a> {
                 },
                 session_ids,
                 upload_paths,
+                message_ids,
             })
         }
     }

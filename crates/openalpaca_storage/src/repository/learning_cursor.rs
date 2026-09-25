@@ -105,6 +105,71 @@ impl<'a> LearningCursorRepository<'a> {
         })
     }
 
+    /// The last message a session's conversation summaries have covered
+    /// (design 09 §13.3, migration 045); `0` when it has no row. It moves
+    /// apart from `extracted_through`: a summary is written after a longer
+    /// quiet period than a learning flush, over the same rows.
+    pub fn episode_through(&self, session_id: &str) -> Result<i64> {
+        self.db.with_connection(|conn| {
+            let through = conn
+                .query_row(
+                    "SELECT episode_through FROM learning_cursor WHERE session_id = ?1",
+                    [session_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(through.unwrap_or(0))
+        })
+    }
+
+    /// Moves the episode cursor to `through` **only** when it still reads
+    /// `expected` — the same compare-and-swap as [`Self::advance_cas`], on
+    /// the other watermark, which it never touches. A session that no longer
+    /// exists gets no row. `true` when it moved.
+    pub fn advance_episode_cas(
+        &self,
+        session_id: &str,
+        through: i64,
+        expected: i64,
+    ) -> Result<bool> {
+        self.db.with_connection(|conn| {
+            let changed = conn.execute(
+                "INSERT INTO learning_cursor(session_id, episode_through, updated_at)
+                 SELECT ?1, ?2, datetime('now') WHERE EXISTS (SELECT 1 FROM session WHERE id = ?1)
+                 ON CONFLICT(session_id) DO UPDATE SET episode_through = excluded.episode_through,
+                     updated_at = excluded.updated_at
+                 WHERE learning_cursor.episode_through = ?3",
+                rusqlite::params![session_id, through, expected],
+            )?;
+            Ok(changed > 0)
+        })
+    }
+
+    /// Every session with at least `min_turns` user rows past its episode
+    /// cursor — the conversation summaries' boot catch-up (design 09 §13.3,
+    /// the durable half of the stop drain as §1.5 makes it for learning): a
+    /// user row a turn wrote, not the assistant's own follow-up text and not
+    /// a `/slash` turn. The flush counts again, exactly, before it calls.
+    pub fn sessions_with_unsummarized_turns(&self, min_turns: u32) -> Result<Vec<String>> {
+        self.db.with_connection(|conn| {
+            let ids = conn
+                .prepare(
+                    "SELECT m.session_id FROM conversation_messages m
+                     LEFT JOIN learning_cursor c ON c.session_id = m.session_id
+                     WHERE m.session_id IS NOT NULL AND m.role = 'user'
+                       AND m.request_id IS NOT NULL AND m.source <> 'internal'
+                       AND substr(ltrim(m.content), 1, 1) <> '/'
+                       AND m.id > COALESCE(c.episode_through, 0)
+                     GROUP BY m.session_id
+                     HAVING COUNT(*) >= ?1
+                     ORDER BY MIN(m.id)",
+                )?
+                .query_map([min_turns], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(ids)
+        })
+    }
+
     /// Every session with a user-authored row past its cursor — the boot
     /// catch-up's one query (design §1.5): a user row a turn wrote
     /// (`request_id` set) that is not the assistant's own follow-up text
@@ -279,5 +344,91 @@ mod tests {
             })
             .unwrap();
         assert_eq!(found, None, "reading creates nothing");
+    }
+
+    fn message_with(db: &Database, session: &str, role: &str, content: &str, source: &str) -> i64 {
+        db.with_connection(|c| {
+            c.execute(
+                "INSERT INTO conversation_messages (lane_key, role, content, source, session_id, request_id)
+                 VALUES ('l:gui', ?1, ?2, ?3, ?4, 'r')",
+                (role, content, source, session),
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+        .unwrap()
+    }
+
+    /// Design 09 §13.3: the episode cursor is a second watermark on the same
+    /// row. It advances only from the value it was read at, a session with
+    /// no row reads 0 and gets a row whose learning cursor still reads 0,
+    /// and neither cursor's advance moves the other.
+    #[test]
+    fn the_episode_cursor_moves_apart_from_the_learning_cursor() {
+        let db = test_db();
+        let repo = LearningCursorRepository::new(&db);
+        session(&db, "s1");
+        assert_eq!(repo.episode_through("s1").unwrap(), 0);
+
+        assert!(repo.advance_episode_cas("s1", 6, 0).unwrap());
+        assert_eq!(repo.episode_through("s1").unwrap(), 6);
+        assert_eq!(repo.get("s1").unwrap(), LearningCursor::default());
+        assert!(
+            !repo.advance_episode_cas("s1", 9, 0).unwrap(),
+            "a stale expected value moves nothing"
+        );
+
+        assert!(repo.advance_cas("s1", 4, 0).unwrap());
+        assert_eq!(repo.get("s1").unwrap().extracted_through, 4);
+        assert_eq!(repo.episode_through("s1").unwrap(), 6, "untouched");
+        assert!(repo.advance_episode_cas("s1", 12, 6).unwrap());
+        assert_eq!(repo.get("s1").unwrap().extracted_through, 4, "untouched");
+
+        assert!(
+            !repo.advance_episode_cas("gone", 3, 0).unwrap(),
+            "a missing session gets no row"
+        );
+        assert_eq!(repo.episode_through("gone").unwrap(), 0);
+    }
+
+    /// The episode catch-up's query: a session is listed when at least
+    /// `min_turns` user rows a turn wrote lie past its episode cursor — not
+    /// the assistant's own follow-up text, not a `/slash` turn, not a reply.
+    #[test]
+    fn sessions_with_unsummarized_turns_counts_user_turns_past_the_episode_cursor() {
+        let db = test_db();
+        let repo = LearningCursorRepository::new(&db);
+        for id in ["four", "three", "summarized", "padded"] {
+            session(&db, id);
+        }
+        for i in 0..4 {
+            message_with(&db, "four", "user", &format!("turn {i}"), "gui");
+            message_with(&db, "four", "assistant", "ok", "gui");
+        }
+        for i in 0..3 {
+            message_with(&db, "three", "user", &format!("turn {i}"), "gui");
+        }
+        let mut last = 0;
+        for i in 0..5 {
+            last = message_with(&db, "summarized", "user", &format!("turn {i}"), "gui");
+        }
+        assert!(repo.advance_episode_cas("summarized", last, 0).unwrap());
+        for i in 0..3 {
+            message_with(&db, "padded", "user", &format!("turn {i}"), "gui");
+        }
+        message_with(&db, "padded", "user", "/status", "gui");
+        message_with(&db, "padded", "user", "a queued task", "internal");
+
+        assert_eq!(
+            repo.sessions_with_unsummarized_turns(4).unwrap(),
+            vec!["four".to_string()]
+        );
+        assert_eq!(
+            repo.sessions_with_unsummarized_turns(3).unwrap(),
+            vec![
+                "four".to_string(),
+                "three".to_string(),
+                "padded".to_string()
+            ]
+        );
     }
 }

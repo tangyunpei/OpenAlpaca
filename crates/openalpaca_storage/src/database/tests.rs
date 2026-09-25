@@ -1241,7 +1241,7 @@ fn migration_044_seeds_existing_sessions_at_their_last_message() {
     }
 
     let db = Database::open(&db_path).expect("a 43 database migrates in place");
-    assert_eq!(db.schema_version().unwrap(), 44);
+    assert_eq!(db.schema_version().unwrap(), newest_version());
     db.with_connection(|conn| {
         let newest: i64 = conn.query_row(
             "SELECT MAX(id) FROM conversation_messages WHERE session_id = 'talked'",
@@ -1282,7 +1282,91 @@ fn migration_044_seeds_existing_sessions_at_their_last_message() {
             .prepare("SELECT version FROM schema_version ORDER BY version")?
             .query_map([], |row| row.get::<_, i32>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        assert_eq!(versions, vec![43, 44]);
+        let registered: Vec<i32> = migrations::MIGRATIONS.iter().map(|m| m.version).collect();
+        assert_eq!(versions, registered);
+        assert_eq!(&versions[..2], &[43, 44]);
+        Ok(())
+    })
+    .unwrap();
+}
+
+// ── Migration 045: the episode cursor (design 09 §13.3) ─────────────────
+
+/// A 44 database with sessions, messages and cursors opens at 45: every
+/// existing session's episode cursor starts at its newest message — historic
+/// conversations are not summarised, as they are not re-extracted (design
+/// 03 §6) — a session with no message starts at 0, a session that had no
+/// cursor row gets one whose learning cursor still reads 0, and the learning
+/// cursor, its attempts and its error are left exactly as they were.
+#[test]
+fn migration_045_seeds_episode_cursors_at_each_sessions_last_message() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("at44.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(migrations::MIGRATIONS[0].sql).unwrap();
+        assert_eq!(migrations::MIGRATIONS[1].version, 44);
+        conn.execute_batch(migrations::MIGRATIONS[1].sql).unwrap();
+        conn.execute_batch(
+            "INSERT INTO session (id, lane_key, source) VALUES ('learned', 'u:gui', 'gui');
+             INSERT INTO session (id, lane_key, source) VALUES ('uncursored', 'u:cli', 'cli');
+             INSERT INTO session (id, lane_key, source, status) VALUES ('silent', 'u:tg', 'telegram', 'archived');
+             INSERT INTO conversation_messages (lane_key, role, content, session_id)
+                 VALUES ('u:gui', 'user', 'one', 'learned');
+             INSERT INTO conversation_messages (lane_key, role, content, session_id)
+                 VALUES ('u:gui', 'assistant', 'two', 'learned');
+             INSERT INTO conversation_messages (lane_key, role, content, session_id)
+                 VALUES ('u:cli', 'user', 'three', 'uncursored');
+             INSERT INTO learning_cursor (session_id, extracted_through, attempts, last_error)
+                 VALUES ('learned', 1, 2, 'not json');",
+        )
+        .unwrap();
+    }
+
+    let db = Database::open(&db_path).expect("a 44 database migrates in place");
+    assert_eq!(db.schema_version().unwrap(), newest_version());
+    db.with_connection(|conn| {
+        let newest = |session: &str| -> rusqlite::Result<i64> {
+            conn.query_row(
+                "SELECT MAX(id) FROM conversation_messages WHERE session_id = ?1",
+                [session],
+                |row| row.get(0),
+            )
+        };
+        let cursors = conn
+            .prepare(
+                "SELECT session_id, extracted_through, episode_through, attempts, last_error
+                   FROM learning_cursor ORDER BY session_id",
+            )?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(
+            cursors,
+            vec![
+                (
+                    "learned".to_string(),
+                    1,
+                    newest("learned")?,
+                    2,
+                    Some("not json".to_string())
+                ),
+                ("silent".to_string(), 0, 0, 0, None),
+                ("uncursored".to_string(), 0, newest("uncursored")?, 0, None),
+            ]
+        );
+        let versions = conn
+            .prepare("SELECT version FROM schema_version ORDER BY version")?
+            .query_map([], |row| row.get::<_, i32>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(versions, vec![43, 44, 45]);
         Ok(())
     })
     .unwrap();

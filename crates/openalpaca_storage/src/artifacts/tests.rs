@@ -1866,11 +1866,26 @@ fn purge_project_takes_the_conversations_the_runs_and_the_uploads() {
     f.foreign_row("upload-1", "loose/2026-09-01/99-uploaded.md", &upload_path);
 
     let plan = f.store().purge_plan(&root).unwrap();
+    // The purged conversations' message ids: what the route forgets their
+    // summaries by (design 09 §13.3), read before the rows go.
+    let purged_messages: Vec<i64> = f
+        .db
+        .with_connection(|conn| {
+            Ok(conn
+                .prepare(
+                    "SELECT id FROM conversation_messages WHERE session_id = 'session-1' ORDER BY id",
+                )?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?)
+        })
+        .unwrap();
+    assert_eq!(purged_messages.len(), 1);
     let outcome = f.store().purge_project(&root).unwrap();
     assert_eq!(
         plan.counts, outcome.counts,
         "the dry run and the real call must agree"
     );
+    assert_eq!(outcome.message_ids, purged_messages);
     assert_eq!(
         outcome.counts,
         PurgeCounts {
