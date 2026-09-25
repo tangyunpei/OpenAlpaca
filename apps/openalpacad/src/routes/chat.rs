@@ -721,18 +721,7 @@ pub async fn delete_chat_history_handler(
 
     match chat_service.clear_history(&session_id) {
         Ok(deleted) => {
-            // Also clear that conversation's summary — the compactor's notes
-            // describe messages that no longer exist. The session row itself
-            // survives: this empties a conversation, it does not delete one
-            // (`DELETE /v1/sessions/{id}` does).
-            let conv_repo = openalpaca_storage::ConversationRepository::new(&state.db);
-            let _ = conv_repo.clear_summary_for_session(&session_id);
-            // LQ4: the cleared turns are not learned — they went with the
-            // messages. The cursor stays where it is: message ids are never
-            // reused, so it still reads correctly for the turns that follow.
-            if let Some(queue) = state.gateway.learning() {
-                queue.forget_session(&session_id);
-            }
+            after_history_cleared(&state.db, state.gateway.learning(), &session_id);
             Json(ChatDeleteResponse { deleted }).into_response()
         }
         Err(e) => error_response(
@@ -741,6 +730,25 @@ pub async fn delete_chat_history_handler(
             &e.to_string(),
         )
         .into_response(),
+    }
+}
+
+/// What clearing a conversation's messages leaves to tidy. The session row
+/// survives: this empties a conversation, it does not delete one
+/// (`DELETE /v1/sessions/{id}` does).
+fn after_history_cleared(
+    db: &openalpaca_storage::Database,
+    learning: Option<&Arc<openalpaca_core::memory::learning::LearningQueue>>,
+    session_id: &str,
+) {
+    // The compactor's summary describes messages that no longer exist.
+    let _ =
+        openalpaca_storage::ConversationRepository::new(db).clear_summary_for_session(session_id);
+    // LQ4: the cleared turns are not learned — they went with the messages.
+    // The cursor stays where it is: message ids are never reused, so it
+    // still reads correctly for the turns that follow.
+    if let Some(queue) = learning {
+        queue.forget_session(session_id);
     }
 }
 
@@ -1312,6 +1320,24 @@ mod tests {
         let data: serde_json::Value = serde_json::from_str(&done_event_data(&event)).unwrap();
         assert_eq!(data["delegation"]["task_id"], "task-123");
         assert_eq!(data["delegation"]["title"], "Research Rust");
+    }
+
+    /// LQ4: clearing a conversation drops its turns not yet learned — the
+    /// learning queue forgets the session — as well as its summary.
+    #[tokio::test]
+    async fn clearing_a_conversation_drops_its_unlearned_turns() {
+        let (_dir, db) = sessions_db();
+        let session = openalpaca_storage::ConversationRepository::new(&db)
+            .create_session("user1:gui", "gui", None, None)
+            .expect("session")
+            .id;
+        let queue = crate::test_util::learning_queue(&db);
+        crate::test_util::finish_turn(&queue, "user1:gui", &session);
+        assert_eq!(queue.pending_turns(&session), 1);
+
+        after_history_cleared(&db, Some(&queue), &session);
+        assert_eq!(queue.pending_turns(&session), 0, "the turns were dropped");
+        assert!(!queue.is_due(&session));
     }
 
     // ── Phase 7a: which conversation a chat turn lands in ───────────

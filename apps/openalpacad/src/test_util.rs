@@ -130,3 +130,48 @@ impl MockOllama {
         }
     }
 }
+
+/// A learning queue over `db` in manual mode — nothing starts a flush on its
+/// own — for the routes that drop a conversation's queue state (LQ4). Its
+/// router has no provider and its memory index lives in memory: the routes
+/// only ever call `forget_session`.
+pub(crate) fn learning_queue(
+    db: &openalpaca_storage::Database,
+) -> std::sync::Arc<openalpaca_core::memory::learning::LearningQueue> {
+    use openalpaca_core::memory::learning::{LearningDeps, LearningQueue, QueueMode};
+    let router = openalpaca_llm::LlmRouter::new(
+        std::collections::HashMap::new(),
+        openalpaca_llm::ModelRegistry::with_defaults(),
+        std::collections::HashMap::new(),
+        std::sync::Arc::new(openalpaca_llm::CostTracker::new(
+            openalpaca_llm::ModelRegistry::with_defaults(),
+        )),
+        "none".to_string(),
+    );
+    let index = openalpaca_storage::memory_index::MemoryIndex::open_in_memory()
+        .expect("an in-memory index");
+    LearningQueue::new(
+        LearningDeps {
+            db: db.clone(),
+            router: std::sync::Arc::new(router),
+            daemon_config: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                openalpaca_core::daemon_config::DaemonConfig::default(),
+            )),
+            memory_service: std::sync::Arc::new(
+                openalpaca_core::memory::service::MemoryService::new(Some(db.clone()), index),
+            ),
+        },
+        QueueMode::Manual,
+    )
+}
+
+/// One finished, user-authored turn of `lane` in `session_id`, as the
+/// gateway's hook records it: the queue holds it as not yet learned.
+pub(crate) fn finish_turn(
+    queue: &std::sync::Arc<openalpaca_core::memory::learning::LearningQueue>,
+    lane: &str,
+    session_id: &str,
+) {
+    let guard = queue.turn_started(uuid::Uuid::new_v4(), lane, true);
+    guard.attach_session(session_id);
+}

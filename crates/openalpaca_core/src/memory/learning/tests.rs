@@ -1987,6 +1987,32 @@ async fn an_archived_session_with_pending_turns_is_due() {
     assert!(scene.queue.is_due(&s));
 }
 
+/// The switch trigger's other half, in the gateway's hook: a lane's turn that
+/// lands in another session — R48's project switch opens it right there —
+/// makes the session it left due at once, before any sweep. Another turn in
+/// the same session, or a turn on another lane, is no switch.
+#[tokio::test]
+async fn a_turn_in_another_session_of_its_lane_makes_the_one_it_left_due() {
+    let scene = Scene::new(vec![]);
+    let left = scene.session();
+    scene.finish_turn(&left, true);
+    scene.finish_turn(&left, true);
+    assert!(!scene.queue.is_due(&left), "the same session twice");
+
+    let elsewhere = scene.session_on("user1:cli");
+    let other_lane = scene
+        .queue
+        .turn_started(uuid::Uuid::new_v4(), "user1:cli", true);
+    other_lane.attach_session(&elsewhere);
+    assert!(!scene.queue.is_due(&left), "another lane's turn");
+
+    let next = scene.session();
+    let turn = scene.queue.turn_started(uuid::Uuid::new_v4(), LANE, true);
+    turn.attach_session(&next);
+    assert!(scene.queue.is_due(&left), "the session it left is due");
+    assert!(!scene.queue.is_due(&next));
+}
+
 /// LQ4: a deleted conversation's queue state is dropped at the next sweep
 /// — its unlearned turns went with its messages.
 #[tokio::test]
@@ -2027,6 +2053,25 @@ async fn drain_returns_within_its_budget() {
         0,
         "nothing lost: the window is still there"
     );
+}
+
+/// The drain with a model that answers: it learns what is pending — ignoring
+/// the quiet rule, since the server has already stopped (a turn ended just
+/// now here) — and reports that it finished.
+#[tokio::test]
+async fn drain_learns_the_pending_window_and_reports_done() {
+    let scene = Scene::new(vec![items(&[vim_item(&[1])])]);
+    let s = scene.session();
+    let (_, answer) = scene.turn(&s, PREF, "Noted.");
+    scene.finish_turn(&s, true);
+
+    assert!(
+        scene.queue.drain(SHUTDOWN_DRAIN).await,
+        "the drain finished"
+    );
+    assert_eq!(scene.cursor(&s), answer, "the window was learned");
+    assert_eq!(scene.titles(), vec!["Editor preference".to_string()]);
+    assert!(!scene.queue.is_due(&s));
 }
 
 /// The durable half of "before the daemon stops": at boot, every session

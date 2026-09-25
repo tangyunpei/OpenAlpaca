@@ -52,6 +52,7 @@ impl Harness {
             owner: OWNER,
             sessions_root: Some(self.sessions_root.clone()),
             session_log: Some(self.log.clone()),
+            learning: None,
         }
     }
 
@@ -997,6 +998,29 @@ async fn deleting_answers_204_and_takes_the_transcript_with_it() {
         rx.try_recv(),
         Ok(SystemEvent::SessionChanged { ref status, .. }) if status == "deleted"
     ));
+}
+
+/// LQ4: a deleted conversation's turns not yet learned go with its messages —
+/// the learning queue forgets the session, so nothing is flushed for it.
+#[tokio::test]
+async fn deleting_drops_the_conversations_unlearned_turns() {
+    let h = Harness::new();
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+    let queue = crate::test_util::learning_queue(&h.db);
+    crate::test_util::finish_turn(&queue, LANE, &session.id);
+    assert_eq!(queue.pending_turns(&session.id), 1);
+
+    let deps = Deps {
+        learning: Some(queue.clone()),
+        ..h.deps()
+    };
+    let response = delete_session(&deps, &session.id).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(queue.pending_turns(&session.id), 0, "turns dropped");
+    assert!(!queue.is_due(&session.id));
 }
 
 #[tokio::test]

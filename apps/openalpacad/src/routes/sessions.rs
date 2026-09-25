@@ -201,6 +201,10 @@ pub(super) struct Deps<'a> {
     /// `create_dir_all`). `None` when no session store resolved at boot, which
     /// is also when there is nothing on disk to remove.
     pub session_log: Option<Arc<openalpaca_core::session_log::SessionLogService>>,
+    /// The learning queue the gateway feeds, for `DELETE`: a deleted
+    /// conversation's turns not yet learned go with its messages (LQ4).
+    /// `None` when no router was configured at boot.
+    pub learning: Option<Arc<openalpaca_core::memory::learning::LearningQueue>>,
 }
 
 impl Deps<'_> {
@@ -349,6 +353,7 @@ fn deps(state: &AppState) -> Deps<'_> {
             .as_ref()
             .map(|service| service.root().to_path_buf()),
         session_log,
+        learning: state.gateway.learning().cloned(),
     }
 }
 
@@ -738,15 +743,7 @@ pub async fn delete_session_handler(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     flush_session_logs(&state).await;
-    let response = delete_session(&deps(&state), &id).await;
-    // LQ4: the conversation's unlearned turns went with its messages; the
-    // learning queue forgets it too (a flush in flight writes nothing).
-    if response.status() == StatusCode::NO_CONTENT
-        && let Some(queue) = state.gateway.learning()
-    {
-        queue.forget_session(&id);
-    }
-    response
+    delete_session(&deps(&state), &id).await
 }
 
 /// Delete a conversation: its rows, and then the transcript on disk.
@@ -785,6 +782,12 @@ pub(super) async fn delete_session(deps: &Deps<'_>, id: &str) -> Response {
     match deps.repo().delete_session(id) {
         Ok(true) => {
             remove_session_log(deps, id).await;
+            // LQ4: the conversation's unlearned turns went with its
+            // messages; the learning queue forgets it too (a flush in flight
+            // writes nothing).
+            if let Some(queue) = deps.learning.as_deref() {
+                queue.forget_session(id);
+            }
             deps.announce(&session.id, &session.lane_key, "deleted");
             StatusCode::NO_CONTENT.into_response()
         }
