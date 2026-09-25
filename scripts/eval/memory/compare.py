@@ -18,9 +18,13 @@ judge calls of the paired rows — and two reports graded by different judges
 are refused (design 09 §7.4): a difference between them would be partly the
 judges'. `--allow-judge-mismatch` compares them anyway and says so. A report
 that records `judge_is_reader` (the reader graded its own answers, owner
-answer LQ1) has it printed beside its judge.
+answer LQ1) has it printed beside its judge, and one that records
+`recall_mode` (`index` or `excerpts`, design 09 §13.2) has that printed too —
+two reports in different recall modes are compared, never refused: that is
+L8's D-excerpts against D-index (design 09 §13.4).
 """
 import argparse
+import io
 import json
 import math
 import os
@@ -55,6 +59,10 @@ def judge_line(report, models):
         line += f"  judge_is_reader={str(conditions['judge_is_reader']).lower()}"
     if conditions.get("judge_same_family") is not None:
         line += f"  judge_same_family={str(conditions['judge_same_family']).lower()}"
+    # Printed, never checked: D-excerpts against D-index is a comparison
+    # worth making (design 09 §13.4). The archived reports record no mode.
+    if conditions.get("recall_mode") is not None:
+        line += f"  recall_mode={conditions['recall_mode']}"
     return line
 
 
@@ -143,9 +151,10 @@ def compare(candidate, baseline, margin=-5.0, category_block=-10.0, allow_judge_
 
 def self_test():
     """The judge check on synthetic reports: the same judge compares, a
-    different judge is refused, and --allow-judge-mismatch compares anyway."""
+    different judge is refused, and --allow-judge-mismatch compares anyway;
+    and each report's recall mode is printed, a mismatch compared."""
 
-    def report(system, judge, judge_is_reader=None):
+    def report(system, judge, judge_is_reader=None, recall_mode=None):
         rows = []
         for i in range(20):
             correct = i % 4 != 0
@@ -156,9 +165,12 @@ def self_test():
         conditions = {"judge_prompt_sha256": "0" * 64}
         if judge_is_reader is not None:
             conditions["judge_is_reader"] = judge_is_reader
+        if recall_mode is not None:
+            conditions["recall_mode"] = recall_mode
         return {"schema": 1, "status": "complete", "system": system, "conditions": conditions, "rows": rows}
 
-    def run(cand, base, **kw):
+    def run_printing(cand, base, **kw):
+        """The comparison's result and what it printed."""
         with tempfile.TemporaryDirectory() as d:
             paths = []
             for name, rep in (("cand.json", cand), ("base.json", base)):
@@ -167,14 +179,18 @@ def self_test():
                     json.dump(rep, f)
                 paths.append(p)
             stdout = sys.stdout
-            sys.stdout = open(os.devnull, "w")
+            sys.stdout = io.StringIO()
             try:
-                return compare(paths[0], paths[1], **kw)
+                code = compare(paths[0], paths[1], **kw)
             except SystemExit as e:
-                return e.code
+                code = e.code
             finally:
-                sys.stdout.close()
+                printed = sys.stdout.getvalue()
                 sys.stdout = stdout
+            return code, printed
+
+    def run(cand, base, **kw):
+        return run_printing(cand, base, **kw)[0]
 
     failures = []
 
@@ -195,6 +211,21 @@ def self_test():
     unrecorded = run(report("L", "qwen3.8:27b-mlx"), report("A", None))
     expect("a report with no recorded judge is refused against one with", unrecorded,
            lambda r: isinstance(r, str) and r.startswith("refused:"))
+    # Design 09 §13.4: D-excerpts against D-index is the comparison L8 makes,
+    # so a recall-mode mismatch is printed on each header line, never refused.
+    code, printed = run_printing(report("D", "qwen3.8:27b-mlx", True, "excerpts"),
+                                 report("D", "qwen3.8:27b-mlx", True, "index"))
+    expect("two recall modes are compared", code, 0)
+    header = dict(line.split(":", 1) for line in printed.splitlines()[:2])
+    expect("the candidate's recall mode is printed beside its judge", header.get("candidate judge", ""),
+           lambda line: line.endswith("judge_is_reader=true  recall_mode=excerpts"))
+    expect("the baseline's recall mode is printed beside its judge", header.get("baseline judge", ""),
+           lambda line: line.endswith("recall_mode=index"))
+    code, printed = run_printing(report("D", "qwen3.8:27b-mtp-q8_0", None, "index"),
+                                 report("B", "qwen3.8:27b-mtp-q8_0"))
+    expect("an archived report, which records no mode, is compared", code, 0)
+    expect("and prints none", printed.splitlines()[1],
+           lambda line: line.startswith("baseline judge:") and "recall_mode" not in line)
     print("self-test:", "FAILED" if failures else "passed")
     return 1 if failures else 0
 
@@ -208,7 +239,8 @@ def main():
                     help="a category whose point estimate is below this blocks (default -10 pp)")
     ap.add_argument("--allow-judge-mismatch", action="store_true",
                     help="compare two reports graded by different judge models (refused by default)")
-    ap.add_argument("--self-test", action="store_true", help="check the judge-mismatch refusal and exit")
+    ap.add_argument("--self-test", action="store_true",
+                    help="check the judge-mismatch refusal and the recall-mode printout, and exit")
     args = ap.parse_args()
     if args.self_test:
         return self_test()
