@@ -84,12 +84,12 @@ const PROMPT_ARGUMENTS_BYTES: usize = 500;
 /// The name and the arguments are what the person approves, and both come
 /// from outside OpenAlpaca (an MCP `<server>__<tool>` or plugin
 /// `<plugin>::<tool>` name, model-written arguments), so every hidden
-/// character in them — a bidi override, a zero-width character, a C1
-/// control — is shown as `<U+XXXX>` by [`escape_hidden`], escaped before the
-/// cut so the cut never splits an escape, and one notice line under the
-/// arguments counts them, those the cut left out included. Display only:
-/// `tool_arguments` is borrowed, and a reply is matched by request id, not
-/// by anything shown here.
+/// character in them — a bidi override, a zero-width character, a variation
+/// selector, a C1 control — is shown as `<U+XXXX>` by [`escape_hidden`],
+/// escaped before the cut so the cut never splits an escape, and one notice
+/// line under the arguments counts them, those the cut left out included.
+/// Display only: `tool_arguments` is borrowed, and a reply is matched by
+/// request id, not by anything shown here.
 ///
 /// [`escape_hidden`]: openalpaca_core::utils::text::escape_hidden
 pub fn format_confirmation_prompt(

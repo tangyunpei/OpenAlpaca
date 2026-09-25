@@ -20,9 +20,10 @@
 //! [`escape_hidden`] answers the same danger for a different text: the exact
 //! values a person approves or denies — a tool's arguments, the tool's name,
 //! the agent asking. Nothing may be dropped from those, because what is
-//! dropped from the prompt still runs, so every hidden character is shown as
-//! `<U+XXXX>` and [`hidden_notice`] says how many there were. The two do not
-//! compete: `one_line` is for prose OpenAlpaca composed to be read (a memory
+//! dropped from the prompt still runs, so every hidden character — and every
+//! code point Unicode says renders as nothing — is shown as `<U+XXXX>` and
+//! [`hidden_notice`] says how many there were. The two do not compete:
+//! `one_line` is for prose OpenAlpaca composed to be read (a memory
 //! suggestion's `preview`, sanitized by the daemon before any surface sees
 //! it), and the escape is for the values beside it that decide what runs.
 //! The GUI mirrors the escape from one shared table,
@@ -103,11 +104,14 @@ pub struct Escaped {
 }
 
 /// A character an approval surface shows as `<U+XXXX>` instead of itself:
-/// every [hidden](is_hidden) character, and the line and paragraph
-/// separators (U+2028, U+2029), which break a line where the text shows
-/// none — but not `\n` and `\t`, the two characters the surfaces' own layout
-/// (pretty-printed JSON) is written in. `\r` is escaped: at a terminal it
-/// returns the cursor and the rest of the line overwrites what was shown.
+/// every [hidden](is_hidden) character, every code point Unicode calls
+/// default-ignorable (`Default_Ignorable_Code_Point`: drawn as nothing, so a
+/// variation selector inside a path reads as the path without it), and the
+/// line and paragraph separators (U+2028, U+2029), which break a line where
+/// the text shows none — but not `\n` and `\t`, the two characters the
+/// surfaces' own layout (pretty-printed JSON) is written in. `\r` is
+/// escaped: at a terminal it returns the cursor and the rest of the line
+/// overwrites what was shown.
 ///
 /// The GUI derives its copy from `apps/openalpaca-gui/src/lib/hidden-chars.json`;
 /// a test on each side holds its own to that table.
@@ -115,8 +119,41 @@ pub fn needs_escape(c: char) -> bool {
     match c {
         '\n' | '\t' => false,
         '\u{2028}' | '\u{2029}' => true,
-        c => is_hidden(c),
+        c => is_hidden(c) || is_default_ignorable(c),
     }
+}
+
+/// A code point Unicode says a renderer draws as nothing when it does not
+/// support it (`Default_Ignorable_Code_Point`, Unicode 16.0, held equal to
+/// the `regex` crate's own table by a test). Most are [hidden](is_hidden)
+/// already; what this adds is letters and marks that show as nothing — the
+/// variation selectors (U+FE00–U+FE0F, U+E0100–U+E01EF, the Mongolian ones),
+/// the combining grapheme joiner (U+034F), the Hangul fillers (U+115F,
+/// U+1160, U+3164, U+FFA0), Khmer U+17B4–U+17B5 — and the code points
+/// Unicode reserves for future invisible characters (U+2065,
+/// U+FFF0–U+FFF8, U+E0000–U+E0FFF), which a renderer newer than this table
+/// may already hide.
+fn is_default_ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{34f}'
+            | '\u{61c}'
+            | '\u{115f}'..='\u{1160}'
+            | '\u{17b4}'..='\u{17b5}'
+            | '\u{180b}'..='\u{180f}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}'
+            | '\u{feff}'
+            | '\u{ffa0}'
+            | '\u{fff0}'..='\u{fff8}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0000}'..='\u{e0fff}'
+    )
 }
 
 /// `text` for a person deciding whether it runs: every [`needs_escape`]
@@ -129,8 +166,9 @@ pub fn needs_escape(c: char) -> bool {
 /// shows is what will run, and a value with its hidden characters taken out
 /// reads as a different value from the one that runs — `/srv/allowed` for a
 /// path with a zero-width space inside it — and hides an override the value
-/// carries to wherever it lands. The price, an emoji's zero-width joiner
-/// shown as `<U+200D>`, is right on a surface whose job is to be exact. This
+/// carries to wherever it lands. The price, an emoji's zero-width joiner or
+/// variation selector shown as `<U+200D>` or `<U+FE0F>`, is right on a
+/// surface whose job is to be exact. This
 /// is display only: nothing the tool receives, nothing stored and nothing
 /// matched against a reply changes.
 pub fn escape_hidden(text: &str) -> Escaped {
@@ -189,8 +227,8 @@ pub fn hidden_notice(hidden: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Escaped, byte_prefix, escape_hidden, escape_hidden_within, hidden_notice, is_hidden,
-        needs_escape, one_line,
+        Escaped, byte_prefix, escape_hidden, escape_hidden_within, hidden_notice,
+        is_default_ignorable, is_hidden, needs_escape, one_line,
     };
 
     /// Every scalar value, for the tests that must hold over all of them.
@@ -198,15 +236,36 @@ mod tests {
         (0..=0x10ffff_u32).filter_map(char::from_u32)
     }
 
-    /// The escape's set is `is_hidden`'s, plus the line and paragraph
-    /// separators, less the newline and the tab the surfaces lay JSON out
-    /// with — and nothing else, so neither can drift from the other.
+    /// The escape's set is `is_hidden`'s and the default-ignorable code
+    /// points, plus the line and paragraph separators, less the newline and
+    /// the tab the surfaces lay JSON out with — and nothing else, so none of
+    /// them can drift from the others.
     #[test]
-    fn needs_escape_is_hidden_plus_the_separators_less_newline_and_tab() {
+    fn needs_escape_is_hidden_and_default_ignorable_plus_the_separators_less_newline_and_tab() {
         for c in every_char() {
             let expected =
-                (is_hidden(c) || c == '\u{2028}' || c == '\u{2029}') && c != '\n' && c != '\t';
+                (is_hidden(c) || is_default_ignorable(c) || c == '\u{2028}' || c == '\u{2029}')
+                    && c != '\n'
+                    && c != '\t';
             assert_eq!(needs_escape(c), expected, "U+{:04X}", c as u32);
+        }
+    }
+
+    /// The hand-written table is Unicode's `Default_Ignorable_Code_Point` by
+    /// the `regex` crate's tables — the characters a renderer draws as
+    /// nothing, assigned or reserved — so a dependency upgrade that brings a
+    /// newer Unicode fails here rather than letting a new one through.
+    #[test]
+    fn is_default_ignorable_is_exactly_unicodes() {
+        let unicode = regex::Regex::new(r"^\p{Default_Ignorable_Code_Point}$").unwrap();
+        let mut buf = [0u8; 4];
+        for c in every_char() {
+            assert_eq!(
+                is_default_ignorable(c),
+                unicode.is_match(c.encode_utf8(&mut buf)),
+                "U+{:04X}",
+                c as u32
+            );
         }
     }
 
@@ -246,6 +305,26 @@ mod tests {
             // Visible text stays as written: CJK, right-to-left letters (not
             // format characters), emoji — an emoji's joiner is the price.
             ("日本語 שלום 👩\u{200d}💻", "日本語 שלום 👩<U+200D>💻", 1),
+            // Default-ignorable but neither Cc nor Cf: a variation selector
+            // inside a path is a different path that reads the same.
+            ("/srv/allow\u{fe00}ed", "/srv/allow<U+FE00>ed", 1),
+            // A Hangul filler as an identifier: code that reads as one thing.
+            (
+                "const { timeout,\u{3164} } = q; exec(\u{3164});",
+                "const { timeout,<U+3164> } = q; exec(<U+3164>);",
+                2,
+            ),
+            // The combining grapheme joiner and a Hangul choseong filler.
+            ("a\u{115f}b\u{34f}c", "a<U+115F>b<U+034F>c", 2),
+            // An astral variation selector; reserved (unassigned) ignorables,
+            // which a newer renderer may already draw as nothing.
+            (
+                "vs\u{e0100} t\u{e0002} \u{fff0}x\u{2065}",
+                "vs<U+E0100> t<U+E0002> <U+FFF0>x<U+2065>",
+                4,
+            ),
+            // An emoji's variation selector is the same price as its joiner.
+            ("\u{2764}\u{fe0f}", "\u{2764}<U+FE0F>", 1),
         ];
         for (input, shown, hidden) in cases {
             assert_eq!(

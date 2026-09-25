@@ -258,6 +258,33 @@ mod hidden_characters {
         );
     }
 
+    /// Default-ignorable characters that are neither Cc nor Cf — a variation
+    /// selector, a Hangul filler, the combining grapheme joiner — draw as
+    /// nothing, so a path or an identifier carrying one reads as another.
+    #[test]
+    fn a_variation_selector_a_hangul_filler_and_a_grapheme_joiner_are_shown_escaped() {
+        let args = serde_json::json!({
+            "path": "/srv/allow\u{fe00}ed/run.sh",
+            "code": "exec(\u{3164})\u{34f}",
+        });
+
+        let prompt = format_confirmation_prompt("shell_exec", &args, 1);
+
+        assert_nothing_hidden(&prompt);
+        assert!(
+            prompt.contains("\"path\": \"/srv/allow<U+FE00>ed/run.sh\""),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("\"code\": \"exec(<U+3164>)<U+034F>\""),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Note: this request contains 3 hidden characters, shown as <U+…>."),
+            "{prompt}"
+        );
+    }
+
     /// `serde_json` escapes a `\r` inside a string itself, so a raw one can
     /// only arrive in the name; a C1 control and an astral tag character pass
     /// through `serde_json` raw.
