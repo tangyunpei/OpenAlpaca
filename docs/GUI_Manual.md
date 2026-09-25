@@ -628,11 +628,15 @@ Two columns, in the Library's shape. The left one, top to bottom:
   you. When something you said changes a note **you saved** (or edited by
   hand), OpenAlpaca does not overwrite it: it asks — *"Replace “X” (saved by
   you) with “B”?"* — showing your note and the new text side by side (the new
-  one can turn out to say the same thing), why it thinks so, and *"From what
-  you said on <date>"*. **Replace** makes the new note yours and keeps the old
+  one can turn out to say the same thing; the old one is labelled *Current*
+  rather than *Yours* when OpenAlpaca learned it), why it thinks so, and *"From
+  what you said on <date>"* (*"Edited by you · suggested on <date>"* once you
+  edited the suggestion itself). **Replace** makes the new note yours and keeps the old
   one as history (*"Replaced — “X” is kept as history"*); if you edited the old
   note after the suggestion was made, the Replace is refused rather than
-  retiring your edit unseen. **Keep mine** dismisses the suggestion and leaves
+  retiring your edit unseen. A suggestion whose note was already replaced or
+  archived some other way leaves this card; its Replace in the note's detail is
+  refused too, and Keep mine clears it. **Keep mine** dismisses the suggestion and leaves
   your note as it was (*"Kept your note"*). Neither forgets anything else you
   said in the same message. A suggestion is never used in answers while it
   waits; one that was only inferred from the conversation says so.

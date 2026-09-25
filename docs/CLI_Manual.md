@@ -701,12 +701,16 @@ Notes:
   `<id8>  replace “X” (saved by you) → “B”  from your words, 2026-09-24 — <reason>`,
   with `(+N older)` when several restatements named the same note, and `inferred
   from the conversation` for one read out of an answer or a tool's output rather
-  than your own words. A change to a note that was itself *learned* needs no
+  than your own words. A suggestion whose own text changed after it was written
+  says who wrote it now: `edited by you, suggested <date>` (or `edited outside
+  OpenAlpaca`, `imported`). A change to a note that was itself *learned* needs no
   question: it replaces the old note at once, and `undo` brings the old one back.
 - `confirm` makes a candidate an active note of yours. For a suggestion it also
   reads the note the suggestion would replace and sends that note's current
   revision with the confirm, so a note you edited after the suggestion was made is
-  a `409`, never retired unseen; then it prints what the suggestion replaced — kept
+  a `409`, never retired unseen, and one already replaced or archived some other
+  way is refused, since nothing is left to replace (`undo` the suggestion
+  instead); then it prints what the suggestion replaced — kept
   as history, readable with `show` — and any other suggestions for the same note,
   which the confirm dismissed. It is refused for a note that is not a candidate.
 - `undo` takes back what learning did, and forgets nothing else. On a *recently

@@ -664,14 +664,20 @@ characters; one over 8 KiB keeps its first 6 KiB and last 2 KiB). Each message
 learns into the project its own turn named, or into the global partition when
 it named none, whatever project the conversation was later bound to. What you
 said in your own words becomes an active note learned from you (origin
-`extracted_user`, listed as *recently learned* with a one-step undo). What was
-inferred from an answer, from a follow-up the assistant queued for itself, from
-a message over 8 KiB (which may quote other text — a piped email, a pasted
-page) or from a run's output becomes a **candidate**, kept out of recall until
-you confirm it. Every learned note cites the messages it came from, and a
-message you forgot a note from is never learned from again. Slash commands and
-their answers, extension notices, workflow updates and completion reports are
-not read.
+`extracted_user`, listed as *recently learned* with a one-step undo). When it
+changes a note that was itself learned, it replaces that note at once (an
+explicit `supersedes`; undo brings the old one back). When it changes a note you
+saved, edited by hand or imported, it is written as a **suggestion** instead: a
+candidate naming the note it would replace, while your note stays in force and
+in recall until you *Replace* or *Keep mine* (`GET /v1/memories/suggestions`
+below). What was inferred from an answer, from a follow-up the assistant
+queued for itself, from a message over 8 KiB (which may quote other text — a
+piped email, a pasted page) or from a run's output becomes a **candidate**,
+kept out of recall until you confirm it; one that would change a note is
+listed with the suggestions, marked as inferred. Every learned note cites the
+messages it came from, and a message you forgot a note from is never learned
+from again. Slash commands and their answers, extension notices, workflow
+updates and completion reports are not read.
 
 At most `[orchestrator.costs] extract_max_items_per_call` (12) notes per
 learning call and `task_extract_max_items_per_run` (10) candidates per run are
@@ -696,8 +702,10 @@ The model's tools are the same service with less authority. `memory_search`,
 `memory_read` and `memory_list` are registered for every agent granted
 `memory_read`; `memory_store`, `memory_update` and `memory_forget` are offered to
 the main conversation alone. A tool call records origin `extracted_user` at most,
-never `user`; it cannot confirm a candidate, and it cannot edit, archive or
-replace a note you wrote. `memory_update` and `memory_forget` raise the ordinary
+never `user`; it cannot confirm a candidate, it cannot edit, archive or
+replace a note you wrote, and it cannot edit a suggestion (the text you are
+asked about stays the extractor's). No surface archives a suggestion — it is
+replaced or kept. `memory_update` and `memory_forget` raise the ordinary
 confirmation card, and an unattended turn (a scheduled skill, a piped
 `openalpaca chat`) is refused them outright.
 
@@ -712,9 +720,10 @@ addressed. Bodies and queries are closed objects — an unknown key is a `400`.
 
 | Method and path | Purpose |
 |---|---|
-| `GET /v1/memories` | List notes: `kind`, `status` (default `active`), `scope`, `include_history`, `include_candidates`, `limit` (1–100, default 50) and `cursor`. Answers `{items, next_cursor}`; a cursor is valid for the filter set that issued it, and one from another filter set is `400 MEMORY_INVALID_INPUT`. |
+| `GET /v1/memories` | List notes: `kind`, `status` (default `active`), `scope`, `include_history`, `include_candidates`, `limit` (1–100, default 50) and `cursor`. Answers `{items, next_cursor}`, each item with `supersedes` (the ids it names as replaced); a cursor is valid for the filter set that issued it, and one from another filter set is `400 MEMORY_INVALID_INPUT`. |
 | `GET /v1/memories/search` | Literal search: `q` (1–512 chars), `kind`, `scope`, `limit` (1–20, default 8), `historical`, `as_of`. Answers cited results with `freshness`, `conflict`, `same_key_loser`, `sources_status`, plus `partial` and `index_state`. Candidates are never returned. |
-| `GET /v1/memories/recently-learned` | The extractor's active `extracted_user` notes, newest first — `since` (RFC 3339, or a window like `7d`, `24h`, `30m`; default 7 days) and `limit`. An edit through this surface re-records a note as `user` and it leaves the list. |
+| `GET /v1/memories/recently-learned` | The extractor's `extracted_user` notes that recall would use, newest first, each with `supersedes` (what it replaced) — `since` (RFC 3339, or a window like `7d`, `24h`, `30m`; default 7 days) and `limit`. A note that is not in force, loses its `fact_key` to another note, or cites a message a forget suppressed is not listed. An edit through this surface re-records a note as `user` and it leaves the list. |
+| `GET /v1/memories/suggestions` | The pending suggestions, newest first — `limit` (1–100, default 20). Each item: `id`, `revision`, `title`, `knowledge` (the suggested text), `reason`, `created_at`, `observed_at` (the cited message's time), `origin`, `scope`, `sources`, `older_count`, and `target: {id, revision, title, excerpt, origin, scope}` — the note it would replace, as read now. Where several name one note only the newest is listed, and `older_count` counts the rest. A suggestion whose note is gone or no longer in force is not listed (undo still dismisses it). Records nothing. |
 | `GET /v1/memories/recently-used` | The in-memory ring of notes delivered to a model since the daemon started (`limit`, default 50, max 200): `{id, revision, reason, delivered_at, lane_key, task_id}`. Cleared at restart. |
 | `GET /v1/memories/doctor` | The read-only report: every partition with its health, counts, malformed files, duplicate ids and conflicts, other owners' partitions as orphans, and stale/abandoned/orphaned move snapshots. Changes nothing. |
 | `POST /v1/memories` | Save a note: `title`, `body`, `kind`, and optionally `scope`, `aliases`, `tags`, `fact_key`, `sources` (`[{type: message\|task, id}]`, verified against the database), `valid_from`, `valid_to`, and `supersedes: {id, expected_revision}` to replace a note. `201` with the `memory_store` result and `ETag`; an exact duplicate is `200` with the existing id and `dedup: existing`; a moved `supersedes` target is `409`. |
@@ -722,8 +731,8 @@ addressed. Bodies and queries are closed objects — an unknown key is a `400`.
 | `POST /v1/memories/sync` | One reconciliation scan now: `{scanned, changed, index_state, changes}`. |
 | `GET /v1/memories/{id}` | One note with its frontmatter, body (≤ 32 KiB), provenance and `ETag: "<revision>"`. `?section=<heading>` for one section; `?revision=<rev>` for one of the last five daemon-written revisions. |
 | `GET /v1/memories/{id}/history` | Those revisions, newest first: `{revisions: [{revision, written_at}]}`. |
-| `POST /v1/memories/{id}` | Update under `If-Match`: `{action: edit\|archive\|confirm, patch?, reason?}`. `edit` takes a `patch` of `title`, `body`, `aliases`, `tags`, `fact_key`, `valid_from`, `valid_to`, `review_after` (an explicit `null` clears a nullable one); `confirm` makes a candidate active. Answers the new revision, as body and `ETag`. |
-| `POST /v1/memories/{id}/undo` | Forget a recently learned note under `If-Match`; `409 MEMORY_NOT_UNDOABLE` once its origin is no longer `extracted_user`. |
+| `POST /v1/memories/{id}` | Update under `If-Match`: `{action: edit\|archive\|confirm, patch?, target_revision?, reason?}`. `edit` takes a `patch` of `title`, `body`, `aliases`, `tags`, `fact_key`, `valid_from`, `valid_to`, `review_after` (an explicit `null` clears a nullable one); `confirm` makes a candidate active. Confirming a **suggestion** also retires the note it names, so the body carries `target_revision`, that note's revision as you last read it: absent is `400`; a note edited since is `409 MEMORY_REVISION_CONFLICT` with *that* note's revision as `ETag`; a note gone is `404`; a note already replaced or archived another way is `400` (nothing is left to replace — undo the suggestion); a candidate naming several notes is `400`. `target_revision` with any other action is `400`, and `archive` of a suggestion is `400`. Answers `{id, revision, status, superseded, dismissed}` and the new revision as `ETag`: `superseded` is the note a confirmed suggestion replaced (kept as history), `dismissed` the other suggestions for that note, each withdrawn. |
+| `POST /v1/memories/{id}/undo` | Take back what learning did, under `If-Match`: a note learned from your words (origin `extracted_user`) or any candidate — for a suggestion, *Keep mine*. It is a **withdrawal**, not a forget: the one note goes, no message it cited is suppressed (whatever else that message taught stays learned), and what it had replaced is in force again unless another note still replaces it. Answers `{id, status: "withdrawn", restored}`, `restored` naming the notes that came back (empty for a candidate). Any other note is `409 MEMORY_NOT_UNDOABLE`. |
 | `DELETE /v1/memories/{id}` | Forget one note under `If-Match`: `{id, status: "forgotten", retained}`. |
 
 **A revision travels in `If-Match` and nowhere else.** The three single-note
@@ -1090,7 +1099,8 @@ list is the whole union. Every frame also carries `ts` and `instance_id`.
 - `skill_invocation_started`, `skill_completed`, `skill_failed`
 - `extension_state_changed` (an MCP server or plugin changed state), `extension_capability_withheld` (a surface asked for a tool a disabled extension owns), `extension_capability_withdrawn` (a disable/crash took tools away, with the affected templates, skills and cron skills)
 - `memory_changed` (`partition_key`, `note_id`, `change` — `created`,
-  `updated`, `archived`, `confirmed`, `forgotten` or `external` —, `revision`
+  `updated`, `archived`, `confirmed`, `forgotten` (also sent for an undo and
+  for each suggestion a confirm dismisses) or `external` —, `revision`
   (`null` for a forget), `origin`, and `surface` — `user`, `model_tool` or
   `extraction`, **absent** when the daemon's reconciliation scan found the change
   on disk): one frame per write the memory service makes, whichever surface
