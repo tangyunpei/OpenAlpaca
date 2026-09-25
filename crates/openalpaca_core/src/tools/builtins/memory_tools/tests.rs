@@ -682,6 +682,114 @@ async fn an_unattended_turn_is_refused_forget_and_update_before_anything_runs() 
     assert!(out.contains(&id.to_string()), "{out}");
 }
 
+/// A registry holding the main loop's memory writers with the annotations
+/// their names carry, as `MainLoopToolSet::register_into` registers them.
+fn writer_registry(h: &Harness) -> Arc<ToolRegistry> {
+    let registry = Arc::new(ToolRegistry::default());
+    for (definition, backend) in [
+        (
+            memory_update_tool_definition(),
+            Arc::new(MemoryUpdateTool::new(h.service.clone())) as Arc<dyn BuiltInTool>,
+        ),
+        (
+            memory_forget_tool_definition(),
+            Arc::new(MemoryForgetTool::new(h.service.clone())),
+        ),
+    ] {
+        registry
+            .register(RegisteredTool {
+                annotations: annotations_for_builtin(&definition.name),
+                definition,
+                backend: ToolBackend::BuiltIn(backend),
+                provides_capabilities: vec![],
+                exempt_from_timeout: false,
+                version: "test".into(),
+                author: "test".into(),
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+    }
+    registry
+}
+
+/// A candidate the extractor inferred from the conversation — the kind of
+/// note `memory_update action: confirm` could only ever be pointed at.
+fn inferred_candidate(h: &Harness) -> crate::memory::service::StoreOutput {
+    let extractor = h
+        .service
+        .context(
+            ALICE,
+            WorkspaceHint::None,
+            Surface::Extraction,
+            Capabilities::EXTRACTION,
+            Attribution::default(),
+        )
+        .unwrap();
+    h.service
+        .store(
+            &extractor,
+            StoreInput {
+                title: "Staging URL".into(),
+                body: "# Staging URL\n\nA tool said staging moved to staging-2.\n".into(),
+                kind: Some(NoteKind::Fact),
+                provenance: Some(crate::memory::service::ExtractionProvenance::OtherOutput),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+
+/// Design 09 §4.1, the wasted click: a `memory_update` confirm raises the
+/// ordinary card on an attended turn, and only after the person approves
+/// does the service refuse it — the click was for nothing.
+#[tokio::test]
+async fn an_approved_memory_update_confirm_is_refused_after_the_click() {
+    let h = Harness::new();
+    let candidate = inferred_candidate(&h);
+    let broker = Arc::new(crate::security::confirmation::ConfirmationBroker::new());
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+    let mut sandbox = SandboxManager::with_defaults(writer_registry(&h), bus);
+    sandbox.set_confirmation_broker(broker.clone());
+    let answering = broker.clone();
+    let clicked = tokio::spawn(async move {
+        for _ in 0..200 {
+            if let Some(id) = answering.pending_keys().first().cloned() {
+                answering
+                    .respond(
+                        &id,
+                        crate::security::confirmation::ConfirmationResponse {
+                            approved: true,
+                            approval_scope: None,
+                        },
+                    )
+                    .unwrap();
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        false
+    });
+    let call = ToolCall {
+        id: "tc".into(),
+        name: "memory_update".into(),
+        arguments: serde_json::json!({"id": candidate.id.to_string(), "expected_revision": candidate.revision, "action": "confirm"}),
+    };
+    let err = sandbox
+        .execute_tool(&call, &sandbox_policy(false), &h.tool_ctx(ALICE))
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("confirm_refused"), "{err}");
+    assert!(clicked.await.unwrap(), "a card was raised and answered");
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok()).any(|e| matches!(
+            e,
+            crate::events::SystemEvent::ToolConfirmationRequested { .. }
+        )),
+        "the card went out before the refusal"
+    );
+}
+
 /// The model is told what `historical` adds — superseded, archived and
 /// ended notes — and when to reach for it: a question about the past. A
 /// note whose validity window has ended is hidden from a current search, so
