@@ -2872,6 +2872,51 @@ async fn a_same_stat_hand_edit_of_a_learned_note_is_never_replaced_automatically
     );
 }
 
+/// §2.5's table, last row, against a note the user saved: an inferred
+/// change is an inferred suggestion. The file layer refuses a candidate
+/// naming a `user` note until S1 (L3), so in L2 it is decided and counted
+/// like a suggestion and never attempted — not counted `failed`, with a
+/// WARN that blames a tool call.
+#[tokio::test]
+async fn an_inferred_change_to_a_saved_note_is_a_suggestion_not_a_failure() {
+    let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
+        "title": "Commute",
+        "content": "The user probably cycles to the office now.",
+        "kind": "fact",
+        "stated_by": "assistant",
+        "rows": [2],
+        "fact_key": "user.commute",
+    }))])]);
+    let saved = scene.save("Commute", "The user commutes by bus.", Some("user.commute"));
+    let s = scene.session();
+    scene.turn(
+        &s,
+        "Where should I lock my bike near work?",
+        "Since you seem to cycle to the office now, try the rack by the entrance.",
+    );
+    let report = scene.queue.flush_session(&s).await;
+    assert!(
+        !scene.model.prompts()[0].contains("\"Commute\""),
+        "the saved note was not listed: {}",
+        scene.model.prompts()[0]
+    );
+    assert_eq!(
+        (report.suggestions, report.failed, report.stored),
+        (1, 0, 0),
+        "{report:?}"
+    );
+    let active = scene.active();
+    assert_eq!(active.len(), 1, "{active:?}");
+    assert_eq!(
+        (active[0].id, &active[0].revision),
+        (saved.id, &saved.revision)
+    );
+    assert!(
+        scene.candidates().is_empty(),
+        "nothing is written before L3"
+    );
+}
+
 /// Rulings LR10, LR11: a learned `user.*` fact restated with a new value
 /// in a project chat replaces the **global** note — its key is looked up in
 /// both of the chunk's partitions, and the replacement is written in its

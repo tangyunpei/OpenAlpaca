@@ -547,7 +547,8 @@ pub(crate) enum Plan {
     /// a `user` note and writes it as one; in L2 it is counted, not written.
     Suggestion(KnownNote),
     /// Assistant or tool output naming a target: a candidate that
-    /// supersedes nothing until confirmed (MD-2).
+    /// supersedes nothing until confirmed (MD-2). Against a `user` note it
+    /// waits for S1 (L3) like a suggestion: in L2 it is counted, not written.
     Inferred(KnownNote),
 }
 
@@ -671,7 +672,8 @@ pub(crate) struct StoreCounts {
     pub dropped_unchanged: usize,
     /// §2.5, *The race*: the target moved between the lookup and the write.
     pub dropped_conflict: usize,
-    /// User-words changes to a saved note: decided, and written from L3 on.
+    /// User-words changes to a saved note, and inferred changes to a
+    /// `user` note: decided, and written from L3 on.
     pub suggestions: usize,
     pub failed: usize,
 }
@@ -822,11 +824,17 @@ pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
     for (item, plan) in planned {
         let target = match &plan {
             Plan::New => None,
-            Plan::Automatic(t) | Plan::Inferred(t) => Some(t),
-            Plan::Suggestion(t) => {
+            Plan::Suggestion(t)
+            | Plan::Inferred(
+                t @ KnownNote {
+                    origin: Origin::User,
+                    ..
+                },
+            ) => {
                 // S1 and S2 (L3) let a suggestion be written; until then
                 // the file layer would refuse it for a `user` note and
-                // retire an `external` one outright (LR9), so it waits.
+                // retire an `external` one outright (LR9), so it waits. An
+                // inferred candidate naming a `user` note waits for S1 too.
                 tracing::debug!(
                     session_id = %job.session_id,
                     target = %t.id,
@@ -835,6 +843,7 @@ pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
                 counts.suggestions += 1;
                 continue;
             }
+            Plan::Automatic(t) | Plan::Inferred(t) => Some(t),
             Plan::Unchanged => continue,
         };
         let provenance = if item.user_words {
