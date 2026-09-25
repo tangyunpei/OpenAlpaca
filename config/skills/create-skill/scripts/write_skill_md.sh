@@ -94,6 +94,17 @@ if [[ -z "$SLASH" ]]; then
   SLASH="/$SKILL_ID"
 fi
 
+# The chat memory commands are answered by the daemon before any skill, so a
+# skill named for one would never be reached by its slash command.
+RESERVED_CHECK="$(echo "${SKILL_ID}" | tr '[:upper:]' '[:lower:]')"
+SLASH_CHECK="$(echo "${SLASH#/}" | tr '[:upper:]' '[:lower:]')"
+for name in remember forget memories; do
+  if [[ "$RESERVED_CHECK" == "$name" || "$SLASH_CHECK" == "$name" ]]; then
+    echo "Error: '$name' is reserved for a chat memory command (/$name) and cannot name a skill" >&2
+    exit 1
+  fi
+done
+
 # Ensure directory exists
 mkdir -p "$SKILL_DIR"
 

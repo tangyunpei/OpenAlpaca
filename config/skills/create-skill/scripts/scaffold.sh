@@ -45,6 +45,15 @@ if ! echo "$SKILL_ID" | grep -qE '^[a-z][a-z0-9]*(-[a-z0-9]+)*$'; then
   exit 1
 fi
 
+# The chat memory commands are answered by the daemon before any skill, so a
+# skill with one of their names would never be reached by its slash command.
+case "$SKILL_ID" in
+  remember|forget|memories)
+    echo "Error: '$SKILL_ID' is reserved for a chat memory command and cannot be a skill ID" >&2
+    exit 1
+    ;;
+esac
+
 # Determine base path
 if [[ "$SCOPE" == "user" ]]; then
   BASE_DIR="$HOME/.config/openalpaca/skills"
