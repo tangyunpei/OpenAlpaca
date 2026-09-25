@@ -1695,6 +1695,100 @@ fn timing_upcoming_uses_the_index_clock() {
     assert!(recalled.render().contains(TRUST_LABEL));
 }
 
+/// Rewrites `from` as `to` in `file` — same byte length — and puts the
+/// file's modification time back, so the stat scan (mtime, size, inode)
+/// cannot see the edit: only a re-read and re-hash can.
+fn edit_behind_the_stat_scan(file: &Path, from: &str, to: &str) {
+    assert_eq!(from.len(), to.len(), "the edit keeps the size");
+    let modified = fs::metadata(file).unwrap().modified().unwrap();
+    let text = fs::read_to_string(file).unwrap();
+    assert!(text.contains(from), "{text}");
+    fs::write(file, text.replace(from, to)).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(file)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+}
+
+/// Design 09 §6.1 (L5 review 1): `timing=upcoming` is the index's word
+/// about the bytes it indexed, and is printed only when the re-read file is
+/// those bytes. A hand edit the stat scan cannot see moves a planned window
+/// into the past: the re-read file is what is served, `stale`, and its
+/// header must not call a window that has begun "upcoming" on the strength
+/// of a row that is out of date — neither for a hit nor for a pinned note.
+/// The next turn reads the re-indexed row and says the same.
+#[test]
+fn a_stale_row_never_calls_a_begun_window_upcoming() {
+    let h = harness_at("2026-01-10T12:00:00Z");
+    let planned = store_windowed(
+        &h,
+        "Lisbon trip",
+        "# Lisbon trip\n\nThe user travels to Lisbon for a conference in March.\n",
+        Some("2026-03-01T00:00:00Z"),
+        Some("2026-04-01T00:00:00Z"),
+    );
+    let packing = store_windowed(
+        &h,
+        "Packing list",
+        "# Packing list\n\nA raincoat and the adapter.\n",
+        Some("2026-03-01T00:00:00Z"),
+        Some("2026-04-01T00:00:00Z"),
+    );
+    let notes = h.home_notes_dir(ALICE_KEY);
+    let packing_file = note_file_for(&notes, packing.id).unwrap();
+    let text = fs::read_to_string(&packing_file)
+        .unwrap()
+        .replace("pinned: false", "pinned: true");
+    fs::write(&packing_file, text).unwrap();
+    h.service.sync(&h.user(ALICE, None)).unwrap();
+
+    let recall = || {
+        h.service
+            .recall(
+                &h.tool(ALICE, None),
+                "when is my conference trip?",
+                RecallBudget::default(),
+            )
+            .unwrap()
+    };
+    let header = |recalled: &RecallResult, id: NoteId| {
+        header_of(
+            recalled
+                .notes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap_or_else(|| panic!("{id} was not recalled")),
+        )
+    };
+    // Upcoming on the index's clock, before any edit.
+    let before = recall();
+    for id in [planned.id, packing.id] {
+        let header = header(&before, id);
+        assert!(header.ends_with(" timing=upcoming]"), "{header}");
+    }
+
+    // The window moves into the past, behind the stat scan's back.
+    for id in [planned.id, packing.id] {
+        edit_behind_the_stat_scan(
+            &note_file_for(&notes, id).unwrap(),
+            "valid_from: 2026-03-01T00:00:00Z",
+            "valid_from: 2026-01-01T00:00:00Z",
+        );
+    }
+    let window = " valid_from=2026-01-01T00:00:00Z valid_to=2026-04-01T00:00:00Z]";
+    for (turn, recalled) in [("the stale turn", recall()), ("the next turn", recall())] {
+        for (id, reason) in [(planned.id, "recall"), (packing.id, "pinned")] {
+            let header = header(&recalled, id);
+            assert!(
+                header.ends_with(&format!(" reason={reason}{window}")),
+                "{turn}: {header}"
+            );
+        }
+    }
+}
+
 /// Design 09 §6.1: a windowed note's header carries both bounds, RFC 3339
 /// to the second with `Z`, and `-` for an open one; a window that has begun
 /// says nothing more.

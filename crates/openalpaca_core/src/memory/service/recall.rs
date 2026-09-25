@@ -162,10 +162,14 @@ fn chunk_at(body: &str, ordinal: u32) -> Option<chunker::Chunk> {
 
 /// `timing=upcoming` when the index said the window has not begun (design
 /// 09 §6.1): it decided on its own clock, the instant its validity filter
-/// used. A re-read file with no `valid_from` has no window to begin, whatever
-/// the index row said, and says nothing.
-fn timing(upcoming: bool, valid_from: Option<DateTime<Utc>>) -> Option<Timing> {
-    (upcoming && valid_from.is_some()).then_some(Timing::Upcoming)
+/// used — and about the bytes it indexed. So the word is printed only from
+/// the re-read file's own `valid_from`: a `stale` row (the file changed
+/// since it was indexed) decided about a window the file may no longer
+/// have, and a re-read file with no `valid_from` has no window to begin.
+/// Either says nothing; the re-read goes back into the index, and the next
+/// turn reads the file's own window.
+fn timing(upcoming: bool, stale: bool, valid_from: Option<DateTime<Utc>>) -> Option<Timing> {
+    (upcoming && !stale && valid_from.is_some()).then_some(Timing::Upcoming)
 }
 
 fn query_text(message: &str) -> Option<String> {
@@ -268,6 +272,8 @@ impl MemoryService {
             .filter(|n| n.upcoming)
             .filter_map(|n| NoteId::parse(&n.id).ok())
             .collect();
+        // `stale` here is the re-read's own: the file moved since this row
+        // was indexed. The scan's findings are added to the freshness below.
         let mut verified_pins: Vec<(Note, String, u32, bool, &Partition, String)> = Vec::new();
         for pin in &pinned {
             let Some(p) = by_key(&pin.partition_key) else {
@@ -291,7 +297,7 @@ impl MemoryService {
                             *note,
                             revision,
                             body_line_offset,
-                            stale || found_stale.contains(&id),
+                            stale,
                             p,
                             pin.relative_path.clone(),
                         ));
@@ -323,7 +329,7 @@ impl MemoryService {
                 heading: None,
                 line_range: (offset + 1, offset + lines.max(1)),
                 matches: Vec::new(),
-                freshness: if stale {
+                freshness: if stale || found_stale.contains(&note.id) {
                     Freshness::Stale
                 } else {
                     Freshness::Verified
@@ -333,7 +339,7 @@ impl MemoryService {
                 text: note.body.clone(),
                 valid_from: note.valid_from,
                 valid_to: note.valid_to,
-                timing: timing(upcoming_pins.contains(&note.id), note.valid_from),
+                timing: timing(upcoming_pins.contains(&note.id), stale, note.valid_from),
             };
             // The sub-budget bounds the pinned text (design §5 step 2); the
             // wrappers count against the total like everything else.
@@ -505,7 +511,7 @@ impl MemoryService {
             text,
             valid_from: note.valid_from,
             valid_to: note.valid_to,
-            timing: timing(hit.upcoming, note.valid_from),
+            timing: timing(hit.upcoming, stale, note.valid_from),
         })
     }
 
