@@ -2790,6 +2790,88 @@ async fn a_change_against_an_unlisted_saved_note_is_a_suggestion() {
     );
 }
 
+/// Ruling LR9 over the one hand edit the stat scan cannot see: a learned
+/// note rewritten by hand at the same size, its mtime put back, is the
+/// user's now (`external`). A change in the user's words with its key is
+/// a suggestion — the edit is never replaced automatically.
+#[tokio::test]
+async fn a_same_stat_hand_edit_of_a_learned_note_is_never_replaced_automatically() {
+    let scene = Scene::new(vec![items(&[full_item(serde_json::json!({
+        "title": "Editor",
+        "content": "Since June the user edits with Helix.",
+        "fact_key": "user.editor",
+    }))])]);
+    let learned = scene.learned(
+        "Editor preference",
+        "The user edits with vim.",
+        Some("user.editor"),
+    );
+    assert!(
+        scene
+            .service
+            .reconcile_owner(OWNER)
+            .unwrap()
+            .changes
+            .is_empty()
+    );
+    let ctx = scene.user_ctx();
+    let file = scene
+        .root
+        .path()
+        .join("home/memory/owners")
+        .join(&ctx.owner_key)
+        .join(scene.read(&ctx, learned.id).path);
+    let before = std::fs::metadata(&file).unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    let rewritten = text.replacen("vim.", "VIM.", 1);
+    assert_ne!(rewritten, text);
+    std::fs::write(&file, &rewritten).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+    assert!(
+        scene
+            .service
+            .reconcile_owner(OWNER)
+            .unwrap()
+            .changes
+            .is_empty(),
+        "the stat scan cannot see this edit"
+    );
+
+    let s = scene.session();
+    scene.turn(&s, "Since June I switched to Helix.", "Noted.");
+    let report = scene.queue.flush_session(&s).await;
+    assert!(
+        !scene.model.prompts()[0].contains("Editor preference"),
+        "the edited note was not listed: {}",
+        scene.model.prompts()[0]
+    );
+    assert_eq!(
+        (report.suggestions, report.stored, report.replaced),
+        (1, 0, 0),
+        "{report:?}"
+    );
+    let active = scene.active();
+    assert_eq!(active.len(), 1, "{active:?}");
+    assert_eq!(active[0].id, learned.id);
+    let note = scene.read(&ctx, learned.id);
+    assert_eq!(note.effective_status, EffectiveStatus::Active);
+    assert!(note.superseded_by.is_empty(), "{:?}", note.superseded_by);
+    assert!(
+        note.body.contains("The user edits with VIM."),
+        "{}",
+        note.body
+    );
+    assert!(
+        scene.candidates().is_empty(),
+        "nothing is written before L3"
+    );
+}
+
 /// Rulings LR10, LR11: a learned `user.*` fact restated with a new value
 /// in a project chat replaces the **global** note — its key is looked up in
 /// both of the chunk's partitions, and the replacement is written in its

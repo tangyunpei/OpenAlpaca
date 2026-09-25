@@ -3744,6 +3744,55 @@ fn learning_key_targets_look_in_the_project_first_then_home() {
     assert!(!targets.contains_key("user.none"));
 }
 
+/// Ruling LR9 at the key lookup: a learned note rewritten by hand in the
+/// one way the stat scan cannot see — same size, mtime put back — still
+/// reads as `external`, because the lookup re-hashes the file it returns.
+/// Reported as learned, the hand edit would be replaced automatically.
+#[test]
+fn learning_key_targets_serve_a_same_stat_hand_edit_as_external() {
+    let h = Harness::new();
+    let row = h.message_row("I edit with vim.");
+    let extraction = h
+        .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap();
+    let note = learned(
+        &h,
+        &extraction,
+        "Editor preference",
+        "# Editor preference\n\n## Knowledge\nThe user edits with vim.\n",
+        Some("user.editor"),
+        ExtractionProvenance::UserWords,
+        row,
+    );
+    let keys = ["user.editor".to_string()];
+    let target = &h.service.learning_key_targets(&extraction, &keys).unwrap()["user.editor"];
+    assert_eq!((target.id, target.origin), (note.id, Origin::ExtractedUser));
+    assert!(h.service.reconcile_owner(ALICE).unwrap().changes.is_empty());
+
+    let file = note_file_for(&h.home_notes_dir(ALICE_KEY), note.id).unwrap();
+    let before = fs::metadata(&file).unwrap();
+    let text = fs::read_to_string(&file).unwrap();
+    let rewritten = text.replacen("vim.", "VIM.", 1);
+    assert_ne!(rewritten, text);
+    fs::write(&file, &rewritten).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+    assert!(
+        h.service.reconcile_owner(ALICE).unwrap().changes.is_empty(),
+        "the stat scan cannot see this edit"
+    );
+
+    let targets = h.service.learning_key_targets(&extraction, &keys).unwrap();
+    let target = &targets["user.editor"];
+    assert_eq!(target.id, note.id);
+    assert_eq!(target.origin, Origin::External);
+    assert_eq!(target.knowledge, "The user edits with VIM.");
+}
+
 /// Design 09 §2.5: a learned note records when its evidence was said —
 /// `observed_at`, which R9 reads among notes of equal authority. Only the
 /// extractor may set it; a tool or the user's own save cannot.
