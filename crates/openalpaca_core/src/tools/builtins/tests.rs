@@ -1254,53 +1254,140 @@ fn memory_tool_descriptions_promise_no_semantic_search() {
     }
 }
 
-/// What OpenAI's strict mode requires of a schema, restated here on its own
-/// (the function-calling guide, *Strict mode*): the root is an object; every
-/// object is closed with `additionalProperties: false` and lists every
-/// property in `required`; arrays and `anyOf` branches obey the same. The
-/// builtins use nothing beyond that. `Err` names the first breach.
-fn openai_strict_accepts(path: &str, schema: &serde_json::Value) -> Result<(), String> {
-    let Some(node) = schema.as_object() else {
-        return Err(format!("{path}: not a schema object"));
-    };
-    let is_object = match node.get("type") {
-        Some(serde_json::Value::String(t)) => t == "object",
-        Some(serde_json::Value::Array(ts)) => ts.iter().any(|t| t == "object"),
-        _ => node.contains_key("properties"),
-    };
-    if is_object {
-        if node.get("additionalProperties") != Some(&serde_json::json!(false)) {
-            return Err(format!("{path}: additionalProperties is not false"));
+/// What OpenAI's strict mode accepts, restated here on its own from its
+/// documentation (the function-calling guide, *Strict mode*; the
+/// structured-outputs guide, *Supported schemas*) so that it checks the
+/// provider's `strict_mode_compatible` rather than copies it: the root is an
+/// object; every node says what it is (a `type`, an `enum`, a `const`, an
+/// `anyOf` or a `$ref`); every object is closed and requires every property;
+/// every array has one `items`; and a node carries only keywords from the
+/// documented list, each where it applies — anything else is refused.
+/// `Err` names the first breach.
+fn openai_strict_accepts(schema: &serde_json::Value) -> Result<(), String> {
+    use serde_json::Value;
+
+    const FORMATS: [&str; 9] = [
+        "date-time",
+        "time",
+        "date",
+        "duration",
+        "email",
+        "hostname",
+        "ipv4",
+        "ipv6",
+        "uuid",
+    ];
+
+    fn check(path: &str, schema: &Value, root: &Value) -> Result<(), String> {
+        let node = schema
+            .as_object()
+            .ok_or_else(|| format!("{path}: not a schema object"))?;
+        let types: Vec<&str> = match node.get("type") {
+            Some(Value::String(t)) => vec![t.as_str()],
+            Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        let is = |t: &str| types.contains(&t);
+        if !types.is_empty()
+            && !types.iter().all(|t| {
+                [
+                    "string", "number", "integer", "boolean", "object", "array", "null",
+                ]
+                .contains(t)
+            })
+        {
+            return Err(format!("{path}: a type strict mode does not know"));
         }
-        let properties = node
-            .get("properties")
-            .and_then(|p| p.as_object())
-            .ok_or_else(|| format!("{path}: no properties"))?;
-        let required: std::collections::BTreeSet<&str> = node
-            .get("required")
-            .and_then(|r| r.as_array())
-            .map(|r| r.iter().filter_map(|k| k.as_str()).collect())
-            .unwrap_or_default();
-        let keys: std::collections::BTreeSet<&str> =
-            properties.keys().map(String::as_str).collect();
-        if required != keys {
-            return Err(format!(
-                "{path}: required {required:?} is not every key {keys:?}"
-            ));
+        if !["type", "enum", "const", "anyOf", "$ref"]
+            .iter()
+            .any(|k| node.contains_key(*k))
+        {
+            return Err(format!("{path}: says nothing of what it is"));
         }
-        for (key, property) in properties {
-            openai_strict_accepts(&format!("{path}.{key}"), property)?;
+        for (key, value) in node {
+            let belongs = match key.as_str() {
+                "type" | "description" | "title" | "enum" | "const" | "anyOf" => true,
+                "$ref" => node.keys().all(|k| k == "$ref" || k == "description"),
+                "$defs" | "definitions" => path == "$",
+                "properties" | "required" | "additionalProperties" => is("object"),
+                "items" | "minItems" | "maxItems" => is("array"),
+                "pattern" => is("string"),
+                "format" => is("string") && FORMATS.contains(&value.as_str().unwrap_or("")),
+                "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" | "multipleOf" => {
+                    is("number") || is("integer")
+                }
+                _ => false,
+            };
+            if !belongs {
+                return Err(format!("{path}: `{key}` is not accepted here"));
+            }
         }
+        if let Some(target) = node.get("$ref").and_then(Value::as_str) {
+            let found = target == "#"
+                || ["$defs", "definitions"].iter().any(|defs| {
+                    target
+                        .strip_prefix(&format!("#/{defs}/"))
+                        .is_some_and(|name| root[*defs].get(name).is_some())
+                });
+            if !found {
+                return Err(format!("{path}: `$ref` {target} names no local definition"));
+            }
+        }
+        if is("object") {
+            if node.get("additionalProperties") != Some(&Value::Bool(false)) {
+                return Err(format!("{path}: additionalProperties is not false"));
+            }
+            let properties = node
+                .get("properties")
+                .and_then(Value::as_object)
+                .ok_or_else(|| format!("{path}: no properties"))?;
+            let required: Vec<&str> = node
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|r| r.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            let mut sorted = required.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            let mut keys: Vec<&str> = properties.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            if sorted != keys || sorted.len() != required.len() {
+                return Err(format!(
+                    "{path}: required {required:?} is not every key {keys:?}"
+                ));
+            }
+            for (key, property) in properties {
+                check(&format!("{path}.{key}"), property, root)?;
+            }
+        }
+        if is("array") {
+            let items = node
+                .get("items")
+                .ok_or_else(|| format!("{path}: an array with no items"))?;
+            check(&format!("{path}[]"), items, root)?;
+        }
+        if let Some(branches) = node.get("anyOf") {
+            for (i, branch) in branches.as_array().into_iter().flatten().enumerate() {
+                check(&format!("{path}|{i}"), branch, root)?;
+            }
+        }
+        for defs in ["$defs", "definitions"] {
+            for (name, definition) in node
+                .get(defs)
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+            {
+                check(&format!("{path}/{defs}/{name}"), definition, root)?;
+            }
+        }
+        Ok(())
     }
-    if let Some(items) = node.get("items") {
-        openai_strict_accepts(&format!("{path}[]"), items)?;
+
+    if schema.get("type") != Some(&Value::String("object".into())) {
+        return Err("$: the root is not an object".into());
     }
-    if let Some(branches) = node.get("anyOf").and_then(|a| a.as_array()) {
-        for (i, branch) in branches.iter().enumerate() {
-            openai_strict_accepts(&format!("{path}|{i}"), branch)?;
-        }
-    }
-    Ok(())
+    check("$", schema, schema)
 }
 
 /// R8: every builtin definition — the registered ones and the per-request
@@ -1372,7 +1459,7 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
             continue;
         }
         marked += 1;
-        match openai_strict_accepts("$", &def.parameters) {
+        match openai_strict_accepts(&def.parameters) {
             Ok(()) => {
                 assert!(sent_strict, "{}: a compliant schema keeps strict", def.name);
                 kept.push(def.name.clone());
@@ -1388,4 +1475,69 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
     // the one schema already written in strict mode's shape keeps its flag.
     assert_eq!(marked, 21, "strict-marked builtins seen");
     assert!(kept.contains(&"memory_confirm".to_string()), "{kept:?}");
+
+    // The serializer and this restatement agree beyond today's builtins:
+    // closed, fully required schemas carrying a keyword strict mode refuses
+    // (the review's probe) lose the flag, and ones using only documented
+    // keywords keep it.
+    let closed = |properties: serde_json::Value| {
+        let keys: Vec<String> = properties.as_object().unwrap().keys().cloned().collect();
+        serde_json::json!({
+            "type": "object",
+            "properties": properties,
+            "required": keys,
+            "additionalProperties": false,
+        })
+    };
+    let with_defs = |mut schema: serde_json::Value| {
+        schema["$defs"] = serde_json::json!({ "n": closed(serde_json::json!({})) });
+        schema
+    };
+    let refused = [
+        closed(
+            serde_json::json!({ "v": { "type": "array", "items": { "type": "string" }, "uniqueItems": true } }),
+        ),
+        closed(
+            serde_json::json!({ "v": { "type": "array", "items": { "type": "string" }, "minContains": 1 } }),
+        ),
+        serde_json::json!({ "type": "object", "properties": {}, "required": [], "additionalProperties": false, "minProperties": 0 }),
+        serde_json::json!({ "type": "object", "properties": {}, "required": [], "additionalProperties": false, "maxProperties": 3 }),
+        closed(serde_json::json!({ "v": { "type": "string", "default": "x" } })),
+        with_defs(closed(
+            serde_json::json!({ "v": { "$ref": "#/$defs/n", "title": "N" } }),
+        )),
+        closed(serde_json::json!({ "v": { "type": "string", "format": "uri" } })),
+    ];
+    let accepted = [
+        closed(serde_json::json!({
+            "when": { "type": ["string", "null"], "format": "date-time" },
+            "code": { "type": "string", "pattern": "^[a-z]+$" },
+            "count": { "type": "integer", "minimum": 0, "maximum": 9 },
+            "tags": { "type": "array", "items": { "type": "string" }, "maxItems": 5 },
+        })),
+        with_defs(closed(
+            serde_json::json!({ "v": { "$ref": "#/$defs/n", "description": "N" } }),
+        )),
+    ];
+    for (schema, compliant) in refused
+        .into_iter()
+        .map(|s| (s, false))
+        .chain(accepted.into_iter().map(|s| (s, true)))
+    {
+        assert_eq!(
+            openai_strict_accepts(&schema).is_ok(),
+            compliant,
+            "{schema}"
+        );
+        let def = ToolDefinition {
+            name: "probe".to_string(),
+            description: "probe".to_string(),
+            parameters: schema.clone(),
+            strict: Some(true),
+            input_examples: None,
+        };
+        let sent =
+            openai_function_tool(&def)["function"].get("strict") == Some(&serde_json::json!(true));
+        assert_eq!(sent, compliant, "{schema}");
+    }
 }

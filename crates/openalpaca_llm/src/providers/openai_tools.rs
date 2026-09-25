@@ -39,45 +39,69 @@ const MAX_PROPERTIES: usize = 5000;
 /// Any descent at all — the recursion's own bound.
 const MAX_DEPTH: usize = 64;
 
-/// Keywords strict mode does not support, or whose effect on "every key is
-/// required, nothing else is allowed" this check cannot verify. OpenAI
-/// documents `anyOf` as the only composition it supports, so `oneOf` and
-/// `allOf` are here too.
-const UNVERIFIABLE: &[&str] = &[
-    "oneOf",
-    "allOf",
-    "not",
-    "if",
-    "then",
-    "else",
-    "patternProperties",
-    "unevaluatedProperties",
-    "unevaluatedItems",
-    "propertyNames",
-    "dependentRequired",
-    "dependentSchemas",
-    "prefixItems",
-    "additionalItems",
-    "contains",
-];
-
 const TYPES: &[&str] = &[
     "string", "number", "integer", "boolean", "object", "array", "null",
 ];
 
+/// The `format` values the structured-outputs guide lists for strict mode.
+const FORMATS: &[&str] = &[
+    "date-time",
+    "time",
+    "date",
+    "duration",
+    "email",
+    "hostname",
+    "ipv4",
+    "ipv6",
+    "uuid",
+];
+
+/// Where a keyword may appear: the keywords the structured-outputs guide
+/// documents for strict mode, and nothing else. This is an **allowlist** —
+/// a keyword not named here (`uniqueItems`, `default`, `minProperties`, an
+/// extension, …) makes the schema incompatible, because it cannot be shown
+/// to be accepted.
+enum Place {
+    /// Any node.
+    Anywhere,
+    /// Only the root (`$defs`, `definitions`).
+    Root,
+    /// A node whose `type` includes this.
+    Typed(&'static [&'static str]),
+}
+
+fn place_of(keyword: &str) -> Option<Place> {
+    Some(match keyword {
+        "type" | "description" | "title" | "enum" | "const" | "anyOf" | "$ref" => Place::Anywhere,
+        "$defs" | "definitions" => Place::Root,
+        "properties" | "required" | "additionalProperties" => Place::Typed(&["object"]),
+        "items" | "minItems" | "maxItems" => Place::Typed(&["array"]),
+        "pattern" | "format" => Place::Typed(&["string"]),
+        "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" | "multipleOf" => {
+            Place::Typed(&["number", "integer"])
+        }
+        _ => return None,
+    })
+}
+
 /// Whether OpenAI's strict mode accepts `schema` as a function's parameters
 /// (the function-calling guide, *Strict mode*; the structured-outputs guide,
-/// *Supported schemas*): the root is an object and not an `anyOf`; every
-/// object has `additionalProperties: false`, a `properties` map, and
-/// `required` naming exactly its keys; every node declares a type (or is an
-/// `enum`, a `const`, an `anyOf` or a local `$ref`); an array has one `items`
-/// schema; and the same holds through `properties`, `items`, `anyOf`,
-/// `$defs` and `definitions`. Anything this cannot verify — an
-/// `UNVERIFIABLE` keyword, a boolean or untyped schema, a `$ref` that is not
-/// `#`, `#/$defs/<name>` or `#/definitions/<name>` naming a definition that
-/// exists, more than 10 levels of objects or 5000 properties — counts as
-/// incompatible: a flag left off costs best-effort adherence, a flag sent
-/// wrongly costs the request.
+/// *Supported schemas*). The root is an object and not an `anyOf`. Every
+/// node is a JSON object that declares a known type (or is an `enum`, a
+/// `const`, an `anyOf` or a local `$ref`) and carries only keywords from
+/// the documented list, each where it applies (`place_of`):
+/// `type`, `description`, `title`, `enum`, `const`, `anyOf`; `$ref` — alone,
+/// or beside a `description` — naming `#`, `#/$defs/<name>` or
+/// `#/definitions/<name>`, with `$defs`/`definitions` at the root;
+/// `properties`, `required` and `additionalProperties` on an object, which
+/// must be closed (`additionalProperties: false`) and require exactly its
+/// keys; `items` (one schema), `minItems`, `maxItems` on an array; `pattern`
+/// and a listed `format` on a string; `minimum`, `maximum`,
+/// `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf` on a number. The
+/// walk goes through `properties`, `items`, `anyOf`, `$defs` and
+/// `definitions`, at most 10 levels of objects and 5000 properties. Anything
+/// else counts as incompatible: a flag left off costs best-effort adherence,
+/// a flag sent wrongly costs the request.
 pub fn strict_mode_compatible(schema: &Value) -> bool {
     let Some(root) = schema.as_object() else {
         return false;
@@ -103,7 +127,7 @@ impl Walk<'_> {
         let Some(node) = schema.as_object() else {
             return false;
         };
-        if depth > MAX_DEPTH || UNVERIFIABLE.iter().any(|k| node.contains_key(*k)) {
+        if depth > MAX_DEPTH {
             return false;
         }
         let types: Vec<&str> = match node.get("type") {
@@ -128,27 +152,33 @@ impl Walk<'_> {
         if !described {
             return false;
         }
+        // The allowlist: every keyword known, in its place, of the right shape.
+        for (keyword, value) in node {
+            let placed = match place_of(keyword) {
+                None => false,
+                Some(Place::Anywhere) => true,
+                Some(Place::Root) => depth == 0,
+                Some(Place::Typed(wanted)) => wanted.iter().any(|t| types.contains(t)),
+            };
+            if !placed || !Self::shaped(keyword, value) {
+                return false;
+            }
+        }
         if let Some(reference) = node.get("$ref")
-            && !self.resolves(reference)
+            && (node.keys().any(|k| k != "$ref" && k != "description") || !self.resolves(reference))
         {
             return false;
         }
         for defs in ["$defs", "definitions"] {
-            if let Some(defs) = node.get(defs) {
-                let Some(defs) = defs.as_object() else {
-                    return false;
-                };
-                if !defs.values().all(|d| self.node(d, depth + 1, objects)) {
-                    return false;
-                }
-            }
-        }
-        if types.contains(&"object") || node.contains_key("properties") {
-            if objects >= MAX_OBJECT_DEPTH || !self.object(node, depth, objects + 1) {
+            if let Some(defs) = node.get(defs).and_then(Value::as_object)
+                && !defs.values().all(|d| self.node(d, depth + 1, objects))
+            {
                 return false;
             }
-        } else if node.contains_key("required") || node.contains_key("additionalProperties") {
-            // Object keywords on a node that says it is not an object.
+        }
+        if types.contains(&"object")
+            && (objects >= MAX_OBJECT_DEPTH || !self.object(node, depth, objects + 1))
+        {
             return false;
         }
         if types.contains(&"array") && !node.contains_key("items") {
@@ -159,15 +189,31 @@ impl Walk<'_> {
         {
             return false;
         }
-        if let Some(branches) = node.get("anyOf") {
-            let Some(branches) = branches.as_array() else {
-                return false;
-            };
-            if branches.is_empty() || !branches.iter().all(|b| self.node(b, depth + 1, objects)) {
-                return false;
-            }
+        if let Some(branches) = node.get("anyOf").and_then(Value::as_array)
+            && !branches.iter().all(|b| self.node(b, depth + 1, objects))
+        {
+            return false;
         }
         true
+    }
+
+    /// The value a keyword on the allowlist must hold; the recursive ones
+    /// (`items`, `anyOf`'s branches, a definition) are checked by the walk.
+    fn shaped(keyword: &str, value: &Value) -> bool {
+        match keyword {
+            "description" | "title" | "pattern" | "$ref" => value.is_string(),
+            "format" => value.as_str().is_some_and(|f| FORMATS.contains(&f)),
+            "enum" => value.as_array().is_some_and(|v| !v.is_empty()),
+            "anyOf" => value.as_array().is_some_and(|v| !v.is_empty()),
+            "$defs" | "definitions" | "properties" => value.is_object(),
+            "required" => value.is_array(),
+            "additionalProperties" => value.is_boolean(),
+            "minItems" | "maxItems" => value.is_u64(),
+            "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" => value.is_number(),
+            "multipleOf" => value.as_f64().is_some_and(|m| m > 0.0),
+            // `type` is checked above; `const` may hold any value.
+            _ => true,
+        }
     }
 
     /// Closed, every key required, every property compliant.
@@ -272,6 +318,34 @@ mod tests {
         assert!(strict_mode_compatible(&schema));
         // No properties at all is still a closed, fully required object.
         assert!(strict_mode_compatible(&closed(json!({}))));
+        // Every keyword on the allowlist, where it belongs.
+        let mut schema = closed(json!({
+            "when": { "type": ["string", "null"], "format": "date-time", "title": "When" },
+            "code": { "type": "string", "pattern": "^[a-z]+$" },
+            "count": {
+                "type": "integer", "minimum": 0, "maximum": 10,
+                "exclusiveMinimum": -1, "exclusiveMaximum": 11, "multipleOf": 1,
+            },
+            "tags": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 5 },
+            "fixed": { "const": "v1" },
+            "node": { "$ref": "#/definitions/node", "description": "The node" },
+        }));
+        schema["definitions"] = json!({ "node": closed(json!({})) });
+        assert!(strict_mode_compatible(&schema), "{schema}");
+        for format in [
+            "date-time",
+            "time",
+            "date",
+            "duration",
+            "email",
+            "hostname",
+            "ipv4",
+            "ipv6",
+            "uuid",
+        ] {
+            let schema = closed(json!({ "v": { "type": "string", "format": format } }));
+            assert!(strict_mode_compatible(&schema), "{format}");
+        }
     }
 
     #[test]
@@ -371,6 +445,38 @@ mod tests {
             closed(json!({ "v": { "$ref": "#/properties/other" } })),
             // Object keywords on a string.
             closed(json!({ "v": { "type": "string", "required": [] } })),
+            // Keywords strict mode does not accept, on a closed, fully
+            // required schema (the review's probe): an allowlist, not a
+            // denylist, decides.
+            closed(
+                json!({ "v": { "type": "array", "items": { "type": "string" }, "uniqueItems": true } }),
+            ),
+            closed(
+                json!({ "v": { "type": "array", "items": { "type": "string" }, "minContains": 1 } }),
+            ),
+            json!({
+                "type": "object", "properties": {}, "required": [],
+                "additionalProperties": false, "minProperties": 0,
+            }),
+            json!({
+                "type": "object", "properties": {}, "required": [],
+                "additionalProperties": false, "maxProperties": 4,
+            }),
+            closed(json!({ "v": { "type": "string", "default": "x" } })),
+            closed(json!({ "v": { "type": "string", "x-internal": true } })),
+            // A `$ref` with a sibling other than `description`.
+            {
+                let mut schema = closed(json!({ "v": { "$ref": "#/$defs/n", "title": "N" } }));
+                schema["$defs"] = json!({ "n": closed(json!({})) });
+                schema
+            },
+            // A `format` strict mode does not list, and one on a non-string.
+            closed(json!({ "v": { "type": "string", "format": "uri" } })),
+            closed(json!({ "v": { "type": "integer", "format": "date" } })),
+            // Number, array and string keywords where they do not belong.
+            closed(json!({ "v": { "type": "string", "minimum": 1 } })),
+            closed(json!({ "v": { "type": "integer", "pattern": "^[0-9]+$" } })),
+            closed(json!({ "v": { "type": "string", "maxItems": 2 } })),
         ];
         for schema in cases {
             assert!(!strict_mode_compatible(&schema), "{schema}");
