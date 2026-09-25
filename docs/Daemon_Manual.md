@@ -1248,7 +1248,19 @@ lane, and a suggestion is never raised there.) Multiple pending confirmations in
 in FIFO order: a prompt sent while others wait says its place and that a reply
 answers the oldest first (`2 of 2 pending; each /yes or /no answers the oldest
 first`), and the acknowledgement names the tool it approved or denied
-(`Approved: shell_exec. Tool execution will proceed.`).
+(`Approved: shell_exec. Tool execution will proceed.`), or no tool when the
+request had already timed out.
+
+Every hidden or invisible character in the prompt's tool name and arguments (a
+bidi override, a zero-width or control character, a variation selector, and in
+the name also a line break or any space but a plain one) is shown as
+`<U+XXXX>`, and a line under the arguments counts them
+(`Note: this request contains 2 hidden characters, shown as <U+…>.`). The
+arguments are cut after 500 bytes, and the cut says how much it left out
+(`... (31 more characters not shown)`). Discord receives the prompt with its
+Markdown characters backslash-escaped, so it reads as written, and neither
+Telegram nor Discord draws a link preview under the prompt or the
+acknowledgement.
 
 ## Event Taxonomy
 
