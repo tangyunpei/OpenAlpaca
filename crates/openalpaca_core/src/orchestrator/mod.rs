@@ -319,6 +319,7 @@ impl Orchestrator {
             let sources: Vec<Box<dyn crate::prompt_ctx::sources::ContextSource>> = vec![
                 Box::new(crate::prompt_ctx::sources::memory::MemorySource::new(
                     memory_service.clone(),
+                    daemon_config.clone(),
                 )),
                 Box::new(
                     crate::prompt_ctx::sources::conversation::ConversationSource::new(),

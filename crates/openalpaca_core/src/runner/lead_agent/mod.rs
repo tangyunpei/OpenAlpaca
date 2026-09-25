@@ -27,7 +27,7 @@ use crate::agent::subagent::SubAgent;
 use crate::agent::template::AgentTemplate;
 use crate::bus::EventBus;
 use crate::context::SharedContext;
-use crate::daemon_config::DaemonConfig;
+use crate::daemon_config::{DaemonConfig, RecallMode};
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::memory::service::{
     Attribution, Capabilities, MemoryAccessContext, MemoryError, MemoryService, MemoryUsed,
@@ -442,8 +442,9 @@ pub async fn run_lead_agent(
         let recall_service = service.clone();
         let recall_ctx = ctx.clone();
         let description = task_description.to_string();
+        let mode = daemon_config.load().orchestrator.memory.recall_mode;
         match tokio::task::spawn_blocking(move || {
-            lead_memory_delivery(&recall_service, &recall_ctx, &description)
+            lead_memory_delivery(&recall_service, &recall_ctx, &description, mode)
         })
         .await
         {
@@ -738,7 +739,8 @@ fn lead_memory_context(
 }
 
 /// What the lead's opening prompt is primed with: the service's recall for
-/// the task description, rendered as one quoted-data block, and the
+/// the task description, delivered as `[orchestrator.memory] recall_mode`
+/// says (design 09 §13.2) and rendered as one quoted-data block, and the
 /// `memory_used` entries the caller records once the block is in the
 /// prompt. `None` when nothing was selected or the recall failed (one WARN;
 /// the run is unaffected).
@@ -746,8 +748,9 @@ fn lead_memory_delivery(
     service: &MemoryService,
     ctx: &MemoryAccessContext,
     task_description: &str,
+    mode: RecallMode,
 ) -> Option<(String, Vec<MemoryUsed>)> {
-    match service.recall(ctx, task_description, RecallBudget::default()) {
+    match service.recall(ctx, task_description, RecallBudget::for_mode(mode)) {
         Ok(result) if result.is_empty() => None,
         Ok(result) => Some((result.render(), result.memory_used())),
         Err(e) => {

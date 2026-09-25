@@ -5,6 +5,7 @@
 //! index is in memory; no model, no network.
 
 use super::*;
+use crate::daemon_config::RecallMode;
 use crate::security::policy::Principal;
 use crate::test_util::HomeStoreGuard;
 use crate::tools::registry::ToolContext;
@@ -5449,4 +5450,247 @@ fn a_date_bound_is_an_instant_or_a_whole_utc_day() {
     assert_eq!(approx_tokens(1), 1);
     assert_eq!(approx_tokens(8), 2);
     assert_eq!(approx_tokens(9), 3);
+}
+
+// ============================================================================
+// Index-first recall (design 09 §13.2, MD-15, slice L10b)
+// ============================================================================
+
+/// Pins `id`'s file by hand — `pinned` is not a tool input — as the budget
+/// test above does; the caller syncs.
+fn pin_by_hand(h: &Harness, id: NoteId) {
+    let file = note_file_for(&h.home_notes_dir(ALICE_KEY), id).unwrap();
+    let text = fs::read_to_string(&file)
+        .unwrap()
+        .replace("pinned: false", "pinned: true");
+    fs::write(&file, text).unwrap();
+}
+
+/// A pinned note and twelve notes the release question matches.
+fn index_scene() -> (Harness, NoteId) {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let pinned = h
+        .store(
+            &user,
+            "Working hours",
+            "# Working hours\n\nThe user works from 09:00 to 17:00.\n",
+            NoteKind::Preference,
+        )
+        .id;
+    pin_by_hand(&h, pinned);
+    for i in 1..=12 {
+        h.store(
+            &user,
+            &format!("Release note {i}"),
+            &format!(
+                "# Release note {i}\n\nRelease detail {i}: tag the release, write the changelog entry and run the smoke test before publishing it.\n"
+            ),
+            NoteKind::Reference,
+        );
+    }
+    h.service.sync(&user).unwrap();
+    (h, pinned)
+}
+
+const RELEASE_QUESTION: &str = "how do I publish the release?";
+
+/// The recall's whole ranking: every matching note as an excerpt, nothing
+/// cut by a budget.
+fn full_ranking(h: &Harness, ctx: &MemoryAccessContext, query: &str) -> Vec<NoteId> {
+    let everything = RecallBudget {
+        total_bytes: 1 << 20,
+        pinned_bytes: RECALL_PINNED_BYTES,
+        max_items: 100,
+        excerpts: 100,
+        listed: 0,
+    };
+    h.service
+        .recall(ctx, query, everything)
+        .unwrap()
+        .notes
+        .iter()
+        .filter(|n| n.reason == UsedReason::Recall)
+        .map(|n| n.id)
+        .collect()
+}
+
+/// **Design 09 §13.2 (MD-15), `recall_mode = "index"`.** The pinned note,
+/// then the top 2 recalled notes as excerpts, then an index block of the
+/// next 8 — one line each, `<id> <date> <kind> “<title>” — <reason>`, under
+/// its one header line — all inside the 8 KiB wrapper, as quoted data under
+/// the trust label. `memory_used` names the listed notes after what was
+/// excerpted, with reason `index`, and the ring records them so.
+#[test]
+fn index_mode_excerpts_the_top_two_and_lists_the_next_eight_within_8_kib() {
+    let (h, pinned) = index_scene();
+    let ctx = h.tool(ALICE, None);
+    let ranked = full_ranking(&h, &ctx, RELEASE_QUESTION);
+    assert_eq!(ranked.len(), 12, "{ranked:?}");
+
+    let recalled = h
+        .service
+        .recall(
+            &ctx,
+            RELEASE_QUESTION,
+            RecallBudget::for_mode(RecallMode::Index),
+        )
+        .unwrap();
+    let excerpted: Vec<NoteId> = recalled
+        .notes
+        .iter()
+        .filter(|n| n.reason == UsedReason::Recall)
+        .map(|n| n.id)
+        .collect();
+    assert_eq!(excerpted, ranked[..RECALL_INDEX_EXCERPTS].to_vec());
+    let listed: Vec<NoteId> = recalled.listed.iter().map(|l| l.id).collect();
+    assert_eq!(
+        listed,
+        ranked[RECALL_INDEX_EXCERPTS..RECALL_INDEX_EXCERPTS + RECALL_INDEX_LINES].to_vec()
+    );
+    assert!(recalled.truncated, "two matching notes were left out");
+
+    let used: Vec<(NoteId, UsedReason)> = recalled
+        .memory_used()
+        .iter()
+        .map(|u| (u.id, u.reason))
+        .collect();
+    let mut expected = vec![(pinned, UsedReason::Pinned)];
+    expected.extend(excerpted.iter().map(|id| (*id, UsedReason::Recall)));
+    expected.extend(listed.iter().map(|id| (*id, UsedReason::Index)));
+    assert_eq!(used, expected);
+    assert_eq!(UsedReason::Index.as_str(), "index");
+    assert_eq!(
+        serde_json::to_value(UsedReason::Index).unwrap(),
+        serde_json::json!("index")
+    );
+
+    let rendered = recalled.render();
+    assert_eq!(rendered.len(), recalled.bytes);
+    assert!(recalled.bytes <= RECALL_TOTAL_BYTES, "{}", recalled.bytes);
+    assert!(rendered.starts_with(&format!("<memory_context>\n{TRUST_LABEL}\n")));
+    assert_eq!(
+        rendered.matches(INDEX_BLOCK_HEADER).count(),
+        1,
+        "{rendered}"
+    );
+    let (excerpts, block) = rendered.split_once(INDEX_BLOCK_HEADER).unwrap();
+    assert_eq!(excerpts.matches("[/memory]\n").count(), 3, "{rendered}");
+    let lines: Vec<&str> = block
+        .strip_suffix("</memory_context>\n")
+        .expect("the index block closes the delivery")
+        .lines()
+        .collect();
+    assert_eq!(lines.len(), RECALL_INDEX_LINES, "{rendered}");
+    for (line, note) in lines.iter().zip(&recalled.listed) {
+        assert_eq!(
+            *line,
+            format!(
+                "{} {} reference “{}” — {}",
+                note.id,
+                format_ts(note.date),
+                note.title,
+                match_reasons(&note.matches)
+            )
+        );
+    }
+    assert!(!block.contains("Release detail"), "a line carries no body");
+
+    h.service.record_delivery(
+        &Attribution {
+            lane_key: Some("u:gui".into()),
+            ..Default::default()
+        },
+        &recalled.memory_used(),
+    );
+    let ring = h.service.recently_used(50);
+    for id in &listed {
+        assert!(
+            ring.iter()
+                .any(|r| r.id == *id && r.reason == UsedReason::Index),
+            "{ring:?}"
+        );
+    }
+}
+
+/// With two recalled notes or fewer, the index-first delivery is the
+/// excerpts one byte for byte: there is nothing to list.
+#[test]
+fn index_mode_with_two_matches_is_the_excerpts_delivery() {
+    let h = Harness::new();
+    let ctx = h.tool(ALICE, None);
+    let user = h.user(ALICE, None);
+    let pinned = h
+        .store(
+            &user,
+            "Working hours",
+            "# Working hours\n\nThe user works from 09:00 to 17:00.\n",
+            NoteKind::Preference,
+        )
+        .id;
+    pin_by_hand(&h, pinned);
+    for i in 1..=2 {
+        h.store(
+            &user,
+            &format!("Release note {i}"),
+            &format!(
+                "# Release note {i}\n\nRelease detail {i}: tag the release before publishing it.\n"
+            ),
+            NoteKind::Reference,
+        );
+    }
+    h.service.sync(&user).unwrap();
+    let index = h
+        .service
+        .recall(
+            &ctx,
+            RELEASE_QUESTION,
+            RecallBudget::for_mode(RecallMode::Index),
+        )
+        .unwrap();
+    let excerpts = h
+        .service
+        .recall(
+            &ctx,
+            RELEASE_QUESTION,
+            RecallBudget::for_mode(RecallMode::Excerpts),
+        )
+        .unwrap();
+    assert_eq!(index.notes.len(), 3);
+    assert!(index.listed.is_empty());
+    assert_eq!(index.render(), excerpts.render());
+    assert_eq!(index.memory_used(), excerpts.memory_used());
+    assert_eq!(
+        RecallBudget::for_mode(RecallMode::Excerpts),
+        RecallBudget::default(),
+        "the excerpts delivery is design §4's budgets, unchanged"
+    );
+}
+
+/// A recalled note the budget cannot hold as an excerpt is listed instead,
+/// and the next note may take its excerpt place: under a budget with room
+/// for lines but not for a chunk, the top notes are listed, none excerpted.
+#[test]
+fn a_note_the_budget_cannot_excerpt_is_listed_instead() {
+    let (h, _pinned) = index_scene();
+    let ctx = h.tool(ALICE, None);
+    let ranked = full_ranking(&h, &ctx, RELEASE_QUESTION);
+    let wrapper = wrap_delivery(["x"]).len() - 1;
+    let budget = RecallBudget {
+        // No pinned note fits either: the sub-budget is zero.
+        pinned_bytes: 0,
+        // Room for the header and three lines (about 110 bytes each), not
+        // for one excerpt (its header alone is over 300).
+        total_bytes: wrapper + 400,
+        ..RecallBudget::for_mode(RecallMode::Index)
+    };
+    let recalled = h.service.recall(&ctx, RELEASE_QUESTION, budget).unwrap();
+    assert!(recalled.notes.is_empty(), "{:?}", recalled.notes);
+    assert!(!recalled.listed.is_empty());
+    let listed: Vec<NoteId> = recalled.listed.iter().map(|l| l.id).collect();
+    assert_eq!(listed, ranked[..listed.len()].to_vec());
+    assert!(recalled.truncated);
+    assert!(recalled.bytes <= budget.total_bytes);
+    assert_eq!(recalled.render().len(), recalled.bytes);
+    assert!(recalled.render().contains(INDEX_BLOCK_HEADER));
 }

@@ -50,14 +50,14 @@ pub use in_chat::{
     SUGGESTION_LINE_TITLE_BYTES, SuggestionPreview,
 };
 pub use openalpaca_storage::memory_index::SearchOrder;
-pub use recall::{TRUST_LABEL, wrap_delivery};
+pub use recall::{INDEX_BLOCK_HEADER, TRUST_LABEL, render_delivery, wrap_delivery};
 pub use suggestions::{SUGGESTION_EXCERPT_BYTES, SUGGESTIONS_DEFAULT_LIMIT, SUGGESTIONS_MAX_LIMIT};
 pub use types::{
     ExtractionProvenance, ForgetInput, ForgetItem, ForgetItemStatus, ForgetOutput, Freshness,
-    HistoryEntry, IndexRow, KnownNote, LearningView, ListInput, ListItem, ListOutput, MemoryChange,
-    MemoryUsed, Patch, ReadInput, ReadManyInput, ReadManyItem, ReadManyOutput, ReadOutput,
-    RecallBudget, RecallResult, RecalledNote, RecentlyUsedItem, Retained, RowStatus, SearchDetail,
-    SearchInput, SearchOutput, SearchResultItem, StoreInput, StoreOutput, Suggestion,
+    HistoryEntry, IndexRow, KnownNote, LearningView, ListInput, ListItem, ListOutput, ListedNote,
+    MemoryChange, MemoryUsed, Patch, ReadInput, ReadManyInput, ReadManyItem, ReadManyOutput,
+    ReadOutput, RecallBudget, RecallResult, RecalledNote, RecentlyUsedItem, Retained, RowStatus,
+    SearchDetail, SearchInput, SearchOutput, SearchResultItem, StoreInput, StoreOutput, Suggestion,
     SuggestionTarget, TimelineAnchor, TimelineInput, TimelineOutput, Timing, UpdateAction,
     UpdateInput, UpdateOutput, UsedReason, WithdrawOutput, match_reasons,
 };
@@ -88,6 +88,11 @@ pub const RECALL_TOTAL_BYTES: usize = 8 * 1024;
 pub const RECALL_PINNED_BYTES: usize = 2 * 1024;
 /// Design §4: at most 8 retrieved chunks.
 pub const RECALL_MAX_ITEMS: usize = 8;
+/// Design 09 §13.2: `recall_mode = "index"` excerpts the top 2 recalled
+/// notes…
+pub const RECALL_INDEX_EXCERPTS: usize = 2;
+/// …and lists at most 8 further ones, one line each.
+pub const RECALL_INDEX_LINES: usize = 8;
 /// Design §4: the explicit tool read response — one note's, or a batch's
 /// together (design 09 §13.1).
 pub const READ_MAX_BYTES: usize = 32 * 1024;

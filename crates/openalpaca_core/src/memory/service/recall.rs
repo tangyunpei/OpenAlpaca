@@ -4,9 +4,9 @@
 //! of design §4 applied to the rendered delivery (step 8).
 
 use super::{
-    Freshness, MemoryAccessContext, MemoryError, MemoryService, MemoryUsed, RecallBudget,
-    RecallResult, RecalledNote, SEARCH_DEFAULT_LIMIT, SEARCH_MAX_LIMIT, SearchInput, SearchOutput,
-    SearchResultItem, Timing, UsedReason, approx_tokens, scope_of,
+    Freshness, ListedNote, MemoryAccessContext, MemoryError, MemoryService, MemoryUsed,
+    RecallBudget, RecallResult, RecalledNote, SEARCH_DEFAULT_LIMIT, SEARCH_MAX_LIMIT, SearchInput,
+    SearchOutput, SearchResultItem, Timing, UsedReason, approx_tokens, scope_of,
 };
 use chrono::{DateTime, Utc};
 use openalpaca_storage::memory_files::{
@@ -52,11 +52,42 @@ pub fn wrap_delivery<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
     out
 }
 
+/// The one line the index block opens with (design 09 §13.2): what follows
+/// it are notes listed, not delivered, for the model to open with
+/// `memory_read`.
+pub const INDEX_BLOCK_HEADER: &str = "More notes that may be relevant (read with memory_read):\n";
+
+/// The delivery in its order (design §5 step 8; design 09 §13.2): the
+/// excerpts, then — when any note is listed — the index block's header and
+/// its lines, then `trailer` (a `<memory_suggestions>` block), all wrapped
+/// as quoted data under the trust label. Empty when there is nothing. With
+/// nothing listed it is exactly [`wrap_delivery`] of the excerpts.
+pub fn render_delivery<'a>(
+    excerpts: impl IntoIterator<Item = &'a str>,
+    listed: impl IntoIterator<Item = &'a str>,
+    trailer: Option<&'a str>,
+) -> String {
+    let mut listed = listed.into_iter().peekable();
+    let header = listed.peek().is_some().then_some(INDEX_BLOCK_HEADER);
+    wrap_delivery(
+        excerpts
+            .into_iter()
+            .chain(header)
+            .chain(listed)
+            .chain(trailer),
+    )
+}
+
 /// The whole delivery as quoted data with its trust label; empty when
 /// nothing was delivered.
-pub(super) fn render_block(notes: &[RecalledNote]) -> String {
-    let parts: Vec<String> = notes.iter().map(RecalledNote::render).collect();
-    wrap_delivery(parts.iter().map(String::as_str))
+pub(super) fn render_block(notes: &[RecalledNote], listed: &[ListedNote]) -> String {
+    let notes: Vec<String> = notes.iter().map(RecalledNote::render).collect();
+    let listed: Vec<String> = listed.iter().map(ListedNote::render).collect();
+    render_delivery(
+        notes.iter().map(String::as_str),
+        listed.iter().map(String::as_str),
+        None,
+    )
 }
 
 fn wrapper_bytes() -> usize {
@@ -177,6 +208,10 @@ impl MemoryService {
     /// partitions (quarantined ones excluded), a few pinned notes within
     /// their sub-budget, then the union-of-terms search with the automatic
     /// filter set, every selected file re-read, the whole delivery bounded.
+    /// The search's notes are excerpted in rank order up to
+    /// `budget.excerpts`, and the next ones listed up to `budget.listed`
+    /// (design 09 §13.2); a note the budget cannot hold as an excerpt is
+    /// listed instead.
     ///
     /// Selects; does not record. The caller records what it put in front of
     /// a model with [`MemoryService::record_delivery`], because a context
@@ -213,6 +248,8 @@ impl MemoryService {
         };
 
         let mut notes: Vec<RecalledNote> = Vec::new();
+        let mut listed: Vec<ListedNote> = Vec::new();
+        let mut excerpted = 0usize;
         let mut bytes = wrapper_bytes();
         let mut pinned_bytes = 0usize;
         let mut truncated = false;
@@ -340,7 +377,8 @@ impl MemoryService {
                 if pinned_ids.contains(&id) {
                     continue;
                 }
-                if notes.len() >= budget.max_items {
+                let excerpt_slot = excerpted < budget.excerpts && notes.len() < budget.max_items;
+                if !excerpt_slot && listed.len() >= budget.listed {
                     truncated = true;
                     break;
                 }
@@ -357,14 +395,35 @@ impl MemoryService {
                 if found_stale.contains(&item.id) {
                     item.freshness = Freshness::Stale;
                 }
-                let item = item.into_recalled(UsedReason::Recall);
-                let block = item.render().len();
-                if bytes + block > budget.total_bytes {
+                if excerpt_slot {
+                    let recalled = item.recalled(UsedReason::Recall);
+                    let block = recalled.render().len();
+                    if bytes + block <= budget.total_bytes {
+                        bytes += block;
+                        excerpted += 1;
+                        notes.push(recalled);
+                        continue;
+                    }
+                    truncated = true;
+                    if listed.len() >= budget.listed {
+                        continue;
+                    }
+                }
+                // Design 09 §13.2: one line of the index block — the header
+                // is paid for by the first.
+                let line = item.listed();
+                let cost = line.render().len()
+                    + if listed.is_empty() {
+                        INDEX_BLOCK_HEADER.len()
+                    } else {
+                        0
+                    };
+                if bytes + cost > budget.total_bytes {
                     truncated = true;
                     continue;
                 }
-                bytes += block;
-                notes.push(item);
+                bytes += cost;
+                listed.push(line);
             }
         }
 
@@ -376,9 +435,14 @@ impl MemoryService {
             }
         }
 
-        let bytes = if notes.is_empty() { 0 } else { bytes };
+        let bytes = if notes.is_empty() && listed.is_empty() {
+            0
+        } else {
+            bytes
+        };
         Ok(RecallResult {
             notes,
+            listed,
             truncated,
             partial,
             index_state,
@@ -631,24 +695,36 @@ struct VerifiedItem {
 }
 
 impl VerifiedItem {
-    fn into_recalled(self, reason: UsedReason) -> RecalledNote {
+    fn recalled(&self, reason: UsedReason) -> RecalledNote {
         RecalledNote {
             id: self.id,
-            revision: self.revision,
-            title: self.title,
+            revision: self.revision.clone(),
+            title: self.title.clone(),
             kind: self.kind,
             scope: self.scope,
-            path: self.path,
-            heading: self.heading,
+            path: self.path.clone(),
+            heading: self.heading.clone(),
             line_range: self.line_range,
-            matches: self.matches,
+            matches: self.matches.clone(),
             freshness: self.freshness,
-            sources: self.sources,
+            sources: self.sources.clone(),
             reason,
-            text: self.text,
+            text: self.text.clone(),
             valid_from: self.valid_from,
             valid_to: self.valid_to,
             timing: self.timing,
+        }
+    }
+
+    /// The note as a line of the index block (design 09 §13.2).
+    fn listed(&self) -> ListedNote {
+        ListedNote {
+            id: self.id,
+            revision: self.revision.clone(),
+            date: self.date,
+            kind: self.kind,
+            title: self.title.clone(),
+            matches: self.matches.clone(),
         }
     }
 }

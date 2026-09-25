@@ -7351,6 +7351,132 @@ async fn memory_suggestions_reach_only_an_attended_gui_turn() {
     }
 }
 
+/// **Design 09 §13.2 (MD-15), end to end on the main loop.** Under the
+/// shipped default, `recall_mode = "index"`, a question five notes match
+/// gets the top 2 as excerpts and the other 3 under the index block's
+/// header, one line each, in the turn's one memory message; the turn's
+/// `memory_used` names each listed note with reason `index`, and the
+/// recently-used ring records it that way — listed, not delivered. Under
+/// `recall_mode = "excerpts"` the same question gets today's delivery: five
+/// excerpts, no index block, no `index` reason.
+#[tokio::test]
+async fn an_index_turn_lists_notes_and_reports_them_with_reason_index() {
+    use crate::daemon_config::RecallMode;
+    use crate::memory::service::{Attribution, Capabilities, StoreInput, Surface, WorkspaceHint};
+    use openalpaca_storage::memory_files::NoteKind;
+    const HEADER: &str = "More notes that may be relevant (read with memory_read):\n";
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let owner = scene
+        .service
+        .context(
+            "user1",
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    for topic in ["theme", "font", "plugins", "keymap"] {
+        scene
+            .service
+            .store(
+                &owner,
+                StoreInput {
+                    title: format!("Editor {topic}"),
+                    body: format!(
+                        "# Editor {topic}\n\nThe editor {topic} is set up as the user likes it.\n"
+                    ),
+                    kind: Some(NoteKind::Preference),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "vim, as you told me",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+    let request_id = Uuid::new_v4();
+    send_tool_mode(&orch, request_id, "what editor do I prefer?").await;
+    let block = {
+        let reqs = requests.lock().unwrap();
+        let blocks = memory_messages(&reqs[0]);
+        assert_eq!(blocks.len(), 1, "one memory message per turn");
+        blocks[0].clone()
+    };
+    assert_eq!(block.matches(HEADER).count(), 1, "{block}");
+    let (excerpts, index) = block.split_once(HEADER).unwrap();
+    assert_eq!(excerpts.matches("[memory id=").count(), 2, "{block}");
+    assert!(!index.contains("[memory id="), "{block}");
+    let lines: Vec<&str> = index
+        .strip_suffix("</memory_context>\n")
+        .expect("the index block is the last thing in the wrapper")
+        .lines()
+        .collect();
+    assert_eq!(lines.len(), 3, "{block}");
+    assert!(!excerpts.contains("espresso") && !index.contains("Coffee"));
+
+    let used = orch.take_memory_used(request_id);
+    let reasons: Vec<&str> = used.iter().map(|u| u.reason.as_str()).collect();
+    assert_eq!(
+        reasons,
+        ["recall", "recall", "index", "index", "index"],
+        "{used:?}"
+    );
+    for (line, listed) in lines.iter().zip(&used[2..]) {
+        assert!(
+            line.starts_with(&format!("{} ", listed.id)),
+            "each line names its note first: {line}"
+        );
+    }
+    let ring = scene.service.recently_used(50);
+    for listed in &used[2..] {
+        assert!(
+            ring.iter().any(|r| r.id == listed.id
+                && r.reason.as_str() == "index"
+                && r.lane_key.as_deref() == Some("user1:cli")),
+            "{ring:?}"
+        );
+    }
+    assert!(
+        !ring
+            .iter()
+            .any(|r| r.reason.as_str() == "recall" && used[2..].iter().any(|u| u.id == r.id)),
+        "a listed note is not recorded as delivered: {ring:?}"
+    );
+
+    let mut excerpts_config = DaemonConfig::default();
+    excerpts_config.orchestrator.memory.recall_mode = RecallMode::Excerpts;
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "vim, as you told me",
+        excerpts_config,
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+    let request_id = Uuid::new_v4();
+    send_tool_mode(&orch, request_id, "what editor do I prefer?").await;
+    let reqs = requests.lock().unwrap();
+    let blocks = memory_messages(&reqs[0]);
+    assert_eq!(blocks.len(), 1);
+    assert!(!blocks[0].contains(HEADER), "{}", blocks[0]);
+    assert_eq!(blocks[0].matches("[memory id=").count(), 5, "{}", blocks[0]);
+    let used = orch.take_memory_used(request_id);
+    assert_eq!(used.len(), 5, "{used:?}");
+    assert!(
+        used.iter().all(|u| u.reason.as_str() == "recall"),
+        "{used:?}"
+    );
+}
 /// **Plan 3.3.** The same question twice on the same lane, a note stored in
 /// between: the second turn's request carries both notes. Layer 3 is a
 /// per-lane cache keyed by query text, and the memory delivery is built

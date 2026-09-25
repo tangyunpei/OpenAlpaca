@@ -11,15 +11,17 @@
 //! skips `ContextKind::Memory` for the same reason, so a repeated question on
 //! a lane never reads the previous turn's notes back out of the cache.
 
+use crate::daemon_config::DaemonConfig;
 use crate::memory::service::{
     Attribution, Capabilities, MemoryError, MemoryService, MemoryUsed, PendingSuggestion,
-    RECALL_TOTAL_BYTES, RecallBudget, Surface, WorkspaceHint, wrap_delivery,
+    RECALL_TOTAL_BYTES, RecallBudget, Surface, UsedReason, WorkspaceHint, render_delivery,
 };
 use crate::prompt_ctx::section::{
     ContextBundle, ContextKey, ContextKind, ContextSection, InjectionMode, SectionPriority,
     TrustLevel,
 };
 use crate::prompt_ctx::sources::{ContextRequest, ContextSource};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -32,11 +34,21 @@ pub struct MemorySource {
     /// (`Orchestrator::set_memory_service`); `None` until then, and nothing
     /// is recalled.
     service: Arc<RwLock<Option<Arc<MemoryService>>>>,
+    /// The live daemon config: `[orchestrator.memory] recall_mode` is read
+    /// on every turn (design 09 §13.2), so a hot reload takes effect on the
+    /// next one.
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
 }
 
 impl MemorySource {
-    pub fn new(service: Arc<RwLock<Option<Arc<MemoryService>>>>) -> Self {
-        Self { service }
+    pub fn new(
+        service: Arc<RwLock<Option<Arc<MemoryService>>>>,
+        daemon_config: Arc<ArcSwap<DaemonConfig>>,
+    ) -> Self {
+        Self {
+            service,
+            daemon_config,
+        }
     }
 
     fn service(&self) -> Option<Arc<MemoryService>> {
@@ -90,10 +102,10 @@ impl ContextSource for MemorySource {
             }
         };
         let query = request.query.clone();
-        let recalled = tokio::task::spawn_blocking(move || {
-            service.recall(&ctx, &query, RecallBudget::default())
-        })
-        .await;
+        let budget =
+            RecallBudget::for_mode(self.daemon_config.load().orchestrator.memory.recall_mode);
+        let recalled =
+            tokio::task::spawn_blocking(move || service.recall(&ctx, &query, budget)).await;
         let result = match recalled {
             Ok(Ok(result)) => result,
             Ok(Err(e)) => {
@@ -105,32 +117,33 @@ impl ContextSource for MemorySource {
                 return vec![];
             }
         };
-        result
+        // One section per note, keyed by its `memory_used` entry: each
+        // excerpt, then each line of the index block (design 09 §13.2),
+        // whose header `memory_turn` writes before the first listed note it
+        // renders.
+        let used = result.memory_used();
+        let contents = result
             .notes
-            .into_iter()
-            .map(|note| {
-                let used = MemoryUsed {
-                    id: note.id,
-                    revision: note.revision.clone(),
-                    reason: note.reason,
-                };
-                let content = note.render();
-                ContextSection {
-                    source: SOURCE_NAME,
-                    kind: ContextKind::Memory,
-                    token_estimate: content.len() / 4,
-                    content,
-                    priority: SectionPriority::Normal,
-                    // The service already ranked them (design §5 step 6); the
-                    // manager's sort is stable, so equal relevance keeps that
-                    // order.
-                    relevance: 1.0,
-                    key: ContextKey::Memory(used),
-                    injection: InjectionMode::UserMessage {
-                        tag: "memory_context".to_string(),
-                        trust: TrustLevel::Untrusted,
-                    },
-                }
+            .iter()
+            .map(|note| note.render())
+            .chain(result.listed.iter().map(|note| note.render()));
+        used.into_iter()
+            .zip(contents)
+            .map(|(used, content)| ContextSection {
+                source: SOURCE_NAME,
+                kind: ContextKind::Memory,
+                token_estimate: content.len() / 4,
+                content,
+                priority: SectionPriority::Normal,
+                // The service already ranked them (design §5 step 6); the
+                // manager's sort is stable, so equal relevance keeps that
+                // order.
+                relevance: 1.0,
+                key: ContextKey::Memory(used),
+                injection: InjectionMode::UserMessage {
+                    tag: "memory_context".to_string(),
+                    trust: TrustLevel::Untrusted,
+                },
             })
             .collect()
     }
@@ -161,22 +174,39 @@ pub fn memory_turn(bundle: &ContextBundle) -> Option<MemoryTurn> {
     memory_turn_with(bundle, None)
 }
 
+/// A section that is a line of the index block (design 09 §13.2), not an
+/// excerpt.
+fn is_listed(section: &ContextSection) -> bool {
+    matches!(&section.key, ContextKey::Memory(used) if used.reason == UsedReason::Index)
+}
+
+/// The kept sections as one delivery: the excerpts in rank order, then the
+/// listed notes under the index block's header, then `suggestions`.
+fn render_sections(sections: &[&ContextSection], suggestions: Option<&str>) -> String {
+    let (listed, excerpts): (Vec<&ContextSection>, Vec<&ContextSection>) =
+        sections.iter().partition(|s| is_listed(s));
+    render_delivery(
+        excerpts.iter().map(|s| s.content.as_str()),
+        listed.iter().map(|s| s.content.as_str()),
+        suggestions,
+    )
+}
+
 /// [`memory_turn`], with a `<memory_suggestions>` block after the notes
 /// (design 09 §4.5): delivered in the same quoted-data wrapper under the
 /// trust label, and counted against the same 8 KiB — the lowest-ranked
-/// recalled notes give way to it, and `used` names only what stayed.
+/// notes give way to it, the listed ones first (design 09 §13.2), and
+/// `used` names only what stayed.
 pub fn memory_turn_with(bundle: &ContextBundle, suggestions: Option<&str>) -> Option<MemoryTurn> {
-    let mut sections: Vec<&ContextSection> = bundle.memory_sections().collect();
+    // Excerpts first, then the listed notes, each in the order the manager
+    // kept them: the order they are rendered in, and the order they give way
+    // in, from the end.
+    let (listed, mut sections): (Vec<&ContextSection>, Vec<&ContextSection>) =
+        bundle.memory_sections().partition(|s| is_listed(s));
+    sections.extend(listed);
     if let Some(block) = suggestions {
         while !sections.is_empty()
-            && wrap_delivery(
-                sections
-                    .iter()
-                    .map(|s| s.content.as_str())
-                    .chain(std::iter::once(block)),
-            )
-            .len()
-                > RECALL_TOTAL_BYTES
+            && render_sections(&sections, Some(block)).len() > RECALL_TOTAL_BYTES
         {
             sections.pop();
         }
@@ -191,12 +221,7 @@ pub fn memory_turn_with(bundle: &ContextBundle, suggestions: Option<&str>) -> Op
             _ => None,
         })
         .collect();
-    let content = wrap_delivery(
-        sections
-            .iter()
-            .map(|s| s.content.as_str())
-            .chain(suggestions),
-    );
+    let content = render_sections(&sections, suggestions);
     Some(MemoryTurn { content, used })
 }
 
@@ -276,8 +301,10 @@ mod tests {
     //! row, an in-memory index.
 
     use super::*;
+    use crate::daemon_config::{DaemonConfig, RecallMode};
     use crate::memory::scope_context::MemoryScopeContext;
     use crate::memory::service::StoreInput;
+    use crate::memory::service::{INDEX_BLOCK_HEADER, wrap_delivery};
     use crate::orchestrator::intent::Intent;
     use crate::prompt_ctx::sources::ExecutionPath;
     use crate::test_util::HomeStoreGuard;
@@ -292,6 +319,16 @@ mod tests {
         _root: tempfile::TempDir,
         service: Arc<MemoryService>,
         source: MemorySource,
+        /// The live config the source reads `recall_mode` from on each turn.
+        config: Arc<ArcSwap<DaemonConfig>>,
+    }
+
+    impl Scene {
+        fn set_recall_mode(&self, mode: RecallMode) {
+            let mut config = (**self.config.load()).clone();
+            config.orchestrator.memory.recall_mode = mode;
+            self.config.store(Arc::new(config));
+        }
     }
 
     fn scene() -> Scene {
@@ -307,11 +344,13 @@ mod tests {
         service.rebuild_index().unwrap();
         let service = Arc::new(service);
         let slot = Arc::new(RwLock::new(Some(service.clone())));
+        let config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
         Scene {
             _env: env,
             _root: root,
             service,
-            source: MemorySource::new(slot),
+            source: MemorySource::new(slot, config.clone()),
+            config,
         }
     }
 
@@ -438,7 +477,7 @@ mod tests {
                 .await
                 .is_empty()
         );
-        let uninstalled = MemorySource::new(Arc::new(RwLock::new(None)));
+        let uninstalled = MemorySource::new(Arc::new(RwLock::new(None)), scene.config.clone());
         assert!(
             uninstalled
                 .resolve(&request("what editor do I prefer?", Some(ALICE)))
@@ -753,10 +792,100 @@ mod tests {
     #[tokio::test]
     async fn excerpts_mode_is_todays_delivery_byte_for_byte() {
         let scene = golden_scene();
+        scene.set_recall_mode(RecallMode::Excerpts);
         let turn = golden_turn(&scene).await;
         assert_eq!(
             golden_text(&turn),
             include_str!("memory_recall_excerpts.golden.txt")
         );
+    }
+
+    /// **Design 09 §13.2: `recall_mode = "index"`, the default.** The same
+    /// question on the same notes: the pinned note and the top 2 recalled
+    /// notes as excerpts, byte for byte as the excerpts delivery renders
+    /// them, then the index block — its one header line and one line per
+    /// further note, `<id> <date> <kind> “<title>” — <reason>`, the date
+    /// `observed_at` when the note has one — inside the same wrapper under
+    /// the same trust label. `memory_used` names the listed notes last, with
+    /// reason `index`.
+    #[tokio::test]
+    async fn index_mode_is_pinned_two_excerpts_and_the_index_block() {
+        let scene = golden_scene();
+        assert_eq!(
+            scene.config.load().orchestrator.memory.recall_mode,
+            RecallMode::Index,
+            "index is the default"
+        );
+        let turn = golden_turn(&scene).await;
+        let golden = include_str!("memory_recall_index.golden.txt");
+        assert_eq!(golden_text(&turn), golden);
+        // The excerpts are the excerpts delivery's first three blocks, and
+        // nothing in the index block is a body.
+        let excerpts = include_str!("memory_recall_excerpts.golden.txt");
+        let (head, _) = golden.split_once(INDEX_BLOCK_HEADER).unwrap();
+        assert!(excerpts.starts_with(head), "{head}");
+        assert!(turn.content.len() <= RECALL_TOTAL_BYTES);
+    }
+
+    fn keyed(id: u128, reason: UsedReason, content: &str) -> ContextSection {
+        let mut s = section(id, content.to_string());
+        if let ContextKey::Memory(used) = &mut s.key {
+            used.reason = reason;
+        }
+        s
+    }
+
+    /// The index block is rendered from the sections a context manager
+    /// kept: its header goes before the first listed note wherever the
+    /// manager put it, only when one is kept, and a `<memory_suggestions>`
+    /// block that needs the room takes it from the listed notes first —
+    /// lowest ranked, then the header with the last of them.
+    #[test]
+    fn listed_sections_render_under_one_header_and_give_way_first() {
+        let line = |n: u128| format!("{n} 2026-09-01T00:00:00Z fact “Note {n}” — term\n");
+        let bundle = ContextBundle {
+            sections: vec![
+                keyed(1, UsedReason::Index, &line(1)),
+                keyed(
+                    2,
+                    UsedReason::Recall,
+                    &format!("[memory id=2]\n{}\n[/memory]\n", "b".repeat(3000)),
+                ),
+                keyed(3, UsedReason::Index, &line(3)),
+            ],
+            total_tokens: 0,
+            available_budget: 8192,
+        };
+        let turn = memory_turn(&bundle).unwrap();
+        let (excerpts, index) = turn.content.split_once(INDEX_BLOCK_HEADER).unwrap();
+        assert!(excerpts.contains("[memory id=2]"), "{}", turn.content);
+        assert_eq!(index, format!("{}{}</memory_context>\n", line(1), line(3)));
+        let reasons: Vec<UsedReason> = turn.used.iter().map(|u| u.reason).collect();
+        assert_eq!(
+            reasons,
+            [UsedReason::Recall, UsedReason::Index, UsedReason::Index]
+        );
+
+        // A block that leaves room for the excerpt but for no line: both
+        // listed notes give way, and the header with them.
+        let room = RECALL_TOTAL_BYTES - wrap_delivery([bundle.sections[1].content.as_str()]).len();
+        let block = format!(
+            "<memory_suggestions>\n{}\n</memory_suggestions>\n",
+            "s".repeat(room - 45)
+        );
+        let turn = memory_turn_with(&bundle, Some(&block)).unwrap();
+        assert!(
+            turn.content.len() <= RECALL_TOTAL_BYTES,
+            "{}",
+            turn.content.len()
+        );
+        assert!(
+            !turn.content.contains(INDEX_BLOCK_HEADER),
+            "{}",
+            turn.content
+        );
+        assert!(turn.content.contains("[memory id=2]"));
+        assert_eq!(turn.used.len(), 1);
+        assert_eq!(turn.used[0].reason, UsedReason::Recall);
     }
 }

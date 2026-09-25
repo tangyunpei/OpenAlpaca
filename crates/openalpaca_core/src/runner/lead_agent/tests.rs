@@ -2861,7 +2861,7 @@ fn lead_memory_without_workspace_reads_the_global_partition_only() {
     assert_eq!(ctx.project_root, None);
     assert_eq!(ctx.attribution.task_id.as_deref(), Some("task-1"));
 
-    let delivery = lead_memory_delivery(&scene.service, &ctx, "status reports");
+    let delivery = lead_memory_delivery(&scene.service, &ctx, "status reports", RecallMode::Index);
     assert_eq!(delivered_ids(&delivery), vec![scene.global]);
     let (block, _) = delivery.unwrap();
     assert!(block.starts_with("<memory_context>\n"), "{block}");
@@ -2886,13 +2886,83 @@ fn lead_memory_with_workspace_reads_its_project_and_global() {
     .unwrap();
     assert_eq!(ctx.project_root.as_deref(), Some(scene.project("projA").as_path()));
 
-    let delivery = lead_memory_delivery(&scene.service, &ctx, "status reports");
+    let delivery = lead_memory_delivery(&scene.service, &ctx, "status reports", RecallMode::Index);
     let mut ids = delivered_ids(&delivery);
     ids.sort();
     let mut expected = vec![scene.global, scene.proj_a];
     expected.sort();
     assert_eq!(ids, expected);
     assert!(!ids.contains(&scene.proj_b));
+}
+
+/// Design 09 §13.2: the lead's opening recall is delivered the way
+/// `[orchestrator.memory] recall_mode` says, like every turn's. Under
+/// `index`, a task three notes match is primed with the top 2 as excerpts
+/// and the third listed under the index block's header, reported with
+/// reason `index`; under `excerpts`, all three are excerpts.
+#[test]
+fn lead_memory_follows_the_recall_mode() {
+    use crate::memory::service::{INDEX_BLOCK_HEADER, StoreInput, UsedReason};
+    use openalpaca_storage::memory_files::NoteKind;
+
+    let scene = lead_memory_scene();
+    let owner = scene
+        .service
+        .context(
+            LEAD_OWNER,
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    for (title, body) in [
+        (
+            "Status report format",
+            "# Status report format\n\nStatus reports lead with the blockers.\n",
+        ),
+        (
+            "Status report audience",
+            "# Status report audience\n\nStatus reports go to the whole team.\n",
+        ),
+    ] {
+        scene
+            .service
+            .store(
+                &owner,
+                StoreInput {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: Some(NoteKind::Preference),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    let ctx = lead_memory_context(
+        &scene.service,
+        LEAD_OWNER,
+        &MemoryScopeContext::global_only(),
+        "task-1",
+        "user-1:cli",
+        "cli",
+    )
+    .unwrap();
+
+    let (block, used) =
+        lead_memory_delivery(&scene.service, &ctx, "status reports", RecallMode::Index).unwrap();
+    assert_eq!(block.matches(INDEX_BLOCK_HEADER).count(), 1, "{block}");
+    let reasons: Vec<UsedReason> = used.iter().map(|u| u.reason).collect();
+    assert_eq!(
+        reasons,
+        [UsedReason::Recall, UsedReason::Recall, UsedReason::Index]
+    );
+
+    let (block, used) =
+        lead_memory_delivery(&scene.service, &ctx, "status reports", RecallMode::Excerpts).unwrap();
+    assert!(!block.contains(INDEX_BLOCK_HEADER), "{block}");
+    assert_eq!(used.len(), 3);
+    assert!(used.iter().all(|u| u.reason == UsedReason::Recall));
 }
 
 /// A `System` run (`/v1/command process`) and an unlinked `provider:id`

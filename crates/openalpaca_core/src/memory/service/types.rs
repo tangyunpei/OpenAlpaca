@@ -9,6 +9,7 @@ use openalpaca_storage::memory_files::{
 use openalpaca_storage::memory_index::{IndexState, MatchReason, SearchOrder};
 
 use super::context::Surface;
+use crate::daemon_config::RecallMode;
 
 /// What an extraction write is made of (design §7a `Extraction`): the user's
 /// own words become an active `extracted_user` note; assistant or tool
@@ -617,15 +618,19 @@ pub struct SearchOutput {
     pub index_state: IndexState,
 }
 
-/// `memory_used[].reason` (design §7a): `pinned` and `recall` are the
-/// automatic path, `tool` a note the model fetched through `memory_search`,
-/// `memory_timeline` or `memory_read` in that turn — an index row counts,
-/// its title reached the model (design 09 §13.1).
+/// `memory_used[].reason` (design §7a): `pinned`, `recall` and `index` are
+/// the automatic path, `tool` a note the model fetched through
+/// `memory_search`, `memory_timeline` or `memory_read` in that turn — an
+/// index row counts, its title reached the model (design 09 §13.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsedReason {
     Pinned,
     Recall,
+    /// Listed, not delivered: one line of the automatic recall's index block
+    /// (design 09 §13.2) — its id, date, kind, title and match reason reached
+    /// the model, its body did not.
+    Index,
     Tool,
 }
 
@@ -634,6 +639,7 @@ impl UsedReason {
         match self {
             UsedReason::Pinned => "pinned",
             UsedReason::Recall => "recall",
+            UsedReason::Index => "index",
             UsedReason::Tool => "tool",
         }
     }
@@ -660,24 +666,54 @@ pub struct RecentlyUsedItem {
     pub task_id: Option<String>,
 }
 
-/// The byte budgets of design §4 (*Initial limits*).
+/// The budgets of design §4 (*Initial limits*), and how the search's notes
+/// are delivered within them (design 09 §13.2): as excerpts, or the first
+/// few as excerpts and the next ones listed one line each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecallBudget {
-    /// Combined automatic memory context, pinned notes and wrappers included.
+    /// Combined automatic memory context, pinned notes, wrappers and the
+    /// index block included.
     pub total_bytes: usize,
     /// The pinned sub-budget (design §5 step 2).
     pub pinned_bytes: usize,
-    /// At most this many delivered items, pinned included.
+    /// At most this many delivered items — excerpts, pinned included.
     pub max_items: usize,
+    /// At most this many of the search's notes are delivered as excerpts.
+    pub excerpts: usize,
+    /// At most this many further notes are listed in the index block; `0`,
+    /// and there is no index block.
+    pub listed: usize,
 }
 
-impl Default for RecallBudget {
-    fn default() -> Self {
-        Self {
+impl RecallBudget {
+    /// The budget `[orchestrator.memory] recall_mode` names (design 09
+    /// §13.2): `excerpts` is design §4's — every note that fits the 8 KiB
+    /// and the 8 items an excerpt, nothing listed; `index` excerpts the top
+    /// 2 and lists up to 8 more, inside the same 8 KiB.
+    pub fn for_mode(mode: RecallMode) -> Self {
+        let excerpts = Self {
             total_bytes: super::RECALL_TOTAL_BYTES,
             pinned_bytes: super::RECALL_PINNED_BYTES,
             max_items: super::RECALL_MAX_ITEMS,
+            excerpts: super::RECALL_MAX_ITEMS,
+            listed: 0,
+        };
+        match mode {
+            RecallMode::Excerpts => excerpts,
+            RecallMode::Index => Self {
+                excerpts: super::RECALL_INDEX_EXCERPTS,
+                listed: super::RECALL_INDEX_LINES,
+                ..excerpts
+            },
         }
+    }
+}
+
+/// Design §4's budgets: the excerpts delivery. A per-turn caller builds its
+/// budget from the configured mode with [`RecallBudget::for_mode`].
+impl Default for RecallBudget {
+    fn default() -> Self {
+        Self::for_mode(RecallMode::Excerpts)
     }
 }
 
@@ -781,11 +817,48 @@ impl RecalledNote {
     }
 }
 
+/// One note the automatic recall lists rather than delivers (design 09
+/// §13.2): a line of the index block, read from the verified file — the
+/// model sees that it exists and why it matched, and opens it with
+/// `memory_read` if it needs it.
+#[derive(Debug, Clone)]
+pub struct ListedNote {
+    pub id: NoteId,
+    pub revision: String,
+    /// `observed_at`, else `created_at` — an index row's date (design 09
+    /// §13.1).
+    pub date: DateTime<Utc>,
+    pub kind: NoteKind,
+    pub title: String,
+    pub matches: Vec<MatchReason>,
+}
+
+impl ListedNote {
+    /// `<id> <date> <kind> “<title>” — <reason>`, one line: the date and the
+    /// reason as an index row writes them (design 09 §13.1), the full id —
+    /// what `memory_read` takes.
+    pub fn render(&self) -> String {
+        format!(
+            "{} {} {} “{}” — {}\n",
+            self.id,
+            super::format_ts(self.date),
+            self.kind,
+            self.title.replace(['\r', '\n'], " "),
+            match_reasons(&self.matches),
+        )
+    }
+}
+
 /// What a recall delivered (design §5 step 8).
 #[derive(Debug, Clone)]
 pub struct RecallResult {
+    /// The delivered notes: pinned first, then the recalled excerpts.
     pub notes: Vec<RecalledNote>,
-    /// Something matched but did not fit the budget or the item cap.
+    /// The notes listed after them in the index block, in rank order
+    /// (design 09 §13.2); empty in the excerpts delivery.
+    pub listed: Vec<ListedNote>,
+    /// Something matched but did not fit the budget, the item cap or the
+    /// index block.
     pub truncated: bool,
     pub partial: bool,
     pub index_state: IndexState,
@@ -798,10 +871,11 @@ pub struct RecallResult {
 
 impl RecallResult {
     pub fn is_empty(&self) -> bool {
-        self.notes.is_empty()
+        self.notes.is_empty() && self.listed.is_empty()
     }
 
-    /// `memory_used` for the turn's `done` frame (design §7a).
+    /// `memory_used` for the turn's `done` frame (design §7a): the delivered
+    /// notes, then the listed ones with reason `index` (design 09 §13.2).
     pub fn memory_used(&self) -> Vec<MemoryUsed> {
         self.notes
             .iter()
@@ -810,13 +884,19 @@ impl RecallResult {
                 revision: n.revision.clone(),
                 reason: n.reason,
             })
+            .chain(self.listed.iter().map(|l| MemoryUsed {
+                id: l.id,
+                revision: l.revision.clone(),
+                reason: UsedReason::Index,
+            }))
             .collect()
     }
 
     /// The whole delivery as quoted data with its trust label (design §5
     /// step 8): reference data in user or tool context, never a system
-    /// instruction. Empty when nothing was delivered.
+    /// instruction — the index block included. Empty when nothing was
+    /// delivered.
     pub fn render(&self) -> String {
-        super::recall::render_block(&self.notes)
+        super::recall::render_block(&self.notes, &self.listed)
     }
 }
