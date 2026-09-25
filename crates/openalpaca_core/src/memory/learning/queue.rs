@@ -1798,16 +1798,17 @@ impl LearningQueue {
                 return report;
             }
 
-            // A summary already cites this window — a re-run after a crash
-            // between its write and the cursor's advance: no second one, and
-            // no call. Then the turns a forget suppressed are taken out, so
-            // no summary restates what the user said to forget (design 03
-            // §6's hard guarantee).
+            // A summary already covers the start of this window — a re-run
+            // after a crash between its write and the cursor's advance: the
+            // cursor moves past what it covers, with no call and no second
+            // summary, and the turns after it are summarised next. Then the
+            // turns a forget suppressed are taken out, so no summary restates
+            // what the user said to forget (design 03 §6's hard guarantee).
             let service = self.deps.memory_service.clone();
             let check_ctx = ctx.clone();
             let ids: Vec<i64> = chunk.rows.iter().map(|r| r.id).collect();
             let checked = tokio::task::spawn_blocking(move || {
-                let covered = service.summary_cites(&check_ctx, &ids)?;
+                let covered = service.summary_coverage(&check_ctx, &ids)?;
                 let keys: Vec<String> = ids.iter().map(|id| format!("message:{id}")).collect();
                 let suppressed = service.suppressed_sources(&check_ctx, &keys)?;
                 Ok::<_, MemoryError>((covered, suppressed))
@@ -1836,9 +1837,8 @@ impl LearningQueue {
                     return report;
                 }
             };
-            if covered {
-                self.advance_episode(session_id, chunk.through, expected)
-                    .await;
+            if let Some(through) = covered {
+                self.advance_episode(session_id, through, expected).await;
                 windows += 1;
                 report.skipped_summarized += 1;
                 continue;

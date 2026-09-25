@@ -318,6 +318,41 @@ async fn a_rerun_after_a_crash_writes_no_second_episode() {
     assert_eq!(episode_cursor(&scene, &s), *rows.last().unwrap());
 }
 
+/// The same crash, with turns that arrived after it: the re-run passes
+/// only the rows the summary already covers — its sources run to its
+/// window's last row — and summarises the turns after them, instead of
+/// passing the whole chunk it reads now.
+#[tokio::test]
+async fn a_rerun_after_a_crash_still_summarises_the_turns_after_the_summary() {
+    let scene = Scene::new(vec![trip_summary(), trip_summary()]);
+    let s = scene.session();
+    four_turns(&scene, &s);
+    scene.queue.set_store_hooks(StoreHooks {
+        skip_advance: true,
+        ..Default::default()
+    });
+    let crashed = scene.queue.flush_episodes(&s).await;
+    assert_eq!(crashed.episodes, 1, "{crashed:?}");
+    scene.queue.set_store_hooks(StoreHooks::default());
+    let mut later = Vec::new();
+    for text in TURNS {
+        let (q, a) = scene.turn(&s, text, "Later.");
+        later.extend([q, a]);
+    }
+
+    let rerun = scene.queue.flush_episodes(&s).await;
+    assert_eq!(
+        (rerun.skipped_summarized, rerun.calls, rerun.episodes),
+        (1, 1, 1),
+        "{rerun:?}"
+    );
+    assert_eq!(episodes(&scene).len(), 2);
+    assert_eq!(episode_cursor(&scene, &s), *later.last().unwrap());
+    let newest = scene.model.prompts().last().cloned().unwrap();
+    assert!(newest.contains("Later."), "{newest}");
+    assert!(!newest.contains("Answer 0."), "the covered turns: {newest}");
+}
+
 /// An unusable answer holds the window with a backoff, like learning's
 /// (ruling LR20); the third in a row moves the cursor past the chunk with
 /// no episode.

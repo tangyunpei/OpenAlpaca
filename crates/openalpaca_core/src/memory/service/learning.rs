@@ -13,7 +13,7 @@ use super::{
     KnownNote, LearningView, MemoryAccessContext, MemoryError, MemoryService, Surface, scope_of,
 };
 use openalpaca_storage::memory_files::{
-    EffectiveStatus, NoteId, NoteKind, NoteStatus, Origin, Partition, PartitionHealth,
+    EffectiveStatus, NoteId, NoteKind, NoteStatus, Origin, Partition, PartitionHealth, SourceType,
     is_conversation_summary, knowledge_text,
 };
 use openalpaca_storage::memory_index::{self as index, SearchHit, SearchMode, SearchQuery};
@@ -93,18 +93,20 @@ impl MemoryService {
             .collect())
     }
 
-    /// Whether a conversation summary already cites any of these message
-    /// rows (design 09 §13.3): a re-run after a crash between a summary's
-    /// write and its episode cursor's advance writes no second one. Only the
-    /// `Extraction` surface may ask; it records nothing.
-    pub(crate) fn summary_cites(
+    /// How far the conversation summaries already cover these message rows
+    /// (design 09 §13.3): the newest of them any summary cites, or `None`
+    /// when none cites any. A summary cites its window's last row, so after a
+    /// crash between a summary's write and its episode cursor's advance the
+    /// re-run passes exactly the rows it covers and writes no second one.
+    /// Only the `Extraction` surface may ask; it records nothing.
+    pub(crate) fn summary_coverage(
         &self,
         ctx: &MemoryAccessContext,
         message_ids: &[i64],
-    ) -> Result<bool, MemoryError> {
+    ) -> Result<Option<i64>, MemoryError> {
         Self::require_extraction(ctx)?;
         if message_ids.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
         let resolved = self.resolve(ctx)?;
         let partitions: Vec<&Partition> = resolved
@@ -123,11 +125,46 @@ impl MemoryService {
             .iter()
             .map(|id| format!("message:{id}"))
             .collect();
-        Ok(self
-            .index
-            .notes_citing(&keys, &source_keys)?
-            .iter()
-            .any(|row| is_summary_row(&row.kind, &row.origin)))
+        let wanted: HashSet<i64> = message_ids.iter().copied().collect();
+        let mut dirty: HashSet<String> = HashSet::new();
+        let mut newest: Option<i64> = None;
+        for row in self.index.notes_citing(&keys, &source_keys)? {
+            if !is_summary_row(&row.kind, &row.origin) {
+                continue;
+            }
+            let (Some(p), Ok(id)) = (
+                partitions
+                    .iter()
+                    .find(|p| p.partition_key() == row.partition_key),
+                NoteId::parse(&row.id),
+            ) else {
+                continue;
+            };
+            match verify(p, &row.relative_path, id, &row.revision) {
+                Verified::Fresh { note, stale, .. } => {
+                    if stale {
+                        dirty.insert(row.partition_key.clone());
+                    }
+                    let cited = note
+                        .sources
+                        .iter()
+                        .filter(|s| s.kind == SourceType::Message)
+                        .filter_map(|s| s.id.parse::<i64>().ok())
+                        .filter(|n| wanted.contains(n))
+                        .max();
+                    newest = newest.max(cited);
+                }
+                Verified::Gone => {
+                    dirty.insert(row.partition_key.clone());
+                }
+            }
+        }
+        for key in dirty {
+            if let Some(p) = partitions.iter().find(|p| p.partition_key() == key) {
+                self.reindex(p, true)?;
+            }
+        }
+        Ok(newest)
     }
 
     /// Learning's known-notes lookup for one chunk (design 09 §2.3). Only
