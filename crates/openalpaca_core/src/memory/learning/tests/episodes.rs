@@ -320,6 +320,45 @@ async fn a_rerun_after_a_crash_writes_no_second_episode() {
     assert_eq!(episode_cursor(&scene, &s), *rows.last().unwrap());
 }
 
+/// L1 re-review, as for learning: a project directory deleted while the
+/// model writes the summary is not re-created by the summary's write. The
+/// store re-checks the root right before it writes; gone, the window is
+/// skipped as the check before the call skips it — no episode, the
+/// directory stays deleted, `skipped_root_gone`, the episode cursor past it.
+#[tokio::test]
+async fn a_project_deleted_during_the_summary_call_is_not_recreated() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let root_str = root.to_string_lossy().into_owned();
+    let model = Scripted::new(vec![trip_summary()]);
+    let scene = Scene::with(model.clone(), DaemonConfig::default());
+    let s = scene.session();
+    let mut last = 0;
+    for (i, text) in TURNS.iter().enumerate() {
+        last = scene
+            .turn_in(&s, text, &format!("Answer {i}."), Some(&root_str))
+            .1;
+    }
+    let doomed = root.clone();
+    *model.on_call.lock().unwrap() = Some(Arc::new(move |_| {
+        std::fs::remove_dir_all(&doomed).unwrap();
+    }));
+
+    let report = scene.queue.flush_episodes(&s).await;
+    assert_eq!(
+        model.calls(),
+        1,
+        "the root was there when the call went out"
+    );
+    assert!(!root.exists(), "the summary re-created the deleted project");
+    assert_eq!(report.stopped, None, "{report:?}");
+    assert_eq!(report.episodes, 0, "{report:?}");
+    assert_eq!(report.skipped_root_gone, 1, "{report:?}");
+    assert_eq!(episode_cursor(&scene, &s), last);
+    assert!(episodes(&scene).is_empty());
+}
+
 /// The same crash, with turns that arrived after it: the re-run passes
 /// only the rows the summary already covers — its sources run to its
 /// window's last row — and summarises the turns after them, instead of

@@ -47,6 +47,7 @@ use openalpaca_storage::memory_files::{
 };
 use openalpaca_storage::{ConversationRepository, Database, LearningCursorRepository};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// The usage label chat learning's calls are billed and gated under.
@@ -693,6 +694,11 @@ pub(crate) enum StoreEnd {
     /// A store failed on I/O or a quarantine: the cursor holds. The notes
     /// already written answer `dedup` or `already_learned` on the retry.
     Held(String),
+    /// The chunk's project directory was deleted while the model answered:
+    /// nothing was written, so nothing re-created it, and the cursor moved
+    /// past the chunk — what the check before the call does (design 09 rev
+    /// 3.2, `skipped_root_gone`).
+    RootGone,
 }
 
 /// Everything the closure needs, owned so it can run on the blocking pool.
@@ -701,6 +707,9 @@ pub(crate) struct StoreJob {
     pub service: Arc<MemoryService>,
     pub ctx: MemoryAccessContext,
     pub session_id: String,
+    /// The chunk's project directory (its rows' `workspace_root`), checked
+    /// again right before the first write.
+    pub root: Option<PathBuf>,
     pub items: Vec<ValidItem>,
     /// The notes the prompt listed: `replaces: n<k>` names `listed[k - 1]`.
     pub listed: Vec<KnownNote>,
@@ -823,6 +832,21 @@ pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
         planned.truncate(job.max_items);
     }
 
+    // The project directory, again, right before the first write: one
+    // deleted while the model answered is not re-created by a note. The
+    // chunk is dropped exactly as the check before the call drops it —
+    // nothing written, nothing else counted, the cursor past it.
+    if root_gone(job.root.as_deref()) {
+        let end = advance_past(
+            &job.db,
+            &job.session_id,
+            job.through,
+            job.expected,
+            StoreEnd::RootGone,
+        );
+        return (StoreCounts::default(), end);
+    }
+
     for (item, plan) in planned {
         // §2.5's table: the file layer applies it (S1, S2) — an automatic
         // replacement of a learned note, a suggestion for one the user
@@ -908,19 +932,38 @@ pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
         // A test's crash between steps 3 and 4.
         return (counts, StoreEnd::Held("injected fault".to_string()));
     }
-    match LearningCursorRepository::new(&job.db).advance_cas(
+    let end = advance_past(
+        &job.db,
         &job.session_id,
         job.through,
         job.expected,
-    ) {
-        Ok(true) => (counts, StoreEnd::Advanced),
-        Ok(false) => match ConversationRepository::new(&job.db).get_session(&job.session_id) {
-            Ok(None) => (counts, StoreEnd::SessionGone),
-            _ => (counts, StoreEnd::CursorMoved),
+        StoreEnd::Advanced,
+    );
+    (counts, end)
+}
+
+/// Whether a chunk's project directory is gone — no longer a directory.
+/// The check before the model call (`queue.rs`) and the one right before
+/// the first write ask the same question.
+pub(crate) fn root_gone(root: Option<&Path>) -> bool {
+    root.is_some_and(|r| !std::fs::metadata(r).is_ok_and(|m| m.is_dir()))
+}
+
+/// The chunk's cursor advance (§1.4 step 4): `done` when it moved; another
+/// writer's move, or the session deleted meanwhile, otherwise.
+fn advance_past(
+    db: &Database,
+    session_id: &str,
+    through: i64,
+    expected: i64,
+    done: StoreEnd,
+) -> StoreEnd {
+    match LearningCursorRepository::new(db).advance_cas(session_id, through, expected) {
+        Ok(true) => done,
+        Ok(false) => match ConversationRepository::new(db).get_session(session_id) {
+            Ok(None) => StoreEnd::SessionGone,
+            _ => StoreEnd::CursorMoved,
         },
-        Err(e) => (
-            counts,
-            StoreEnd::Held(format!("cursor advance failed: {e:#}")),
-        ),
+        Err(e) => StoreEnd::Held(format!("cursor advance failed: {e:#}")),
     }
 }

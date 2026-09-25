@@ -706,8 +706,9 @@ partition is quarantined, and while a daily cap binds; an answer the model
 cannot give in the expected shape three times running is skipped, with one
 `WARN` naming the conversation and the messages. Deleting or clearing a
 conversation drops its turns not yet learned, and so does deleting the project
-directory a turn named: learning skips those turns rather than re-create the
-directory and its `.openalpaca/` store. `[orchestrator.learning] enabled
+directory a turn named — even while the model is answering: learning, and an
+episode note, skip those turns rather than re-create the directory and its
+`.openalpaca/` store. `[orchestrator.learning] enabled
 = false` switches learning off.
 
 **Episode notes** record conversations the way learning records facts: one

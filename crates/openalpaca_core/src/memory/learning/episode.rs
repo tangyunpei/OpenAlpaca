@@ -21,7 +21,7 @@
 //!   ([`crate::memory::service::ExtractionProvenance::Summary`]).
 
 use super::EPISODE_MAX_KNOWLEDGE_BYTES;
-use super::extractor::{StoreEnd, fill_template, one_line};
+use super::extractor::{StoreEnd, fill_template, one_line, root_gone};
 use super::window::{LearnRow, RowKind};
 use crate::memory::service::{
     ExtractionProvenance, MemoryAccessContext, MemoryError, MemoryService, StoreInput,
@@ -30,6 +30,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use openalpaca_llm::{ChatMessage, RequestContext, RouterRequest};
 use openalpaca_storage::memory_files::{Dedup, MAX_SOURCES, NoteKind, NoteSource, SourceType};
 use openalpaca_storage::{ConversationRepository, Database, LearningCursorRepository};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// The usage label conversation summaries are billed and gated under: their
@@ -258,6 +259,9 @@ pub(crate) enum EpisodeWrite {
     /// The service refused it — a cited row deleted since the window was
     /// read, say. Nothing was written; the cursor still moves.
     Refused,
+    /// Not attempted: the window's project directory was deleted while the
+    /// model wrote the summary ([`StoreEnd::RootGone`]).
+    NotAttempted,
 }
 
 /// Everything the closure needs, owned so it can run on the blocking pool.
@@ -266,6 +270,8 @@ pub(crate) struct EpisodeJob {
     pub service: Arc<MemoryService>,
     pub ctx: MemoryAccessContext,
     pub session_id: String,
+    /// The window's project directory, checked again right before the write.
+    pub root: Option<PathBuf>,
     pub input: StoreInput,
     pub through: i64,
     pub expected: i64,
@@ -275,7 +281,9 @@ pub(crate) struct EpisodeJob {
 /// The write and the episode cursor's advance, as **one** blocking task:
 /// a cancellation after the model answered cannot separate them (design 09
 /// §1.4's shape). A session deleted since the window was read gets nothing
-/// (LQ4).
+/// (LQ4), and so does a project directory deleted while the model wrote:
+/// the window is skipped as the check before the call skips it, and the
+/// summary's write never re-creates the directory.
 pub(crate) fn store_and_advance(job: EpisodeJob) -> (EpisodeWrite, StoreEnd) {
     match ConversationRepository::new(&job.db).get_session(&job.session_id) {
         Ok(Some(_)) => {}
@@ -286,6 +294,16 @@ pub(crate) fn store_and_advance(job: EpisodeJob) -> (EpisodeWrite, StoreEnd) {
                 StoreEnd::Held(format!("session lookup failed: {e:#}")),
             );
         }
+    }
+    if root_gone(job.root.as_deref()) {
+        let end = advance_past(
+            &job.db,
+            &job.session_id,
+            job.through,
+            job.expected,
+            StoreEnd::RootGone,
+        );
+        return (EpisodeWrite::NotAttempted, end);
     }
     let written = match job.service.store(&job.ctx, job.input) {
         Ok(out) if out.dedup == Dedup::Existing => EpisodeWrite::Existing,
@@ -305,20 +323,32 @@ pub(crate) fn store_and_advance(job: EpisodeJob) -> (EpisodeWrite, StoreEnd) {
     if job.hooks.skip_advance {
         return (written, StoreEnd::Held("injected fault".to_string()));
     }
-    match LearningCursorRepository::new(&job.db).advance_episode_cas(
+    let end = advance_past(
+        &job.db,
         &job.session_id,
         job.through,
         job.expected,
-    ) {
-        Ok(true) => (written, StoreEnd::Advanced),
-        Ok(false) => match ConversationRepository::new(&job.db).get_session(&job.session_id) {
-            Ok(None) => (written, StoreEnd::SessionGone),
-            _ => (written, StoreEnd::CursorMoved),
+        StoreEnd::Advanced,
+    );
+    (written, end)
+}
+
+/// The episode cursor's advance: `done` when it moved; another writer's
+/// move, or the session deleted meanwhile, otherwise.
+fn advance_past(
+    db: &Database,
+    session_id: &str,
+    through: i64,
+    expected: i64,
+    done: StoreEnd,
+) -> StoreEnd {
+    match LearningCursorRepository::new(db).advance_episode_cas(session_id, through, expected) {
+        Ok(true) => done,
+        Ok(false) => match ConversationRepository::new(db).get_session(session_id) {
+            Ok(None) => StoreEnd::SessionGone,
+            _ => StoreEnd::CursorMoved,
         },
-        Err(e) => (
-            written,
-            StoreEnd::Held(format!("episode cursor advance failed: {e:#}")),
-        ),
+        Err(e) => StoreEnd::Held(format!("episode cursor advance failed: {e:#}")),
     }
 }
 

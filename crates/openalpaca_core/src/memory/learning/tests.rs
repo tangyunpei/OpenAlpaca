@@ -1449,6 +1449,51 @@ async fn a_turn_whose_project_directory_is_gone_is_skipped() {
     assert_eq!(scene.cursor(&s), answer, "the cursor moved past its turns");
 }
 
+/// L1 re-review: the project directory can also go while the model is
+/// answering. The store re-checks the root right before it writes, and a
+/// root gone by then is treated as the check before the call treats it —
+/// nothing is written, the directory stays deleted, the chunk counts as
+/// `skipped_root_gone` and the cursor moves past it.
+#[tokio::test]
+async fn a_project_deleted_during_the_call_is_not_recreated() {
+    let (_dir, root) = project();
+    let model = Scripted::new(vec![items(&[item(
+        "Project fact",
+        "The project ships on Tuesdays.",
+        "fact",
+        "user",
+        &[1],
+    )])]);
+    let scene = Scene::with(model.clone(), DaemonConfig::default());
+    let s = scene.session();
+    let (_, answer) = scene.turn_in(
+        &s,
+        "This project ships on Tuesdays.",
+        "Noted.",
+        Some(&root.to_string_lossy()),
+    );
+    let doomed = root.clone();
+    *model.on_call.lock().unwrap() = Some(Arc::new(move |_| {
+        std::fs::remove_dir_all(&doomed).unwrap();
+    }));
+
+    let report = scene.queue.flush_session(&s).await;
+    assert_eq!(
+        model.calls(),
+        1,
+        "the root was there when the call went out"
+    );
+    assert!(!root.exists(), "learning re-created the deleted project");
+    assert_eq!(report.stopped, None, "{report:?}");
+    assert_eq!(report.stored, 0, "{report:?}");
+    assert_eq!(report.skipped_root_gone, 1, "{report:?}");
+    assert_eq!(scene.cursor(&s), answer, "the cursor moved past its turns");
+    assert!(
+        scene.active().is_empty(),
+        "nothing was learned at home either"
+    );
+}
+
 // ── Long text (§1.2, §1.6, ruling LR21) ─────────────────────────────────
 
 /// MD-10: messages are no longer cut to 800 characters — the tail of a

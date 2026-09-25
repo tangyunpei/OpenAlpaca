@@ -1267,7 +1267,7 @@ impl LearningQueue {
             // The owner must be a `global_user` row (design §3): anything
             // else learns nothing, and its cursor advances.
             let ctx = match self
-                .owner_context(session_id, &session, root, chunk.last_request_id())
+                .owner_context(session_id, &session, root.clone(), chunk.last_request_id())
                 .await
             {
                 Ok(Some(ctx)) => ctx,
@@ -1407,6 +1407,7 @@ impl LearningQueue {
                 service: self.deps.memory_service.clone(),
                 ctx,
                 session_id: session_id.to_string(),
+                root,
                 items: validated.items,
                 listed: lookup.listed,
                 from_this_window: lookup.from_this_window,
@@ -1430,6 +1431,17 @@ impl LearningQueue {
             report.add(&counts);
             match end {
                 StoreEnd::Advanced | StoreEnd::CursorMoved => report.chunks += 1,
+                // Deleted while the model answered: skipped as above.
+                StoreEnd::RootGone => {
+                    tracing::info!(
+                        session_id,
+                        first_row = expected + 1,
+                        last_row = chunk.through,
+                        "memory learning skipped rows whose project directory was deleted during the call"
+                    );
+                    report.chunks += 1;
+                    report.skipped_root_gone += 1;
+                }
                 StoreEnd::SessionGone => {
                     self.forget_session(session_id);
                     report.stopped = Some(FlushStop::SessionGone);
@@ -1777,7 +1789,7 @@ impl LearningQueue {
                 continue;
             }
             let ctx = match self
-                .owner_context(session_id, &session, root, chunk.last_request_id())
+                .owner_context(session_id, &session, root.clone(), chunk.last_request_id())
                 .await
             {
                 Ok(Some(ctx)) => ctx,
@@ -1938,6 +1950,7 @@ impl LearningQueue {
                 service: self.deps.memory_service.clone(),
                 ctx,
                 session_id: session_id.to_string(),
+                root,
                 input: episode::store_input(&summary, &chunk.rows, &today),
                 through: chunk.through,
                 expected,
@@ -1953,11 +1966,15 @@ impl LearningQueue {
                 };
             match written {
                 EpisodeWrite::Written => report.episodes += 1,
-                EpisodeWrite::Existing => {}
+                EpisodeWrite::Existing | EpisodeWrite::NotAttempted => {}
                 EpisodeWrite::Refused => report.refused += 1,
             }
+            if end == StoreEnd::RootGone {
+                // Deleted while the model wrote: skipped as above.
+                report.skipped_root_gone += 1;
+            }
             match end {
-                StoreEnd::Advanced | StoreEnd::CursorMoved => {
+                StoreEnd::Advanced | StoreEnd::CursorMoved | StoreEnd::RootGone => {
                     windows += 1;
                     if let Some(s) = self.lock().sessions.get_mut(session_id) {
                         s.episode_failures = None;
