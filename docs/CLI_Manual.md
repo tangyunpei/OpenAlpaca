@@ -553,6 +553,9 @@ openalpaca sessions --limit 10 --format json
 openalpaca sessions delete <id>            # rows and transcript, both
 ```
 
+Deleting a conversation also forgets its **episode notes** — the memory notes
+that summarise it (see `memory` below).
+
 Notes:
 - The table is `ID`, `STATUS` (`active` / `archived`), `TITLE`, `WORKSPACE` and `UPDATED`, newest first. A conversation that has never been renamed prints `(untitled)`; one bound to no project prints `-`, which is the normal state for a connector lane.
 - With no flags the list is the lane the CLI and the GUI share (`{user}:gui`) — the lane a `openalpaca chat` turn lands on, read from `GET /v1/me`. `--all` widens to every lane the daemon holds.
@@ -587,7 +590,7 @@ Notes:
 - **`--dry-run` is what happens anyway.** Without `-y` the command prints the plan and deletes nothing; `-y` prints the same plan and then carries it out. `<project>` and `--all` are mutually exclusive, and one of them is required — a destructive verb never guesses which project you meant. The daemon defaults the same way, so a direct `POST /v1/workspaces/purge` with no `dry_run` field is also a dry run.
 - **`<project>` is taken almost literally.** Rows are the proof of a root: it is canonicalized, and if any of your conversations, runs or uploads still name that exact path, or your memory has a partition there, it is purgeable outright — no further check, even when the path sits under another project's `.git`/`.openalpaca` (a project moved out from under a monorepo, its own marker gone with it, purges by the root its rows still name). Only a path nothing names is checked against the same `.openalpaca`/`.git` walk `rebase`'s *old* path takes — but unlike `rebase`, purge never silently follows that walk. If it resolves to an **ancestor** different from what you typed, the whole call is refused with a `422` `WORKSPACE_NOT_A_ROOT` naming that root: `openalpaca store purge /repo/src` deletes nothing and tells you to name `/repo` (or give `/repo/src` a project marker of its own first), rather than purging the whole project for a path that named one file of it. A path that resolves to itself, or to no marker at all, is taken as given — and from there the ordinary `404` follows if nothing turns out to be recorded under it.
 - **What goes:** this project's conversations (`session` rows, their messages, tool-call index rows and queued follow-ups) together with each conversation's log directory under `~/.openalpaca/sessions/`; its runs (`task` rows with their subagent spans, run events, dispatch decisions and LLM call log); and the uploads copied into `<project>/.openalpaca/uploads/`, rows and bytes. Rows go in one transaction per project, then the files.
-- **What stays, and is named in the plan rather than left out of it:** `artifacts/` and every produced file record (never garbage-collected), the project's memory notes under `memory/` (files, not rows, so the purge cannot reach them), `skills/` and `config/`, the store's own `.layout` / `README.md` / `.gitignore`, and any directory inside `<project>/.openalpaca/` that OpenAlpaca did not create. Conversations with no project belong to the home store and are never touched — `--all` says how many there are, names the home store's `state/` as kept too (a factory reset is a separate, deliberate act), and leaves the conversations to `openalpaca sessions delete`.
+- **What stays, and is named in the plan rather than left out of it:** `artifacts/` and every produced file record (never garbage-collected), the project's memory notes under `memory/` (files, not rows, so the purge cannot reach them — except the episode notes summarising the conversations it deletes, which go with them), `skills/` and `config/`, the store's own `.layout` / `README.md` / `.gitignore`, and any directory inside `<project>/.openalpaca/` that OpenAlpaca did not create. Conversations with no project belong to the home store and are never touched — `--all` says how many there are, names the home store's `state/` as kept too (a factory reset is a separate, deliberate act), and leaves the conversations to `openalpaca sessions delete`.
 - The plan is printed in the retention classes of the README seeded into every store root, so the reason for each verdict is on the line beside it:
 
 ```text
@@ -748,7 +751,17 @@ Notes:
   terminal it refuses and says to pass `--yes`), then forgets each with the
   revision it printed. A forgotten note's files, history copies and index rows are
   gone and its sources are never re-extracted; the transcript messages it cited
-  stay in the conversation, and the command says so. There is no undo.
+  stay in the conversation, and the command says so. There is no undo. An
+  **episode note** is the exception on sources: forgetting one forgets that note
+  alone, and what its messages taught stays learned.
+- **Episode notes.** After a conversation has been quiet for 30 minutes, when you
+  switch conversations and before the daemon stops, a conversation with at least
+  4 new turns of yours gets an `episode` note, `Conversation on <date>: <topic>`
+  — what was discussed, decided and left open, written by the assistant (origin
+  `extracted_other`) and active. `list --kind episode`, `search`, `timeline` and
+  the model's memory search find it; it is never recalled into a chat on its
+  own. `openalpaca config set daemon.orchestrator.learning.episode_max_per_day N`
+  caps them per UTC day (default 20, `0` writes none).
 - `sync` runs one reconciliation scan now: the daemon re-hashes the note files,
   records any edited, added or removed behind its back as `external`, and prints
   what changed. The daemon also scans every 30 s on its own, and before every read,

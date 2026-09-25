@@ -250,7 +250,8 @@ something is open in it — an aside (`src/views/chat/`).
 active at a time; the sidebar is the surface that makes that visible. The live
 one sits on top, archived ones below it by `updated_at`, each labelled with the
 project it is bound to, with `New chat`, rename, archive, delete (a two-step
-confirm — there is no undo) and a `Show more` when the list has further pages.
+confirm — there is no undo; the conversation's episode notes, below, go with
+it) and a `Show more` when the list has further pages.
 Clicking a row resumes it. A row whose runs were cut short by a daemon restart
 carries an `N interrupted` badge.
 
@@ -697,6 +698,14 @@ Two columns, in the Library's shape. The left one, top to bottom:
   state (`candidate`, `archived`, `superseded`, `conflict`), and `Add note` in the header (title, kind
   and body, saved to the partition the list shows; a note already there word
   for word is opened rather than written twice).
+- **Episode notes** are among them: `Conversation on <date>: <topic>`, kind
+  `episode`, *Inferred from the conversation* — what a conversation discussed,
+  decided and left open, written after it has been quiet for 30 minutes, when
+  you switch to another conversation or when the daemon stops, once it has at
+  least 4 new turns of yours. They are records for finding, never used in an
+  answer on their own: the search here and the assistant's own memory search
+  find them. `Forget` removes the one note and nothing it cites, and deleting
+  or clearing its conversation removes it too.
 
 The right column is one note: a pinned head — title, kind, scope, who wrote it,
 when, and tags for a candidate, a conflict or a file changed on disk — with

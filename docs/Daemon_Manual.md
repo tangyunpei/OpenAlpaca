@@ -126,14 +126,14 @@ root is the human's:
    resuming it under its own id exists behind `[orchestrator.routing]
    resume_enabled`, which is **off** by default.
 9. Bootstrap persona documents (SOUL/USER/IDENTITY/BOOTSTRAP) if missing.
-10. Open the memory service — its search index at `state/cache/memory-index-v1.sqlite` is checked, and rebuilt from the note files when it is missing, damaged or of another version — then start the orchestrator, the learning queue, wake manager, plugin manager, MCP clients, connectors, hot reload, background workers (the 30 s memory reconciliation and the 15 s learning sweeper among them) and the HTTP router. Thirty seconds after start, the learning queue's boot catch-up looks for conversations with turns not yet learned (see [Memory](#memory)).
+10. Open the memory service — its search index at `state/cache/memory-index-v1.sqlite` is checked, and rebuilt from the note files when it is missing, damaged or of another version — then start the orchestrator, the learning queue, wake manager, plugin manager, MCP clients, connectors, hot reload, background workers (the 30 s memory reconciliation and the 15 s learning sweeper among them) and the HTTP router. Thirty seconds after start, the learning queue's boot catch-up looks for conversations with turns not yet learned, and for conversations with at least four of your turns no episode note covers yet (see [Memory](#memory)).
 
 Shutdown can be initiated by a signal (SIGINT/SIGTERM) or by `POST
 /v1/command {"command":"shutdown"}`; both converge on one cancellation. The
 daemon then stops accepting connections and waits for in-flight responses to
 finish, after which it runs its shutdown tail in this order: learn what is
-pending, for at most 3 seconds (the learning drain — what it does not finish,
-the next start learns); stop the background jobs — conversation summaries, a
+pending and write the episode notes due, for at most 3 seconds (the learning
+drain — what it does not finish, the next start learns); stop the background jobs — conversation summaries, a
 finished run's task extraction and learning — within 3 seconds; flush the cost
 tracker to the database; flush every session log; close every MCP connection
 and kill every plugin child; stop the connectors; stop the wake scheduler and
@@ -315,6 +315,7 @@ otherwise the conservative cloud fallback still applies.
 | One workflow's lead agent | $5 | `[execution.lead_agent_defaults] max_cost` |
 | Learning from conversations, per UTC day | $0.25 | `[orchestrator.costs] extract_max_daily_cost_usd` |
 | Learning from conversations, calls per UTC day | 200 (`0` = no cap) | `[orchestrator.costs] extract_max_calls_per_day` |
+| Episode notes, per UTC day | 20 (`0` = none) | `[orchestrator.learning] episode_max_per_day` |
 | Conversation summaries, per day | $0.50 | `[orchestrator.costs] summary_max_daily_cost_usd` |
 | Task-output extraction, per UTC day | $0.50 | `[orchestrator.costs] task_extract_max_daily_cost_usd` |
 
@@ -327,7 +328,9 @@ and `writing_agent` set none and run at the $1 default.
 There is no overall daily budget for turns or workflows. Only the background
 jobs in the table carry a daily ceiling. The two memory jobs read today's calls
 and spend from the usage table (`llm_usage_daily`) for the **UTC** date, so
-their day starts at 00:00 UTC whatever the daemon's uptime. The call cap is
+their day starts at 00:00 UTC whatever the daemon's uptime. Episode notes
+are billed apart (`orchestrator_episode`) but count under learning's two
+daily caps as well as under their own count. The call cap is
 what bounds a local model, where the cost cap never binds at price `0`. A
 capped learning window is not dropped: it waits, with one `INFO` per
 conversation per day, and is learned once the cap no longer binds. The summary
@@ -475,7 +478,7 @@ extension routes differ by design: they answer a flat `{"error": "<word>"}`.
 | `POST /v1/chat` | Start a turn. Answers `{stream_id, lane_key, model_used}` at once; the answer arrives on the stream. See [SSE Chat Stream](#sse-chat-stream). |
 | `GET /v1/chat/stream/{stream_id}` | The turn's SSE stream. Query token. |
 | `GET /v1/chat/history` | One conversation's messages (`lane_key`, `session_id`, `limit`, `offset`; defaults to the default lane's active session). Each message carries its `artifacts` links. |
-| `DELETE /v1/chat/history` | Empties one conversation and its summary. The session itself survives — `DELETE /v1/sessions/{id}` removes one. |
+| `DELETE /v1/chat/history` | Empties one conversation and its summary, and forgets the episode notes that summarise it. The session itself survives — `DELETE /v1/sessions/{id}` removes one. |
 | `PUT\|GET\|DELETE /v1/chat/messages/{message_id}/feedback` | Message feedback (`positive` or `negative`, with an optional comment). |
 | `GET /v1/chat/confirmations` | The tool-approval prompts still waiting for an answer. |
 | `POST /v1/chat/confirmations/{request_id}` | Answer one prompt. |
@@ -497,7 +500,7 @@ Confirmations are covered under
 | Method and path | Purpose |
 |---|---|
 | `GET\|POST /v1/sessions` | List or create conversations. |
-| `GET\|PATCH\|DELETE /v1/sessions/{id}` | Read one, change its title or bind it to a project, or delete it. |
+| `GET\|PATCH\|DELETE /v1/sessions/{id}` | Read one, change its title or bind it to a project, or delete it — and with it the episode notes that summarise it. |
 | `GET /v1/sessions/{id}/messages` | Its transcript. |
 | `GET /v1/sessions/{id}/events` | Its session log (JSONL records), paged by `seq`. |
 | `POST /v1/sessions/{id}/activate` | Make it the lane's active conversation. |
@@ -563,7 +566,7 @@ lane never posts its completion report or its confirmation prompts there.
 | `GET /v1/artifacts/{id}/content` | The head version's bytes. Query token or bearer header. |
 | `GET /v1/artifacts/{id}/versions/{n}/content` | One version's bytes. Query token or bearer header. |
 | `GET\|PATCH /v1/workspaces` | Describe a project root; re-base everything addressed under it after the project moved. |
-| `POST /v1/workspaces/purge` | Delete a project's conversations, runs and uploads, and answer the plan it followed. `dry_run` defaults to **true**. It removes the session-log directory of every session it purges. |
+| `POST /v1/workspaces/purge` | Delete a project's conversations, runs and uploads, and answer the plan it followed. `dry_run` defaults to **true**. It removes the session-log directory of every session it purges. The project's memory notes stay, except the episode notes summarising the conversations it deletes. |
 
 An upload is refused with the reason in the error code: `NO_FILE`,
 `FILE_TOO_LARGE`, `STORAGE_QUOTA_EXCEEDED`, `UNSUPPORTED_MIME`,
@@ -707,6 +710,43 @@ directory a turn named: learning skips those turns rather than re-create the
 directory and its `.openalpaca/` store. `[orchestrator.learning] enabled
 = false` switches learning off.
 
+**Episode notes** record conversations the way learning records facts: one
+note of kind `episode` per stretch of conversation — what was discussed, what
+was decided, what was left open. The learning queue writes one when a
+conversation has been quiet for **30 minutes**, when you switch to another
+conversation, and before the daemon stops (its durable half, as for
+learning, is the boot catch-up), and only once **at least 4 of your turns**
+have accumulated since that conversation's last episode note; a
+conversation's facts are learned first. One model call per note, under
+learning's rules: the same chunks of the stored conversation, the quiet
+start and the yielding to chat, the daily caps (it counts under
+`extract_max_calls_per_day` and `extract_max_daily_cost_usd`) and its own
+`[orchestrator.learning] episode_max_per_day` (20; `0` writes none). A
+message you forgot a note from is left out of the note, with its answer.
+
+The note is titled `Conversation on <YYYY-MM-DD>: <topic>`, the date its last
+turn's; its `## Knowledge` holds at most 1 KiB of prose — `Discussed: …`,
+`Decided: …`, `Left open: …` — in the conversation's language; `observed_at`
+is its last turn's time, and it cites the conversation's messages (all of
+them up to eight, else eight spread from the first to the last). It has no
+`fact_key` and replaces nothing. It is the assistant's own wording, so its
+origin is `extracted_other`, but it is **active**: `memory_search`,
+`memory_timeline`, `memory_list`, the routes below and the Memory view find
+it. **Automatic recall never delivers one** — not as an excerpt, not in the
+index block, not to a workflow's lead — and learning never shows one to the
+extractor: it reaches a model only when the model or you look for it (a note
+you pinned is delivered, as every pinned note is). An episode you saved
+yourself, or one learned from what you said, is an ordinary note and is
+recalled as any other.
+
+Forgetting an episode note — the Memory view, `/forget`, `memory_forget`,
+`DELETE /v1/memories/{id}` — forgets that note and nothing else: unlike any
+other forget, it suppresses none of the messages it cites, so what those
+messages taught stays learned and recallable. Deleting or clearing a
+conversation (`DELETE /v1/sessions/{id}`, `DELETE /v1/chat/history`) or
+purging its project forgets the episode notes whose cited messages all
+belong to it.
+
 Nothing is pruned by age and nothing is replaced because it looks similar: a
 note is replaced only by an explicit `supersedes`, and forgotten only by a
 forget. `USER.md` is not written by any of this — see [Persona](#persona).
@@ -840,7 +880,7 @@ addressed. Bodies and queries are closed objects — an unknown key is a `400`.
 | `GET /v1/memories/{id}/history` | Those revisions, newest first: `{revisions: [{revision, written_at}]}`. |
 | `POST /v1/memories/{id}` | Update under `If-Match`: `{action: edit\|archive\|confirm, patch?, target_revision?, reason?}`. `edit` takes a `patch` of `title`, `body`, `aliases`, `tags`, `fact_key`, `valid_from`, `valid_to`, `review_after` (an explicit `null` clears a nullable one); `confirm` makes a candidate active. Confirming a **suggestion** also retires the note it names, so the body carries `target_revision`, that note's revision as you last read it: absent is `400`; a note edited since is `409 MEMORY_REVISION_CONFLICT` with *that* note's revision as `ETag`; a note gone is `404`; a note already replaced or archived another way is `400` (nothing is left to replace — undo the suggestion); a candidate naming several notes is `400`. `target_revision` with any other action is `400`, and `archive` of a suggestion is `400`. Answers `{id, revision, status, superseded, dismissed}` and the new revision as `ETag`: `superseded` is the note a confirmed suggestion replaced (kept as history), `dismissed` the other suggestions for that note, each withdrawn. |
 | `POST /v1/memories/{id}/undo` | Take back what learning did, under `If-Match`: a note learned from your words (origin `extracted_user`) or any candidate — for a suggestion, *Keep mine*. It is a **withdrawal**, not a forget: the one note goes, no message it cited is suppressed (whatever else that message taught stays learned), and what it had replaced is in force again unless another note still replaces it. Answers `{id, status: "withdrawn", restored}`, `restored` naming the notes that came back (empty for a candidate). Any other note is `409 MEMORY_NOT_UNDOABLE`. |
-| `DELETE /v1/memories/{id}` | Forget one note under `If-Match`: `{id, status: "forgotten", retained}`. |
+| `DELETE /v1/memories/{id}` | Forget one note under `If-Match`: `{id, status: "forgotten", retained}`. An episode note's forget suppresses none of the messages it cites (see [Memory](#memory)). |
 
 **A revision travels in `If-Match` and nowhere else.** The three single-note
 mutations take `If-Match: "<revision>"` — the `ETag` a read answered. Absent is
@@ -1247,8 +1287,8 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 
 - heartbeat event emitter
 - memory reconciliation (fixed 30 s interval): a stat scan of every memory partition the owner's control snapshots know; a note file edited, added or removed behind the daemon's back is re-recorded as `external`, the search index follows, and each finding is one `memory_changed` frame
-- learning sweeper (fixed 15 s interval): a conversation with turns not yet learned becomes due once it has been idle `[orchestrator.learning] idle_secs` or is no longer its lane's active conversation, and a due one is learned once no chat turn has been in flight for 20 s (see [Memory](#memory))
-- learning boot catch-up (once, 30 s after start): every conversation with turns not yet learned is due
+- learning sweeper (fixed 15 s interval): a conversation with turns not yet learned becomes due once it has been idle `[orchestrator.learning] idle_secs` or is no longer its lane's active conversation, and a due one is learned once no chat turn has been in flight for 20 s; a conversation with new turns becomes due for its episode note once it has been quiet 30 minutes or is no longer its lane's active conversation, and the note is written after its facts, when it has at least 4 of your turns (see [Memory](#memory))
+- learning boot catch-up (once, 30 s after start): every conversation with turns not yet learned is due, and so is the episode note of every conversation with at least 4 of your turns past its episode cursor
 - file-processing worker and asset cleanup (upload governance)
 - telemetry cleanup (fixed daily interval)
 - chat-stream cleanup (stale SSE streams)
@@ -1256,7 +1296,7 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 ## Storage Model
 
 - SQLite location is resolved by `openalpaca_storage::store::database_path()` — `~/.openalpaca/state/openalpaca.db`. Every path in the layout comes from that module; no crate joins a literal directory name onto a store root.
-- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`. The unreleased chain is consolidated into `crates/openalpaca_storage/src/migrations/001_baseline.sql`, which initializes schema version **43** directly and needs nothing beyond SQLite itself — no extension is loaded. Migration **44** (`044_learning.sql`) follows it: it adds the turn's id and project root to each stored message (`conversation_messages.request_id`, `workspace_root`) and the `learning_cursor` table — how far learning has read each conversation — seeded at every existing conversation's newest message, so conversations from before it are not re-learned. A fresh database opens at 44 and a 43 database is upgraded in place; every schema older than 43 is refused rather than upgraded, 42 included, and the next migration version is 45. A build from before 44 refuses a database at 44, so keep a copy of `state/openalpaca.db` before the first start of a build that migrates it if you may go back. `GET /v1/status` reports the version the open database is actually at.
+- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`. The unreleased chain is consolidated into `crates/openalpaca_storage/src/migrations/001_baseline.sql`, which initializes schema version **43** directly and needs nothing beyond SQLite itself — no extension is loaded. Migration **44** (`044_learning.sql`) follows it: it adds the turn's id and project root to each stored message (`conversation_messages.request_id`, `workspace_root`) and the `learning_cursor` table — how far learning has read each conversation — seeded at every existing conversation's newest message, so conversations from before it are not re-learned. Migration **45** (`045_episodes.sql`) adds `learning_cursor.episode_through` — how far episode notes have covered each conversation — seeded at every existing conversation's newest message, so conversations from before it get no episode note. A fresh database opens at 45 and a 43 or 44 database is upgraded in place; every schema older than 43 is refused rather than upgraded, 42 included, and the next migration version is 46. A build from before a migration refuses a database that has it, so keep a copy of `state/openalpaca.db` before the first start of a build that migrates it if you may go back. `GET /v1/status` reports the version the open database is actually at.
 - Memory is **not** in the database. The notes are Markdown files under `memory/` (see the runtime paths at the top of this manual), each partition's revisions, origins and tombstones are one JSON control snapshot under `state/memory-control/`, and the search index is a separate, disposable SQLite file, `state/cache/memory-index-v1.sqlite`. A backup of your memory is the `memory/` directories **and** `state/memory-control/`; the index can always be rebuilt. See [Memory](#memory).
 - **If your database is refused.** No migration runs — the old schema and its rows are left exactly as they were — and the message names the absolute path of the file. It comes in two wordings:
   - `Unsupported legacy schema version 42: this build starts at schema version 43 and cannot read a database from before the memory redesign — its memory storage was replaced.` A complete, working database from the build before memory moved to files. It is not converted: the message names `openalpaca config reset --factory`, lists everything that reset removes (every task, message, session record and memory row, `llm.toml` with its API keys and keychain entries, `daemon.toml` back to defaults) and what survives, and says a build from before the memory redesign still opens the file. The whole procedure — keeping a copy first, reconnecting a model, reviewing `USER.md` — is [Installation Manual → Switching to the Markdown Memory Build](Installation_Manual.md#switching-to-the-markdown-memory-build).
