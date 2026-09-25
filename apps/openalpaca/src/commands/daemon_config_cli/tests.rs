@@ -133,3 +133,13 @@ fn test_find_mapping_recall_mode() {
     assert_eq!(mapping.section, &["orchestrator", "memory"]);
     assert_eq!(mapping.field, "recall_mode");
 }
+
+/// Conversation summaries (design 09 §13.3): `episode_max_per_day` lives in
+/// `[orchestrator.learning]`, beside the cadence it bounds.
+#[test]
+fn test_find_mapping_episode_max_per_day() {
+    let mapping = find_mapping("daemon.orchestrator.learning.episode_max_per_day")
+        .expect("daemon.orchestrator.learning.episode_max_per_day has a mapping");
+    assert_eq!(mapping.section, &["orchestrator", "learning"]);
+    assert_eq!(mapping.field, "episode_max_per_day");
+}

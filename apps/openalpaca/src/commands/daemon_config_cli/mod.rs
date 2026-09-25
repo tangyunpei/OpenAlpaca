@@ -158,6 +158,12 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["orchestrator", "learning"],
         field: "turns_per_flush",
     },
+    // Conversation summaries (design 09 §13.3)
+    TomlMapping {
+        schema_key: "daemon.orchestrator.learning.episode_max_per_day",
+        section: &["orchestrator", "learning"],
+        field: "episode_max_per_day",
+    },
     TomlMapping {
         schema_key: "daemon.orchestrator.extract_max_calls_per_day",
         section: &["orchestrator", "costs"],

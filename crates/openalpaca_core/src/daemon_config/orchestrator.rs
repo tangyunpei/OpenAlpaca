@@ -39,6 +39,12 @@ pub struct LearningConfig {
     /// makes the session due at once. Range 1..=100.
     #[serde(default = "default_learning_turns_per_flush")]
     pub turns_per_flush: u32,
+    /// Conversation summaries a day (design 09 §13.3, MD-16): at most this
+    /// many `episode` calls per UTC day, read durably from
+    /// `llm_usage_daily`, on top of the extraction's own daily caps, which
+    /// the summaries count under too. `0` writes none. Range 0..=1000.
+    #[serde(default = "default_learning_episode_max_per_day")]
+    pub episode_max_per_day: u32,
 }
 
 fn default_learning_enabled() -> bool {
@@ -50,6 +56,9 @@ fn default_learning_idle_secs() -> u64 {
 fn default_learning_turns_per_flush() -> u32 {
     10
 }
+fn default_learning_episode_max_per_day() -> u32 {
+    20
+}
 
 impl Default for LearningConfig {
     fn default() -> Self {
@@ -57,6 +66,7 @@ impl Default for LearningConfig {
             enabled: default_learning_enabled(),
             idle_secs: default_learning_idle_secs(),
             turns_per_flush: default_learning_turns_per_flush(),
+            episode_max_per_day: default_learning_episode_max_per_day(),
         }
     }
 }

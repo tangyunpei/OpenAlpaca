@@ -718,3 +718,38 @@ fn the_shipped_daemon_toml_names_recall_mode_index() {
     let config: DaemonConfig = toml::from_str(shipped).unwrap();
     assert_eq!(config.orchestrator.memory.recall_mode, RecallMode::Index);
 }
+
+// ── Conversation summaries (design 09 §13.3, MD-16) ─────────────────────
+
+/// `[orchestrator.learning] episode_max_per_day` is 20 unless the file says
+/// otherwise — from the struct default, an empty file and a learning table
+/// that does not name it — survives a round trip, is clamped to 0..=1000,
+/// and the shipped `config/daemon.toml` names it with its default.
+#[test]
+fn episode_max_per_day_defaults_to_20_and_is_clamped() {
+    for config in [
+        DaemonConfig::default(),
+        toml::from_str("").unwrap(),
+        toml::from_str("[orchestrator.learning]\nidle_secs = 60\n").unwrap(),
+    ] {
+        assert_eq!(config.orchestrator.learning.episode_max_per_day, 20);
+    }
+    let config: DaemonConfig =
+        toml::from_str("[orchestrator.learning]\nepisode_max_per_day = 0\n").unwrap();
+    assert_eq!(config.orchestrator.learning.episode_max_per_day, 0);
+    let round: DaemonConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+    assert_eq!(round.orchestrator.learning.episode_max_per_day, 0);
+
+    let mut high: DaemonConfig =
+        toml::from_str("[orchestrator.learning]\nepisode_max_per_day = 5000\n").unwrap();
+    high.validate();
+    assert_eq!(high.orchestrator.learning.episode_max_per_day, 1000);
+
+    let shipped = include_str!("../../../../config/daemon.toml");
+    assert!(
+        shipped.contains("\nepisode_max_per_day = 20\n"),
+        "{shipped}"
+    );
+    let config: DaemonConfig = toml::from_str(shipped).unwrap();
+    assert_eq!(config.orchestrator.learning.episode_max_per_day, 20);
+}
