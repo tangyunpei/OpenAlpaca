@@ -735,6 +735,48 @@ it waiting in the Memory view. A suggestion inferred from the conversation
 rather than your words, or citing no message you typed, is `not_a_suggestion`
 here — it is confirmed only through the routes below.
 
+**Chat memory commands** (`/remember`, `/forget`, `/memories`). The
+orchestrator answers these itself, in its deterministic tier, with **no model
+involved** — the turn's `IntentClassified` names them `memory_command`. Typed
+by a person on an attended turn of the app's or the CLI's chat (source `gui`
+or `cli`, not `unattended`), such a command is a **user-directed** surface like
+the routes below: it builds its `UserSurface` context from the turn — the
+turn's owner, and the project root the turn's own workspace resolved to — so
+`/remember` records origin `user`. G2 is untouched: no model ever sees the
+command, and the text written is exactly what was typed.
+
+- `/remember [--kind <k>] [--global | --project] <text>` stores a note: the
+  title is the first line cut at 80 characters, the body is the whole text,
+  the kind is `fact` unless named, and the scope follows the kind against the
+  turn's project (a `preference` global, the other kinds the project, as
+  above) unless `--global` or `--project` says otherwise;
+  `--project` on a turn with no project root is refused `invalid_input`. An
+  exact duplicate answers the existing note. The answer is `Saved as a note you
+  wrote: “<title>” (<id8>, <scope>). It is used from your next message.`, or
+  the refusal's own sentence after `Nothing was saved:`.
+- `/forget <id-or-prefix>` resolves a prefix of at least 8 hex characters
+  (case and hyphens ignored) among every note the turn can read, any status,
+  and forgets a unique match at the revision just read — tombstone first, as
+  every forget — answering `Forgot “<title>” (<id8>).` and the service's
+  retained-copies sentence. A prefix several notes share lists them by full id
+  and forgets nothing.
+- `/forget <text>` searches (5 active notes) and forgets nothing: it lists the
+  matches and `Send /forget <id> to forget one.`
+- `/memories` lists the 10 most recently updated active notes and the number of
+  pending suggestions; `/memories <query>` searches (8 active notes) with each
+  hit's match reason. A line is `<id8>  <title>  [<kind>/<scope>]`, at most 160
+  characters; no body is ever printed.
+
+Every write is the service's own, so it is announced as one `memory_changed`
+(`surface: "user"`) like any other; an exact duplicate writes nothing and
+announces nothing. A connector turn (Telegram, Discord, iMessage), an
+unattended one, a scheduled skill, a follow-up and a `/v1/command process`
+turn are answered `Memory commands work in the OpenAlpaca app and the CLI.`;
+a turn with no owner (`Principal::System`, an unlinked identity) or a daemon
+with no memory service, `Memory is not available here.` — and nothing is read
+or written. The turn's attachments are reported skipped. Learning never reads
+these turns: it leaves out every `/`-line and its answer.
+
 The routes below reach the memory notes (Markdown files under the home store's
 `memory/` and a project's `.openalpaca/memory/`) through the one memory service
 the model's tools and the automatic per-turn recall also use. These are the **user-directed**
@@ -852,6 +894,7 @@ Every chat message (any source: GUI, CLI, connectors) is routed by the orchestra
    - `/status` / `/tasks` — task summary; `/status <task_id>` for one task.
    - `/cancel`, `/pause`, `/resume` — task control. Bare forms (no id) resolve against the lane's active workflows; an explicit id (`/cancel <id>`) targets that task.
    - `/steer <text>` — inject a steering message into the lane's running workflow (guaranteed delivery, bypasses the model; requires `orchestrator.routing.steering_enabled`, default on).
+   - `/remember`, `/forget`, `/memories` — the chat memory commands (see [Memory](#memory), *Chat memory commands*): parsed after task control and before any skill, the command word in any case and followed by a space or nothing (`/remembering` is not one). Only on an attended turn of the app's or the CLI's chat; every other turn is answered with a fixed sentence and changes nothing. Their names are reserved: a skill claiming one as its slash command, an alias or its id is not reached by that slash, and the skill loader logs one `WARN` naming it.
    - `/<skill> [args]` — invoke a skill by slash command, alias, or skill ID (directory name); skills can also be selected by the weighted skill router.
 2. **Social fast path** — trivial acknowledgements ("ok", "thanks") answered with an ultra-light prompt.
 3. **Main loop** — everything else, including messages sent while workflows run. The model answers directly or calls routing tools: `start_workflow` (background workflow), `steer_workflow` / `queue_followup` (offered while the lane has active workflows), `task_status`, and memory tools. Workflows run in the background under a lead agent that can spawn subagents; concurrency is capped per lane (`max_workflows_per_lane`, default 3). On completion the workflow posts a model-authored completion report to the lane, and queued follow-ups auto-start (`followup_autostart`, default on).
@@ -925,8 +968,8 @@ arrive. A **file-based skill** (a `/slash` or router-selected skill) streams the
 same way as the main loop. A turn that streams nothing sends exactly one
 `delta` with the finished answer. That covers:
 
-- a tier that answers without a model (task commands, `/steer`, a withdrawn
-  skill's notice);
+- a tier that answers without a model (task commands, `/steer`, a memory
+  command, a withdrawn skill's notice);
 - a **plugin-contributed** skill — the plugin protocol hands back a finished
   answer, so there is nothing to stream;
 - a provider without streaming;
@@ -1014,8 +1057,8 @@ Every file of the turn ends up in exactly one of `attachments_used` and
 `attachments_skipped`. "Used" means the model's request carried it. A turn
 answered without its files says so, with a reason per file:
 
-- task commands, `/steer`, the social fast path and other paths that never hand
-  the files to a model;
+- task commands, `/steer`, the memory commands, the social fast path and other
+  paths that never hand the files to a model;
 - a **plugin-contributed** skill, whose protocol carries a plain query and no
   files. A file-based skill does take the turn's attachments.
 

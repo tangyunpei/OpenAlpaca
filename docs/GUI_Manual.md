@@ -348,6 +348,25 @@ one OpenAlpaca inferred from its own replies or a tool's output waits in the
 Memory view — and only in the app's and the CLI's chat, never on Telegram,
 Discord or iMessage.
 
+**Memory commands.** Three messages are answered by the daemon itself, with
+no model, like `/status`: `/remember <text>` saves the text as a note **you
+wrote** — what `Add note` in the Memory view saves, with the first line as its
+title — and answers *"Saved as a note you wrote: “…” (<id>, <scope>). It is used
+from your next message."*; `/forget <id>` forgets that note (a unique prefix of
+at least 8 hex characters will do), while `/forget <words>` forgets nothing and
+lists up to five notes that match, so you can pick one; `/memories` lists your
+ten most recently updated notes and how many suggestions wait in the Memory
+view, and `/memories <words>` searches. `/remember` takes `--kind <kind>`
+(`fact` by default) and `--global` or `--project`; without them a preference
+is global and the other kinds go to the window's project. Answers are short
+lines — id, title, kind and scope — and never a note's body. The note's
+change reaches the Memory view at once (a `memory_changed` frame). Files
+attached to such a message are not saved and are reported *not sent to the
+model*. The commands work in this window and the CLI's chat only; on Telegram,
+Discord or iMessage the daemon answers that they work in the app and the CLI,
+and changes nothing. The full syntax is in the
+[CLI manual](CLI_Manual.md#memory-commands).
+
 **Attaching files.** Three ways in, all the same path: the `Attach` button
 left of the model button opens a file picker, you can paste an image into the
 textarea, and you can drop files on the composer (there is no drop zone — the
@@ -394,6 +413,8 @@ It also depends on the turn. Some turns reach no model at all, or reach one
 with a prompt of their own, and answer without your files:
 
 - a task command (`/tasks`, `/status`) or a `/steer`;
+- a memory command (`/remember`, `/forget`, `/memories`), which saves only the
+  text you typed;
 - a short social message (`thanks`, `ok`), which is answered from a small
   prompt of its own;
 - a message that is just a quoted send to a connector;
@@ -700,6 +721,10 @@ second; then four tabs:
 - **History** — the last five versions the daemon wrote, newest first, each
   with `Compare`. An edit made outside the app is not one of them, and the tab
   says so.
+
+In a chat, `/remember`, `/forget` and `/memories` do the same without leaving
+the conversation (see *Memory commands* under Chat); a note saved with
+`/remember` is yours, exactly as one added here.
 
 An empty list says *"Nothing remembered yet. Ask Alpaca to remember something,
 or add a note."* After a forget, the detail says, in the daemon's words, what a

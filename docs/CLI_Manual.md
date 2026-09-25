@@ -648,6 +648,10 @@ global ones alone. `--global` sends no project (the global partition only);
 prefix (at least four hex characters). `show`, `list` and `search` print the
 first eight.
 
+**From a chat.** `/remember`, `/forget` and `/memories`, typed in `openalpaca
+chat`, do the same three things without leaving the conversation — see
+[Memory commands](#memory-commands).
+
 Notes:
 - `list` is the active notes by default. `--status candidate|archived` lists those
   instead; `--history` adds notes a newer note replaced; `--candidates` adds the
@@ -819,7 +823,7 @@ openalpaca chat --session 0f2c9a41-3b7d-4e58-9a10-6c1f2d3e4b55
 | stdin piped, no `--message` | All of stdin is read and sent as one message; the reply is the output. |
 
 - The REPL has streaming replies, tab completion and line history (kept in `~/.openalpaca/state/repl_history`). Exit with `exit`, `quit`, or Ctrl-D. If the daemon was restarted in the meantime, the REPL reconnects once and retries.
-- The REPL handles these slash commands itself: `/help`, `/model`, `/models`, `/agents`, `/keys`, `/usage`, `/clear`, `/verbose`. Every other slash line goes to the daemon — see [Slash commands](#slash-commands).
+- The REPL handles these slash commands itself: `/help`, `/model`, `/models`, `/agents`, `/keys`, `/usage`, `/clear`, `/verbose`. Every other slash line goes to the daemon — see [Slash commands](#slash-commands) and [Memory commands](#memory-commands).
 - Piped stdin that is empty (or only whitespace) sends nothing and exits **1** with `No input on stdin` — a pipe that produced nothing is a mistake upstream, not a request to send an empty turn.
 
 #### Attachments
@@ -834,7 +838,7 @@ openalpaca chat --session 0f2c9a41-3b7d-4e58-9a10-6c1f2d3e4b55
 Attachment <file id> did not reach the model: the answering model does not support image input
 ```
 
-- Some turns cannot carry files at all, and report every attachment as skipped the same way: a task command such as `/status`, a `/steer`, or a skill that comes from a plugin (it receives the question as plain text).
+- Some turns cannot carry files at all, and report every attachment as skipped the same way: a task command such as `/status`, a `/steer`, a memory command such as `/remember` (it saves only the text you typed), or a skill that comes from a plugin (it receives the question as plain text).
 
 #### Project and conversation
 
@@ -900,9 +904,36 @@ A tool on the confirm list suspends the turn and asks before it runs.
 
 - The daemon answers these chat-level commands itself, without asking a model: `/status [task_id]`, `/tasks`, `/cancel`/`/pause`/`/resume` (bare forms target the lane's active workflows, or pass an explicit task id), and `/steer <text>` (inject a correction into the running workflow).
 - `/<skill>` runs that skill directly, without the main loop choosing it.
-- In the REPL, only the client-side commands (`/help`, `/model`, `/models`, `/agents`, `/keys`, `/usage`, `/clear`, `/verbose`) are handled locally. Every other slash line — the daemon commands here and anything unrecognized (which may be a skill command) — is forwarded to the daemon as a chat message, so `/steer focus on the tests` works directly at the prompt.
+- In the REPL, only the client-side commands (`/help`, `/model`, `/models`, `/agents`, `/keys`, `/usage`, `/clear`, `/verbose`) are handled locally. Every other slash line — the daemon commands here, the [memory commands](#memory-commands), and anything unrecognized (which may be a skill command) — is forwarded to the daemon as a chat message, so `/steer focus on the tests` works directly at the prompt. `/help` lists them and Tab completes them.
 - One-shot mode works too: `openalpaca chat --message "/steer focus on the tests"`.
 - A skill's answer streams like any other turn. A skill contributed by a plugin cannot stream: its answer arrives in one piece.
+
+#### Memory commands
+
+Three chat commands change and read your memory notes **with no model involved**: the daemon answers them itself, like `/status`. Because you typed the text, `/remember` saves it as a note **you wrote** (origin `user`) — what `openalpaca memory add` and the app's Memory view save, not a note learned or written by the assistant.
+
+| Command | What it does |
+|---|---|
+| `/remember [--kind <kind>] [--global \| --project] <text>` | Saves `<text>` as a note. The title is its first line, cut at 80 characters; the body is the whole text, as typed. `--kind` takes `fact` (the default), `preference`, `decision`, `procedure`, `reference` or `episode`. The scope follows the kind: a `preference` is global, the other kinds go to the project of your working directory (the global notes when there is none); `--global` or `--project` says which instead, and `--project` outside any project is refused. `--` ends the options, for a text that starts with dashes. The same text twice answers the note already saved. |
+| `/forget <id>` | Forgets that note — a full id or a unique prefix of at least 8 hex characters, as `/memories` prints them. A prefix several notes share lists them, with their full ids, and forgets nothing. |
+| `/forget <words>` | Forgets **nothing**: lists up to 5 notes that match, one line each, so you can send `/forget <id>`. |
+| `/memories` | Your 10 most recently updated notes, and how many suggestions wait in the Memory view (`openalpaca memory suggestions`). |
+| `/memories <words>` | Up to 8 notes that match, with why each matched. |
+
+```text
+you: /remember --kind preference I review diffs in a split view
+Alpaca: Saved as a note you wrote: “I review diffs in a split view” (3f9a1c2d, global). It is used from your next message.
+you: /memories diffs
+Alpaca: 3f9a1c2d  I review diffs in a split view  [preference/global]  (matched: term)
+you: /forget 3f9a1c2d
+Alpaca: Forgot “I review diffs in a split view” (3f9a1c2d). The note files, their history and their index rows are gone, …
+```
+
+- A line is `<id>  <title>  [<kind>/<scope>]`, at most 160 characters, and at most 10 notes are listed. No note's body is printed: `openalpaca memory show <id>` reads one.
+- A forget here is a forget like `openalpaca memory forget`, with no second prompt — typing the id is the say-so: the note file, its history and its index rows go, and the answer says what it leaves behind (conversation messages and session logs are separate data).
+- **Only where you can read the answer.** The commands work in the REPL and in a `--message` typed at a terminal. A piped or redirected `openalpaca chat` is unattended (see [Approval prompts](#approval-prompts)), and the daemon answers `Memory commands work in the OpenAlpaca app and the CLI.` and changes nothing — as it does on a connector (Telegram, Discord, iMessage) and for a scheduled skill.
+- A memory command's answer is not learned from: learning leaves out every `/`-line and its answer.
+- The three names are reserved: a skill whose slash command is `/remember`, `/forget` or `/memories` is not reached by it (the daemon logs one warning naming the skill when it loads it).
 
 ## Troubleshooting
 
