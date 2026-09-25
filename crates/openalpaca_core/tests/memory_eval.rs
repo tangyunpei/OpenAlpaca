@@ -1295,6 +1295,9 @@ struct Conditions {
     /// before the answering round; `null` when only the shipped caps bound
     /// them.
     follow_up_search_bound: Option<usize>,
+    /// `[orchestrator.memory] recall_mode` (design 09 §13.2): how the
+    /// per-turn recall delivered its matches, `index` or `excerpts`.
+    recall_mode: &'static str,
     /// The retrieved byte budget (plan §5 control; design §4): the per-turn
     /// recall's total and pinned bytes and item cap, and a `memory_read`'s
     /// body cap.
@@ -4139,6 +4142,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
     let workflow_cap = cfg.orchestrator.routing.max_workflows_per_lane;
     let tool_result_inline_bytes = cfg.orchestrator.sessions.tool_result_inline_bytes;
     let autocompact_buffer_ratio = cfg.execution.context.autocompact_buffer_ratio;
+    let recall_mode = cfg.orchestrator.memory.recall_mode;
     let extraction_model = cfg.orchestrator.costs.extraction_model.clone();
     let daemon_config = Arc::new(ArcSwap::from_pointee(cfg.clone()));
 
@@ -4200,7 +4204,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
         .as_ref()
         .map(|(c, _)| corpus_sessions(c, system, settings.session_limit))
         .unwrap_or_default();
-    let recall = RecallBudget::default();
+    let recall = RecallBudget::for_mode(recall_mode);
     report.conditions = Some(Conditions {
         owner_id: owner_id.clone(),
         llm_toml: settings.llm_toml.to_string_lossy().into_owned(),
@@ -4249,6 +4253,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
             Vec::new()
         },
         follow_up_search_bound: budget.follow_up_search_bound,
+        recall_mode: recall_mode.as_str(),
         recall_total_bytes: recall.total_bytes,
         recall_pinned_bytes: recall.pinned_bytes,
         recall_max_items: recall.max_items,
@@ -4780,7 +4785,7 @@ fn replay_conditions(
     learning: LearningConditions,
 ) -> Conditions {
     let cfg = eval_daemon_config(System::L);
-    let recall = RecallBudget::default();
+    let recall = RecallBudget::for_mode(cfg.orchestrator.memory.recall_mode);
     Conditions {
         owner_id: replay.owner_id.clone(),
         llm_toml: settings.llm_toml.to_string_lossy().into_owned(),
@@ -4831,6 +4836,7 @@ fn replay_conditions(
                              learned again by a fresh store, with no reader call; no questions",
         memory_tools_offered: Vec::new(),
         follow_up_search_bound: None,
+        recall_mode: cfg.orchestrator.memory.recall_mode.as_str(),
         recall_total_bytes: recall.total_bytes,
         recall_pinned_bytes: recall.pinned_bytes,
         recall_max_items: recall.max_items,

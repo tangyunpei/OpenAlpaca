@@ -413,6 +413,7 @@ or E report with the archived A and B reports:
   paths with hashes, how many notes were seeded — and how many as a
   replacement — what was on the tool surface, the scratch store; new with 3.11:
   `system_description`, `memory_tools_offered`, `follow_up_search_bound`, the
+  per-turn recall's `recall_mode` (`index` or `excerpts`, design 09 §13.2), the
   retrieved byte budget `recall_total_bytes` / `recall_pinned_bytes` /
   `recall_max_items` / `read_max_bytes`, `notes_scope_applied`,
   `notes_superseding` and `seeded_ids`) are the run's recorded conditions — the
