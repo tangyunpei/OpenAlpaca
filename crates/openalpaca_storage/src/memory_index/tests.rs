@@ -1268,6 +1268,50 @@ fn the_automatic_path_excludes_same_key_losers_and_source_forgotten_notes() {
     assert_eq!(got, vec!["linked", "winner"]);
 }
 
+/// Design 09 §13.3 (MD-16): the automatic path never returns a
+/// conversation summary — an `episode` of origin `extracted_other` — while
+/// an explicit search does; an episode of any other origin and another
+/// kind of `extracted_other` note are not summaries and stay recallable.
+#[test]
+fn the_automatic_path_excludes_conversation_summaries() {
+    let index = ready_index();
+    let mut summary = record(
+        "summary",
+        "Conversation on 2026-09-20: the release",
+        "Discussed: the release checklist.\n",
+    );
+    summary.kind = "episode".into();
+    summary.origin = "extracted_other".into();
+    let mut saved = record("saved", "The release party", "We celebrated the release.\n");
+    saved.kind = "episode".into();
+    let mut learned = record("learned", "Release day", "The release ships on Tuesdays.\n");
+    learned.kind = "episode".into();
+    learned.origin = "extracted_user".into();
+    let mut inferred = record("inferred", "Release owner", "Mina owns the release.\n");
+    inferred.origin = "extracted_other".into();
+    index
+        .upsert_many(&[summary, saved, learned, inferred])
+        .unwrap();
+
+    let mut explicit = q("release");
+    explicit.limit = 20;
+    let mut got = ids(&index.search(&explicit).unwrap())
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    got.sort();
+    assert_eq!(got, vec!["inferred", "learned", "saved", "summary"]);
+
+    let mut auto = explicit.clone();
+    auto.mode = SearchMode::Automatic;
+    let mut got = ids(&index.search(&auto).unwrap())
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    got.sort();
+    assert_eq!(got, vec!["inferred", "learned", "saved"]);
+}
+
 #[test]
 fn validity_is_a_half_open_interval_evaluated_at_as_of_or_now() {
     let index = ready_index();

@@ -239,12 +239,20 @@ impl MemoryService {
                 continue;
             };
             let store_scope = holder.scope().clone();
+            // Design 09 §13.3: forgetting a conversation summary forgets the
+            // summary, not what was said. It cites the conversation's own
+            // rows, so a forget's suppression would turn every note those
+            // rows taught `source_forgotten`; its tombstone suppresses none.
+            let mode = if files::is_conversation_summary(view.note.kind, view.derived.origin) {
+                ForgetMode::Withdraw
+            } else {
+                ForgetMode::Forget
+            };
             let _write = self
                 .slots
                 .begin_write(&Self::slot_key(&store_scope, &ctx.owner_key));
             let partition = self.open_partition(&store_scope, &ctx.owner_id)?;
-            let (outcomes, after) =
-                partition.forget_viewed(&[(*id, expected.clone())], ForgetMode::Forget)?;
+            let (outcomes, after) = partition.forget_viewed(&[(*id, expected.clone())], mode)?;
             for outcome in outcomes {
                 let status = match outcome.status {
                     ForgetStatus::Forgotten => {
@@ -292,6 +300,101 @@ impl MemoryService {
             retained,
             changes,
         })
+    }
+
+    /// Deleting or clearing a conversation (design 09 §13.3, LQ4) "also
+    /// forgets the episodes whose sources all lie in that session": every
+    /// conversation summary of `owner_id`, in the home partition and — when
+    /// the conversation had one — its project's, whose `sources` are all
+    /// `message` rows among `message_ids`. An episode the user saved, a note
+    /// learned from the same rows and a summary that also cites another
+    /// conversation's row all stay. Each is forgotten as `memory_forget`
+    /// forgets a summary, on the user's own surface: the deletion is the
+    /// user's act. Returns how many were forgotten.
+    ///
+    /// The caller reads `message_ids` before the rows go; the lookup is the
+    /// index's `note_source`, and each note is re-read before it is judged.
+    pub fn forget_conversation_summaries(
+        &self,
+        owner_id: &str,
+        project_root: Option<&std::path::Path>,
+        message_ids: &[i64],
+    ) -> Result<usize, MemoryError> {
+        if message_ids.is_empty() {
+            return Ok(0);
+        }
+        let hint = match project_root {
+            Some(root) => super::WorkspaceHint::Root(root),
+            None => super::WorkspaceHint::None,
+        };
+        let ctx = self.context(
+            owner_id,
+            hint,
+            super::Surface::UserSurface,
+            super::Capabilities::ALL,
+            super::Attribution::default(),
+        )?;
+        let resolved = self.resolve(&ctx)?;
+        let rows: std::collections::HashSet<String> =
+            message_ids.iter().map(|id| id.to_string()).collect();
+        let source_keys: Vec<String> = message_ids
+            .iter()
+            .map(|id| format!("message:{id}"))
+            .collect();
+        let mut targets: Vec<(NoteId, String)> = Vec::new();
+        for p in resolved.all() {
+            if matches!(p.health(), files::PartitionHealth::Quarantined(_)) {
+                continue;
+            }
+            self.touch(p)?;
+            let key = p.partition_key().to_string();
+            for row in self
+                .index
+                .notes_citing(std::slice::from_ref(&key), &source_keys)?
+            {
+                let (Some(kind), Some(origin)) = (
+                    files::NoteKind::parse(&row.kind),
+                    Origin::parse(&row.origin),
+                ) else {
+                    continue;
+                };
+                if !files::is_conversation_summary(kind, origin) {
+                    continue;
+                }
+                let Ok(id) = NoteId::parse(&row.id) else {
+                    continue;
+                };
+                let super::recall::Verified::Fresh { note, revision, .. } =
+                    super::recall::verify(p, &row.relative_path, id, &row.revision)
+                else {
+                    continue;
+                };
+                let all_here = !note.sources.is_empty()
+                    && note
+                        .sources
+                        .iter()
+                        .all(|s| s.kind == SourceType::Message && rows.contains(&s.id));
+                if all_here && files::is_conversation_summary(note.kind, origin) {
+                    targets.push((id, revision));
+                }
+            }
+        }
+        let mut forgotten = 0;
+        for batch in targets.chunks(20) {
+            let out = self.forget(
+                &ctx,
+                ForgetInput {
+                    targets: batch.to_vec(),
+                    reason: Some("its conversation was deleted".to_string()),
+                },
+            )?;
+            forgotten += out
+                .results
+                .iter()
+                .filter(|r| r.status == ForgetItemStatus::Forgotten)
+                .count();
+        }
+        Ok(forgotten)
     }
 
     /// `undo` (design §6 *recently learned*; design 09 §3.3): a

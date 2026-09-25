@@ -113,6 +113,23 @@ pub const OWNER_KEY_HEX: usize = 32;
 pub const DIR_KEY_HEX: usize = 16;
 
 // ============================================================================
+// Conversation summaries (design 09 §13.3)
+// ============================================================================
+
+/// A conversation summary (design 09 §13.3, owner decision MD-16): an
+/// `episode` whose origin is `extracted_other`, written active by the
+/// episode writer — the one writer of an active note of that origin, where
+/// every other assistant-derived note stays a candidate (MD-2). It is
+/// findable (search, the
+/// timeline, the list, the Memory view) and never delivered by automatic
+/// recall, never shown to the extractor, and forgetting one suppresses no
+/// source: it is the assistant's record of a conversation, not something
+/// the user said. An episode of any other origin is an ordinary note.
+pub fn is_conversation_summary(kind: NoteKind, origin: Origin) -> bool {
+    kind == NoteKind::Episode && origin == Origin::ExtractedOther
+}
+
+// ============================================================================
 // Key derivations (design §2)
 // ============================================================================
 

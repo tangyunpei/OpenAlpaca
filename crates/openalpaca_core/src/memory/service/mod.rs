@@ -38,6 +38,8 @@ mod write_slot;
 #[cfg(test)]
 mod bench;
 #[cfg(test)]
+mod episode_tests;
+#[cfg(test)]
 mod tests;
 
 pub use context::{
@@ -1239,6 +1241,18 @@ impl MemoryService {
             }
             (_, None) => {}
         }
+        // Design 09 §13.3: the one active `extracted_other` note is a plain
+        // `episode` — "it can supersede nothing" and carries no key.
+        if input.provenance == Some(ExtractionProvenance::Summary)
+            && (input.kind != Some(files::NoteKind::Episode)
+                || input.fact_key.is_some()
+                || input.supersedes.is_some()
+                || input.replace_policy != ReplacePolicy::Direct)
+        {
+            return Err(MemoryError::invalid(
+                "a conversation summary is a plain `episode`: no fact_key, no supersedes and no replace policy",
+            ));
+        }
         if let Some((_, rev)) = &input.supersedes
             && !files::is_revision(rev)
         {
@@ -1302,6 +1316,9 @@ impl MemoryService {
         let (status, origin) = match (ctx.surface, input.provenance) {
             (Surface::Extraction, Some(ExtractionProvenance::UserWords)) => {
                 (NoteStatus::Active, Some(Origin::ExtractedUser))
+            }
+            (Surface::Extraction, Some(ExtractionProvenance::Summary)) => {
+                (NoteStatus::Active, Some(Origin::ExtractedOther))
             }
             (Surface::Extraction, _) => (NoteStatus::Candidate, Some(Origin::ExtractedOther)),
             _ => (NoteStatus::Active, None),

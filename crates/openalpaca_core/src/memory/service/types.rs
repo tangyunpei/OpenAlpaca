@@ -13,11 +13,20 @@ use crate::daemon_config::RecallMode;
 
 /// What an extraction write is made of (design §7a `Extraction`): the user's
 /// own words become an active `extracted_user` note; assistant or tool
-/// output becomes an `extracted_other` candidate.
+/// output becomes an `extracted_other` candidate; a conversation summary
+/// becomes an **active** `extracted_other` `episode` (design 09 §13.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtractionProvenance {
     UserWords,
     OtherOutput,
+    /// A conversation summary (design 09 §13.3, MD-16): the model's own
+    /// wording, so origin `extracted_other`, but `active` — a record of a
+    /// conversation, not a claim about the user — so search, the timeline,
+    /// the list and the Memory view find it, while automatic recall never
+    /// delivers it ([`openalpaca_storage::memory_files::is_conversation_summary`]).
+    /// Only a plain `episode` may carry it: no `fact_key`, no `supersedes`,
+    /// no replace policy.
+    Summary,
 }
 
 /// `memory_store` (design §7a).

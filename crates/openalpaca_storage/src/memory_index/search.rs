@@ -52,7 +52,9 @@ pub enum SearchMode {
     /// are returned, flagged.
     #[default]
     Explicit,
-    /// The automatic per-turn recall: both are excluded.
+    /// The automatic per-turn recall: both are excluded, and so is a
+    /// conversation summary (design 09 §13.3,
+    /// [`crate::memory_files::is_conversation_summary`]).
     Automatic,
 }
 
@@ -271,6 +273,9 @@ impl Filter {
         }
         if q.mode == SearchMode::Automatic {
             clause.push_str(" AND n.same_key_loser = 0 AND n.source_forgotten = 0");
+            // Design 09 §13.3 (MD-16): a conversation summary is found by an
+            // explicit search and never delivered on its own.
+            clause.push_str(" AND NOT (n.kind = 'episode' AND n.origin = 'extracted_other')");
         }
         // Design 09 §13.1: the date bounds are inclusive and, like every
         // filter here, run before the limit.

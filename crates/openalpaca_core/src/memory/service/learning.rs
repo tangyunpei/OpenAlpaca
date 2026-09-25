@@ -13,7 +13,8 @@ use super::{
     KnownNote, LearningView, MemoryAccessContext, MemoryError, MemoryService, Surface, scope_of,
 };
 use openalpaca_storage::memory_files::{
-    EffectiveStatus, NoteId, NoteStatus, Origin, Partition, PartitionHealth, knowledge_text,
+    EffectiveStatus, NoteId, NoteKind, NoteStatus, Origin, Partition, PartitionHealth,
+    is_conversation_summary, knowledge_text,
 };
 use openalpaca_storage::memory_index::{self as index, SearchHit, SearchMode, SearchQuery};
 use std::collections::{HashMap, HashSet};
@@ -100,7 +101,8 @@ impl MemoryService {
     /// 2. **This window's notes**: through the index's `note_source`, every
     ///    note citing a `message:<id>` of `chunk_message_ids` whose origin is
     ///    `extracted_user` or `extracted_other` and which is active or a
-    ///    candidate — the re-run guard's input (§1.4(b)).
+    ///    candidate — the re-run guard's input (§1.4(b)). A conversation
+    ///    summary is not one of them, here or in step 3 (design 09 §13.3).
     /// 3. **Search**: each of `queries` through the index search
     ///    `memory_search` uses, its top five effectively active hits kept —
     ///    recallable or not, so a same-key loser, a note whose sources were
@@ -153,6 +155,7 @@ impl MemoryService {
                     row.effective_status,
                     index::EffectiveStatus::Active | index::EffectiveStatus::Candidate
                 )
+                || is_summary_row(&row.kind, &row.origin)
             {
                 continue;
             }
@@ -194,6 +197,7 @@ impl MemoryService {
                 .hits
                 .into_iter()
                 .filter(|h| h.effective_status == index::EffectiveStatus::Active)
+                .filter(|h| !is_summary_row(&h.kind, &h.origin))
                 .take(LEARNING_HITS_PER_QUERY)
             {
                 match best.get(&hit.id) {
@@ -313,6 +317,16 @@ impl MemoryService {
         }
         Ok(out)
     }
+}
+
+/// Whether an index row is a conversation summary (design 09 §13.3): one
+/// never enters the extractor's prompt, as it never enters any prompt on its
+/// own — neither shown nor counted among a window's learned notes.
+fn is_summary_row(kind: &str, origin: &str) -> bool {
+    matches!(
+        (NoteKind::parse(kind), Origin::parse(origin)),
+        (Some(k), Some(o)) if is_conversation_summary(k, o)
+    )
 }
 
 /// One named note, re-read and re-hashed (design §5 step 7). `None` when the
