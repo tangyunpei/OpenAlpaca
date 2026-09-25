@@ -1417,6 +1417,52 @@ Output is bounded (at most 10 lines of notes, each line at most 160 characters).
 - `/memories` and `/memories <query>` are bounded and print no body;
 - one `memory_changed` per write; the rows are not in the next learning window.
 
+## 13. Layered retrieval, index-first recall and conversation summaries (MD-14…MD-16, slice L10)
+
+> **Owner, 2026-09-24:** adopt three ideas from claude-mem's `mem-search` / `how-it-works` skills (`github.com/thedotmack/claude-mem`, `plugin/skills/mem-search/SKILL.md`, `plugin/skills/how-it-works/SKILL.md`, read 2026-09-24): **MD-14** layered memory tools; **MD-15** index-first recall each turn, measured against excerpt recall; **MD-16** conversation summaries as `episode` notes, findable but never injected automatically. The reference's rule is "filter first, fetch later": a search returns a compact index (about 50–100 tokens a result), a timeline shows what surrounds an entry in time, and full details are fetched only for chosen ids, in one batch — the reference reports about 10× fewer tokens.
+
+### 13.1 Layered memory tools (MD-14, L10a)
+
+All three stay under the `memory_read` capability (no new grant).
+
+| Tool | Change |
+|---|---|
+| `memory_search` | New `detail: "index" \| "snippets"`, **default `"index"`**. An index row is `{id, date, kind, scope, status, title, reason, size}` — `date` is `observed_at` when present, else `created_at`; `reason` is the match reason; `size` the note's approximate token count (bytes ÷ 4) so the model can budget a read. `"snippets"` is today's output. New `date_from`, `date_to` (inclusive, on `date`) and `order_by: "relevance" \| "newest" \| "oldest"` (default `relevance`). `limit` default 10, max 50. The filters of §5/§7b are unchanged. |
+| `memory_read` | Takes `ids: [..]` (1–10) instead of one `id`; one call returns every note, each with its revision and provenance, inside the unchanged 32 KiB total (split evenly; a cut note says so). A single id is `ids: [id]` — the app is unreleased, so the old argument breaks cleanly (03 §7). Each id is re-checked for access as today. |
+| `memory_timeline` (new) | Input: exactly one of `anchor` (a note id), `query` (the first search hit becomes the anchor) or `date` (an instant); `before` and `after` (default 5, max 20). Returns index rows (the `memory_search` index shape) in time order around the anchor, **including** superseded, archived and ended-window notes marked by `status`, and `episode` notes (§13.3), so "what did I decide before the June move" and "what did we discuss last week" have one tool. Candidates and suggestions are excluded. |
+
+The three tool descriptions teach the layered workflow in two sentences each ("Search returns an index; pick ids; read only those — several at once"). The main loop's memory guidance in the system prompt says the same in one line. API and CLI parity: `GET /v1/memories/search` accepts `detail`, `date_from`, `date_to`, `order_by`; `GET /v1/memories/timeline` is new; `openalpaca memory search --since --until --order` and `openalpaca memory timeline <id|--query q|--date d>` are new. The GUI keeps its current calls.
+
+### 13.2 Index-first recall each turn (MD-15, L10b)
+
+A new key `[orchestrator.memory] recall_mode = "index" | "excerpts"`, **default `"index"`** (owner-adopted; §13.4 measures it against `"excerpts"`, and a regression is reported to the owner, not silently reverted).
+
+- `"excerpts"` is today's §5 delivery (up to 8 chunks, 8 KiB).
+- `"index"` delivers, inside the same 8 KiB: the pinned notes (unchanged, 2 KiB sub-budget); the **top 2** recalled notes as excerpts; then an **index block** of up to 8 further relevant notes, one line each — `<id8> <date> <kind> “<title>” — <reason>` — under the line `More notes that may be relevant (read with memory_read):`. All of it stays quoted reference data (03 §5 step 8).
+- `memory_used` gains `reason: "index"` for a listed note; the recently-used ring records it as listed, not delivered.
+
+### 13.3 Conversation summaries as `episode` notes (MD-16, L10c)
+
+- **When:** at the end of a conversation's quiet period of **at least 30 minutes**, on a conversation switch, and in the shutdown drain — the MD-10 triggers minus the 120-second idle one, which is too frequent for a summary — and only when at least **4 user turns** have accumulated since the session's last episode. The window, byte budget, cost gates and yielding to chat of §1 apply; one call per episode.
+- **What:** one note, `kind: episode`, title `Conversation on <YYYY-MM-DD>: <topic>`, body: what was discussed, what was decided, what was left open, in at most 1 KiB of prose; `observed_at` = the last turn's time; `sources` = the session's message rows in the window; no `fact_key`, no aliases required, no `supersedes`.
+- **Authority and visibility:** origin `extracted_other` (the model's own wording, lowest rank, so it can supersede nothing). Unlike a candidate, an episode is `active` so that `memory_search`, `memory_timeline`, `memory_list` and the Memory view find it — but **automatic recall excludes `kind = episode`** (per-turn recall and the index block alike), so it is never injected on its own. This is a stated exception to MD-2's "assistant-derived stays a candidate", justified by the owner's choice: an episode is a record of a conversation, not a claim about the user, and it never enters a prompt unless the model or the user asks for it.
+- **Forgetting:** `/forget`, the Memory view and `memory_forget` work as for any note. Deleting or clearing a conversation (LQ4) also **forgets the episodes whose sources all lie in that session**.
+- **Cost:** counted under the same durable daily gates as extraction (§1.8), with its own per-day count cap `episode_max_per_day` (default 20).
+
+### 13.4 Plan rows L10a–L10c
+
+| Slice | What lands | Depends on | Size |
+|---|---|---|---|
+| **L10a** | `memory_search` index/snippets, date filters, `order_by`; batch `memory_read`; `memory_timeline`; the descriptions and the one-line prompt guidance; route and CLI parity | L5 | M |
+| **L10b** | `recall_mode` with the index block; `memory_used` reason `index`; the config key with its registry row, `daemon_config_cli` row and `config/daemon.toml` line | L10a | S |
+| **L10c** | Episode writing on the three triggers; the recall exclusion; the conversation-delete forget; `episode_max_per_day` | L1, L10a | M |
+
+**Evidence (tests first):**
+- L10a: an index row carries no body and every field above; `date_from`/`date_to` bound on `observed_at` else `created_at`; `order_by` newest/oldest; a 10-id `memory_read` returns all within 32 KiB and refuses an 11th id; a foreign id in the batch is refused without leaking the others' order; `memory_timeline` by anchor, by query and by date returns neighbours in time order with superseded/ended notes marked and candidates absent; the route and CLI mirror the tool.
+- L10b: `recall_mode = "excerpts"` reproduces today's delivery byte for byte (a golden test); `"index"` delivers pinned + 2 excerpts + at most 8 index lines inside 8 KiB; an index note appears in `memory_used` with reason `index`.
+- L10c: no episode before 4 user turns; one episode after a 30-minute quiet period, a switch, or the shutdown drain (the harness's deterministic flush drives all three); an episode is returned by search and timeline and **never** by per-turn recall; deleting the conversation forgets it; the daily cap holds.
+- L8 gains: the D run in both recall modes (`D-excerpts`, `D-index`), reporting accuracy, input tokens per turn and tool rounds; and a small **episode question split** (`scripts/eval/memory/questions-episodes.json`, about 20 "what did we discuss / decide on …" questions over the learning corpus), answered after a learning run.
+
 ## Revision log
 
 - **rev 3.4 (2026-09-24), L2's review fixed (from `388ed329`, one commit per finding: two tests that pin guards no test covered — LR9's same-stat hand edit read as `external`, rule 13's target clause — a broken doc link, and the change below).** One fix changes what rev 3.3 recorded:
@@ -1439,6 +1485,7 @@ Output is bounded (at most 10 lines of notes, each line at most 160 characters).
   - **A bad-output hold backs off too** (60 s doubling), like §1.4's other holds; attempts are logged at INFO and only the skip at WARN, which is the "one WARN" of `three_invalid_outputs_skip_the_chunk_with_one_warn`.
   - **An automatic flush that made no progress does not restart at once.** A cap, the rate headroom, a busy daemon or a yield leaves the session due for the next sweep; restarting at the end of the flush looped (found by a revert experiment, pinned by `a_flush_that_made_no_progress_waits_for_the_next_sweep`).
   - **Details.** The sweeper reads each watched session with `get_session` (N small) rather than one `IN (…)` query, which also finds a deleted session and forgets it (LQ4, covering the workspace purge); `DELETE /v1/sessions/{id}` and `DELETE /v1/chat/history` forget at once. `extract_min_content_len` counts the user's own rows only, so a chunk of assistant-written follow-ups alone is advanced past with no call. A turn landing in another session of its lane marks the session it left due (the gateway sees R48's project switch first).
+- **rev 5 (2026-09-24):** §13 adds MD-14 (layered memory tools: index-first `memory_search`, batch `memory_read`, `memory_timeline`), MD-15 (index-first recall, `recall_mode`, measured against excerpts) and MD-16 (conversation summaries as `episode` notes, searchable, never auto-injected), adopted from claude-mem's `mem-search`/`how-it-works`; plan rows L10a–L10c and two L8 additions.
 - **rev 4 (2026-09-24):** §12 adds MD-13 — `/remember`, `/forget`, `/memories` as deterministic, model-free chat commands on attended app/CLI turns, `/remember` minting origin `user` — and plan row L9.
 - **rev 3 (2026-09-24):** the owner answered LQ1–LQ4; LQ1 (the reader judges, marked) rewrites §7.4 and the L7 guard tests from refusal to recording; the test model is `qwen3.8:27b-mlx`.
 - **rev 1 (2026-09-24):** initial design and plan for Learning v2, written for MD-10–MD-12, the adopted scope and the recommended answers to LQ1–LQ4. It is grounded in three read-only surveys at `bdfcf272`/`55a1dc4c`, whose citations are restated here, and it adds rulings LR1–LR16.
