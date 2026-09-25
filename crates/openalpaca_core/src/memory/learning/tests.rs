@@ -1578,6 +1578,51 @@ async fn a_cap_leaves_the_window_queued() {
     assert_eq!(resumed.stored, 1, "{resumed:?}");
 }
 
+/// §1.8's "one INFO per session per day": a capped session tried on every
+/// sweep logs the cap once, and a flush that did nothing — no call, no chunk
+/// — is not logged at INFO. A flush that learned still is.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_capped_session_logs_one_info_however_often_it_is_tried() {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.costs.extract_max_calls_per_day = 1;
+    let scene = Scene::with(
+        Scripted::new(vec![items(&[vim_item(&[1])])]),
+        config.clone(),
+    );
+    openalpaca_storage::LlmUsageRepository::new(&scene.db)
+        .upsert_daily_usage(&usage_row(chrono::Utc::now().date_naive(), 1, 0.0))
+        .unwrap();
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+    for _ in 0..3 {
+        let capped = scene.queue.flush_session(&s).await;
+        assert_eq!(capped.stopped, Some(FlushStop::Cap), "{capped:?}");
+    }
+    config.orchestrator.costs.extract_max_calls_per_day = 0;
+    scene.config.store(Arc::new(config));
+    let learned = scene.queue.flush_session(&s).await;
+    assert_eq!(learned.stored, 1, "{learned:?}");
+
+    logs_assert(|lines: &[&str]| {
+        let info = |needle: &str| {
+            lines
+                .iter()
+                .filter(|l| l.contains(" INFO ") && l.contains(needle))
+                .count()
+        };
+        match (
+            info("memory learning finished"),
+            info("daily cap is reached"),
+        ) {
+            (1, 1) => Ok(()),
+            other => Err(format!(
+                "expected one INFO for the flush that learned and one for the cap, saw {other:?}"
+            )),
+        }
+    });
+}
+
 /// The daily-cap defect, fixed: the gate counts today's UTC date in
 /// `llm_usage_daily`. Yesterday's calls and cost bind nothing — nor does
 /// the in-memory cost tracker, which counts since boot and never resets —

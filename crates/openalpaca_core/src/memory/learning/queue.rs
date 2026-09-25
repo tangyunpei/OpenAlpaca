@@ -817,28 +817,41 @@ impl LearningQueue {
         };
         let report = self.flush_chunks(session_id, policy).await;
         running.finish(&report);
-        tracing::info!(
-            session_id,
-            calls = report.calls,
-            chunks = report.chunks,
-            stored = report.stored,
-            active = report.active,
-            candidates = report.candidates,
-            deduplicated = report.deduplicated,
-            dropped_over_cap = report.dropped_over_cap,
-            dropped_below_threshold = report.dropped_below_threshold,
-            dropped_invalid = report.dropped_invalid,
-            dropped_suppressed = report.dropped_suppressed,
-            failed = report.failed,
-            skipped_short = report.skipped_short,
-            skipped_no_owner = report.skipped_no_owner,
-            skipped_unusable = report.skipped_unusable,
-            skipped_root_gone = report.skipped_root_gone,
-            input_tokens = report.input_tokens,
-            output_tokens = report.output_tokens,
-            stopped = ?report.stopped,
-            "memory learning finished"
-        );
+        // A flush that did nothing — a cap, the rate headroom, a busy daemon,
+        // a yield — is tried again on every sweep, so it logs at DEBUG: a
+        // capped session's one INFO a day is the cap's own (§1.8).
+        macro_rules! finished {
+            ($level:expr) => {
+                tracing::event!(
+                    $level,
+                    session_id,
+                    calls = report.calls,
+                    chunks = report.chunks,
+                    stored = report.stored,
+                    active = report.active,
+                    candidates = report.candidates,
+                    deduplicated = report.deduplicated,
+                    dropped_over_cap = report.dropped_over_cap,
+                    dropped_below_threshold = report.dropped_below_threshold,
+                    dropped_invalid = report.dropped_invalid,
+                    dropped_suppressed = report.dropped_suppressed,
+                    failed = report.failed,
+                    skipped_short = report.skipped_short,
+                    skipped_no_owner = report.skipped_no_owner,
+                    skipped_unusable = report.skipped_unusable,
+                    skipped_root_gone = report.skipped_root_gone,
+                    input_tokens = report.input_tokens,
+                    output_tokens = report.output_tokens,
+                    stopped = ?report.stopped,
+                    "memory learning finished"
+                );
+            };
+        }
+        if report.calls > 0 || report.chunks > 0 {
+            finished!(tracing::Level::INFO);
+        } else {
+            finished!(tracing::Level::DEBUG);
+        }
         report
     }
 
