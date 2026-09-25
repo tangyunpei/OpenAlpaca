@@ -3870,3 +3870,189 @@ fn a_replace_policy_is_accepted_on_the_extraction_surface_only() {
         )
         .unwrap();
 }
+
+// ============================================================================
+// Learning v2 L3 (design 09 §3.3, S7): characterization at HEAD
+// ============================================================================
+//
+// Written against the unchanged service before the withdrawal and S7 land
+// (04 §1); the L3 storage-and-service commit flips each one.
+
+/// A tool-written (`extracted_user`) note with a key and a source, for the
+/// characterizations below.
+fn learned_with(
+    h: &Harness,
+    ctx: &MemoryAccessContext,
+    title: &str,
+    body: &str,
+    fact_key: Option<&str>,
+    sources: Vec<NoteSource>,
+    supersedes: Option<(NoteId, String)>,
+) -> StoreOutput {
+    h.service
+        .store(
+            ctx,
+            StoreInput {
+                title: title.into(),
+                body: body.into(),
+                kind: Some(NoteKind::Fact),
+                fact_key: fact_key.map(str::to_string),
+                sources,
+                supersedes,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+
+fn message_source(id: i64) -> NoteSource {
+    NoteSource {
+        kind: SourceType::Message,
+        id: id.to_string(),
+        observed_at: None,
+    }
+}
+
+/// §3.3 at HEAD: undo is a forget, and a forget's tombstone keeps the
+/// replacement's `supersedes` — so undoing an automatic replacement leaves
+/// the note it replaced retired for good.
+#[test]
+fn undo_of_a_replacement_leaves_the_old_note_superseded() {
+    let h = Harness::new();
+    let tool = h.tool(ALICE, None);
+    let user = h.user(ALICE, None);
+    let a = learned_with(
+        &h,
+        &tool,
+        "Editor",
+        "# Editor\n\nThe user edits with vim.\n",
+        Some("user.editor"),
+        Vec::new(),
+        None,
+    );
+    let b = learned_with(
+        &h,
+        &tool,
+        "Editor",
+        "# Editor\n\nThe user edits with Helix.\n",
+        Some("user.editor"),
+        Vec::new(),
+        Some((a.id, a.revision.clone())),
+    );
+    h.service.undo(&user, b.id, &b.revision).unwrap();
+    let old = h
+        .service
+        .read(
+            &user,
+            ReadInput {
+                id: a.id,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(old.effective_status, EffectiveStatus::Superseded);
+    assert_eq!(old.superseded_by, [b.id]);
+}
+
+/// S7 at HEAD (`memory/service/mod.rs:826-829`): recently learned lists an
+/// active `extracted_user` note even when it silently loses its key to a
+/// note the user saved — listed as learned, and never used.
+#[test]
+fn recently_learned_lists_a_same_key_loser() {
+    let h = Harness::new();
+    let tool = h.tool(ALICE, None);
+    let user = h.user(ALICE, None);
+    let learned = learned_with(
+        &h,
+        &tool,
+        "Editor",
+        "# Editor\n\nThe user edits with vim.\n",
+        Some("user.editor"),
+        Vec::new(),
+        None,
+    );
+    h.service
+        .store(
+            &user,
+            StoreInput {
+                title: "My editor".into(),
+                body: "# My editor\n\nI edit with Helix.\n".into(),
+                kind: Some(NoteKind::Fact),
+                fact_key: Some("user.editor".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let read = h
+        .service
+        .read(
+            &user,
+            ReadInput {
+                id: learned.id,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(read.conflict, "the learned note is the same-key loser");
+    let listed: Vec<NoteId> = h
+        .service
+        .recently_learned(&user, None, None)
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(listed, [learned.id]);
+}
+
+/// §3.3 at HEAD: undo is a forget, and a forget suppresses every message
+/// the note cited — so undoing one learned note silently takes a sibling
+/// that the same message taught out of automatic recall.
+#[test]
+fn undo_makes_a_sibling_note_source_forgotten() {
+    let h = Harness::new();
+    let tool = h.tool(ALICE, None);
+    let user = h.user(ALICE, None);
+    let row = h.message_row("I switched to Helix, and I moved to Berlin.");
+    let editor = learned_with(
+        &h,
+        &tool,
+        "Editor",
+        "# Editor\n\nThe user edits with Helix.\n",
+        None,
+        vec![message_source(row)],
+        None,
+    );
+    let city = learned_with(
+        &h,
+        &tool,
+        "Home city",
+        "# Home city\n\nThe user lives in Berlin.\n",
+        None,
+        vec![message_source(row)],
+        None,
+    );
+    h.service.undo(&user, editor.id, &editor.revision).unwrap();
+    let sibling = h
+        .service
+        .read(
+            &user,
+            ReadInput {
+                id: city.id,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        sibling.source_forgotten,
+        "the sibling left automatic recall"
+    );
+    let recalled = h
+        .service
+        .recall(
+            &user,
+            "Where does the user live? Berlin?",
+            RecallBudget::default(),
+        )
+        .unwrap();
+    assert!(!recall_ids(&recalled).contains(&city.id));
+}

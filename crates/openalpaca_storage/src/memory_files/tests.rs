@@ -3717,3 +3717,157 @@ fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing(
         "the doctor changes nothing"
     );
 }
+
+// ============================================================================
+// Learning v2 L3 (design 09 §3.2): characterization at HEAD
+// ============================================================================
+//
+// Written against the unchanged file layer before S1–S10 land (04 §1); the
+// L3 storage commit flips each one.
+
+/// A note the service wrote once and a hand then edited: its bytes no longer
+/// match the snapshot's record, so it reads as `external` (rank 2).
+fn hand_edited(p: &Partition, title: &str, body: &str) -> NoteView {
+    let saved = p
+        .create(new_note(title, body, NoteKind::Fact), Actor::UserSurface)
+        .unwrap();
+    let path = file_for(p, &saved.id).unwrap();
+    let mut bytes = read_file(&path);
+    bytes.extend_from_slice(b"\nEdited by hand.\n");
+    std::fs::write(&path, bytes).unwrap();
+    let view = p.read(&saved.id).unwrap();
+    assert_eq!(view.derived.origin, Origin::External);
+    view
+}
+
+/// A candidate naming `target` in `supersedes`, from the extractor.
+fn candidate_naming(
+    p: &Partition,
+    target: &NoteView,
+    origin: Origin,
+) -> Result<Created, MemoryFilesError> {
+    p.create(
+        NewNote {
+            status: Some(NoteStatus::Candidate),
+            supersedes: Some((target.note.id, target.revision.clone())),
+            ..new_note(
+                "Commute",
+                "# Commute\n\nThe user cycles to the office now.\n",
+                NoteKind::Fact,
+            )
+        },
+        Actor::Extraction { origin },
+    )
+}
+
+/// D5 at HEAD (`partition.rs:982-984`): a `supersedes` naming a `user` note
+/// from a surface the user did not direct is refused at create time,
+/// whatever the new note's status — so not even a suggestion can exist.
+#[test]
+fn create_refuses_an_extraction_candidate_naming_a_user_note() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let saved = p
+        .create(
+            new_note(
+                "Commute",
+                "# Commute\n\nThe user takes the bus.\n",
+                NoteKind::Fact,
+            ),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let target = p.read(&saved.id).unwrap();
+    let err = candidate_naming(&p, &target, Origin::ExtractedUser).unwrap_err();
+    assert_eq!(err.class(), "authority_conflict");
+    assert_eq!(p.load().unwrap().views.len(), 1, "nothing written");
+}
+
+/// S3 at HEAD (`partition.rs:1158-1169`, `authority.rs:192-202`): a
+/// forgotten candidate's tombstone keeps its `supersedes` and its origin,
+/// and is honoured by rank — a forgotten user-words candidate (rank 4)
+/// retires a hand-edited target (rank 2) it never replaced while it lived.
+#[test]
+fn a_forgotten_candidates_tombstone_is_honoured_by_rank() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let target = hand_edited(&p, "Commute", "# Commute\n\nThe user takes the bus.\n");
+    let candidate = candidate_naming(&p, &target, Origin::ExtractedUser).unwrap();
+    assert_eq!(
+        p.read(&target.note.id).unwrap().derived.effective_status,
+        EffectiveStatus::Active,
+        "a candidate supersedes nothing"
+    );
+    let out = p
+        .forget(&[(candidate.id, candidate.revision.clone())])
+        .unwrap();
+    assert_eq!(out[0].status, ForgetStatus::Forgotten);
+    let tomb = p
+        .snapshot()
+        .unwrap()
+        .tombstone(&candidate.id)
+        .cloned()
+        .unwrap();
+    assert_eq!(tomb.supersedes, [target.note.id]);
+    assert_eq!(
+        p.read(&target.note.id).unwrap().derived.effective_status,
+        EffectiveStatus::Superseded,
+        "the forgotten candidate's tombstone retires the hand-edited note"
+    );
+}
+
+/// S9 at HEAD (`partition.rs:1078-1091`): archiving a candidate that carries
+/// `supersedes` makes its link count — derivation skips a link only while
+/// the note is a candidate — and a tool call's archive records
+/// `extracted_user` (rank 4), which retires a hand-edited target.
+#[test]
+fn archiving_a_candidate_activates_its_link() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let target = hand_edited(&p, "Commute", "# Commute\n\nThe user takes the bus.\n");
+    let candidate = candidate_naming(&p, &target, Origin::ExtractedOther).unwrap();
+    let archived = p
+        .update(
+            &candidate.id,
+            &candidate.revision,
+            UpdateAction::Archive,
+            Actor::ModelTool,
+        )
+        .unwrap();
+    assert_eq!(archived.status, NoteStatus::Archived);
+    assert_eq!(
+        p.snapshot().unwrap().notes[&candidate.id].origin,
+        Origin::ExtractedUser
+    );
+    assert_eq!(
+        p.read(&target.note.id).unwrap().derived.effective_status,
+        EffectiveStatus::Superseded
+    );
+}
+
+/// S10 at HEAD (`partition.rs:1092-1106`): a tool call may edit a candidate
+/// that carries `supersedes` — only a `user` note is protected — and the
+/// edit re-records it as `extracted_user`, laundering an inferred
+/// suggestion into one that reads as the user's words.
+#[test]
+fn a_model_tool_edit_of_a_candidate_records_extracted_user() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let target = hand_edited(&p, "Commute", "# Commute\n\nThe user takes the bus.\n");
+    let candidate = candidate_naming(&p, &target, Origin::ExtractedOther).unwrap();
+    assert_eq!(candidate.origin, Origin::ExtractedOther);
+    let edited = p
+        .update(
+            &candidate.id,
+            &candidate.revision,
+            edit_body("# Commute\n\nThe user said they cycle now.\n"),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    assert!(edited.written);
+    assert_eq!(edited.status, NoteStatus::Candidate);
+    assert_eq!(
+        p.snapshot().unwrap().notes[&candidate.id].origin,
+        Origin::ExtractedUser
+    );
+}
