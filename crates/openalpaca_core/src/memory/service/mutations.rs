@@ -15,8 +15,9 @@ use super::{
     MemoryError, MemoryService, Retained, UpdateAction, UpdateInput, UpdateOutput, WithdrawOutput,
 };
 use openalpaca_storage::memory_files::{
-    self as files, EffectiveStatus, ForgetMode, ForgetStatus, MAX_NOTE_BYTES, MAX_TITLE_CHARS,
-    NoteId, NotePatch, NoteStatus, NoteView, Origin, Partition, SourceType, is_valid_fact_key,
+    self as files, EffectiveStatus, ForgetMode, ForgetStatus, LoadedPartition, MAX_NOTE_BYTES,
+    MAX_TITLE_CHARS, NoteId, NotePatch, NoteStatus, NoteView, Origin, Partition, SourceType,
+    is_valid_fact_key,
 };
 
 impl MemoryService {
@@ -104,8 +105,12 @@ impl MemoryService {
             .slots
             .begin_write(&Self::slot_key(&store_scope, &ctx.owner_key));
         let partition = Self::open_partition(&store_scope, &ctx.owner_id)?;
-        let updated =
-            partition.update(&input.id, &input.expected_revision, action, ctx.actor(None))?;
+        let (updated, mut view) = partition.update_viewed(
+            &input.id,
+            &input.expected_revision,
+            action,
+            ctx.actor(None),
+        )?;
         // S6: the confirm is written; every other pending suggestion for the
         // same note is now moot, and each is withdrawn on its own (design
         // 09 §3.2). A confirm that failed returned above and dismissed
@@ -113,11 +118,10 @@ impl MemoryService {
         let dismissed = if suggestion_targets.is_empty() {
             Vec::new()
         } else {
-            self.dismiss_others(ctx, &partition, input.id, &suggestion_targets)
+            self.dismiss_others(ctx, &partition, &mut view, input.id, &suggestion_targets)
         };
-        self.reindex(&partition, false)?;
-        let origin = partition
-            .load()?
+        self.reindex_view(&partition, &view, false)?;
+        let origin = view
             .get(&input.id)
             .map(|v| v.derived.origin)
             .unwrap_or(Origin::External);
@@ -148,39 +152,35 @@ impl MemoryService {
     /// A withdrawal suppresses nothing, so a dismissed suggestion citing the
     /// row the confirmed note cites leaves that note recallable. One that
     /// moved or went since is left alone; the confirm stands whatever
-    /// happens to these, so nothing here fails it — a partition that cannot
-    /// be re-read dismisses nothing and says so in the log.
+    /// happens to these, so nothing here fails it. `view` is the partition
+    /// right after the confirm, and is brought up to date with each
+    /// dismissal.
     fn dismiss_others(
         &self,
         ctx: &MemoryAccessContext,
         partition: &Partition,
+        view: &mut LoadedPartition,
         confirmed: NoteId,
         targets: &[NoteId],
     ) -> Vec<NoteId> {
-        let loaded = match partition.load() {
-            Ok(loaded) => loaded,
-            Err(e) => {
-                tracing::warn!(
-                    note = %confirmed,
-                    "memory: the suggestions a confirm made moot were not dismissed, because the partition could not be re-read: {e}"
-                );
-                return Vec::new();
-            }
-        };
-        let others: Vec<(NoteId, String, Origin)> = loaded
+        let others: Vec<(NoteId, String, Origin)> = view
             .views
-            .into_iter()
+            .iter()
             .filter(|v| {
                 v.note.id != confirmed
                     && v.note.status == NoteStatus::Candidate
                     && v.note.supersedes.iter().any(|t| targets.contains(t))
             })
-            .map(|v| (v.note.id, v.revision, v.derived.origin))
+            .map(|v| (v.note.id, v.revision.clone(), v.derived.origin))
             .collect();
         let mut dismissed = Vec::new();
         for (id, revision, origin) in others {
-            match partition.forget_as(&[(id, revision)], ForgetMode::Withdraw) {
-                Ok(out) if out.first().map(|o| &o.status) == Some(&ForgetStatus::Forgotten) => {
+            match partition.forget_viewed(&[(id, revision)], ForgetMode::Withdraw) {
+                Ok((out, after)) => {
+                    *view = after;
+                    if out.first().map(|o| &o.status) != Some(&ForgetStatus::Forgotten) {
+                        continue;
+                    }
                     self.publish(&MemoryChange {
                         partition_key: partition.partition_key().to_string(),
                         note_id: id,
@@ -191,11 +191,17 @@ impl MemoryService {
                     });
                     dismissed.push(id);
                 }
-                Ok(_) => {}
-                Err(e) => tracing::warn!(
-                    note = %id,
-                    "memory: a suggestion made moot by a confirm could not be dismissed: {e}"
-                ),
+                Err(e) => {
+                    tracing::warn!(
+                        note = %id,
+                        "memory: a suggestion made moot by a confirm could not be dismissed: {e}"
+                    );
+                    // A failure part-way may have left a tombstone: read
+                    // what is there now, for the index.
+                    if let Ok(fresh) = partition.load() {
+                        *view = fresh;
+                    }
+                }
             }
         }
         dismissed
@@ -237,7 +243,8 @@ impl MemoryService {
                 .slots
                 .begin_write(&Self::slot_key(&store_scope, &ctx.owner_key));
             let partition = Self::open_partition(&store_scope, &ctx.owner_id)?;
-            let outcomes = partition.forget(&[(*id, expected.clone())])?;
+            let (outcomes, after) =
+                partition.forget_viewed(&[(*id, expected.clone())], ForgetMode::Forget)?;
             for outcome in outcomes {
                 let status = match outcome.status {
                     ForgetStatus::Forgotten => {
@@ -269,7 +276,7 @@ impl MemoryService {
                     status,
                 });
             }
-            self.reindex(&partition, false)?;
+            self.reindex_view(&partition, &after, false)?;
         }
         let forgotten = results
             .iter()
@@ -347,8 +354,8 @@ impl MemoryService {
             .filter(|v| v.derived.superseded_by.contains(&id))
             .map(|v| v.note.id)
             .collect();
-        let out =
-            partition.forget_as(&[(id, expected_revision.to_string())], ForgetMode::Withdraw)?;
+        let (out, loaded) = partition
+            .forget_viewed(&[(id, expected_revision.to_string())], ForgetMode::Withdraw)?;
         match out.first().map(|o| &o.status) {
             Some(ForgetStatus::Forgotten) => {}
             Some(ForgetStatus::RevisionConflict { current_revision }) => {
@@ -359,8 +366,7 @@ impl MemoryService {
             }
             Some(ForgetStatus::NotFound) | None => return Err(MemoryError::NotFound(id)),
         }
-        self.reindex(&partition, false)?;
-        let loaded = partition.load()?;
+        self.reindex_view(&partition, &loaded, false)?;
         let restored = retired
             .into_iter()
             .filter(|t| {

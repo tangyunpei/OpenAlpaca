@@ -191,7 +191,8 @@ impl MemoryService {
             return Ok((scanned, Vec::new()));
         }
         let mut changes = Vec::new();
-        for change in partition.reconcile()? {
+        let (found, view) = partition.reconcile_viewed()?;
+        for change in found {
             let change = MemoryChange {
                 partition_key: key.to_string(),
                 note_id: change.id,
@@ -203,7 +204,7 @@ impl MemoryService {
             self.publish(&change);
             changes.push(change);
         }
-        self.reindex(partition, false)?;
+        self.reindex_view(partition, &view, false)?;
         self.last_scans
             .lock()
             .unwrap_or_else(|e| e.into_inner())

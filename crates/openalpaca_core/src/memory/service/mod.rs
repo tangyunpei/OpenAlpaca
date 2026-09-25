@@ -482,19 +482,58 @@ impl MemoryService {
             .collect())
     }
 
-    fn records_from(
-        p: &Partition,
-        loaded: &LoadedPartition,
-        scan: &[ScanEntry],
-    ) -> Vec<IndexRecord> {
-        let stats: HashMap<&str, FileStat> = scan
+    /// The index row of one note (design §5), a copy of its body.
+    fn record_for(p: &Partition, v: &NoteView, file: FileStat) -> IndexRecord {
+        #[cfg(test)]
+        RECORDS_BUILT.with(|n| n.set(n.get() + 1));
+        IndexRecord {
+            id: v.note.id.to_string(),
+            revision: v.revision.clone(),
+            partition_key: p.partition_key().to_string(),
+            scope: scope_of(p).as_str().to_string(),
+            relative_path: format!("{}/{}", files::NOTES_DIR, v.file_name),
+            title: v.note.title.clone(),
+            aliases: v.note.aliases.clone(),
+            tags: v.note.tags.clone(),
+            kind: v.note.kind.as_str().to_string(),
+            status: v.note.status.as_str().to_string(),
+            effective_status: map_status(v.derived.effective_status),
+            origin: v.derived.origin.as_str().to_string(),
+            fact_key: v.note.fact_key.clone(),
+            valid_from: v.note.valid_from.map(format_ts),
+            valid_to: v.note.valid_to.map(format_ts),
+            updated_at: format_ts(v.note.updated_at),
+            pinned: v.note.pinned,
+            source_forgotten: v.derived.source_forgotten,
+            conflict: v.derived.conflict,
+            same_key_loser: v.derived.same_key_loser_to.is_some(),
+            superseded_by: v
+                .derived
+                .superseded_by
+                .iter()
+                .map(|id| id.to_string())
+                .collect(),
+            supersedes: v.note.supersedes.iter().map(|id| id.to_string()).collect(),
+            sources: v
+                .note
+                .sources
+                .iter()
+                .map(NoteSource::suppression_key)
+                .collect(),
+            body: v.note.body.clone(),
+            body_line_offset: body_line_offset(&v.note),
+            file,
+        }
+    }
+
+    /// The notes of `loaded` the index takes, each with its file's stat: a
+    /// body over the note limit is left out, with one WARN per re-index.
+    fn indexable(loaded: &LoadedPartition) -> Vec<(&NoteView, FileStat)> {
+        let stats: HashMap<&str, FileStat> = loaded
+            .scan
             .iter()
             .map(|e| (e.file_name.as_str(), file_stat(e)))
             .collect();
-        let scope = match p.scope() {
-            StoreScope::Home => NoteScope::Global,
-            StoreScope::Project(_) => NoteScope::Project,
-        };
         loaded
             .views
             .iter()
@@ -509,53 +548,33 @@ impl MemoryService {
                 true
             })
             .map(|v| {
-                #[cfg(test)]
-                RECORDS_BUILT.with(|n| n.set(n.get() + 1));
-                v
-            })
-            .map(|v| IndexRecord {
-                id: v.note.id.to_string(),
-                revision: v.revision.clone(),
-                partition_key: p.partition_key().to_string(),
-                scope: scope.as_str().to_string(),
-                relative_path: format!("{}/{}", files::NOTES_DIR, v.file_name),
-                title: v.note.title.clone(),
-                aliases: v.note.aliases.clone(),
-                tags: v.note.tags.clone(),
-                kind: v.note.kind.as_str().to_string(),
-                status: v.note.status.as_str().to_string(),
-                effective_status: map_status(v.derived.effective_status),
-                origin: v.derived.origin.as_str().to_string(),
-                fact_key: v.note.fact_key.clone(),
-                valid_from: v.note.valid_from.map(format_ts),
-                valid_to: v.note.valid_to.map(format_ts),
-                updated_at: format_ts(v.note.updated_at),
-                pinned: v.note.pinned,
-                source_forgotten: v.derived.source_forgotten,
-                conflict: v.derived.conflict,
-                same_key_loser: v.derived.same_key_loser_to.is_some(),
-                superseded_by: v.derived.superseded_by.iter().map(|id| id.to_string()).collect(),
-                supersedes: v.note.supersedes.iter().map(|id| id.to_string()).collect(),
-                sources: v.note.sources.iter().map(NoteSource::suppression_key).collect(),
-                body: v.note.body.clone(),
-                body_line_offset: body_line_offset(&v.note),
-                file: stats.get(v.file_name.as_str()).copied().unwrap_or_default(),
+                let stat = stats.get(v.file_name.as_str()).copied().unwrap_or_default();
+                (v, stat)
             })
             .collect()
     }
 
-    fn fingerprint(record: &IndexRecord, view: &NoteView) -> Fingerprint {
+    fn records_from(p: &Partition, loaded: &LoadedPartition) -> Vec<IndexRecord> {
+        Self::indexable(loaded)
+            .into_iter()
+            .map(|(v, stat)| Self::record_for(p, v, stat))
+            .collect()
+    }
+
+    /// What the index needs to know about a note — the facts its row is
+    /// built from — read off the view without building the row.
+    fn fingerprint(view: &NoteView, file: FileStat) -> Fingerprint {
         Fingerprint {
-            revision: record.revision.clone(),
+            revision: view.revision.clone(),
             effective_status: view.derived.effective_status,
             origin: view.derived.origin,
-            conflict: record.conflict,
-            same_key_loser: record.same_key_loser,
-            source_forgotten: record.source_forgotten,
+            conflict: view.derived.conflict,
+            same_key_loser: view.derived.same_key_loser_to.is_some(),
+            source_forgotten: view.derived.source_forgotten,
             superseded_by: view.derived.superseded_by.clone(),
-            pinned: record.pinned,
-            relative_path: record.relative_path.clone(),
-            stat: (record.file.mtime_ns, record.file.size, record.file.inode),
+            pinned: view.note.pinned,
+            relative_path: format!("{}/{}", files::NOTES_DIR, view.file_name),
+            stat: (file.mtime_ns, file.size, file.inode),
         }
     }
 
@@ -563,36 +582,42 @@ impl MemoryService {
     /// when the index has no rows for it, otherwise only the notes whose
     /// facts changed since this process last indexed them.
     fn reindex(&self, p: &Partition, full: bool) -> Result<(), MemoryError> {
-        let key = p.partition_key().to_string();
-        let scan = p.scan()?;
         let loaded = p.load()?;
-        let records = Self::records_from(p, &loaded, &scan);
+        self.reindex_view(p, &loaded, full)
+    }
+
+    /// [`Self::reindex`] from a view already read — the one a mutation
+    /// returns (design 09 §6.3 quick win 3). An incremental pass builds a
+    /// row, and copies a body, only for a note whose fingerprint changed
+    /// (quick win 4).
+    fn reindex_view(
+        &self,
+        p: &Partition,
+        loaded: &LoadedPartition,
+        full: bool,
+    ) -> Result<(), MemoryError> {
+        let key = p.partition_key().to_string();
+        let notes = Self::indexable(loaded);
         let mut fingerprints = self.fingerprints.lock().unwrap_or_else(|e| e.into_inner());
         let known = fingerprints.entry(key.clone()).or_default();
         if full || known.is_empty() {
+            let records: Vec<IndexRecord> = notes
+                .iter()
+                .map(|(v, stat)| Self::record_for(p, v, *stat))
+                .collect();
             self.index.replace_partition(&key, &records)?;
             known.clear();
-            for (record, view) in records.iter().zip(
-                loaded
-                    .views
-                    .iter()
-                    .filter(|v| v.note.body.len() <= MAX_NOTE_BYTES),
-            ) {
-                known.insert(view.note.id, Self::fingerprint(record, view));
+            for (view, stat) in &notes {
+                known.insert(view.note.id, Self::fingerprint(view, *stat));
             }
         } else {
             let mut seen: HashSet<NoteId> = HashSet::new();
             let mut changed: Vec<IndexRecord> = Vec::new();
-            for (record, view) in records.iter().zip(
-                loaded
-                    .views
-                    .iter()
-                    .filter(|v| v.note.body.len() <= MAX_NOTE_BYTES),
-            ) {
+            for (view, stat) in &notes {
                 seen.insert(view.note.id);
-                let fp = Self::fingerprint(record, view);
+                let fp = Self::fingerprint(view, *stat);
                 if known.get(&view.note.id) != Some(&fp) {
-                    changed.push(record.clone());
+                    changed.push(Self::record_for(p, view, *stat));
                     known.insert(view.note.id, fp);
                 }
             }
@@ -610,8 +635,17 @@ impl MemoryService {
             }
         }
         drop(fingerprints);
-        // Stamp the scan so `last_scan` says the rows were checked.
-        self.index.reconcile(&key, || Self::scan_entries(p))?;
+        // Stamp the scan so `last_scan` says the rows were checked — the
+        // view's own scan, which after a write carries the written file.
+        let entries: Vec<index::ScanEntry> = loaded
+            .scan
+            .iter()
+            .map(|e| index::ScanEntry {
+                relative_path: format!("{}/{}", files::NOTES_DIR, e.file_name),
+                stat: file_stat(e),
+            })
+            .collect();
+        self.index.reconcile(&key, || Ok(entries))?;
         Ok(())
     }
 
@@ -646,9 +680,8 @@ impl MemoryService {
             }
         }
         for p in &opened {
-            let scan = p.scan()?;
             let loaded = p.load()?;
-            records.extend(Self::records_from(p, &loaded, &scan));
+            records.extend(Self::records_from(p, &loaded));
         }
         self.index.rebuild(&records)?;
         {
@@ -1082,8 +1115,8 @@ impl MemoryService {
             .slots
             .begin_write(&Self::slot_key(&store_scope, &ctx.owner_key));
         let partition = Self::open_partition(&store_scope, &ctx.owner_id)?;
-        let created = partition.create(new, actor)?;
-        self.reindex(&partition, false)?;
+        let (created, view) = partition.create_viewed(new, actor)?;
+        self.reindex_view(&partition, &view, false)?;
         let change = (created.dedup == Dedup::Created).then(|| MemoryChange {
             partition_key: partition.partition_key().to_string(),
             note_id: created.id,
@@ -1126,8 +1159,9 @@ impl MemoryService {
                 .slots
                 .begin_write(&Self::slot_key(p.scope(), &ctx.owner_key));
             let fresh = Self::open_partition(p.scope(), &ctx.owner_id)?;
-            scanned += fresh.scan()?.len();
-            for change in fresh.reconcile()? {
+            let (found, view) = fresh.reconcile_viewed()?;
+            scanned += view.scan.len();
+            for change in found {
                 let change = MemoryChange {
                     partition_key: fresh.partition_key().to_string(),
                     note_id: change.id,
@@ -1139,7 +1173,7 @@ impl MemoryService {
                 self.publish(&change);
                 changes.push(change);
             }
-            self.reindex(&fresh, false)?;
+            self.reindex_view(&fresh, &view, false)?;
         }
         Ok(SyncReport {
             scanned,

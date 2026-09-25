@@ -4442,11 +4442,11 @@ fn twenty_of_twenty_five(p: &Partition) -> Vec<(NoteId, String)> {
         .collect()
 }
 
-/// Design 09 §6.3 quick win 2, at HEAD: a forget of twenty notes reads the
-/// whole partition twice per target — once for the revision check, once
-/// for `MEMORY.md`.
+/// Design 09 §6.3 quick win 2 (flipped from
+/// `a_twenty_target_forget_parses_twice_per_target`, 40): a forget of twenty
+/// notes reads the partition once, and rebuilds `MEMORY.md` from that read.
 #[test]
-fn a_twenty_target_forget_parses_twice_per_target() {
+fn a_twenty_target_forget_loads_the_partition_once() {
     let sb = Sandbox::new();
     let p = sb.open_home(ALICE);
     let targets = twenty_of_twenty_five(&p);
@@ -4454,13 +4454,17 @@ fn a_twenty_target_forget_parses_twice_per_target() {
     let outcomes = p.forget(&targets).unwrap();
     let parses = whole_parses_on_this_thread() - before;
     assert!(outcomes.iter().all(|o| o.status == ForgetStatus::Forgotten));
-    assert_eq!(parses, 40);
+    assert_eq!(parses, 1);
+    let navigation = std::fs::read_to_string(p.root().join(NAVIGATION_FILE)).unwrap();
+    assert!(!navigation.contains("Note 0]"), "{navigation}");
+    assert!(navigation.contains("Note 24]"), "{navigation}");
 }
 
-/// Recovery at open deletes a tombstoned note's leftover file. At HEAD it
-/// lists `notes/` once per tombstone to look for one.
+/// Recovery at open deletes a tombstoned note's leftover file, and lists
+/// `notes/` once to look for every one (flipped from
+/// `opening_a_partition_scans_its_notes_once_per_tombstone`, 20).
 #[test]
-fn opening_a_partition_scans_its_notes_once_per_tombstone() {
+fn opening_a_partition_scans_its_notes_once() {
     let sb = Sandbox::new();
     let p = sb.open_home(ALICE);
     let targets = twenty_of_twenty_five(&p);
@@ -4468,6 +4472,167 @@ fn opening_a_partition_scans_its_notes_once_per_tombstone() {
     assert_eq!(p.snapshot().unwrap().tombstones.len(), 20);
     let before = scans_on_this_thread();
     let reopened = sb.open_home(ALICE);
-    assert_eq!(scans_on_this_thread() - before, 20);
+    assert_eq!(scans_on_this_thread() - before, 1);
     assert_eq!(reopened.load().unwrap().views.len(), 5);
+    // A leftover a crashed forget could leave — a file of a tombstoned id —
+    // is found by that one listing; the other scan is `MEMORY.md`'s rebuild.
+    let leftover = p.notes_dir().join(format!("{}--leftover.md", targets[7].0));
+    std::fs::write(&leftover, b"left behind").unwrap();
+    let before = scans_on_this_thread();
+    sb.open_home(ALICE);
+    assert_eq!(scans_on_this_thread() - before, 2);
+    assert!(!leftover.exists(), "recovery deleted it");
+}
+
+/// Everything a view says, for comparing two of them.
+fn view_digest(loaded: &LoadedPartition) -> String {
+    format!(
+        "{:?}\n{:#?}\n{:?}\n{:?}\n{:?}\n{:?}",
+        loaded.health,
+        loaded.views,
+        loaded.malformed,
+        loaded.duplicates,
+        loaded.conflicts,
+        loaded.scan
+    )
+}
+
+/// Design 09 §6.3 quick win 3: the view a mutation returns is patched from
+/// the read it made, not read again — so after every kind of write it must
+/// be exactly what a fresh read finds: every note's derived facts (a
+/// same-key pair, a suggestion, a confirmed replacement, a withdrawal
+/// bringing its target back), a retitle's renamed file, the malformed file
+/// and the duplicate pair it never touched, and the scan.
+#[test]
+fn the_view_a_mutation_returns_is_a_fresh_read() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let fresh = |view: &LoadedPartition, step: &str| {
+        assert_eq!(
+            view_digest(view),
+            view_digest(&p.load().unwrap()),
+            "after {step}"
+        );
+    };
+    let (editor, view) = p
+        .create_viewed(
+            NewNote {
+                fact_key: Some("user.editor".into()),
+                ..new_note("Editor", "# Editor\n\nvim\n", NoteKind::Preference)
+            },
+            Actor::UserSurface,
+        )
+        .unwrap();
+    fresh(&view, "a create");
+    std::fs::write(p.notes_dir().join("not-a-note.md"), b"garbage").unwrap();
+    let (twin, _) = p
+        .create_viewed(
+            new_note("Twin", "# Twin\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    std::fs::copy(
+        file_for(&p, &twin.id).unwrap(),
+        p.notes_dir().join(format!("{}--copy.md", twin.id)),
+    )
+    .unwrap();
+    let (learned, view) = p
+        .create_viewed(
+            NewNote {
+                fact_key: Some("user.editor".into()),
+                ..new_note("Editor (learned)", "# Editor\n\nhelix\n", NoteKind::Preference)
+            },
+            Actor::Extraction {
+                origin: Origin::ExtractedUser,
+            },
+        )
+        .unwrap();
+    fresh(&view, "a same-key create beside a malformed file and a duplicate");
+    let (_, view) = p
+        .create_viewed(
+            new_note("Editor", "# Editor\n\nvim\n", NoteKind::Preference),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    fresh(&view, "an exact duplicate");
+    let target = p.read(&editor.id).unwrap();
+    let suggestion = learned_change(&p, &target, "# Editor\n\nkakoune\n").unwrap();
+    assert!(suggestion.suggestion);
+    let (edited, view) = p
+        .update_viewed(
+            &learned.id,
+            &learned.revision,
+            edit_body("# Editor\n\nhelix, since June\n"),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    fresh(&view, "an edit");
+    let (retitled, view) = p
+        .update_viewed(
+            &learned.id,
+            &edited.revision,
+            UpdateAction::Edit(NotePatch {
+                title: Some("Editor of choice".into()),
+                ..Default::default()
+            }),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    fresh(&view, "a retitle");
+    let (_, view) = p
+        .update_viewed(
+            &learned.id,
+            &retitled.revision,
+            UpdateAction::Edit(NotePatch {
+                title: Some("Editor of choice".into()),
+                ..Default::default()
+            }),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    fresh(&view, "a no-op edit");
+    let (confirmed, view) = p
+        .update_viewed(
+            &suggestion.id,
+            &suggestion.revision,
+            UpdateAction::Confirm {
+                target_revision: Some(target.revision.clone()),
+            },
+            Actor::UserSurface,
+        )
+        .unwrap();
+    fresh(&view, "a confirm that retires its target");
+    let (_, view) = p
+        .update_viewed(
+            &learned.id,
+            &retitled.revision,
+            UpdateAction::Archive,
+            Actor::ModelTool,
+        )
+        .unwrap();
+    fresh(&view, "an archive");
+    let (outcomes, view) = p
+        .forget_viewed(
+            &[
+                (confirmed.id, confirmed.revision.clone()),
+                (twin.id, twin.revision.clone()),
+                (NoteId::new(), "f".repeat(64)),
+            ],
+            ForgetMode::Withdraw,
+        )
+        .unwrap();
+    assert_eq!(outcomes[0].status, ForgetStatus::Forgotten);
+    assert_eq!(outcomes[1].status, ForgetStatus::NotFound, "a duplicate is not served");
+    fresh(&view, "a withdrawal that brings its target back");
+    assert_eq!(effective(&p, &editor.id), EffectiveStatus::Active);
+    let path = file_for(&p, &editor.id).unwrap();
+    let mut bytes = read_file(&path);
+    bytes.extend_from_slice(b"\nEdited by hand.\n");
+    std::fs::write(&path, &bytes).unwrap();
+    let (changes, view) = p.reconcile_viewed().unwrap();
+    assert_eq!(changes.len(), 1);
+    fresh(&view, "a reconcile that re-records an edit");
+    let (changes, view) = p.reconcile_viewed().unwrap();
+    assert!(changes.is_empty());
+    fresh(&view, "a quiet reconcile");
 }

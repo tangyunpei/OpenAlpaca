@@ -4907,23 +4907,31 @@ fn ten_notes(h: &Harness, ctx: &MemoryAccessContext) -> Vec<StoreOutput> {
         .collect()
 }
 
-/// Design 09 §6.3 quick win 3, at HEAD: a store reads the whole partition
-/// three times — the create's check, `MEMORY.md`, the re-index.
+/// Design 09 §6.3 quick win 3 (flipped from
+/// `a_store_parses_the_partition_three_times`): a store reads the partition
+/// once — the create's check — and `MEMORY.md` and the re-index use the
+/// view the write returned.
 #[test]
-fn a_store_parses_the_partition_three_times() {
+fn a_store_parses_the_partition_once() {
     let h = Harness::new();
     let user = h.user(ALICE, None);
     ten_notes(&h, &user);
     let before = parses();
-    h.store(&user, "Another", "# Another\n\nMore.\n", NoteKind::Fact);
-    assert_eq!(parses() - before, 3);
+    let stored = h.store(&user, "Another", "# Another\n\nMore.\n", NoteKind::Fact);
+    assert_eq!(parses() - before, 1);
+    assert_eq!(
+        search_ids(&search(&h, &user, "another")),
+        vec![stored.id],
+        "the index took the new note from the returned view"
+    );
 }
 
-/// Design 09 §6.3 quick win 3, at HEAD: an edit reads the whole partition
-/// five times — finding the note, the update's check, `MEMORY.md`, the
-/// re-index and the origin read back for the event.
+/// Design 09 §6.3 quick win 3 (flipped from
+/// `an_update_parses_the_partition_five_times`): an edit reads the
+/// partition twice — finding the note, and the update's own check — and
+/// `MEMORY.md`, the re-index and the event's origin use the returned view.
 #[test]
-fn an_update_parses_the_partition_five_times() {
+fn an_update_parses_the_partition_twice() {
     let h = Harness::new();
     let user = h.user(ALICE, None);
     let notes = ten_notes(&h, &user);
@@ -4942,13 +4950,16 @@ fn an_update_parses_the_partition_five_times() {
             },
         )
         .unwrap();
-    assert_eq!(parses() - before, 5);
+    assert_eq!(parses() - before, 2);
+    assert_eq!(search_ids(&search(&h, &user, "revised")), vec![notes[3].id]);
 }
 
-/// Design 09 §6.3 quick win 2, at HEAD: a forget of twenty notes reads the
-/// whole partition four times per target.
+/// Design 09 §6.3 quick win 2 (flipped from
+/// `a_twenty_target_forget_parses_the_partition_eighty_times`): each target
+/// of a forget reads the partition twice — finding the note, and the
+/// forget's own check — and the re-index uses the view the forget returned.
 #[test]
-fn a_twenty_target_forget_parses_the_partition_eighty_times() {
+fn a_twenty_target_forget_parses_the_partition_twice_per_target() {
     let h = Harness::new();
     let user = h.user(ALICE, None);
     let notes: Vec<StoreOutput> = (0..25)
@@ -4977,7 +4988,7 @@ fn a_twenty_target_forget_parses_the_partition_eighty_times() {
             },
         )
         .unwrap();
-    assert_eq!(parses() - before, 80);
+    assert_eq!(parses() - before, 40);
     assert!(
         out.results
             .iter()
@@ -4989,16 +5000,18 @@ fn a_twenty_target_forget_parses_the_partition_eighty_times() {
     );
 }
 
-/// Design 09 §6.3 quick win 4, at HEAD: the re-index after a store builds an
-/// index record — a copy of the body — for every note of the partition.
+/// Design 09 §6.3 quick win 4 (flipped from
+/// `a_store_builds_an_index_record_for_every_note`, 11): the re-index after
+/// a store builds an index record — a copy of the body — for the one note
+/// whose facts changed.
 #[test]
-fn a_store_builds_an_index_record_for_every_note() {
+fn a_store_builds_one_index_record() {
     let h = Harness::new();
     let user = h.user(ALICE, None);
     ten_notes(&h, &user);
     let before = records_built();
     h.store(&user, "Another", "# Another\n\nMore.\n", NoteKind::Fact);
-    assert_eq!(records_built() - before, 11);
+    assert_eq!(records_built() - before, 1);
 }
 
 /// Design 09 §6.3 quick win 5 (landed with §2.3's lookup, ruling LR18): the
