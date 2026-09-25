@@ -1054,12 +1054,24 @@ impl LearningQueue {
             }
 
             // Ask the model. On a local model a turn that starts cancels
-            // this call: nothing is written and nothing is counted.
-            let local_call = (policy.shares_with_chat && local).then(|| {
+            // this call: nothing is written and nothing is counted. The call
+            // is registered under the lock that reads the in-flight set: a
+            // turn that started since the quiet check — the window read, the
+            // pre-flight and the gates all await — yields here, before the
+            // call goes out, and a later one finds the token to cancel.
+            let local_call = if policy.shares_with_chat && local {
                 let token = cancel.child_token();
-                self.lock().local_call = Some(token.clone());
-                token
-            });
+                let mut state = self.lock();
+                if !state.in_flight.is_empty() {
+                    drop(state);
+                    report.stopped = Some(FlushStop::Yielded);
+                    return report;
+                }
+                state.local_call = Some(token.clone());
+                Some(token)
+            } else {
+                None
+            };
             let yielded = async {
                 match &local_call {
                     Some(token) => token.cancelled().await,

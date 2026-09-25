@@ -1670,6 +1670,63 @@ async fn an_openai_provider_on_localhost_yields() {
     assert_yielded(&scene, &s, &report);
 }
 
+/// The quiet check and the call are one decision: a chat turn that starts
+/// while the flush is between them — here, waiting on its window read —
+/// makes a local model's flush yield **before** the call goes out. The call
+/// is registered for cancellation under the lock that reads the in-flight
+/// set, so no turn can slip between the check and the registration.
+#[tokio::test]
+async fn a_turn_before_the_call_is_registered_still_makes_it_yield() {
+    let model = Arc::new(Scripted {
+        keyless: true,
+        ..Arc::into_inner(Scripted::new(vec![Say::Hang])).unwrap()
+    });
+    let router = router_for(model.clone(), ProviderType::Ollama, "local-model");
+    let scene = Scene::with_router(model, router, DaemonConfig::default());
+    scene.no_quiet_period();
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+
+    // Hold the database, so the flush passes its quiet check and then waits
+    // on its window read.
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let db = scene.db.clone();
+    let holder = std::thread::spawn(move || {
+        db.with_connection(|_| {
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        })
+        .unwrap();
+    });
+    held_rx.recv().unwrap();
+    let queue = scene.queue.clone();
+    let session = s.clone();
+    let flush = tokio::spawn(async move { queue.flush_automatic(&session).await });
+    // The test runtime has one thread: the flush runs to its first await,
+    // the blocked window read, before this task resumes.
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!flush.is_finished(), "the flush waits on its window read");
+
+    let _chat = scene.queue.turn_started(uuid::Uuid::new_v4(), LANE, true);
+    release_tx.send(()).unwrap();
+    let report = tokio::time::timeout(std::time::Duration::from_secs(5), flush)
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the extraction call went out while a chat turn was in flight (calls = {})",
+                scene.model.calls()
+            )
+        })
+        .unwrap();
+    holder.join().unwrap();
+    assert_eq!(scene.model.calls(), 0, "no call while a turn is in flight");
+    assert_yielded(&scene, &s, &report);
+}
+
 /// On a keyed remote model a chunk starts only when half of the key's RPM
 /// and TPM would remain after it: the second chunk waits, and a chat round
 /// made then still finds at least half the bucket.
