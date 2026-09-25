@@ -406,6 +406,49 @@ async fn a_user_stated_preference_becomes_an_active_extracted_user_note() {
     assert_eq!(learned[0].id, active[0].id);
 }
 
+/// Characterization at HEAD (design 09 §8 L2, D3): the extractor reads only
+/// title, content, kind, stated_by, confidence and rows, so the aliases, the
+/// `fact_key` and the validity a model sends never reach the note, and the
+/// note carries no `observed_at`.
+#[tokio::test]
+async fn a_learned_note_has_no_aliases_key_or_observed_at() {
+    let scene = Scene::new(vec![Say::Text(
+        serde_json::json!({"items": [{
+            "title": "Editor preference",
+            "content": "The user edits with Helix.",
+            "kind": "preference",
+            "stated_by": "user",
+            "confidence": 0.9,
+            "rows": [1],
+            "aliases": ["Helix", "编辑器"],
+            "fact_key": "user.editor",
+            "valid_from": "2026-06-01",
+            "valid_to": null
+        }]})
+        .to_string(),
+    )]);
+    let s = scene.session();
+    scene.turn(&s, "I edit with Helix these days.", "Noted.");
+    let report = scene.queue.flush_session(&s).await;
+    assert_eq!(report.active, 1, "{report:?}");
+
+    let active = scene.active();
+    let note = scene
+        .service
+        .read(
+            &scene.user_ctx(),
+            ReadInput {
+                id: active[0].id,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(note.frontmatter["aliases"], serde_json::json!([]));
+    assert_eq!(note.frontmatter["fact_key"], serde_json::Value::Null);
+    assert_eq!(note.frontmatter["observed_at"], serde_json::Value::Null);
+    assert_eq!(note.frontmatter["valid_from"], serde_json::Value::Null);
+}
+
 /// **MD-2.** Something the model infers from the assistant's reply is a
 /// candidate — outside the active list until it is confirmed.
 #[tokio::test]
