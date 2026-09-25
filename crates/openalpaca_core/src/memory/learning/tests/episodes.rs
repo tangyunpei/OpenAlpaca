@@ -579,6 +579,22 @@ async fn a_30_minute_quiet_period_makes_the_conversation_due_for_its_episode() {
     );
 }
 
+/// Nor does learning's other trigger: ten of the user's turns make the
+/// conversation due for learning at once, and not for its episode note.
+#[tokio::test]
+async fn ten_turns_make_learning_due_and_not_the_episode_note() {
+    let scene = Scene::new(vec![]);
+    let s = scene.session();
+    for i in 0..10 {
+        fed_turn(&scene, &s, &format!("Turn {i} about the trip."));
+    }
+    assert!(scene.queue.is_due(&s), "learning's ten-turn trigger");
+    assert!(
+        !scene.queue.is_episode_due(&s),
+        "ten turns are not the summary's trigger"
+    );
+}
+
 /// The daemon's path for the quiet period, end to end: the sweeper learns
 /// the conversation first, then writes its one episode.
 #[tokio::test(start_paused = true)]
