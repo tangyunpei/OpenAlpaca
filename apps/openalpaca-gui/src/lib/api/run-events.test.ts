@@ -195,7 +195,8 @@ describe("runEventsFromLog — sentences", () => {
    * A tool's name here is the one an approval card showed, and it is its
    * third party's: the row shows it as the card does, a bidi override, a
    * zero-width space or a line break in it as `<U+XXXX>` (plain text — the
-   * row is a string). The CLI's `tasks log` does the same.
+   * row is a string). The CLI's `tasks log` escapes the same rows, as JSON
+   * `\u` escapes in its detail.
    */
   it("names a tool as the approval card does, its hidden characters as escapes", () => {
     const tool = "srv__rm\u{202E}fdp\u{200B}\n";
@@ -214,7 +215,8 @@ describe("runEventsFromLog — sentences", () => {
     );
     // The daemon's own reasons repeat the name, and one names the agent too
     // (`security/capabilities/mod.rs`, `security/sandbox/mod.rs`): the row
-    // shows it escaped there as well, on one line, as `tasks log` does.
+    // shows it escaped there as well, on one line (`tasks log` escapes it
+    // too, in its JSON detail).
     expect(
       one(
         row(24, "security_violation", {

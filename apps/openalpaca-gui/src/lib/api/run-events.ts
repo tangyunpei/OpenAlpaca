@@ -7,7 +7,7 @@
  * calls included, and they survive a restart. What is left here is the
  * projection — one persisted row onto the design's `LogTag` palette (§3.28).
  *
- * Two rules hold the projection honest:
+ * Three rules hold the projection honest:
  *
  * - **Nothing is invented.** A row whose `detail` is missing the field a
  *   sentence would name falls back to the raw `event_type` rather than to a
@@ -16,8 +16,9 @@
  *   third party's (an MCP `<server>__<tool>`, a plugin `<plugin>::<tool>`),
  *   and the prompt's own rows sit here beside the rest of the run: a bidi
  *   override, a zero-width space or a line break in it is shown as
- *   `<U+XXXX>` (`lib/hidden-chars`), in plain text since a row is a string —
- *   as the CLI's `tasks log` shows it. A `security_violation`'s reason
+ *   `<U+XXXX>` (`lib/hidden-chars`), in plain text since a row is a string.
+ *   The CLI's `tasks log` escapes the same rows, as JSON `\u` escapes in its
+ *   detail. A `security_violation`'s reason
  *   repeats the name, so it is escaped the same way; the rows' other fields
  *   (a span's label, progress narration, titles, model ids) are as they
  *   came.
