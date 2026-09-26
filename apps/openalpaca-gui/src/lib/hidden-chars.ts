@@ -26,10 +26,12 @@
  *
  * - **The arguments** take `escapeHidden`: `\n` and `\t` stay, because the
  *   pretty-printed JSON is laid out in them, and `JSON.stringify` has already
- *   written out every control character inside a string — the card's
- *   bare-string shortcut (`formatToolArguments`: a lone `command`, `path`,
- *   `url`, …) steps aside for a value holding one, so a value's own line
- *   break or tab never reaches the card as layout.
+ *   written out every C0 control character (U+0000–U+001F) inside a string —
+ *   the card's bare-string shortcut (`formatToolArguments`: a lone
+ *   `command`, `path`, `url`, …) steps aside for a value holding one, so a
+ *   value's own line break or tab never reaches the card as layout. DEL and
+ *   the C1 controls (U+007F–U+009F), which JSON leaves raw, are escaped here
+ *   like any other member of the set.
  * - **A one-line field** — the tool's name, the agent's name — takes
  *   `escapeHiddenLine`, which also shows a newline and a tab: a name has no
  *   layout of its own, and a line break in it would draw lines the card does
@@ -44,7 +46,13 @@
  * GUI does not cut an approval's text, so there is no cut here: each surface
  * that shows it wraps a run too long for its line anywhere
  * (`overflow-wrap: anywhere`) rather than letting it run past an edge that
- * clips it, and an escape itself is never split across two lines.
+ * clips it. Where an escape is drawn as a highlighted span — the card, the
+ * composer's bar, the run card, the resolution row — the span is never
+ * split across two lines. The palette's Approve row and the Always-allow
+ * toast take the plain-text form, which wraps like any other text and can
+ * break inside an escape (every character stays on screen); the run's
+ * Event log, which is not an approval surface, cuts its one-line rows with
+ * an ellipsis.
  */
 
 import table from "./hidden-chars.json";

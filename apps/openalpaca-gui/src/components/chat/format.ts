@@ -190,10 +190,12 @@ export function shortTitle(title: string, words = 3): string {
  * pretty-printed rather than flattened, because the user is being asked to
  * approve exactly these bytes.
  *
- * The bare-string shortcut steps aside for a string holding a control
- * character — a line break, a tab, a carriage return, ESC: the whole value
- * is then pretty-printed, and JSON writes each one out (`\n`, `\t`, `\r`,
- * `\u001b`) as every other approval surface does. Drawn as layout instead, a
+ * The bare-string shortcut steps aside for a string holding a C0 control
+ * character (U+0000–U+001F) — a line break, a tab, a carriage return, ESC:
+ * the whole value is then pretty-printed, and JSON writes each one out
+ * (`\n`, `\t`, `\r`, `\u001b`) as every other approval surface does. DEL
+ * and the C1 controls, which JSON leaves raw, keep the bare form and are
+ * shown as `<U+XXXX>` by the card's escape. Drawn as layout instead, a
  * command's own line break looks exactly like the box's soft wrap, so
  * `echo … wait` over `rm -rf ~` reads as one echo while the shell runs two
  * commands.
