@@ -67,8 +67,7 @@ function strings(value: unknown): string[] {
 
 /**
  * What Confirm adopts with a candidate's text besides its title — its
- * aliases, tags and fact key — each escaped as a one-line field, in the
- * order `openalpaca memory show` prints them.
+ * aliases, tags and fact key — each escaped as a one-line field.
  */
 function adoptedFields(
   frontmatter: Record<string, unknown>,
