@@ -1369,11 +1369,12 @@ async fn the_preview_is_daemon_authored_and_bounded() {
          Your note is kept as history in the Memory view."
     );
 
-    // Long notes are cut, and the whole stays within the bound.
+    // Long notes are cut, and the whole stays within the bound — the line
+    // that counts what was left out included, which no cut reaches.
     let long = "word ".repeat(2000);
     let target = h.user_note(
         ALICE,
-        &format!("A very long title {}", "x".repeat(150)),
+        &format!("A very long title\u{200b} {}", "x".repeat(150)),
         &format!("# Long\n\n## Knowledge\n{long}\n"),
     );
     let row = typed_row(&h, "Replace it.", "2026-09-24 10:00:00");
@@ -1405,6 +1406,12 @@ async fn the_preview_is_daemon_authored_and_bounded() {
     assert!(preview.contains('…'), "{preview}");
     assert!(
         preview.contains("(from what you said on 2026-09-24)"),
+        "{preview}"
+    );
+    assert!(
+        preview.ends_with(
+            "\nThis preview leaves out 1 hidden character; the Memory view shows it as <U+…>."
+        ),
         "{preview}"
     );
 }
@@ -1455,7 +1462,12 @@ async fn the_preview_and_the_block_carry_no_control_characters() {
         preview.contains("The user[1A[2K edits with Helix."),
         "{preview}"
     );
-    assert_eq!(preview.lines().count(), 5, "{preview}");
+    assert_eq!(preview.lines().count(), 6, "{preview}");
+    assert_eq!(
+        preview.lines().last(),
+        Some("This preview leaves out 9 hidden characters; the Memory view shows them as <U+…>."),
+        "{preview}"
+    );
 
     let mut other = h.tool_ctx(ALICE);
     other.lane_key = Some(format!("{ALICE}:other"));
@@ -1475,7 +1487,8 @@ async fn the_preview_and_the_block_carry_no_control_characters() {
 /// (U+202E) makes `xileH` read as "Helix", an isolate or a zero-width
 /// character hides text. The preview and the `<memory_suggestions>` line
 /// carry none; the line and paragraph separators (U+2028, U+2029) are
-/// spaces like any other whitespace, so the preview keeps its five lines.
+/// spaces like any other whitespace, so the preview keeps its five lines,
+/// and a sixth counts what was left out.
 #[tokio::test]
 async fn the_preview_and_the_block_carry_no_format_characters() {
     use crate::prompt_ctx::sources::memory::memory_suggestions_block;
@@ -1522,7 +1535,12 @@ async fn the_preview_and_the_block_carry_no_format_characters() {
         preview.contains("New: The user edits with xileH."),
         "{preview}"
     );
-    assert_eq!(preview.lines().count(), 5, "{preview}");
+    assert_eq!(preview.lines().count(), 6, "{preview}");
+    assert_eq!(
+        preview.lines().last(),
+        Some("This preview leaves out 13 hidden characters; the Memory view shows them as <U+…>."),
+        "{preview}"
+    );
 
     let mut other = h.tool_ctx(ALICE);
     other.lane_key = Some(format!("{ALICE}:other"));
@@ -1544,7 +1562,11 @@ async fn the_preview_and_the_block_carry_no_format_characters() {
 /// `Cc` and `Cf`: a variation selector, the combining grapheme joiner, a
 /// Hangul filler and a tag-block selector draw as nothing, and U+2800 and
 /// U+FFFC as blank space a run of which wraps — none of them is a control or
-/// a format character, and none may reach the card's text either.
+/// a format character, and none may reach the card's text either. And the
+/// card says so: `memory_confirm`'s arguments are three ids, so the preview
+/// is the only text on it, and a drop nobody is told about is item 1's
+/// danger — one last line counts what was left out and says where it is
+/// shown.
 #[tokio::test]
 async fn the_preview_drops_every_character_an_approval_escapes() {
     use crate::utils::text::needs_escape;
@@ -1588,7 +1610,12 @@ async fn the_preview_drops_every_character_an_approval_escapes() {
         preview.contains("New: The user edits with Helix."),
         "{preview}"
     );
-    assert_eq!(preview.lines().count(), 5, "{preview}");
+    assert_eq!(preview.lines().count(), 6, "{preview}");
+    assert_eq!(
+        preview.lines().last(),
+        Some("This preview leaves out 13 hidden characters; the Memory view shows them as <U+…>."),
+        "{preview}"
+    );
 }
 
 /// The turn's own `ModelTool` read context, as the main loop reads with it.

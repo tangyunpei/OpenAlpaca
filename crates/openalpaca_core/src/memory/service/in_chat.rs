@@ -507,6 +507,13 @@ fn one_line(text: &str, max: usize) -> String {
 /// text being replaced decides how it is named — the owner's own (saved,
 /// edited by hand, imported) is "yours", anything learning wrote is "the
 /// current note".
+///
+/// Its fields drop every character an approval's escape would show
+/// ([`one_line`]), and when any was dropped one last line says how many and
+/// where they are shown ([`left_out_line`]): `memory_confirm`'s arguments
+/// are three ids, so this preview is the only text on its card, and a drop
+/// nobody is told about is the danger the escape exists for. No cut reaches
+/// that line.
 fn render_preview(target: &NoteView, suggestion: &Note, said_on: &str) -> String {
     let (named, label, kept) = match target.derived.origin {
         Origin::User => ("your saved note", "Yours", "Your note is kept"),
@@ -514,8 +521,18 @@ fn render_preview(target: &NoteView, suggestion: &Note, said_on: &str) -> String
         Origin::Imported => ("your imported note", "Yours", "Your note is kept"),
         _ => ("the note", "Current", "The current note is kept"),
     };
-    let reason = super::suggestions::replace_reason(&suggestion.body)
-        .map(|r| one_line(&r, PREVIEW_REASON_BYTES));
+    let raw_reason = super::suggestions::replace_reason(&suggestion.body);
+    let target_text = knowledge_text(&target.note.body);
+    let suggested_text = knowledge_text(&suggestion.body);
+    let left_out = left_out_line(
+        [
+            target.note.title.as_str(),
+            suggestion.title.as_str(),
+            raw_reason.as_deref().unwrap_or(""),
+        ],
+        [target_text.as_str(), suggested_text.as_str()],
+    );
+    let reason = raw_reason.map(|r| one_line(&r, PREVIEW_REASON_BYTES));
     let when = format!("from what you said on {said_on}");
     let why = match reason {
         Some(reason) => format!("Why: {reason} ({when})"),
@@ -525,8 +542,41 @@ fn render_preview(target: &NoteView, suggestion: &Note, said_on: &str) -> String
         "Replace {named} “{}” with “{}”?\n{label}: {}\nNew: {}\n{why}\n{kept} as history in the Memory view.",
         one_line(&target.note.title, PREVIEW_TITLE_BYTES),
         one_line(&suggestion.title, PREVIEW_TITLE_BYTES),
-        one_line(&knowledge_text(&target.note.body), PREVIEW_TEXT_BYTES),
-        one_line(&knowledge_text(&suggestion.body), PREVIEW_TEXT_BYTES),
+        one_line(&target_text, PREVIEW_TEXT_BYTES),
+        one_line(&suggested_text, PREVIEW_TEXT_BYTES),
     );
-    cut_bytes(&text, PREVIEW_MAX_BYTES).0
+    match left_out {
+        None => cut_bytes(&text, PREVIEW_MAX_BYTES).0,
+        Some(line) => {
+            let (kept, _) = cut_bytes(&text, PREVIEW_MAX_BYTES - line.len() - 1);
+            format!("{kept}\n{line}")
+        }
+    }
+}
+
+/// The preview's last line when its fields dropped anything an approval's
+/// escape shows, or `None`: how many characters, counted as the Memory
+/// view's Suggestions card counts the same five fields — the titles and the
+/// reason with the one-line escape, the two texts with the arguments' — in
+/// the whole of each, not only the part a byte budget kept. That card shows
+/// each of them as `<U+XXXX>`. The counterpart of an approval's notice for
+/// a text that drops: it keeps R2's drop (spec item 4) and tells the person
+/// what the drop left out and where it is (A6, A8).
+fn left_out_line(lines: [&str; 3], texts: [&str; 2]) -> Option<String> {
+    use crate::utils::text::{escape_hidden, escape_hidden_line};
+    let hidden = lines
+        .iter()
+        .map(|t| escape_hidden_line(t).hidden)
+        .chain(texts.iter().map(|t| escape_hidden(t).hidden))
+        .sum::<usize>();
+    match hidden {
+        0 => None,
+        1 => Some(
+            "This preview leaves out 1 hidden character; the Memory view shows it as <U+…>."
+                .to_string(),
+        ),
+        n => Some(format!(
+            "This preview leaves out {n} hidden characters; the Memory view shows them as <U+…>."
+        )),
+    }
 }
