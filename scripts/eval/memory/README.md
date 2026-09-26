@@ -539,10 +539,13 @@ costs cents.
 
 On the local test model the cost is time (design 09 §7.5): L ≈ 4 h (300 fed
 turns, about 40 flushes, 470 questions, 83 coverage calls), a replay ≈ 0.5 h,
-L0 ≈ 3.3 h, L-S ≈ 0.5 h. Since the L8 fix slice a flush that stops
-`BadOutput` is retried up to twice more (L8 saw 11 such flushes in L, 16 in
-L-episodes), an extraction answer may run to 4,140 output tokens instead of
-2,800 (a runaway takes about 35 s longer), and a coverage verdict to 2,048. `OPENALPACA_MEMORY_EVAL_SESSIONS=2` with
+L0 ≈ 3.3 h, L-S ≈ 0.5 h. Since the L8 fix slice a `switch`, `replay`,
+summary or forced re-run flush that stops `BadOutput` is retried up to
+twice more (L8's fed flushes stopped `BadOutput` 11 times in L — 8
+`switch`, 3 `turns` — and 16 in L-episodes; a `turns` one waits for its
+session's next flush), an
+extraction answer may run to 2,892 output tokens instead of 2,800, and a
+coverage verdict to 2,048. `OPENALPACA_MEMORY_EVAL_SESSIONS=2` with
 `OPENALPACA_MEMORY_EVAL_LIMIT=5` is a smoke run of the whole L pipeline.
 
 ## Reading a report

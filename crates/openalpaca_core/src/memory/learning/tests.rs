@@ -1627,22 +1627,51 @@ async fn a_chunk_under_the_minimum_is_advanced_past_with_no_call() {
 
 // ── The budget (§1.6) ───────────────────────────────────────────────────
 
-/// The L8 fix slice's P3: the largest answer the prompt permits — the JSON
-/// around the items and every item it allows at the per-item output L8
-/// measured — fits the call's output ceiling, whatever the window and the
-/// `extract_max_items_per_call` cap; and a large window still gets the
-/// cap's default, twelve. The measurement: on the successful single-call
-/// flushes of L, L-episodes and the three replays, output tokens per item
-/// ran at a median of 205–232 and a p90 of 242–319 per run; the JSON
-/// around them fits a 300-token allowance (a line fitted over 229 flushes
-/// crosses zero items at 84 tokens).
+/// The L8 fix slice's P3, re-derived in its repair round 1 from the line
+/// fitted to what L8 measured. Over its 230 successful single-call flushes
+/// (L, L-episodes, L-S and the three replays, their forced re-runs among
+/// them) an answer of `n` items cost 83.6 + 179.5 `n` output tokens, least
+/// squares, with a p95 residual of 182; an item's cost over that intercept
+/// had a p90 of 216 tokens; and the
+/// answers of five or more items ran at most 241 tokens an item. The
+/// budget's band — [`ANSWER_OVERHEAD_TOKENS`] for the JSON around the
+/// items, at least the intercept and the residual, and
+/// [`ITEM_OUTPUT_TOKENS`] an item — lies over the p90 of every answer size
+/// L8 saw, and the largest answer the prompt permits fits the call's
+/// ceiling by the fitted line with its residual, by the worst large answer
+/// and by the band, for any window of 2,064 tokens or more and any cap. A
+/// smaller window still gets one item, over the band. A large window keeps
+/// the default twelve.
 #[test]
 fn the_largest_answer_the_prompt_permits_fits_the_ceiling() {
-    const MEASURED_P90_TOKENS_PER_ITEM: usize = 319;
-    const MEASURED_ANSWER_OVERHEAD_TOKENS: usize = 84;
+    // The p90 output tokens of an answer of `n` items, for each size with
+    // at least four answers.
+    const MEASURED_P90_BY_ITEMS: [(usize, usize); 7] = [
+        (1, 308),
+        (2, 526),
+        (3, 732),
+        (4, 937),
+        (5, 1105),
+        (6, 1274),
+        (7, 1441),
+    ];
+    const FITTED_INTERCEPT: usize = 84;
+    const FITTED_SLOPE: usize = 180;
+    const P95_RESIDUAL: usize = 182;
+    const WORST_LARGE_ANSWER_TOKENS_PER_ITEM: usize = 241;
+    let band = |n: usize| ANSWER_OVERHEAD_TOKENS + n * ITEM_OUTPUT_TOKENS;
+    const { assert!(ANSWER_OVERHEAD_TOKENS >= FITTED_INTERCEPT + P95_RESIDUAL) };
+    for (n, p90) in MEASURED_P90_BY_ITEMS {
+        assert!(
+            p90 <= band(n),
+            "{n} items: a p90 of {p90} tokens over the band's {}",
+            band(n)
+        );
+    }
     for window in [
-        None,
+        Some(2064),
         Some(4096),
+        None,
         Some(8192),
         Some(16_384),
         Some(32_768),
@@ -1650,19 +1679,25 @@ fn the_largest_answer_the_prompt_permits_fits_the_ceiling() {
     ] {
         for cap in [1, 5, 12, 50] {
             let b = Budget::for_window(window, cap, None);
+            let (n, out) = (b.items, b.out_tokens as usize);
+            assert!(n >= 1 && n <= cap, "{window:?}, cap {cap}: {b:?}");
+            let fitted = FITTED_INTERCEPT + n * FITTED_SLOPE + P95_RESIDUAL;
+            let worst = if n >= 5 {
+                n * WORST_LARGE_ANSWER_TOKENS_PER_ITEM
+            } else {
+                0
+            };
+            let largest = fitted.max(worst).max(band(n));
             assert!(
-                b.items >= 1 && b.items <= cap,
-                "{window:?}, cap {cap}: {b:?}"
-            );
-            let largest = MEASURED_ANSWER_OVERHEAD_TOKENS + b.items * MEASURED_P90_TOKENS_PER_ITEM;
-            assert!(
-                largest <= b.out_tokens as usize,
-                "{window:?}, cap {cap}: {} items at the measured p90 need {largest} tokens, over the ceiling of {}",
-                b.items,
-                b.out_tokens
+                largest <= out,
+                "{window:?}, cap {cap}: {n} items may need {largest} tokens, over the ceiling of {out}"
             );
         }
     }
+    // Under 2,064 tokens the one-item floor is over the band.
+    let tiny = Budget::for_window(Some(1024), 12, None);
+    assert_eq!(tiny.items, 1);
+    assert!(band(1) > tiny.out_tokens as usize, "{tiny:?}");
     let default_cap = DaemonConfig::default()
         .orchestrator
         .costs
@@ -1674,17 +1709,19 @@ fn the_largest_answer_the_prompt_permits_fits_the_ceiling() {
     );
 }
 
-/// An 8,192-token local model gets 7,201 bytes of transcript, 3,086 bytes
-/// of known notes and 5 items (9 until the L8 fix slice's P3, which would
-/// not fit its 2,048 output tokens at the measured p90); a 128K model gets
-/// 24 KiB, 8 KiB and 12 items under a 4,140-token ceiling.
+/// An 8,192-token local model — and a model whose window is unknown — gets
+/// 7,201 bytes of transcript, 3,086 bytes of known notes and 8 items (9
+/// before the L8 fix slice, whose 180 tokens an item was the fitted slope
+/// with no band; 5 in its first cut, which counted the JSON twice); a 16K
+/// one 12 items under the 2,892-token ceiling, and a 4K one 3; a 128K model
+/// gets 24 KiB, 8 KiB and 12 items.
 #[test]
 fn budget_for_an_8k_window() {
     assert_eq!(
         Budget::for_window(Some(8192), 12, None),
         Budget {
             out_tokens: 2048,
-            items: 5,
+            items: 8,
             transcript_bytes: 7201,
             known_bytes: 3086,
         }
@@ -1695,9 +1732,27 @@ fn budget_for_an_8k_window() {
         "an unknown window is Ollama's 8192 fallback"
     );
     assert_eq!(
+        Budget::for_window(Some(16_384), 12, None),
+        Budget {
+            out_tokens: 2892,
+            items: 12,
+            transcript_bytes: 17_488,
+            known_bytes: 7495,
+        }
+    );
+    assert_eq!(
+        Budget::for_window(Some(4096), 12, None),
+        Budget {
+            out_tokens: 1024,
+            items: 3,
+            transcript_bytes: 2900,
+            known_bytes: 1243,
+        }
+    );
+    assert_eq!(
         Budget::for_window(Some(128_000), 12, None),
         Budget {
-            out_tokens: 4140,
+            out_tokens: 2892,
             items: 12,
             transcript_bytes: 24 * 1024,
             known_bytes: 8 * 1024,

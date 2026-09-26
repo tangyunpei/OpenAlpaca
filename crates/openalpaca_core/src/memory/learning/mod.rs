@@ -42,20 +42,23 @@ pub(crate) use lookup::{MAX_KEYS_BYTES, render_keys};
 pub const MAX_TRANSCRIPT_BYTES: usize = 24 * 1024;
 /// The most known-note text one call carries (L2 fills it).
 pub const MAX_KNOWN_BYTES: usize = 8 * 1024;
-/// The output an extraction answer spends on the JSON around its items.
+/// The output an extraction answer spends on the JSON around its items: at
+/// least the intercept of the line fitted to the L8 evaluation's answers
+/// (84 tokens) plus its p95 residual (182).
 pub const ANSWER_OVERHEAD_TOKENS: usize = 300;
-/// The output one item is budgeted at: the highest per-run p90 the L8
-/// evaluation measured on successful single-call flushes (319 tokens an
-/// item; medians 205–232), rounded up — the L8 fix slice's P3. The 180 it
-/// replaces was under even the median, so the largest answer the prompt
-/// permitted could be cut at the ceiling.
-pub const ITEM_OUTPUT_TOKENS: usize = 320;
+/// The output one item is budgeted at, over that allowance: the p90 of an
+/// item's cost over the fitted intercept on L8's 230 successful single-call
+/// flushes — the L8 fix slice's P3, re-derived in its repair round 1. The
+/// fitted slope is 180 (the old figure, with no band above it); the answers
+/// of five or more items ran at most 241 tokens an item, which the band
+/// covers up to [`CEILING_ITEMS`] items.
+pub const ITEM_OUTPUT_TOKENS: usize = 216;
 /// The items the ceiling is sized for: `extract_max_items_per_call`'s
 /// default, so a large window's largest permitted answer fits.
 pub const CEILING_ITEMS: usize = 12;
 /// The most output tokens one call asks for: the JSON's allowance and
-/// [`CEILING_ITEMS`] items at [`ITEM_OUTPUT_TOKENS`] — 4,140 (2,800 until
-/// the L8 fix slice).
+/// [`CEILING_ITEMS`] items at [`ITEM_OUTPUT_TOKENS`] — 2,892, and twelve
+/// items at the worst rate L8 measured (2,800 until the L8 fix slice).
 pub const MAX_OUTPUT_TOKENS: usize = ANSWER_OVERHEAD_TOKENS + CEILING_ITEMS * ITEM_OUTPUT_TOKENS;
 /// The window a model with no known context window is budgeted against:
 /// Ollama's discovery fallback.
@@ -122,17 +125,18 @@ pub const EPISODE_OUT_TOKENS: u32 = 1024;
 ///
 /// ```text
 /// window   = the model's window, or 8192 tokens when unknown
-/// out_tok  = min(4140, window / 4)                      the request's max_tokens
-/// items    = min(extract_max_items_per_call, (out_tok − 300) / 320)
+/// out_tok  = min(2892, window / 4)                      the request's max_tokens
+/// items    = min(extract_max_items_per_call, (out_tok − 300) / 216)
 /// in_bytes = (window − out_tok − 1000) × 2               2 bytes/token: safe for CJK
 /// transcript_bytes = min(24 KiB, in_bytes × 7 / 10)
 /// known_bytes      = min(8 KiB,  in_bytes × 3 / 10)
 /// ```
 ///
 /// The largest answer the prompt permits — [`ANSWER_OVERHEAD_TOKENS`] and
-/// `items` items at [`ITEM_OUTPUT_TOKENS`] — therefore always fits `out_tok`
-/// (the L8 fix slice's P3): a window of 16,560 tokens or more gets the full
-/// ceiling and the default twelve items, an 8,192-token one five.
+/// `items` items at [`ITEM_OUTPUT_TOKENS`] — therefore fits `out_tok` in
+/// any window of 2,064 tokens or more (the L8 fix slice's P3); a smaller
+/// one still gets one item, over it. A window of 11,568 tokens or more gets
+/// the full ceiling and the default twelve items, an 8,192-token one eight.
 ///
 /// On a provider that needs a key, `in_bytes` is also capped so the chunk's
 /// whole estimated request (bytes ÷ 4, the router's own estimate) — its
