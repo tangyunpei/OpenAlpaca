@@ -250,6 +250,21 @@ describe("ToolConfirmationBanner — hidden characters (§3.14)", () => {
     expect(box?.textContent).toBe('{\n  "path": ""\n}');
   });
 
+  /**
+   * One combining mark on the trailing space is no longer whitespace to
+   * `trim`, and it draws as a speck: bare, the value would read
+   * `/srv/allowed` again. The quotes show the space under it.
+   */
+  it("keeps a value's quotes when a combining mark ends it", () => {
+    const { box, escapes } = card({
+      toolName: "file_read",
+      toolArguments: { path: "/srv/allowed \u{5C1}" },
+    });
+    expect(box?.textContent).toBe('{\n  "path": "/srv/allowed \u{5C1}"\n}');
+    expect(escapes).toEqual([]);
+    expect(screen.queryByText(/hidden character/)).toBeNull();
+  });
+
   it("keeps the pretty-printed arguments' own lines", () => {
     const { box } = card({
       toolName: "file_write",

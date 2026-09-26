@@ -186,4 +186,34 @@ describe("formatToolArguments (§3.14)", () => {
       "ls  -la /tmp",
     );
   });
+
+  /**
+   * A combining mark sits on the character before it, and `trim` stops at
+   * it: `/srv/allowed ` and U+05C1 draws as `/srv/allowed` with a speck a
+   * space to the right, and it is another file. A mark that opens a value
+   * sits on nothing, and U+05C1 before ` /etc/passwd` makes a relative path.
+   * Either end a mark, the value keeps its quotes, which show the space.
+   */
+  it("shows a value that starts or ends with a combining mark as JSON", () => {
+    expect(formatToolArguments({ path: "/srv/allowed \u{5C1}" })).toBe(
+      '{\n  "path": "/srv/allowed \u{5C1}"\n}',
+    );
+    expect(formatToolArguments({ path: "/srv/allowed \u{5B4}" })).toBe(
+      '{\n  "path": "/srv/allowed \u{5B4}"\n}',
+    );
+    expect(formatToolArguments({ url: "https://a.example/ \u{323}" })).toBe(
+      '{\n  "url": "https://a.example/ \u{323}"\n}',
+    );
+    expect(formatToolArguments({ path: "\u{5C1} /etc/passwd" })).toBe(
+      '{\n  "path": "\u{5C1} /etc/passwd"\n}',
+    );
+    expect(formatToolArguments({ path: "\u{301}/etc/passwd" })).toBe(
+      '{\n  "path": "\u{301}/etc/passwd"\n}',
+    );
+    expect(formatToolArguments("ls -la \u{323}")).toBe('"ls -la \u{323}"');
+    // A mark inside the value keeps the bare form.
+    expect(formatToolArguments({ query: "cafe\u{301} menu" })).toBe(
+      "cafe\u{301} menu",
+    );
+  });
 });

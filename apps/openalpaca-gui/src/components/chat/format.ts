@@ -201,9 +201,12 @@ export function shortTitle(title: string, words = 3): string {
  * commands.
  *
  * It also steps aside for an empty value and for one that starts or ends
- * with whitespace: bare, nothing marks where a value ends, so a trailing
- * space (`/srv/allowed `, another file) is not seen and an empty value draws
- * no box at all. JSON's quotes show its extent, as on every other surface.
+ * with whitespace or a combining mark: bare, nothing marks where a value
+ * ends, so a trailing space (`/srv/allowed `, another file) is not seen, nor
+ * one a mark sits on (a speck, and `trim` stops at the mark), and an empty
+ * value draws no box at all. JSON's quotes show its extent, as on every
+ * other surface. The cost: a value whose last letter carries its accent as
+ * a mark (decomposed text, many Thai or Devanagari words) keeps its quotes.
  */
 const COMMAND_KEYS = ["command", "cmd", "script", "query", "path", "url"];
 
@@ -211,12 +214,21 @@ const COMMAND_KEYS = ["command", "cmd", "script", "query", "path", "url"];
 const JSON_ESCAPED_CONTROL = /[\u0000-\u001f]/u;
 
 /**
+ * An end nothing marks when the value is drawn bare: whitespace (what `trim`
+ * strips), or a combining mark, which sits on the character before it — a
+ * space among them — or, opening the value, on nothing.
+ */
+const UNMARKED_END = /^[\s\p{M}]|[\s\p{M}]$/u;
+
+/**
  * A string the card may show bare: nothing in it JSON would write out, and
- * both its ends visible (not empty, no leading or trailing whitespace).
+ * both its ends visible (not empty, neither end whitespace or a mark).
  */
 function showsBare(value: string): boolean {
   return (
-    value !== "" && value === value.trim() && !JSON_ESCAPED_CONTROL.test(value)
+    value !== "" &&
+    !UNMARKED_END.test(value) &&
+    !JSON_ESCAPED_CONTROL.test(value)
   );
 }
 
