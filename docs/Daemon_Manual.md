@@ -1252,10 +1252,10 @@ first`), and the acknowledgement names the tool it approved or denied
 request had already timed out.
 
 Every hidden or invisible character in the prompt's tool name and arguments (a
-bidi override, a zero-width or control character, a variation selector, an
-object replacement character — U+FFFC, which Apple devices draw as blank space
-— and in the name also a line break or any space but a plain one) is shown as
-`<U+XXXX>`, and a line under the arguments counts them
+bidi override, a zero-width or control character, a variation selector, any
+space but a plain one, an object replacement character — U+FFFC, which Apple
+devices draw as blank space — and in the name also a line break or a tab) is
+shown as `<U+XXXX>`, and a line under the arguments counts them
 (`Note: this request contains 2 hidden characters, shown as <U+…>.`). The
 arguments are cut after 500 bytes, and the cut says how much it left out
 (`... (31 more characters not shown)`). Discord receives the prompt with its

@@ -227,7 +227,7 @@ fn listing(prompts: &[PendingPrompt], format: OutputFormat, tty: bool) -> String
 
 /// A prompt's tool-controlled text as a person is shown it: the tool's name
 /// and the agent's id on one line each (`escape_hidden_line`, which also
-/// shows a line break and every space but the plain one), the arguments
+/// shows a line break and a tab), the arguments
 /// serialized on one line and then escaped (`escape_hidden`). The name comes
 /// from a third party (an MCP `<server>__<tool>` or plugin `<plugin>::<tool>`
 /// name), the id from a template, the arguments from the model.
@@ -1111,7 +1111,7 @@ mod tests {
     #[test]
     fn the_json_listing_writes_hidden_characters_as_json_escapes() {
         let prompts = vec![PendingPrompt {
-            // A wide blank: every JSON string is one line, so the one-line set.
+            // A wide blank, which serde_json writes raw.
             lane_key: Some("alice\u{3000}:gui".to_string()),
             ..spoofed_prompt()
         }];

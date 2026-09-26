@@ -165,11 +165,11 @@ describe("RunCard (§3.19)", () => {
   it("names the tool a blocked run waits on with its hidden characters shown as escapes", () => {
     card(
       { status: "running", note: null },
-      { blocked: true, blockedOn: "srv\u{202E}__x\u{200B}\u{3000}" },
+      { blocked: true, blockedOn: "srv\u{202E}__x\u{200B}\t" },
     );
     const line = screen.getByText(/Waiting on you:/);
     expect(line.textContent).toBe(
-      "Waiting on you: srv<U+202E>__x<U+200B><U+3000> — approve or deny it in the chat.",
+      "Waiting on you: srv<U+202E>__x<U+200B><U+0009> — approve or deny it in the chat.",
     );
     expect(line.querySelectorAll("[data-hidden-char]")).toHaveLength(3);
   });

@@ -45,15 +45,12 @@ describe("ResolutionRow (§3.15)", () => {
     render(
       <ResolutionRow
         resolution="denied"
-        note={pendingResolutionNote(
-          "denied",
-          "srv__rm\u{202E}fdp\u{200B}\u{3000}",
-        )}
+        note={pendingResolutionNote("denied", "srv__rm\u{202E}fdp\u{200B}\t")}
       />,
     );
     const note = screen.getByText(/denied · the agent was told to skip it\./);
     expect(note.textContent).toBe(
-      "srv__rm<U+202E>fdp<U+200B><U+3000> denied · the agent was told to skip it.",
+      "srv__rm<U+202E>fdp<U+200B><U+0009> denied · the agent was told to skip it.",
     );
     expect(note.querySelectorAll("[data-hidden-char]")).toHaveLength(3);
     expect(screen.queryByText(/hidden character/)).toBeNull();

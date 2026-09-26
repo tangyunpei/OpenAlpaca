@@ -8,7 +8,10 @@
  * controls inside a string and passes everything else through, so a bidi
  * override (U+202E), a zero-width space (U+200B), a C1 control or a tag
  * character reaches the card raw — and can make the card read differently
- * from what runs. Every such character is **shown**, never dropped: dropped,
+ * from what runs; so does a blank that is not the plain space (a braille
+ * blank, a no-break or ideographic space), a run of which wraps into empty
+ * lines between what is read and what runs. Every such character is
+ * **shown**, never dropped: dropped,
  * `/srv/allow` + U+200B + `ed` would read as a path it is not, and the person
  * would not be told anything was there. `hiddenNotice` says how many.
  *
@@ -28,9 +31,9 @@
  *   `url`, …) steps aside for a value holding one, so a value's own line
  *   break or tab never reaches the card as layout.
  * - **A one-line field** — the tool's name, the agent's name — takes
- *   `escapeHiddenLine`, which also shows a newline, a tab and every space
- *   but the plain one: a name has no layout of its own, and a line break or
- *   a run of wide blanks in it would draw lines the card does not have.
+ *   `escapeHiddenLine`, which also shows a newline and a tab: a name has no
+ *   layout of its own, and a line break in it would draw lines the card does
+ *   not have.
  * - **The daemon-authored `preview`** is not escaped. It is OpenAlpaca's own
  *   prose, composed to be read, and the daemon strips it of control and
  *   format characters before any surface sees it; the values that decide
@@ -107,8 +110,10 @@ const LINE_SET = merged([
 
 /**
  * A code point the arguments show as `<U+XXXX>`: Unicode's control, format
- * and default-ignorable code points, U+2028/U+2029 and U+FFFC (which macOS
- * draws as an empty cell), but not `\n` and `\t` (Rust's `needs_escape`).
+ * and default-ignorable code points, every space but the plain one (U+2028
+ * and U+2029 among them), U+2800 BRAILLE PATTERN BLANK and U+FFFC (which
+ * macOS draws as an empty cell), but not `\n` and `\t` (Rust's
+ * `needs_escape`).
  */
 export function needsEscape(codePoint: number): boolean {
   return contains(ARGUMENT_SET, codePoint);
@@ -116,8 +121,7 @@ export function needsEscape(codePoint: number): boolean {
 
 /**
  * A code point a one-line field shows as `<U+XXXX>`: every `needsEscape`
- * one, and every space but the plain one — `\n` and `\t` among them — and
- * U+2800 BRAILLE PATTERN BLANK (Rust's `needs_escape_in_line`).
+ * one, and `\n` and `\t` (Rust's `needs_escape_in_line`).
  */
 export function needsEscapeInLine(codePoint: number): boolean {
   return contains(LINE_SET, codePoint);
@@ -186,8 +190,8 @@ export function escapeHidden(text: string): Escaped {
 
 /**
  * A one-line field — a tool's name, an agent's name: every
- * `needsEscapeInLine` character as `<U+XXXX>`, newlines, tabs and wide
- * blanks included (Rust's `escape_hidden_line`).
+ * `needsEscapeInLine` character as `<U+XXXX>`, newlines and tabs included
+ * (Rust's `escape_hidden_line`).
  */
 export function escapeHiddenLine(text: string): Escaped {
   return escapeWhere(text, needsEscapeInLine);

@@ -539,10 +539,10 @@ impl ConfirmationDetails {
 /// JSON is serialized) and one notice under the arguments counts them. The
 /// name is one line — an MCP `<server>__<tool>` or plugin `<plugin>::<tool>`
 /// name is whatever its third party lists — so it takes `escape_hidden_line`,
-/// which also shows a line break and every space but the plain one: a name
-/// cannot print a forged `Arguments:` block above the real one. The preview
-/// is left as it comes: the daemon composed it for reading and took every
-/// control and format character out of what it quotes (`utils::text::one_line`).
+/// which also shows a line break and a tab: a name cannot print a forged
+/// `Arguments:` block above the real one. The preview is left as it comes:
+/// the daemon composed it for reading and took every control and format
+/// character out of what it quotes (`utils::text::one_line`).
 /// Display only — the answer is built from the frame's `request_id`, untouched.
 pub(crate) fn confirmation_details(frame: &serde_json::Value) -> ConfirmationDetails {
     use openalpaca_core::utils::text::{escape_hidden, escape_hidden_line, hidden_notice};

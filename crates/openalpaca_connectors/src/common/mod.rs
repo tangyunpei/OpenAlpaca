@@ -96,11 +96,11 @@ const PROMPT_ARGUMENTS_BYTES: usize = 500;
 /// from outside OpenAlpaca (an MCP `<server>__<tool>` or plugin
 /// `<plugin>::<tool>` name, model-written arguments), so every hidden
 /// character in them — a bidi override, a zero-width character, a variation
-/// selector, a C1 control — is shown as `<U+XXXX>` by [`escape_hidden`],
-/// escaped before the cut so the cut never splits an escape, and one notice
-/// line under the arguments counts them, those the cut left out included.
-/// The name is one line, so it goes through [`escape_hidden_line`], which
-/// also shows a newline, a tab and every other space but the plain one: a
+/// selector, a C1 control, a blank that is not the plain space — is shown as
+/// `<U+XXXX>` by [`escape_hidden`], escaped before the cut so the cut never
+/// splits an escape, and one notice line under the arguments counts them,
+/// those the cut left out included. The name is one line, so it goes
+/// through [`escape_hidden_line`], which also shows a newline and a tab: a
 /// name cannot break the prompt's lines, nor wrap its tail onto a line of
 /// its own with a run of wide blanks. A run of plain spaces can still wrap
 /// it there — residue, recorded at [`escape_hidden_line`]'s predicate.

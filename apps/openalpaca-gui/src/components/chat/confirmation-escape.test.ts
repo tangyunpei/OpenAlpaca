@@ -12,14 +12,14 @@ describe("escapeConfirmation", () => {
     const escaped = escapeConfirmation({
       toolName: "srv__rm\u{202E}fdp",
       toolArguments: { path: "/srv/allow\u{200B}ed", mode: "0755" },
-      agentName: "review\u{3000}agent",
+      agentName: "review\tagent",
     });
 
     expect(escaped.name.text).toBe("srv__rm<U+202E>fdp");
     expect(escaped.command.text).toBe(
       '{\n  "path": "/srv/allow<U+200B>ed",\n  "mode": "0755"\n}',
     );
-    expect(escaped.agent?.text).toBe("review<U+3000>agent");
+    expect(escaped.agent?.text).toBe("review<U+0009>agent");
     expect(escaped.hidden).toBe(3);
   });
 
