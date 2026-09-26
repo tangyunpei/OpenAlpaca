@@ -237,7 +237,7 @@ Optional variables:
 | `OPENALPACA_MEMORY_EVAL_SESSIONS` | L, L0, L-S: feed only the first N corpus sessions — a smoke run. Recorded (`conditions.learning.session_limit`). |
 | `OPENALPACA_MEMORY_EVAL_LEARN_FROM` | With `SYSTEM=L`: **replay** the learning phase of the L run whose scratch directory this names. See below. |
 | `OPENALPACA_MEMORY_EVAL_REJUDGE` | An archived report to **re-judge**; `SYSTEM` is then not needed, and neither is a store. See below. |
-| `OPENALPACA_MEMORY_EVAL_RECALL_MODE` | `index` or `excerpts`: the `[orchestrator.memory] recall_mode` of the run (design 09 §13.2). D, E and the learning systems' questions recall in it; a replay (no questions) or a `none` run (no memory service) records it only. Unset: the config's default, `index`. Any other value refuses the run before any model call, naming the two. Recorded (`conditions.recall_mode`). |
+| `OPENALPACA_MEMORY_EVAL_RECALL_MODE` | `index` or `excerpts`: the `[orchestrator.memory] recall_mode` of the run (design 09 §13.2). D, E and the learning systems' questions recall in it; a replay without a question file, or a `none` run (no memory service), records it only. Unset: the config's default, `index`. Any other value refuses the run before any model call, naming the two. Recorded (`conditions.recall_mode`). |
 
 The data-validation and harness unit tests run without any of this:
 
@@ -413,12 +413,23 @@ It makes no reader call, so its store holds the learning queue's notes and
 none of the live reader's own `memory_store` notes — which were most of
 L8's live store (L: 80 of 116 active learned notes). The spread over three
 replays is therefore the **extraction path's** variance on a fixed
-transcript: compare a replay with the live run's `extraction` numbers (the
-`*_by_surface` fields below), never with its pooled ones. A live run is the
-only sample of the whole system — reader and extractor together; a second
-live run (L-episodes was one) is the way to see its variance. Reader writes
-are not re-applied in a replay: that would need a live feed that records
-them.
+transcript, never a sample of the pooled figures. Beside a live run it
+compares **per note only**: the shares of active extraction notes with an
+other-script alias, with any alias and with a key
+(`aliases_by_surface.extraction`, `fact_keys_by_surface.extraction`, over a
+different set of notes). A live run's `coverage.by_surface` and
+`noise_by_surface` are not the extraction path's own coverage and noise:
+the coverage judge names one note per gold, so a gold both paths learned is
+credited to whichever note it named (L8's L: 34 of the reader's 58 matches
+also had an extraction note among the hits) and the note it passed over
+counts as noise; and the live extractor, listing the reader's notes among
+the known ones, writes fewer notes (L: 36 active extraction notes against
+the replays' 107–115, none dropped as already learned). L8's live
+`extraction` coverage of 12 of 83 against the replays' 60–66 is that
+attribution and pre-emption, not variance. A live run is the only sample of
+the whole system — reader and extractor together; a second live run
+(L-episodes was one) is the way to see its variance. Reader writes are not
+re-applied in a replay: that would need a live feed that records them.
 
 **What a learning report adds** (`learning`, `conditions.learning`):
 
@@ -429,23 +440,33 @@ them.
 | `learning.flushes` | Every flush: its label (`turns`, `switch`, `replay`, `forced_rerun`), `turns_fed` (a fed flush's place), `cursor_before` and `cursor_after` (the session's learning cursor, a message id, around it: the rows it moved past), its `attempts`, `attempt_stops` and `attempt_latencies_ms`, latency (over every attempt), the queue's counts per §2.4 outcome summed over the attempts, the notes it wrote, and `unusable_answers` |
 | `learning.episode_flushes` | L, and a replay asked questions: every conversation-summary flush (label `switch`, or `replay`): its attempts, calls, the summaries written, the windows it skipped after `MAX_ATTEMPTS` unusable answers (`skipped_unusable`), tokens, latency, the notes it wrote and its unusable answers |
 | `learning.learned` | The store after the phase, history and candidates included: status, origin, key, aliases, validity, sources, links, knowledge and `surface` — `extraction` when a learning flush's `memory_changed` created it, `model_tool` for any other learned note (the reader's `memory_store`) — conversation summaries left out |
-| `learning.episodes` | L: the conversation summaries the phase wrote, in the same shape |
-| `learning.coverage` | Per relied-on gold note: a historical search on its title and aliases (at most 5 notes) and the coverage judge's `MATCH <n>` or `NONE`; `share` is the fact coverage; `none`, `unparsed` (a reply with no verdict line — an unread row, not a miss; `unparsed_cut_at_max_tokens` of them ran to the cap), `not_found` and `judge_errors` (a failed judge call or a failed search — the row's `judge_error` begins `search:` for the second) counted apart; `by_surface`, `matched` by the writer of the note the judge chose. The judge's cap is its own, `conditions.learning.coverage_judge_max_tokens` (2048: at the QA judge's 400 every L8 unparsed verdict was a deliberation cut before its line) |
-| `learning.noise`, `learning.noise_by_surface` | Active learned notes no coverage call chose, and the candidates raised — pooled, and by path |
-| `learning.changed_facts` | The 8 pairs and the 7 corrections, each with its outcome (`new_active_old_superseded`, `new_active_old_same_key_loser`, `both_active_unlinked`, `new_missing`, `old_never_learned`, …) and whether the two notes share a key. When the judge matched one note for both golds and that note is active, no same-key loser, and supersedes a note the old gold's search returned, the store recorded the change: `new_active_old_superseded`, with `old_note_from: supersedes_link` (`judge` otherwise) |
+| `learning.episodes` | L, and a replay asked questions: the conversation summaries the phase wrote, in the same shape |
+| `learning.coverage` | Per relied-on gold note: a historical search on its title and aliases (at most 5 notes) and the coverage judge's `MATCH <n>` or `NONE`; `share` is the fact coverage; `none`, `unparsed` (a reply with no verdict line — an unread row, not a miss; `unparsed_cut_at_max_tokens` of them ran to the cap), `not_found` and `judge_errors` (a failed judge call or a failed search — the row's `judge_error` begins `search:` for the second) counted apart; `by_surface`, `matched` by the writer of the note the judge chose — in a live run the judge's single pick, not a path's own coverage (above). The judge's cap is its own, `conditions.learning.coverage_judge_max_tokens` (2048: at the QA judge's 400 every L8 unparsed verdict was a deliberation cut before its line). Against a report from before it (no `coverage_judge_max_tokens`), coverage can gain up to that report's `unparsed` count from the cap alone — L8's L 2, its replays 5–8 (up to +9.6 pp) — unless the old store is judged again: at temperature 0 a verdict that ended under 400 tokens is unchanged |
+| `learning.noise`, `learning.noise_by_surface` | Active learned notes no coverage call chose, and the candidates raised — pooled, and by path (in a live run, a path's note the judge passed over for the other path's counts as its noise) |
+| `learning.changed_facts` | The 8 pairs and the 7 corrections, each with its outcome (`new_active_old_superseded`, `new_active_old_same_key_loser`, `both_active_unlinked`, `new_missing`, `old_never_learned`, …) and whether the two notes share a key. When the judge matched one note for both golds and that note is active, no same-key loser, and supersedes a superseded note the old gold's search returned, the store recorded the change: `new_active_old_superseded`, with `old_note_from: supersedes_link` (`judge` otherwise) — and the pair's key reuse (`fact_keys.pairs_key_reused` of `pairs_with_two_notes`) is read over that linked note |
 | `learning.restatements`, `learning.restatements_by_surface` | Per `restate` turn: `nothing_written`, `automatic_replacement`, `suggestion`, `duplicate_note`, `first_learned` from the notes citing its row; where none does, `model_tool_write` (the reader wrote a note during the turn — `reader_notes`; its notes mostly carry no sources) or `extraction_failed` (no flush of the session moved its cursor across the turn's row without skipping a window: a flush reads from the cursor, so a turn an earlier flush skipped past stays unread whatever a later flush read, and a flush that skipped a window counts none of its range read), and `nothing_written` only for a turn extraction read and wrote nothing for. `by_surface` gives each path's own outcome; the tally is pooled and by path |
 | `learning.aliases`, `learning.fact_keys`, `…_by_surface` | The share of active learned notes with an alias in the other script (CJK against Latin), with any alias, and with a key — pooled, and by path |
 | `learning.suggestion_check` | L-S: per seeded note, its suggestions and its status before and after the confirm |
 | `learning.invariants` | User notes retired without a confirm, forgotten notes resurrected — both must be 0 — and `forced_rerun_checked`: the re-run forgot a note and its flush made an extraction call and read its session to the end (no `stopped`, no window skipped). For L and a replay a re-run that checked nothing (skipped, no call, a flush that stopped — an unusable answer, no model — or one whose window the queue skipped after `MAX_ATTEMPTS` unusable answers) is a violation, never a 0 that reads as a pass; `forced_rerun_unchecked` says why. A violation fails the run after the report is written |
 | `learning.cost` | Extraction calls and tokens, flush latency p50/p95 (over attempts, each one flush as a daemon runs it — as L8 measured it; a trigger's retries summed would read up to three times as long), flushes by trigger, the conversation summaries' calls, count and tokens, memory changes by surface, the reader's feed cost and its turn errors (`feed_turn_errors`, `feed_turn_errors_at`); and, over every attempt, for learning and for summaries apart (`episode_…`): `flush_attempts`, `unusable_answers` and `unusable_answers_by_reason` (`cut at max_tokens`, `empty completion`, or the parser's reason) and `windows_skipped_unusable`. Count failures from these, never from `flushes[].stopped`: a retried flush's `stopped` is its last attempt's, and a window skipped after `MAX_ATTEMPTS` unusable answers ends with none |
 
+The L8 fix slice reclassifies as well as adds (design 09 rev 3.26): H6
+moves a pair whose one note supersedes the old one to
+`new_active_old_superseded` (and into the pairs' key reuse), and H7 moves a
+restatement no note cites to `model_tool_write` or `extraction_failed`. A
+new report's `changed_facts_correct`, `fact_keys.pairs_*` and
+`restatements_by_outcome` compare with an archived L8 report's only through
+rev 3.26's re-scored figures (L's 10 of 15 is 11 of 15 under the new rule),
+never as an improvement.
+
 The proposed targets (coverage ≥ 80 %, changed facts ≥ 12 of 15, other-script
 aliases ≥ 60 %, restatements raising a suggestion or a duplicate ≤ 2, L within
 −10 pp of D′) are never read against one run. The four samples are two
-systems: the replays' spread is the extraction path's, to be read beside the
-live run's `extraction` figures, and the whole system — the pooled figures —
-has one sample per live run. Which of the two a target applies to is the
-owner's question, not the harness's: the report gives both.
+systems: the replays' spread is the extraction path's, to be read beside a
+live run's per-note `extraction` shares only (above), and the whole system —
+the pooled figures — has one sample per live run. Which of the two a target
+applies to is the owner's question, not the harness's: the report gives
+both.
 
 **The episode split** (design 09 §13.4, for L8) is answered after a learning
 run: an L run with `OPENALPACA_MEMORY_EVAL_QUESTIONS` naming

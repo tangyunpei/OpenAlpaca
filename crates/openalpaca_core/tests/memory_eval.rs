@@ -1420,8 +1420,9 @@ struct LearningConditions {
     /// were kept, for `OPENALPACA_MEMORY_EVAL_LEARN_FROM`.
     scratch_kept: Option<String>,
     /// L writes each session's conversation summaries at its `switch`
-    /// (design 09 §13.3), for the episode split; the fact measures leave
-    /// them out.
+    /// (design 09 §13.3), for the episode split, and so does a replay asked
+    /// questions after each session's flush (the L8 fix slice's H9); the
+    /// fact measures leave them out.
     summaries: bool,
     coverage_judge_prompt_path: String,
     coverage_judge_prompt_sha256: String,
@@ -2907,7 +2908,8 @@ async fn flush_one(
 struct EpisodeRecord {
     session: String,
     /// `switch`: a session's end, where the harness stands in for the
-    /// quiet period, the switch and the drain alike.
+    /// quiet period, the switch and the drain alike; `replay`: a replay
+    /// asked questions, after each session's flush (the L8 fix slice's H9).
     label: &'static str,
     latency_ms: u64,
     /// `flush_episodes` calls: 1, or up to `MAX_ATTEMPTS` when one stops
@@ -4574,12 +4576,15 @@ struct SuggestionCheck {
 /// The learning side of a report (design 09 §7.3).
 #[derive(Debug, Default, Serialize)]
 struct LearningResults {
-    /// What a reader of the numbers must know first: a flush a daily cap
-    /// stopped (the L8 fix slice's H1). Printed at the head of the summary.
+    /// What a reader of the numbers must know first: fed turns that ended
+    /// in an error (the L8 fix slice's H8), flushes a daily cap stopped
+    /// (H1) and windows skipped after `MAX_ATTEMPTS` unusable answers (its
+    /// repair round 1). Printed at the head of the summary.
     warnings: Vec<String>,
     turns: Vec<TurnRecord>,
     flushes: Vec<FlushRecord>,
-    /// The conversation summaries' flushes (L only, design 09 §13.3).
+    /// The conversation summaries' flushes (design 09 §13.3): L's, and a
+    /// replay's when it asks questions.
     episode_flushes: Vec<EpisodeRecord>,
     /// The learned store, conversation summaries left out: what every fact
     /// measure below reads.
@@ -5797,8 +5802,9 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
 /// and read its session to the end (`calls` counts an answer before it is
 /// parsed, so a call alone proves nothing was examined) with no window
 /// skipped — the product's `MAX_ATTEMPTS`-th unusable answer moves the
-/// cursor past the window and ends the flush with no stop, having read
-/// nothing (the L8 fix slice's H2).
+/// cursor past that window's chunk unread, and the flush goes on to the
+/// next chunk and ends with no stop when none holds it (the L8 fix slice's
+/// H2).
 fn invariants(learning: &LearningResults, rerun_required: bool) -> Invariants {
     let retired = match &learning.suggestion_check {
         Some(check) => check
