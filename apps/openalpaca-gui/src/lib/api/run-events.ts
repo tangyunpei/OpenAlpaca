@@ -17,7 +17,10 @@
  *   and the prompt's own rows sit here beside the rest of the run: a bidi
  *   override, a zero-width space or a line break in it is shown as
  *   `<U+XXXX>` (`lib/hidden-chars`), in plain text since a row is a string —
- *   as the CLI's `tasks log` shows it.
+ *   as the CLI's `tasks log` shows it. A `security_violation`'s reason
+ *   repeats the name, so it is escaped the same way; the rows' other fields
+ *   (a span's label, progress narration, titles, model ids) are as they
+ *   came.
  * - **Nothing is silently dropped, except a known duplicate.** No daemon emits
  *   `dag_node_status` any more — P9 deleted the variant in Phase 8 (T53) — but
  *   rows an older one wrote still read back from `event_log`, and each mirrors
@@ -193,11 +196,15 @@ function textFor(record: EventLogRecord): string {
       const tool = toolName(detail);
       return tool === null ? record.event_type : `${tool} · auto-approved`;
     }
+    // The daemon's reason repeats the tool's name (and may name the agent):
+    // it is shown on one line, escaped as the name is.
     case "security_violation": {
       const tool = toolName(detail);
       const reason = str(detail, "reason");
       if (tool === null) return record.event_type;
-      return reason === null ? `${tool} · denied` : `${tool} · ${reason}`;
+      return reason === null
+        ? `${tool} · denied`
+        : `${tool} · ${escapeHiddenLine(reason).text}`;
     }
     case "circuit_breaker_tripped": {
       const tool = toolName(detail);

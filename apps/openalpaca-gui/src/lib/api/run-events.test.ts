@@ -212,14 +212,27 @@ describe("runEventsFromLog — sentences", () => {
     expect(one(row(23, "tool_auto_approved", { tool_name: tool }))?.text).toBe(
       `${shown} · auto-approved`,
     );
+    // The daemon's own reasons repeat the name, and one names the agent too
+    // (`security/capabilities/mod.rs`, `security/sandbox/mod.rs`): the row
+    // shows it escaped there as well, on one line, as `tasks log` does.
     expect(
       one(
         row(24, "security_violation", {
           tool_name: tool,
-          reason: "not in allow list",
+          reason: `Capability '${tool}' not in allow list for agent 'lead\u{202E}_agent'`,
         }),
       )?.text,
-    ).toBe(`${shown} · not in allow list`);
+    ).toBe(
+      `${shown} · Capability '${shown}' not in allow list for agent 'lead<U+202E>_agent'`,
+    );
+    expect(
+      one(
+        row(26, "security_violation", {
+          tool_name: tool,
+          reason: `Tool '${tool}' timed out after 30s`,
+        }),
+      )?.text,
+    ).toBe(`${shown} · Tool '${shown}' timed out after 30s`);
     expect(
       one(
         row(25, "circuit_breaker_tripped", {
