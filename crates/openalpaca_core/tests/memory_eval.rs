@@ -2612,6 +2612,10 @@ struct FlushRecord {
     attempts: usize,
     /// Each attempt's `stopped`, in order.
     attempt_stops: Vec<Option<String>>,
+    /// Each attempt's latency, in order (repair round 1 of the L8 fix
+    /// slice): `latency_ms` is the trigger's, over every attempt; the cost's
+    /// percentiles read these, one per flush a daemon would run.
+    attempt_latencies_ms: Vec<u64>,
     /// A fed session's turns fed when the flush ran — the `turns` flush's
     /// place, and the whole session for `switch`; `null` for a replay's and
     /// the forced re-run's, which read the whole stored session (the L8 fix
@@ -2724,6 +2728,7 @@ impl FlushRecord {
                 .iter()
                 .map(|r| r.stopped.map(|s| format!("{s:?}")))
                 .collect(),
+            attempt_latencies_ms: Vec::new(),
             turns_fed: None,
             cursor_before: None,
             cursor_after: None,
@@ -2796,24 +2801,29 @@ fn drain_memory_changes(
     (written, lagged)
 }
 
-/// The attempts a trigger's flush makes (the L8 fix slice's H2): one, then
-/// again while an attempt stops `BadOutput`, up to the product's
-/// `MAX_ATTEMPTS` — what the production queue's retries of a held window
-/// that cannot grow come to (ruling LR20), with no backoff: `Manual` mode
-/// waits for nothing. Not for a `turns` flush ([`retried_at_once`]). The
-/// request is the same each time; nothing perturbs it.
+/// The attempts a trigger's flush makes (the L8 fix slice's H2), each
+/// timed: one, then again while an attempt stops `BadOutput`, up to `max` —
+/// the product's `MAX_ATTEMPTS` for a window that cannot grow, what the
+/// production queue's retries of it come to (ruling LR20), with no backoff:
+/// `Manual` mode waits for nothing; one for a `turns` flush
+/// ([`retried_at_once`]). The request is the same each time; nothing
+/// perturbs it.
 async fn with_retries<R>(
+    max: usize,
     mut attempt: impl AsyncFnMut() -> R,
     stopped: impl Fn(&R) -> Option<openalpaca_core::memory::learning::FlushStop>,
-) -> Vec<R> {
-    use openalpaca_core::memory::learning::{FlushStop, MAX_ATTEMPTS};
+) -> (Vec<R>, Vec<u64>) {
+    use openalpaca_core::memory::learning::FlushStop;
     let mut attempts = Vec::new();
+    let mut latencies_ms = Vec::new();
     loop {
+        let t0 = Instant::now();
         let report = attempt().await;
+        latencies_ms.push(t0.elapsed().as_millis() as u64);
         let again = stopped(&report) == Some(FlushStop::BadOutput);
         attempts.push(report);
-        if !again || attempts.len() >= MAX_ATTEMPTS as usize {
-            return attempts;
+        if !again || attempts.len() >= max {
+            return (attempts, latencies_ms);
         }
     }
 }
@@ -2856,15 +2866,18 @@ async fn flush_one(
     let mut rx = bus.subscribe();
     let cursor_before = cursor_of(db, session_id);
     let t0 = Instant::now();
-    let attempts = if retried_at_once(label) {
-        with_retries(|| queue.flush_session(session_id), |r| r.stopped).await
+    let max = if retried_at_once(label) {
+        openalpaca_core::memory::learning::MAX_ATTEMPTS as usize
     } else {
-        vec![queue.flush_session(session_id).await]
+        1
     };
+    let (attempts, attempt_latencies_ms) =
+        with_retries(max, || queue.flush_session(session_id), |r| r.stopped).await;
     let latency_ms = t0.elapsed().as_millis() as u64;
     let (written, lagged) = drain_memory_changes(&mut rx);
     let mut record =
         FlushRecord::from_attempts(corpus_id, label, latency_ms, &attempts, written, lagged);
+    record.attempt_latencies_ms = attempt_latencies_ms;
     record.cursor_before = cursor_before;
     record.cursor_after = cursor_of(db, session_id);
     eprintln!(
@@ -2901,6 +2914,8 @@ struct EpisodeRecord {
     /// `BadOutput` (the L8 fix slice's H2); the counts below are summed.
     attempts: usize,
     attempt_stops: Vec<Option<String>>,
+    /// Each attempt's latency, in order; `latency_ms` is over them all.
+    attempt_latencies_ms: Vec<u64>,
     calls: usize,
     episodes: usize,
     input_tokens: u64,
@@ -2952,6 +2967,7 @@ impl EpisodeRecord {
                 .iter()
                 .map(|r| r.stopped.map(|s| format!("{s:?}")))
                 .collect(),
+            attempt_latencies_ms: Vec::new(),
             calls: attempts.iter().map(|r| r.calls).sum(),
             episodes: attempts.iter().map(|r| r.episodes).sum(),
             input_tokens: attempts.iter().map(|r| r.input_tokens).sum(),
@@ -2982,10 +2998,15 @@ async fn episode_one(
 ) -> EpisodeRecord {
     let mut rx = bus.subscribe();
     let t0 = Instant::now();
-    let attempts = with_retries(|| queue.flush_episodes(session_id), |r| r.stopped).await;
+    let (attempts, attempt_latencies_ms) = with_retries(
+        openalpaca_core::memory::learning::MAX_ATTEMPTS as usize,
+        || queue.flush_episodes(session_id),
+        |r| r.stopped,
+    )
+    .await;
     let latency_ms = t0.elapsed().as_millis() as u64;
     let (written, events_lagged) = drain_memory_changes(&mut rx);
-    let record = EpisodeRecord::from_attempts(
+    let mut record = EpisodeRecord::from_attempts(
         corpus_id,
         label,
         latency_ms,
@@ -2993,6 +3014,7 @@ async fn episode_one(
         written,
         events_lagged,
     );
+    record.attempt_latencies_ms = attempt_latencies_ms;
     eprintln!(
         "memory_eval: summary {corpus_id} ({label}): {} attempt(s), {} call(s), {} episode(s), {latency_ms} ms{}",
         record.attempts,
@@ -4285,7 +4307,10 @@ struct LearningCost {
     extraction_calls: usize,
     extraction_tokens_in: u64,
     extraction_tokens_out: u64,
-    /// Over the flushes that made a call.
+    /// Over the attempts of the flushes that made a call: each attempt is
+    /// one flush as a daemon runs it, a backoff apart, and one L8 flush
+    /// (repair round 1 of the L8 fix slice) — a trigger's retries summed
+    /// would read up to `MAX_ATTEMPTS` times as long.
     flush_latency_p50_ms: u64,
     flush_latency_p95_ms: u64,
     flushes_by_trigger: BTreeMap<String, usize>,
@@ -4455,10 +4480,14 @@ fn learning_cost(
     episodes: &[EpisodeRecord],
     feed_wall_ms: u64,
 ) -> LearningCost {
+    // Every attempt timed; a hand-made record with none counts its latency.
     let mut latencies: Vec<u64> = flushes
         .iter()
         .filter(|f| f.calls > 0)
-        .map(|f| f.latency_ms)
+        .flat_map(|f| match &f.attempt_latencies_ms[..] {
+            [] => vec![f.latency_ms],
+            each => each.to_vec(),
+        })
         .collect();
     latencies.sort_unstable();
     let mut by_trigger = BTreeMap::new();
@@ -4476,7 +4505,7 @@ fn learning_cost(
     let errors = feed_turn_errors(turns);
     LearningCost {
         flushes: flushes.len(),
-        flushes_with_calls: latencies.len(),
+        flushes_with_calls: flushes.iter().filter(|f| f.calls > 0).count(),
         extraction_calls: flushes.iter().map(|f| f.calls).sum(),
         extraction_tokens_in: flushes.iter().map(|f| f.input_tokens).sum(),
         extraction_tokens_out: flushes.iter().map(|f| f.output_tokens).sum(),
@@ -7720,6 +7749,37 @@ fn unusable_answers_and_skipped_windows_are_counted_and_warned_about() {
     );
 }
 
+/// Repair round 1 of the L8 fix slice (the fidelity review's F8): the flush
+/// latency p50/p95 are read over attempts — each is what a daemon runs as
+/// one flush, a backoff apart, and what L8 measured before any retry — not
+/// over a trigger's attempts summed, which a retry would triple.
+#[test]
+fn flush_latency_is_read_over_attempts() {
+    use openalpaca_core::memory::learning::FlushReport;
+    let flush = |latency_ms: u64, attempts: Vec<u64>| {
+        let mut record = FlushRecord::new(
+            "cs-001",
+            FLUSH_SWITCH,
+            latency_ms,
+            &FlushReport {
+                calls: attempts.len(),
+                ..Default::default()
+            },
+            Vec::new(),
+            0,
+        );
+        record.attempt_latencies_ms = attempts;
+        record
+    };
+    let flushes = [flush(300, vec![100, 100, 100]), flush(100, vec![100])];
+    let cost = serde_json::to_value(learning_cost(&[], &flushes, &[], 0)).unwrap();
+    assert_eq!(
+        (&cost["flush_latency_p50_ms"], &cost["flush_latency_p95_ms"]),
+        (&serde_json::json!(100), &serde_json::json!(100)),
+        "{cost}"
+    );
+}
+
 /// L-S feeds the suggestion sessions only; L and L0 feed everything, and a
 /// session limit takes the first N of what the system feeds.
 #[test]
@@ -9010,6 +9070,13 @@ async fn a_flush_that_stops_bad_output_is_flushed_again_up_to_max_attempts() {
     assert_eq!(
         json(retried)["attempt_stops"],
         serde_json::json!(["BadOutput", null])
+    );
+    assert_eq!(
+        json(retried)["attempt_latencies_ms"]
+            .as_array()
+            .map(Vec::len),
+        Some(2),
+        "each attempt timed"
     );
     assert_eq!(retried.unusable_answers.len(), 1);
 
