@@ -950,3 +950,42 @@ fn a_streamed_control_character_is_recorded_as_sent_so_done_owes_nothing() {
         Reconciliation::Nothing
     );
 }
+
+/// What the stream handler itself writes to a terminal, not only what its
+/// helpers return: a reasoning frame, a delta and a `done` whose answer
+/// diverged from what was streamed each reach it with every control
+/// character shown as `<U+XXXX>`, and nothing raw anywhere in the bytes.
+#[test]
+fn the_stream_writes_the_models_text_to_a_terminal_without_a_control_character() {
+    colored::control::set_override(false);
+    let opts = terminal();
+    let mut state = SseState::default();
+    let mut written = Vec::new();
+    for (event, data) in [
+        (
+            "reasoning",
+            serde_json::json!({ "text": "think\u{1b}[?7l" }),
+        ),
+        ("delta", serde_json::json!({ "content": "a\u{1b}(0b" })),
+        ("done", serde_json::json!({ "content": "x\u{9b}8my" })),
+    ] {
+        process_sse_event_to(
+            &format!("event: {event}\ndata: {data}"),
+            &opts,
+            &mut state,
+            &mut written,
+        )
+        .expect("each frame is shown");
+    }
+    let written = String::from_utf8(written).expect("the handler writes UTF-8");
+    assert_eq!(
+        written, "think<U+001B>[?7l\na<U+001B>(0b\nx<U+009B>8my\n",
+        "reasoning, then the delta on its own line, then the diverging answer redrawn"
+    );
+    assert!(
+        !written.contains(['\u{1b}', '\u{9b}']),
+        "no raw control reaches the terminal: {written:?}"
+    );
+    // What was streamed is still recorded as the daemon sent it.
+    assert_eq!(state.shown, "x\u{9b}8my");
+}

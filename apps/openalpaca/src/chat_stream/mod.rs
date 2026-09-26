@@ -623,17 +623,32 @@ fn find_event_boundary(buf: &str) -> Option<usize> {
 }
 
 /// Close an open reasoning run so the answer starts on its own line.
-fn end_reasoning(state: &mut SseState) -> Result<()> {
+fn end_reasoning(state: &mut SseState, out: &mut impl Write) -> Result<()> {
     if !state.reasoning_open {
         return Ok(());
     }
     state.reasoning_open = false;
-    println!();
-    std::io::stdout().flush()?;
+    writeln!(out)?;
+    out.flush()?;
     Ok(())
 }
 
+/// [`process_sse_event_to`] on this process's stdout.
 fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseState) -> Result<()> {
+    process_sse_event_to(event_text, opts, state, &mut std::io::stdout())
+}
+
+/// Handle one SSE frame: record what it says in `state` and write what it
+/// shows to `out` — stdout in production, a buffer in a test, so what the
+/// model's text looks like on a terminal is observed where it is written,
+/// not only in the helpers that compute it. The skipped-attachment lines go
+/// to stderr whatever `out` is.
+fn process_sse_event_to(
+    event_text: &str,
+    opts: &StreamOptions,
+    state: &mut SseState,
+    out: &mut impl Write,
+) -> Result<()> {
     let mut event_type = String::new();
     let mut data = String::new();
 
@@ -648,10 +663,10 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
     match event_type.as_str() {
         "thinking" => {
             if opts.verbose {
-                print!("{}", "Thinking...".dimmed());
-                std::io::stdout().flush()?;
-                print!("\r            \r");
-                std::io::stdout().flush()?;
+                write!(out, "{}", "Thinking...".dimmed())?;
+                out.flush()?;
+                write!(out, "\r            \r")?;
+                out.flush()?;
             }
         }
         // S2: the model's own reasoning, live. Never recorded in `shown` — it
@@ -661,8 +676,8 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
                 && let Some(text) = parsed["text"].as_str()
                 && let Some(visible) = reasoning_to_print(opts.tty, text)
             {
-                print!("{}", visible.dimmed());
-                std::io::stdout().flush()?;
+                write!(out, "{}", visible.dimmed())?;
+                out.flush()?;
                 state.reasoning_open = true;
             }
         }
@@ -671,9 +686,9 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
                 && let Some(content) = parsed["content"].as_str()
                 && let Some(visible) = delta_to_print(opts.tty, content)
             {
-                end_reasoning(state)?;
-                print!("{}", visible);
-                std::io::stdout().flush()?;
+                end_reasoning(state, out)?;
+                write!(out, "{}", visible)?;
+                out.flush()?;
                 // What the daemon sent, not its escaped form: `done` is
                 // reconciled against this.
                 state.shown.push_str(content);
@@ -688,9 +703,9 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
                 // once, whatever the deltas showed.
                 if let Some(content) = parsed["content"].as_str() {
                     let reconciliation = reconcile(&state.shown, content);
-                    end_reasoning(state)?;
+                    end_reasoning(state, out)?;
                     if let Some(text) = reconciliation.text(opts.tty) {
-                        print!("{text}");
+                        write!(out, "{text}")?;
                     }
                     match reconciliation {
                         Reconciliation::Nothing => {}
@@ -706,7 +721,7 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
                     state.delegation = Some(delegation);
                 }
 
-                println!();
+                writeln!(out)?;
 
                 // U3(d): what the turn answered *without*, before the usage
                 // line — one line per withheld attachment, naming the reason
@@ -727,7 +742,7 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
                         tokens_out,
                         duration_ms,
                     };
-                    println!("{}", format_usage_line(&info).dimmed());
+                    writeln!(out, "{}", format_usage_line(&info).dimmed())?;
                     state.usage = Some(info);
                 }
             }
