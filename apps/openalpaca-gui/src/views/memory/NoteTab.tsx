@@ -18,8 +18,10 @@
  * title the copy quotes — is shown as `<U+XXXX>` (`lib/hidden-chars`, in the
  * plain-text form, since the Markdown renderer takes a string), and one line
  * under the text counts them with the title's, which the head shows
- * highlighted. A note already in force is rendered as written: a joiner or a
- * right-to-left mark can be its content.
+ * highlighted. The text is drawn `wrapAnywhere`, a code block and a table
+ * included, so no counted escape sits behind a sideways scroll. A note
+ * already in force is rendered as written: a joiner or a right-to-left mark
+ * can be its content.
  */
 
 import { MessageBody } from "@/components/chat";
@@ -79,7 +81,11 @@ export function NoteTab({ note, replaces = null }: NoteTabProps) {
       {note.body.trim() === "" ? (
         <p className="m-0 text-md text-muted-fg">This note has no text.</p>
       ) : (
-        <MessageBody text={body?.text ?? note.body} spacing="assistant" />
+        <MessageBody
+          text={body?.text ?? note.body}
+          spacing="assistant"
+          wrapAnywhere={deciding}
+        />
       )}
       {notice !== null && (
         <p className="mt-[10px] mb-0 text-base leading-[1.5] text-red-ink">

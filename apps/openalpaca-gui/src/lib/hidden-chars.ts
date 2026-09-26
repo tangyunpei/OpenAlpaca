@@ -55,8 +55,10 @@
  * across two lines. The palette's Approve row, the Always-allow toast and a
  * candidate's rendered Markdown take the plain-text form, which wraps like
  * any other text and can break inside an escape (every character stays on
- * screen); the run's Event log, which is not an approval surface, cuts its
- * one-line rows with an ellipsis.
+ * screen: the Markdown is drawn with `MessageBody`'s `wrapAnywhere`, so a
+ * code block or a table wraps too instead of scrolling sideways); the run's
+ * Event log, which is not an approval surface, cuts its one-line rows with
+ * an ellipsis.
  */
 
 import table from "./hidden-chars.json";

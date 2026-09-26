@@ -4,7 +4,8 @@
  * The parser has its own tests (`prose.test.ts`); these are the two P4 cases
  * where *what the parser says* and *what the DOM shows* could still disagree —
  * an emphasis run wrapping a code span, where the renderer used to pick one of
- * the two and drop the other, and the blockquote element itself.
+ * the two and drop the other, and the blockquote element itself — and the
+ * `wrapAnywhere` a text someone decides on is drawn with.
  */
 
 import { render, screen } from "@testing-library/react";
@@ -46,5 +47,58 @@ describe("MessageBody — blockquotes (P4)", () => {
     const quote = container.querySelector("blockquote");
     expect(quote?.querySelector("strong")?.textContent).toBe("note:");
     expect(quote?.querySelector("code")?.textContent).toBe("cargo test");
+  });
+});
+
+/** Every kind of block the renderer draws, each holding an escape. */
+const DECIDED = [
+  "A paragraph <U+202E> here.",
+  "",
+  "## A heading <U+200B>",
+  "",
+  "- a list item <U+2800>",
+  "",
+  "```sh",
+  "curl https://example.com/<U+200B>" + "x".repeat(200),
+  "```",
+  "",
+  "| key <U+202E> | value |",
+  "| --- | --- |",
+  "| a | b<U+200B> |",
+].join("\n");
+
+describe("MessageBody — wrapAnywhere (a text someone decides on)", () => {
+  /**
+   * A candidate note's text is escaped and counted before the owner
+   * confirms it (`lib/hidden-chars`), so no block may put an escape out of
+   * sight: a code block wraps instead of scrolling sideways (behind a
+   * scrollbar macOS does not draw), a table header may wrap, and every
+   * block wraps a run with no break opportunity anywhere.
+   */
+  it("wraps every block, a code block and a table header included", () => {
+    const { container } = render(<MessageBody text={DECIDED} wrapAnywhere />);
+    const pre = container.querySelector("pre");
+    expect(pre?.className).toContain("whitespace-pre-wrap");
+    expect(pre?.className).toContain("wrap-anywhere");
+    for (const th of Array.from(container.querySelectorAll("th"))) {
+      expect(th.className).not.toContain("whitespace-nowrap");
+      expect(th.className).toContain("wrap-anywhere");
+    }
+    for (const selector of ["p", "h2", "ul", "table"]) {
+      const block = container.querySelector(selector);
+      const wrapped = block?.closest(".wrap-anywhere");
+      expect(wrapped, selector).not.toBeNull();
+    }
+  });
+
+  it("leaves a transcript's blocks as they were", () => {
+    const { container } = render(<MessageBody text={DECIDED} />);
+    expect(container.querySelector("pre")?.className).not.toContain(
+      "whitespace-pre-wrap",
+    );
+    expect(container.querySelector("th")?.className).toContain(
+      "whitespace-nowrap",
+    );
+    expect(container.querySelector(".wrap-anywhere")).toBeNull();
   });
 });

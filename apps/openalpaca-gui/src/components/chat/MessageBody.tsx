@@ -15,6 +15,13 @@
  * The type scale is the transcript's own — 15px body, headings stepped above
  * it from the existing tokens — because a chat row is not a document and a
  * model's `#` is a section marker, not a title page.
+ *
+ * **`wrapAnywhere`** is for a text someone decides on — a candidate note the
+ * owner confirms, whose escapes (`lib/hidden-chars`) are counted under it —
+ * where nothing may sit out of sight: every block wraps a run with no break
+ * opportunity anywhere, a code block wraps its lines instead of scrolling
+ * sideways behind a scrollbar macOS does not draw, and a table's header
+ * cells may wrap. A transcript keeps its own layout.
  */
 
 import { cn } from "@/lib/cn";
@@ -28,6 +35,8 @@ export interface MessageBodyProps {
   /** Rendered at the end of the last block — the streaming caret. */
   trailing?: React.ReactNode;
   className?: string;
+  /** Wrap every block, code and table headers included (see above). */
+  wrapAnywhere?: boolean;
 }
 
 /**
@@ -77,10 +86,12 @@ export function MessageBody({
   text,
   spacing = "assistant",
   trailing,
-  className,
+  className: extra,
+  wrapAnywhere = false,
 }: MessageBodyProps) {
   const blocks = parseProse(text);
   const last = blocks.length - 1;
+  const className = cn(wrapAnywhere && "wrap-anywhere", extra);
 
   if (blocks.length === 0) {
     return trailing === undefined ? null : (
@@ -158,8 +169,14 @@ export function MessageBody({
                 </span>
               )}
               {/* Its own horizontal scroll: a long line is the block's
-                  problem, never the transcript's. */}
-              <pre className="m-0 overflow-x-auto rounded-md border border-line-subtle bg-code-chip px-[11px] py-[9px] font-mono text-md leading-[1.5] text-ink">
+                  problem, never the transcript's. With `wrapAnywhere` the
+                  lines wrap instead, so nothing scrolls out of sight. */}
+              <pre
+                className={cn(
+                  "m-0 overflow-x-auto rounded-md border border-line-subtle bg-code-chip px-[11px] py-[9px] font-mono text-md leading-[1.5] text-ink",
+                  wrapAnywhere && "wrap-anywhere whitespace-pre-wrap",
+                )}
+              >
                 {block.text}
                 {isLast && trailing}
               </pre>
@@ -208,7 +225,10 @@ export function MessageBody({
                     {block.header.map((cell, column) => (
                       <th
                         key={column}
-                        className="border-b border-line px-[9px] py-[5px] text-left font-semibold whitespace-nowrap"
+                        className={cn(
+                          "border-b border-line px-[9px] py-[5px] text-left font-semibold",
+                          wrapAnywhere ? "wrap-anywhere" : "whitespace-nowrap",
+                        )}
                       >
                         <Segments segments={cell} />
                       </th>

@@ -1485,6 +1485,12 @@ describe("the Memory view", () => {
     expect(detail).toHaveTextContent(
       "Note: this request contains 3 hidden characters, shown as <U+…>.",
     );
+    // The text wraps anywhere, so no escape the count names is out of sight.
+    expect(
+      within(detail)
+        .getByText("The user<U+200B> likes dark<U+2800> themes.")
+        .closest(".wrap-anywhere"),
+    ).not.toBeNull();
 
     const read = candidate.revision;
     await user.click(screen.getByRole("button", { name: "Confirm" }));
@@ -1556,5 +1562,9 @@ describe("the Memory view", () => {
     if (detail === null) throw new Error("no detail");
     expect(detail.textContent).toContain("👩\u200D👧 at home.");
     expect(detail).not.toHaveTextContent("hidden character");
+    // …and laid out as the transcript lays a message out.
+    expect(
+      within(detail).getByText("👩\u200D👧 at home.").closest(".wrap-anywhere"),
+    ).toBeNull();
   });
 });
