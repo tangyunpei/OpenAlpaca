@@ -10,10 +10,12 @@
  * character reaches the card raw — and can make the card read differently
  * from what runs; so does a blank that is not the plain space (a braille
  * blank, a no-break or ideographic space), a run of which wraps into empty
- * lines between what is read and what runs. Every such character is
- * **shown**, never dropped: dropped,
- * `/srv/allow` + U+200B + `ed` would read as a path it is not, and the person
- * would not be told anything was there. `hiddenNotice` says how many.
+ * lines between what is read and what runs, and so does a code point Unicode
+ * has not assigned, which has no agreed appearance (the WebKit the app runs
+ * in on macOS draws some of them as an empty cell a full em wide). Every
+ * such character is **shown**, never dropped: dropped, `/srv/allow` +
+ * U+200B + `ed` would read as a path it is not, and the person would not be
+ * told anything was there. `hiddenNotice` says how many.
  *
  * This is the GUI's copy of `openalpaca_core::utils::text`'s escape
  * (`needs_escape`, `escape_hidden`, `needs_escape_in_line`,
@@ -125,11 +127,11 @@ const LINE_SET = merged([
 ]);
 
 /**
- * A code point the arguments show as `<U+XXXX>`: Unicode's control, format
- * and default-ignorable code points, every space but the plain one (U+2028
- * and U+2029 among them), U+2800 BRAILLE PATTERN BLANK and U+FFFC (which
- * macOS draws as an empty cell), but not `\n` and `\t` (Rust's
- * `needs_escape`).
+ * A code point the arguments show as `<U+XXXX>`: Unicode's control, format,
+ * default-ignorable and unassigned code points (the noncharacters among
+ * them), every space but the plain one (U+2028 and U+2029 among them),
+ * U+2800 BRAILLE PATTERN BLANK and U+FFFC (which macOS draws as an empty
+ * cell), but not `\n` and `\t` (Rust's `needs_escape`).
  */
 export function needsEscape(codePoint: number): boolean {
   return contains(ARGUMENT_SET, codePoint);

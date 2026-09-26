@@ -792,6 +792,36 @@ fn the_inline_prompt_shows_an_object_replacement_character_escaped() {
     );
 }
 
+/// An unassigned code point has no agreed appearance, and a macOS terminal
+/// draws some of them (the gaps in the Mongolian block) as an empty cell a
+/// full em wide: a run of it in the name wraps the name's tail onto a line of
+/// its own, and one at the end of a value is not seen. Both are shown and
+/// counted.
+#[test]
+fn the_inline_prompt_shows_an_unassigned_code_point_escaped() {
+    let frame = serde_json::json!({
+        "request_id": "req-1",
+        "tool_name": "srv__read_file\u{181a}\u{181a}\u{181a}Arguments: {}",
+        "tool_arguments": { "path": "/srv/allowed\u{181a}" },
+        "per_call": false,
+    });
+    let details = confirmation_details(&frame);
+    assert_eq!(
+        details.headline,
+        "Tool 'srv__read_file<U+181A><U+181A><U+181A>Arguments: {}' requires confirmation"
+    );
+    let arguments = details.arguments.expect("the arguments");
+    assert!(
+        arguments.contains("\"/srv/allowed<U+181A>\""),
+        "{arguments}"
+    );
+    assert!(!arguments.contains('\u{181a}'), "{arguments}");
+    assert_eq!(
+        details.notice.as_deref(),
+        Some("Note: this request contains 4 hidden characters, shown as <U+…>.")
+    );
+}
+
 /// A run of blanks in an argument wraps, at a terminal as anywhere, into
 /// empty lines between the command's head, which runs, and a benign tail
 /// printed just above `[y/N]`: every blank but the plain space is shown in

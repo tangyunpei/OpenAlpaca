@@ -504,6 +504,39 @@ mod hidden_characters {
         );
     }
 
+    /// An unassigned code point has no agreed appearance, and Apple
+    /// platforms draw some of them (the gaps in the Mongolian block, after
+    /// the Yi syllables) as an empty cell a full em wide: a run of it in the
+    /// name wraps the name's tail onto a line of its own, and one at the end
+    /// of a value is not seen. Both are shown and counted.
+    #[test]
+    fn an_unassigned_code_point_is_shown_escaped_in_the_name_and_the_arguments() {
+        let forged = format!(
+            "srv__read_file{}Arguments: {{\"path\": \"notes.txt\"}}",
+            "\u{181a}".repeat(40)
+        );
+        let args = serde_json::json!({"path": "/srv/allowed\u{181a}"});
+
+        let prompt = format_confirmation_prompt(&forged, &args, 1);
+
+        assert!(!prompt.contains('\u{181a}'), "{prompt}");
+        assert!(
+            prompt.contains(&format!(
+                "Tool: srv__read_file{}Arguments: {{\"path\": \"notes.txt\"}}\n",
+                "<U+181A>".repeat(40)
+            )),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("\"path\": \"/srv/allowed<U+181A>\""),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Note: this request contains 41 hidden characters, shown as <U+…>."),
+            "{prompt}"
+        );
+    }
+
     /// A run of blanks in an argument wraps into empty lines between the
     /// command's head, which runs, and a benign tail, which is what a person
     /// reads last: every blank but the plain space is shown in the arguments

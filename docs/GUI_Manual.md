@@ -345,8 +345,9 @@ run, so every hidden or invisible character in the tool's name, its arguments
 and the asking agent's name — a bidi override such as U+202E, a zero-width or
 control character, a tag or a variation selector, any space but a plain one (a
 no-break, ideographic or braille blank), an object replacement character
-(U+FFFC, which macOS draws as blank space), and in the two names also a line
-break or a tab — is shown in its place as a highlighted `<U+XXXX>`, never
+(U+FFFC, which macOS draws as blank space), a code point Unicode has not
+assigned (which has no agreed appearance: macOS draws some as blank space),
+and in the two names also a line break or a tab — is shown in its place as a highlighted `<U+XXXX>`, never
 drawn raw. A line directly under the arguments counts them for the whole
 request: `Note: this request contains 2 hidden characters, shown as <U+…>.`
 On the card, a `<U+…>` that is not highlighted was typed into the value as
@@ -788,8 +789,8 @@ the conversation (see *Memory commands* under Chat); a note saved with
 learned row and a candidate's detail ask you to decide on text learning or a
 file wrote, so every hidden or invisible character in it — a bidi override, a
 zero-width or control character, a variation selector, any space but a plain
-one, an object replacement character, and in a title or the reason also a
-line break or a tab — is shown as a highlighted `<U+XXXX>` (as plain
+one, an object replacement character, a code point Unicode has not assigned,
+and in a title or the reason also a line break or a tab — is shown as a highlighted `<U+XXXX>` (as plain
 `<U+XXXX>` in a candidate's rendered text and in the line naming the note it
 would replace), and a line under the texts counts them:
 `Note: this request contains 2 hidden characters, shown as <U+…>.` The card

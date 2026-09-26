@@ -136,6 +136,32 @@ describe("ToolConfirmationBanner — hidden characters (§3.14)", () => {
   });
 
   /**
+   * An unassigned code point has no agreed appearance, and the WebKit the app
+   * runs in on macOS draws some of them (the gaps in the Mongolian block,
+   * after the Yi syllables) as an empty cell a full em wide. A run of it in a
+   * tool's name wraps the name's tail onto a line of its own, where it reads
+   * as a line of the card; one at the end of a bare path is not seen at all.
+   */
+  it("shows an unassigned code point in the name and at the end of a bare path", () => {
+    const { section, eyebrow, box, escapes } = card({
+      toolName: `srv__read_file${"\u{181A}".repeat(40)}arguments: {"path": "notes.txt"}`,
+      toolArguments: { path: "/srv/allowed\u{181A}" },
+    });
+
+    expect(section.textContent).not.toContain("\u{181A}");
+    expect(eyebrow?.textContent).toBe(
+      `Confirmation required · srv__read_file${"<U+181A>".repeat(40)}arguments: {"path": "notes.txt"}`,
+    );
+    expect(box?.textContent).toBe("/srv/allowed<U+181A>");
+    expect(escapes).toHaveLength(41);
+    expect(
+      screen.getByText(
+        "Note: this request contains 41 hidden characters, shown as <U+…>.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  /**
    * A run of blanks in a value wraps into empty lines inside the box, and the
    * chat scrolls to a new card's bottom: the benign tail is what is read,
    * the head that runs is off-screen. Every blank but the plain space is
