@@ -413,16 +413,17 @@ command prints the manifest first — what it contributes, what capabilities it
 asks for, which config keys it needs — because that is the decision approving
 makes. Every hidden character the plugin's author put in it — in the name,
 version, description, entry, capabilities or keys: a bidi override, a zero-width
-or control character, a variation selector, any space but a plain one, a line
-break or a tab — is shown as `<U+XXXX>`, and a line under the manifest counts
-them (`Note: this request contains 2 hidden characters, shown as <U+…>.`). On a
-terminal the manifest starts with the same reset as an approval prompt (see
-[Approval prompts](#approval-prompts)). `install --dry-run` and `update` print
-it the same way. The lines under the manifest — `ok installed <id>`, the `ext
-approve <id>` it tells you to run, and `update`'s `ok updated <id>` and `now
-also asks for:` — show the id and each capability the same way, and the count
-under the manifest covers them: they are the manifest's own name and
-capabilities. A warning `update` prints shows its control characters as
+or control character, a variation selector, any space but a plain one, an object
+replacement character, a code point Unicode has not assigned or leaves to
+private use, a line break or a tab — is shown as `<U+XXXX>`, and a line under
+the manifest counts them (`Note: this request contains 2 hidden characters,
+shown as <U+…>.`). On a terminal the manifest starts with the same reset as an
+approval prompt (see [Approval prompts](#approval-prompts)). `install --dry-run`
+and `update` print it the same way. The lines under the manifest — `ok installed
+<id>`, the `ext approve <id>` it tells you to run, and `update`'s `ok updated
+<id>` and `now also asks for:` — show the id and each capability the same way,
+and the count under the manifest covers them: they are the manifest's own name
+and capabilities. A warning `update` prints shows its control characters as
 `<U+XXXX>` and is not counted.
 
 ```bash
@@ -720,18 +721,19 @@ Notes:
   since it is the note's whole text. `--raw` prints the file unchanged.
 - Where you decide, nothing is dropped: `suggestions` and `show` of a
   **candidate** (a note waiting for `confirm`) show every hidden character — a
-  control or format character, a variation selector, any space but a plain one,
-  a code point Unicode has not assigned or leaves to private use, and in a
-  title, alias, tag or reason also a line break or a tab — as `<U+XXXX>`, and a
-  line counts them (`Note: this request contains 2 hidden characters, shown as
-  <U+…>.`): under each suggestion that holds any, and under a candidate's text,
-  where it counts the title, aliases, tags, fact key and text — as the GUI's
-  candidate detail does, which also counts the title of the note it would
-  replace. A suggestion's count includes both notes' texts, which its line does
-  not print, and one line under the list says so; `show <id>` prints the
-  suggestion's own, and `--format json` prints both, each hidden character as a
-  JSON `\u` escape. On a terminal both start with the same reset as an approval
-  prompt (see [Approval prompts](#approval-prompts)).
+  bidi override, a zero-width or control character, a variation selector, any
+  space but a plain one, an object replacement character, a code point Unicode
+  has not assigned or leaves to private use, and in a title, alias, tag, fact
+  key or reason also a line break or a tab — as `<U+XXXX>`, and a line counts
+  them (`Note: this request contains 2 hidden characters, shown as <U+…>.`):
+  under each suggestion that holds any, and under a candidate's text, where it
+  counts the title, aliases, tags, fact key and text — as the GUI's candidate
+  detail does, which also counts the title of the note it would replace. A
+  suggestion's count includes both notes' texts, which its line does not print,
+  and one line under the list says so; `show <id>` prints the suggestion's own,
+  and `--format json` prints both, each hidden character as a JSON `\u` escape.
+  On a terminal both start with the same reset as an approval prompt (see
+  [Approval prompts](#approval-prompts)).
 - `add` saves a note **as you**: its origin is `user`, the highest authority, and a
   tool call can never edit, archive or replace it (the model can only *forget* it,
   under the ordinary confirmation card). The body is the last argument, `-` for

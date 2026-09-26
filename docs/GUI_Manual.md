@@ -799,20 +799,21 @@ row and a candidate's detail ask you to decide on text learning or a file wrote,
 so every hidden character in it — a bidi override, a zero-width or control
 character, a variation selector, any space but a plain one, an object
 replacement character, a code point Unicode has not assigned or leaves to
-private use, and in a title or the reason also a line break or a tab — is shown
-as a highlighted `<U+XXXX>` (as plain `<U+XXXX>` in a candidate's rendered text
-and in the line naming the note it would replace), and a line under the texts
-counts them: `Note: this request contains 2 hidden characters, shown as <U+…>.`
-The card counts both titles, both texts and the reason; a row its title and the
-title of the note it replaced; a candidate its title, the title of the note it
-would replace, its text, and the aliases, tags and fact key Confirm adopts with
-it, which its Note tab shows under the text. A text holding an escape wraps at
-its edge — a candidate's code blocks included — rather than being cut or
-scrolling sideways, and a candidate's table is drawn as its rows, one wrapping
-line each with its cells joined by ` · ` and every cell kept, so no escape a
-count names is out of sight. Any other note is shown as written — a joiner or a
-right-to-left mark can be what it says — and so is the Raw tab, which is the
-editor. Replace, Keep mine, Confirm and Undo answer the note as read.
+private use, and in a title, the reason, an alias, a tag or the fact key also a
+line break or a tab — is shown as a highlighted `<U+XXXX>` (as plain `<U+XXXX>`
+in a candidate's rendered text and in the line naming the note it would
+replace), and a line under the texts counts them: `Note: this request contains 2
+hidden characters, shown as <U+…>.` The card counts both titles, both texts and
+the reason; a row its title and the title of the note it replaced; a candidate
+its title, the title of the note it would replace, its text, and the aliases,
+tags and fact key Confirm adopts with it, which its Note tab shows under the
+text. A text holding an escape wraps at its edge — a candidate's code blocks
+included — rather than being cut or scrolling sideways, and a candidate's table
+is drawn as its rows, one wrapping line each with its cells joined by ` · ` and
+every cell kept, so no escape a count names is out of sight. Any other note is
+shown as written — a joiner or a right-to-left mark can be what it says — and so
+is the Raw tab, which is the editor. Replace, Keep mine, Confirm and Undo answer
+the note as read.
 
 An empty list says *"Nothing remembered yet. Ask Alpaca to remember something,
 or add a note."* After a forget, the detail says, in the daemon's words, what a
@@ -1057,11 +1058,13 @@ A row awaiting consent shows the plugin's id, its version and what it asks
 for — its declared capabilities (a plugin you denied included, since
 `Approve` grants what it declares now), or those an update added — with
 every hidden character (a bidi override, a zero-width or control character, a
-variation selector, any space but a plain one, a line break) as a highlighted
-`<U+XXXX>`, and a line under them counts them: `Note: this request contains 1
-hidden character, shown as <U+…>.` The id and the version wrap at the row's edge
-rather than being cut or pushing `Approve` aside. `Approve` grants exactly those
-strings, and it answers for the plugin by the id the daemon listed.
+variation selector, any space but a plain one, an object replacement character,
+a code point Unicode has not assigned or leaves to private use, a line break or
+a tab) as a highlighted `<U+XXXX>`, and a line under them counts them: `Note:
+this request contains 1 hidden character, shown as <U+…>.` The id and the
+version wrap at the row's edge rather than being cut or pushing `Approve` aside.
+`Approve` grants exactly those strings, and it answers for the plugin by the id
+the daemon listed.
 
 `Add extension` installs either kind:
 

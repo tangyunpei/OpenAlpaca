@@ -53,21 +53,23 @@
  *
  * Display only: nothing sent to the daemon, stored or matched changes — the
  * card, the composer's answer and every POST body read the raw values. The
- * GUI does not cut an approval's text, so there is no cut here: each surface
- * that shows it wraps a run too long for its line anywhere
- * (`overflow-wrap: anywhere`) rather than letting it run past an edge that
- * clips it. Where an escape is drawn as a highlighted span — the card, the
- * composer's bar, the run card, the resolution row, a plugin's consent row
- * in Settings → Extensions, and the Memory view's Suggestions card,
- * Recently learned rows and a candidate's title — the span is never split
- * across two lines. The palette's Approve row, the Always-allow toast, a
- * candidate's "would replace “…”" copy and its rendered Markdown take the
- * plain-text form, which wraps like any other text and can break inside an
- * escape (every character stays on screen: the Markdown is drawn with
- * `MessageBody`'s `wrapAnywhere`, so a code block wraps too instead of
- * scrolling sideways, and a table is drawn as its rows, one wrapping line
- * each with every cell kept); the run's Event log, which is not an
- * approval surface, cuts its one-line rows with an ellipsis.
+ * GUI does not cut an approval's text itself: each surface that shows it
+ * wraps a run too long for its line anywhere (`overflow-wrap: anywhere`)
+ * rather than letting it run past an edge that clips it. On a surface that
+ * decides, a cut is the daemon's, never the GUI's: the Suggestions card ends
+ * a text the daemon served cut with `cutNotice`, how many characters the cut
+ * left out. Where an escape is drawn as a highlighted span — the card, the
+ * composer's bar, the run card, the resolution row, a plugin's consent row in
+ * Settings → Extensions, and the Memory view's Suggestions card, Recently
+ * learned rows and a candidate's title, aliases, tags and fact key — the span
+ * is never split across two lines. The palette's Approve row, the
+ * Always-allow toast, a candidate's "would replace “…”" copy and its rendered
+ * Markdown take the plain-text form, which wraps like any other text and can
+ * break inside an escape (every character stays on screen: the Markdown is
+ * drawn with `MessageBody`'s `wrapAnywhere`, so a code block wraps too
+ * instead of scrolling sideways, and a table is drawn as its rows, one
+ * wrapping line each with every cell kept); the run's Event log, which is not
+ * an approval surface, cuts its one-line rows with an ellipsis.
  */
 
 import table from "./hidden-chars.json";

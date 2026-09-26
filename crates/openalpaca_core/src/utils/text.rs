@@ -24,12 +24,12 @@
 //! dropped from the prompt still runs, so every hidden character — every
 //! code point Unicode says renders as nothing, every code point it has not
 //! assigned or leaves to private use, and every blank but the plain space —
-//! is shown as `<U+XXXX>` and [`hidden_notice`] says how many there were. The two do not compete:
-//! `one_line` is for prose OpenAlpaca composed to be read (a memory
-//! suggestion's `preview`, stripped by the daemon of every character the
-//! escape would show before any surface sees it), and the escape is for the
-//! values beside it that decide what runs. Both read one set,
-//! [`needs_escape`]: what one drops the other shows.
+//! is shown as `<U+XXXX>` and [`hidden_notice`] says how many there were. The
+//! two do not compete: `one_line` is for prose OpenAlpaca composed to be read
+//! (a memory suggestion's `preview`, stripped by the daemon of every
+//! character the escape would show before any surface sees it), and the
+//! escape is for the values beside it that decide what runs. Both read one
+//! set, [`needs_escape`]: what one drops the other shows.
 //! A one-line field — the tool's name, the agent's id — takes
 //! [`escape_hidden_line`], which shows a newline and a tab as well: the
 //! pretty-printed arguments are laid out in lines, a name is not. A model's
@@ -70,12 +70,12 @@ pub(crate) fn byte_prefix(s: &str, max_bytes: usize) -> &str {
 /// [hidden](is_hidden) character, no default-ignorable one (a variation
 /// selector, a Hangul filler), no unassigned or private-use code point, no
 /// U+2800 BRAILLE PATTERN BLANK and no U+FFFC, which draw as nothing, as
-/// blank space or as whatever a font happens to hold. One set, [`needs_escape`], says
-/// what hides on every surface; this drops it where the escape shows it.
-/// Dropped, not replaced with a visible mark: what is left is the text as
-/// stored, in its own order, and a mark would litter the legitimate uses (an
-/// emoji's zero-width joiner or variation selector, a soft hyphen) on the
-/// very line that must read clearly.
+/// blank space or as whatever a font happens to hold. One set,
+/// [`needs_escape`], says what hides on every surface; this drops it where
+/// the escape shows it. Dropped, not replaced with a visible mark: what is
+/// left is the text as stored, in its own order, and a mark would litter the
+/// legitimate uses (an emoji's zero-width joiner or variation selector, a
+/// soft hyphen) on the very line that must read clearly.
 pub fn one_line(text: &str) -> String {
     text.split_whitespace()
         .map(|word| word.replace(needs_escape, ""))
