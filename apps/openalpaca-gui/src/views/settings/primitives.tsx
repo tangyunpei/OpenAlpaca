@@ -247,6 +247,12 @@ export interface ListRowProps {
   chips?: React.ReactNode;
   /** Mono meta pinned right of the description column. */
   meta?: React.ReactNode;
+  /**
+   * Wrap the meta within a bounded width instead of letting it widen the row
+   * — for a meta a person approves (a plugin's version on its consent row),
+   * whose long unbroken run could push the controls past the row's edge.
+   */
+  wrapMeta?: boolean;
   /** The trailing control — a `Toggle`, buttons, or nothing. */
   control?: React.ReactNode;
 }
@@ -258,6 +264,7 @@ export function ListRow({
   description,
   chips,
   meta,
+  wrapMeta = false,
   control,
 }: ListRowProps) {
   return (
@@ -284,7 +291,14 @@ export function ListRow({
         )}
       </div>
       {meta !== undefined && (
-        <span className="shrink-0 font-mono text-xs text-faint">{meta}</span>
+        <span
+          className={cn(
+            "shrink-0 font-mono text-xs text-faint",
+            wrapMeta && "max-w-[12rem] wrap-anywhere",
+          )}
+        >
+          {meta}
+        </span>
       )}
       {control}
     </div>

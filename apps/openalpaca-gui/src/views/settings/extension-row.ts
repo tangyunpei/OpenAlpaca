@@ -23,12 +23,13 @@
  * **The consent row is an approval** (`lib/hidden-chars`). What Approve
  * grants is exactly the plugin's own strings — its id (the directory name)
  * and the capabilities its manifest declares, or the ones an update added —
- * so on an `unapproved` row every hidden character in them is shown as
- * `<U+XXXX>` (the one-line escape: a name or a capability has no layout of
+ * so on an `unapproved` row every hidden character in them, and in the
+ * manifest's version the row shows beside Approve, is shown as `<U+XXXX>`
+ * (the one-line escape: a name, a version or a capability has no layout of
  * its own) and the row counts them in the words every approval surface
- * uses. Every other row's text — a failed row's quoted detail among it — is
- * shown as it came. Display only: every verb is sent the id the daemon
- * listed.
+ * uses, as the CLI's manifest does. Every other row's text — a failed row's
+ * quoted detail among it — is shown as it came. Display only: every verb is
+ * sent the id the daemon listed.
  */
 
 import type { TagTone } from "@/components/ui";
@@ -77,8 +78,8 @@ export interface ExtensionRowView {
   /**
    * On a row that asks for consent (`unapproved`), what Approve answers for,
    * escaped: the plugin's id, the description (`asks`, whose plain-text form
-   * is `description`) and the notice counting both — `null` when nothing was
-   * escaped. `null` on every other row.
+   * is `description`), the manifest's version and the notice counting all
+   * three — `null` when nothing was escaped. `null` on every other row.
    */
   consent: RowConsent | null;
 }
@@ -87,6 +88,8 @@ export interface ExtensionRowView {
 export interface RowConsent {
   name: Escaped;
   asks: Escaped;
+  /** The manifest's version, drawn beside Approve; `null` when it has none. */
+  version: Escaped | null;
   notice: string | null;
 }
 
@@ -271,12 +274,16 @@ function unapproved(row: ExtensionRow, base: Base): ExtensionRowView {
   const consented = (description: string) => {
     const name = escapeHiddenLine(row.id);
     const asks = escapeHiddenLine(description);
+    const version = row.version === null ? null : escapeHiddenLine(row.version);
     return {
       description: asks.text,
       consent: {
         name,
         asks,
-        notice: hiddenNotice(name.hidden + asks.hidden),
+        version,
+        notice: hiddenNotice(
+          name.hidden + asks.hidden + (version?.hidden ?? 0),
+        ),
       },
     };
   };

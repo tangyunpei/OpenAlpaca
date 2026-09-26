@@ -177,6 +177,7 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
     const view = extensionRowView(
       extensionRow({
         id: "no\u202Etes\u200B",
+        version: "1.0\u200B",
         state: "unapproved",
         reason: "never_seen",
         enabled: true,
@@ -197,8 +198,11 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
         .filter((piece) => piece.kind === "escape")
         .map((piece) => piece.text),
     ).toEqual(["<U+202E>", "<U+200B>", "<U+000A>", "<U+2800>"]);
+    // The version the row shows beside Approve is the manifest's free text
+    // too, escaped and counted as the CLI's manifest counts it.
+    expect(view.consent?.version?.text).toBe("1.0<U+200B>");
     expect(view.consent?.notice).toBe(
-      "Note: this request contains 6 hidden characters, shown as <U+…>.",
+      "Note: this request contains 7 hidden characters, shown as <U+…>.",
     );
   });
 
@@ -241,6 +245,7 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
     const view = extensionRowView(
       extensionRow({
         id: "notes",
+        version: "1.0",
         state: "unapproved",
         reason: "never_seen",
         declared: {
@@ -252,6 +257,7 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
     );
 
     expect(view.consent?.name.text).toBe("notes");
+    expect(view.consent?.version?.text).toBe("1.0");
     expect(view.consent?.asks.text).toBe(view.description);
     expect(view.consent?.notice).toBeNull();
   });

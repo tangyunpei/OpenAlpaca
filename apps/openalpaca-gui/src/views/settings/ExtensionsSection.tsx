@@ -122,6 +122,8 @@ export function ExtensionsSection() {
     view: ExtensionRowView;
   }) => {
     const key = rowKey(row);
+    // On a consent row the version is the manifest's text, escaped.
+    const version = view.consent?.version ?? null;
 
     return (
       <ListRow
@@ -201,7 +203,16 @@ export function ExtensionsSection() {
           },
           onCancelPending: () => setPending(null),
         })}
-        meta={row.version === null ? undefined : `v${row.version}`}
+        meta={
+          version !== null ? (
+            <>
+              v<EscapedText escaped={version} />
+            </>
+          ) : row.version === null ? undefined : (
+            `v${row.version}`
+          )
+        }
+        wrapMeta={view.consent !== null}
         control={
           <span className="flex shrink-0 items-center gap-[6px]">
             {view.actions.includes("approve") && (

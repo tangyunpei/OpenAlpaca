@@ -268,6 +268,7 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
     state.rows = [
       extensionRow({
         id: "no\u202Etes",
+        version: "1.0\u200B",
         state: "unapproved",
         reason: "never_seen",
         declared: {
@@ -285,14 +286,21 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
         container.querySelectorAll("[data-hidden-char]"),
         (node) => node.textContent,
       ),
-    ).toEqual(["<U+202E>", "<U+200B>"]);
+    ).toEqual(["<U+202E>", "<U+200B>", "<U+200B>"]);
     expect(container.textContent).toContain("no<U+202E>tes");
     expect(container.textContent).toContain(
       "Asks for: fs<U+200B>_write — starts on approval",
     );
+    // The version beside Approve is the manifest's free text: escaped,
+    // counted, and wrapped within its own width rather than widening the
+    // row past Approve and Deny.
+    const version = screen.getByText("v1.0", { exact: false });
+    expect(version.textContent).toBe("v1.0<U+200B>");
+    expect(version.className).toContain("wrap-anywhere");
+    expect(version.className).toMatch(/max-w-/);
     expect(
       screen.getByText(
-        "Note: this request contains 2 hidden characters, shown as <U+…>.",
+        "Note: this request contains 3 hidden characters, shown as <U+…>.",
       ),
     ).toBeInTheDocument();
     // The id wraps at the row's edge instead of being cut with an ellipsis,
@@ -308,9 +316,11 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
   });
 
   it("still cuts an ordinary row's name with an ellipsis", () => {
-    state.rows = [extensionRow({ kind: "mcp", id: "github" })];
+    state.rows = [extensionRow({ kind: "mcp", id: "github", version: "1.2" })];
     render(<ExtensionsSection />);
     expect(screen.getByText("github").className).toContain("truncate");
+    // …and its version is drawn as it was, unbounded.
+    expect(screen.getByText("v1.2").className).not.toContain("wrap-anywhere");
   });
 
   it("removes an orphan, and offers Remove nowhere else", async () => {
