@@ -34,10 +34,15 @@
 //! out in lines, a name is not. A model's own prose printed at a terminal —
 //! not an approval surface, but printed where the next prompt will be —
 //! takes [`escape_controls`], the same form for the control characters
-//! alone, so it cannot leave the terminal in a state the prompt inherits. The GUI mirrors the escape from one shared
-//! table, `apps/openalpaca-gui/src/lib/hidden-chars.json`, which a test here
-//! holds equal to [`needs_escape`] and [`needs_escape_in_line`] over every
-//! scalar value.
+//! alone, so it cannot leave the terminal in a state the prompt inherits.
+//! The CLI's JSON output (`tasks confirmations list --format json`, the
+//! payloads of `tasks log`) is the one other rendering of the escape: it
+//! writes the [`needs_escape_in_line`] set in JSON's own lossless `\u`
+//! form, reading this predicate rather than keeping a copy of the set.
+//! The GUI mirrors the escape from one shared table,
+//! `apps/openalpaca-gui/src/lib/hidden-chars.json`, which a test here holds
+//! equal to [`needs_escape`] and [`needs_escape_in_line`] over every scalar
+//! value.
 
 /// Borrow at most `max_bytes` of `s`, ending on a character boundary.
 ///
