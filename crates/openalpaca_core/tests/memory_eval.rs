@@ -2604,6 +2604,12 @@ struct FlushRecord {
     attempts: usize,
     /// Each attempt's `stopped`, in order.
     attempt_stops: Vec<Option<String>>,
+    /// A fed session's turns fed when the flush ran — the `turns` flush's
+    /// place, and the whole session for `switch`; `null` for a replay's and
+    /// the forced re-run's, which read the whole stored session. What it
+    /// read, when it read to the end, is the turns before this (the L8 fix
+    /// slice's H7).
+    turns_fed: Option<usize>,
     calls: usize,
     chunks: usize,
     input_tokens: u64,
@@ -2704,6 +2710,7 @@ impl FlushRecord {
                 .iter()
                 .map(|r| r.stopped.map(|s| format!("{s:?}")))
                 .collect(),
+            turns_fed: None,
             calls: sum(|r| r.calls),
             chunks: sum(|r| r.chunks),
             input_tokens: attempts.iter().map(|r| r.input_tokens).sum(),
@@ -2967,6 +2974,8 @@ struct TurnRecord {
     /// The reader's own memory writes this turn (`memory_changed`, surface
     /// `model_tool`) — the learning path L0 keeps.
     model_tool_memory_changes: usize,
+    /// The notes those writes changed, each once (the L8 fix slice's H7).
+    model_tool_notes: Vec<String>,
 }
 
 /// Which database session holds which corpus session, and each corpus
@@ -3149,6 +3158,7 @@ impl Learner {
                     reader_models: Vec::new(),
                     tools: Vec::new(),
                     model_tool_memory_changes: 0,
+                    model_tool_notes: Vec::new(),
                 };
                 let mut models = BTreeSet::new();
                 loop {
@@ -3172,8 +3182,14 @@ impl Learner {
                         }) if agent_id == MAIN_LOOP_AGENT_ID => record.tools.push(tool_name),
                         Ok(SystemEvent::MemoryChanged {
                             surface: Some(surface),
+                            note_id,
                             ..
-                        }) if surface == "model_tool" => record.model_tool_memory_changes += 1,
+                        }) if surface == "model_tool" => {
+                            record.model_tool_memory_changes += 1;
+                            if !record.model_tool_notes.contains(&note_id) {
+                                record.model_tool_notes.push(note_id);
+                            }
+                        }
                         Ok(_) => {}
                         Err(TryRecvError::Lagged(_)) => continue,
                         Err(_) => break,
@@ -3192,29 +3208,29 @@ impl Learner {
                 );
                 fed.turns.push(record);
                 if learn && (ti + 1) % self.turns_per_flush.max(1) as usize == 0 {
-                    fed.flushes.push(
-                        flush_one(
-                            &self.queue,
-                            &self.bus,
-                            &created.id,
-                            &session.id,
-                            FLUSH_TURNS,
-                        )
-                        .await,
-                    );
-                }
-            }
-            if learn {
-                fed.flushes.push(
-                    flush_one(
+                    let mut flush = flush_one(
                         &self.queue,
                         &self.bus,
                         &created.id,
                         &session.id,
-                        FLUSH_SWITCH,
+                        FLUSH_TURNS,
                     )
-                    .await,
-                );
+                    .await;
+                    flush.turns_fed = Some(ti + 1);
+                    fed.flushes.push(flush);
+                }
+            }
+            if learn {
+                let mut flush = flush_one(
+                    &self.queue,
+                    &self.bus,
+                    &created.id,
+                    &session.id,
+                    FLUSH_SWITCH,
+                )
+                .await;
+                flush.turns_fed = Some(session.turns.len());
+                fed.flushes.push(flush);
                 if self.summaries {
                     fed.episodes.push(
                         episode_one(
@@ -3949,10 +3965,18 @@ struct Restatement {
     /// `nothing_written` (unchanged, already learned or a dedup) |
     /// `automatic_replacement` | `suggestion` | `duplicate_note` (an active
     /// note beside another with its key or title) | `first_learned` (the
-    /// earlier statement was never learned) | `candidate` | `unknown_row`.
+    /// earlier statement was never learned) | `candidate` | `unknown_row` —
+    /// from the notes citing the row; where none does, since the L8 fix
+    /// slice's H7, `model_tool_write` (the reader wrote a note itself during
+    /// the turn: its notes carry no sources) or `extraction_failed` (no
+    /// flush of the session read the turn: every answer to its window was
+    /// unusable, or it stopped), and `nothing_written` only for a turn
+    /// extraction read.
     outcome: &'static str,
     /// The notes citing the turn's row.
     notes: Vec<String>,
+    /// The notes the reader wrote during the turn (`model_tool`).
+    reader_notes: Vec<String>,
     /// The outcome over each learning path's notes citing the row alone
     /// (the L8 fix slice's H3); `outcome` is over all of them.
     by_surface: BySurface<&'static str>,
@@ -4369,10 +4393,31 @@ struct LearningResults {
     cost: Option<LearningCost>,
 }
 
+/// Whether a flush of the session read its turn `turn` (the L8 fix slice's
+/// H7): a `turns`, `switch` or `replay` flush that reached it and read to
+/// its end — no stop, and no window skipped after `MAX_ATTEMPTS` unusable
+/// answers. `None` when the session was never flushed (learning off): no
+/// extraction ran, so none failed.
+fn extraction_read_turn(flushes: &[FlushRecord], session: &str, turn: usize) -> Option<bool> {
+    let mut ran = false;
+    let mut read = false;
+    for f in flushes.iter().filter(|f| {
+        f.session == session && [FLUSH_TURNS, FLUSH_SWITCH, FLUSH_REPLAY].contains(&f.label)
+    }) {
+        ran = true;
+        read |= f.stopped.is_none()
+            && f.skipped_unusable == 0
+            && f.turns_fed.is_none_or(|fed| fed > turn);
+    }
+    ran.then_some(read)
+}
+
 fn measure_restatements(
     sessions: &[&CorpusSession],
     transcript: &Transcript,
     learned: &[LearnedNote],
+    turns: &[TurnRecord],
+    flushes: &[FlushRecord],
 ) -> Vec<Restatement> {
     let mut out = Vec::new();
     for s in sessions {
@@ -4381,7 +4426,23 @@ fn measure_restatements(
                 continue;
             }
             let row = transcript.row_of(&s.id, ti);
-            let (outcome, notes) = classify_restatement(row, learned);
+            let reader_notes: Vec<String> = turns
+                .iter()
+                .filter(|r| r.session == s.id && r.turn == ti)
+                .flat_map(|r| r.model_tool_notes.iter().cloned())
+                .collect();
+            let reader_wrote = turns
+                .iter()
+                .any(|r| r.session == s.id && r.turn == ti && r.model_tool_memory_changes > 0);
+            let failed = extraction_read_turn(flushes, &s.id, ti) == Some(false);
+            let (mut outcome, notes) = classify_restatement(row, learned);
+            if outcome == "nothing_written" {
+                if reader_wrote {
+                    outcome = "model_tool_write";
+                } else if failed {
+                    outcome = "extraction_failed";
+                }
+            }
             let by_surface = BySurface::of(|surface| match row {
                 None => "unknown_row",
                 Some(row) => {
@@ -4389,7 +4450,15 @@ fn measure_restatements(
                         .iter()
                         .filter(|n| n.surface == Some(surface) && n.cites_row(row))
                         .collect();
-                    classify_citing(&citing, learned)
+                    match classify_citing(&citing, learned) {
+                        "nothing_written" if surface == SURFACE_MODEL_TOOL && reader_wrote => {
+                            "model_tool_write"
+                        }
+                        "nothing_written" if surface == SURFACE_EXTRACTION && failed => {
+                            "extraction_failed"
+                        }
+                        outcome => outcome,
+                    }
                 }
             });
             out.push(Restatement {
@@ -4399,6 +4468,7 @@ fn measure_restatements(
                 row,
                 outcome,
                 notes,
+                reader_notes,
                 by_surface,
             });
         }
@@ -4475,7 +4545,13 @@ async fn measure_learning(
         measure_changed_facts(&pairs, &corrections, &coverage, &results.learned);
     results.changed_facts_correct =
         Some(results.changed_facts.iter().filter(|c| c.correct).count());
-    results.restatements = measure_restatements(sessions, transcript, &results.learned);
+    results.restatements = measure_restatements(
+        sessions,
+        transcript,
+        &results.learned,
+        &results.turns,
+        &results.flushes,
+    );
     tally_restatements(results);
     let learned = &results.learned;
     results.aliases = Some(measure_aliases(learned));
@@ -5570,7 +5646,13 @@ async fn suggestion_check(
         &learning.flushes,
         &learning.episode_flushes,
     );
-    learning.restatements = measure_restatements(sessions, transcript, &learning.learned);
+    learning.restatements = measure_restatements(
+        sessions,
+        transcript,
+        &learning.learned,
+        &learning.turns,
+        &learning.flushes,
+    );
     tally_restatements(learning);
     let (svc, c) = (service.clone(), ctx.clone());
     let suggestions = blocking(move || svc.suggestions(&c, Some(SUGGESTIONS_MAX_LIMIT)))
@@ -8749,14 +8831,102 @@ async fn every_learning_measure_is_reported_by_surface() {
         ),
         (
             &serde_json::json!("nothing_written"),
-            &serde_json::json!("nothing_written")
+            &serde_json::json!("model_tool_write")
         ),
-        "no note cites the row: {restated}"
+        "no note cites the row; the reader wrote one (H7): {restated}"
     );
     assert_eq!(
-        json["restatements_by_surface"]["extraction"]["nothing_written"],
-        1
+        (
+            &json["restatements_by_surface"]["extraction"]["nothing_written"],
+            &json["restatements_by_surface"]["model_tool"]["model_tool_write"]
+        ),
+        (&serde_json::json!(1), &serde_json::json!(1))
     );
+}
+
+/// The L8 fix slice's H7: a `restate` turn at which the reader wrote a
+/// note itself (a `model_tool` memory change during the turn) is attributed
+/// to it — `model_tool_write`, with the notes it wrote — and one no flush
+/// of its session read (every attempt unusable, the window skipped) is
+/// `extraction_failed`; `nothing_written` is left for a turn extraction read
+/// and wrote nothing for. A run that never learns (L0) fails nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restatement_is_attributed_to_the_reader_or_to_a_failed_extraction() {
+    let (run, results) = two_writer_run().await;
+    // The run holds the environment lock the next one takes.
+    drop(run);
+    let json = serde_json::to_value(&results).unwrap();
+    let restated = &json["restatements"][0];
+    assert_eq!(restated["session"], "cs-t32");
+    assert_eq!(restated["outcome"], "model_tool_write", "{restated}");
+    assert_eq!(
+        (
+            &restated["by_surface"]["extraction"],
+            &restated["by_surface"]["model_tool"]
+        ),
+        (
+            &serde_json::json!("nothing_written"),
+            &serde_json::json!("model_tool_write")
+        ),
+        "{restated}"
+    );
+    assert_eq!(
+        restated["reader_notes"].as_array().map(Vec::len),
+        Some(1),
+        "the note the reader wrote at the turn: {restated}"
+    );
+
+    // Every answer unusable: the queue skips the window, reading nothing.
+    let (router, _stub) = stub_router(&[TEST_MODEL], |request| {
+        if prompt_of(request).contains("You are the memory extractor") {
+            "Let me think about which facts matter here.".to_string()
+        } else {
+            "Noted.".to_string()
+        }
+    });
+    let run = OfflineRun::new(router.clone());
+    let session = fixture_session(
+        "cs-t41",
+        &[
+            ("I take my tea at seven every morning.", TurnMode::Explicit),
+            ("As I said, tea at seven, every morning.", TurnMode::Restate),
+        ],
+    );
+    for learn in [true, false] {
+        let fed = run.learner().feed(&[&session], learn).await;
+        let transcript = run.transcript(fed.transcript);
+        let mut results = LearningResults {
+            flushes: fed.flushes,
+            turns: fed.turns,
+            ..Default::default()
+        };
+        measure_learning(
+            &router,
+            None,
+            "",
+            &run.service,
+            &run.ctx(),
+            &[],
+            &BTreeSet::new(),
+            &[&session],
+            &transcript,
+            &mut results,
+        )
+        .await;
+        let json = serde_json::to_value(&results).unwrap();
+        let restated = &json["restatements"][0];
+        let (pooled, extraction) = if learn {
+            ("extraction_failed", "extraction_failed")
+        } else {
+            ("nothing_written", "nothing_written")
+        };
+        assert_eq!(restated["outcome"], pooled, "learning {learn}: {restated}");
+        assert_eq!(
+            restated["by_surface"]["extraction"], extraction,
+            "learning {learn}: {restated}"
+        );
+        assert_eq!(restated["by_surface"]["model_tool"], "nothing_written");
+    }
 }
 
 /// The L8 fix slice's H5: the coverage judge is not cut off before its
