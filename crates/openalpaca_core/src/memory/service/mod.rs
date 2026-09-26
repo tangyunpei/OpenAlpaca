@@ -53,7 +53,9 @@ pub use in_chat::{
 };
 pub use openalpaca_storage::memory_index::SearchOrder;
 pub use recall::{INDEX_BLOCK_HEADER, TRUST_LABEL, render_delivery, wrap_delivery};
-pub use suggestions::{SUGGESTION_EXCERPT_BYTES, SUGGESTIONS_DEFAULT_LIMIT, SUGGESTIONS_MAX_LIMIT};
+pub use suggestions::{
+    SUGGESTION_EXCERPT_BYTES, SUGGESTIONS_DEFAULT_LIMIT, SUGGESTIONS_MAX_LIMIT, suggestion_hidden,
+};
 pub use types::{
     ExtractionProvenance, ForgetInput, ForgetItem, ForgetItemStatus, ForgetOutput, Freshness,
     HistoryEntry, IndexRow, KnownNote, LearningView, ListInput, ListItem, ListOutput, ListedNote,

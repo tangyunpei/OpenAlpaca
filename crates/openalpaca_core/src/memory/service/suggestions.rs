@@ -236,6 +236,30 @@ pub(super) fn suggested_knowledge(body: &str) -> (String, usize) {
     cut_counting(&knowledge_text(body), SUGGESTION_KNOWLEDGE_BYTES)
 }
 
+/// How many hidden characters one suggestion holds, counted as every
+/// surface that decides on it counts them — the Memory view's Suggestions
+/// card, `openalpaca memory suggestions` and `memory_confirm`'s preview —
+/// over the five fields as the listing serves them: the two titles and the
+/// reason with the one-line escape (`escape_hidden_line`, so a tab or a
+/// line break in them counts), the replaced note's excerpt and the
+/// suggestion's knowledge with the arguments' (`escape_hidden`). One
+/// function for the Rust surfaces; the GUI's copy is held to it by
+/// `hidden-chars.json`'s `suggestion_cases`.
+pub fn suggestion_hidden(
+    target_title: &str,
+    title: &str,
+    reason: Option<&str>,
+    excerpt: &str,
+    knowledge: &str,
+) -> usize {
+    use crate::utils::text::{escape_hidden, escape_hidden_line};
+    [target_title, title, reason.unwrap_or("")]
+        .iter()
+        .map(|t| escape_hidden_line(t).hidden)
+        .chain([excerpt, knowledge].iter().map(|t| escape_hidden(t).hidden))
+        .sum()
+}
+
 /// `text` cut to `max` bytes on a character boundary, and how many of its
 /// characters the cut left out.
 fn cut_counting(text: &str, max: usize) -> (String, usize) {
@@ -259,4 +283,40 @@ pub(crate) fn replace_reason(body: &str) -> Option<String> {
     let colon = rest.find("): ")?;
     let reason = rest[colon + 3..].lines().next()?.trim();
     (!reason.is_empty()).then(|| reason.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::suggestion_hidden;
+
+    /// The GUI's Suggestions card counts one suggestion with its own copy of
+    /// [`suggestion_hidden`]; both are held to `hidden-chars.json`'s
+    /// `suggestion_cases`, whose fields tell the two escapes apart (a tab
+    /// counts in a title or the reason, not in a text).
+    #[test]
+    fn suggestion_hidden_is_the_gui_tables_suggestion_cases() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/openalpaca-gui/src/lib/hidden-chars.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let table: serde_json::Value = serde_json::from_str(&text).expect("the table is JSON");
+        let cases = table["suggestion_cases"]
+            .as_array()
+            .expect("suggestion_cases is an array");
+        assert!(!cases.is_empty());
+        for case in cases {
+            let field = |key: &str| case[key].as_str().expect(key);
+            assert_eq!(
+                suggestion_hidden(
+                    field("target_title"),
+                    field("title"),
+                    case["reason"].as_str(),
+                    field("excerpt"),
+                    field("knowledge"),
+                ),
+                case["hidden"].as_u64().expect("hidden") as usize,
+                "{case}"
+            );
+        }
+    }
 }

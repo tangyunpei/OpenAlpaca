@@ -548,14 +548,13 @@ fn render_preview(target: &NoteView, suggestion: &Note, said_on: &str) -> String
     let (suggested_text, suggested_left_out) =
         super::suggestions::suggested_knowledge(&suggestion.body);
     let (target_cut, suggested_cut) = (target_left_out > 0, suggested_left_out > 0);
-    let left_out = left_out_line(
-        [
-            target.note.title.as_str(),
-            suggestion.title.as_str(),
-            raw_reason.as_deref().unwrap_or(""),
-        ],
-        [target_text.as_str(), suggested_text.as_str()],
-    );
+    let left_out = left_out_line(super::suggestions::suggestion_hidden(
+        &target.note.title,
+        &suggestion.title,
+        raw_reason.as_deref(),
+        &target_text,
+        &suggested_text,
+    ));
     let reason = raw_reason.map(|r| one_line(&r, PREVIEW_REASON_BYTES));
     let text_bytes = match left_out {
         None => PREVIEW_TEXT_BYTES,
@@ -583,23 +582,16 @@ fn render_preview(target: &NoteView, suggestion: &Note, said_on: &str) -> String
 }
 
 /// The preview's last line when its fields dropped anything an approval's
-/// escape shows, or `None`: how many characters, counted as the Memory
-/// view's Suggestions card and `openalpaca memory suggestions` count the
-/// same five fields as the daemon serves them — the titles and the reason
-/// whole, with the one-line escape; the replaced note's excerpt and the
-/// suggestion's knowledge, with the arguments' — not only the part the
+/// escape shows, or `None`: how many characters, counted by
+/// [`super::suggestions::suggestion_hidden`] over the same five fields as
+/// the daemon serves them — the count the Memory view's Suggestions card
+/// and `openalpaca memory suggestions` show — not only the part the
 /// preview's byte budget kept. That card shows each of them as
 /// `<U+XXXX>`, so the three read one number. The counterpart of an
 /// approval's notice for a text that drops: it keeps R2's drop (spec item
 /// 4) and tells the person what the drop left out and where it is (A6,
 /// A8).
-fn left_out_line(lines: [&str; 3], texts: [&str; 2]) -> Option<String> {
-    use crate::utils::text::{escape_hidden, escape_hidden_line};
-    let hidden = lines
-        .iter()
-        .map(|t| escape_hidden_line(t).hidden)
-        .chain(texts.iter().map(|t| escape_hidden(t).hidden))
-        .sum::<usize>();
+fn left_out_line(hidden: usize) -> Option<String> {
     match hidden {
         0 => None,
         1 => Some(

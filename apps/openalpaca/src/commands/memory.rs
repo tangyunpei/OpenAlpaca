@@ -944,15 +944,18 @@ fn escape_line(value: &Value) -> openalpaca_core::utils::text::Escaped {
 }
 
 /// How many hidden characters one suggestion holds: the two titles and the
-/// reason its line shows, and both notes' texts, which it does not — the
-/// count the Memory view's Suggestions card shows beside all five.
+/// reason its line shows, and both notes' texts, which it does not — core's
+/// one count, which the Memory view's Suggestions card and the chat
+/// preview read too.
 fn suggestion_hidden(item: &Value) -> usize {
-    let text = |value: &Value| escape_hidden(value.as_str().unwrap_or("")).hidden;
-    escape_line(&item["target"]["title"]).hidden
-        + escape_line(&item["title"]).hidden
-        + escape_line(&item["reason"]).hidden
-        + text(&item["knowledge"])
-        + text(&item["target"]["excerpt"])
+    let text = |value: &Value| value.as_str().unwrap_or("").to_string();
+    openalpaca_core::memory::service::suggestion_hidden(
+        &text(&item["target"]["title"]),
+        &text(&item["title"]),
+        item["reason"].as_str(),
+        &text(&item["target"]["excerpt"]),
+        &text(&item["knowledge"]),
+    )
 }
 
 /// Under the lines, once, when any suggestion was counted: its notice counts

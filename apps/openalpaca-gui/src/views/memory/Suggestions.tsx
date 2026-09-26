@@ -44,6 +44,7 @@ import {
 } from "@/lib/hidden-chars";
 
 import { suggestionWhence, targetOriginLabel, targetTextLabel } from "./copy";
+import { suggestionHidden } from "./suggestion-hidden";
 
 export interface SuggestionsProps {
   items: readonly MemorySuggestion[];
@@ -103,13 +104,7 @@ function SuggestionRow({
   const excerpt = escapeHidden(item.target.excerpt);
   const knowledge = escapeHidden(item.knowledge);
   const reason = item.reason === null ? null : escapeHiddenLine(item.reason);
-  const notice = hiddenNotice(
-    target.hidden +
-      title.hidden +
-      excerpt.hidden +
-      knowledge.hidden +
-      (reason?.hidden ?? 0),
-  );
+  const notice = hiddenNotice(suggestionHidden(item));
   return (
     <li className="min-w-0 text-base leading-[1.5] wrap-anywhere text-amber-ink">
       {/* Design 09 §3.5: “Replace “X” (saved by you) with “B”?” */}
