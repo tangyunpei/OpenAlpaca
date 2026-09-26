@@ -1,4 +1,5 @@
-//! Byte-budget text cuts that cannot panic.
+//! Text a person reads: byte-budget cuts that cannot panic, one-line prose,
+//! and the approval surfaces' escape of hidden characters.
 //!
 //! A log preview or a refusal message wants a **byte** ceiling — a budget in
 //! characters lets one CJK line grow to four times the bytes it was meant to

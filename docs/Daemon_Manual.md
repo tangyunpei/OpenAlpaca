@@ -1251,7 +1251,8 @@ in FIFO order: a prompt sent while others wait says its place and that a reply
 answers the oldest first (`2 of 2 pending; each /yes or /no answers the oldest
 first`), and the acknowledgement names the tool it approved or denied
 (`Approved: shell_exec. Tool execution will proceed.`), or no tool when the
-request had already timed out.
+request had already timed out, been cancelled or been answered elsewhere (in
+the GUI or with `openalpaca tasks confirmations`).
 
 Every hidden or invisible character in the prompt's tool name and arguments (a
 bidi override, a zero-width or control character, a variation selector, any

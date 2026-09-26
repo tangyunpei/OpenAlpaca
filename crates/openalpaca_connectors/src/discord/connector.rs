@@ -173,7 +173,9 @@ fn resolve_confirmation_channel(db: &Database, lane_key: &str) -> Option<u64> {
 /// alone would stake the escape on matching Discord's link grammar exactly.
 /// A message long enough to be sent in chunks can leave one escaped
 /// character bare at the start of a chunk; every other delimiter is still
-/// escaped, so it has no partner to hide text with.
+/// escaped, so it has no partner to hide text with — though a bare
+/// line-start marker (`#`, `>`, `-`) can still restyle that chunk's first
+/// line as a heading, a quote or a list item, which hides nothing.
 fn discord_plain_text(text: &str) -> String {
     let mut plain = String::with_capacity(text.len() + text.len() / 8);
     for c in text.chars() {
