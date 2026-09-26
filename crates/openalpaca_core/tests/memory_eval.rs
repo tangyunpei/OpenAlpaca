@@ -4236,12 +4236,31 @@ struct LearningCost {
     reader_tokens_in: u64,
     reader_tokens_out: u64,
     feed_wall_ms: u64,
+    /// Fed turns that ended in an error (the L8 fix slice's H8) — `totals`
+    /// counts the question phase's only — and which: `<session>#<turn>`.
+    feed_turn_errors: usize,
+    feed_turn_errors_at: Vec<String>,
 }
 
-/// The learning phase's loud warnings (the L8 fix slice's H1): the flushes
-/// a daily cap stopped — learning's and the conversation summaries' apart.
-/// A daemon would learn those windows after 00:00 UTC; a run ends first.
-fn learning_warnings(flushes: &[FlushRecord], episodes: &[EpisodeRecord]) -> Vec<String> {
+/// The fed turns that ended in an error, as `<session>#<turn>`.
+fn feed_turn_errors(turns: &[TurnRecord]) -> Vec<String> {
+    turns
+        .iter()
+        .filter(|t| t.is_error)
+        .map(|t| format!("{}#{}", t.session, t.turn))
+        .collect()
+}
+
+/// The learning phase's loud warnings: the fed turns that ended in an error
+/// (the L8 fix slice's H8) — their transcript is not the reader's answer —
+/// and the flushes a daily cap stopped, learning's and the conversation
+/// summaries' apart (H1). A daemon would learn those windows after 00:00
+/// UTC; a run ends first.
+fn learning_warnings(
+    turns: &[TurnRecord],
+    flushes: &[FlushRecord],
+    episodes: &[EpisodeRecord],
+) -> Vec<String> {
     let capped = |stops: Vec<(&str, Option<&str>)>| -> Vec<String> {
         stops
             .into_iter()
@@ -4250,6 +4269,14 @@ fn learning_warnings(flushes: &[FlushRecord], episodes: &[EpisodeRecord]) -> Vec
             .collect()
     };
     let mut warnings = Vec::new();
+    let errors = feed_turn_errors(turns);
+    if !errors.is_empty() {
+        warnings.push(format!(
+            "{} fed turn(s) ended in an error: {}",
+            errors.len(),
+            errors.join(", ")
+        ));
+    }
     let learning = capped(
         flushes
             .iter()
@@ -4303,6 +4330,7 @@ fn learning_cost(
     }
     let model_tool: usize = turns.iter().map(|t| t.model_tool_memory_changes).sum();
     *by_surface.entry("model_tool".to_string()).or_insert(0) += model_tool;
+    let errors = feed_turn_errors(turns);
     LearningCost {
         flushes: flushes.len(),
         flushes_with_calls: latencies.len(),
@@ -4321,6 +4349,8 @@ fn learning_cost(
         reader_tokens_in: turns.iter().map(|t| t.reader_tokens_in).sum(),
         reader_tokens_out: turns.iter().map(|t| t.reader_tokens_out).sum(),
         feed_wall_ms,
+        feed_turn_errors: errors.len(),
+        feed_turn_errors_at: errors,
     }
 }
 
@@ -5422,7 +5452,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
             &fed.episodes,
             fed.wall_ms,
         ));
-        learning.warnings = learning_warnings(&fed.flushes, &fed.episodes);
+        learning.warnings = learning_warnings(&fed.turns, &fed.flushes, &fed.episodes);
         learning.turns = fed.turns;
         learning.flushes = fed.flushes;
         learning.episode_flushes = fed.episodes;
@@ -5821,7 +5851,7 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
 
     let flushes = replay_learning(&queue, &bus, &replay.transcript).await;
     let mut learning = LearningResults {
-        warnings: learning_warnings(&flushes, &[]),
+        warnings: learning_warnings(&[], &flushes, &[]),
         cost: Some(learning_cost(
             &[],
             &flushes,
@@ -6100,14 +6130,15 @@ fn print_learning(l: &LearningResults) {
     }
     if let Some(c) = &l.cost {
         println!(
-            "learning: {} flushes ({:?}), {} extraction calls, {} in / {} out tokens, flush p50={}ms p95={}ms",
+            "learning: {} flushes ({:?}), {} extraction calls, {} in / {} out tokens, flush p50={}ms p95={}ms; feed: {} turn error(s)",
             c.flushes,
             c.flushes_by_trigger,
             c.extraction_calls,
             c.extraction_tokens_in,
             c.extraction_tokens_out,
             c.flush_latency_p50_ms,
-            c.flush_latency_p95_ms
+            c.flush_latency_p95_ms,
+            c.feed_turn_errors
         );
     }
     if let Some(r) = &l.forced_rerun {
@@ -7110,6 +7141,51 @@ fn a_learning_system_lifts_the_extraction_caps() {
     assert_eq!(e.orchestrator.routing.main_loop_max_tools_per_round, 1);
 }
 
+/// A fed turn's record, answered or an error.
+fn fed_turn(session: &str, turn: usize, is_error: bool) -> TurnRecord {
+    TurnRecord {
+        session: session.to_string(),
+        turn,
+        mode: TurnMode::Explicit,
+        states: Vec::new(),
+        row: None,
+        latency_ms: 10,
+        is_error,
+        answer_chars: 5,
+        reader_llm_calls: u32::from(!is_error),
+        reader_tokens_in: 0,
+        reader_tokens_out: 0,
+        reader_models: Vec::new(),
+        tools: Vec::new(),
+        model_tool_memory_changes: 0,
+        model_tool_notes: Vec::new(),
+    }
+}
+
+/// The L8 fix slice's H8: a fed turn that ended in an error — L0's feed had
+/// seven, and "0 turn errors" was all a report said, since `totals` counts
+/// the question phase — is counted in the learning cost, named, and warned
+/// about at the head of the printed summary.
+#[test]
+fn a_feed_turn_error_is_counted_and_warned_about() {
+    let turns = [
+        fed_turn("cs-026", 7, false),
+        fed_turn("cs-026", 8, true),
+        fed_turn("cs-027", 0, true),
+    ];
+    let cost = serde_json::to_value(learning_cost(&turns, &[], &[], 0)).unwrap();
+    assert_eq!(cost["feed_turn_errors"], 2, "{cost}");
+    assert_eq!(
+        cost["feed_turn_errors_at"],
+        serde_json::json!(["cs-026#8", "cs-027#0"])
+    );
+    let warnings = learning_warnings(&turns, &[], &[]);
+    assert!(
+        warnings.len() == 1 && warnings[0].contains("2 fed turn(s) ended in an error"),
+        "{warnings:?}"
+    );
+}
+
 /// The L8 fix slice's H4: a replay learns with no reader, so its store is
 /// extraction-only, and its conditions say so — a replay is compared with a
 /// live run's `extraction` numbers, never its pooled ones; a live run is
@@ -7170,7 +7246,7 @@ fn a_flush_a_daily_cap_stopped_is_a_loud_warning() {
         summary("cs-021", Some(FlushStop::Cap)),
         summary("cs-022", Some(FlushStop::Cap)),
     ];
-    let warnings = learning_warnings(&[], &episodes);
+    let warnings = learning_warnings(&[], &[], &episodes);
     let [one] = &warnings[..] else {
         panic!("one warning: {warnings:?}");
     };
@@ -7181,7 +7257,7 @@ fn a_flush_a_daily_cap_stopped_is_a_loud_warning() {
     ] {
         assert!(one.contains(part), "{part:?} in {one:?}");
     }
-    assert!(learning_warnings(&[], &[written]).is_empty());
+    assert!(learning_warnings(&[], &[], &[written]).is_empty());
     let capped = FlushRecord::new(
         "cs-003",
         FLUSH_SWITCH,
@@ -7193,7 +7269,7 @@ fn a_flush_a_daily_cap_stopped_is_a_loud_warning() {
         Vec::new(),
         0,
     );
-    let warnings = learning_warnings(std::slice::from_ref(&capped), &[]);
+    let warnings = learning_warnings(&[], std::slice::from_ref(&capped), &[]);
     assert!(
         warnings.len() == 1
             && warnings[0].contains("1 learning flush")
@@ -7201,7 +7277,7 @@ fn a_flush_a_daily_cap_stopped_is_a_loud_warning() {
         "{warnings:?}"
     );
     let results = LearningResults {
-        warnings: learning_warnings(&[capped], &episodes),
+        warnings: learning_warnings(&[], &[capped], &episodes),
         ..Default::default()
     };
     assert_eq!(
