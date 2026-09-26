@@ -2905,6 +2905,10 @@ struct EpisodeRecord {
     episodes: usize,
     input_tokens: u64,
     output_tokens: u64,
+    /// Windows passed after `MAX_ATTEMPTS` unusable answers, left with no
+    /// summary (repair round 1 of the L8 fix slice): such a flush ends with
+    /// no stop, like one with nothing to summarise.
+    skipped_unusable: usize,
     stopped: Option<String>,
     written: Vec<WrittenNote>,
     events_lagged: u64,
@@ -2952,6 +2956,7 @@ impl EpisodeRecord {
             episodes: attempts.iter().map(|r| r.episodes).sum(),
             input_tokens: attempts.iter().map(|r| r.input_tokens).sum(),
             output_tokens: attempts.iter().map(|r| r.output_tokens).sum(),
+            skipped_unusable: attempts.iter().map(|r| r.skipped_unusable).sum(),
             stopped: attempts
                 .last()
                 .and_then(|r| r.stopped)
@@ -4284,11 +4289,31 @@ struct LearningCost {
     flush_latency_p50_ms: u64,
     flush_latency_p95_ms: u64,
     flushes_by_trigger: BTreeMap<String, usize>,
-    /// The conversation summaries' calls and tokens (L only).
+    // ── Unusable answers, over every attempt (repair round 1 of the L8 fix
+    //    slice): a retried flush's `stopped` is its last attempt's, and a
+    //    window skipped after `MAX_ATTEMPTS` unusable answers ends with
+    //    none ────────────────────────────────────────────────────────────
+    /// `flush_session` calls: a flush retried at once counts each attempt
+    /// (`extraction_calls` counts the model calls).
+    flush_attempts: usize,
+    /// Answers the learning queue could not use, and by reason: `cut at
+    /// max_tokens`, `empty completion`, or the parser's reason.
+    unusable_answers: usize,
+    unusable_answers_by_reason: BTreeMap<String, usize>,
+    /// Windows skipped after `MAX_ATTEMPTS` unusable answers: their turns
+    /// are never learned. `warnings` names each session.
+    windows_skipped_unusable: usize,
+    /// The conversation summaries' calls and tokens (L, and a replay asked
+    /// questions).
     episode_calls: usize,
     episodes_written: usize,
     episode_tokens_in: u64,
     episode_tokens_out: u64,
+    /// The same four for the conversation summaries.
+    episode_flush_attempts: usize,
+    episode_unusable_answers: usize,
+    episode_unusable_answers_by_reason: BTreeMap<String, usize>,
+    episode_windows_skipped_unusable: usize,
     /// The two learning paths: `extraction` from the flushes' events,
     /// `model_tool` (the reader's own writes) from the fed turns'.
     memory_changes_by_surface: BTreeMap<String, usize>,
@@ -4302,6 +4327,30 @@ struct LearningCost {
     feed_turn_errors_at: Vec<String>,
 }
 
+/// The class an unusable answer's reason falls in, for the tallies: `cut at
+/// max_tokens` (the ceiling left out), `empty completion` (no answer came
+/// back: the reasoning ate the budget), or the parser's own reason.
+fn unusable_class(answer: &UnusableRecord) -> String {
+    if answer.reason.starts_with("cut at max_tokens") {
+        "cut at max_tokens".to_string()
+    } else if answer.finish_reason.is_none() {
+        "empty completion".to_string()
+    } else {
+        answer.reason.clone()
+    }
+}
+
+/// Unusable answers by [`unusable_class`].
+fn unusable_by_reason<'a>(
+    answers: impl Iterator<Item = &'a UnusableRecord>,
+) -> BTreeMap<String, usize> {
+    let mut by = BTreeMap::new();
+    for a in answers {
+        *by.entry(unusable_class(a)).or_insert(0) += 1;
+    }
+    by
+}
+
 /// The fed turns that ended in an error, as `<session>#<turn>`.
 fn feed_turn_errors(turns: &[TurnRecord]) -> Vec<String> {
     turns
@@ -4313,9 +4362,11 @@ fn feed_turn_errors(turns: &[TurnRecord]) -> Vec<String> {
 
 /// The learning phase's loud warnings: the fed turns that ended in an error
 /// (the L8 fix slice's H8) — their transcript is not the reader's answer —
-/// and the flushes a daily cap stopped, learning's and the conversation
-/// summaries' apart (H1). A daemon would learn those windows after 00:00
-/// UTC; a run ends first.
+/// the flushes a daily cap stopped, learning's and the conversation
+/// summaries' apart (H1) — a daemon would learn those windows after 00:00
+/// UTC; a run ends first — and the windows skipped after `MAX_ATTEMPTS`
+/// unusable answers, whose turns are never learned or summarised (repair
+/// round 1).
 fn learning_warnings(
     turns: &[TurnRecord],
     flushes: &[FlushRecord],
@@ -4363,6 +4414,38 @@ fn learning_warnings(
             summaries.join(", ")
         ));
     }
+    let max = openalpaca_core::memory::learning::MAX_ATTEMPTS;
+    let skipped = |windows: Vec<(&str, usize)>| -> (usize, Vec<String>) {
+        let hit: Vec<(&str, usize)> = windows.into_iter().filter(|(_, n)| *n > 0).collect();
+        (
+            hit.iter().map(|(_, n)| n).sum(),
+            hit.iter().map(|(s, _)| s.to_string()).collect(),
+        )
+    };
+    let (n, sessions) = skipped(
+        flushes
+            .iter()
+            .map(|f| (f.session.as_str(), f.skipped_unusable))
+            .collect(),
+    );
+    if n > 0 {
+        warnings.push(format!(
+            "{n} learning window(s) skipped after {max} unusable answers, their turns never learned: {}",
+            sessions.join(", ")
+        ));
+    }
+    let (n, sessions) = skipped(
+        episodes
+            .iter()
+            .map(|e| (e.session.as_str(), e.skipped_unusable))
+            .collect(),
+    );
+    if n > 0 {
+        warnings.push(format!(
+            "{n} conversation-summary window(s) skipped after {max} unusable answers, left with no summary: {}",
+            sessions.join(", ")
+        ));
+    }
     warnings
 }
 
@@ -4400,10 +4483,22 @@ fn learning_cost(
         flush_latency_p50_ms: percentile(&latencies, 0.50),
         flush_latency_p95_ms: percentile(&latencies, 0.95),
         flushes_by_trigger: by_trigger,
+        flush_attempts: flushes.iter().map(|f| f.attempts).sum(),
+        unusable_answers: flushes.iter().map(|f| f.unusable_answers.len()).sum(),
+        unusable_answers_by_reason: unusable_by_reason(
+            flushes.iter().flat_map(|f| &f.unusable_answers),
+        ),
+        windows_skipped_unusable: flushes.iter().map(|f| f.skipped_unusable).sum(),
         episode_calls: episodes.iter().map(|e| e.calls).sum(),
         episodes_written: episodes.iter().map(|e| e.episodes).sum(),
         episode_tokens_in: episodes.iter().map(|e| e.input_tokens).sum(),
         episode_tokens_out: episodes.iter().map(|e| e.output_tokens).sum(),
+        episode_flush_attempts: episodes.iter().map(|e| e.attempts).sum(),
+        episode_unusable_answers: episodes.iter().map(|e| e.unusable_answers.len()).sum(),
+        episode_unusable_answers_by_reason: unusable_by_reason(
+            episodes.iter().flat_map(|e| &e.unusable_answers),
+        ),
+        episode_windows_skipped_unusable: episodes.iter().map(|e| e.skipped_unusable).sum(),
         memory_changes_by_surface: by_surface,
         reader_llm_calls: turns.iter().map(|t| t.reader_llm_calls).sum(),
         reader_tokens_in: turns.iter().map(|t| t.reader_tokens_in).sum(),
@@ -6324,6 +6419,19 @@ fn print_learning(l: &LearningResults) {
             c.flush_latency_p95_ms,
             c.feed_turn_errors
         );
+        println!(
+            "  unusable answers: {} of {} extraction calls over {} flush attempts {:?}, {} window(s) skipped; summaries: {} of {} calls over {} attempts {:?}, {} window(s) skipped",
+            c.unusable_answers,
+            c.extraction_calls,
+            c.flush_attempts,
+            c.unusable_answers_by_reason,
+            c.windows_skipped_unusable,
+            c.episode_unusable_answers,
+            c.episode_calls,
+            c.episode_flush_attempts,
+            c.episode_unusable_answers_by_reason,
+            c.episode_windows_skipped_unusable,
+        );
     }
     if let Some(r) = &l.forced_rerun {
         println!(
@@ -7470,6 +7578,145 @@ fn a_flush_a_daily_cap_stopped_is_a_loud_warning() {
             .map(Vec::len),
         Some(2),
         "recorded in the report"
+    );
+}
+
+/// Repair round 1 of the L8 fix slice (the fidelity review's F1): a retried
+/// flush's `stopped` is only its last attempt's, and a window skipped after
+/// `MAX_ATTEMPTS` unusable answers ends with none — it reads like a clean
+/// flush. So the learning cost adds up, over every attempt, the flush
+/// attempts, the unusable answers by reason and the windows skipped, for
+/// learning and for the conversation summaries apart; a summary record
+/// keeps its skipped windows; and `learning.warnings` names each session
+/// whose window was skipped, whose turns are never learned.
+#[test]
+fn unusable_answers_and_skipped_windows_are_counted_and_warned_about() {
+    use openalpaca_core::memory::learning::{
+        EpisodeReport, FlushReport, FlushStop, MAX_ATTEMPTS, UnusableAnswer,
+    };
+    let answer = |reason: &str, finish_reason: Option<&'static str>| UnusableAnswer {
+        reason: reason.to_string(),
+        chars: if finish_reason.is_some() { 12 } else { 0 },
+        finish_reason,
+        head: String::new(),
+        tail: String::new(),
+    };
+    let not_json = || answer("the answer is not JSON", Some("stop"));
+    let bad = |unusable: UnusableAnswer| FlushReport {
+        calls: 1,
+        unusable: vec![unusable],
+        stopped: Some(FlushStop::BadOutput),
+        ..Default::default()
+    };
+    let skipped = FlushRecord::from_attempts(
+        "cs-006",
+        FLUSH_SWITCH,
+        0,
+        &[
+            bad(not_json()),
+            bad(answer("cut at max_tokens (2892)", Some("max_tokens"))),
+            FlushReport {
+                calls: 1,
+                chunks: 1,
+                skipped_unusable: 1,
+                unusable: vec![answer("the model returned no answer", None)],
+                ..Default::default()
+            },
+        ],
+        Vec::new(),
+        0,
+    );
+    let clean = FlushRecord::new(
+        "cs-007",
+        FLUSH_TURNS,
+        0,
+        &FlushReport {
+            calls: 1,
+            chunks: 1,
+            stored: 1,
+            ..Default::default()
+        },
+        Vec::new(),
+        0,
+    );
+    let summary = EpisodeRecord::from_attempts(
+        "cs-006",
+        FLUSH_SWITCH,
+        0,
+        &[
+            EpisodeReport {
+                calls: 1,
+                unusable: vec![not_json()],
+                stopped: Some(FlushStop::BadOutput),
+                ..Default::default()
+            },
+            EpisodeReport {
+                calls: 1,
+                skipped_unusable: 1,
+                unusable: vec![not_json()],
+                ..Default::default()
+            },
+        ],
+        Vec::new(),
+        0,
+    );
+    assert_eq!(
+        serde_json::to_value(&summary).unwrap()["skipped_unusable"],
+        1,
+        "a summary record keeps its skipped windows"
+    );
+    let flushes = [skipped, clean];
+    let episodes = [summary];
+    let cost = serde_json::to_value(learning_cost(&[], &flushes, &episodes, 0)).unwrap();
+    assert_eq!(
+        (
+            &cost["flush_attempts"],
+            &cost["unusable_answers"],
+            &cost["windows_skipped_unusable"],
+        ),
+        (
+            &serde_json::json!(4),
+            &serde_json::json!(3),
+            &serde_json::json!(1)
+        ),
+        "{cost}"
+    );
+    assert_eq!(
+        cost["unusable_answers_by_reason"],
+        serde_json::json!({
+            "cut at max_tokens": 1,
+            "empty completion": 1,
+            "the answer is not JSON": 1,
+        })
+    );
+    assert_eq!(
+        (
+            &cost["episode_flush_attempts"],
+            &cost["episode_unusable_answers"],
+            &cost["episode_windows_skipped_unusable"],
+            &cost["episode_unusable_answers_by_reason"],
+        ),
+        (
+            &serde_json::json!(2),
+            &serde_json::json!(2),
+            &serde_json::json!(1),
+            &serde_json::json!({"the answer is not JSON": 2}),
+        ),
+        "{cost}"
+    );
+    let warnings = learning_warnings(&[], &flushes, &episodes);
+    let max = MAX_ATTEMPTS.to_string();
+    for (what, session) in [("learning window", "cs-006"), ("summary window", "cs-006")] {
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains(what) && w.contains(&max) && w.contains(session)),
+            "a warning names the skipped {what} of {session}: {warnings:?}"
+        );
+    }
+    assert!(
+        !warnings.iter().any(|w| w.contains("cs-007")),
+        "a clean flush warns about nothing: {warnings:?}"
     );
 }
 
