@@ -90,6 +90,38 @@ pub fn terminal_reset(tty: bool) -> &'static str {
     if tty { TERMINAL_RESET } else { "" }
 }
 
+/// `json` with each hidden character written as a JSON `\uXXXX` escape.
+///
+/// JSON a person reads at a terminal but a program may parse: the one-line
+/// set (`openalpaca_core::utils::text::needs_escape_in_line`) in JSON's own
+/// lossless form rather than `<U+XXXX>`, so the document still reads back as
+/// exactly the daemon's values — `tasks confirmations list --format json`,
+/// and the payloads of `tasks log`. No notice: it would not be JSON.
+///
+/// Sound on `serde_json`'s output and only there: it writes JSON's structure
+/// in ASCII laid out with `\n` and spaces, and escapes every C0 control
+/// inside a string itself, so every other character of the one-line set
+/// (`needs_escape_in_line`) it leaves raw is inside a string, where the
+/// escape is the same character to any reader.
+pub fn json_with_hidden_escaped(json: &str) -> String {
+    use openalpaca_core::utils::text::needs_escape_in_line;
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c != '\n' && needs_escape_in_line(c) {
+            let mut units = [0u16; 2];
+            for unit in c.encode_utf16(&mut units) {
+                // Writing into a `String` cannot fail.
+                let _ = write!(out, "\\u{unit:04x}");
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Print a table header row with separator.
 pub fn print_table_header(headers: &[(&str, usize)]) {
     let (header_line, rule) = table_header_lines(headers);

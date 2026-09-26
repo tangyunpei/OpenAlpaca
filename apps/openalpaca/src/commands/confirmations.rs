@@ -42,7 +42,7 @@ use std::io::{IsTerminal, Write};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::client::DaemonClient;
-use crate::output::{OutputFormat, TableRow, table_header_lines};
+use crate::output::{OutputFormat, TableRow, json_with_hidden_escaped, table_header_lines};
 
 #[derive(Subcommand)]
 pub enum ConfirmationCommands {
@@ -285,32 +285,6 @@ const NOTICE_COUNTS_UNPRINTED: &str = "The count includes the agent id and the a
 /// controls). No notice line: it would not be JSON.
 fn listing_json(prompts: &[PendingPrompt]) -> String {
     json_with_hidden_escaped(&serde_json::to_string_pretty(prompts).unwrap_or_default())
-}
-
-/// `json` with each hidden character written as a JSON `\uXXXX` escape.
-///
-/// Sound on `serde_json`'s output and only there: it writes JSON's structure
-/// in ASCII laid out with `\n` and spaces, and escapes every C0 control
-/// inside a string itself, so every other character of the one-line set
-/// (`needs_escape_in_line`) it leaves raw is inside a string, where the
-/// escape is the same character to any reader.
-fn json_with_hidden_escaped(json: &str) -> String {
-    use openalpaca_core::utils::text::needs_escape_in_line;
-    use std::fmt::Write as _;
-
-    let mut out = String::with_capacity(json.len());
-    for c in json.chars() {
-        if c != '\n' && needs_escape_in_line(c) {
-            let mut units = [0u16; 2];
-            for unit in c.encode_utf16(&mut units) {
-                // Writing into a `String` cannot fail.
-                let _ = write!(out, "\\u{unit:04x}");
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 /// Under the table, what each card with a daemon-authored preview says
