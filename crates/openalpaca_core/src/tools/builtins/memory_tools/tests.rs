@@ -1674,6 +1674,101 @@ async fn the_preview_drops_every_character_an_approval_escapes() {
     );
 }
 
+/// The preview's last line says "the Memory view shows them", so it counts
+/// what the Memory view's Suggestions card counts — the fields as the
+/// daemon serves them there: the replaced note's text as its 600-byte
+/// excerpt, the suggestion's as its 4 KiB knowledge — and one number reads
+/// on the chat card, the Suggestions card and `memory suggestions`. The
+/// preview quotes those same fields, so nothing it drops is a character the
+/// card does not show: a hidden character past the excerpt is neither
+/// quoted nor counted, and a text the excerpt cut says so with "…" even
+/// when what is left is short.
+#[tokio::test]
+async fn the_preview_counts_what_the_suggestions_card_counts() {
+    use crate::utils::text::{escape_hidden, escape_hidden_line};
+    let h = Harness::new();
+    let tool = MemoryConfirmTool::new(h.service.clone());
+    // An owner's French note: a no-break space before each colon, three in
+    // its first 600 bytes and twelve past them.
+    let french = format!(
+        "Trajet\u{a0}: bus. Horaire\u{a0}: 8h. Retour\u{a0}: 18h. {}{}",
+        "Le bus passe tôt. ".repeat(40),
+        "Arrêt\u{a0}: gare. ".repeat(12)
+    );
+    let target = h.user_note(
+        ALICE,
+        "Trajet",
+        &format!("# Trajet\n\n## Knowledge\n{french}\n"),
+    );
+    let row = typed_row(&h, "Je prends le vélo maintenant.", "2026-09-24 10:00:00");
+    // The suggestion's own text: a zero-width space past the 4 KiB the
+    // card serves.
+    let knowledge = format!("Le vélo. {}\u{200b}", "pad ".repeat(1100));
+    let s = suggestion_for(
+        &h,
+        (target.0, &target.1),
+        "Trajet",
+        &knowledge,
+        &[row],
+        crate::memory::service::ExtractionProvenance::UserWords,
+    );
+    let preview = tool
+        .confirmation_preview(
+            &serde_json::json!({"id": s.id.to_string(), "expected_revision": s.revision, "target_revision": target.1}),
+            &h.tool_ctx(ALICE),
+        )
+        .await
+        .unwrap()
+        .expect("a preview");
+    let card = h
+        .service
+        .suggestions(&read_ctx(&h), None)
+        .unwrap()
+        .into_iter()
+        .find(|x| x.id == s.id)
+        .expect("the suggestion is listed");
+    let card_count = escape_hidden_line(&card.target.title).hidden
+        + escape_hidden_line(&card.title).hidden
+        + escape_hidden_line(card.reason.as_deref().unwrap_or("")).hidden
+        + escape_hidden(&card.target.excerpt).hidden
+        + escape_hidden(&card.knowledge).hidden;
+    assert_eq!(card_count, 3);
+    assert_eq!(
+        preview.lines().last(),
+        Some("This preview leaves out 3 hidden characters; the Memory view shows them as <U+…>."),
+        "{preview}"
+    );
+
+    // Past the excerpt, nothing is quoted: a hidden character there is not
+    // dropped from the preview, because the preview never reaches it.
+    let target = h.user_note(
+        ALICE,
+        "Start",
+        &format!(
+            "# Start\n\n## Knowledge\nStart{}b\u{200b}c\n",
+            " ".repeat(700)
+        ),
+    );
+    let s = suggestion_for(
+        &h,
+        (target.0, &target.1),
+        "Start",
+        "Begin.",
+        &[row],
+        crate::memory::service::ExtractionProvenance::UserWords,
+    );
+    let preview = tool
+        .confirmation_preview(
+            &serde_json::json!({"id": s.id.to_string(), "expected_revision": s.revision, "target_revision": target.1}),
+            &h.tool_ctx(ALICE),
+        )
+        .await
+        .unwrap()
+        .expect("a preview");
+    assert_eq!(preview.lines().count(), 5, "{preview}");
+    assert_eq!(preview.lines().nth(1), Some("Yours: Start…"), "{preview}");
+}
+
 /// The turn's own `ModelTool` read context, as the main loop reads with it.
 fn read_ctx(h: &Harness) -> crate::memory::service::MemoryAccessContext {
     h.service

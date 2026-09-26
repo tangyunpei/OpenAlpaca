@@ -24,7 +24,7 @@ use crate::tools::registry::{HumanApproval, HumanDenial};
 use openalpaca_storage::ConversationRepository;
 use openalpaca_storage::memory_files::{
     self as files, EffectiveStatus, Note, NoteId, NoteStatus, NoteView, Origin, Partition,
-    PartitionHealth, SourceType, knowledge_text,
+    PartitionHealth, SourceType,
 };
 use std::collections::HashSet;
 
@@ -503,10 +503,16 @@ fn check_revisions(expected_revision: &str, target_revision: &str) -> Result<(),
 /// the person may want to check, is in the Memory view and
 /// `openalpaca memory show`.
 fn one_line(text: &str, max: usize) -> String {
+    one_line_of(text, false, max)
+}
+
+/// [`one_line`] of a text the daemon served already cut (`served_cut`): the
+/// ellipsis marks that cut too, even where what is left fits `max`.
+fn one_line_of(text: &str, served_cut: bool, max: usize) -> String {
     let flat = crate::utils::text::one_line(text);
     match cut_bytes(&flat, max) {
-        (cut, true) => format!("{}…", cut.trim_end()),
-        (whole, false) => whole,
+        (kept, cut) if cut || served_cut => format!("{}…", kept.trim_end()),
+        (whole, _) => whole,
     }
 }
 
@@ -514,6 +520,12 @@ fn one_line(text: &str, max: usize) -> String {
 /// text being replaced decides how it is named — the owner's own (saved,
 /// edited by hand, imported) is "yours", anything learning wrote is "the
 /// current note".
+///
+/// It quotes the fields the Memory view's Suggestions card serves — both
+/// titles, the reason, the replaced note's text as its excerpt
+/// ([`super::suggestions::target_excerpt`]) and the suggestion's as its
+/// knowledge ([`super::suggestions::suggested_knowledge`]) — so every
+/// character it drops is one that card shows escaped.
 ///
 /// Its fields drop every character an approval's escape would show
 /// ([`one_line`]), and when any was dropped one last line says how many and
@@ -532,8 +544,8 @@ fn render_preview(target: &NoteView, suggestion: &Note, said_on: &str) -> String
         _ => ("the note", "Current", "The current note is kept"),
     };
     let raw_reason = super::suggestions::replace_reason(&suggestion.body);
-    let target_text = knowledge_text(&target.note.body);
-    let suggested_text = knowledge_text(&suggestion.body);
+    let (target_text, target_cut) = super::suggestions::target_excerpt(&target.note.body);
+    let (suggested_text, suggested_cut) = super::suggestions::suggested_knowledge(&suggestion.body);
     let left_out = left_out_line(
         [
             target.note.title.as_str(),
@@ -556,8 +568,8 @@ fn render_preview(target: &NoteView, suggestion: &Note, said_on: &str) -> String
         "Replace {named} “{}” with “{}”?\n{label}: {}\nNew: {}\n{why}\n{kept} as history in the Memory view.",
         one_line(&target.note.title, PREVIEW_TITLE_BYTES),
         one_line(&suggestion.title, PREVIEW_TITLE_BYTES),
-        one_line(&target_text, text_bytes),
-        one_line(&suggested_text, text_bytes),
+        one_line_of(&target_text, target_cut, text_bytes),
+        one_line_of(&suggested_text, suggested_cut, text_bytes),
     );
     match left_out {
         None => cut_bytes(&text, PREVIEW_MAX_BYTES).0,
@@ -570,12 +582,15 @@ fn render_preview(target: &NoteView, suggestion: &Note, said_on: &str) -> String
 
 /// The preview's last line when its fields dropped anything an approval's
 /// escape shows, or `None`: how many characters, counted as the Memory
-/// view's Suggestions card counts the same five fields — the titles and the
-/// reason with the one-line escape, the two texts with the arguments' — in
-/// the whole of each, not only the part a byte budget kept. That card shows
-/// each of them as `<U+XXXX>`. The counterpart of an approval's notice for
-/// a text that drops: it keeps R2's drop (spec item 4) and tells the person
-/// what the drop left out and where it is (A6, A8).
+/// view's Suggestions card and `openalpaca memory suggestions` count the
+/// same five fields as the daemon serves them — the titles and the reason
+/// whole, with the one-line escape; the replaced note's excerpt and the
+/// suggestion's knowledge, with the arguments' — not only the part the
+/// preview's byte budget kept. That card shows each of them as
+/// `<U+XXXX>`, so the three read one number. The counterpart of an
+/// approval's notice for a text that drops: it keeps R2's drop (spec item
+/// 4) and tells the person what the drop left out and where it is (A6,
+/// A8).
 fn left_out_line(lines: [&str; 3], texts: [&str; 2]) -> Option<String> {
     use crate::utils::text::{escape_hidden, escape_hidden_line};
     let hidden = lines

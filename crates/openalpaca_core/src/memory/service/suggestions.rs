@@ -157,7 +157,7 @@ pub(super) fn verified_target(
     } else {
         Origin::parse(&row.origin).unwrap_or(Origin::External)
     };
-    let (excerpt, _) = cut_bytes(&knowledge_text(&note.body), SUGGESTION_EXCERPT_BYTES);
+    let (excerpt, _) = target_excerpt(&note.body);
     Ok(Some(SuggestionTarget {
         id: note_id,
         revision,
@@ -200,7 +200,7 @@ fn verified_suggestion(
     } else {
         Origin::parse(&row.origin).unwrap_or(Origin::External)
     };
-    let (knowledge, _) = cut_bytes(&knowledge_text(&note.body), SUGGESTION_KNOWLEDGE_BYTES);
+    let (knowledge, _) = suggested_knowledge(&note.body);
     Some(Suggestion {
         id,
         revision,
@@ -215,6 +215,20 @@ fn verified_suggestion(
         older_count: 0,
         target: target.clone(),
     })
+}
+
+/// The replaced note's text as a suggestion serves it (`target.excerpt`):
+/// its Knowledge section, cut at [`SUGGESTION_EXCERPT_BYTES`] — `true` when
+/// cut. `memory_confirm`'s preview quotes and counts this same field.
+pub(super) fn target_excerpt(body: &str) -> (String, bool) {
+    cut_bytes(&knowledge_text(body), SUGGESTION_EXCERPT_BYTES)
+}
+
+/// The suggested text as a suggestion serves it (`knowledge`): its
+/// Knowledge section, cut at [`SUGGESTION_KNOWLEDGE_BYTES`] — `true` when
+/// cut. `memory_confirm`'s preview quotes and counts this same field.
+pub(super) fn suggested_knowledge(body: &str) -> (String, bool) {
+    cut_bytes(&knowledge_text(body), SUGGESTION_KNOWLEDGE_BYTES)
 }
 
 /// The reason a learned replacement gives (design 09 §2.6): its evidence
