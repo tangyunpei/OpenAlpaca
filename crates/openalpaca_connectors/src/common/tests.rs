@@ -655,6 +655,7 @@ mod hidden_characters {
             "{prompt}"
         );
     }
+
     /// What the cut leaves out still runs, and a bare `...` does not say how
     /// much that is: a model can pad a shell command past the cut and put
     /// the part that matters after it. The cut says how many characters it

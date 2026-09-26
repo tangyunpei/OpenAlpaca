@@ -165,7 +165,7 @@ fn a_multibyte_argument_block_is_cut_without_panicking() {
     assert!(prompt.contains("Reply /yes or /no to approve or deny."));
     assert!(prompt.ends_with("Reply /yes or /no to approve or deny."));
     // One prompt, so no queue hint.
-    assert!(!prompt.contains("pending)"), "{prompt}");
+    assert!(!prompt.contains("pending"), "{prompt}");
     assert!(prompt.contains("..."), "the arguments were truncated");
 }
 
