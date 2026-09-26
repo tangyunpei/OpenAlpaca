@@ -9,7 +9,9 @@ import { suggestionHidden } from "./suggestion-hidden";
  * and `openalpaca memory suggestions` read: both are held to the shared
  * table's worked cases. Each title and the reason there holds a tab or a line
  * break, which the one-line escape counts and the texts' does not, so a field
- * counted with the wrong escape fails.
+ * counted with the wrong escape fails; and in the first case each of the five
+ * fields holds a different number of hidden characters (1 to 5), so a field
+ * read in place of another, or left out, fails too.
  */
 describe("suggestionHidden — the shared table's suggestion cases", () => {
   it("counts every case as Rust counts it", () => {
