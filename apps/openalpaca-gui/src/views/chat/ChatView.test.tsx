@@ -1130,6 +1130,128 @@ describe("ChatView — a confirmation with hidden characters", () => {
       ),
     );
   });
+
+  /**
+   * The row an answer leaves is noted with the tool's name exactly as the
+   * daemon sent it, and escaped only where it is drawn: drawn, its escapes
+   * are highlighted spans (a name escaped when it was noted would draw them
+   * as plain text, like a typed `<U+202E>`), and the name it keeps is the one
+   * the tool's own report is matched on, in either order (G6).
+   */
+  describe("the row an answer leaves", () => {
+    async function raiseWithTwin(source: FakeEventSource) {
+      await act(async () => {
+        source.emit("confirmation_requested", {
+          request_id: "req-h",
+          tool_name: TOOL,
+          tool_arguments: { name: "notes.md" },
+        });
+        emitServerEvent({
+          type: "tool_confirmation_requested",
+          request_id: "req-h",
+          agent_id: "orchestrator",
+          tool_name: TOOL,
+          tool_arguments: { name: "notes.md" },
+          stream_id: null,
+          lane_key: "user:gui",
+          task_id: null,
+        });
+      });
+    }
+
+    async function toolReported() {
+      await act(async () => {
+        emitServerEvent({
+          type: "tool_executed",
+          agent_id: "orchestrator",
+          tool_name: TOOL,
+          success: true,
+          duration_ms: 1400,
+          task_id: null,
+        });
+      });
+    }
+
+    /** The one resolution row whose text matches, and its highlighted escapes. */
+    function rowEscapes(text: RegExp): string[] {
+      const rows = Array.from(document.querySelectorAll("span.flex-1")).filter(
+        (node) => text.test(node.textContent ?? ""),
+      );
+      expect(rows).toHaveLength(1);
+      return Array.from(
+        (rows[0] as Element).querySelectorAll("[data-hidden-char]"),
+        (node) => node.textContent ?? "",
+      );
+    }
+
+    it("keeps its escapes highlighted and is upgraded by the tool's report", async () => {
+      renderChat();
+      const source = await sendMessage("write the notes");
+      await raiseWithTwin(source);
+
+      fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+      await screen.findByText(/approved · waiting/);
+      expect(rowEscapes(/approved · waiting/)).toEqual([
+        "<U+202E>",
+        "<U+200B>",
+      ]);
+
+      await toolReported();
+      await waitFor(() =>
+        expect(screen.queryByText(/waiting for the tool to run/)).toBeNull(),
+      );
+      expect(rowEscapes(/returned in 1\.4s/)).toEqual(["<U+202E>", "<U+200B>"]);
+      expect(rawHidden()).toEqual([]);
+    });
+
+    it("is settled by a report that came before the answer landed", async () => {
+      let release = (): void => {};
+      confirmationReply = () =>
+        new Promise<Response>((resolve) => {
+          release = () => resolve(new Response("", { status: 200 }));
+        });
+      renderChat();
+      const source = await sendMessage("write the notes");
+      await raiseWithTwin(source);
+
+      fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+      await toolReported();
+      await act(async () => {
+        release();
+      });
+
+      await waitFor(() =>
+        expect(document.body.textContent).toMatch(/returned in 1\.4s/),
+      );
+      expect(rowEscapes(/returned in 1\.4s/)).toEqual(["<U+202E>", "<U+200B>"]);
+    });
+
+    it("keeps its escapes highlighted when the prompt timed out", async () => {
+      renderChat();
+      const source = await sendMessage("write the notes");
+      await raiseWithTwin(source);
+
+      await act(async () => {
+        emitServerEvent({
+          type: "tool_confirmation_resolved",
+          request_id: "req-h",
+          agent_id: "orchestrator",
+          tool_name: TOOL,
+          outcome: "timed_out",
+          stream_id: null,
+          lane_key: "user:gui",
+          task_id: null,
+        });
+      });
+
+      await screen.findByText(/timed out — not run/);
+      expect(rowEscapes(/timed out — not run/)).toEqual([
+        "<U+202E>",
+        "<U+200B>",
+      ]);
+      expect(rawHidden()).toEqual([]);
+    });
+  });
 });
 
 /**
