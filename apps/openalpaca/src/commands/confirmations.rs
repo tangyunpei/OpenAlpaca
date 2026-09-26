@@ -200,8 +200,12 @@ fn listing(prompts: &[PendingPrompt], format: OutputFormat) -> String {
     for prompt in prompts {
         let _ = writeln!(out, "{}", prompt.table_row());
     }
-    for line in notice_lines(prompts) {
+    let notices = notice_lines(prompts);
+    for line in &notices {
         let _ = writeln!(out, "{}", line.yellow());
+    }
+    if !notices.is_empty() {
+        let _ = writeln!(out, "{}", NOTICE_COUNTS_UNPRINTED.dimmed());
     }
     for block in preview_blocks(prompts) {
         let _ = writeln!(out);
@@ -246,8 +250,10 @@ impl EscapedPrompt {
 /// It counts the whole request — the name, the agent and the arguments —
 /// not only the name the table shows escaped: the arguments are what
 /// `approve <id>` lets run and the table has no room for them, so this line
-/// is the one warning a person answering by id gets. `--format json` carries
-/// the arguments, and `watch` shows a prompt's arguments escaped.
+/// is the one warning a person answering by id gets. [`listing`] prints one
+/// line under these saying so and pointing at `--format json`, which carries
+/// the agent and the arguments; `watch` shows a new prompt's arguments
+/// escaped.
 fn notice_lines(prompts: &[PendingPrompt]) -> Vec<String> {
     prompts
         .iter()
@@ -262,6 +268,13 @@ fn notice_lines(prompts: &[PendingPrompt]) -> Vec<String> {
         })
         .collect()
 }
+
+/// Under the notices, once: a notice counts the whole request (see
+/// [`notice_lines`]) and says the characters are "shown as <U+…>", yet the
+/// table prints only the name — so this says where the rest are shown.
+const NOTICE_COUNTS_UNPRINTED: &str = "The count includes the agent id and the arguments, \
+     which the table does not print: --format json prints them, each hidden character as a \
+     JSON \\u escape.";
 
 /// `--format json`: the daemon's own fields, as they came, with every
 /// character a one-line field would show as `<U+XXXX>` written instead with
@@ -1030,7 +1043,27 @@ mod tests {
             lines[4],
             "req-spoof — Note: this request contains 7 hidden characters, shown as <U+…>."
         );
-        assert_eq!(lines.len(), 5, "{table}");
+        // The count covers what the table does not print, so the listing says
+        // where those escapes are to be seen.
+        assert_eq!(
+            lines[5],
+            "The count includes the agent id and the arguments, which the table does not \
+             print: --format json prints them, each hidden character as a JSON \\u escape."
+        );
+        assert_eq!(lines.len(), 6, "{table}");
+
+        let clean = PendingPrompt {
+            tool_name: "file_write".to_string(),
+            tool_arguments: serde_json::json!({ "path": "notes.md" }),
+            agent_id: "orchestrator".to_string(),
+            ..spoofed_prompt()
+        };
+        let table = listing(&[clean], OutputFormat::Table);
+        assert!(!table.contains("Note:"), "{table}");
+        assert!(
+            !table.contains("The count"),
+            "no notice, nothing to explain: {table}"
+        );
 
         assert_eq!(
             listing(&[], OutputFormat::Table),
