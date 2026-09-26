@@ -36,6 +36,8 @@ const LANE: &str = "user1:gui";
 /// One answer of the scripted model.
 enum Say {
     Text(String),
+    /// Text the model stopped at the `max_tokens` cap: a runaway answer.
+    Cut(String),
     /// Nothing, at the `max_tokens` cap: the router's `EmptyCompletion`.
     Spent,
     Fail(LlmError),
@@ -120,6 +122,7 @@ impl LlmProvider for Scripted {
         let (content, finish_reason) = match say {
             None => (r#"{"items": []}"#.to_string(), FinishReason::Stop),
             Some(Say::Text(t)) => (t, FinishReason::Stop),
+            Some(Say::Cut(t)) => (t, FinishReason::MaxTokens),
             Some(Say::Spent) => (String::new(), FinishReason::MaxTokens),
             Some(Say::Fail(e)) => return Err(e),
             Some(Say::Hang) => std::future::pending().await,
@@ -1760,6 +1763,53 @@ async fn three_invalid_outputs_skip_the_chunk_with_one_warn() {
             other => Err(format!("expected one skip WARN, saw {other:?}")),
         }
     });
+}
+
+/// The L8 fix slice's P1: an answer the model stopped at the output ceiling
+/// says it was cut there — `cut at max_tokens (<n>)`, the request's own
+/// ceiling — not "the answer is not JSON". It is the same unusable answer,
+/// counted as ruling LR20 counts it; an answer that ended on its own keeps
+/// the parser's reason, and a cut answer that parses anyway is used, as it
+/// always was.
+#[tokio::test]
+async fn an_answer_cut_at_max_tokens_says_it_was_cut() {
+    let cut = r#"{"items": [{"title": "Editor preference", "content": "The user pre"#;
+    let scene = Scene::new(vec![
+        Say::Cut(cut.into()),
+        Say::Text("I would rather describe it in prose.".into()),
+        Say::Cut(format!(r#"{{"items": [{}]}}"#, vim_item(&[1]))),
+    ]);
+    let (cut_session, prose_session, parsed_session) =
+        (scene.session(), scene.session(), scene.session());
+    for s in [&cut_session, &prose_session, &parsed_session] {
+        scene.turn(s, PREF, "Noted.");
+    }
+    let last_error = |s: &str| {
+        LearningCursorRepository::new(&scene.db)
+            .get(s)
+            .unwrap()
+            .last_error
+    };
+
+    let report = scene.queue.flush_session(&cut_session).await;
+    assert_eq!(report.stopped, Some(FlushStop::BadOutput), "{report:?}");
+    let ceiling = scene.model.first_request().max_tokens.expect("a ceiling");
+    assert_eq!(
+        last_error(&cut_session).as_deref(),
+        Some(format!("cut at max_tokens ({ceiling})").as_str())
+    );
+    assert_eq!(scene.attempts(&cut_session), 1, "LR20 counts it");
+    assert_eq!(scene.cursor(&cut_session), 0, "the window holds");
+
+    let report = scene.queue.flush_session(&prose_session).await;
+    assert_eq!(report.stopped, Some(FlushStop::BadOutput), "{report:?}");
+    assert_eq!(
+        last_error(&prose_session).as_deref(),
+        Some("the answer is not JSON")
+    );
+
+    let report = scene.queue.flush_session(&parsed_session).await;
+    assert_eq!((report.stopped, report.stored), (None, 1), "{report:?}");
 }
 
 /// §7b P10 and ruling LR20: a model that cannot answer holds the window,

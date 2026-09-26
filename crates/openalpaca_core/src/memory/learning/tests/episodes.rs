@@ -543,6 +543,35 @@ async fn three_unusable_answers_skip_the_window() {
     assert_eq!(scene.model.calls(), 3);
 }
 
+/// The L8 fix slice's P1, for a summary: an answer stopped at the output
+/// ceiling is reported as cut there, with the request's own ceiling, not as
+/// "the answer is not JSON"; it holds the window like any unusable answer.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_summary_cut_at_max_tokens_says_it_was_cut() {
+    let scene = Scene::new(vec![Say::Cut(r#"{"topic": "Lisbon trip plan"#.into())]);
+    let s = scene.session();
+    four_turns(&scene, &s);
+    let held = scene.queue.flush_episodes(&s).await;
+    assert_eq!(held.stopped, Some(FlushStop::BadOutput), "{held:?}");
+    assert_eq!(episode_cursor(&scene, &s), 0);
+    let ceiling = scene.model.first_request().max_tokens.expect("a ceiling");
+    let reason = format!("cut at max_tokens ({ceiling})");
+    logs_assert(|lines: &[&str]| {
+        match lines
+            .iter()
+            .filter(|l| l.contains("episode note was unusable"))
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            [one] if one.contains(&reason) && !one.contains("not JSON") => Ok(()),
+            other => Err(format!(
+                "expected one line naming {reason:?}, saw {other:?}"
+            )),
+        }
+    });
+}
+
 // ── The gates (§13.3, *Cost*; §1.8) ───────────────────────────────────────
 
 /// `episode_max_per_day` binds on today's UTC episode calls in

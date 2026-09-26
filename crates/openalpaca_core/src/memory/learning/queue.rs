@@ -530,6 +530,22 @@ fn is_loopback_url(base_url: &str) -> bool {
     }
 }
 
+/// Why an answer that did not parse is unusable: the parser's reason, unless
+/// the model stopped at the request's output ceiling — then the answer was
+/// cut there, and the reason says so (the L8 fix slice's P1). Either way it
+/// is one unusable answer, counted as ruling LR20 counts it.
+fn unusable_reason(
+    response: &openalpaca_llm::ChatResponse,
+    max_tokens: u32,
+    parse_error: String,
+) -> String {
+    if response.finish_reason == openalpaca_llm::FinishReason::MaxTokens {
+        format!("cut at max_tokens ({max_tokens})")
+    } else {
+        parse_error
+    }
+}
+
 /// Runs `f` on the blocking pool.
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
@@ -1385,6 +1401,7 @@ impl LearningQueue {
             let items = match parsed {
                 Ok(items) => items,
                 Err(why) => {
+                    let why = unusable_reason(&response, budget.out_tokens, why);
                     if self
                         .count_failure(session_id, &chunk, expected, &why, &mut report)
                         .await
@@ -1893,12 +1910,9 @@ impl LearningQueue {
 
             let (transcript, _) = chunk.transcript();
             let today = chunk.today();
-            let request = episode::build_request(
-                &today,
-                &transcript,
-                EPISODE_OUT_TOKENS.min(setup.budget.out_tokens),
-                setup.model.clone(),
-            );
+            let out_tokens = EPISODE_OUT_TOKENS.min(setup.budget.out_tokens);
+            let request =
+                episode::build_request(&today, &transcript, out_tokens, setup.model.clone());
             drop(dcfg);
             let (response, latency_ms) =
                 match self.call_model(request, policy, &setup, &cancel).await {
@@ -1934,6 +1948,7 @@ impl LearningQueue {
             let summary = match parsed {
                 Ok(summary) => summary,
                 Err(why) => {
+                    let why = unusable_reason(&response, out_tokens, why);
                     if self
                         .count_episode_failure(session_id, &chunk, expected, &why, &mut report)
                         .await
