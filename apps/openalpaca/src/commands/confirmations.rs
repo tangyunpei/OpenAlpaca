@@ -452,8 +452,8 @@ fn confirmation_frame(text: &str) -> Option<ConfirmationFrame> {
 /// rewrites the line and a bidi override reorders it: every hidden character
 /// in them is shown as `<U+XXXX>` ([`EscapedPrompt`]) and one notice directly
 /// under the arguments counts them. The run and request ids are the daemon's
-/// own; the preview is the daemon's text, composed with every control and
-/// format character taken out of what it quotes (`utils::text::one_line`),
+/// own; the preview is the daemon's text, composed with every character the
+/// escape would show taken out of what it quotes (`utils::text::one_line`),
 /// and printed as it comes.
 fn prompt_block(frame: &ConfirmationFrame) -> String {
     let shown = EscapedPrompt::new(

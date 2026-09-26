@@ -1540,6 +1540,57 @@ async fn the_preview_and_the_block_carry_no_format_characters() {
     );
 }
 
+/// The card's preview drops what an approval's escape would show, not only
+/// `Cc` and `Cf`: a variation selector, the combining grapheme joiner, a
+/// Hangul filler and a tag-block selector draw as nothing, and U+2800 and
+/// U+FFFC as blank space a run of which wraps — none of them is a control or
+/// a format character, and none may reach the card's text either.
+#[tokio::test]
+async fn the_preview_drops_every_character_an_approval_escapes() {
+    use crate::utils::text::needs_escape;
+    let h = Harness::new();
+    let target = h.user_note(
+        ALICE,
+        "Edi\u{fe00}tor \u{3164}choice\u{e0100}",
+        "# Editor\n\n## Knowledge\nI use vim\u{2800}\u{2800}\u{2800} for everything.\u{fffc}\n",
+    );
+    let row = typed_row(&h, "I switched to Helix.", "2026-06-14 09:30:00");
+    let s = suggestion_for(
+        &h,
+        (target.0, &target.1),
+        "Editor\u{34f} choice\u{ffa0}",
+        "The user edits with Helix\u{180b}.\u{2800}\u{fffc}\u{115f}",
+        &[row],
+        crate::memory::service::ExtractionProvenance::UserWords,
+    );
+    let preview = MemoryConfirmTool::new(h.service.clone())
+        .confirmation_preview(
+            &serde_json::json!({"id": s.id.to_string(), "expected_revision": s.revision, "target_revision": target.1}),
+            &h.tool_ctx(ALICE),
+        )
+        .await
+        .unwrap()
+        .expect("a preview");
+    let shown: Vec<char> = preview
+        .chars()
+        .filter(|c| *c != '\n' && needs_escape(*c))
+        .collect();
+    assert_eq!(shown, Vec::<char>::new(), "{preview:?}");
+    assert!(
+        preview.contains("Replace your saved note “Editor choice” with “Editor choice”?"),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("Yours: I use vim for everything."),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("New: The user edits with Helix."),
+        "{preview}"
+    );
+    assert_eq!(preview.lines().count(), 5, "{preview}");
+}
+
 /// The turn's own `ModelTool` read context, as the main loop reads with it.
 fn read_ctx(h: &Harness) -> crate::memory::service::MemoryAccessContext {
     h.service

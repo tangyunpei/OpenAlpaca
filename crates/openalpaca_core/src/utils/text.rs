@@ -25,10 +25,10 @@
 //! space — is shown as `<U+XXXX>` and [`hidden_notice`] says how many there
 //! were. The two do not compete:
 //! `one_line` is for prose OpenAlpaca composed to be read (a memory
-//! suggestion's `preview`, stripped of control and format characters by the
-//! daemon before any surface sees it — the default-ignorable letters the
-//! escape also shows, a variation selector or a Hangul filler, pass through
-//! it), and the escape is for the values beside it that decide what runs.
+//! suggestion's `preview`, stripped by the daemon of every character the
+//! escape would show before any surface sees it), and the escape is for the
+//! values beside it that decide what runs. Both read one set,
+//! [`needs_escape`]: what one drops the other shows.
 //! A one-line field — the tool's name, the agent's id — takes
 //! [`escape_hidden_line`], which shows a newline and a tab as well: the
 //! pretty-printed arguments are laid out in lines, a name is not. A model's or a tool's own text the CLI
@@ -56,15 +56,20 @@ pub(crate) fn byte_prefix(s: &str, max_bytes: usize) -> &str {
 }
 
 /// `text` on one line for a person to read and act on: runs of whitespace —
-/// newlines and the line and paragraph separators (U+2028, U+2029) among
-/// them — as one space, and no [hidden](is_hidden) character. Hidden
-/// characters are dropped, not replaced with a visible mark: what is left is
-/// the text as stored, in its own order, and a mark would litter the
-/// legitimate uses (an emoji's zero-width joiner, a soft hyphen) on the very
-/// line that must read clearly.
+/// newlines, the line and paragraph separators (U+2028, U+2029) and every
+/// other blank Unicode calls white space among them — as one space, and none
+/// of the other characters [`escape_hidden`] would show: no
+/// [hidden](is_hidden) character, no default-ignorable one (a variation
+/// selector, a Hangul filler), no U+2800 BRAILLE PATTERN BLANK and no U+FFFC,
+/// which draw as nothing or as blank space. One set, [`needs_escape`], says
+/// what hides on every surface; this drops it where the escape shows it.
+/// Dropped, not replaced with a visible mark: what is left is the text as
+/// stored, in its own order, and a mark would litter the legitimate uses (an
+/// emoji's zero-width joiner or variation selector, a soft hyphen) on the
+/// very line that must read clearly.
 pub fn one_line(text: &str) -> String {
     text.split_whitespace()
-        .map(|word| word.replace(is_hidden, ""))
+        .map(|word| word.replace(needs_escape, ""))
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
@@ -849,6 +854,29 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(one_line(input), *expected, "one_line({input:?})");
         }
+    }
+
+    /// `one_line` hides what the escape shows, and nothing else: over every
+    /// scalar value, a blank between two letters is one space, any other
+    /// character of the escape's set — a variation selector, a Hangul
+    /// filler, U+2800, U+FFFC among them, which draw as nothing or as blank
+    /// space and are not `Cc` or `Cf` — is gone, and everything else stays.
+    #[test]
+    fn one_line_drops_every_character_the_escape_shows() {
+        for c in every_char() {
+            let expected = if c.is_whitespace() {
+                "a b".to_string()
+            } else if needs_escape(c) {
+                "ab".to_string()
+            } else {
+                format!("a{c}b")
+            };
+            assert_eq!(one_line(&format!("a{c}b")), expected, "U+{:04X}", c as u32);
+        }
+        assert_eq!(
+            one_line("/srv/allow\u{fe00}ed \u{2800}\u{2800} tail\u{fffc} \u{3164}x\u{34f}"),
+            "/srv/allowed tail x"
+        );
     }
 
     /// Every one of these but the ASCII rows panicked under `&s[..n]`.

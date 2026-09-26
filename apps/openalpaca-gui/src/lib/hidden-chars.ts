@@ -37,9 +37,9 @@
  *   layout of its own, and a line break in it would draw lines the card does
  *   not have.
  * - **The daemon-authored `preview`** is not escaped. It is OpenAlpaca's own
- *   prose, composed to be read, and the daemon strips it of control and
- *   format characters before any surface sees it; the values that decide
- *   what runs are the arguments beside it, which this escapes.
+ *   prose, composed to be read, and the daemon drops from it every character
+ *   this module would escape before any surface sees it; the values that
+ *   decide what runs are the arguments beside it, which this escapes.
  *
  * Display only: nothing sent to the daemon, stored or matched changes — the
  * card, the composer's answer and every POST body read the raw values. The

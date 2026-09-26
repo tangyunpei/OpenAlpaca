@@ -485,11 +485,16 @@ fn check_revisions(expected_revision: &str, target_revision: &str) -> Result<(),
     Ok(())
 }
 
-/// `text` on one line — runs of whitespace as one space, no control or
-/// format character ([`crate::utils::text::one_line`]: the CLI prints this
-/// raw at a terminal, where an ESC sequence could rewrite what the person
-/// approves, and a bidi override reorders it anywhere) — cut to `max` bytes
-/// with an ellipsis when it was longer.
+/// `text` on one line — runs of whitespace as one space, and none of the
+/// characters an approval's escape shows ([`crate::utils::text::one_line`]:
+/// the CLI prints this raw at a terminal, where an ESC sequence could rewrite
+/// what the person approves; a bidi override reorders it anywhere; and a
+/// variation selector, U+2800 or U+FFFC draws as nothing or as blank space a
+/// run of which wraps) — cut to `max` bytes with an ellipsis when it was
+/// longer. Dropped, not escaped: the preview is OpenAlpaca's prose, a
+/// summary cut to a budget for reading, and the note's exact text, which
+/// the person may want to check, is in the Memory view and
+/// `openalpaca memory show`.
 fn one_line(text: &str, max: usize) -> String {
     let flat = crate::utils::text::one_line(text);
     match cut_bytes(&flat, max) {
