@@ -2,6 +2,7 @@
 
 export * from "./Badge";
 export * from "./Button";
+export * from "./EscapedText";
 export * from "./Eyebrow";
 export * from "./FileBadge";
 export * from "./file-kind";
