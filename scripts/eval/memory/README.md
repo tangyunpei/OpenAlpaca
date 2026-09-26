@@ -481,8 +481,13 @@ OPENALPACA_MEMORY_EVAL_REPORT=/tmp/memory-eval/report-L-episodes-replay.json \
 
 It is not like for like with a live L-episodes run: the replay's store is
 extraction-only (none of the live reader's `memory_store` notes, which
-answered two of L8's twenty episode questions), and its transcript is the
-kept L run's, not L-episodes' (the live reader's replies differ run to run).
+answered two of L8's twenty episode questions), its transcript is the
+kept L run's, not L-episodes' (the live reader's replies differ run to run),
+and its summaries are uncapped (H1) where L8's L-episodes had 27 summary
+flushes stopped by the daily cap of 20 — every session from the 21st on
+had no summary. The report's `system` is `L`: its printed totals say
+`L (a replay of …: extraction-only store)`, and `compare.py` labels it
+`(system L, replay)` and warns that it is not a live L run.
 
 ## The judge
 

@@ -5749,7 +5749,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
             .map(|u| u.total_cost_usd)
             .unwrap_or(0.0);
         let t = totals(&report.rows, judge_cost, wall_ms);
-        print_totals(system, &t);
+        print_totals(&totals_label(system, None), &t);
         report.totals = Some(t);
     }
     if let Some(learning) = &report.learning {
@@ -6170,7 +6170,7 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
             judge_cost,
             started.elapsed().as_millis() as u64,
         );
-        print_totals(System::L, &t);
+        print_totals(&totals_label(System::L, Some(from)), &t);
         report.totals = Some(t);
     }
     print_learning(&learning);
@@ -6303,10 +6303,24 @@ fn replay_conditions(
     }
 }
 
-fn print_totals(system: System, t: &Totals) {
+/// What the printed totals call the run: its system, and for a replay (the
+/// L8 fix slice's H9, which reports as L) the kept run it replayed and that
+/// its store is extraction-only — none of the live reader's own notes
+/// (repair round 1).
+fn totals_label(system: System, replayed_from: Option<&Path>) -> String {
+    match replayed_from {
+        None => system.as_str().to_string(),
+        Some(from) => format!(
+            "{} (a replay of {}: extraction-only store)",
+            system.as_str(),
+            from.display()
+        ),
+    }
+}
+
+fn print_totals(label: &str, t: &Totals) {
     println!(
-        "\n== memory_eval: system {} — {}/{} correct ({:.1}%), {} unparsed, {} judge errors, {} turn errors ==",
-        system.as_str(),
+        "\n== memory_eval: system {label} — {}/{} correct ({:.1}%), {} unparsed, {} judge errors, {} turn errors ==",
         t.correct,
         t.questions,
         t.accuracy.unwrap_or(0.0) * 100.0,
@@ -7568,6 +7582,20 @@ fn a_replays_conditions_say_it_is_extraction_only() {
     assert_eq!(replay["replay_is_extraction_only"], true);
     let live = conditions(None);
     assert_eq!(live["replay_is_extraction_only"], false);
+}
+
+/// Repair round 1 of the L8 fix slice (the fidelity review's F7): a replay
+/// asked questions (H9) reports as system L, so its printed totals say it
+/// is a replay — of which kept run, with an extraction-only store — and a
+/// live run's say nothing more than the system.
+#[test]
+fn a_replays_totals_are_labelled_as_a_replay() {
+    assert_eq!(totals_label(System::L, None), "L");
+    assert_eq!(totals_label(System::D, None), "D");
+    let replay = totals_label(System::L, Some(Path::new("/kept/scratch")));
+    for part in ["L", "replay of /kept/scratch", "extraction-only store"] {
+        assert!(replay.contains(part), "{part:?} in {replay:?}");
+    }
 }
 
 /// The L8 fix slice's H1: a learning run says loudly — in the report's

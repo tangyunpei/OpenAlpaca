@@ -22,6 +22,12 @@ answer LQ1) has it printed beside its judge, and one that records
 `recall_mode` (`index` or `excerpts`, design 09 §13.2) has that printed too —
 two reports in different recall modes are compared, never refused: that is
 L8's D-excerpts against D-index (design 09 §13.4).
+
+A replay that asked questions (the L8 fix slice's H9) reports as system L;
+its `conditions.learning` records `replayed_from` and
+`replay_is_extraction_only`. Such a report is labelled a replay on its line
+and warned about: its store is the learning queue's alone, none of a live
+reader's own notes, so it is not a live L run.
 """
 import argparse
 import io
@@ -64,6 +70,22 @@ def judge_line(report, models):
     if conditions.get("recall_mode") is not None:
         line += f"  recall_mode={conditions['recall_mode']}"
     return line
+
+
+def replay_of(report):
+    """Where a replay was learned from (`(unrecorded)` if only flagged), or
+    `None` for a report that is not one."""
+    learning = (report.get("conditions") or {}).get("learning") or {}
+    if learning.get("replayed_from") or learning.get("replay_is_extraction_only"):
+        return learning.get("replayed_from") or "(unrecorded)"
+    return None
+
+
+def system_label(report):
+    label = f"system {report.get('system')}"
+    if replay_of(report) is not None:
+        label += ", replay"
+    return label
 
 
 def judge_check(cand_models, base_models, allow_mismatch):
@@ -112,8 +134,14 @@ def compare(candidate, baseline, margin=-5.0, category_block=-10.0, allow_judge_
     lo, hi = diff - 1.96 * se, diff + 1.96 * se
     discordant = (b01 + b10) / n
 
-    print(f"candidate: {candidate} (system {cand_rep.get('system')})")
-    print(f"baseline:  {baseline} (system {base_rep.get('system')})")
+    print(f"candidate: {candidate} ({system_label(cand_rep)})")
+    print(f"baseline:  {baseline} ({system_label(base_rep)})")
+    for role, rep in (("candidate", cand_rep), ("baseline", base_rep)):
+        source = replay_of(rep)
+        if source is not None:
+            print(f"warning: the {role} is a replay of {source}: its store is extraction-only "
+                  "(none of a live reader's own notes) and its transcript the kept run's - "
+                  "not a live L run", file=sys.stderr)
     print(f"paired questions: {n}  (candidate judged {len(cand)}, baseline judged {len(base)})")
     print(f"accuracy: candidate {acc_c*100:.1f}%  baseline {acc_b*100:.1f}%")
     print(f"paired difference: {diff*100:+.1f} pp  95% CI [{lo*100:+.1f}, {hi*100:+.1f}]  SE {se*100:.2f} pp")
@@ -154,7 +182,7 @@ def self_test():
     different judge is refused, and --allow-judge-mismatch compares anyway;
     and each report's recall mode is printed, a mismatch compared."""
 
-    def report(system, judge, judge_is_reader=None, recall_mode=None):
+    def report(system, judge, judge_is_reader=None, recall_mode=None, learning=None):
         rows = []
         for i in range(20):
             correct = i % 4 != 0
@@ -167,10 +195,16 @@ def self_test():
             conditions["judge_is_reader"] = judge_is_reader
         if recall_mode is not None:
             conditions["recall_mode"] = recall_mode
+        if learning is not None:
+            conditions["learning"] = learning
         return {"schema": 1, "status": "complete", "system": system, "conditions": conditions, "rows": rows}
 
     def run_printing(cand, base, **kw):
         """The comparison's result and what it printed."""
+        return run_capturing(cand, base, **kw)[:2]
+
+    def run_capturing(cand, base, **kw):
+        """The comparison's result, what it printed and what it warned."""
         with tempfile.TemporaryDirectory() as d:
             paths = []
             for name, rep in (("cand.json", cand), ("base.json", base)):
@@ -178,16 +212,16 @@ def self_test():
                 with open(p, "w", encoding="utf-8") as f:
                     json.dump(rep, f)
                 paths.append(p)
-            stdout = sys.stdout
-            sys.stdout = io.StringIO()
+            stdout, stderr = sys.stdout, sys.stderr
+            sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
             try:
                 code = compare(paths[0], paths[1], **kw)
             except SystemExit as e:
                 code = e.code
             finally:
-                printed = sys.stdout.getvalue()
-                sys.stdout = stdout
-            return code, printed
+                printed, warned = sys.stdout.getvalue(), sys.stderr.getvalue()
+                sys.stdout, sys.stderr = stdout, stderr
+            return code, printed, warned
 
     def run(cand, base, **kw):
         return run_printing(cand, base, **kw)[0]
@@ -226,6 +260,27 @@ def self_test():
     expect("an archived report, which records no mode, is compared", code, 0)
     expect("and prints none", printed.splitlines()[1],
            lambda line: line.startswith("baseline judge:") and "recall_mode" not in line)
+    # The L8 fix slice's H9 and its repair round 1: a replay that asked
+    # questions reports as L; it is labelled and warned about, a live L not.
+    replay = {"replayed_from": "/kept/scratch", "replay_is_extraction_only": True, "summaries": True}
+    code, printed, warned = run_capturing(
+        report("L", "qwen3.8:27b-mlx", True, "index", replay),
+        report("D", "qwen3.8:27b-mlx", True, "index"))
+    expect("a replay is compared", code, 0)
+    expect("its line says it is a replay", printed,
+           lambda out: any(line.startswith("candidate: ") and line.endswith("(system L, replay)")
+                           for line in out.splitlines()))
+    expect("and it is warned about", warned,
+           lambda err: "warning: the candidate is a replay of /kept/scratch" in err
+           and "extraction-only" in err)
+    live = {"replayed_from": None, "replay_is_extraction_only": False, "summaries": True}
+    code, printed, warned = run_capturing(
+        report("L", "qwen3.8:27b-mlx", True, "index", live),
+        report("D", "qwen3.8:27b-mlx", True, "index"))
+    expect("a live L run is not labelled a replay", printed,
+           lambda out: any(line.startswith("candidate: ") and line.endswith("(system L)")
+                           for line in out.splitlines()))
+    expect("nor warned about", warned, lambda err: "replay" not in err)
     print("self-test:", "FAILED" if failures else "passed")
     return 1 if failures else 0
 
