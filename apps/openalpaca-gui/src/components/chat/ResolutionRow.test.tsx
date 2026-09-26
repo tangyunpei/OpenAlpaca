@@ -37,8 +37,9 @@ describe("ResolutionRow (§3.15)", () => {
   });
 
   /**
-   * The echo of an answer names the tool as the card did (SPEC A3), with no
-   * notice line of its own: the card already counted it.
+   * The echo of an answer names the tool as the card did, with no notice
+   * line of its own: the card already counted it (as the chat connectors'
+   * acknowledgement does).
    */
   it("shows a hidden character in the tool name it names as an escape", () => {
     render(

@@ -908,12 +908,13 @@ describe("ChatView — tool confirmation (§3.14, §3.16a)", () => {
 });
 
 /**
- * Hidden characters on the approval flow (SPEC items 1–5). The tool name and
- * the arguments are the model's, an MCP server's or a plugin's: every place
- * this view shows them — the card, the composer's bar, the row the answer
- * leaves, the allowlist toast — shows a bidi override or a zero-width space
- * as `<U+XXXX>`, and what is answered is the request id and `{approved}`
- * alone, exactly as for a card with nothing hidden.
+ * Hidden characters on the approval flow (`docs/GUI_Manual.md` → *Hidden
+ * characters on an approval*). The tool name and the arguments are the
+ * model's, an MCP server's or a plugin's: every place this view shows them —
+ * the card, the composer's bar, the row the answer leaves, the allowlist
+ * toast — shows a bidi override or a zero-width space as `<U+XXXX>`, and what
+ * is answered is the request id and `{approved}` alone, exactly as for a card
+ * with nothing hidden.
  */
 describe("ChatView — a confirmation with hidden characters", () => {
   const TOOL = "srv__rm\u{202E}fdp\u{200B}";

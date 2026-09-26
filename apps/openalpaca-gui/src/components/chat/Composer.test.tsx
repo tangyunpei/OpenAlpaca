@@ -167,7 +167,8 @@ describe("Composer — blocked state (§3.16a)", () => {
   /**
    * The bar sits right above Approve, so it names the tool as the card does:
    * an MCP or plugin name is its third party's, and a bidi override, a
-   * zero-width space or a line break in it is shown, not obeyed (SPEC A2).
+   * zero-width space or a line break in it is shown, not obeyed (one-line
+   * escape, `escapeHiddenLine`).
    */
   it("names the tool it waits on with its hidden characters shown as escapes", () => {
     setup({

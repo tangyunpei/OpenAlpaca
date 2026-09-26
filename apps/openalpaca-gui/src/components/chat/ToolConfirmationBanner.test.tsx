@@ -37,7 +37,8 @@ function card(props: Parameters<typeof ToolConfirmationBanner>[0]) {
 /**
  * The card is where the person decides, so it shows the exact values that
  * will run: every hidden character as `<U+XXXX>`, set apart from the text,
- * and one line under the arguments saying how many (SPEC items 1–4, 8).
+ * and one line under the arguments saying how many (`lib/hidden-chars`,
+ * `docs/GUI_Manual.md` → *Hidden characters on an approval*).
  *
  * Nothing here checks that the tool receives its arguments unchanged: the
  * card borrows them and sends nothing. The answer is `POST

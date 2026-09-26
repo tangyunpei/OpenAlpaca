@@ -195,7 +195,7 @@ describe("runEventsFromLog — sentences", () => {
    * A tool's name here is the one an approval card showed, and it is its
    * third party's: the row shows it as the card does, a bidi override, a
    * zero-width space or a line break in it as `<U+XXXX>` (plain text — the
-   * row is a string). The CLI's `tasks log` does the same (SPEC A11).
+   * row is a string). The CLI's `tasks log` does the same.
    */
   it("names a tool as the approval card does, its hidden characters as escapes", () => {
     const tool = "srv__rm\u{202E}fdp\u{200B}\n";

@@ -43,8 +43,8 @@ const hex = (codePoint: number) =>
   `U+${codePoint.toString(16).toUpperCase().padStart(4, "0")}`;
 
 /**
- * Parity with the Rust side (SPEC item 7). `hidden-chars.json` is the one
- * table: `openalpaca_core::utils::text`'s tests hold `needs_escape`,
+ * Parity with the Rust side. `hidden-chars.json` is the one table:
+ * `openalpaca_core::utils::text`'s tests hold `needs_escape`,
  * `needs_escape_in_line`, `escape_hidden`, `escape_hidden_line` and
  * `hidden_notice` to it, and these hold the GUI's copy to the same file —
  * so a drift on either side fails a test on that side.
