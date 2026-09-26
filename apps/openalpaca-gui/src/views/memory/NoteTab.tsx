@@ -121,7 +121,9 @@ export function NoteTab({ note, replaces = null }: NoteTabProps) {
         </p>
       )}
 
-      {note.body.trim() === "" ? (
+      {/* A candidate's blank test reads the escaped text: `trim` strips
+          U+3000, U+00A0, U+FEFF and U+2028, which the escape shows. */}
+      {(body?.text ?? note.body).trim() === "" ? (
         <p className="m-0 text-md text-muted-fg">This note has no text.</p>
       ) : (
         <MessageBody

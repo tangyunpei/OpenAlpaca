@@ -369,10 +369,10 @@ hidden characters`. The row an answer leaves, the Always-allow toast and the
 run's Event log name the tool the same way with no count (the palette row, the
 toast and the Event log show the escape as plain text). The `From OpenAlpaca`
 text is the daemon's own and is shown as it wrote it: a summary cut short for
-reading, from which the daemon leaves out every hidden character of the titles
-and texts it quotes, and when it left any out, its last line says how many:
-`This preview leaves out 2 hidden characters; the Memory view shows them as
-<U+…>.` (The suggestion's exact text is in the Memory view, which shows each
+reading, from which the daemon leaves out every hidden character of the titles,
+texts and reason it quotes, and when it left any out, its last line says how
+many: `This preview leaves out 2 hidden characters; the Memory view shows them
+as <U+…>.` (The suggestion's exact text is in the Memory view, which shows each
 one.) Only what you see changes: approving answers the request the
 daemon sent. Two things no escape
 changes: right-to-left letters inside a value can still reorder the digits and

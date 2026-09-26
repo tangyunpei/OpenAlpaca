@@ -1560,6 +1560,40 @@ describe("the Memory view", () => {
   });
 
   /**
+   * JavaScript's `trim` strips U+3000, U+00A0, U+FEFF and U+2028, which the
+   * escape shows: a candidate whose text is made only of them is not a note
+   * with no text, and its Note tab draws them as escapes under the count
+   * that names them.
+   */
+  it("draws a candidate's text made only of blanks the escape shows, not 'no text'", async () => {
+    note({
+      id: "n-1",
+      title: "Blank",
+      body: "\u3000\u00a0\ufeff\u2028\n",
+      status: "candidate",
+      origin: "extracted_other",
+    });
+    renderView();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Candidates" }));
+    const list = await screen.findByRole("list", { name: "Notes" });
+    await user.click(
+      await within(list).findByRole("button", { name: "Blank" }),
+    );
+    const heading = await screen.findByRole("heading", {
+      name: "Blank",
+      level: 2,
+    });
+    const detail = heading.closest("section");
+    if (detail === null) throw new Error("no detail");
+    expect(detail).not.toHaveTextContent("This note has no text.");
+    expect(detail).toHaveTextContent("<U+3000><U+00A0><U+FEFF><U+2028>");
+    expect(detail).toHaveTextContent(
+      "Note: this request contains 4 hidden characters, shown as <U+…>.",
+    );
+  });
+
+  /**
    * Confirm adopts a candidate's aliases, tags and fact key with its text,
    * and the extractor writes them from model output: the Note tab shows
    * them escaped (highlighted) and counts them with the title and the text,
