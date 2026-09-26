@@ -229,7 +229,7 @@ Optional variables:
 
 | Variable | Effect |
 |---|---|
-| `OPENALPACA_MEMORY_EVAL_QUESTIONS` | Another question file (the tuning split, or a subset). Default: `questions-heldout.json`. |
+| `OPENALPACA_MEMORY_EVAL_QUESTIONS` | Another question file (the tuning split, or a subset). Default: `questions-heldout.json`. With `LEARN_FROM`, naming a file makes the replay write the conversation summaries and ask it (the episode split on a replay, below); a replay without it asks nothing. |
 | `OPENALPACA_MEMORY_EVAL_LIMIT` | Take only the first N selected questions — for a smoke run. Recorded in the report. |
 | `OPENALPACA_MEMORY_EVAL_CATEGORY` | One category only. Recorded. |
 | `OPENALPACA_MEMORY_EVAL_JUDGE_MODEL` | Judge model id; default: the reader's model, the router's effective default (owner answer LQ1). `none` makes no judge call: every row is `not_judged` (the dry run below). See [The judge](#the-judge). |
@@ -272,7 +272,17 @@ database, both with no reader call — and the live phase's own path: two short
 sessions fed through the gateway as a run builds it (every turn mapped to its
 row, the flushes at the 10th turn and at each session's end, the reader's
 calls read off the bus, then the forced re-run), and L-S's suggestion raised,
-nothing retired, and the user's confirm retiring the old note. The stub
+nothing retired, and the user's confirm retiring the old note. The L8 fix
+slice's tests run there too: the summaries' daily cap lifted and a capped or
+erroring feed warned about; a flush and a summary that stop `BadOutput`
+flushed again up to `MAX_ATTEMPTS`, and a forced re-run whose window the
+queue skipped after its unusable answers unchecked; a flush record keeping
+each unusable answer's excerpt; every learning measure split by the path
+that wrote the note (a stub reader that calls `memory_store` beside a stub
+extractor); the coverage judge's own cap and its `none`/`unparsed` totals;
+a pair whose one matched note supersedes the old one; a restatement the
+reader wrote or no flush read; a replay's conditions; and a replay that
+writes summaries and asks a question file. The stub
 router's rate limits are lifted, so the tests time the harness, not the
 default 40 000-TPM bucket. Plain `cargo test -p openalpaca_core` does
 not compile this file at all; it compiles and runs `memory_eval_corpus`, the
@@ -310,9 +320,34 @@ goes through `Gateway::handle_event` — persisted, answered by the reader
 deterministically: `flush_session` after every 10th user turn of a session
 (`turns`) and at its end (`switch`). The idle trigger has no deterministic
 stand-in; L1's tests cover it. The extraction's daily caps are lifted
-(`extract_max_calls_per_day = 0`), so a cap never stops the phase part-way;
-both are recorded. Then learning is switched off and the questions are asked
-as D asks them. The bus is read around every flush and every turn, so the
+(`extract_max_calls_per_day = 0`), and so is the conversation summaries'
+daily count, `[orchestrator.learning] episode_max_per_day`, to the most the
+config's validation accepts (1000; never 0, which writes none): the whole
+corpus is fed on one UTC day, and at the default of 20 every summary from
+the corpus's 21st session on stopped `Cap` (L8, before the fix slice). All
+three are recorded (`conditions.learning`), so a cap never stops the phase
+part-way; if one ever does, the run says so first (`learning.warnings`,
+printed as `!! WARNING` at the head of the summary block), as it does for a
+fed turn that ended in an error (`learning.cost.feed_turn_errors`).
+
+**A flush whose answer is unusable is flushed again**, as the production
+queue retries a held window (ruling LR20): a `turns`, `switch`, `replay`,
+summary or forced re-run flush that stops `BadOutput` is flushed again, up
+to the product's `MAX_ATTEMPTS` flushes (three), at once — `Manual` mode
+waits out no backoff — with the same request. Each flush record covers all
+its attempts: `attempts`, `attempt_stops` (each attempt's stop), the counts
+and tokens summed, `stopped` the last attempt's, and `unusable_answers`, each
+answer the queue could not use with its reason (`cut at max_tokens (<n>)`
+when the model stopped at the output ceiling, the parser's reason
+otherwise), its length, its finish reason and its first and last 400
+characters — kept in the report only, never persisted by the product. The
+third unusable answer skips the window, as in production. Read the retries
+honestly: at temperature 0 the same prompt mostly fails the same way again
+(L8's sceptics: 13 of 13 same-prompt pairs gave the same outcome), so a
+retry mirrors what a daemon does to such a window — it does not rescue it —
+and nothing perturbs the prompt to make it pass.
+
+Then learning is switched off and the questions are asked as D asks them. The bus is read around every flush and every turn, so the
 report counts the two learning paths apart: `extraction` (the flushes) and
 `model_tool` (the reader's own `memory_store` calls).
 
@@ -324,9 +359,12 @@ report counts the two learning paths apart: `extraction` (the flushes) and
   out (`learning.learned` and the coverage search skip them); they are
   dumped apart as `learning.episodes`. After the questions, a **forced re-run**: the first
   learned note still active is forgotten, its session's cursor moved back to
-  0, and the session flushed again; a note citing a forgotten row is a
-  resurrection. A re-run that could not run, or whose flush made no
-  extraction call, fails the run: it checked nothing.
+  0, and the session flushed again (retried like any flush); a note citing a
+  forgotten row is a resurrection. A re-run that could not run, whose flush
+  made no extraction call, stopped, or ended with its window skipped after
+  `MAX_ATTEMPTS` unusable answers fails the run: it checked nothing —
+  `learning.invariants.forced_rerun_unchecked` says why (`unchecked after 3
+  unusable answers`), apart from `forgotten_resurrected`.
 - **L0** — the same feed, never flushed: only the reader's own writes learn.
 - **L-S** — the change pairs' 8 old notes seeded as the user's own, then only
   `suggestion_sessions` (the 8 changes and the old notes' restatements).
@@ -360,30 +398,47 @@ A replay copies the kept database into a new tempdir, gives it a fresh owner
 and a fresh scratch project (so both partitions start empty and the kept
 scratch is only read), moves every cursor to 0, and flushes each stored
 session whole, in order. It measures the learning side as L does, then the
-forced re-run; it asks no question. Run three: the learning side is reported
-as the spread (minimum, median, maximum) over the live run and the replays.
+forced re-run; it asks no question unless `OPENALPACA_MEMORY_EVAL_QUESTIONS`
+names a file (below).
+
+**A replay is extraction-only** (`conditions.learning.replay_is_extraction_only`).
+It makes no reader call, so its store holds the learning queue's notes and
+none of the live reader's own `memory_store` notes — which were most of
+L8's live store (L: 80 of 116 active learned notes). The spread over three
+replays is therefore the **extraction path's** variance on a fixed
+transcript: compare a replay with the live run's `extraction` numbers (the
+`*_by_surface` fields below), never with its pooled ones. A live run is the
+only sample of the whole system — reader and extractor together; a second
+live run (L-episodes was one) is the way to see its variance. Reader writes
+are not re-applied in a replay: that would need a live feed that records
+them.
 
 **What a learning report adds** (`learning`, `conditions.learning`):
 
 | Field | What it is |
 |---|---|
-| `learning.turns` | Every fed turn: its corpus place and mode, its user row, the reader's calls, tools and own memory writes |
-| `learning.flushes` | Every flush: its label (`turns`, `switch`, `replay`, `forced_rerun`), latency, the queue's counts per §2.4 outcome, and the notes it wrote |
-| `learning.episode_flushes` | L: every conversation-summary flush (label `switch`): its calls, the summaries written, tokens, latency and the notes it wrote |
-| `learning.learned` | The store after the phase, history and candidates included: status, origin, key, aliases, validity, sources, links, knowledge — conversation summaries left out |
+| `learning.warnings` | What to read first: fed turns that ended in an error, and learning or summary flushes a daily cap stopped |
+| `learning.turns` | Every fed turn: its corpus place and mode, its user row, the reader's calls, tools and own memory writes (`model_tool_memory_changes`, and the notes, `model_tool_notes`) |
+| `learning.flushes` | Every flush: its label (`turns`, `switch`, `replay`, `forced_rerun`), `turns_fed` (a fed flush's place), its `attempts` and `attempt_stops`, latency, the queue's counts per §2.4 outcome summed over the attempts, the notes it wrote, and `unusable_answers` |
+| `learning.episode_flushes` | L, and a replay asked questions: every conversation-summary flush (label `switch`, or `replay`): its attempts, calls, the summaries written, tokens, latency, the notes it wrote and its unusable answers |
+| `learning.learned` | The store after the phase, history and candidates included: status, origin, key, aliases, validity, sources, links, knowledge and `surface` — `extraction` when a learning flush's `memory_changed` created it, `model_tool` for any other learned note (the reader's `memory_store`) — conversation summaries left out |
 | `learning.episodes` | L: the conversation summaries the phase wrote, in the same shape |
-| `learning.coverage` | Per relied-on gold note: a historical search on its title and aliases (at most 5 notes) and the coverage judge's `MATCH <n>` or `NONE`; `share` is the fact coverage |
-| `learning.noise` | Active learned notes no coverage call chose, and the candidates raised |
-| `learning.changed_facts` | The 8 pairs and the 7 corrections, each with its outcome (`new_active_old_superseded`, `new_active_old_same_key_loser`, `both_active_unlinked`, `new_missing`, `old_never_learned`, …) and whether the two notes share a key |
-| `learning.restatements` | Per `restate` turn: `nothing_written`, `automatic_replacement`, `suggestion`, `duplicate_note`, `first_learned` |
-| `learning.aliases`, `learning.fact_keys` | The share of active learned notes with an alias in the other script (CJK against Latin), with any alias, and with a key |
+| `learning.coverage` | Per relied-on gold note: a historical search on its title and aliases (at most 5 notes) and the coverage judge's `MATCH <n>` or `NONE`; `share` is the fact coverage; `none`, `unparsed` (a reply with no verdict line — an unread row, not a miss; `unparsed_cut_at_max_tokens` of them ran to the cap), `not_found` and `judge_errors` counted apart; `by_surface`, `matched` by the writer of the note the judge chose. The judge's cap is its own, `conditions.learning.coverage_judge_max_tokens` (2048: at the QA judge's 400 every L8 unparsed verdict was a deliberation cut before its line) |
+| `learning.noise`, `learning.noise_by_surface` | Active learned notes no coverage call chose, and the candidates raised — pooled, and by path |
+| `learning.changed_facts` | The 8 pairs and the 7 corrections, each with its outcome (`new_active_old_superseded`, `new_active_old_same_key_loser`, `both_active_unlinked`, `new_missing`, `old_never_learned`, …) and whether the two notes share a key. When the judge matched one note for both golds and that note is active, no same-key loser, and supersedes a note the old gold's search returned, the store recorded the change: `new_active_old_superseded`, with `old_note_from: supersedes_link` (`judge` otherwise) |
+| `learning.restatements`, `learning.restatements_by_surface` | Per `restate` turn: `nothing_written`, `automatic_replacement`, `suggestion`, `duplicate_note`, `first_learned` from the notes citing its row; where none does, `model_tool_write` (the reader wrote a note during the turn — `reader_notes`; its notes carry no sources) or `extraction_failed` (no flush of the session read the turn), and `nothing_written` only for a turn extraction read and wrote nothing for. `by_surface` gives each path's own outcome; the tally is pooled and by path |
+| `learning.aliases`, `learning.fact_keys`, `…_by_surface` | The share of active learned notes with an alias in the other script (CJK against Latin), with any alias, and with a key — pooled, and by path |
 | `learning.suggestion_check` | L-S: per seeded note, its suggestions and its status before and after the confirm |
-| `learning.invariants` | User notes retired without a confirm, forgotten notes resurrected — both must be 0 — and `forced_rerun_checked`: the re-run forgot a note and its flush made an extraction call and read its session to the end (no `stopped`). For L and a replay a re-run that checked nothing (skipped, no call, or a flush that stopped — an unusable answer, no model) is a violation, never a 0 that reads as a pass. A violation fails the run after the report is written |
-| `learning.cost` | Extraction calls and tokens, flush latency p50/p95, flushes by trigger, the conversation summaries' calls, count and tokens, memory changes by surface, the reader's feed cost |
+| `learning.invariants` | User notes retired without a confirm, forgotten notes resurrected — both must be 0 — and `forced_rerun_checked`: the re-run forgot a note and its flush made an extraction call and read its session to the end (no `stopped`, no window skipped). For L and a replay a re-run that checked nothing (skipped, no call, a flush that stopped — an unusable answer, no model — or one whose window the queue skipped after `MAX_ATTEMPTS` unusable answers) is a violation, never a 0 that reads as a pass; `forced_rerun_unchecked` says why. A violation fails the run after the report is written |
+| `learning.cost` | Extraction calls and tokens, flush latency p50/p95, flushes by trigger, the conversation summaries' calls, count and tokens, memory changes by surface, the reader's feed cost and its turn errors (`feed_turn_errors`, `feed_turn_errors_at`) |
 
 The proposed targets (coverage ≥ 80 %, changed facts ≥ 12 of 15, other-script
 aliases ≥ 60 %, restatements raising a suggestion or a duplicate ≤ 2, L within
-−10 pp of D′) are read against the median of the four samples, never one run.
+−10 pp of D′) are never read against one run. The four samples are two
+systems: the replays' spread is the extraction path's, to be read beside the
+live run's `extraction` figures, and the whole system — the pooled figures —
+has one sample per live run. Which of the two a target applies to is the
+owner's question, not the harness's: the report gives both.
 
 **The episode split** (design 09 §13.4, for L8) is answered after a learning
 run: an L run with `OPENALPACA_MEMORY_EVAL_QUESTIONS` naming
@@ -401,6 +456,26 @@ OPENALPACA_MEMORY_EVAL_REPORT=/tmp/memory-eval/report-L-episodes.json \
   cargo test -p openalpaca_core --features live-eval \
   --test memory_eval -- --ignored memory_eval --nocapture
 ```
+
+**The episode split on a replay**, without the three-hour live feed: a replay
+with `OPENALPACA_MEMORY_EVAL_QUESTIONS` naming a file also writes each
+session's conversation summaries at its end (label `replay`, as L does at
+its `switch`) and then asks the questions as D asks them, learning off, before
+its forced re-run (`conditions.learning.summaries` is then `true`):
+
+```sh
+OPENALPACA_MEMORY_EVAL_SYSTEM=L \
+OPENALPACA_MEMORY_EVAL_LEARN_FROM=/path/printed/as/scratch-kept \
+OPENALPACA_MEMORY_EVAL_QUESTIONS="$PWD/scripts/eval/memory/questions-episodes.json" \
+OPENALPACA_MEMORY_EVAL_REPORT=/tmp/memory-eval/report-L-episodes-replay.json \
+  cargo test -p openalpaca_core --features live-eval \
+  --test memory_eval -- --ignored memory_eval --nocapture
+```
+
+It is not like for like with a live L-episodes run: the replay's store is
+extraction-only (none of the live reader's `memory_store` notes, which
+answered two of L8's twenty episode questions), and its transcript is the
+kept L run's, not L-episodes' (the live reader's replies differ run to run).
 
 ## The judge
 
@@ -452,7 +527,10 @@ costs cents.
 
 On the local test model the cost is time (design 09 §7.5): L ≈ 4 h (300 fed
 turns, about 40 flushes, 470 questions, 83 coverage calls), a replay ≈ 0.5 h,
-L0 ≈ 3.3 h, L-S ≈ 0.5 h. `OPENALPACA_MEMORY_EVAL_SESSIONS=2` with
+L0 ≈ 3.3 h, L-S ≈ 0.5 h. Since the L8 fix slice a flush that stops
+`BadOutput` is retried up to twice more (L8 saw 11 such flushes in L, 16 in
+L-episodes), an extraction answer may run to 4,140 output tokens instead of
+2,800 (a runaway takes about 35 s longer), and a coverage verdict to 2,048. `OPENALPACA_MEMORY_EVAL_SESSIONS=2` with
 `OPENALPACA_MEMORY_EVAL_LIMIT=5` is a smoke run of the whole L pipeline.
 
 ## Reading a report
