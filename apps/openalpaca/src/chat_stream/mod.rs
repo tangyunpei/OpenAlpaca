@@ -358,7 +358,7 @@ fn delta_to_print(tty: bool, content: &str) -> Option<String> {
 /// would cut the argument that runs at the margin, with nothing hidden in it
 /// for the prompt's notice to count. Display only: `SseState::shown` keeps
 /// what the daemon sent, so `done` still reconciles against it.
-fn model_text(tty: bool, text: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn model_text(tty: bool, text: &str) -> std::borrow::Cow<'_, str> {
     if tty {
         std::borrow::Cow::Owned(openalpaca_core::utils::text::escape_controls(text))
     } else {

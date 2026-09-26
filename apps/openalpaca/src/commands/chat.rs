@@ -232,7 +232,12 @@ fn tail_of(messages: &[TranscriptMessage], limit: usize) -> &[TranscriptMessage]
 }
 
 /// The block printed above the prompt, one line per turn.
-fn render_tail(messages: &[TranscriptMessage]) -> String {
+///
+/// The stored turns are printed into the terminal whose inline `[y/N]`
+/// prompt comes next — an assistant row is the model's own answer as it
+/// wrote it — so a terminal gets each one as it gets a streamed answer
+/// (`chat_stream::model_text`); a pipe gets the stored text.
+fn render_tail(messages: &[TranscriptMessage], tty: bool) -> String {
     let mut out = String::new();
     for message in messages {
         let who = match message.role.as_str() {
@@ -240,7 +245,8 @@ fn render_tail(messages: &[TranscriptMessage]) -> String {
             "assistant" => "Alpaca:".cyan().bold(),
             other => other.dimmed(),
         };
-        out.push_str(&format!("{} {}\n", who, message.content.trim()));
+        let content = chat_stream::model_text(tty, message.content.trim());
+        out.push_str(&format!("{} {}\n", who, content));
     }
     out
 }
@@ -268,7 +274,13 @@ async fn print_transcript_tail(client: &DaemonClient, session_id: &str) -> Resul
     }
 
     println!();
-    print!("{}", render_tail(tail_of(&page.messages, TAIL_MESSAGES)));
+    print!(
+        "{}",
+        render_tail(
+            tail_of(&page.messages, TAIL_MESSAGES),
+            std::io::IsTerminal::is_terminal(&std::io::stdout())
+        )
+    );
     println!("{}", "─".repeat(40).dimmed());
     Ok(())
 }
@@ -626,7 +638,7 @@ mod tests {
         colored::control::set_override(false);
 
         let all = transcript(50);
-        let printed = render_tail(tail_of(&all, TAIL_MESSAGES));
+        let printed = render_tail(tail_of(&all, TAIL_MESSAGES), false);
         let lines: Vec<&str> = printed.lines().collect();
 
         assert_eq!(lines.len(), TAIL_MESSAGES, "{printed}");
@@ -643,8 +655,38 @@ mod tests {
     fn a_short_conversation_prints_whole() {
         colored::control::set_override(false);
 
-        let printed = render_tail(tail_of(&transcript(3), TAIL_MESSAGES));
+        let printed = render_tail(tail_of(&transcript(3), TAIL_MESSAGES), false);
         let lines: Vec<&str> = printed.lines().collect();
         assert_eq!(lines, vec!["You: turn 1", "Alpaca: turn 2", "You: turn 3"]);
+    }
+
+    /// A resumed conversation's stored turns are printed into the terminal
+    /// whose inline `[y/N]` prompt comes next, so they reach it as a
+    /// streamed answer does: every control character but `\n` and `\t`
+    /// shown as `<U+XXXX>` — a palette change (OSC 4) or a scroll region
+    /// (`ESC [ 1 ; 2 r`) stored in an answer would outlive it, and the
+    /// prompt's reset undoes neither. A pipe gets the stored text.
+    #[test]
+    fn a_resumed_tail_reaches_a_terminal_without_a_control_character() {
+        colored::control::set_override(false);
+
+        let messages = vec![
+            TranscriptMessage {
+                role: "user".to_string(),
+                content: "hi\u{1b}[?7l".to_string(),
+            },
+            TranscriptMessage {
+                role: "assistant".to_string(),
+                content: "done\u{1b}]4;3;#000000\u{7}\u{1b}[1;2r\n".to_string(),
+            },
+        ];
+        assert_eq!(
+            render_tail(&messages, true),
+            "You: hi<U+001B>[?7l\nAlpaca: done<U+001B>]4;3;#000000<U+0007><U+001B>[1;2r\n"
+        );
+        assert_eq!(
+            render_tail(&messages, false),
+            "You: hi\u{1b}[?7l\nAlpaca: done\u{1b}]4;3;#000000\u{7}\u{1b}[1;2r\n"
+        );
     }
 }
