@@ -258,6 +258,50 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
     ).toBeInTheDocument();
   });
 
+  /**
+   * The consent row is an approval surface: the plugin's id and what it asks
+   * for are its author's strings, so each hidden character is drawn as a
+   * highlighted `<U+XXXX>` — never raw — with the count under them. Approve
+   * still answers for the plugin the daemon listed, id untouched.
+   */
+  it("shows a pending plugin's hidden characters, and approves the real id", async () => {
+    state.rows = [
+      extensionRow({
+        id: "no‮tes",
+        state: "unapproved",
+        reason: "never_seen",
+        declared: {
+          capabilities: ["fs​_write"],
+          virtual_capabilities: [],
+          types: { tool: true },
+        },
+      }),
+    ];
+    const { container } = render(<ExtensionsSection />);
+
+    expect(container.textContent).not.toMatch(/[‮​]/);
+    expect(
+      Array.from(
+        container.querySelectorAll("[data-hidden-char]"),
+        (node) => node.textContent,
+      ),
+    ).toEqual(["<U+202E>", "<U+200B>"]);
+    expect(container.textContent).toContain("no<U+202E>tes");
+    expect(container.textContent).toContain(
+      "Asks for: fs<U+200B>_write — starts on approval",
+    );
+    expect(
+      screen.getByText(
+        "Note: this request contains 2 hidden characters, shown as <U+…>.",
+      ),
+    ).toBeInTheDocument();
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Approve" }));
+    expect(state.calls).toEqual([{ id: "no‮tes", verb: "approve" }]);
+  });
+
   it("removes an orphan, and offers Remove nowhere else", async () => {
     state.rows = [
       extensionRow({ id: "ghost", state: "orphaned" }),

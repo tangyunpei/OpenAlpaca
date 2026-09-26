@@ -24,11 +24,16 @@
  *
  * There is **no per-tool switch** here or in Tools: ENABLE is one toggle per
  * MCP server and per plugin, ALLOW is per-agent capability (S1).
+ *
+ * A row that asks for consent draws the plugin's id and what it asks for with
+ * each hidden character as a highlighted `<U+XXXX>`, and the count under them
+ * (`extension-row`'s `consent`, `lib/hidden-chars`): Approve grants exactly
+ * those strings. Approve and Deny send the id as the daemon listed it.
  */
 
 import { useState } from "react";
 
-import { Button, Tag } from "@/components/ui";
+import { Button, EscapedText, Tag } from "@/components/ui";
 import { useHomeRoot } from "@/hooks/useConnection";
 import {
   useExtensions,
@@ -47,6 +52,7 @@ import {
   orderExtensions,
   type ExtensionMenuItem,
   type ExtensionRowView,
+  type RowConsent,
 } from "./extension-row";
 import { ListCard, ListRow, ListState, Toggle } from "./primitives";
 
@@ -120,14 +126,26 @@ export function ExtensionsSection() {
     return (
       <ListRow
         key={key}
-        name={row.id}
+        name={
+          view.consent === null ? (
+            row.id
+          ) : (
+            <EscapedText escaped={view.consent.name} />
+          )
+        }
         tags={
           <>
             <Tag value={row.kind === "mcp" ? "MCP" : "Plugin"} />
             <Tag value={view.tag} tone={view.tone} />
           </>
         }
-        description={view.description}
+        description={
+          view.consent === null ? (
+            view.description
+          ) : (
+            <ConsentAsks consent={view.consent} />
+          )
+        }
         chips={rowDetail({
           row,
           view,
@@ -303,6 +321,22 @@ export function ExtensionsSection() {
         </ListState>
       </ListCard>
     </>
+  );
+}
+
+/**
+ * What a consent row asks for, escaped, and — when anything was — the line
+ * that counts it, in the words every approval surface uses. It wraps
+ * anywhere, so a capability with no break in it cannot run past the row.
+ */
+function ConsentAsks({ consent }: { consent: RowConsent }) {
+  return (
+    <span className="block wrap-anywhere">
+      <EscapedText escaped={consent.asks} />
+      {consent.notice !== null && (
+        <span className="mt-[2px] block text-red-ink">{consent.notice}</span>
+      )}
+    </span>
   );
 }
 
