@@ -918,6 +918,20 @@
       "hidden": 0
     }
   ],
+  "cut_notices": [
+    {
+      "left_out": 0,
+      "text": null
+    },
+    {
+      "left_out": 1,
+      "text": "... (1 more character not shown)"
+    },
+    {
+      "left_out": 31,
+      "text": "... (31 more characters not shown)"
+    }
+  ],
   "notices": [
     {
       "hidden": 0,

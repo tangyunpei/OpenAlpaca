@@ -544,8 +544,10 @@ fn render_preview(target: &NoteView, suggestion: &Note, said_on: &str) -> String
         _ => ("the note", "Current", "The current note is kept"),
     };
     let raw_reason = super::suggestions::replace_reason(&suggestion.body);
-    let (target_text, target_cut) = super::suggestions::target_excerpt(&target.note.body);
-    let (suggested_text, suggested_cut) = super::suggestions::suggested_knowledge(&suggestion.body);
+    let (target_text, target_left_out) = super::suggestions::target_excerpt(&target.note.body);
+    let (suggested_text, suggested_left_out) =
+        super::suggestions::suggested_knowledge(&suggestion.body);
+    let (target_cut, suggested_cut) = (target_left_out > 0, suggested_left_out > 0);
     let left_out = left_out_line(
         [
             target.note.title.as_str(),

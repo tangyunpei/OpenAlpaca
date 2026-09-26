@@ -157,12 +157,13 @@ pub(super) fn verified_target(
     } else {
         Origin::parse(&row.origin).unwrap_or(Origin::External)
     };
-    let (excerpt, _) = target_excerpt(&note.body);
+    let (excerpt, excerpt_left_out) = target_excerpt(&note.body);
     Ok(Some(SuggestionTarget {
         id: note_id,
         revision,
         title: note.title,
         excerpt,
+        excerpt_left_out,
         origin,
         scope: scope_of(p),
     }))
@@ -200,11 +201,12 @@ fn verified_suggestion(
     } else {
         Origin::parse(&row.origin).unwrap_or(Origin::External)
     };
-    let (knowledge, _) = suggested_knowledge(&note.body);
+    let (knowledge, knowledge_left_out) = suggested_knowledge(&note.body);
     Some(Suggestion {
         id,
         revision,
         knowledge,
+        knowledge_left_out,
         reason: replace_reason(&note.body),
         title: note.title,
         created_at: note.created_at,
@@ -218,17 +220,32 @@ fn verified_suggestion(
 }
 
 /// The replaced note's text as a suggestion serves it (`target.excerpt`):
-/// its Knowledge section, cut at [`SUGGESTION_EXCERPT_BYTES`] — `true` when
-/// cut. `memory_confirm`'s preview quotes and counts this same field.
-pub(super) fn target_excerpt(body: &str) -> (String, bool) {
-    cut_bytes(&knowledge_text(body), SUGGESTION_EXCERPT_BYTES)
+/// its Knowledge section, cut at [`SUGGESTION_EXCERPT_BYTES`], and how many
+/// characters the cut left out (0 when it is whole), which the wire carries
+/// as `target.excerpt_left_out` for the card to say (A6).
+/// `memory_confirm`'s preview quotes and counts this same field.
+pub(super) fn target_excerpt(body: &str) -> (String, usize) {
+    cut_counting(&knowledge_text(body), SUGGESTION_EXCERPT_BYTES)
 }
 
 /// The suggested text as a suggestion serves it (`knowledge`): its
-/// Knowledge section, cut at [`SUGGESTION_KNOWLEDGE_BYTES`] — `true` when
-/// cut. `memory_confirm`'s preview quotes and counts this same field.
-pub(super) fn suggested_knowledge(body: &str) -> (String, bool) {
-    cut_bytes(&knowledge_text(body), SUGGESTION_KNOWLEDGE_BYTES)
+/// Knowledge section, cut at [`SUGGESTION_KNOWLEDGE_BYTES`], and how many
+/// characters the cut left out (`knowledge_left_out`, 0 when whole).
+/// `memory_confirm`'s preview quotes and counts this same field.
+pub(super) fn suggested_knowledge(body: &str) -> (String, usize) {
+    cut_counting(&knowledge_text(body), SUGGESTION_KNOWLEDGE_BYTES)
+}
+
+/// `text` cut to `max` bytes on a character boundary, and how many of its
+/// characters the cut left out.
+fn cut_counting(text: &str, max: usize) -> (String, usize) {
+    let (kept, cut) = cut_bytes(text, max);
+    let left_out = if cut {
+        text[kept.len()..].chars().count()
+    } else {
+        0
+    };
+    (kept, left_out)
 }
 
 /// The reason a learned replacement gives (design 09 §2.6): its evidence

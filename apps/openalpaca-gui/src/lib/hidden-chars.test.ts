@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import table from "./hidden-chars.json";
 import {
+  cutNotice,
   escapeHidden,
   escapeHiddenLine,
   hiddenNotice,
@@ -95,6 +96,13 @@ describe("hidden-chars — the shared table (parity with Rust)", () => {
         shown,
         hidden,
       });
+    }
+  });
+
+  it("says the table's cut notice, word for word, and none when nothing was cut", () => {
+    expect(table.cut_notices.length).toBeGreaterThan(0);
+    for (const { left_out, text } of table.cut_notices) {
+      expect(cutNotice(left_out)).toBe(text);
     }
   });
 

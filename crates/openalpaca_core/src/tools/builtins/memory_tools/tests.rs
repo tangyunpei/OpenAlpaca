@@ -1873,6 +1873,74 @@ async fn the_preview_counts_what_the_suggestions_card_counts() {
     assert_eq!(preview.lines().nth(2), Some("New: Begin…"), "{preview}");
 }
 
+/// The Suggestions card serves the replaced note's text cut at 600 bytes and
+/// the suggestion's at 4 KiB, and a cut on a surface someone decides on
+/// says how much it left out (A6): the wire carries, beside each served
+/// text, how many characters of the Knowledge section its cut left out —
+/// 0 when it is whole — for the card to print.
+#[test]
+fn a_suggestion_says_how_much_its_served_texts_leave_out() {
+    let h = Harness::new();
+    let long = "word ".repeat(200);
+    let target = h.user_note(ALICE, "Long", &format!("# Long\n\n## Knowledge\n{long}\n"));
+    let row = typed_row(&h, "Replace it.", "2026-09-24 10:00:00");
+    let knowledge = format!("New {}", "text ".repeat(1000));
+    let s = suggestion_for(
+        &h,
+        (target.0, &target.1),
+        "Long",
+        &knowledge,
+        &[row],
+        crate::memory::service::ExtractionProvenance::UserWords,
+    );
+    let json = crate::memory::service::wire::suggestions_json(
+        &h.service.suggestions(&read_ctx(&h), None).unwrap(),
+    );
+    let item = json["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == s.id.to_string())
+        .expect("the suggestion is listed");
+    let excerpt = item["target"]["excerpt"].as_str().unwrap();
+    let whole = long.trim_end();
+    assert!(whole.len() > 600 && excerpt.len() <= 600);
+    assert_eq!(
+        item["target"]["excerpt_left_out"],
+        whole.chars().count() - excerpt.chars().count(),
+        "{item}"
+    );
+    let served = item["knowledge"].as_str().unwrap();
+    assert!(served.len() <= 4096);
+    assert_eq!(
+        item["knowledge_left_out"],
+        knowledge.trim_end().chars().count() - served.chars().count(),
+        "{item}"
+    );
+
+    // Whole texts leave nothing out.
+    let short = h.user_note(ALICE, "Short", "# Short\n\n## Knowledge\nBus.\n");
+    let s = suggestion_for(
+        &h,
+        (short.0, &short.1),
+        "Short",
+        "Bike.",
+        &[row],
+        crate::memory::service::ExtractionProvenance::UserWords,
+    );
+    let json = crate::memory::service::wire::suggestions_json(
+        &h.service.suggestions(&read_ctx(&h), None).unwrap(),
+    );
+    let item = json["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == s.id.to_string())
+        .expect("the suggestion is listed");
+    assert_eq!(item["target"]["excerpt_left_out"], 0, "{item}");
+    assert_eq!(item["knowledge_left_out"], 0, "{item}");
+}
+
 /// What the preview's last line counts, field by field, as the Suggestions
 /// card and `memory suggestions` count it: the reason too; the titles and
 /// the reason with the one-line escape, so a tab in the reason counts; the

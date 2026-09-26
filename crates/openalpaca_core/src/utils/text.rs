@@ -362,6 +362,21 @@ pub fn hidden_notice(hidden: usize) -> Option<String> {
     }
 }
 
+/// What a surface that cuts a text someone decides on prints where the cut
+/// is, or `None` when nothing was cut: how many characters it left out, in
+/// the same words on every surface (A6) — the chat connectors under a
+/// prompt's arguments, the Memory view's Suggestions card under a served
+/// text (the GUI's copy is held to them by `hidden-chars.json`'s
+/// `cut_notices`). What a cut leaves out still runs, or is still replaced,
+/// so a bare `...` is not enough.
+pub fn cut_notice(left_out: usize) -> Option<String> {
+    match left_out {
+        0 => None,
+        1 => Some("... (1 more character not shown)".to_string()),
+        n => Some(format!("... ({n} more characters not shown)")),
+    }
+}
+
 /// `text` for a terminal when it is prose a model or a tool wrote — an
 /// answer, its reasoning, a run's result, a tool's error text — rather than
 /// a value a person approves: every control character (Cc) but `\n` and
@@ -389,7 +404,7 @@ pub fn escape_controls(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Escaped, byte_prefix, escape_controls, escape_hidden, escape_hidden_line,
+        Escaped, byte_prefix, cut_notice, escape_controls, escape_hidden, escape_hidden_line,
         escape_hidden_within, hidden_notice, is_default_ignorable, is_hidden, is_unassigned,
         needs_escape, needs_escape_in_line, one_line,
     };
@@ -886,6 +901,24 @@ mod tests {
                 hidden_notice(hidden).as_deref(),
                 notice["text"].as_str(),
                 "hidden_notice({hidden})"
+            );
+        }
+    }
+
+    /// The GUI's cut notices are what Rust prints.
+    #[test]
+    fn the_gui_tables_cut_notices_are_what_rust_shows() {
+        let table = gui_table();
+        let notices = table["cut_notices"]
+            .as_array()
+            .expect("cut_notices is an array");
+        assert!(!notices.is_empty());
+        for notice in notices {
+            let left_out = notice["left_out"].as_u64().expect("left_out") as usize;
+            assert_eq!(
+                cut_notice(left_out).as_deref(),
+                notice["text"].as_str(),
+                "cut_notice({left_out})"
             );
         }
     }

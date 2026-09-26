@@ -229,6 +229,21 @@ export function hiddenNotice(hidden: number): string | null {
 }
 
 /**
+ * What a surface that cuts a text someone decides on prints where the cut
+ * is, or `null` when nothing was cut: how many characters it left out, word
+ * for word what the chat connectors print under a cut prompt (Rust's
+ * `cut_notice`, held to the table's `cut_notices` on both sides). The
+ * Memory view's Suggestions card prints it under a text the daemon served
+ * cut.
+ */
+export function cutNotice(leftOut: number): string | null {
+  if (leftOut <= 0) return null;
+  return leftOut === 1
+    ? "... (1 more character not shown)"
+    : `... (${leftOut} more characters not shown)`;
+}
+
+/**
  * What a surface that shows part of a pending request says beside it — the
  * composer's bar and the palette's Approve row, which answer the request,
  * and the run card, which sends the person to it — or `null` when nothing

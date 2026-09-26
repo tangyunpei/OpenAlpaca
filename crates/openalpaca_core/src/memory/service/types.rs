@@ -220,6 +220,9 @@ pub struct SuggestionTarget {
     /// Its `## Knowledge` section (or its body below the title), cut to
     /// [`super::SUGGESTION_EXCERPT_BYTES`].
     pub excerpt: String,
+    /// How many characters of that section the cut left out: 0 when the
+    /// excerpt is the whole of it.
+    pub excerpt_left_out: usize,
     pub origin: Origin,
     pub scope: NoteScope,
 }
@@ -233,8 +236,12 @@ pub struct Suggestion {
     pub revision: String,
     pub title: String,
     /// The suggested text: its `## Knowledge` section — shown beside the
-    /// target's, because a suggestion can merely restate it (§2.5 case 3).
+    /// target's, because a suggestion can merely restate it (§2.5 case 3) —
+    /// cut to 4 KiB.
     pub knowledge: String,
+    /// How many characters of that section the cut left out: 0 when
+    /// `knowledge` is the whole of it.
+    pub knowledge_left_out: usize,
     /// Why it replaces the target, from its `Replaces …` evidence sentence
     /// (§2.6); `None` when the note carries none.
     pub reason: Option<String>,

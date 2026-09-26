@@ -114,17 +114,15 @@ pub fn format_confirmation_prompt(
     tool_arguments: &serde_json::Value,
     queue_len: usize,
 ) -> String {
-    use openalpaca_core::utils::text::{escape_hidden_line, escape_hidden_within, hidden_notice};
+    use openalpaca_core::utils::text::{
+        cut_notice, escape_hidden_line, escape_hidden_within, hidden_notice,
+    };
 
     let name = escape_hidden_line(tool_name);
     let pretty =
         serde_json::to_string_pretty(tool_arguments).unwrap_or_else(|_| tool_arguments.to_string());
     let args = escape_hidden_within(&pretty, PROMPT_ARGUMENTS_BYTES);
-    let rest = match args.left_out {
-        0 => String::new(),
-        1 => "... (1 more character not shown)".to_string(),
-        n => format!("... ({n} more characters not shown)"),
-    };
+    let rest = cut_notice(args.left_out).unwrap_or_default();
     let notice = hidden_notice(name.hidden + args.hidden)
         .map(|line| format!("\n{line}"))
         .unwrap_or_default();

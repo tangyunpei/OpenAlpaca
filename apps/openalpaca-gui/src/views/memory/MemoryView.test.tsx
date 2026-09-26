@@ -64,6 +64,9 @@ interface FakeNote {
   aliases?: string[];
   tags?: string[];
   fact_key?: string | null;
+  /** How many characters the listing's cut of a text left out. */
+  excerpt_left_out?: number;
+  knowledge_left_out?: number;
 }
 
 interface Recorded {
@@ -269,6 +272,7 @@ function daemon(url: URL, method: string, headers: Headers, body: unknown) {
             revision: n.revision,
             title: n.title,
             knowledge: n.knowledge ?? n.body,
+            knowledge_left_out: n.knowledge_left_out ?? 0,
             reason: n.reason ?? null,
             created_at: n.created_at,
             observed_at: n.observed_at ?? null,
@@ -281,6 +285,7 @@ function daemon(url: URL, method: string, headers: Headers, body: unknown) {
               revision: target.revision,
               title: target.title,
               excerpt: target.body.trim(),
+              excerpt_left_out: target.excerpt_left_out ?? 0,
               origin: target.origin,
               scope: target.scope,
             },
@@ -1399,6 +1404,46 @@ describe("the Memory view", () => {
       action: "confirm",
       target_revision: target,
     });
+  });
+
+  /**
+   * The card serves the replaced note's text cut at 600 bytes and the
+   * suggestion's at 4 KiB, and Replace retires the whole note: a cut on the
+   * surface someone decides on says how much it left out (A6), in the words
+   * the chat apps print under a cut prompt.
+   */
+  it("says how much a suggestion's served texts leave out", async () => {
+    note({
+      id: "n-1",
+      title: "Commute",
+      body: "The user takes the bus.\n",
+      excerpt_left_out: 1400,
+    });
+    note({
+      id: "n-2",
+      title: "Commute",
+      body: "# Commute\n",
+      knowledge: "Since March the user cycles.",
+      knowledge_left_out: 1,
+      status: "candidate",
+      origin: "extracted_user",
+      supersedes: ["n-1"],
+    });
+    renderView();
+    const section = await screen.findByRole("region", { name: "Suggestions" });
+    expect(section).toHaveTextContent(
+      "YoursThe user takes the bus. ... (1400 more characters not shown)New",
+    );
+    expect(section).toHaveTextContent(
+      "Since March the user cycles. ... (1 more character not shown)",
+    );
+  });
+
+  it("says nothing about a cut when a suggestion's texts are whole", async () => {
+    savedAndSuggested();
+    renderView();
+    const section = await screen.findByRole("region", { name: "Suggestions" });
+    expect(section).not.toHaveTextContent("not shown");
   });
 
   it("says nothing about hidden characters on a suggestion that holds none", async () => {

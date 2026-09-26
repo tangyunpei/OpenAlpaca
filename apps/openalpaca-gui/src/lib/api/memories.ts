@@ -223,6 +223,8 @@ export interface MemorySuggestionTarget {
   title: string;
   /** Its knowledge, cut short — shown beside the suggested text. */
   excerpt: string;
+  /** How many characters the excerpt's cut (600 bytes) left out; 0 when whole. */
+  excerpt_left_out: number;
   origin: NoteOrigin;
   scope: NoteScope;
 }
@@ -232,8 +234,10 @@ export interface MemorySuggestion {
   id: string;
   revision: string;
   title: string;
-  /** The suggested text. */
+  /** The suggested text, cut to 4 KiB. */
   knowledge: string;
+  /** How many characters that cut left out; 0 when whole. */
+  knowledge_left_out: number;
   /** Why it replaces the target, when the note says. */
   reason: string | null;
   created_at: string;

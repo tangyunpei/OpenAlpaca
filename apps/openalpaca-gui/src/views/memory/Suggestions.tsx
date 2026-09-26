@@ -27,11 +27,17 @@
  * under the texts counts them in the words every approval surface uses.
  * Display only: Replace and Keep mine answer the notes by id and revision,
  * as read.
+ *
+ * The daemon serves the replaced note's text cut at 600 bytes and the
+ * suggestion's at 4 KiB, and Replace retires the whole note: a text served
+ * cut ends with how many characters the cut left out (`cutNotice`, the chat
+ * apps' words for a cut prompt), and the rest is in the note's detail.
  */
 
 import { Button, EscapedText, Eyebrow } from "@/components/ui";
 import type { MemorySuggestion } from "@/lib/api/memories";
 import {
+  cutNotice,
   escapeHidden,
   escapeHiddenLine,
   hiddenNotice,
@@ -123,10 +129,12 @@ function SuggestionRow({
         </dt>
         <dd className="m-0 min-w-0 break-words text-secondary">
           <EscapedText escaped={excerpt} />
+          <CutNote leftOut={item.target.excerpt_left_out} />
         </dd>
         <dt className="font-mono text-2xs-plus text-muted-fg">New</dt>
         <dd className="m-0 min-w-0 break-words text-ink">
           <EscapedText escaped={knowledge} />
+          <CutNote leftOut={item.knowledge_left_out} />
         </dd>
         {reason !== null && (
           <>
@@ -165,4 +173,10 @@ function SuggestionRow({
       </div>
     </li>
   );
+}
+
+/** How much a served text's cut left out, after the text; nothing when whole. */
+function CutNote({ leftOut }: { leftOut: number }) {
+  const note = cutNotice(leftOut);
+  return note === null ? null : <span className="text-muted-fg"> {note}</span>;
 }

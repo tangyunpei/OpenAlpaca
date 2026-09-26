@@ -723,7 +723,10 @@ Two columns, in the Library's shape. The left one, top to bottom:
   hand), OpenAlpaca does not overwrite it: it asks — *"Replace “X” (saved by
   you) with “B”?"* — showing your note and the new text side by side (the new
   one can turn out to say the same thing; the old one is labelled *Current*
-  rather than *Yours* when OpenAlpaca learned it), why it thinks so, and *"From
+  rather than *Yours* when OpenAlpaca learned it; a text longer than the card
+  shows — your note past its first 600 bytes, the new one past 4 KiB — ends
+  with how much is not shown, `... (1400 more characters not shown)`, and the
+  note's detail has the rest), why it thinks so, and *"From
   what you said on <date>"* (*"Edited by you · suggested on <date>"* once you
   edited the suggestion itself). **Replace** makes the new note yours and keeps the old
   one as history (*"Replaced — “X” is kept as history"*); if you edited the old
