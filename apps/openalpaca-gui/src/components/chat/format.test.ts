@@ -158,5 +158,32 @@ describe("formatToolArguments (§3.14)", () => {
     expect(formatToolArguments("done\r x\u{1B}[2J")).toBe(
       '"done\\r x\\u001b[2J"',
     );
+    // Any C0 control, not only the three above: an ESC alone steps aside
+    // too, as JSON and every other approval surface write it out.
+    expect(formatToolArguments({ command: "a\u{1B}b" })).toBe(
+      '{\n  "command": "a\\u001bb"\n}',
+    );
+  });
+
+  /**
+   * Bare, a value has no mark where it ends: a trailing space is not seen,
+   * a leading one is a slight indent, and an empty value draws no box at all.
+   * `std::fs` does not trim, so `/srv/allowed ` is another file. JSON's quotes
+   * show the value's extent, as the CLI and the chat apps show it.
+   */
+  it("shows a value that is empty or starts or ends with a space as JSON", () => {
+    expect(formatToolArguments({ path: "/srv/allowed " })).toBe(
+      '{\n  "path": "/srv/allowed "\n}',
+    );
+    expect(formatToolArguments({ command: " /etc/passwd" })).toBe(
+      '{\n  "command": " /etc/passwd"\n}',
+    );
+    expect(formatToolArguments({ path: "" })).toBe('{\n  "path": ""\n}');
+    expect(formatToolArguments("ls -la ")).toBe('"ls -la "');
+    expect(formatToolArguments("")).toBe('""');
+    // A space inside the value keeps the bare form.
+    expect(formatToolArguments({ command: "ls  -la /tmp" })).toBe(
+      "ls  -la /tmp",
+    );
   });
 });

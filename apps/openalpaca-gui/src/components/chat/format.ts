@@ -199,15 +199,25 @@ export function shortTitle(title: string, words = 3): string {
  * command's own line break looks exactly like the box's soft wrap, so
  * `echo … wait` over `rm -rf ~` reads as one echo while the shell runs two
  * commands.
+ *
+ * It also steps aside for an empty value and for one that starts or ends
+ * with whitespace: bare, nothing marks where a value ends, so a trailing
+ * space (`/srv/allowed `, another file) is not seen and an empty value draws
+ * no box at all. JSON's quotes show its extent, as on every other surface.
  */
 const COMMAND_KEYS = ["command", "cmd", "script", "query", "path", "url"];
 
 /** What `JSON.stringify` writes out inside a string: U+0000–U+001F. */
 const JSON_ESCAPED_CONTROL = /[\u0000-\u001f]/u;
 
-/** A string the card may show bare: nothing in it JSON would write out. */
+/**
+ * A string the card may show bare: nothing in it JSON would write out, and
+ * both its ends visible (not empty, no leading or trailing whitespace).
+ */
 function showsBare(value: string): boolean {
-  return !JSON_ESCAPED_CONTROL.test(value);
+  return (
+    value !== "" && value === value.trim() && !JSON_ESCAPED_CONTROL.test(value)
+  );
 }
 
 function pretty(args: unknown): string {

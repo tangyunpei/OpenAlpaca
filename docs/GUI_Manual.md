@@ -357,7 +357,9 @@ edge instead of running past it. A single command is shown bare unless it
 holds a line break, a tab or another C0 control character
 (U+0000–U+001F); then the request is shown as JSON, which writes each one out
 (`\n`, `\t`), as the CLI and the chat apps show it — drawn as a real line
-break, it would look just like the box's own wrapping. DEL and the C1 controls
+break, it would look just like the box's own wrapping. A command that is
+empty, or starts or ends with a space, is shown as JSON too, so its quotes
+show where it ends. DEL and the C1 controls
 (U+007F–U+009F), which JSON does not write out, leave a command bare and are
 shown as a highlighted `<U+XXXX>`. The composer's bar, the palette's `Approve
 pending …` row and the run card's `Waiting on you: …` name the tool the same

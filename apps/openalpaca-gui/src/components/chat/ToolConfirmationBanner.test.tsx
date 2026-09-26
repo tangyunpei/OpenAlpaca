@@ -228,6 +228,28 @@ describe("ToolConfirmationBanner — hidden characters (§3.14)", () => {
     expect(screen.queryByText(/hidden character/)).toBeNull();
   });
 
+  /**
+   * The card is the one surface that drops a value's JSON quotes, so it must
+   * keep them where they are the only mark of where a value ends: a trailing
+   * space opens another file, and an empty value would draw no box at all,
+   * reading as a call with no arguments.
+   */
+  it("keeps a value's quotes when it is empty or starts or ends with a space", () => {
+    const { box } = card({
+      toolName: "file_read",
+      toolArguments: { path: "/srv/allowed " },
+    });
+    expect(box?.textContent).toBe('{\n  "path": "/srv/allowed "\n}');
+  });
+
+  it("draws the box for an empty value", () => {
+    const { box } = card({
+      toolName: "file_read",
+      toolArguments: { path: "" },
+    });
+    expect(box?.textContent).toBe('{\n  "path": ""\n}');
+  });
+
   it("keeps the pretty-printed arguments' own lines", () => {
     const { box } = card({
       toolName: "file_write",
