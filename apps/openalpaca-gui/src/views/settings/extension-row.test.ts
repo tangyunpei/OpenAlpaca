@@ -176,12 +176,12 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
   it("unapproved/never_seen — the plugin's id and asks show hidden characters", () => {
     const view = extensionRowView(
       extensionRow({
-        id: "no‮tes​",
+        id: "no\u202Etes\u200B",
         state: "unapproved",
         reason: "never_seen",
         enabled: true,
         declared: {
-          capabilities: ["fs_read‮", "net​connect", "a\nb⠀"],
+          capabilities: ["fs_read\u202E", "net\u200Bconnect", "a\nb\u2800"],
           virtual_capabilities: [],
           types: { tool: true },
         },
@@ -207,7 +207,7 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
       extensionRow({
         state: "unapproved",
         reason: "capabilities_grew",
-        added_capabilities: ["net​connect\u{E0041}"],
+        added_capabilities: ["net\u200Bconnect\u{E0041}"],
       }),
     );
 
@@ -267,16 +267,20 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
       extensionRow({
         state: "failed",
         reason: "crashed",
-        detail: "bro‮ken",
+        detail: "bro\u202Eken",
       }),
     ]) {
       expect(extensionRowView(row).consent).toBeNull();
     }
     expect(
       extensionRowView(
-        extensionRow({ state: "failed", reason: "crashed", detail: "b‮c" }),
+        extensionRow({
+          state: "failed",
+          reason: "crashed",
+          detail: "b\u202Ec",
+        }),
       ).description,
-    ).toMatch(/^"b‮c" · since /);
+    ).toMatch(/^"b\u202Ec" · since /);
   });
 
   it("failed/needs_authorization — asks, the hint, and the switch stays ON", () => {

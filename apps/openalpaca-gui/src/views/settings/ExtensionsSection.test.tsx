@@ -267,11 +267,11 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
   it("shows a pending plugin's hidden characters, and approves the real id", async () => {
     state.rows = [
       extensionRow({
-        id: "no‮tes",
+        id: "no\u202Etes",
         state: "unapproved",
         reason: "never_seen",
         declared: {
-          capabilities: ["fs​_write"],
+          capabilities: ["fs\u200B_write"],
           virtual_capabilities: [],
           types: { tool: true },
         },
@@ -279,7 +279,7 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
     ];
     const { container } = render(<ExtensionsSection />);
 
-    expect(container.textContent).not.toMatch(/[‮​]/);
+    expect(container.textContent).not.toMatch(/[\u202E\u200B]/);
     expect(
       Array.from(
         container.querySelectorAll("[data-hidden-char]"),
@@ -304,7 +304,7 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
     await userEvent
       .setup()
       .click(screen.getByRole("button", { name: "Approve" }));
-    expect(state.calls).toEqual([{ id: "no‮tes", verb: "approve" }]);
+    expect(state.calls).toEqual([{ id: "no\u202Etes", verb: "approve" }]);
   });
 
   it("still cuts an ordinary row's name with an ellipsis", () => {
