@@ -2614,10 +2614,16 @@ struct FlushRecord {
     attempt_stops: Vec<Option<String>>,
     /// A fed session's turns fed when the flush ran — the `turns` flush's
     /// place, and the whole session for `switch`; `null` for a replay's and
-    /// the forced re-run's, which read the whole stored session. What it
-    /// read, when it read to the end, is the turns before this (the L8 fix
+    /// the forced re-run's, which read the whole stored session (the L8 fix
     /// slice's H7).
     turns_fed: Option<usize>,
+    /// The session's learning cursor (`extracted_through`, a message id)
+    /// before the first attempt and after the last: the rows the flush
+    /// moved past, `cursor_before < row ≤ cursor_after` — what it read, or
+    /// skipped (repair round 1 of the L8 fix slice). A flush reads from the
+    /// cursor, never behind it. `null` when not read (a hand-made record).
+    cursor_before: Option<i64>,
+    cursor_after: Option<i64>,
     calls: usize,
     chunks: usize,
     input_tokens: u64,
@@ -2719,6 +2725,8 @@ impl FlushRecord {
                 .map(|r| r.stopped.map(|s| format!("{s:?}")))
                 .collect(),
             turns_fed: None,
+            cursor_before: None,
+            cursor_after: None,
             calls: sum(|r| r.calls),
             chunks: sum(|r| r.chunks),
             input_tokens: attempts.iter().map(|r| r.input_tokens).sum(),
@@ -2824,17 +2832,29 @@ fn retried_at_once(label: &str) -> bool {
     label != FLUSH_TURNS
 }
 
+/// The session's learning cursor, `extracted_through`; `None` when it
+/// cannot be read.
+fn cursor_of(db: &openalpaca_storage::Database, session_id: &str) -> Option<i64> {
+    openalpaca_storage::LearningCursorRepository::new(db)
+        .get(session_id)
+        .ok()
+        .map(|c| c.extracted_through)
+}
+
 /// `flush_session`, with the bus subscribed around it (design 09 §7.2,
 /// *Counting the two learning paths*), and — but for a `turns` flush —
-/// flushed again while it stops `BadOutput` ([`retried_at_once`]).
+/// flushed again while it stops `BadOutput` ([`retried_at_once`]); the
+/// session's cursor read before and after.
 async fn flush_one(
     queue: &openalpaca_core::memory::learning::LearningQueue,
     bus: &openalpaca_core::bus::EventBus,
+    db: &openalpaca_storage::Database,
     session_id: &str,
     corpus_id: &str,
     label: &'static str,
 ) -> FlushRecord {
     let mut rx = bus.subscribe();
+    let cursor_before = cursor_of(db, session_id);
     let t0 = Instant::now();
     let attempts = if retried_at_once(label) {
         with_retries(|| queue.flush_session(session_id), |r| r.stopped).await
@@ -2843,8 +2863,10 @@ async fn flush_one(
     };
     let latency_ms = t0.elapsed().as_millis() as u64;
     let (written, lagged) = drain_memory_changes(&mut rx);
-    let record =
+    let mut record =
         FlushRecord::from_attempts(corpus_id, label, latency_ms, &attempts, written, lagged);
+    record.cursor_before = cursor_before;
+    record.cursor_after = cursor_of(db, session_id);
     eprintln!(
         "memory_eval: flush {corpus_id} ({label}): {} attempt(s), {} call(s), {} chunk(s), {} stored ({} active, {} candidates, {} replaced, {} suggestions), {} ms{}",
         record.attempts,
@@ -3238,6 +3260,7 @@ impl Learner {
                     let mut flush = flush_one(
                         &self.queue,
                         &self.bus,
+                        &self.db,
                         &created.id,
                         &session.id,
                         FLUSH_TURNS,
@@ -3251,6 +3274,7 @@ impl Learner {
                 let mut flush = flush_one(
                     &self.queue,
                     &self.bus,
+                    &self.db,
                     &created.id,
                     &session.id,
                     FLUSH_SWITCH,
@@ -3377,13 +3401,14 @@ fn prepare_replay(from: &Path, into: &Path) -> Result<ReplayScratch, String> {
 async fn replay_learning(
     queue: &openalpaca_core::memory::learning::LearningQueue,
     bus: &openalpaca_core::bus::EventBus,
+    db: &openalpaca_storage::Database,
     transcript: &Transcript,
     summaries: bool,
 ) -> (Vec<FlushRecord>, Vec<EpisodeRecord>) {
     let mut flushes = Vec::with_capacity(transcript.sessions.len());
     let mut episodes = Vec::new();
     for s in &transcript.sessions {
-        flushes.push(flush_one(queue, bus, &s.session_id, &s.corpus_id, FLUSH_REPLAY).await);
+        flushes.push(flush_one(queue, bus, db, &s.session_id, &s.corpus_id, FLUSH_REPLAY).await);
         if summaries {
             episodes.push(episode_one(queue, bus, &s.session_id, &s.corpus_id, FLUSH_REPLAY).await);
         }
@@ -4002,10 +4027,11 @@ struct Restatement {
     /// earlier statement was never learned) | `candidate` | `unknown_row` —
     /// from the notes citing the row; where none does, since the L8 fix
     /// slice's H7, `model_tool_write` (the reader wrote a note itself during
-    /// the turn: its notes carry no sources) or `extraction_failed` (no
-    /// flush of the session read the turn: every answer to its window was
-    /// unusable, or it stopped), and `nothing_written` only for a turn
-    /// extraction read.
+    /// the turn: its notes mostly carry no sources) or `extraction_failed`
+    /// (no flush of the session moved the cursor across the turn's row
+    /// without skipping a window: every answer to its window was unusable,
+    /// or the flushes stopped short of it — [`extraction_read_turn`]), and
+    /// `nothing_written` only for a turn extraction read.
     outcome: &'static str,
     /// The notes citing the turn's row.
     notes: Vec<String>,
@@ -4457,21 +4483,31 @@ struct LearningResults {
     cost: Option<LearningCost>,
 }
 
-/// Whether a flush of the session read its turn `turn` (the L8 fix slice's
-/// H7): a `turns`, `switch` or `replay` flush that reached it and read to
-/// its end — no stop, and no window skipped after `MAX_ATTEMPTS` unusable
-/// answers. `None` when the session was never flushed (learning off): no
+/// Whether extraction read a fed session's turn, whose user row is `row`
+/// (the L8 fix slice's H7, decided by range since its repair round 1): a
+/// `turns`, `switch` or `replay` flush of the session moved the cursor
+/// across the row — `cursor_before < row ≤ cursor_after` — and skipped no
+/// window after `MAX_ATTEMPTS` unusable answers. A flush reads from the
+/// cursor, so a row an earlier flush skipped past is never read by a later
+/// one, whatever that one read; a stopped flush counts the chunks it read
+/// before it stopped; a flush that skipped a window counts none of its
+/// range read — the chunks it read with it too, which errs toward
+/// `extraction_failed` in a flush of several chunks only; and a chunk
+/// passed with no call for too little of the user's text counts read, as
+/// before. `None` when the session was never flushed (learning off): no
 /// extraction ran, so none failed.
-fn extraction_read_turn(flushes: &[FlushRecord], session: &str, turn: usize) -> Option<bool> {
+fn extraction_read_turn(flushes: &[FlushRecord], session: &str, row: Option<i64>) -> Option<bool> {
     let mut ran = false;
     let mut read = false;
     for f in flushes.iter().filter(|f| {
         f.session == session && [FLUSH_TURNS, FLUSH_SWITCH, FLUSH_REPLAY].contains(&f.label)
     }) {
         ran = true;
-        read |= f.stopped.is_none()
-            && f.skipped_unusable == 0
-            && f.turns_fed.is_none_or(|fed| fed > turn);
+        read |= f.skipped_unusable == 0
+            && matches!(
+                (row, f.cursor_before, f.cursor_after),
+                (Some(row), Some(before), Some(after)) if before < row && row <= after
+            );
     }
     ran.then_some(read)
 }
@@ -4498,7 +4534,7 @@ fn measure_restatements(
             let reader_wrote = turns
                 .iter()
                 .any(|r| r.session == s.id && r.turn == ti && r.model_tool_memory_changes > 0);
-            let failed = extraction_read_turn(flushes, &s.id, ti) == Some(false);
+            let failed = extraction_read_turn(flushes, &s.id, row) == Some(false);
             let (mut outcome, notes) = classify_restatement(row, learned);
             if outcome == "nothing_written" {
                 if reader_wrote {
@@ -4734,6 +4770,7 @@ async fn forced_rerun(
     let flush = flush_one(
         queue,
         bus,
+        db,
         &session.session_id,
         &session.corpus_id,
         FLUSH_FORCED_RERUN,
@@ -5910,7 +5947,8 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
     ));
     write_report(&settings.report_path, &report);
 
-    let (flushes, episodes) = replay_learning(&queue, &bus, &replay.transcript, asks).await;
+    let (flushes, episodes) =
+        replay_learning(&queue, &bus, &replay.db, &replay.transcript, asks).await;
     let mut learning = LearningResults {
         warnings: learning_warnings(&[], &flushes, &episodes),
         cost: Some(learning_cost(
@@ -7918,7 +7956,8 @@ async fn replay_learns_from_a_fixture_sized_scratch_database_with_no_reader_call
         },
         QueueMode::Manual,
     );
-    let (flushes, episodes) = replay_learning(&queue, &bus, &replay.transcript, false).await;
+    let (flushes, episodes) =
+        replay_learning(&queue, &bus, &replay.db, &replay.transcript, false).await;
     assert!(episodes.is_empty(), "no summary without questions");
 
     assert_eq!(flushes.len(), 2);
@@ -9259,6 +9298,113 @@ async fn a_restatement_is_attributed_to_the_reader_or_to_a_failed_extraction() {
         );
         assert_eq!(restated["by_surface"]["model_tool"], "nothing_written");
     }
+}
+
+/// Repair round 1 of the L8 fix slice (the tests review's F2, the fidelity
+/// review's F5, the consistency review's m1): a flush reads from the
+/// cursor, so a later flush that read to its end has not read a turn an
+/// earlier flush's skipped window held — the cursor was already past it. A
+/// restatement inside that window is `extraction_failed`, not
+/// `nothing_written`; one the later flush read is `nothing_written`. Here a
+/// flush every two turns: the three windows holding the first turn are
+/// answered unusably and the third skipped; the last flush reads turns 6–7.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_in_a_skipped_window_is_unread_whatever_a_later_flush_read() {
+    let (router, _stub) = stub_router(&[TEST_MODEL], |request| {
+        let prompt = prompt_of(request);
+        if !prompt.contains("You are the memory extractor") {
+            return "Noted.".to_string();
+        }
+        if conversation_of(&prompt).contains("cycle to work") {
+            UNUSABLE_ANSWER.to_string()
+        } else {
+            first_row_item(&prompt)
+        }
+    });
+    let run = OfflineRun::new(router.clone());
+    let session = fixture_session(
+        "cs-t52",
+        &[
+            ("I cycle to work on Tuesdays.", TurnMode::Explicit),
+            (
+                "As I said, Tuesdays are my cycling days.",
+                TurnMode::Restate,
+            ),
+            ("Noise turn 2.", TurnMode::Noise),
+            ("Noise turn 3.", TurnMode::Noise),
+            ("Noise turn 4.", TurnMode::Noise),
+            ("Noise turn 5.", TurnMode::Noise),
+            ("My helmet is red.", TurnMode::Explicit),
+            ("Again: the helmet is red.", TurnMode::Restate),
+        ],
+    );
+    let learner = Learner::new(
+        &run.stack,
+        &run.queue,
+        &run.bus,
+        &run.db,
+        &run.owner,
+        &run.project,
+        2,
+    );
+    let fed = learner.feed(&[&session], true).await;
+    let shape: Vec<(&str, Option<usize>, usize, Option<&str>)> = fed
+        .flushes
+        .iter()
+        .map(|f| {
+            (
+                f.label,
+                f.turns_fed,
+                f.skipped_unusable,
+                f.stopped.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            (FLUSH_TURNS, Some(2), 0, Some("BadOutput")),
+            (FLUSH_TURNS, Some(4), 0, Some("BadOutput")),
+            (FLUSH_TURNS, Some(6), 1, None),
+            (FLUSH_TURNS, Some(8), 0, None),
+            (FLUSH_SWITCH, Some(8), 0, None),
+        ],
+        "{:?}",
+        fed.flushes
+    );
+    let transcript = run.transcript(fed.transcript);
+    let mut results = LearningResults {
+        flushes: fed.flushes,
+        turns: fed.turns,
+        ..Default::default()
+    };
+    measure_learning(
+        &router,
+        None,
+        "",
+        &run.service,
+        &run.ctx(),
+        &[],
+        &BTreeSet::new(),
+        &[&session],
+        &transcript,
+        &mut results,
+    )
+    .await;
+    let outcomes: Vec<(usize, &str, &str)> = results
+        .restatements
+        .iter()
+        .map(|r| (r.turn, r.outcome, r.by_surface.extraction))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (1, "extraction_failed", "extraction_failed"),
+            (7, "nothing_written", "nothing_written"),
+        ],
+        "{:?}",
+        results.restatements
+    );
 }
 
 /// The L8 fix slice's H5: the coverage judge is not cut off before its
