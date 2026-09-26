@@ -82,7 +82,11 @@ export function RecentlyLearned({
               >
                 <EscapedText escaped={title} />
               </button>
-              <span className="mt-[2px] block font-mono text-2xs-plus text-muted-fg">
+              {/* Wraps anywhere, as the title does: the replaced note's
+                  title can hold an escape the count says is there, and the
+                  list scrolls sideways behind a scrollbar macOS does not
+                  draw. */}
+              <span className="mt-[2px] block font-mono text-2xs-plus wrap-anywhere text-muted-fg">
                 {/* Design 09 §3.5: “Learned from what you said · replaced “A” · Undo” */}
                 {LEARNED_FROM_YOU}
                 {was !== null && (

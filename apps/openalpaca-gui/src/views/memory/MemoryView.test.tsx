@@ -1432,6 +1432,12 @@ describe("the Memory view", () => {
     });
     expect(title.className).toContain("wrap-anywhere");
     expect(title.className).not.toContain("truncate");
+    // So does the line quoting the replaced note's title: the list scrolls
+    // sideways behind a scrollbar macOS does not draw, and the count says
+    // its escape is there.
+    const replaced = within(row).getByText("<U+200B>").parentElement;
+    expect(replaced?.textContent).toContain("replaced “Old<U+200B> editor”");
+    expect(replaced?.className).toContain("wrap-anywhere");
 
     await user.click(
       within(row).getByRole("button", {
