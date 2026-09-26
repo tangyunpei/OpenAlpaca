@@ -20,10 +20,12 @@
  * owner confirms, whose escapes (`lib/hidden-chars`) are counted under it —
  * where nothing may sit out of sight: every block wraps a run with no break
  * opportunity anywhere, a code block wraps its lines instead of scrolling
- * sideways behind a scrollbar macOS does not draw, a table's header cells
- * may wrap, and a table keeps a row's cells past its header's width (the
- * header is padded to them) where a transcript drops them. A transcript
- * keeps its own layout.
+ * sideways behind a scrollbar macOS does not draw, and a table is drawn as
+ * its rows, one wrapping line each, its cells joined by ` · ` — a `<table>`
+ * never shrinks a column below its cells' padding, so past about 26 columns
+ * it is wider than the Note tab and its far cells scroll out of sight. Each
+ * row keeps its cells past the header's width, where a transcript's table
+ * drops them. A transcript keeps its own layout.
  */
 
 import { cn } from "@/lib/cn";
@@ -38,8 +40,8 @@ export interface MessageBodyProps {
   trailing?: React.ReactNode;
   className?: string;
   /**
-   * Wrap every block, code and table headers included, and keep every table
-   * cell (see above).
+   * Wrap every block, code included, and draw a table as its rows, one
+   * wrapping line each, every cell kept (see above).
    */
   wrapAnywhere?: boolean;
 }
@@ -63,6 +65,31 @@ function Segment({ segment }: { segment: ProseSegment }) {
   }
   if (segment.em === true) return <em>{body}</em>;
   return segment.code ? body : <span>{segment.text}</span>;
+}
+
+/** A table cell that holds no text: what `keepEveryCell` pads a row with. */
+function isEmptyCell(cell: ProseSegment[]): boolean {
+  return cell.every((segment) => segment.text === "");
+}
+
+/**
+ * One row of a table someone decides on, as a line: its cells joined by
+ * ` · `, its trailing empty cells (the header's padding among them) left
+ * off, since they hold nothing to show.
+ */
+function TableRowLine({ row }: { row: ProseSegment[][] }) {
+  let end = row.length;
+  while (end > 0 && isEmptyCell(row[end - 1] ?? [])) end -= 1;
+  return (
+    <>
+      {row.slice(0, end).map((cell, column) => (
+        <span key={column}>
+          {column > 0 && <span className="text-faint"> · </span>}
+          <Segments segments={cell} />
+        </span>
+      ))}
+    </>
+  );
 }
 
 function Segments({ segments }: { segments: ProseSegment[] }) {
@@ -217,6 +244,34 @@ export function MessageBody({
           );
         }
 
+        if (block.kind === "table" && wrapAnywhere) {
+          return (
+            <div
+              key={block.key}
+              className={cn(
+                "mb-[14px] text-base-plus leading-[1.5] text-ink",
+                className,
+              )}
+            >
+              {[block.header, ...block.rows].map((row, rowIndex) => (
+                <p
+                  key={rowIndex}
+                  data-table-row=""
+                  className={cn(
+                    "m-0 py-[4px]",
+                    rowIndex === 0
+                      ? "border-b border-line font-semibold"
+                      : "border-b border-line-subtle",
+                  )}
+                >
+                  <TableRowLine row={row} />
+                </p>
+              ))}
+              {isLast && trailing}
+            </div>
+          );
+        }
+
         if (block.kind === "table") {
           return (
             <div
@@ -230,10 +285,7 @@ export function MessageBody({
                     {block.header.map((cell, column) => (
                       <th
                         key={column}
-                        className={cn(
-                          "border-b border-line px-[9px] py-[5px] text-left font-semibold",
-                          wrapAnywhere ? "wrap-anywhere" : "whitespace-nowrap",
-                        )}
+                        className="border-b border-line px-[9px] py-[5px] text-left font-semibold whitespace-nowrap"
                       >
                         <Segments segments={cell} />
                       </th>

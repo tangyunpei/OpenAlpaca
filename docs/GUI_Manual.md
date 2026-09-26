@@ -799,9 +799,10 @@ would replace), and a line under the texts counts them:
 counts both titles, both texts and the reason; a row its title and the title
 of the note it replaced; a candidate its title, the title of the note it would
 replace and its text. A text holding an escape wraps at its edge — a
-candidate's code blocks and tables included — rather than being cut or
-scrolling sideways, and a candidate's table keeps every cell of a row wider
-than its header, so no escape a count names is out of sight. Any other note
+candidate's code blocks included — rather than being cut or scrolling
+sideways, and a candidate's table is drawn as its rows, one wrapping line
+each with its cells joined by ` · ` and every cell kept, so no escape a count
+names is out of sight. Any other note
 is shown as written — a joiner or a right-to-left mark can be what it says —
 and so is the Raw tab, which is the editor. Replace, Keep mine, Confirm and
 Undo answer the note as read.
