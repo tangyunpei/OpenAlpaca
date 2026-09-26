@@ -191,6 +191,45 @@ describe("runEventsFromLog — sentences", () => {
     ).toBe("web_search · circuit open after 3 failures");
   });
 
+  /**
+   * A tool's name here is the one an approval card showed, and it is its
+   * third party's: the row shows it as the card does, a bidi override, a
+   * zero-width space or a line break in it as `<U+XXXX>` (plain text — the
+   * row is a string). The CLI's `tasks log` does the same (SPEC A11).
+   */
+  it("names a tool as the approval card does, its hidden characters as escapes", () => {
+    const tool = "srv__rm\u{202E}fdp\u{200B}\n";
+    const shown = "srv__rm<U+202E>fdp<U+200B><U+000A>";
+    expect(
+      one(row(20, "tool_confirmation_requested", { tool_name: tool }))?.text,
+    ).toBe(`${shown} · awaiting approval`);
+    expect(
+      one(resolved(21, { tool_name: tool }, { outcome: "denied" }))?.text,
+    ).toBe(`${shown} · denied`);
+    expect(
+      one(row(22, "tool_executed", { tool_name: tool, success: false }))?.text,
+    ).toBe(`${shown} · failed`);
+    expect(one(row(23, "tool_auto_approved", { tool_name: tool }))?.text).toBe(
+      `${shown} · auto-approved`,
+    );
+    expect(
+      one(
+        row(24, "security_violation", {
+          tool_name: tool,
+          reason: "not in allow list",
+        }),
+      )?.text,
+    ).toBe(`${shown} · not in allow list`);
+    expect(
+      one(
+        row(25, "circuit_breaker_tripped", {
+          tool_name: tool,
+          consecutive_failures: 3,
+        }),
+      )?.text,
+    ).toBe(`${shown} · circuit open after 3 failures`);
+  });
+
   /** Never a plausible-looking phrase built out of nothing. */
   it("falls back to the raw event type when the blob cannot fill a sentence", () => {
     expect(one(row(12, "task_status", {}))?.text).toBe("task_status");
