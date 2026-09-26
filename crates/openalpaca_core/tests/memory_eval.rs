@@ -3771,7 +3771,7 @@ async fn measure_coverage(
     gold: &[&GoldNote],
     learned: &[LearnedNote],
 ) -> CoverageReport {
-    use openalpaca_core::memory::service::{ReadInput, SearchInput};
+    use openalpaca_core::memory::service::SearchInput;
     let by_id: HashMap<&str, &LearnedNote> = learned.iter().map(|n| (n.id.as_str(), n)).collect();
     let mut rows = Vec::with_capacity(gold.len());
     for note in gold {
@@ -3825,24 +3825,9 @@ async fn measure_coverage(
             .take(COVERAGE_HITS)
         {
             let id = hit.id.to_string();
-            let knowledge = match by_id.get(id.as_str()) {
-                Some(n) => n.knowledge.clone(),
-                None => {
-                    let (svc, c, nid) = (service.clone(), ctx.clone(), hit.id);
-                    blocking(move || {
-                        svc.read(
-                            &c,
-                            ReadInput {
-                                id: nid,
-                                ..Default::default()
-                            },
-                        )
-                    })
-                    .await
-                    .map(|r| knowledge_section(&r.body))
-                    .unwrap_or_else(|_| hit.excerpt.clone())
-                }
-            };
+            let knowledge = knowledge_of(service, ctx, &by_id, &id)
+                .await
+                .unwrap_or_else(|| hit.excerpt.clone());
             texts.push((hit.title.clone(), knowledge));
             row.hits.push(CoverageHit {
                 note: id,
@@ -3938,9 +3923,11 @@ struct ChangedFact {
     new_gold: String,
     old_note: Option<String>,
     /// Where `old_note` came from: `judge`, the coverage judge's pick for
-    /// the old gold, or `supersedes_link` — the judge picked the new note
-    /// for both golds, and `old_note` is the old gold's search hit it
-    /// supersedes (the L8 fix slice's H6). `null` with no old note.
+    /// the old gold, or `link_check` — the judge picked the new note for
+    /// both golds, that note supersedes one of the old gold's search hits,
+    /// and `old_note` is the judge's pick when asked again without the new
+    /// note (the L8 fix slice's H6, judged since its repair round 2;
+    /// `link_check` below). `null` with no old note.
     old_note_from: Option<&'static str>,
     new_note: Option<String>,
     /// A pair: `new_active_old_superseded` | `new_active_old_same_key_loser`
@@ -3951,28 +3938,54 @@ struct ChangedFact {
     /// Both learned notes carry one `fact_key`.
     key_reused: Option<bool>,
     correct: bool,
+    /// H6's check, when one was due ([`check_links`]); `null` otherwise.
+    link_check: Option<LinkCheck>,
+}
+
+/// H6's link, judged (repair round 2 of the L8 fix slice, the fidelity
+/// review's M1): the coverage judge named one note for both golds of a pair,
+/// and that note — active, no same-key loser — supersedes a superseded note
+/// the old gold's search returned. The link says the store replaced that
+/// note, not what it states: it may be an earlier version of the new value,
+/// and an active note that still states the old value may sit beside it. So
+/// the judge is asked about the old gold once more, shown its hits without
+/// the new note, and the pair is scored from its pick as any pair is.
+#[derive(Debug, Clone, Serialize)]
+struct LinkCheck {
+    /// The old gold's search hit the new note supersedes.
+    superseded: String,
+    /// The notes the judge was shown, in order: the old gold's hits
+    /// without the new note.
+    candidates: Vec<String>,
+    /// `match` | `none` | `unparsed` | `judge_error` | `not_judged`.
+    verdict: &'static str,
+    /// The note it named.
+    named: Option<String>,
+    judge_raw: String,
+    judge_error: Option<String>,
+    judge_tokens_in: u32,
+    judge_tokens_out: u32,
 }
 
 /// A pair's outcome from what the coverage judge matched for its two gold
 /// notes. The same learned note matching both means the old value was never
-/// learned as its own note — unless that note records the change: active,
-/// no same-key loser, and superseding `superseded_old_hit`, a note the old
-/// gold's search returned (the L8 fix slice's H6; [`superseded_old_hit`]).
+/// learned as its own note — unless H6's check ([`LinkCheck`]) asked the
+/// judge again without it: `rechecked` is the note it then named for the old
+/// gold, and the pair is scored from that pick as from any other.
 fn classify_pair(
     old: Option<&CoverageHit>,
     new: Option<&CoverageHit>,
-    superseded_old_hit: Option<&CoverageHit>,
+    rechecked: Option<&CoverageHit>,
 ) -> &'static str {
     let Some(new) = new else {
         return "new_missing";
     };
+    let old = match old {
+        Some(o) if o.note == new.note => rechecked,
+        other => other,
+    };
     let Some(old) = old.filter(|o| o.note != new.note) else {
-        return match superseded_old_hit {
-            Some(_) if new.effective_status == "active" && !new.same_key_loser => {
-                "new_active_old_superseded"
-            }
-            _ => "old_never_learned",
-        };
+        return "old_never_learned";
     };
     if new.effective_status != "active" || new.same_key_loser {
         "new_not_active"
@@ -3993,11 +4006,11 @@ fn classify_correction(new: Option<&CoverageHit>) -> &'static str {
     }
 }
 
-/// When the judge matched one note for both golds of a pair: the old
-/// gold's search hit that note supersedes, if the hit is superseded — the
-/// store recorded the change (the L8 fix slice's H6). A search hit is the
-/// evidence it states the old value: the judge names one note per gold,
-/// and it named the changed one.
+/// When the judge matched one note for both golds of a pair, and that note
+/// is active and no same-key loser: the old gold's search hit it
+/// supersedes, if the hit is superseded (the L8 fix slice's H6). The link is
+/// what makes a [`LinkCheck`] due — it credits nothing on its own (repair
+/// round 2): whether the hit states the old value is the judge's to say.
 fn superseded_old_hit(
     old_row: Option<&CoverageRow>,
     old: Option<&CoverageHit>,
@@ -4005,7 +4018,7 @@ fn superseded_old_hit(
     learned: &[LearnedNote],
 ) -> Option<CoverageHit> {
     let (old_row, old, new) = (old_row?, old?, new?);
-    if old.note != new.note {
+    if old.note != new.note || new.effective_status != "active" || new.same_key_loser {
         return None;
     }
     let supersedes = &learned.iter().find(|n| n.id == new.note)?.supersedes;
@@ -4016,11 +4029,131 @@ fn superseded_old_hit(
         .cloned()
 }
 
+/// A note's knowledge as the coverage judge is shown it — the learned
+/// note's, else read from the store — or `None` when it cannot be read.
+async fn knowledge_of(
+    service: &Arc<MemoryService>,
+    ctx: &openalpaca_core::memory::service::MemoryAccessContext,
+    by_id: &HashMap<&str, &LearnedNote>,
+    id: &str,
+) -> Option<String> {
+    use openalpaca_core::memory::service::ReadInput;
+    if let Some(n) = by_id.get(id) {
+        return Some(n.knowledge.clone());
+    }
+    let (svc, c, id) = (service.clone(), ctx.clone(), NoteId::parse(id).ok()?);
+    blocking(move || {
+        svc.read(
+            &c,
+            ReadInput {
+                id,
+                ..Default::default()
+            },
+        )
+    })
+    .await
+    .ok()
+    .map(|r| knowledge_section(&r.body))
+}
+
+/// H6's checks ([`LinkCheck`]), by old gold: for each pair whose one matched
+/// note supersedes a superseded hit of the old gold's search
+/// ([`superseded_old_hit`]), one more coverage-judge call on the old gold
+/// with the same frozen prompt, shown its hits without the new note — at
+/// most one call a pair (8 in all), none for a pair with no link.
+#[allow(clippy::too_many_arguments)]
+async fn check_links(
+    router: &openalpaca_llm::LlmRouter,
+    mut gate: Option<&mut JudgeGate>,
+    template: &str,
+    service: &Arc<MemoryService>,
+    ctx: &openalpaca_core::memory::service::MemoryAccessContext,
+    gold: &[GoldNote],
+    pairs: &[ChangePair],
+    coverage: &CoverageReport,
+    learned: &[LearnedNote],
+) -> HashMap<String, LinkCheck> {
+    let by_gold: HashMap<&str, &CoverageRow> =
+        coverage.rows.iter().map(|r| (r.gold.as_str(), r)).collect();
+    let by_id: HashMap<&str, &LearnedNote> = learned.iter().map(|n| (n.id.as_str(), n)).collect();
+    let hit = |gold: &str| by_gold.get(gold).and_then(|r| r.matched_hit()).cloned();
+    let mut checks = HashMap::new();
+    for p in pairs {
+        let (Some(old_row), Some(new)) = (by_gold.get(p.old.as_str()).copied(), hit(&p.new)) else {
+            continue;
+        };
+        let Some(superseded) =
+            superseded_old_hit(Some(old_row), hit(&p.old).as_ref(), Some(&new), learned)
+        else {
+            continue;
+        };
+        let Some(old_gold) = gold.iter().find(|g| g.id == p.old) else {
+            continue;
+        };
+        let candidates: Vec<&CoverageHit> =
+            old_row.hits.iter().filter(|h| h.note != new.note).collect();
+        let mut check = LinkCheck {
+            superseded: superseded.note,
+            candidates: candidates.iter().map(|h| h.note.clone()).collect(),
+            verdict: "not_judged",
+            named: None,
+            judge_raw: String::new(),
+            judge_error: None,
+            judge_tokens_in: 0,
+            judge_tokens_out: 0,
+        };
+        if let Some(gate) = gate.as_deref_mut() {
+            let mut texts = Vec::with_capacity(candidates.len());
+            for h in &candidates {
+                let knowledge = knowledge_of(service, ctx, &by_id, &h.note).await;
+                texts.push((h.title.clone(), knowledge.unwrap_or_default()));
+            }
+            let prompt = fill_coverage_prompt(template, old_gold, &texts);
+            match judge_call(
+                router,
+                gate,
+                COVERAGE_JUDGE_AGENT_ID,
+                &prompt,
+                COVERAGE_JUDGE_MAX_TOKENS,
+            )
+            .await
+            {
+                Ok(reply) => {
+                    check.verdict = match parse_coverage_verdict(&reply.raw, candidates.len()) {
+                        CoverageVerdict::Match(k) => {
+                            check.named = Some(candidates[k - 1].note.clone());
+                            "match"
+                        }
+                        CoverageVerdict::NoMatch => "none",
+                        CoverageVerdict::Unparsed => "unparsed",
+                    };
+                    check.judge_raw = reply.raw;
+                    check.judge_tokens_in = reply.tokens_in;
+                    check.judge_tokens_out = reply.tokens_out;
+                }
+                Err(e) => {
+                    check.verdict = "judge_error";
+                    check.judge_error = Some(e);
+                }
+            }
+        }
+        println!(
+            "[link check] {:<32} {:<10} named={}",
+            p.fact_key,
+            check.verdict,
+            check.named.as_deref().unwrap_or("-")
+        );
+        checks.insert(p.old.clone(), check);
+    }
+    checks
+}
+
 fn measure_changed_facts(
     pairs: &[ChangePair],
     corrections: &[&CorpusTurn],
     coverage: &CoverageReport,
     learned: &[LearnedNote],
+    checks: &HashMap<String, LinkCheck>,
 ) -> Vec<ChangedFact> {
     let by_gold: HashMap<&str, &CoverageRow> =
         coverage.rows.iter().map(|r| (r.gold.as_str(), r)).collect();
@@ -4034,19 +4167,26 @@ fn measure_changed_facts(
     let mut out = Vec::new();
     for p in pairs {
         let (mut old, new) = (hit(&p.old), hit(&p.new));
-        let link = superseded_old_hit(
-            by_gold.get(p.old.as_str()).copied(),
-            old.as_ref(),
-            new.as_ref(),
-            learned,
-        );
-        let outcome = classify_pair(old.as_ref(), new.as_ref(), link.as_ref());
+        let check = checks.get(&p.old).cloned();
+        // The note the check named, among the old gold's hits.
+        let rechecked = check
+            .as_ref()
+            .and_then(|c| c.named.as_deref())
+            .and_then(|id| {
+                by_gold
+                    .get(p.old.as_str())?
+                    .hits
+                    .iter()
+                    .find(|h| h.note == id)
+            })
+            .cloned();
+        let outcome = classify_pair(old.as_ref(), new.as_ref(), rechecked.as_ref());
         let mut old_note_from = old.is_some().then_some("judge");
-        if outcome == "new_active_old_superseded"
-            && let Some(link) = link
+        if let (Some(o), Some(n), Some(r)) = (&old, &new, rechecked)
+            && o.note == n.note
         {
-            old = Some(link);
-            old_note_from = Some("supersedes_link");
+            old = Some(r);
+            old_note_from = Some("link_check");
         }
         let key_reused = match (&old, &new) {
             (Some(o), Some(n)) if o.note != n.note => Some(matches!(
@@ -4069,6 +4209,7 @@ fn measure_changed_facts(
                 outcome,
                 "new_active_old_superseded" | "new_active_old_same_key_loser"
             ),
+            link_check: check,
         });
     }
     for turn in corrections {
@@ -4086,6 +4227,7 @@ fn measure_changed_facts(
                 outcome,
                 key_reused: None,
                 correct: outcome == "new_active",
+                link_check: None,
             });
         }
     }
@@ -4857,7 +4999,7 @@ fn tally_restatements(results: &mut LearningResults) {
 #[allow(clippy::too_many_arguments)]
 async fn measure_learning(
     router: &openalpaca_llm::LlmRouter,
-    gate: Option<&mut JudgeGate>,
+    mut gate: Option<&mut JudgeGate>,
     coverage_template: &str,
     service: &Arc<MemoryService>,
     ctx: &openalpaca_core::memory::service::MemoryAccessContext,
@@ -4878,7 +5020,7 @@ async fn measure_learning(
     let gold: Vec<&GoldNote> = notes.iter().filter(|n| relied.contains(&n.id)).collect();
     let coverage = measure_coverage(
         router,
-        gate,
+        gate.as_deref_mut(),
         coverage_template,
         service,
         ctx,
@@ -4892,8 +5034,20 @@ async fn measure_learning(
         .flat_map(|s| s.turns.iter())
         .filter(|t| t.mode == TurnMode::Correction)
         .collect();
+    let checks = check_links(
+        router,
+        gate,
+        coverage_template,
+        service,
+        ctx,
+        notes,
+        &pairs,
+        &coverage,
+        &results.learned,
+    )
+    .await;
     results.changed_facts =
-        measure_changed_facts(&pairs, &corrections, &coverage, &results.learned);
+        measure_changed_facts(&pairs, &corrections, &coverage, &results.learned, &checks);
     results.changed_facts_correct =
         Some(results.changed_facts.iter().filter(|c| c.correct).count());
     results.restatements = measure_restatements(
@@ -6515,7 +6669,25 @@ fn print_learning(l: &LearningResults) {
         );
     }
     if let Some(correct) = l.changed_facts_correct {
-        println!("changed facts: {correct}/{} correct", l.changed_facts.len());
+        let checks = l
+            .changed_facts
+            .iter()
+            .filter(|c| c.link_check.is_some())
+            .count();
+        let credited = l
+            .changed_facts
+            .iter()
+            .filter(|c| c.correct && c.old_note_from == Some("link_check"))
+            .count();
+        println!(
+            "changed facts: {correct}/{} correct{}",
+            l.changed_facts.len(),
+            if checks > 0 {
+                format!(" ({credited} of them after {checks} link check(s))")
+            } else {
+                String::new()
+            }
+        );
     }
     if !l.restatements_by_outcome.is_empty() {
         println!(
@@ -7268,16 +7440,30 @@ fn a_change_pair_is_classified_by_what_the_coverage_judge_matched() {
         "old_never_learned",
         "one note matched both"
     );
-    // … unless it supersedes a note the old gold's search returned (H6).
-    let link = hit("o", "superseded", false);
+    // … unless H6's check, asked again without it, named another note:
+    // the pair is then scored from that pick (repair round 2).
     assert_eq!(
-        classify_pair(Some(&new), Some(&new), Some(&link)),
+        classify_pair(Some(&new), Some(&new), Some(&hit("o", "superseded", false))),
         "new_active_old_superseded"
     );
     assert_eq!(
-        classify_pair(Some(&new), Some(&hit("n", "active", true)), Some(&link)),
+        classify_pair(Some(&new), Some(&new), Some(&hit("o", "active", false))),
+        "both_active_unlinked",
+        "an active note still states the old value"
+    );
+    assert_eq!(
+        classify_pair(Some(&new), Some(&new), Some(&hit("o", "active", true))),
+        "new_active_old_same_key_loser"
+    );
+    assert_eq!(
+        classify_pair(Some(&new), Some(&new), Some(&new)),
         "old_never_learned",
-        "a same-key loser records no change"
+        "a pick of the new note itself records nothing"
+    );
+    assert_eq!(
+        classify_pair(Some(&hit("o", "active", false)), Some(&new), Some(&new)),
+        "both_active_unlinked",
+        "a check is read only when one note matched both"
     );
     assert_eq!(
         classify_pair(Some(&hit("o", "superseded", false)), Some(&new), None),
@@ -7346,15 +7532,16 @@ fn coverage_row(gold: &str, hits: Vec<CoverageHit>, matched: Option<&str>) -> Co
     }
 }
 
-/// The L8 fix slice's H6: when the coverage judge matched one note for both
-/// golds of a pair — a note that says the value changed states the old one
-/// too — and that note is active, no same-key loser, and supersedes a note
-/// the old gold's search returned, the store records the change: the pair
-/// is `new_active_old_superseded`, its old note the superseded one (L's
-/// `moss.output_dir`, L-episodes' `user.laptop`, two replays' `user.commute`
-/// in L8). One note matched for both with no such link — L's commute — is
-/// still `old_never_learned`, as is a pair whose old gold the judge matched
-/// to nothing.
+/// The L8 fix slice's H6, judged since its repair round 2: when the
+/// coverage judge matched one note for both golds of a pair — a note that
+/// says the value changed states the old one too — and that note is
+/// active, no same-key loser, and supersedes a superseded note the old
+/// gold's search returned, a check is due (L's `moss.output_dir`,
+/// L-episodes' `user.laptop`, two replays' `user.commute` in L8); one note
+/// matched for both with no such link — L's commute — is not, nor is a
+/// pair whose old gold the judge matched to nothing. The check's pick then
+/// decides: the superseded note, and the store recorded the change; `NONE`,
+/// and the old value was never learned as its own note.
 #[test]
 fn a_pair_matched_to_one_note_that_supersedes_the_old_one_is_recorded() {
     let pair = ChangePair {
@@ -7363,29 +7550,74 @@ fn a_pair_matched_to_one_note_that_supersedes_the_old_one_is_recorded() {
         new: "g-new".to_string(),
         linked: true,
     };
-    let classify = |old_hits: Vec<CoverageHit>,
-                    old_matched: Option<&str>,
-                    new_hit: CoverageHit,
-                    learned: Vec<LearnedNote>| {
-        let coverage = coverage_of(vec![
-            coverage_row("g-old", old_hits, old_matched),
-            coverage_row("g-new", vec![new_hit.clone()], Some(&new_hit.note)),
-        ]);
-        measure_changed_facts(std::slice::from_ref(&pair), &[], &coverage, &learned).remove(0)
-    };
     let changed = learned("n", "active", Some("moss.output_dir"), &[], &["o"]);
     let old = LearnedNote {
         effective_status: "superseded",
         ..learned("o", "active", Some("moss.output_dir"), &[], &[])
     };
     let both = vec![hit("n", "active", false), hit("o", "superseded", false)];
-
-    let recorded = classify(
-        both.clone(),
-        Some("n"),
-        hit("n", "active", false),
-        vec![changed.clone(), old.clone()],
+    let store = [changed.clone(), old.clone()];
+    let due = |old_hits: Vec<CoverageHit>,
+               old_matched: Option<&str>,
+               new_hit: CoverageHit,
+               learned: &[LearnedNote]| {
+        let row = coverage_row("g-old", old_hits, old_matched);
+        superseded_old_hit(Some(&row), row.matched_hit(), Some(&new_hit), learned).map(|h| h.note)
+    };
+    let n = || hit("n", "active", false);
+    assert_eq!(
+        due(both.clone(), Some("n"), n(), &store).as_deref(),
+        Some("o")
     );
+    let unlinked = learned("n", "active", Some("user.commute"), &[], &[]);
+    assert_eq!(
+        due(
+            vec![n(), hit("car", "active", false)],
+            Some("n"),
+            n(),
+            &[unlinked]
+        ),
+        None,
+        "one note matched both, superseding nothing"
+    );
+    assert_eq!(
+        due(vec![n()], Some("n"), n(), &store),
+        None,
+        "the note it supersedes is not one the old gold's search returned"
+    );
+    assert_eq!(
+        due(both.clone(), Some("n"), hit("n", "active", true), &store),
+        None,
+        "a same-key loser records no change"
+    );
+    assert_eq!(
+        due(both.clone(), None, n(), &store),
+        None,
+        "the judge said no note states the old value"
+    );
+
+    let classify = |named: Option<&str>| {
+        let coverage = coverage_of(vec![
+            coverage_row("g-old", both.clone(), Some("n")),
+            coverage_row("g-new", vec![n()], Some("n")),
+        ]);
+        let checks = HashMap::from([(
+            "g-old".to_string(),
+            LinkCheck {
+                superseded: "o".to_string(),
+                candidates: vec!["o".to_string()],
+                verdict: if named.is_some() { "match" } else { "none" },
+                named: named.map(str::to_string),
+                judge_raw: String::new(),
+                judge_error: None,
+                judge_tokens_in: 0,
+                judge_tokens_out: 0,
+            },
+        )]);
+        measure_changed_facts(std::slice::from_ref(&pair), &[], &coverage, &store, &checks)
+            .remove(0)
+    };
+    let recorded = classify(Some("o"));
     assert_eq!(
         (recorded.outcome, recorded.correct),
         ("new_active_old_superseded", true),
@@ -7395,42 +7627,205 @@ fn a_pair_matched_to_one_note_that_supersedes_the_old_one_is_recorded() {
     assert_eq!(recorded.key_reused, Some(true));
     assert_eq!(
         serde_json::to_value(&recorded).unwrap()["old_note_from"],
-        "supersedes_link"
+        "link_check"
     );
-
-    let unlinked = learned("n", "active", Some("user.commute"), &[], &[]);
-    let one_note = classify(
-        vec![hit("n", "active", false), hit("car", "active", false)],
-        Some("n"),
-        hit("n", "active", false),
-        vec![unlinked],
-    );
-    assert_eq!(one_note.outcome, "old_never_learned", "{one_note:?}");
-
-    let elsewhere = classify(
-        vec![hit("n", "active", false)],
-        Some("n"),
-        hit("n", "active", false),
-        vec![changed.clone(), old.clone()],
-    );
+    let none = classify(None);
     assert_eq!(
-        elsewhere.outcome, "old_never_learned",
-        "the note it supersedes is not one the old gold's search returned"
+        (none.outcome, none.old_note.as_deref(), none.old_note_from),
+        ("old_never_learned", Some("n"), Some("judge")),
+        "the judge, asked again, found no note stating the old value: {none:?}"
     );
+}
 
-    let loser = classify(
-        both.clone(),
-        Some("n"),
-        hit("n", "active", true),
-        vec![changed.clone(), old.clone()],
-    );
-    assert_eq!(loser.outcome, "old_never_learned", "{loser:?}");
-
-    let judged_none = classify(both, None, hit("n", "active", false), vec![changed, old]);
+/// Repair round 2 of the L8 fix slice (the fidelity review's M1): a
+/// supersedes link is no judgement. The judge named the new note for both
+/// golds; the old gold's search also returned an active note that still
+/// states the old value (L's `user.commute` had one) and a superseded note
+/// the new one replaced — an earlier version of the new value, for all the
+/// link says. No judge compared either with the old gold, so the link alone
+/// credits nothing.
+#[test]
+fn a_supersedes_link_no_judge_compared_credits_nothing() {
+    let pair = ChangePair {
+        fact_key: "user.commute".to_string(),
+        old: "g-old".to_string(),
+        new: "g-new".to_string(),
+        linked: true,
+    };
+    let coverage = coverage_of(vec![
+        coverage_row(
+            "g-old",
+            vec![
+                hit("n", "active", false),
+                hit("car", "active", false),
+                hit("o", "superseded", false),
+            ],
+            Some("n"),
+        ),
+        coverage_row("g-new", vec![hit("n", "active", false)], Some("n")),
+    ]);
+    let learned = vec![
+        learned("n", "active", Some("user.commute"), &[], &["o"]),
+        LearnedNote {
+            effective_status: "superseded",
+            ..learned("o", "active", Some("user.commute"), &[], &[])
+        },
+        learned("car", "active", Some("user.car"), &[], &[]),
+    ];
+    let no_check = HashMap::new();
+    let fact = measure_changed_facts(
+        std::slice::from_ref(&pair),
+        &[],
+        &coverage,
+        &learned,
+        &no_check,
+    )
+    .remove(0);
     assert_eq!(
-        judged_none.outcome, "old_never_learned",
-        "the judge said no note states the old value"
+        (fact.outcome, fact.correct),
+        ("old_never_learned", false),
+        "{fact:?}"
     );
+}
+
+/// Repair round 2 of the L8 fix slice (the fidelity review's M1): H6's
+/// link is checked by the judge. For a pair whose one matched note
+/// supersedes a superseded hit of the old gold's search, the coverage judge
+/// is asked once more about the old gold, shown its hits without the new
+/// note; the pair is then scored from the two picks as any pair is. Named
+/// the superseded note: the change is recorded. Named an active note that
+/// still states the old value: both are active and unlinked. A pair with no
+/// link costs no call.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_supersedes_link_is_credited_only_when_the_judge_names_the_old_note() {
+    let (router, stub) = stub_router(&[TEST_MODEL], |request| {
+        let prompt = prompt_of(request);
+        let gold = prompt
+            .split("Gold note:")
+            .nth(1)
+            .and_then(|rest| rest.lines().find(|l| !l.trim().is_empty()))
+            .unwrap_or_default();
+        let want = if gold.contains("g-old-1") {
+            "s1"
+        } else if gold.contains("g-old-2") {
+            "a2"
+        } else {
+            return "No note states it.\nNONE".to_string();
+        };
+        prompt
+            .lines()
+            .find_map(|line| {
+                let (k, title) = line.strip_prefix('[')?.split_once("] ")?;
+                (title == want).then(|| format!("Note {k} states it.\nMATCH {k}"))
+            })
+            .unwrap_or_else(|| "NONE".to_string())
+    });
+    let run = OfflineRun::new(router.clone());
+    let pair = |n: usize| ChangePair {
+        fact_key: format!("key.{n}"),
+        old: format!("g-old-{n}"),
+        new: format!("g-new-{n}"),
+        linked: true,
+    };
+    let pairs = [pair(1), pair(2), pair(3)];
+    let golds: Vec<GoldNote> = pairs
+        .iter()
+        .flat_map(|p| [gold(&p.old, &[]), gold(&p.new, &[])])
+        .collect();
+    let active = |id: &str| hit(id, "active", false);
+    let superseded = |id: &str| hit(id, "superseded", false);
+    let coverage = coverage_of(vec![
+        coverage_row("g-old-1", vec![active("n1"), superseded("s1")], Some("n1")),
+        coverage_row("g-new-1", vec![active("n1")], Some("n1")),
+        coverage_row(
+            "g-old-2",
+            vec![active("n2"), active("a2"), superseded("s2")],
+            Some("n2"),
+        ),
+        coverage_row("g-new-2", vec![active("n2")], Some("n2")),
+        // No link: the one note supersedes nothing.
+        coverage_row("g-old-3", vec![active("n3"), active("c3")], Some("n3")),
+        coverage_row("g-new-3", vec![active("n3")], Some("n3")),
+    ]);
+    let retired = |id: &str, key: &str| LearnedNote {
+        effective_status: "superseded",
+        ..learned(id, "active", Some(key), &[], &[])
+    };
+    let learned = vec![
+        learned("n1", "active", Some("key.1"), &[], &["s1"]),
+        retired("s1", "key.1"),
+        learned("n2", "active", Some("key.2"), &[], &["s2"]),
+        retired("s2", "key.2"),
+        learned("a2", "active", None, &[], &[]),
+        learned("n3", "active", Some("key.3"), &[], &[]),
+        learned("c3", "active", None, &[], &[]),
+    ];
+    let mut gate = JudgeGate::new(judge_guard(&router, None, Some(TEST_MODEL), None).unwrap());
+    let template =
+        String::from_utf8(read_bytes(&eval_dir().join("coverage-judge-prompt.md"))).unwrap();
+    let checks = check_links(
+        &router,
+        Some(&mut gate),
+        &template,
+        &run.service,
+        &run.ctx(),
+        &golds,
+        &pairs,
+        &coverage,
+        &learned,
+    )
+    .await;
+    let requests = stub.requests();
+    assert_eq!(requests.len(), 2, "one call a link, none for pair 3");
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.max_tokens == Some(COVERAGE_JUDGE_MAX_TOKENS)),
+        "the coverage judge's own cap"
+    );
+    let candidates = |gold: &str| checks[gold].candidates.clone();
+    assert_eq!(candidates("g-old-1"), ["s1"], "the new note left out");
+    assert_eq!(candidates("g-old-2"), ["a2", "s2"]);
+
+    let facts = measure_changed_facts(&pairs, &[], &coverage, &learned, &checks);
+    let read: Vec<_> = facts
+        .iter()
+        .map(|f| (f.outcome, f.correct, f.old_note.as_deref(), f.old_note_from))
+        .collect();
+    assert_eq!(
+        read,
+        [
+            (
+                "new_active_old_superseded",
+                true,
+                Some("s1"),
+                Some("link_check")
+            ),
+            (
+                "both_active_unlinked",
+                false,
+                Some("a2"),
+                Some("link_check")
+            ),
+            ("old_never_learned", false, Some("n3"), Some("judge")),
+        ],
+        "{facts:?}"
+    );
+    let json = serde_json::to_value(&facts[0]).unwrap();
+    assert_eq!(
+        (
+            &json["link_check"]["superseded"],
+            &json["link_check"]["verdict"],
+            &json["link_check"]["named"],
+        ),
+        (
+            &serde_json::json!("s1"),
+            &serde_json::json!("match"),
+            &serde_json::json!("s1")
+        ),
+        "{json}"
+    );
+    assert!(serde_json::to_value(&facts[2]).unwrap()["link_check"].is_null());
 }
 
 fn learned(
