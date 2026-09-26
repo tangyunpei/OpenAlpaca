@@ -172,16 +172,26 @@ fn listing_note(count: usize) -> String {
 async fn list(format: OutputFormat) -> Result<()> {
     let client = DaemonClient::connect()?;
     let page: PendingPrompts = client.get("/v1/chat/confirmations").await?;
-    print!("{}", listing(&pending_prompts(page), format));
+    print!(
+        "{}",
+        listing(
+            &pending_prompts(page),
+            format,
+            std::io::stdout().is_terminal()
+        )
+    );
     Ok(())
 }
 
 /// Everything `list` prints, painted, one line each: `--format json`'s
 /// document alone ([`listing_json`] — never the generic `print_list`, whose
-/// JSON passes a bidi override or a C1 control through raw); or the note,
-/// the table with its `TOOL` cell escaped, one notice for each request that
-/// hides anything ([`notice_lines`]) and the previews.
-fn listing(prompts: &[PendingPrompt], format: OutputFormat) -> String {
+/// JSON passes a bidi override or a C1 control through raw); or, on a
+/// terminal first [`crate::output::TERMINAL_RESET`] as before a prompt,
+/// then the note, the table with its `TOOL` cell escaped, one notice for
+/// each request that hides anything ([`notice_lines`]) and the previews.
+/// The table is where a person reads those notices before `approve <id>`,
+/// so it gets the reset too; the JSON is a machine format and gets none.
+fn listing(prompts: &[PendingPrompt], format: OutputFormat, tty: bool) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::new();
@@ -190,6 +200,7 @@ fn listing(prompts: &[PendingPrompt], format: OutputFormat) -> String {
         let _ = writeln!(out, "{}", listing_json(prompts));
         return out;
     }
+    out.push_str(crate::output::terminal_reset(tty));
     let _ = writeln!(out, "{}", listing_note(prompts.len()).dimmed());
     if prompts.is_empty() {
         return out;
@@ -1014,11 +1025,11 @@ mod tests {
         colored::control::set_override(false);
         let prompts = vec![spoofed_prompt()];
 
-        let json = listing(&prompts, OutputFormat::Json);
+        let json = listing(&prompts, OutputFormat::Json, false);
         assert_no_raw(&json, true);
         assert_eq!(json, format!("{}\n", listing_json(&prompts)));
 
-        let table = listing(&prompts, OutputFormat::Table);
+        let table = listing(&prompts, OutputFormat::Table, false);
         assert_no_raw(&table, true);
         let lines: Vec<&str> = table.lines().collect();
         assert_eq!(lines[0], listing_note(1));
@@ -1044,7 +1055,7 @@ mod tests {
             agent_id: "orchestrator".to_string(),
             ..spoofed_prompt()
         };
-        let table = listing(&[clean], OutputFormat::Table);
+        let table = listing(&[clean], OutputFormat::Table, false);
         assert!(!table.contains("Note:"), "{table}");
         assert!(
             !table.contains("The count"),
@@ -1052,9 +1063,45 @@ mod tests {
         );
 
         assert_eq!(
-            listing(&[], OutputFormat::Table),
+            listing(&[], OutputFormat::Table, false),
             format!("{}\n", listing_note(0)),
             "nothing waiting: the note alone"
+        );
+    }
+
+    /// Before its table, a terminal gets the reset a prompt gets: `list` is
+    /// where a person reads the notices before `approve <id>`, and what an
+    /// earlier program left set (auto-wrap off, a line-drawing character
+    /// set, a conceal under `NO_COLOR`) would cut, garble or hide them. The
+    /// JSON is a machine format and a pipe is somebody else's input: neither
+    /// gets an escape sequence.
+    #[test]
+    fn list_resets_the_terminal_before_its_table() {
+        colored::control::set_override(false);
+        let prompts = vec![spoofed_prompt()];
+
+        let on_terminal = listing(&prompts, OutputFormat::Table, true);
+        assert_eq!(
+            on_terminal,
+            format!(
+                "\u{f}\u{1b}(B\u{1b}[0m\u{1b}[4l\u{1b}[?7h{}",
+                listing(&prompts, OutputFormat::Table, false)
+            )
+        );
+        assert_eq!(
+            listing(&[], OutputFormat::Table, true),
+            format!(
+                "\u{f}\u{1b}(B\u{1b}[0m\u{1b}[4l\u{1b}[?7h{}\n",
+                listing_note(0)
+            )
+        );
+
+        let json = listing(&prompts, OutputFormat::Json, true);
+        assert_eq!(json, listing(&prompts, OutputFormat::Json, false));
+        assert!(!json.contains(['\u{f}', '\u{1b}']), "{json:?}");
+        assert!(
+            !listing(&prompts, OutputFormat::Table, false).contains(['\u{f}', '\u{1b}']),
+            "no reset into a pipe"
         );
     }
 
