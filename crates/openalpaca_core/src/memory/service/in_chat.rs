@@ -33,6 +33,13 @@ pub const PREVIEW_MAX_BYTES: usize = 1024;
 
 const PREVIEW_TITLE_BYTES: usize = 80;
 const PREVIEW_TEXT_BYTES: usize = 260;
+/// Each text's budget when the preview ends with [`left_out_line`]. The
+/// fields' own budgets bound the rest of the preview at 1,013 bytes (a note
+/// "edited by hand", both titles, both texts and the reason at their caps),
+/// so the 88 bytes the two texts give up hold that line at any count below
+/// 10^16 and the whole-preview cut never runs. A preview that left nothing
+/// out keeps [`PREVIEW_TEXT_BYTES`], byte for byte as before the line.
+const PREVIEW_TEXT_BYTES_UNDER_COUNT: usize = 216;
 const PREVIEW_REASON_BYTES: usize = 160;
 
 /// At most this many suggestions are re-read for one `<memory_suggestions>`
@@ -513,7 +520,10 @@ fn one_line(text: &str, max: usize) -> String {
 /// where they are shown ([`left_out_line`]): `memory_confirm`'s arguments
 /// are three ids, so this preview is the only text on its card, and a drop
 /// nobody is told about is the danger the escape exists for. No cut reaches
-/// that line.
+/// that line, and its bytes come out of the two texts' budgets
+/// ([`PREVIEW_TEXT_BYTES_UNDER_COUNT`]), so the 1 KiB bound — a backstop
+/// here, as on a preview that left nothing out — cuts nothing above it
+/// either: not the date, not the last line.
 fn render_preview(target: &NoteView, suggestion: &Note, said_on: &str) -> String {
     let (named, label, kept) = match target.derived.origin {
         Origin::User => ("your saved note", "Yours", "Your note is kept"),
@@ -533,6 +543,10 @@ fn render_preview(target: &NoteView, suggestion: &Note, said_on: &str) -> String
         [target_text.as_str(), suggested_text.as_str()],
     );
     let reason = raw_reason.map(|r| one_line(&r, PREVIEW_REASON_BYTES));
+    let text_bytes = match left_out {
+        None => PREVIEW_TEXT_BYTES,
+        Some(_) => PREVIEW_TEXT_BYTES_UNDER_COUNT,
+    };
     let when = format!("from what you said on {said_on}");
     let why = match reason {
         Some(reason) => format!("Why: {reason} ({when})"),
@@ -542,8 +556,8 @@ fn render_preview(target: &NoteView, suggestion: &Note, said_on: &str) -> String
         "Replace {named} “{}” with “{}”?\n{label}: {}\nNew: {}\n{why}\n{kept} as history in the Memory view.",
         one_line(&target.note.title, PREVIEW_TITLE_BYTES),
         one_line(&suggestion.title, PREVIEW_TITLE_BYTES),
-        one_line(&target_text, PREVIEW_TEXT_BYTES),
-        one_line(&suggested_text, PREVIEW_TEXT_BYTES),
+        one_line(&target_text, text_bytes),
+        one_line(&suggested_text, text_bytes),
     );
     match left_out {
         None => cut_bytes(&text, PREVIEW_MAX_BYTES).0,

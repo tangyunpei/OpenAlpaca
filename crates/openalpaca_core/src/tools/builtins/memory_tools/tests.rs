@@ -853,6 +853,27 @@ fn suggestion_for(
     rows: &[i64],
     provenance: crate::memory::service::ExtractionProvenance,
 ) -> crate::memory::service::StoreOutput {
+    suggestion_saying(
+        h,
+        target,
+        title,
+        knowledge,
+        "the user said they switched.",
+        rows,
+        provenance,
+    )
+}
+
+/// [`suggestion_for`] with the reason its evidence section gives.
+fn suggestion_saying(
+    h: &Harness,
+    target: (NoteId, &str),
+    title: &str,
+    knowledge: &str,
+    reason: &str,
+    rows: &[i64],
+    provenance: crate::memory::service::ExtractionProvenance,
+) -> crate::memory::service::StoreOutput {
     let extractor = h
         .service
         .context(
@@ -869,7 +890,7 @@ fn suggestion_for(
             StoreInput {
                 title: title.into(),
                 body: format!(
-                    "# {title}\n\n## Knowledge\n{knowledge}\n\n## Evidence and limits\nFrom what you said. Replaces “{title}” (saved by you): the user said they switched.\n"
+                    "# {title}\n\n## Knowledge\n{knowledge}\n\n## Evidence and limits\nFrom what you said. Replaces “{title}” (saved by you): {reason}\n"
                 ),
                 kind: Some(NoteKind::Preference),
                 sources: rows.iter().map(|r| message(*r)).collect(),
@@ -1369,51 +1390,86 @@ async fn the_preview_is_daemon_authored_and_bounded() {
          Your note is kept as history in the Memory view."
     );
 
-    // Long notes are cut, and the whole stays within the bound — the line
-    // that counts what was left out included, which no cut reaches.
+    // Long notes are cut, and the whole stays within the bound. Every field
+    // here is past its budget — both titles, both texts and a reason of
+    // over 160 bytes — so the fields alone compose about 1,000 bytes: the
+    // line that counts what was left out takes its bytes from the two
+    // texts, and no cut reaches the date, the last line or the count (A6,
+    // A18). With nothing left out, the texts keep their whole budget.
     let long = "word ".repeat(2000);
-    let target = h.user_note(
-        ALICE,
-        &format!("A very long title\u{200b} {}", "x".repeat(150)),
-        &format!("# Long\n\n## Knowledge\n{long}\n"),
-    );
+    let reason = format!("the user said so {}", "r".repeat(200));
     let row = typed_row(&h, "Replace it.", "2026-09-24 10:00:00");
-    let s = suggestion_for(
-        &h,
-        (target.0, &target.1),
-        &format!("Another long title {}", "y".repeat(150)),
-        &long,
-        &[row],
-        crate::memory::service::ExtractionProvenance::UserWords,
-    );
-    let preview = tool
-        .confirmation_preview(
-            &serde_json::json!({"id": s.id.to_string(), "expected_revision": s.revision, "target_revision": target.1}),
-            &h.tool_ctx(ALICE),
-        )
-        .await
-        .unwrap()
-        .expect("a preview");
-    assert!(
-        preview.len() <= crate::memory::service::PREVIEW_MAX_BYTES,
-        "{} bytes",
-        preview.len()
-    );
-    assert!(
-        preview.starts_with("Replace your saved note “A very long title"),
-        "{preview}"
-    );
-    assert!(preview.contains('…'), "{preview}");
-    assert!(
-        preview.contains("(from what you said on 2026-09-24)"),
-        "{preview}"
-    );
-    assert!(
-        preview.ends_with(
-            "\nThis preview leaves out 1 hidden character; the Memory view shows it as <U+…>."
-        ),
-        "{preview}"
-    );
+    for (lead, marked) in [
+        ("A very long title\u{200b} ", true),
+        ("A very long title ", false),
+    ] {
+        let target = h.user_note(
+            ALICE,
+            &format!("{lead}{}", "x".repeat(150)),
+            &format!("# Long\n\n## Knowledge\n{long}\n"),
+        );
+        let s = suggestion_saying(
+            &h,
+            (target.0, &target.1),
+            &format!("Another long title {}", "y".repeat(150)),
+            &long,
+            &reason,
+            &[row],
+            crate::memory::service::ExtractionProvenance::UserWords,
+        );
+        let preview = tool
+            .confirmation_preview(
+                &serde_json::json!({"id": s.id.to_string(), "expected_revision": s.revision, "target_revision": target.1}),
+                &h.tool_ctx(ALICE),
+            )
+            .await
+            .unwrap()
+            .expect("a preview");
+        assert!(
+            preview.len() <= crate::memory::service::PREVIEW_MAX_BYTES,
+            "{} bytes",
+            preview.len()
+        );
+        let lines: Vec<&str> = preview.lines().collect();
+        assert!(
+            lines[0].starts_with("Replace your saved note “A very long title xxx")
+                && lines[0].contains("x…” with “Another long title yyy")
+                && lines[0].ends_with("y…”?"),
+            "{preview}"
+        );
+        assert!(
+            lines[1].starts_with("Yours: word word") && lines[1].ends_with('…'),
+            "{preview}"
+        );
+        assert!(
+            lines[2].starts_with("New: word word") && lines[2].ends_with('…'),
+            "{preview}"
+        );
+        assert!(
+            lines[3].starts_with("Why: the user said so rrr")
+                && lines[3].ends_with("r… (from what you said on 2026-09-24)"),
+            "{preview}"
+        );
+        assert_eq!(
+            lines[4], "Your note is kept as history in the Memory view.",
+            "{preview}"
+        );
+        if marked {
+            assert_eq!(lines.len(), 6, "{preview}");
+            assert_eq!(
+                lines[5],
+                "This preview leaves out 1 hidden character; the Memory view shows it as <U+…>.",
+                "{preview}"
+            );
+        } else {
+            assert_eq!(lines.len(), 5, "{preview}");
+            assert_eq!(
+                lines[1],
+                format!("Yours: {}…", "word ".repeat(52).trim_end()),
+                "{preview}"
+            );
+        }
+    }
 }
 
 /// Review finding 4 (L4): a note's title and body may hold control
