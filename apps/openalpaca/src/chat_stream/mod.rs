@@ -366,6 +366,19 @@ pub(crate) fn model_text(tty: bool, text: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// The line the REPL prints on stderr for a turn that failed:
+/// `Error: <message>`, the message through [`model_text`] for a stderr
+/// that is a terminal.
+///
+/// The message is the daemon's `error` frame, and for a loop that ended in
+/// an error it quotes the last tool's own error text — an MCP server's or a
+/// plugin's words. The REPL prints it into the terminal the next turn's
+/// inline prompt is printed into, where a scroll region or a palette change
+/// in it would outlive it.
+pub(crate) fn failure_line(message: &str, tty: bool) -> String {
+    format!("{} {}", "Error:".red(), model_text(tty, message))
+}
+
 /// U3(d) — one line per attachment the daemon says never reached the model.
 ///
 /// The turn answered; it just answered without that file, and the round-7

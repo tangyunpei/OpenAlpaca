@@ -309,7 +309,11 @@ async fn single_message(
         &Default::default(),
     )
     .await?;
-    refuse_failed_turn(&result, stdout_is_terminal)?;
+    refuse_failed_turn(
+        &result,
+        stdout_is_terminal,
+        std::io::IsTerminal::is_terminal(&std::io::stderr()),
+    )?;
     if let StreamResult::Delegation { delegation, .. } = &result {
         chat_stream::poll_task_completion(&client, &delegation.task_id).await?;
     }
@@ -326,13 +330,23 @@ async fn single_message(
 /// The newline closes the label (and any partial reply) already on stdout, and
 /// follows the same rule the label does: a terminal gets it, a pipe — whose
 /// stdout is somebody else's input — gets nothing it did not ask for.
-fn refuse_failed_turn(result: &StreamResult, stdout_is_terminal: bool) -> Result<()> {
+///
+/// `main` prints the message on stderr, so a stderr that is a terminal gets
+/// it as it gets a streamed answer (`chat_stream::model_text`): for a loop
+/// that ended in an error it quotes the last tool's own error text, and a
+/// control sequence in it would outlive the process in that terminal. The
+/// exit code is the same either way.
+fn refuse_failed_turn(
+    result: &StreamResult,
+    stdout_is_terminal: bool,
+    stderr_is_terminal: bool,
+) -> Result<()> {
     match result.failure() {
         Some(message) => {
             if stdout_is_terminal {
                 println!();
             }
-            bail!("{message}")
+            bail!("{}", chat_stream::model_text(stderr_is_terminal, message))
         }
         None => Ok(()),
     }
@@ -407,7 +421,11 @@ async fn pipe_mode(target: &ChatTarget) -> Result<()> {
         &Default::default(),
     )
     .await?;
-    refuse_failed_turn(&result, stdout_is_terminal)?;
+    refuse_failed_turn(
+        &result,
+        stdout_is_terminal,
+        std::io::IsTerminal::is_terminal(&std::io::stderr()),
+    )?;
     if let StreamResult::Delegation { delegation, .. } = &result {
         chat_stream::poll_task_completion(&client, &delegation.task_id).await?;
     }
@@ -533,14 +551,38 @@ mod tests {
                 message: "LLM error: no routable model".to_string(),
             },
             false,
+            false,
         )
         .expect_err("a failed turn is a failed command");
         assert_eq!(err.to_string(), "LLM error: no routable model");
     }
 
+    /// The message a failed turn is refused with is printed on stderr, and
+    /// for an `Error` exit it quotes the last tool's own error text — an MCP
+    /// server's, say. At a terminal it is shown as a streamed answer is,
+    /// every control but `\n` and `\t` as `<U+XXXX>`, so it cannot leave a
+    /// palette change or a scroll region behind; a stderr that is not a
+    /// terminal gets the daemon's words as they came.
+    #[test]
+    fn a_failed_turns_message_reaches_a_terminal_without_a_control_character() {
+        let failed = StreamResult::Failed {
+            message: "The last tool error was: x\u{1b}]4;3;#000000\u{7}\u{1b}[1;2r".to_string(),
+        };
+        let err = refuse_failed_turn(&failed, false, true).expect_err("a failed turn");
+        assert_eq!(
+            err.to_string(),
+            "The last tool error was: x<U+001B>]4;3;#000000<U+0007><U+001B>[1;2r"
+        );
+        let err = refuse_failed_turn(&failed, false, false).expect_err("a failed turn");
+        assert_eq!(
+            err.to_string(),
+            "The last tool error was: x\u{1b}]4;3;#000000\u{7}\u{1b}[1;2r"
+        );
+    }
+
     #[test]
     fn an_answered_turn_is_a_successful_command() {
-        assert!(refuse_failed_turn(&StreamResult::Response(None), true).is_ok());
+        assert!(refuse_failed_turn(&StreamResult::Response(None), true, true).is_ok());
         assert!(
             refuse_failed_turn(
                 &StreamResult::Delegation {
@@ -550,6 +592,7 @@ mod tests {
                         title: "a run".to_string(),
                     },
                 },
+                true,
                 true,
             )
             .is_ok()

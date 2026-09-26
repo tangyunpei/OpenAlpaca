@@ -1055,3 +1055,20 @@ fn a_runs_outcome_prints_the_lines_it_always_did() {
         None
     );
 }
+
+/// The REPL's line for a failed turn: the message is the daemon's, and for
+/// an `Error` exit it quotes the last tool's own error text. At a terminal
+/// it is shown as a streamed answer is; a stderr that is not a terminal gets
+/// the words as they came.
+#[test]
+fn a_failed_turns_line_reaches_a_terminal_without_a_control_character() {
+    colored::control::set_override(false);
+    assert_eq!(
+        failure_line(SPOOFED_SUMMARY, true),
+        format!("Error: {SPOOFED_SUMMARY_SHOWN}")
+    );
+    assert_eq!(
+        failure_line(SPOOFED_SUMMARY, false),
+        format!("Error: {SPOOFED_SUMMARY}")
+    );
+}
