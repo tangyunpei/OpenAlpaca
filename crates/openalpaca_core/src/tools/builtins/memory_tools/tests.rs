@@ -1849,6 +1849,28 @@ async fn the_preview_counts_what_the_suggestions_card_counts() {
         .expect("a preview");
     assert_eq!(preview.lines().count(), 5, "{preview}");
     assert_eq!(preview.lines().nth(1), Some("Yours: Start…"), "{preview}");
+
+    // The same on the suggestion's own text: the card serves its first
+    // 4 KiB, which flatten to one short word, and the quote still ends with
+    // "…" — what the card's cut left out is not the end of the text.
+    let target = h.user_note(ALICE, "Begin", "# Begin\n\n## Knowledge\nBegin.\n");
+    let s = suggestion_for(
+        &h,
+        (target.0, &target.1),
+        "Begin",
+        &format!("Begin{}end.", " ".repeat(5000)),
+        &[row],
+        crate::memory::service::ExtractionProvenance::UserWords,
+    );
+    let preview = tool
+        .confirmation_preview(
+            &serde_json::json!({"id": s.id.to_string(), "expected_revision": s.revision, "target_revision": target.1}),
+            &h.tool_ctx(ALICE),
+        )
+        .await
+        .unwrap()
+        .expect("a preview");
+    assert_eq!(preview.lines().nth(2), Some("New: Begin…"), "{preview}");
 }
 
 /// What the preview's last line counts, field by field, as the Suggestions
