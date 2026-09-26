@@ -1769,6 +1769,86 @@ async fn the_preview_counts_what_the_suggestions_card_counts() {
     assert_eq!(preview.lines().nth(1), Some("Yours: Start…"), "{preview}");
 }
 
+/// What the preview's last line counts, field by field, as the Suggestions
+/// card and `memory suggestions` count it: the reason too; the titles and
+/// the reason with the one-line escape, so a tab in the reason counts; the
+/// texts with the arguments' escape, so a multi-line note's line breaks and
+/// tabs do not; and the whole of each field as it is served, not only the
+/// part the preview's own budget quotes — a hidden character past byte 80
+/// of a title or past byte 260 of a text still counts (spec item 6).
+#[tokio::test]
+async fn the_preview_counts_each_field_whole_with_the_cards_escape() {
+    let h = Harness::new();
+    let tool = MemoryConfirmTool::new(h.service.clone());
+    let row = typed_row(&h, "I switched to Helix.", "2026-09-24 10:00:00");
+    let preview_of = |target: &(NoteId, String), s: &crate::memory::service::StoreOutput| {
+        serde_json::json!({
+            "id": s.id.to_string(),
+            "expected_revision": s.revision,
+            "target_revision": target.1,
+        })
+    };
+    let multi_line = "I use vim.\nEvery day.\n\tEven on Sundays.";
+
+    // One hidden character past byte 80 of the replaced note's title, one
+    // past byte 260 of the suggestion's text, and a U+202E and a tab in
+    // the reason: four.
+    let target = h.user_note(
+        ALICE,
+        &format!("Editor {}\u{200b}", "x".repeat(100)),
+        &format!("# Editor\n\n## Knowledge\n{multi_line}\n"),
+    );
+    let s = suggestion_saying(
+        &h,
+        (target.0, &target.1),
+        "Editor",
+        &format!("Helix {}\u{2060} since June.", "word ".repeat(60)),
+        "the user\u{202e} said\tthey switched.",
+        &[row],
+        crate::memory::service::ExtractionProvenance::UserWords,
+    );
+    let preview = tool
+        .confirmation_preview(&preview_of(&target, &s), &h.tool_ctx(ALICE))
+        .await
+        .unwrap()
+        .expect("a preview");
+    assert!(
+        preview.contains("\nWhy: the user said they switched. (from what you said"),
+        "{preview}"
+    );
+    assert_eq!(preview.lines().count(), 6, "{preview}");
+    assert_eq!(
+        preview.lines().last(),
+        Some("This preview leaves out 4 hidden characters; the Memory view shows them as <U+…>."),
+        "{preview}"
+    );
+
+    // Both texts on several lines, with tabs, and nothing hidden: no count.
+    let target = h.user_note(
+        ALICE,
+        "Shell",
+        &format!("# Shell\n\n## Knowledge\n{multi_line}\n"),
+    );
+    let s = suggestion_for(
+        &h,
+        (target.0, &target.1),
+        "Shell",
+        "The user uses fish.\n\tSince June.\nEvery day.",
+        &[row],
+        crate::memory::service::ExtractionProvenance::UserWords,
+    );
+    let preview = tool
+        .confirmation_preview(&preview_of(&target, &s), &h.tool_ctx(ALICE))
+        .await
+        .unwrap()
+        .expect("a preview");
+    assert_eq!(preview.lines().count(), 5, "{preview}");
+    assert!(
+        preview.contains("\nYours: I use vim. Every day. Even on Sundays.\n"),
+        "{preview}"
+    );
+}
+
 /// The turn's own `ModelTool` read context, as the main loop reads with it.
 fn read_ctx(h: &Harness) -> crate::memory::service::MemoryAccessContext {
     h.service
