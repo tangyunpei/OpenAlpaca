@@ -85,7 +85,11 @@ export function ToolConfirmationBanner({
       )}
     >
       <p className="mt-0 mb-[9px] font-mono text-2xs-plus tracking-eyebrow-w text-amber-ink uppercase">
-        Confirmation required · <EscapedText escaped={name} />
+        Confirmation required ·{" "}
+        {/* As written: capitals fold names that differ (a dotless i, an i). */}
+        <span className="normal-case">
+          <EscapedText escaped={name} />
+        </span>
       </p>
       {preview !== null && preview !== "" && (
         <div className="mb-[9px]">

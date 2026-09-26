@@ -22,6 +22,30 @@ function raw(text: string, allowed: readonly number[] = []): string[] {
   return found;
 }
 
+/** The text node under `root` that holds `text`. */
+function textNode(root: Element | null, text: string): Text | null {
+  if (root === null) return null;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    if (node.textContent?.includes(text)) return node as Text;
+  }
+  return null;
+}
+
+/** The nearest text-transform class over `node`, as Tailwind names it. */
+function caseOf(node: Node | null): string | null {
+  const cases = ["normal-case", "uppercase", "lowercase", "capitalize"];
+  for (
+    let el = node?.parentElement ?? null;
+    el !== null;
+    el = el.parentElement
+  ) {
+    const found = cases.find((name) => el?.classList.contains(name));
+    if (found !== undefined) return found;
+  }
+  return null;
+}
+
 function card(props: Parameters<typeof ToolConfirmationBanner>[0]) {
   render(<ToolConfirmationBanner {...props} />);
   const section = screen.getByRole("alert");
@@ -82,6 +106,26 @@ describe("ToolConfirmationBanner — hidden characters (§3.14)", () => {
         "Note: this request contains 4 hidden characters, shown as <U+…>.",
       ),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * The eyebrow is set in capitals, and a capital folds names that differ as
+   * written: a dotless `ı` (U+0131) and an `i` both draw `I`, a long `ſ`
+   * (U+017F) and an `s` both draw `S`, and `Shell` and `shell` are one word.
+   * Only OpenAlpaca's own words take the capitals; the tool's name is drawn
+   * as written, as the composer's bar, the CLI and the chat apps draw it.
+   */
+  it("draws the tool's name as written, not in the eyebrow's capitals", () => {
+    const { eyebrow } = card({
+      toolName: "srv__f\u{131}le_read",
+      toolArguments: { path: "/tmp/x" },
+    });
+    expect(caseOf(textNode(eyebrow, "Confirmation required"))).toBe(
+      "uppercase",
+    );
+    expect(caseOf(textNode(eyebrow, "srv__f\u{131}le_read"))).toBe(
+      "normal-case",
+    );
   });
 
   it("shows the asking agent's name escaped on one line, and counts it", () => {

@@ -82,6 +82,17 @@ interface RecordedRequest {
 
 let requests: RecordedRequest[] = [];
 
+/**
+ * A card's eyebrow, `Confirmation required · <tool>`, matched on its whole
+ * text: the tool's name is its own span (drawn as written, not in the
+ * eyebrow's capitals), so a plain string matches no element.
+ */
+function eyebrow(tool: string) {
+  return (_: string, node: Element | null) =>
+    node?.tagName === "P" &&
+    node.textContent === `Confirmation required · ${tool}`;
+}
+
 function json(payload: unknown): Response {
   return new Response(JSON.stringify(payload), { status: 200 });
 }
@@ -762,9 +773,7 @@ describe("ChatView — tool confirmation (§3.14, §3.16a)", () => {
   it("blocks the composer and shows the literal command", async () => {
     await block();
 
-    expect(
-      screen.getByText("Confirmation required · shell_execute"),
-    ).toBeInTheDocument();
+    expect(screen.getByText(eyebrow("shell_execute"))).toBeInTheDocument();
     expect(screen.getByText("cargo tree -d")).toBeInTheDocument();
     // §3.16a: the textarea is not rendered at all while blocked.
     expect(screen.queryByLabelText("Message")).toBeNull();
@@ -853,9 +862,7 @@ describe("ChatView — tool confirmation (§3.14, §3.16a)", () => {
       });
     });
 
-    expect(
-      screen.getByText("Confirmation required · memory_confirm"),
-    ).toBeInTheDocument();
+    expect(screen.getByText(eyebrow("memory_confirm"))).toBeInTheDocument();
     expect(screen.getByText("From OpenAlpaca")).toBeInTheDocument();
     expect(
       screen.getByText((_, node) => node?.textContent === preview),
@@ -1364,7 +1371,7 @@ describe("ChatView — a confirmation raised after the turn finished (G1)", () =
     await blockedByARun();
 
     expect(
-      await screen.findByText("Confirmation required · artifact_write"),
+      await screen.findByText(eyebrow("artifact_write")),
     ).toBeInTheDocument();
     expect(
       screen.getByText("artifact_write is waiting on you"),
@@ -1398,7 +1405,7 @@ describe("ChatView — a confirmation raised after the turn finished (G1)", () =
   it("clears the card when the run it belongs to finishes", async () => {
     await blockedByARun();
     expect(
-      await screen.findByText("Confirmation required · artifact_write"),
+      await screen.findByText(eyebrow("artifact_write")),
     ).toBeInTheDocument();
 
     await act(async () => {
@@ -1417,9 +1424,7 @@ describe("ChatView — a confirmation raised after the turn finished (G1)", () =
     });
 
     await waitFor(() =>
-      expect(
-        screen.queryByText("Confirmation required · artifact_write"),
-      ).toBeNull(),
+      expect(screen.queryByText(eyebrow("artifact_write"))).toBeNull(),
     );
     expect(await screen.findByLabelText("Message")).toBeInTheDocument();
   });
@@ -1452,7 +1457,7 @@ describe("ChatView — pending confirmations seeded from the daemon (S9)", () =>
     renderChat();
 
     expect(
-      await screen.findByText("Confirmation required · artifact_write"),
+      await screen.findByText(eyebrow("artifact_write")),
     ).toBeInTheDocument();
 
     // And it is answerable: the composer is blocked and Approve posts to the
@@ -1492,7 +1497,7 @@ describe("ChatView — pending confirmations seeded from the daemon (S9)", () =>
     renderChat();
 
     expect(
-      await screen.findByText("Confirmation required · memory_confirm"),
+      await screen.findByText(eyebrow("memory_confirm")),
     ).toBeInTheDocument();
     expect(
       screen.getByText("Replace your saved note “Editor” with “Editor”?"),
@@ -1508,9 +1513,7 @@ describe("ChatView — pending confirmations seeded from the daemon (S9)", () =>
   it("picks up a prompt raised while the socket was down", async () => {
     const client = renderChat();
     expect(await screen.findByLabelText("Message")).toBeInTheDocument();
-    expect(
-      screen.queryByText("Confirmation required · artifact_write"),
-    ).toBeNull();
+    expect(screen.queryByText(eyebrow("artifact_write"))).toBeNull();
 
     pendingConfirmationRows = [pendingRow({ request_id: "req-offline" })];
     // What `invalidateAfterResync` does when the socket comes back.
@@ -1519,7 +1522,7 @@ describe("ChatView — pending confirmations seeded from the daemon (S9)", () =>
     });
 
     expect(
-      await screen.findByText("Confirmation required · artifact_write"),
+      await screen.findByText(eyebrow("artifact_write")),
     ).toBeInTheDocument();
   });
 
@@ -1546,9 +1549,7 @@ describe("ChatView — pending confirmations seeded from the daemon (S9)", () =>
         ),
       ).toBe(true);
     });
-    expect(
-      screen.queryByText("Confirmation required · artifact_write"),
-    ).toBeNull();
+    expect(screen.queryByText(eyebrow("artifact_write"))).toBeNull();
   });
 
   /**
@@ -1559,7 +1560,7 @@ describe("ChatView — pending confirmations seeded from the daemon (S9)", () =>
     pendingConfirmationRows = [pendingRow()];
     const client = renderChat();
     expect(
-      await screen.findByText("Confirmation required · artifact_write"),
+      await screen.findByText(eyebrow("artifact_write")),
     ).toBeInTheDocument();
 
     await act(async () => {
@@ -1577,17 +1578,13 @@ describe("ChatView — pending confirmations seeded from the daemon (S9)", () =>
       });
     });
     await waitFor(() =>
-      expect(
-        screen.queryByText("Confirmation required · artifact_write"),
-      ).toBeNull(),
+      expect(screen.queryByText(eyebrow("artifact_write"))).toBeNull(),
     );
 
     await act(async () => {
       await client.invalidateQueries();
     });
-    expect(
-      screen.queryByText("Confirmation required · artifact_write"),
-    ).toBeNull();
+    expect(screen.queryByText(eyebrow("artifact_write"))).toBeNull();
   });
 
   /**
@@ -1618,7 +1615,7 @@ describe("ChatView — pending confirmations seeded from the daemon (S9)", () =>
     });
 
     expect(
-      await screen.findByText("Confirmation required · artifact_write"),
+      await screen.findByText(eyebrow("artifact_write")),
     ).toBeInTheDocument();
   });
 
@@ -1654,7 +1651,7 @@ describe("ChatView — pending confirmations seeded from the daemon (S9)", () =>
       });
     });
     expect(
-      await screen.findByText("Confirmation required · artifact_write"),
+      await screen.findByText(eyebrow("artifact_write")),
     ).toBeInTheDocument();
   });
 
@@ -1769,7 +1766,7 @@ describe("ChatView — a confirmation nobody answered (T1)", () => {
     const client = renderChat();
 
     expect(
-      await screen.findByText("Confirmation required · update_persona"),
+      await screen.findByText(eyebrow("update_persona")),
     ).toBeInTheDocument();
     // Paused: §3.16a replaces the textarea outright while a card is up.
     expect(screen.queryByLabelText("Message")).toBeNull();
@@ -1785,9 +1782,7 @@ describe("ChatView — a confirmation nobody answered (T1)", () => {
     });
 
     await waitFor(() =>
-      expect(
-        screen.queryByText("Confirmation required · update_persona"),
-      ).toBeNull(),
+      expect(screen.queryByText(eyebrow("update_persona"))).toBeNull(),
     );
     expect(await screen.findByLabelText("Message")).toBeInTheDocument();
   });
@@ -1800,7 +1795,7 @@ describe("ChatView — a confirmation nobody answered (T1)", () => {
       emitServerEvent(mainLoopPrompt());
     });
     expect(
-      await screen.findByText("Confirmation required · update_persona"),
+      await screen.findByText(eyebrow("update_persona")),
     ).toBeInTheDocument();
     expect(screen.queryByLabelText("Message")).toBeNull();
 
@@ -1817,9 +1812,7 @@ describe("ChatView — a confirmation nobody answered (T1)", () => {
     });
 
     await waitFor(() =>
-      expect(
-        screen.queryByText("Confirmation required · update_persona"),
-      ).toBeNull(),
+      expect(screen.queryByText(eyebrow("update_persona"))).toBeNull(),
     );
     expect(await screen.findByLabelText("Message")).toBeInTheDocument();
   });
@@ -1844,7 +1837,7 @@ describe("ChatView — a confirmation nobody answered (T1)", () => {
       });
     });
     expect(
-      await screen.findByText("Confirmation required · artifact_write"),
+      await screen.findByText(eyebrow("artifact_write")),
     ).toBeInTheDocument();
 
     await act(async () => {
@@ -1858,9 +1851,7 @@ describe("ChatView — a confirmation nobody answered (T1)", () => {
       });
     });
 
-    expect(
-      screen.getByText("Confirmation required · artifact_write"),
-    ).toBeInTheDocument();
+    expect(screen.getByText(eyebrow("artifact_write"))).toBeInTheDocument();
   });
 
   /** Signal 3: the daemon says so — and says the tool did not run. */
@@ -1871,7 +1862,7 @@ describe("ChatView — a confirmation nobody answered (T1)", () => {
       emitServerEvent(mainLoopPrompt({ request_id: "req-timeout" }));
     });
     expect(
-      await screen.findByText("Confirmation required · update_persona"),
+      await screen.findByText(eyebrow("update_persona")),
     ).toBeInTheDocument();
 
     await act(async () => {
@@ -1888,9 +1879,7 @@ describe("ChatView — a confirmation nobody answered (T1)", () => {
     });
 
     await waitFor(() =>
-      expect(
-        screen.queryByText("Confirmation required · update_persona"),
-      ).toBeNull(),
+      expect(screen.queryByText(eyebrow("update_persona"))).toBeNull(),
     );
     expect(screen.getByText("Timed out")).toBeInTheDocument();
     expect(
@@ -1909,7 +1898,7 @@ describe("ChatView — a confirmation nobody answered (T1)", () => {
       emitServerEvent(mainLoopPrompt({ request_id: "req-elsewhere" }));
     });
     expect(
-      await screen.findByText("Confirmation required · update_persona"),
+      await screen.findByText(eyebrow("update_persona")),
     ).toBeInTheDocument();
 
     await act(async () => {
@@ -1926,9 +1915,7 @@ describe("ChatView — a confirmation nobody answered (T1)", () => {
     });
 
     await waitFor(() =>
-      expect(
-        screen.queryByText("Confirmation required · update_persona"),
-      ).toBeNull(),
+      expect(screen.queryByText(eyebrow("update_persona"))).toBeNull(),
     );
     // This client answered nothing, so it claims nothing — and G6's richer
     // row, which only its own POST can write, is not overwritten by a plainer
@@ -1979,11 +1966,9 @@ describe("ChatView — a settle signal never retires a live prompt (R1, R2)", ()
       });
     });
     expect(
-      await screen.findByText("Confirmation required · update_persona"),
+      await screen.findByText(eyebrow("update_persona")),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("Confirmation required · web_search"),
-    ).toBeInTheDocument();
+    expect(screen.getByText(eyebrow("web_search"))).toBeInTheDocument();
 
     await act(async () => {
       source.emit("done", {
@@ -1996,18 +1981,14 @@ describe("ChatView — a settle signal never retires a live prompt (R1, R2)", ()
     });
 
     await waitFor(() =>
-      expect(
-        screen.queryByText("Confirmation required · update_persona"),
-      ).toBeNull(),
+      expect(screen.queryByText(eyebrow("update_persona"))).toBeNull(),
     );
     // `done` re-reads the pending list too, and that answer must not finish
     // off what the terminal frame spared.
     await settleSnapshot();
     // The other client's turn is still blocked on its answer, and this window
     // is showing it — so it stays, and the composer stays paused.
-    expect(
-      screen.getByText("Confirmation required · web_search"),
-    ).toBeInTheDocument();
+    expect(screen.getByText(eyebrow("web_search"))).toBeInTheDocument();
     expect(screen.queryByLabelText("Message")).toBeNull();
   });
 
@@ -2033,7 +2014,7 @@ describe("ChatView — a settle signal never retires a live prompt (R1, R2)", ()
       });
     });
     expect(
-      await screen.findByText("Confirmation required · update_persona"),
+      await screen.findByText(eyebrow("update_persona")),
     ).toBeInTheDocument();
 
     // A snapshot that was in flight when the prompt was raised cannot list it.
@@ -2042,9 +2023,7 @@ describe("ChatView — a settle signal never retires a live prompt (R1, R2)", ()
       await client.invalidateQueries({ queryKey: ["chat", "confirmations"] });
     });
     await settleSnapshot();
-    expect(
-      screen.getByText("Confirmation required · update_persona"),
-    ).toBeInTheDocument();
+    expect(screen.getByText(eyebrow("update_persona"))).toBeInTheDocument();
     expect(screen.queryByLabelText("Message")).toBeNull();
 
     // A minute on, the absence is evidence and the same signal settles it.
@@ -2053,9 +2032,7 @@ describe("ChatView — a settle signal never retires a live prompt (R1, R2)", ()
       await client.invalidateQueries({ queryKey: ["chat", "confirmations"] });
     });
     await waitFor(() =>
-      expect(
-        screen.queryByText("Confirmation required · update_persona"),
-      ).toBeNull(),
+      expect(screen.queryByText(eyebrow("update_persona"))).toBeNull(),
     );
     expect(await screen.findByLabelText("Message")).toBeInTheDocument();
   });
@@ -3742,9 +3719,7 @@ describe("ChatView — frames from another lane (I6)", () => {
       });
     });
 
-    expect(
-      await screen.findByText("Confirmation required · file_write"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(eyebrow("file_write"))).toBeInTheDocument();
   });
 });
 
@@ -4331,7 +4306,7 @@ describe("ChatView — resolution rows stay for the life of the window (P2)", ()
       });
     });
     expect(
-      await screen.findByText("Confirmation required · artifact_write"),
+      await screen.findByText(eyebrow("artifact_write")),
     ).toBeInTheDocument();
 
     await act(async () => {
