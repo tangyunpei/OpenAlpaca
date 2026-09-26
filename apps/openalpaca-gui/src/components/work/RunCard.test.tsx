@@ -174,6 +174,30 @@ describe("RunCard (§3.19)", () => {
     expect(line.querySelectorAll("[data-hidden-char]")).toHaveLength(3);
   });
 
+  /**
+   * The line shows the name alone and sends the person to the chat: when the
+   * request holds hidden characters anywhere, it says how many and that the
+   * card there shows them.
+   */
+  it("counts the whole request's hidden characters and points at its card", () => {
+    const { unmount } = card(
+      { status: "running", note: null },
+      { blocked: true, blockedOn: "shell_execute", blockedHidden: 2 },
+    );
+    expect(screen.getByText(/Waiting on you:/).textContent).toBe(
+      "Waiting on you: shell_execute — approve or deny it in the chat; its card shows 2 hidden characters.",
+    );
+    unmount();
+
+    card(
+      { status: "running", note: null },
+      { blocked: true, blockedOn: "shell_execute", blockedHidden: 0 },
+    );
+    expect(screen.getByText(/Waiting on you:/).textContent).toBe(
+      "Waiting on you: shell_execute — approve or deny it in the chat.",
+    );
+  });
+
   /** A name with no break opportunity wraps; the card clips what overflows. */
   it("wraps a tool name too long for the card instead of clipping it", () => {
     card(

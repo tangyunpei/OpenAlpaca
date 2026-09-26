@@ -36,7 +36,11 @@ describe("buildCommands (§3.33)", () => {
     const labels = buildCommands(
       input({
         activeRun: { id: "b41c8e02", title: "Connector audit" },
-        pendingConfirmation: { toolName: "shell_execute", approve: vi.fn() },
+        pendingConfirmation: {
+          toolName: "shell_execute",
+          hidden: 0,
+          approve: vi.fn(),
+        },
       }),
     ).map((command) => command.label);
     expect(labels.some((label) => label.startsWith("Find"))).toBe(false);
@@ -59,7 +63,11 @@ describe("buildCommands (§3.33)", () => {
   it("draws Approve's ↵ without claiming the key useGlobalKeys owns", () => {
     const commands = buildCommands(
       input({
-        pendingConfirmation: { toolName: "shell_execute", approve: vi.fn() },
+        pendingConfirmation: {
+          toolName: "shell_execute",
+          hidden: 0,
+          approve: vi.fn(),
+        },
       }),
     );
     const approve = commands.find((command) => command.group === "Approve");
@@ -76,6 +84,7 @@ describe("buildCommands (§3.33)", () => {
       input({
         pendingConfirmation: {
           toolName: "srv__rm\u{202E}fdp\u{200B}\n",
+          hidden: 0,
           approve: vi.fn(),
         },
       }),
@@ -84,6 +93,31 @@ describe("buildCommands (§3.33)", () => {
     expect(approve?.label).toBe(
       "Approve pending srv__rm<U+202E>fdp<U+200B><U+000A>",
     );
+  });
+
+  /**
+   * The row approves and shows the name alone: when the request holds hidden
+   * characters anywhere, it says how many and that the card shows them.
+   */
+  it("counts the whole request's hidden characters and points at its card", () => {
+    const label = (hidden: number) =>
+      buildCommands(
+        input({
+          pendingConfirmation: {
+            toolName: "shell_execute",
+            hidden,
+            approve: vi.fn(),
+          },
+        }),
+      ).find((command) => command.group === "Approve")?.label;
+
+    expect(label(2)).toBe(
+      "Approve pending shell_execute · its card shows 2 hidden characters",
+    );
+    expect(label(1)).toBe(
+      "Approve pending shell_execute · its card shows 1 hidden character",
+    );
+    expect(label(0)).toBe("Approve pending shell_execute");
   });
 
   it("labels modifiers the way the design writes them", () => {

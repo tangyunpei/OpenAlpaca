@@ -186,6 +186,37 @@ describe("Composer — blocked state (§3.16a)", () => {
   });
 
   /**
+   * The bar shows the name alone, right above Approve. When the request holds
+   * hidden characters anywhere — in its arguments too, which the bar does not
+   * show — it says how many, and that the card shows them.
+   */
+  it("counts the whole request's hidden characters beside the name and points at its card", () => {
+    setup({
+      blocked: true,
+      pendingToolName: "shell_execute",
+      pendingHidden: 2,
+    });
+    const bar = screen.getByText(
+      (_, node) =>
+        node?.tagName === "SPAN" &&
+        (node.textContent ?? "").startsWith("shell_execute is waiting on you"),
+    );
+    expect(bar.textContent).toBe(
+      "shell_execute is waiting on you · its card shows 2 hidden characters",
+    );
+  });
+
+  it("says nothing of hidden characters when the request holds none", () => {
+    setup({
+      blocked: true,
+      pendingToolName: "shell_execute",
+      pendingHidden: 0,
+    });
+    expect(screen.getByText("shell_execute is waiting on you")).toBeVisible();
+    expect(screen.queryByText(/hidden character/)).toBeNull();
+  });
+
+  /**
    * A name with no break opportunity in it (escapes included: `<`, the hex
    * and `>` do not break) longer than the bar ran past the transcript's edge.
    * The bar wraps it anywhere instead, right above Approve.

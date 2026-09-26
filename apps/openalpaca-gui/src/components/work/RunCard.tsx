@@ -24,7 +24,7 @@ import {
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import type { TaskTimeline } from "@/lib/api/tasks";
-import { escapeHiddenLine } from "@/lib/hidden-chars";
+import { escapeHiddenLine, hiddenOnCard } from "@/lib/hidden-chars";
 
 import { ParallelWorkBlock } from "./ParallelWork";
 import { RunActionBar, TerminalRunRow } from "./RunActionBar";
@@ -61,6 +61,11 @@ export interface RunCardProps {
    * wanted.
    */
   blockedOn?: string | null;
+  /**
+   * The hidden characters that request holds — its card's count — which the
+   * line says beside the name it shows (`hiddenOnCard`).
+   */
+  blockedHidden?: number;
   dense?: boolean;
   busy?: RunActionId | null;
   onAction: (action: RunActionId, run: Run) => void;
@@ -84,6 +89,7 @@ export function RunCard({
   timelineError = null,
   blocked = false,
   blockedOn = null,
+  blockedHidden = 0,
   dense = false,
   busy = null,
   onAction,
@@ -101,6 +107,9 @@ export function RunCard({
   const rerun = actions.find((action) => action.id === "rerun");
   const visible = run.artifacts.slice(0, MAX_FILE_ROWS);
   const overflow = Math.max(0, run.artifactCount - visible.length);
+  // The line shows the name alone: the whole request's count, and where it
+  // is drawn, go beside it.
+  const hiddenPointer = hiddenOnCard(blockedHidden);
 
   return (
     <article
@@ -160,7 +169,8 @@ export function RunCard({
                     <>
                       Waiting on you:{" "}
                       <EscapedText escaped={escapeHiddenLine(blockedOn)} /> —
-                      approve or deny it in the chat.
+                      approve or deny it in the chat
+                      {hiddenPointer === null ? "." : `; ${hiddenPointer}.`}
                     </>
                   )}
                 </span>

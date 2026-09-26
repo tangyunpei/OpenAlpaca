@@ -9,6 +9,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetConnection } from "@/lib/connection";
+import { useConfirmationStore } from "@/stores/confirmation";
 import { useUiStore } from "@/stores/ui";
 
 import { CommandPalette } from "./CommandPalette";
@@ -50,6 +51,7 @@ function render(ui: React.ReactElement) {
 beforeEach(() => {
   hits = [];
   searches = [];
+  useConfirmationStore.setState({ pending: null });
   resetConnection();
   vi.stubGlobal(
     "fetch",
@@ -182,7 +184,11 @@ describe("CommandPalette (§3.33)", () => {
 
     rerender(
       <CommandPalette
-        pendingConfirmation={{ toolName: "shell_execute", onApprove }}
+        pendingConfirmation={{
+          toolName: "shell_execute",
+          hidden: 0,
+          onApprove,
+        }}
       />,
     );
     await userEvent
@@ -194,6 +200,28 @@ describe("CommandPalette (§3.33)", () => {
   });
 
   /**
+   * The row approves with the name alone on it: the count the chat lane
+   * publishes with the confirmation — the card's — goes beside it.
+   */
+  it("says the published request's hidden-character count on its Approve row", () => {
+    useConfirmationStore.setState({
+      pending: {
+        toolName: "shell_execute",
+        hidden: 2,
+        runId: null,
+        approve: vi.fn(),
+        deny: vi.fn(),
+      },
+    });
+    render(<CommandPalette />);
+    expect(
+      screen.getByRole("option", {
+        name: /Approve pending shell_execute · its card shows 2 hidden characters/,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  /**
    * The dialog clips what overflows it, and `Approve pending <name>` approves:
    * a name with no break opportunity wraps inside the row instead.
    */
@@ -202,6 +230,7 @@ describe("CommandPalette (§3.33)", () => {
       <CommandPalette
         pendingConfirmation={{
           toolName: `srv__${"x".repeat(200)}`,
+          hidden: 0,
           onApprove: vi.fn(),
         }}
       />,

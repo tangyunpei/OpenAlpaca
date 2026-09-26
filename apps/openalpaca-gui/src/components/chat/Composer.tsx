@@ -32,7 +32,7 @@ import { Button, EscapedText } from "@/components/ui";
 import { useStopIntent } from "@/hooks/useConnection";
 import { cn } from "@/lib/cn";
 import { dragCarriesFiles } from "@/lib/drag";
-import { escapeHiddenLine } from "@/lib/hidden-chars";
+import { escapeHiddenLine, hiddenOnCard } from "@/lib/hidden-chars";
 import { formatFileSize, type ModelEntry } from "@/lib/api/types";
 import type { ComposerMode } from "@/stores/ui";
 
@@ -86,6 +86,11 @@ export interface ComposerProps {
   // ── blocked state ─────────────────────────────────────────────────────────
   /** The tool the daemon is waiting on. */
   pendingToolName?: string;
+  /**
+   * The hidden characters the whole request holds — its card's count — which
+   * the bar says beside the name it shows (`hiddenOnCard`).
+   */
+  pendingHidden?: number;
   onApprove?: () => void;
   onDeny?: () => void;
   onAlwaysAllow?: () => void;
@@ -204,6 +209,7 @@ export function Composer(props: ComposerProps) {
   const {
     blocked,
     pendingToolName = "This tool",
+    pendingHidden = 0,
     onApprove,
     onDeny,
     onAlwaysAllow,
@@ -252,6 +258,7 @@ export function Composer(props: ComposerProps) {
   }, [value, blocked]);
 
   if (blocked) {
+    const hiddenPointer = hiddenOnCard(pendingHidden);
     return (
       <div className="shrink-0 border-t border-line-subtle bg-main px-[26px] pt-[14px] pb-[20px]">
         <div className="mx-auto max-w-transcript">
@@ -261,9 +268,16 @@ export function Composer(props: ComposerProps) {
               className="animate-pulse-oa-fast block h-[6px] w-[6px] shrink-0 rounded-full bg-red"
             />
             <span className="min-w-0 font-mono text-xs-plus tracking-label wrap-anywhere text-amber-ink">
-              {/* Right above Approve: the name as the card shows it. */}
+              {/* Right above Approve: the name as the card shows it, and the
+                  whole request's count, which the card draws. */}
               <EscapedText escaped={escapeHiddenLine(pendingToolName)} /> is
               waiting on you
+              {hiddenPointer !== null && (
+                <>
+                  {" · "}
+                  <span className="text-red-ink">{hiddenPointer}</span>
+                </>
+              )}
             </span>
           </div>
 

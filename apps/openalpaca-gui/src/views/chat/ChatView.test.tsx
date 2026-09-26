@@ -32,6 +32,7 @@ import { useUiStore } from "@/stores/ui";
 import ChatView from "./ChatView";
 import { FIRST_RUN_ACTION, FIRST_RUN_TITLE } from "./first-run";
 import { useResolutions } from "./resolution-store";
+import type { WorkPaneRenderer } from "./WorkPaneSlot";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async () => ({
@@ -328,14 +329,14 @@ function KeyLadder() {
  * Returns the query client so a test can replay what the `session_changed`
  * frame does — invalidate, and let the view read the daemon's new answer.
  */
-function renderChat(): QueryClient {
+function renderChat(renderWorkPane?: WorkPaneRenderer): QueryClient {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   render(
     <QueryProvider client={client} connectEvents={false}>
       <KeyLadder />
-      <ChatView />
+      <ChatView renderWorkPane={renderWorkPane} />
     </QueryProvider>,
   );
   return client;
@@ -964,7 +965,8 @@ describe("ChatView — a confirmation with hidden characters", () => {
       screen.getByText(
         (_, node) =>
           node?.tagName === "SPAN" &&
-          node.textContent === `${SHOWN} is waiting on you`,
+          node.textContent ===
+            `${SHOWN} is waiting on you · its card shows 4 hidden characters`,
       ),
     ).toBeInTheDocument();
     expect(rawHidden()).toEqual([]);
@@ -989,6 +991,48 @@ describe("ChatView — a confirmation with hidden characters", () => {
       ),
     ).toBeInTheDocument();
     expect(rawHidden()).toEqual([]);
+  });
+
+  /**
+   * The bar, the palette's Approve row and the run card show the name alone,
+   * and the first two approve with the card scrolled away or under the
+   * palette. Each counts the whole request — the arguments' characters here,
+   * under a clean name — as the card does, and points at the card.
+   */
+  it("counts the request's hidden characters on the bar, the palette's row and the work pane, as the card does", async () => {
+    let paneHidden: number | undefined;
+    renderChat((props) => {
+      paneHidden = props.blockedHidden;
+      return null;
+    });
+    const source = await sendMessage("clean up the scratch directory");
+    await act(async () => {
+      source.emit("confirmation_requested", {
+        request_id: "req-8",
+        tool_name: "shell_execute",
+        tool_arguments: {
+          command: "rm -rf /srv/allow\u{200B}ed/\u{202E}fdp.exe",
+        },
+      });
+    });
+
+    expect(
+      screen.getByText(
+        "Note: this request contains 2 hidden characters, shown as <U+…>.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        (_, node) =>
+          node?.tagName === "SPAN" &&
+          node.textContent ===
+            "shell_execute is waiting on you · its card shows 2 hidden characters",
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(useConfirmationStore.getState().pending?.hidden).toBe(2),
+    );
+    expect(paneHidden).toBe(2);
   });
 
   it("toasts an Always allow with the tool's hidden characters escaped", async () => {

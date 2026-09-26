@@ -111,6 +111,7 @@ export default function ChatView({
     session.blocked && session.pendingToolName !== null
       ? {
           toolName: session.pendingToolName,
+          hidden: session.pendingHidden,
           runId: session.blockedRunId,
           approve: session.approve,
           deny: session.deny,
@@ -320,6 +321,7 @@ export default function ChatView({
         <Composer
           blocked={session.blocked}
           pendingToolName={session.pendingToolName ?? undefined}
+          pendingHidden={session.pendingHidden}
           answering={session.answering}
           onApprove={session.approve}
           onDeny={session.deny}
@@ -382,6 +384,7 @@ export default function ChatView({
               blocked: session.blocked,
               blockedRunId: session.blockedRunId,
               blockedOn: session.pendingToolName,
+              blockedHidden: session.pendingHidden,
               onFullView: () => setView("work"),
               onCollapse: closeWorkPane,
             })

@@ -51,6 +51,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   ASSISTANT_NAME,
+  escapeConfirmation,
   executedResolutionNote,
   formatDurationMs,
   resolutionNote,
@@ -289,6 +290,13 @@ export interface ChatSession {
   blocked: boolean;
   /** The tool the daemon is waiting on, if any. */
   pendingToolName: string | null;
+  /**
+   * The hidden characters that request holds — name, arguments and agent, the
+   * card's own count (`escapeConfirmation`) — which the composer's bar, the
+   * palette's row and the run card say beside the name they show. 0 when
+   * nothing is pending.
+   */
+  pendingHidden: number;
   /**
    * Its approval is good for this call only (design 09 §4.2): the composer
    * offers no *Always allow*, and `alwaysAllow` does nothing.
@@ -902,6 +910,13 @@ export function useChatSession(): ChatSession {
   );
 
   const firstConfirmation = confirmations[0] ?? null;
+  const pendingHidden = useMemo(
+    () =>
+      firstConfirmation === null
+        ? 0
+        : escapeConfirmation(firstConfirmation).hidden,
+    [firstConfirmation],
+  );
 
   /**
    * The run the daemon is blocked on.
@@ -1319,6 +1334,7 @@ export function useChatSession(): ChatSession {
 
     blocked: stream.blocked,
     pendingToolName: firstConfirmation?.toolName ?? null,
+    pendingHidden,
     pendingPerCall: firstConfirmation?.perCall ?? false,
     blockedRunId,
     answering: stream.respond.isPending,

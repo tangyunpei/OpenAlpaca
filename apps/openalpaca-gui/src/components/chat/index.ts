@@ -3,6 +3,7 @@
 export * from "./ArtifactCard";
 export * from "./attachments";
 export * from "./Composer";
+export * from "./confirmation-escape";
 export * from "./DensityToggle";
 export * from "./FilePanel";
 export * from "./FollowupQueue";

@@ -5,6 +5,7 @@ import {
   escapeHidden,
   escapeHiddenLine,
   hiddenNotice,
+  hiddenOnCard,
   needsEscape,
   needsEscapeInLine,
 } from "./hidden-chars";
@@ -161,6 +162,17 @@ describe("hidden-chars — what an approval surface shows", () => {
       "}",
     ]);
     expect(escaped.hidden).toBe(3);
+  });
+
+  /**
+   * A surface that shows part of a pending request — the composer's bar, the
+   * palette's Approve row, the run card — counts the whole request and points
+   * at the card, where every escape is drawn.
+   */
+  it("points at the card with the whole request's count, and says nothing when nothing was escaped", () => {
+    expect(hiddenOnCard(0)).toBeNull();
+    expect(hiddenOnCard(1)).toBe("its card shows 1 hidden character");
+    expect(hiddenOnCard(4)).toBe("its card shows 4 hidden characters");
   });
 
   it("shows a newline and a tab in a one-line field, and keeps them as layout in the arguments", () => {

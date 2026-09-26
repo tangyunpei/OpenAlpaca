@@ -17,6 +17,7 @@ const deny = vi.fn();
 
 const confirmation: PendingToolConfirmation = {
   toolName: "shell_execute",
+  hidden: 0,
   runId: "b41c8e02",
   approve,
   deny,

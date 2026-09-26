@@ -262,7 +262,13 @@ describe("AppFrame", () => {
     await screen.findByRole("heading", { name: "Chat", level: 1 });
 
     useConfirmationStore.setState({
-      pending: { toolName: "shell_execute", runId: "b41c8e02", approve, deny },
+      pending: {
+        toolName: "shell_execute",
+        hidden: 0,
+        runId: "b41c8e02",
+        approve,
+        deny,
+      },
     });
 
     // The palette grows the Approve row the chat lane's block earns it.

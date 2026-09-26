@@ -18,7 +18,7 @@
  * and no matcher, so the two bindings cannot fight over the same key.
  */
 
-import { escapeHiddenLine } from "@/lib/hidden-chars";
+import { escapeHiddenLine, hiddenOnCard } from "@/lib/hidden-chars";
 
 /** A key combination the palette can both draw and match. */
 export interface Shortcut {
@@ -82,8 +82,15 @@ export function filterCommands(
 export interface CommandCatalogInput {
   /** The run a `Steer` row would target; `null` when nothing is running. */
   activeRun: { id: string; title: string } | null;
-  /** The tool awaiting confirmation, when the chat lane has one. */
-  pendingConfirmation: { toolName: string; approve: () => void } | null;
+  /**
+   * The tool awaiting confirmation, when the chat lane has one, and the
+   * hidden characters its whole request holds (the card's count).
+   */
+  pendingConfirmation: {
+    toolName: string;
+    hidden: number;
+    approve: () => void;
+  } | null;
   goChat: () => void;
   goWork: () => void;
   goLibrary: () => void;
@@ -125,9 +132,16 @@ export function buildCommands(input: CommandCatalogInput): Command[] {
     commands.push({
       id: "approve.pending",
       group: "Approve",
-      // The row approves, so it names the tool as the card does. A label is
-      // a string: the escapes are the plain-text `<U+XXXX>` form.
-      label: `Approve pending ${escapeHiddenLine(pending.toolName).text}`,
+      // The row approves, so it names the tool as the card does, and it
+      // shows the name alone: the whole request's count, and where it is
+      // drawn, go beside it. A label is a string: the escapes are the
+      // plain-text `<U+XXXX>` form.
+      label: [
+        `Approve pending ${escapeHiddenLine(pending.toolName).text}`,
+        hiddenOnCard(pending.hidden),
+      ]
+        .filter((part) => part !== null)
+        .join(" · "),
       // Enter is already the global approve binding (§4.5); drawing it here
       // documents the key without claiming a second owner for it.
       shortcutLabel: "↵",

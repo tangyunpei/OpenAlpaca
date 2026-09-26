@@ -200,3 +200,19 @@ export function hiddenNotice(hidden: number): string | null {
   }
   return `Note: this request contains ${hidden} hidden characters, shown as <U+…>.`;
 }
+
+/**
+ * What a surface that shows part of a pending request says beside it — the
+ * composer's bar and the palette's Approve row, which answer the request,
+ * and the run card, which sends the person to it — or `null` when nothing
+ * was escaped. `hidden` is the whole request's count, the card's own, and
+ * the words say where the rest is shown: the card is where every escape is
+ * drawn. (The CLI's `tasks confirmations list` does the same under its
+ * table, pointing at `--format json`.)
+ */
+export function hiddenOnCard(hidden: number): string | null {
+  if (hidden <= 0) return null;
+  return hidden === 1
+    ? "its card shows 1 hidden character"
+    : `its card shows ${hidden} hidden characters`;
+}

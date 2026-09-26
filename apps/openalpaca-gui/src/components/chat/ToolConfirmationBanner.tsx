@@ -30,13 +30,9 @@
  */
 
 import { EscapedText } from "@/components/ui";
-import {
-  escapeHidden,
-  escapeHiddenLine,
-  hiddenNotice,
-} from "@/lib/hidden-chars";
+import { hiddenNotice } from "@/lib/hidden-chars";
 
-import { formatToolArguments } from "./format";
+import { escapeConfirmation } from "./confirmation-escape";
 
 export interface ToolConfirmationBannerProps {
   toolName: string;
@@ -53,14 +49,14 @@ export function ToolConfirmationBanner({
   preview = null,
   agentName = null,
 }: ToolConfirmationBannerProps) {
-  const name = escapeHiddenLine(toolName);
-  const command = escapeHidden(formatToolArguments(toolArguments));
-  const agent = agentName === null ? null : escapeHiddenLine(agentName);
+  const { name, command, agent, hidden } = escapeConfirmation({
+    toolName,
+    toolArguments,
+    agentName,
+  });
   // The whole request, whichever line it hides in: what the person approves
   // is all three.
-  const notice = hiddenNotice(
-    name.hidden + command.hidden + (agent?.hidden ?? 0),
-  );
+  const notice = hiddenNotice(hidden);
 
   return (
     <section

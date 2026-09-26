@@ -9,19 +9,27 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { Task } from "@/lib/api/types";
+import { qk } from "@/lib/query-keys";
 import type { WorkPaneSlotProps } from "@/views/chat/WorkPaneSlot";
 import { useUiStore } from "@/stores/ui";
 
 import { WorkPane } from "./WorkPane";
 
-function renderPane(props: Partial<WorkPaneSlotProps> = {}) {
+function renderPane(
+  props: Partial<WorkPaneSlotProps> = {},
+  tasks: Task[] | null = null,
+) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  // The pane's own list read (`limit` 60), seeded fresh so it does not refetch.
+  if (tasks !== null) client.setQueryData(qk.tasks.list({ limit: 60 }), tasks);
   const slotProps: WorkPaneSlotProps = {
     blocked: false,
     blockedRunId: null,
     blockedOn: null,
+    blockedHidden: 0,
     onFullView: vi.fn(),
     onCollapse: vi.fn(),
     ...props,
@@ -79,6 +87,42 @@ describe("WorkPane (§3.18)", () => {
       screen.getByRole("button", { name: "Collapse work pane" }),
     );
     expect(useUiStore.getState().workOpen).toBe(false);
+  });
+
+  /**
+   * The run card shows the pending tool's name alone, so the whole request's
+   * hidden-character count rides the slot down to it with the name.
+   */
+  it("hands the blocked run's card the request's hidden-character count", () => {
+    renderPane(
+      {
+        blocked: true,
+        blockedRunId: "b41c8e02",
+        blockedOn: "shell_execute",
+        blockedHidden: 2,
+      },
+      [
+        {
+          id: "b41c8e02",
+          title: "Audit the connector surface",
+          description: null,
+          status: "running",
+          priority: 0,
+          progress_current: null,
+          progress_total: null,
+          result_summary: null,
+          created_by: "user",
+          source_lane: "local:gui",
+          created_at: "2026-08-31T14:22:41Z",
+          updated_at: "2026-08-31T14:33:45Z",
+          completed_at: null,
+          state_version: 1,
+        },
+      ],
+    );
+    expect(screen.getByText(/Waiting on you:/).textContent).toBe(
+      "Waiting on you: shell_execute — approve or deny it in the chat; its card shows 2 hidden characters.",
+    );
   });
 
   it("states the failure rather than showing an empty pane", async () => {
