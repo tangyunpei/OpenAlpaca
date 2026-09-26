@@ -70,9 +70,7 @@ pub fn status_color(status: &str) -> ColoredString {
 /// What an approval prompt writes first on a terminal: a reset of five
 /// modes that change how the prompt reads, none of which moves the cursor —
 /// shift-in (SI), G0 as ASCII (`ESC ( B`), SGR 0, replace mode (`ESC [ 4 l`)
-/// and auto-wrap on (`ESC [ ? 7 h`). A scroll region or text drawn elsewhere
-/// on the screen by another program is not undone: resetting a scroll
-/// region moves the cursor.
+/// and auto-wrap on (`ESC [ ? 7 h`).
 ///
 /// The prompt's own escape shows every hidden character in what it prints,
 /// but it cannot undo what was printed before it: auto-wrap turned off cuts
@@ -80,9 +78,20 @@ pub fn status_color(status: &str) -> ColoredString {
 /// a line-drawing character set garbles the letters (an SGR reset does not
 /// undo it), and a conceal or background colour left set hides the headline
 /// — `colored` resets only after the text it paints, and under `NO_COLOR`
-/// writes nothing at all. The model's own text can no longer set any of it
-/// (`chat_stream`, `escape_controls`); this is for whatever else ran in the
-/// terminal. Nothing into a pipe.
+/// writes nothing at all. Nothing into a pipe.
+///
+/// Not undone: a scroll region, the cursor's position or text drawn
+/// elsewhere on the screen (resetting a scroll region moves the cursor), and
+/// palette colours changed with OSC 4, 10 or 11 (resetting them, OSC 104,
+/// 110 and 111, would also throw away a theme the person set at run time —
+/// base16-shell, say — at every prompt). None of it can come from what
+/// `openalpaca chat` prints of the model's or a tool's text: the answer, its
+/// reasoning, a delegated run's result, a resumed conversation's turns and a
+/// failed turn's message all reach a terminal through `escape_controls`
+/// (`chat_stream::model_text`). What is left is other output in that
+/// terminal: other programs', and CLI listings that print stored or
+/// third-party text as it comes — `tasks log` and `tasks status` print a
+/// run's title, summary or waiting tool that way.
 pub const TERMINAL_RESET: &str = "\u{f}\u{1b}(B\u{1b}[0m\u{1b}[4l\u{1b}[?7h";
 
 /// [`TERMINAL_RESET`] on a terminal, nothing on a pipe.

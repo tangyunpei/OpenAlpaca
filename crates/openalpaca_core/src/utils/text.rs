@@ -31,8 +31,10 @@
 //! A one-line field — the tool's name, the agent's id — takes
 //! [`escape_hidden_line`], which shows a newline, a tab and every other
 //! space but the plain one as well: the pretty-printed arguments are laid
-//! out in lines, a name is not. A model's own prose printed at a terminal —
-//! not an approval surface, but printed where the next prompt will be —
+//! out in lines, a name is not. A model's or a tool's own text the CLI
+//! prints at a terminal — not an approval surface, but printed where the
+//! next prompt will be: a streamed answer and its reasoning, a delegated
+//! run's result, a resumed conversation's turns, a failed turn's message —
 //! takes [`escape_controls`], the same form for the control characters
 //! alone, so it cannot leave the terminal in a state the prompt inherits.
 //! The CLI's JSON output (`tasks confirmations list --format json`, the
@@ -311,10 +313,11 @@ pub fn hidden_notice(hidden: usize) -> Option<String> {
     }
 }
 
-/// `text` for a terminal when it is prose a model wrote — an answer, its
-/// reasoning — rather than a value a person approves: every control
-/// character (Cc) but `\n` and `\t` written as `<U+XXXX>`, in
-/// [`escape_hidden`]'s form, and everything else as it is.
+/// `text` for a terminal when it is prose a model or a tool wrote — an
+/// answer, its reasoning, a run's result, a tool's error text — rather than
+/// a value a person approves: every control character (Cc) but `\n` and
+/// `\t` written as `<U+XXXX>`, in [`escape_hidden`]'s form, and everything
+/// else as it is.
 ///
 /// At a terminal a control character is an instruction, not text: an ESC or
 /// a C1 CSI (U+009B) starts a sequence that can turn line wrap off, conceal
