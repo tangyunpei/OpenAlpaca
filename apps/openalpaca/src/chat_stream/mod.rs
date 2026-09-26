@@ -307,6 +307,19 @@ enum Reconciliation {
     Redraw(String),
 }
 
+impl Reconciliation {
+    /// What `done` prints for the answer: the tail, or the whole answer on a
+    /// fresh line — at a terminal with no control character in it
+    /// ([`model_text`]), into a pipe exactly as the daemon sent it.
+    fn text(&self, tty: bool) -> Option<String> {
+        match self {
+            Reconciliation::Nothing => None,
+            Reconciliation::Append(tail) => Some(model_text(tty, tail).into_owned()),
+            Reconciliation::Redraw(answer) => Some(format!("\n{}", model_text(tty, answer))),
+        }
+    }
+}
+
 /// Reconcile the authoritative `done.content` against what was printed.
 fn reconcile(shown: &str, content: &str) -> Reconciliation {
     if content.is_empty() || shown == content {
@@ -327,9 +340,30 @@ fn reconcile(shown: &str, content: &str) -> Reconciliation {
 /// A terminal watches the model type. A pipe waits: its bytes are somebody
 /// else's input, and it must contain the final answer once and nothing else —
 /// which, now that deltas no longer concatenate to `done.content`, is only
-/// true if nothing is written before `done` (S13).
-fn delta_to_print(tty: bool, content: &str) -> Option<&str> {
-    (tty && !content.is_empty()).then_some(content)
+/// true if nothing is written before `done` (S13). What a terminal is shown
+/// is the model's text with no control character in it ([`model_text`]).
+fn delta_to_print(tty: bool, content: &str) -> Option<String> {
+    (tty && !content.is_empty()).then(|| model_text(tty, content).into_owned())
+}
+
+/// The model's prose as this process writes it: at a terminal, every control
+/// character but `\n` and `\t` shown as `<U+XXXX>`
+/// (`openalpaca_core::utils::text::escape_controls`); into a pipe, as the
+/// daemon sent it.
+///
+/// A terminal acts on a control character instead of showing it, and the
+/// state an ESC or a C1 CSI sets outlives the text: the model that wrote this
+/// answer also writes the arguments of the tool call whose `[y/N]` prompt is
+/// printed next, into the same terminal, and turning auto-wrap off first
+/// would cut the argument that runs at the margin, with nothing hidden in it
+/// for the prompt's notice to count. Display only: `SseState::shown` keeps
+/// what the daemon sent, so `done` still reconciles against it.
+fn model_text(tty: bool, text: &str) -> std::borrow::Cow<'_, str> {
+    if tty {
+        std::borrow::Cow::Owned(openalpaca_core::utils::text::escape_controls(text))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
 }
 
 /// U3(d) — one line per attachment the daemon says never reached the model.
@@ -360,9 +394,10 @@ fn skipped_attachment_lines(done: &serde_json::Value) -> Vec<String> {
 /// Dim, on a terminal, as it arrives — it is the 13 s a thinking model spends
 /// before its first token, and printing nothing made that look like a hang.
 /// Never on a pipe: reasoning is not the answer, and a script must not have to
-/// tell them apart.
-fn reasoning_to_print(tty: bool, text: &str) -> Option<&str> {
-    (tty && !text.is_empty()).then_some(text)
+/// tell them apart. Like a delta, it reaches a terminal with no control
+/// character in it ([`model_text`]).
+fn reasoning_to_print(tty: bool, text: &str) -> Option<String> {
+    (tty && !text.is_empty()).then(|| model_text(tty, text).into_owned())
 }
 
 async fn stream_sse_events(
@@ -385,7 +420,7 @@ async fn stream_sse_events(
                             let skip = if buffer[pos..].starts_with("\r\n\r\n") { 4 } else { 2 };
                             buffer = buffer[pos + skip..].to_string();
                             if is_confirmation_event(&event_text) {
-                                handle_confirmation_prompt(client, &event_text).await?;
+                                handle_confirmation_prompt(client, &event_text, opts.tty).await?;
                             } else {
                                 process_sse_event(&event_text, opts, &mut state)?;
                             }
@@ -448,12 +483,13 @@ pub(crate) struct ConfirmationDetails {
 
 impl ConfirmationDetails {
     /// Everything the inline prompt writes before it asks, painted, one line
-    /// each: a blank line, the headline, the preview, the arguments and,
-    /// directly under them, the notice.
-    pub(crate) fn text(&self) -> String {
+    /// each: on a terminal first [`crate::output::TERMINAL_RESET`], then a
+    /// blank line, the headline, the preview, the arguments and, directly
+    /// under them, the notice.
+    pub(crate) fn text(&self, tty: bool) -> String {
         use std::fmt::Write as _;
 
-        let mut out = String::new();
+        let mut out = String::from(crate::output::terminal_reset(tty));
         // Writing into a `String` cannot fail.
         let _ = writeln!(out);
         let _ = writeln!(out, "{}", self.headline.yellow().bold());
@@ -544,7 +580,11 @@ fn is_confirmation_event(event_text: &str) -> bool {
 /// fine for CLI — the user can only answer one prompt at a time, and the 300s
 /// server timeout (configurable via `confirmation_timeout_secs`) is sufficient
 /// for sequential multi-prompt scenarios.
-async fn handle_confirmation_prompt(client: &DaemonClient, event_text: &str) -> Result<()> {
+async fn handle_confirmation_prompt(
+    client: &DaemonClient,
+    event_text: &str,
+    tty: bool,
+) -> Result<()> {
     let mut data = String::new();
     for line in event_text.lines() {
         if let Some(val) = line.strip_prefix("data:") {
@@ -553,7 +593,7 @@ async fn handle_confirmation_prompt(client: &DaemonClient, event_text: &str) -> 
     }
     let parsed: serde_json::Value = serde_json::from_str(&data)?;
 
-    print!("{}", confirmation_details(&parsed).text());
+    print!("{}", confirmation_details(&parsed).text(tty));
 
     let approved = tokio::task::block_in_place(|| {
         print!("Allow execution? [y/N] ");
@@ -634,7 +674,9 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
                 end_reasoning(state)?;
                 print!("{}", visible);
                 std::io::stdout().flush()?;
-                state.shown.push_str(visible);
+                // What the daemon sent, not its escaped form: `done` is
+                // reconciled against this.
+                state.shown.push_str(content);
             }
         }
         // Terminal (V7): `done` is the last frame of an answered turn — the
@@ -645,19 +687,15 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
                 // S13: the terminal ends on the authoritative answer, exactly
                 // once, whatever the deltas showed.
                 if let Some(content) = parsed["content"].as_str() {
-                    match reconcile(&state.shown, content) {
-                        Reconciliation::Nothing => end_reasoning(state)?,
-                        Reconciliation::Append(tail) => {
-                            end_reasoning(state)?;
-                            print!("{}", tail);
-                            state.shown.push_str(&tail);
-                        }
-                        Reconciliation::Redraw(answer) => {
-                            end_reasoning(state)?;
-                            println!();
-                            print!("{}", answer);
-                            state.shown = answer;
-                        }
+                    let reconciliation = reconcile(&state.shown, content);
+                    end_reasoning(state)?;
+                    if let Some(text) = reconciliation.text(opts.tty) {
+                        print!("{text}");
+                    }
+                    match reconciliation {
+                        Reconciliation::Nothing => {}
+                        Reconciliation::Append(tail) => state.shown.push_str(&tail),
+                        Reconciliation::Redraw(answer) => state.shown = answer,
                     }
                 }
 

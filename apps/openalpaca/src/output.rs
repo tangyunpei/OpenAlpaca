@@ -67,6 +67,29 @@ pub fn status_color(status: &str) -> ColoredString {
     }
 }
 
+/// What an approval prompt writes first on a terminal: a reset of five
+/// modes that change how the prompt reads, none of which moves the cursor —
+/// shift-in (SI), G0 as ASCII (`ESC ( B`), SGR 0, replace mode (`ESC [ 4 l`)
+/// and auto-wrap on (`ESC [ ? 7 h`). A scroll region or text drawn elsewhere
+/// on the screen by another program is not undone: resetting a scroll
+/// region moves the cursor.
+///
+/// The prompt's own escape shows every hidden character in what it prints,
+/// but it cannot undo what was printed before it: auto-wrap turned off cuts
+/// an argument at the right margin with nothing left for a notice to count,
+/// a line-drawing character set garbles the letters (an SGR reset does not
+/// undo it), and a conceal or background colour left set hides the headline
+/// — `colored` resets only after the text it paints, and under `NO_COLOR`
+/// writes nothing at all. The model's own text can no longer set any of it
+/// (`chat_stream`, `escape_controls`); this is for whatever else ran in the
+/// terminal. Nothing into a pipe.
+pub const TERMINAL_RESET: &str = "\u{f}\u{1b}(B\u{1b}[0m\u{1b}[4l\u{1b}[?7h";
+
+/// [`TERMINAL_RESET`] on a terminal, nothing on a pipe.
+pub fn terminal_reset(tty: bool) -> &'static str {
+    if tty { TERMINAL_RESET } else { "" }
+}
+
 /// Print a table header row with separator.
 pub fn print_table_header(headers: &[(&str, usize)]) {
     let (header_line, rule) = table_header_lines(headers);

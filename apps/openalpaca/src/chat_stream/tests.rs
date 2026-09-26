@@ -435,7 +435,7 @@ fn a_piped_turn_sees_only_the_answer() {
 #[test]
 fn reasoning_is_shown_to_a_terminal_and_withheld_from_a_pipe() {
     assert_eq!(
-        reasoning_to_print(true, "the user is asking about"),
+        reasoning_to_print(true, "the user is asking about").as_deref(),
         Some("the user is asking about")
     );
     assert_eq!(reasoning_to_print(false, "the user is asking about"), None);
@@ -801,7 +801,7 @@ fn the_inline_prompt_writes_its_lines_in_order_with_the_notice_under_the_argumen
         "preview": "Keep it?",
         "per_call": true,
     });
-    let text = confirmation_details(&frame).text();
+    let text = confirmation_details(&frame).text(false);
     assert_no_raw(&text);
     assert_eq!(
         text,
@@ -817,7 +817,7 @@ fn the_inline_prompt_writes_its_lines_in_order_with_the_notice_under_the_argumen
         "tool_arguments": { "path": "notes.md" },
     });
     assert_eq!(
-        confirmation_details(&clean).text(),
+        confirmation_details(&clean).text(false),
         "\nTool 'file_write' requires confirmation\nArguments: {\n  \"path\": \"notes.md\"\n}\n",
         "no preview, no notice"
     );
@@ -855,5 +855,98 @@ fn the_inline_answer_is_the_request_id_and_nothing_the_prompt_showed() {
         inline_answer(&odd, true).0,
         "/v1/chat/confirmations/a%2Fb",
         "one path segment, as `watch` and `approve` send it"
+    );
+}
+
+/// Before the prompt, a terminal gets a reset of the modes that change how
+/// it reads — shift-in, the ASCII character set, SGR 0, replace mode,
+/// auto-wrap on — whatever was printed there before it: a raw
+/// `ESC [ ? 7 l` (auto-wrap off) would cut the arguments at the margin with
+/// no notice, and `ESC ( 0` would draw the letters as line art. A pipe gets
+/// no escape sequence at all.
+#[test]
+fn the_inline_prompt_resets_the_terminal_before_it_asks() {
+    colored::control::set_override(false);
+    let frame = serde_json::json!({
+        "request_id": "req-1",
+        "tool_name": "shell_execute",
+        "tool_arguments": { "command": "ls" },
+    });
+    let details = confirmation_details(&frame);
+    let on_terminal = details.text(true);
+    assert!(
+        on_terminal.starts_with(
+            "\u{f}\u{1b}(B\u{1b}[0m\u{1b}[4l\u{1b}[?7h\nTool 'shell_execute' requires confirmation\n"
+        ),
+        "{on_terminal:?}"
+    );
+    assert!(
+        details
+            .text(false)
+            .starts_with("\nTool 'shell_execute' requires confirmation\n"),
+        "no reset into a pipe"
+    );
+}
+
+// ── The model's own text cannot set terminal state ──────────────────
+//
+// The inline prompt is printed into the terminal the model's answer and
+// reasoning were just printed to, by the same model that wrote the tool's
+// arguments. A raw ESC or C1 CSI in that prose would set state that
+// outlives it — auto-wrap off, concealed text, a line-drawing character
+// set — and the prompt printed under it would inherit it. So a terminal
+// gets the prose with every control character but `\n` and `\t` shown as
+// `<U+XXXX>` (`openalpaca_core::utils::text::escape_controls`); a pipe gets
+// the daemon's text as it came.
+
+/// A delta or a reasoning frame reaches a terminal without a control
+/// character; the layout and the format characters stay (the prose is
+/// read, not run, and a bidi override cannot outlive its line).
+#[test]
+fn a_models_text_reaches_a_terminal_without_a_control_character() {
+    let spoof = "ls -la\u{1b}[?7l\u{9b}8m\u{e}\u{1b}(0done\r";
+    let shown = "ls -la<U+001B>[?7l<U+009B>8m<U+000E><U+001B>(0done<U+000D>";
+    assert_eq!(delta_to_print(true, spoof).as_deref(), Some(shown));
+    assert_eq!(reasoning_to_print(true, spoof).as_deref(), Some(shown));
+    assert_eq!(
+        delta_to_print(true, "a\n\tb \u{202e}c").as_deref(),
+        Some("a\n\tb \u{202e}c")
+    );
+    // A pipe still gets nothing before `done`.
+    assert_eq!(delta_to_print(false, spoof), None);
+    assert_eq!(reasoning_to_print(false, spoof), None);
+}
+
+/// What `done` prints — the tail, or the whole answer on a fresh line —
+/// reaches a terminal the same way; a pipe gets exactly what the daemon
+/// sent, because its bytes are somebody else's input.
+#[test]
+fn what_done_prints_carries_no_control_character_to_a_terminal() {
+    let tail = Reconciliation::Append("x\u{1b}(0y".to_string());
+    assert_eq!(tail.text(true).as_deref(), Some("x<U+001B>(0y"));
+    assert_eq!(tail.text(false).as_deref(), Some("x\u{1b}(0y"));
+    let redraw = Reconciliation::Redraw("a\u{9b}8mb".to_string());
+    assert_eq!(redraw.text(true).as_deref(), Some("\na<U+009B>8mb"));
+    assert_eq!(Reconciliation::Nothing.text(true), None);
+}
+
+/// What a terminal was shown is recorded as the daemon sent it, not as it
+/// was escaped, so a streamed answer carrying a control character still
+/// matches `done.content` and is not printed a second time.
+#[test]
+fn a_streamed_control_character_is_recorded_as_sent_so_done_owes_nothing() {
+    colored::control::set_override(false);
+    let opts = terminal();
+    let mut state = SseState::default();
+    process_sse_event(
+        "event: delta\ndata: {\"content\":\"a\\u001b[?7lb\"}",
+        &opts,
+        &mut state,
+    )
+    .expect("a delta is shown");
+    assert_eq!(state.shown, "a\u{1b}[?7lb");
+    assert_eq!(
+        reconcile(&state.shown, "a\u{1b}[?7lb"),
+        Reconciliation::Nothing
     );
 }

@@ -31,7 +31,10 @@
 //! A one-line field — the tool's name, the agent's id — takes
 //! [`escape_hidden_line`], which shows a newline, a tab and every other
 //! space but the plain one as well: the pretty-printed arguments are laid
-//! out in lines, a name is not. The GUI mirrors the escape from one shared
+//! out in lines, a name is not. A model's own prose printed at a terminal —
+//! not an approval surface, but printed where the next prompt will be —
+//! takes [`escape_controls`], the same form for the control characters
+//! alone, so it cannot leave the terminal in a state the prompt inherits. The GUI mirrors the escape from one shared
 //! table, `apps/openalpaca-gui/src/lib/hidden-chars.json`, which a test here
 //! holds equal to [`needs_escape`] and [`needs_escape_in_line`] over every
 //! scalar value.
@@ -303,13 +306,60 @@ pub fn hidden_notice(hidden: usize) -> Option<String> {
     }
 }
 
+/// `text` for a terminal when it is prose a model wrote — an answer, its
+/// reasoning — rather than a value a person approves: every control
+/// character (Cc) but `\n` and `\t` written as `<U+XXXX>`, in
+/// [`escape_hidden`]'s form, and everything else as it is.
+///
+/// At a terminal a control character is an instruction, not text: an ESC or
+/// a C1 CSI (U+009B) starts a sequence that can turn line wrap off, conceal
+/// what follows, switch to a line-drawing character set or move the cursor,
+/// and SO (U+000E) shifts the character set on its own. That state outlives
+/// the prose that set it — into an approval prompt printed under it, which
+/// its own escape cannot reach: with wrap off, the tail of an argument past
+/// the right margin is never drawn, and nothing in it is hidden for a notice
+/// to count. Format characters stay: they change how the prose reads, not
+/// what the terminal does, a bidi override ends with its line, and the prose
+/// is not what runs. Nothing is counted and there is no notice: this is not
+/// an approval surface.
+pub fn escape_controls(text: &str) -> String {
+    escape_where(text, usize::MAX, |c| {
+        c.is_control() && c != '\n' && c != '\t'
+    })
+    .text
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Escaped, byte_prefix, escape_hidden, escape_hidden_line, escape_hidden_within,
-        hidden_notice, is_default_ignorable, is_hidden, needs_escape, needs_escape_in_line,
-        one_line,
+        Escaped, byte_prefix, escape_controls, escape_hidden, escape_hidden_line,
+        escape_hidden_within, hidden_notice, is_default_ignorable, is_hidden, needs_escape,
+        needs_escape_in_line, one_line,
     };
+
+    /// A model's prose reaches a terminal with every control character but
+    /// the newline and the tab written as its code point, and nothing else
+    /// changed: over every scalar value, exactly Cc less `\n` and `\t`.
+    #[test]
+    fn escape_controls_shows_every_control_but_newline_and_tab() {
+        for c in every_char() {
+            let expected = if c.is_control() && c != '\n' && c != '\t' {
+                format!("<U+{:04X}>", u32::from(c))
+            } else {
+                c.to_string()
+            };
+            assert_eq!(
+                escape_controls(&c.to_string()),
+                expected,
+                "U+{:04X}",
+                c as u32
+            );
+        }
+        assert_eq!(
+            escape_controls("wrap\u{1b}[?7l off\u{9b}8m\u{e}\r\n\tb \u{202e}\u{200b}c"),
+            "wrap<U+001B>[?7l off<U+009B>8m<U+000E><U+000D>\n\tb \u{202e}\u{200b}c"
+        );
+    }
 
     /// Every scalar value, for the tests that must hold over all of them.
     fn every_char() -> impl Iterator<Item = char> {

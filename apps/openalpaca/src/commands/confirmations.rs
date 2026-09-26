@@ -38,7 +38,7 @@ use futures_util::StreamExt;
 use openalpaca_core::utils::text::{Escaped, escape_hidden, escape_hidden_line, hidden_notice};
 use openalpaca_storage::discovery;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::client::DaemonClient;
@@ -499,6 +499,18 @@ fn prompt_block(frame: &ConfirmationFrame) -> String {
     out
 }
 
+/// What `watch` writes when a prompt arrives: on a terminal first
+/// [`crate::output::TERMINAL_RESET`] — whatever ran in this terminal before,
+/// the prompt reads as printed — then a blank line and the [`prompt_block`],
+/// painted.
+fn watch_prompt_text(frame: &ConfirmationFrame, tty: bool) -> String {
+    format!(
+        "{}\n{}\n",
+        crate::output::terminal_reset(tty),
+        prompt_block(frame).yellow().bold()
+    )
+}
+
 /// Sit on the daemon's event socket and answer prompts as they are raised.
 ///
 /// This is the answer to "a workflow's confirmation reaches nobody": the run
@@ -525,6 +537,7 @@ async fn watch() -> Result<()> {
             .dimmed()
     );
 
+    let tty = std::io::stdout().is_terminal();
     let (_, mut read) = ws_stream.split();
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
@@ -534,8 +547,7 @@ async fn watch() -> Result<()> {
             message = read.next() => match message {
                 Some(Ok(Message::Text(text))) => {
                     let Some(frame) = confirmation_frame(&text) else { continue };
-                    println!();
-                    println!("{}", prompt_block(&frame).yellow().bold());
+                    print!("{}", watch_prompt_text(&frame, tty));
                     let (approved, entire_tool) = ask(frame.per_call);
                     match client
                         .post_raw(
@@ -1165,6 +1177,32 @@ mod tests {
         assert!(!block.contains("<U+"), "{block}");
         assert!(block.contains("notes/日本語.md"), "{block}");
         assert!(block.contains(r"שלום\r\nb\tc"), "{block}");
+    }
+
+    /// Before each prompt, a terminal gets a reset of the modes that change
+    /// how it reads (shift-in, the ASCII character set, SGR 0, replace mode,
+    /// auto-wrap on): whatever an earlier program left set in this terminal
+    /// — auto-wrap off would cut the one-line arguments at the margin with
+    /// no notice. A pipe gets no escape sequence.
+    #[test]
+    fn watch_resets_the_terminal_before_each_prompt() {
+        colored::control::set_override(false);
+        let frame = confirmation_frame(
+            r#"{"type":"tool_confirmation_requested","request_id":"req-1","agent_id":"lead_agent",
+                "tool_name":"artifact_write","tool_arguments":{"path":"notes.md"}}"#,
+        )
+        .expect("frame");
+        assert_eq!(
+            watch_prompt_text(&frame, true),
+            format!(
+                "\u{f}\u{1b}(B\u{1b}[0m\u{1b}[4l\u{1b}[?7h\n{}\n",
+                prompt_block(&frame)
+            )
+        );
+        assert_eq!(
+            watch_prompt_text(&frame, false),
+            format!("\n{}\n", prompt_block(&frame))
+        );
     }
 
     /// The name repeated after an answer, and in the refusal of
