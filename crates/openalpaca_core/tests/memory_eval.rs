@@ -3352,6 +3352,10 @@ struct LearnedNote {
     source_forgotten: bool,
     /// Its `## Knowledge` section, cut to 2 000 characters.
     knowledge: String,
+    /// Which learning path wrote it (the L8 fix slice's H3): `extraction` or
+    /// `model_tool` for a learned note ([`attribute_surfaces`]), `null` for
+    /// any other.
+    surface: Option<&'static str>,
 }
 
 impl LearnedNote {
@@ -3406,6 +3410,7 @@ impl LearnedNote {
             conflict: r.conflict,
             source_forgotten: r.source_forgotten,
             knowledge: cut_chars(&knowledge_section(&r.body), 2_000),
+            surface: None,
         }
     }
 
@@ -3421,6 +3426,58 @@ impl LearnedNote {
     fn cites_row(&self, row: i64) -> bool {
         let key = format!("message:{row}");
         self.sources.contains(&key)
+    }
+}
+
+/// The two learning paths (design 09 §7.2, *Counting the two learning
+/// paths*): the learning queue's flushes, and the reader's own tool calls.
+const SURFACE_EXTRACTION: &str = "extraction";
+const SURFACE_MODEL_TOOL: &str = "model_tool";
+
+/// Each learned note's writer (the L8 fix slice's H3), from the
+/// `memory_changed` events the run recorded: a note a learning flush's event
+/// says it `created` (surface `extraction`) is `extraction`; any other
+/// learned note is `model_tool` — while the corpus is fed, the reader's own
+/// `memory_store` is the one other writer of an `extracted_*` note (a tool
+/// call records `extracted_user` at most, G2). A note learning did not write
+/// — the user's own, seeded by L-S — has none.
+fn attribute_surfaces(
+    notes: &mut [LearnedNote],
+    flushes: &[FlushRecord],
+    episodes: &[EpisodeRecord],
+) {
+    let created: BTreeSet<&str> = flushes
+        .iter()
+        .flat_map(|f| &f.written)
+        .chain(episodes.iter().flat_map(|e| &e.written))
+        .filter(|w| w.change == "created" && w.surface.as_deref() == Some(SURFACE_EXTRACTION))
+        .map(|w| w.note.as_str())
+        .collect();
+    for note in notes.iter_mut() {
+        note.surface = note.is_learned().then(|| {
+            if created.contains(note.id.as_str()) {
+                SURFACE_EXTRACTION
+            } else {
+                SURFACE_MODEL_TOOL
+            }
+        });
+    }
+}
+
+/// A measure taken on each learning path's notes apart (the L8 fix slice's
+/// H3), beside the pooled one the report already carries.
+#[derive(Debug, Default, Clone, Serialize)]
+struct BySurface<T> {
+    extraction: T,
+    model_tool: T,
+}
+
+impl<T> BySurface<T> {
+    fn of(measure: impl Fn(&'static str) -> T) -> Self {
+        Self {
+            extraction: measure(SURFACE_EXTRACTION),
+            model_tool: measure(SURFACE_MODEL_TOOL),
+        }
     }
 }
 
@@ -3509,7 +3566,18 @@ struct CoverageReport {
     share: Option<f64>,
     judge_tokens_in: u64,
     judge_tokens_out: u64,
+    /// `matched` by the writer of the note the judge chose (the L8 fix
+    /// slice's H3). The judge names one note, so a gold note both paths
+    /// learned counts once, for the note it named.
+    by_surface: BySurface<SurfaceCoverage>,
     rows: Vec<CoverageRow>,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+struct SurfaceCoverage {
+    matched: usize,
+    /// Of every gold note measured.
+    share: Option<f64>,
 }
 
 /// Fact coverage (design 09 §7.3): for each relied-on gold note, a historical
@@ -3642,12 +3710,24 @@ async fn measure_coverage(
         rows.push(row);
     }
     let matched = rows.iter().filter(|r| r.matched.is_some()).count();
+    let by_surface = BySurface::of(|surface| {
+        let matched = rows
+            .iter()
+            .filter_map(|r| r.matched.as_deref())
+            .filter(|id| by_id.get(id).and_then(|n| n.surface) == Some(surface))
+            .count();
+        SurfaceCoverage {
+            matched,
+            share: share(matched, rows.len()),
+        }
+    });
     CoverageReport {
         gold_notes: rows.len(),
         matched,
         share: (!rows.is_empty()).then(|| matched as f64 / rows.len() as f64),
         judge_tokens_in: rows.iter().map(|r| u64::from(r.judge_tokens_in)).sum(),
         judge_tokens_out: rows.iter().map(|r| u64::from(r.judge_tokens_out)).sum(),
+        by_surface,
         rows,
     }
 }
@@ -3777,6 +3857,9 @@ struct Restatement {
     outcome: &'static str,
     /// The notes citing the turn's row.
     notes: Vec<String>,
+    /// The outcome over each learning path's notes citing the row alone
+    /// (the L8 fix slice's H3); `outcome` is over all of them.
+    by_surface: BySurface<&'static str>,
 }
 
 fn classify_restatement(row: Option<i64>, learned: &[LearnedNote]) -> (&'static str, Vec<String>) {
@@ -3785,7 +3868,12 @@ fn classify_restatement(row: Option<i64>, learned: &[LearnedNote]) -> (&'static 
     };
     let citing: Vec<&LearnedNote> = learned.iter().filter(|n| n.cites_row(row)).collect();
     let ids = citing.iter().map(|n| n.id.clone()).collect();
-    let outcome = if citing.is_empty() {
+    (classify_citing(&citing, learned), ids)
+}
+
+/// A restatement's outcome from the notes citing its row.
+fn classify_citing(citing: &[&LearnedNote], learned: &[LearnedNote]) -> &'static str {
+    if citing.is_empty() {
         "nothing_written"
     } else if citing
         .iter()
@@ -3810,8 +3898,7 @@ fn classify_restatement(row: Option<i64>, learned: &[LearnedNote]) -> (&'static 
         "first_learned"
     } else {
         "candidate"
-    };
-    (outcome, ids)
+    }
 }
 
 /// Han, kana or Hangul in a string (`common/eval.rs`'s `is_cjk`).
@@ -3866,9 +3953,17 @@ fn share(part: usize, whole: usize) -> Option<f64> {
 }
 
 fn measure_aliases(learned: &[LearnedNote]) -> AliasReport {
+    measure_aliases_where(learned, |_| true)
+}
+
+/// [`measure_aliases`] over the notes `keep` keeps.
+fn measure_aliases_where(
+    learned: &[LearnedNote],
+    keep: impl Fn(&LearnedNote) -> bool,
+) -> AliasReport {
     let active: Vec<&LearnedNote> = learned
         .iter()
-        .filter(|n| n.is_learned() && n.is_active())
+        .filter(|n| n.is_learned() && n.is_active() && keep(n))
         .collect();
     let any = active.iter().filter(|n| !n.aliases.is_empty()).count();
     let other = active
@@ -3881,6 +3976,28 @@ fn measure_aliases(learned: &[LearnedNote]) -> AliasReport {
         with_other_script_alias: other,
         share_any: share(any, active.len()),
         share_other_script: share(other, active.len()),
+    }
+}
+
+/// The share with a `fact_key` of one learning path's active learned notes
+/// (the L8 fix slice's H3); the change pairs' key reuse stays pooled.
+#[derive(Debug, Serialize)]
+struct KeyShare {
+    active_learned: usize,
+    with_fact_key: usize,
+    share: Option<f64>,
+}
+
+fn measure_key_share(learned: &[LearnedNote], surface: &str) -> KeyShare {
+    let active: Vec<&LearnedNote> = learned
+        .iter()
+        .filter(|n| n.is_learned() && n.is_active() && n.surface == Some(surface))
+        .collect();
+    let keyed = active.iter().filter(|n| n.fact_key.is_some()).count();
+    KeyShare {
+        active_learned: active.len(),
+        with_fact_key: keyed,
+        share: share(keyed, active.len()),
     }
 }
 
@@ -3901,6 +4018,15 @@ fn measure_fact_keys(learned: &[LearnedNote], changed: &[ChangedFact]) -> FactKe
 }
 
 fn measure_noise(learned: &[LearnedNote], coverage: &CoverageReport) -> NoiseReport {
+    measure_noise_where(learned, coverage, |_| true)
+}
+
+/// [`measure_noise`] over the notes `keep` keeps.
+fn measure_noise_where(
+    learned: &[LearnedNote],
+    coverage: &CoverageReport,
+    keep: impl Fn(&LearnedNote) -> bool,
+) -> NoiseReport {
     let matched: BTreeSet<&str> = coverage
         .rows
         .iter()
@@ -3908,7 +4034,7 @@ fn measure_noise(learned: &[LearnedNote], coverage: &CoverageReport) -> NoiseRep
         .collect();
     let active: Vec<&LearnedNote> = learned
         .iter()
-        .filter(|n| n.is_learned() && n.is_active())
+        .filter(|n| n.is_learned() && n.is_active() && keep(n))
         .collect();
     let never: Vec<String> = active
         .iter()
@@ -3921,7 +4047,7 @@ fn measure_noise(learned: &[LearnedNote], coverage: &CoverageReport) -> NoiseRep
         never_matched_ids: never,
         candidates: learned
             .iter()
-            .filter(|n| n.effective_status == "candidate")
+            .filter(|n| n.effective_status == "candidate" && keep(n))
             .count(),
     }
 }
@@ -4135,6 +4261,12 @@ struct LearningResults {
     restatements_by_outcome: BTreeMap<String, usize>,
     aliases: Option<AliasReport>,
     fact_keys: Option<FactKeyReport>,
+    // ── Added by the L8 fix slice's H3: each measure by learning path, the
+    //    pooled ones above left as they were ───────────────────────────────
+    restatements_by_surface: BySurface<BTreeMap<String, usize>>,
+    aliases_by_surface: Option<BySurface<AliasReport>>,
+    fact_keys_by_surface: Option<BySurface<KeyShare>>,
+    noise_by_surface: Option<BySurface<NoiseReport>>,
     forced_rerun: Option<ForcedRerun>,
     suggestion_check: Option<SuggestionCheck>,
     invariants: Option<Invariants>,
@@ -4154,6 +4286,16 @@ fn measure_restatements(
             }
             let row = transcript.row_of(&s.id, ti);
             let (outcome, notes) = classify_restatement(row, learned);
+            let by_surface = BySurface::of(|surface| match row {
+                None => "unknown_row",
+                Some(row) => {
+                    let citing: Vec<&LearnedNote> = learned
+                        .iter()
+                        .filter(|n| n.surface == Some(surface) && n.cites_row(row))
+                        .collect();
+                    classify_citing(&citing, learned)
+                }
+            });
             out.push(Restatement {
                 session: s.id.clone(),
                 turn: ti,
@@ -4161,10 +4303,35 @@ fn measure_restatements(
                 row,
                 outcome,
                 notes,
+                by_surface,
             });
         }
     }
     out
+}
+
+/// The restatements' tallies: pooled, and by learning path.
+fn tally_restatements(results: &mut LearningResults) {
+    results.restatements_by_outcome.clear();
+    results.restatements_by_surface = BySurface::default();
+    for r in &results.restatements {
+        *results
+            .restatements_by_outcome
+            .entry(r.outcome.to_string())
+            .or_insert(0) += 1;
+        for (tally, outcome) in [
+            (
+                &mut results.restatements_by_surface.extraction,
+                r.by_surface.extraction,
+            ),
+            (
+                &mut results.restatements_by_surface.model_tool,
+                r.by_surface.model_tool,
+            ),
+        ] {
+            *tally.entry(outcome.to_string()).or_insert(0) += 1;
+        }
+    }
 }
 
 /// Everything §7.3 measures on a store the corpus taught (L, L0, a replay):
@@ -4188,6 +4355,9 @@ async fn measure_learning(
         .await
         .unwrap_or_else(|e| panic!("memory_eval: cannot dump the learned store: {e}"));
     (results.episodes, results.learned) = dumped.into_iter().partition(LearnedNote::is_summary);
+    for notes in [&mut results.learned, &mut results.episodes] {
+        attribute_surfaces(notes, &results.flushes, &results.episode_flushes);
+    }
     let gold: Vec<&GoldNote> = notes.iter().filter(|n| relied.contains(&n.id)).collect();
     let coverage = measure_coverage(
         router,
@@ -4210,15 +4380,19 @@ async fn measure_learning(
     results.changed_facts_correct =
         Some(results.changed_facts.iter().filter(|c| c.correct).count());
     results.restatements = measure_restatements(sessions, transcript, &results.learned);
-    for r in &results.restatements {
-        *results
-            .restatements_by_outcome
-            .entry(r.outcome.to_string())
-            .or_insert(0) += 1;
-    }
-    results.aliases = Some(measure_aliases(&results.learned));
-    results.fact_keys = Some(measure_fact_keys(&results.learned, &results.changed_facts));
-    results.noise = Some(measure_noise(&results.learned, &coverage));
+    tally_restatements(results);
+    let learned = &results.learned;
+    results.aliases = Some(measure_aliases(learned));
+    results.aliases_by_surface = Some(BySurface::of(|surface| {
+        measure_aliases_where(learned, |n| n.surface == Some(surface))
+    }));
+    results.fact_keys = Some(measure_fact_keys(learned, &results.changed_facts));
+    results.fact_keys_by_surface =
+        Some(BySurface::of(|surface| measure_key_share(learned, surface)));
+    results.noise = Some(measure_noise(learned, &coverage));
+    results.noise_by_surface = Some(BySurface::of(|surface| {
+        measure_noise_where(learned, &coverage, |n| n.surface == Some(surface))
+    }));
     results.coverage = Some(coverage);
 }
 
@@ -5293,13 +5467,13 @@ async fn suggestion_check(
     learning.learned = blocking(move || dump_learned(&svc, &c))
         .await
         .unwrap_or_else(|e| panic!("memory_eval: cannot dump the store: {e}"));
+    attribute_surfaces(
+        &mut learning.learned,
+        &learning.flushes,
+        &learning.episode_flushes,
+    );
     learning.restatements = measure_restatements(sessions, transcript, &learning.learned);
-    for r in &learning.restatements {
-        *learning
-            .restatements_by_outcome
-            .entry(r.outcome.to_string())
-            .or_insert(0) += 1;
-    }
+    tally_restatements(learning);
     let (svc, c) = (service.clone(), ctx.clone());
     let suggestions = blocking(move || svc.suggestions(&c, Some(SUGGESTIONS_MAX_LIMIT)))
         .await
@@ -5662,26 +5836,71 @@ fn print_learning(l: &LearningResults) {
     for w in &l.warnings {
         println!("!! WARNING: {w}");
     }
+    let pct = |share: Option<f64>| format!("{:.1}%", share.unwrap_or(0.0) * 100.0);
     if let Some(c) = &l.coverage {
         println!(
-            "coverage: {}/{} ({:.1}%)",
+            "coverage: {}/{} ({}) — by path: extraction {} ({}), model_tool {} ({})",
             c.matched,
             c.gold_notes,
-            c.share.unwrap_or(0.0) * 100.0
+            pct(c.share),
+            c.by_surface.extraction.matched,
+            pct(c.by_surface.extraction.share),
+            c.by_surface.model_tool.matched,
+            pct(c.by_surface.model_tool.share),
         );
     }
     if let Some(correct) = l.changed_facts_correct {
         println!("changed facts: {correct}/{} correct", l.changed_facts.len());
     }
     if !l.restatements_by_outcome.is_empty() {
-        println!("restatements: {:?}", l.restatements_by_outcome);
-    }
-    if let Some(a) = &l.aliases {
         println!(
-            "aliases: other script {:.1}%, any {:.1}% of {} active learned notes",
-            a.share_other_script.unwrap_or(0.0) * 100.0,
-            a.share_any.unwrap_or(0.0) * 100.0,
+            "restatements: {:?} — by path: extraction {:?}, model_tool {:?}",
+            l.restatements_by_outcome,
+            l.restatements_by_surface.extraction,
+            l.restatements_by_surface.model_tool
+        );
+    }
+    let aliases = |a: &AliasReport| {
+        format!(
+            "other script {}, any {} of {} active learned notes",
+            pct(a.share_other_script),
+            pct(a.share_any),
             a.active_learned
+        )
+    };
+    if let Some(a) = &l.aliases {
+        println!("aliases: {}", aliases(a));
+    }
+    if let Some(by) = &l.aliases_by_surface {
+        println!(
+            "  aliases by path: extraction {}; model_tool {}",
+            aliases(&by.extraction),
+            aliases(&by.model_tool)
+        );
+    }
+    if let (Some(k), Some(by)) = (&l.fact_keys, &l.fact_keys_by_surface) {
+        println!(
+            "fact keys: {} of {} — by path: extraction {} of {}, model_tool {} of {}",
+            pct(k.share),
+            k.active_learned,
+            pct(by.extraction.share),
+            by.extraction.active_learned,
+            pct(by.model_tool.share),
+            by.model_tool.active_learned
+        );
+    }
+    if let (Some(n), Some(by)) = (&l.noise, &l.noise_by_surface) {
+        println!(
+            "noise: {} of {} active learned notes never matched, {} candidates — by path: extraction {} of {} ({} candidates), model_tool {} of {} ({} candidates)",
+            n.never_matched,
+            n.active_learned,
+            n.candidates,
+            by.extraction.never_matched,
+            by.extraction.active_learned,
+            by.extraction.candidates,
+            by.model_tool.never_matched,
+            by.model_tool.active_learned,
+            by.model_tool.candidates
         );
     }
     if let Some(s) = &l.suggestion_check {
@@ -6395,6 +6614,7 @@ fn learned(
         conflict: false,
         source_forgotten: false,
         knowledge: String::new(),
+        surface: None,
     }
 }
 
@@ -7709,6 +7929,7 @@ struct OfflineRun {
     db: openalpaca_storage::Database,
     owner: String,
     bus: openalpaca_core::bus::EventBus,
+    service: Arc<MemoryService>,
     stack: EvalStack,
     queue: Arc<openalpaca_core::memory::learning::LearningQueue>,
     turns_per_flush: u32,
@@ -7747,7 +7968,7 @@ impl OfflineRun {
                 db: db.clone(),
                 router,
                 daemon_config,
-                memory_service: service,
+                memory_service: service.clone(),
             },
             QueueMode::Manual,
         );
@@ -7756,6 +7977,7 @@ impl OfflineRun {
             db,
             owner,
             bus,
+            service,
             stack,
             queue,
             turns_per_flush,
@@ -7775,6 +7997,28 @@ impl OfflineRun {
             &self.project,
             self.turns_per_flush,
         )
+    }
+
+    fn ctx(&self) -> openalpaca_core::memory::service::MemoryAccessContext {
+        self.service
+            .context(
+                &self.owner,
+                WorkspaceHint::Root(&self.project),
+                Surface::UserSurface,
+                Capabilities::ALL,
+                Attribution::default(),
+            )
+            .unwrap()
+    }
+
+    fn transcript(&self, sessions: Vec<TranscriptSession>) -> Transcript {
+        Transcript {
+            schema: 1,
+            owner_id: self.owner.clone(),
+            project: self.project.to_string_lossy().into_owned(),
+            corpus_sha256: "test".to_string(),
+            sessions,
+        }
     }
 }
 
@@ -8012,6 +8256,235 @@ fn a_forced_rerun_unchecked_after_unusable_answers_says_so() {
     assert_eq!(
         serde_json::to_value(&inv).unwrap()["forced_rerun_unchecked"],
         "unchecked after 3 unusable answers"
+    );
+}
+
+/// The two writers of a fed run, offline: a stub reader that saves the
+/// user's editor with `memory_store` on the turns that name Helix, and a
+/// stub extractor that learns the Longjing tea — with an other-script alias
+/// and a key — and nothing else; then §7.3's measures, with a stub coverage
+/// judge answering `MATCH 1`. The notes, and the reader's turns, as a run
+/// records them.
+async fn two_writer_run() -> (OfflineRun, LearningResults) {
+    use openalpaca_llm::{Role, ToolCall};
+    let conversation = |prompt: &str| {
+        prompt
+            .split("<conversation>")
+            .nth(1)
+            .and_then(|rest| rest.split("</conversation>").next())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let (router, _stub) = stub_router_with_calls(
+        &[TEST_MODEL],
+        move |request| {
+            let prompt = prompt_of(request);
+            if prompt.contains("Notes the search returned:") {
+                return "The first note states it.\nMATCH 1".to_string();
+            }
+            if !prompt.contains("You are the memory extractor") {
+                return "Noted.".to_string();
+            }
+            let conversation = conversation(&prompt);
+            let Some(row) = conversation.lines().find_map(|line| {
+                let (n, rest) = line.strip_prefix('R')?.split_once(' ')?;
+                rest.contains("Longjing").then(|| n.parse::<u32>().ok())?
+            }) else {
+                return r#"{"items": []}"#.to_string();
+            };
+            serde_json::json!({"items": [{
+                "title": "Longjing tea every morning",
+                "content": "The user drinks Longjing tea every morning.",
+                "kind": "preference", "stated_by": "user", "confidence": 0.9,
+                "rows": [row], "aliases": ["龙井"], "fact_key": "user.tea",
+            }]})
+            .to_string()
+        },
+        |request| {
+            if request.messages.iter().any(|m| m.role == Role::Tool) {
+                return Vec::new();
+            }
+            let Some(last) = request.messages.iter().rev().find(|m| m.role == Role::User) else {
+                return Vec::new();
+            };
+            if !last.content.contains("Helix") {
+                return Vec::new();
+            }
+            let body = if last.content.contains("still") {
+                "# Editor: Helix\n\nThe user still edits with Helix.\n"
+            } else {
+                "# Editor: Helix\n\nThe user edits with Helix.\n"
+            };
+            vec![ToolCall {
+                id: "call-store".to_string(),
+                name: "memory_store".to_string(),
+                arguments: serde_json::json!({
+                    "title": "Editor: Helix", "body": body, "kind": "preference",
+                    "aliases": ["hx"],
+                }),
+            }]
+        },
+    );
+    let run = OfflineRun::new(router.clone());
+    let first = fixture_session(
+        "cs-t31",
+        &[
+            ("I drink Longjing tea every morning.", TurnMode::Explicit),
+            ("My editor is Helix these days.", TurnMode::Explicit),
+        ],
+    );
+    let second = fixture_session(
+        "cs-t32",
+        &[("As I said, Helix is still my editor.", TurnMode::Restate)],
+    );
+    let fed = run.learner().feed(&[&first, &second], true).await;
+    let transcript = run.transcript(fed.transcript);
+    let mut results = LearningResults {
+        flushes: fed.flushes,
+        turns: fed.turns,
+        ..Default::default()
+    };
+    let notes = [
+        GoldNote {
+            title: "Longjing tea".to_string(),
+            body: "## Knowledge\nShe drinks Longjing tea every morning.\n".to_string(),
+            ..gold("g-tea", &[])
+        },
+        GoldNote {
+            title: "Helix editor".to_string(),
+            body: "## Knowledge\nShe edits with Helix.\n".to_string(),
+            ..gold("g-editor", &[])
+        },
+    ];
+    let relied: BTreeSet<String> = notes.iter().map(|n| n.id.clone()).collect();
+    let mut gate = JudgeGate::new(judge_guard(&router, None, Some(TEST_MODEL), None).unwrap());
+    let coverage_template =
+        String::from_utf8(read_bytes(&eval_dir().join("coverage-judge-prompt.md"))).unwrap();
+    measure_learning(
+        &router,
+        Some(&mut gate),
+        &coverage_template,
+        &run.service,
+        &run.ctx(),
+        &notes,
+        &relied,
+        &[&first, &second],
+        &transcript,
+        &mut results,
+    )
+    .await;
+    (run, results)
+}
+
+/// The L8 fix slice's H3: every learning measure is reported three ways —
+/// `extraction` (the notes the learning queue wrote), `model_tool` (the
+/// reader's own `memory_store` writes) and pooled, today's number, left as
+/// it was. A learned note's writer is read from the `memory_changed` events
+/// the run recorded: an extraction flush's `created` makes it
+/// `extraction`, anything else that wrote a learned note is the reader.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_learning_measure_is_reported_by_surface() {
+    let (_run, results) = two_writer_run().await;
+    let json = serde_json::to_value(&results).unwrap();
+    let surfaces: BTreeMap<String, Vec<String>> =
+        json["learned"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .fold(BTreeMap::new(), |mut by, n| {
+                by.entry(n["surface"].as_str().unwrap_or("none").to_string())
+                    .or_default()
+                    .push(n["title"].as_str().unwrap().to_string());
+                by
+            });
+    assert_eq!(
+        surfaces,
+        BTreeMap::from([
+            (
+                "extraction".to_string(),
+                vec!["Longjing tea every morning".to_string()]
+            ),
+            (
+                "model_tool".to_string(),
+                vec!["Editor: Helix".to_string(), "Editor: Helix".to_string()]
+            ),
+        ]),
+        "{:?}",
+        results.learned
+    );
+
+    // Pooled: today's numbers.
+    let aliases = &json["aliases"];
+    assert_eq!(
+        (
+            &aliases["active_learned"],
+            &aliases["with_other_script_alias"]
+        ),
+        (&serde_json::json!(3), &serde_json::json!(1))
+    );
+    let by = &json["aliases_by_surface"];
+    assert_eq!(
+        (
+            &by["extraction"]["active_learned"],
+            &by["extraction"]["with_other_script_alias"],
+            &by["model_tool"]["active_learned"],
+            &by["model_tool"]["with_other_script_alias"],
+            &by["model_tool"]["with_any_alias"],
+        ),
+        (
+            &serde_json::json!(1),
+            &serde_json::json!(1),
+            &serde_json::json!(2),
+            &serde_json::json!(0),
+            &serde_json::json!(2),
+        ),
+        "{by}"
+    );
+    let keys = &json["fact_keys_by_surface"];
+    assert_eq!(
+        (
+            &keys["extraction"]["with_fact_key"],
+            &keys["model_tool"]["with_fact_key"]
+        ),
+        (&serde_json::json!(1), &serde_json::json!(0)),
+        "{keys}"
+    );
+    let coverage = &json["coverage"];
+    assert_eq!(coverage["matched"], 2, "{coverage}");
+    assert_eq!(
+        (
+            &coverage["by_surface"]["extraction"]["matched"],
+            &coverage["by_surface"]["model_tool"]["matched"]
+        ),
+        (&serde_json::json!(1), &serde_json::json!(1)),
+        "{coverage}"
+    );
+    let noise = &json["noise_by_surface"];
+    assert_eq!(
+        (
+            &noise["extraction"]["never_matched"],
+            &noise["model_tool"]["never_matched"]
+        ),
+        (&serde_json::json!(0), &serde_json::json!(1)),
+        "one of the reader's two editor notes no coverage call chose: {noise}"
+    );
+    assert_eq!(json["noise"]["never_matched"], 1, "pooled");
+    let restated = &json["restatements"][0];
+    assert_eq!(restated["session"], "cs-t32");
+    assert_eq!(
+        (
+            &restated["by_surface"]["extraction"],
+            &restated["by_surface"]["model_tool"]
+        ),
+        (
+            &serde_json::json!("nothing_written"),
+            &serde_json::json!("nothing_written")
+        ),
+        "no note cites the row: {restated}"
+    );
+    assert_eq!(
+        json["restatements_by_surface"]["extraction"]["nothing_written"],
+        1
     );
 }
 
