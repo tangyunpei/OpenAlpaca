@@ -1384,6 +1384,10 @@ struct LearningConditions {
     /// `0` calls is no cap.
     extract_max_calls_per_day: u32,
     extract_max_daily_cost_usd: f64,
+    /// `[orchestrator.learning] episode_max_per_day`, the conversation
+    /// summaries' daily count: lifted to the validation's maximum for a
+    /// system that learns (the L8 fix slice's H1).
+    episode_max_per_day: u32,
     /// The questions run with `[orchestrator.learning] enabled = false`.
     learning_during_questions: bool,
     /// Every fed turn is unattended, as every question is (M6).
@@ -2246,9 +2250,21 @@ const FLUSH_FORCED_RERUN: &str = "forced_rerun";
 const LIFTED_DAILY_COST_USD: f64 = 1_000_000.0;
 const COVERAGE_JUDGE_AGENT_ID: &str = "memory_eval_coverage_judge";
 
+/// The most conversation summaries a day the config's validation accepts
+/// (`DaemonConfig::validate`'s clamp), read from it rather than copied.
+fn lifted_episode_cap() -> u32 {
+    let mut cfg = openalpaca_core::daemon_config::DaemonConfig::default();
+    cfg.orchestrator.learning.episode_max_per_day = u32::MAX;
+    cfg.validate();
+    cfg.orchestrator.learning.episode_max_per_day
+}
+
 /// The eval's daemon config for a run: no workflow can dispatch, task-output
 /// extraction is off, and — for a system that learns — the extraction's
-/// daily caps are lifted, so a cap never stops a learning phase part-way.
+/// daily caps and the conversation summaries' daily count are lifted, so a
+/// cap never stops a learning phase part-way (the summaries' since the L8
+/// fix slice's H1: all 51 sessions are fed on one UTC day, and at its
+/// default of 20 the count stopped every summary from the 21st session on).
 /// `recall_mode` is `OPENALPACA_MEMORY_EVAL_RECALL_MODE`: every automatic
 /// recall of the run reads it from this config (design 09 §13.4); `None`
 /// keeps the default.
@@ -2270,6 +2286,8 @@ fn eval_daemon_config(
     if system.learns() {
         cfg.orchestrator.costs.extract_max_calls_per_day = 0;
         cfg.orchestrator.costs.extract_max_daily_cost_usd = LIFTED_DAILY_COST_USD;
+        // The maximum, never 0: 0 writes no summary at all.
+        cfg.orchestrator.learning.episode_max_per_day = lifted_episode_cap();
     }
     let budget = MainLoopBudget::for_system(system, &cfg.orchestrator.routing);
     cfg.orchestrator.routing.main_loop_max_rounds = budget.max_rounds;
@@ -3868,6 +3886,47 @@ struct LearningCost {
     feed_wall_ms: u64,
 }
 
+/// The learning phase's loud warnings (the L8 fix slice's H1): the flushes
+/// a daily cap stopped — learning's and the conversation summaries' apart.
+/// A daemon would learn those windows after 00:00 UTC; a run ends first.
+fn learning_warnings(flushes: &[FlushRecord], episodes: &[EpisodeRecord]) -> Vec<String> {
+    let capped = |stops: Vec<(&str, Option<&str>)>| -> Vec<String> {
+        stops
+            .into_iter()
+            .filter(|(_, stopped)| *stopped == Some("Cap"))
+            .map(|(session, _)| session.to_string())
+            .collect()
+    };
+    let mut warnings = Vec::new();
+    let learning = capped(
+        flushes
+            .iter()
+            .map(|f| (f.session.as_str(), f.stopped.as_deref()))
+            .collect(),
+    );
+    if !learning.is_empty() {
+        warnings.push(format!(
+            "{} learning flush(es) stopped on a daily cap, their windows unlearned: {}",
+            learning.len(),
+            learning.join(", ")
+        ));
+    }
+    let summaries = capped(
+        episodes
+            .iter()
+            .map(|e| (e.session.as_str(), e.stopped.as_deref()))
+            .collect(),
+    );
+    if !summaries.is_empty() {
+        warnings.push(format!(
+            "{} conversation-summary flush(es) stopped on a daily cap, their sessions left with no summary: {}",
+            summaries.len(),
+            summaries.join(", ")
+        ));
+    }
+    warnings
+}
+
 fn learning_cost(
     turns: &[TurnRecord],
     flushes: &[FlushRecord],
@@ -3947,6 +4006,9 @@ struct SuggestionCheck {
 /// The learning side of a report (design 09 §7.3).
 #[derive(Debug, Default, Serialize)]
 struct LearningResults {
+    /// What a reader of the numbers must know first: a flush a daily cap
+    /// stopped (the L8 fix slice's H1). Printed at the head of the summary.
+    warnings: Vec<String>,
     turns: Vec<TurnRecord>,
     flushes: Vec<FlushRecord>,
     /// The conversation summaries' flushes (L only, design 09 §13.3).
@@ -4602,6 +4664,7 @@ fn learning_conditions(
         extraction_model: cfg.orchestrator.costs.extraction_model.clone(),
         extract_max_calls_per_day: cfg.orchestrator.costs.extract_max_calls_per_day,
         extract_max_daily_cost_usd: cfg.orchestrator.costs.extract_max_daily_cost_usd,
+        episode_max_per_day: cfg.orchestrator.learning.episode_max_per_day,
         learning_during_questions: false,
         unattended: true,
         seeded_old_notes,
@@ -4905,6 +4968,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
             &fed.episodes,
             fed.wall_ms,
         ));
+        learning.warnings = learning_warnings(&fed.flushes, &fed.episodes);
         learning.turns = fed.turns;
         learning.flushes = fed.flushes;
         learning.episode_flushes = fed.episodes;
@@ -5276,6 +5340,7 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
 
     let flushes = replay_learning(&queue, &bus, &replay.transcript).await;
     let mut learning = LearningResults {
+        warnings: learning_warnings(&flushes, &[]),
         cost: Some(learning_cost(
             &[],
             &flushes,
@@ -5467,6 +5532,9 @@ fn print_totals(system: System, t: &Totals) {
 }
 
 fn print_learning(l: &LearningResults) {
+    for w in &l.warnings {
+        println!("!! WARNING: {w}");
+    }
     if let Some(c) = &l.coverage {
         println!(
             "coverage: {}/{} ({:.1}%)",
@@ -6301,15 +6369,43 @@ fn cohens_kappa_reads_two_binary_gradings() {
 }
 
 /// The learning systems' config: no workflow, no task extraction, learning
-/// on only where it learns, and the extraction caps lifted there.
+/// on only where it learns, and the extraction caps lifted there — the
+/// conversation summaries' daily count too (the L8 fix slice's H1: at its
+/// default of 20 it stopped every summary from the corpus's 21st session
+/// on). The summaries' cap is lifted to the most the config's validation
+/// accepts, never to 0, which writes none; the run's conditions record it.
 #[test]
 fn a_learning_system_lifts_the_extraction_caps() {
+    use openalpaca_core::daemon_config::DaemonConfig;
+    let most_accepted = {
+        let mut cfg = DaemonConfig::default();
+        cfg.orchestrator.learning.episode_max_per_day = u32::MAX;
+        cfg.validate();
+        cfg.orchestrator.learning.episode_max_per_day
+    };
     let l = eval_daemon_config(System::L, None);
     assert!(l.orchestrator.learning.enabled);
     assert_eq!(l.orchestrator.costs.extract_max_calls_per_day, 0, "no cap");
     assert_eq!(
         l.orchestrator.costs.extract_max_daily_cost_usd,
         LIFTED_DAILY_COST_USD
+    );
+    assert_eq!(
+        l.orchestrator.learning.episode_max_per_day, most_accepted,
+        "the summaries' cap at the validation's maximum"
+    );
+    assert!(
+        most_accepted
+            > DaemonConfig::default()
+                .orchestrator
+                .learning
+                .episode_max_per_day
+    );
+    let mut validated = l.clone();
+    validated.validate();
+    assert_eq!(
+        validated.orchestrator.learning.episode_max_per_day, most_accepted,
+        "a value the validation keeps"
     );
     assert_eq!(l.orchestrator.routing.max_workflows_per_lane, 0);
     assert!(!l.orchestrator.costs.task_extract_enabled);
@@ -6318,14 +6414,106 @@ fn a_learning_system_lifts_the_extraction_caps() {
         assert!(!cfg.orchestrator.learning.enabled, "{}", system.as_str());
         assert_eq!(
             cfg.orchestrator.costs.extract_max_calls_per_day,
-            openalpaca_core::daemon_config::DaemonConfig::default()
+            DaemonConfig::default()
                 .orchestrator
                 .costs
                 .extract_max_calls_per_day
         );
+        assert_eq!(
+            cfg.orchestrator.learning.episode_max_per_day,
+            DaemonConfig::default()
+                .orchestrator
+                .learning
+                .episode_max_per_day
+        );
     }
+    let conditions = serde_json::to_value(learning_conditions(
+        &l,
+        &eval_dir().join("conversations-learning.json"),
+        "corpus",
+        &[],
+        &settings_for_tests(),
+        true,
+        0,
+        &eval_dir().join("coverage-judge-prompt.md"),
+        "coverage",
+    ))
+    .unwrap();
+    assert_eq!(conditions["episode_max_per_day"], most_accepted);
     let e = eval_daemon_config(System::E, None);
     assert_eq!(e.orchestrator.routing.main_loop_max_tools_per_round, 1);
+}
+
+/// The L8 fix slice's H1: a learning run says loudly — in the report's
+/// `learning.warnings` and at the head of its printed summary — when a
+/// daily cap stopped a flush, a summary's above all: that session has no
+/// summary for the episode split to find, and nothing in the run retries
+/// it tomorrow as a daemon would.
+#[test]
+fn a_flush_a_daily_cap_stopped_is_a_loud_warning() {
+    use openalpaca_core::memory::learning::{EpisodeReport, FlushReport, FlushStop};
+    let summary = |session: &str, stopped: Option<FlushStop>| {
+        EpisodeRecord::new(
+            session,
+            FLUSH_SWITCH,
+            0,
+            &EpisodeReport {
+                calls: usize::from(stopped.is_none()),
+                episodes: usize::from(stopped.is_none()),
+                stopped,
+                ..Default::default()
+            },
+            Vec::new(),
+            0,
+        )
+    };
+    let written = summary("cs-020", None);
+    let episodes = [
+        written.clone(),
+        summary("cs-021", Some(FlushStop::Cap)),
+        summary("cs-022", Some(FlushStop::Cap)),
+    ];
+    let warnings = learning_warnings(&[], &episodes);
+    let [one] = &warnings[..] else {
+        panic!("one warning: {warnings:?}");
+    };
+    for part in [
+        "2 conversation-summary flush",
+        "daily cap",
+        "cs-021, cs-022",
+    ] {
+        assert!(one.contains(part), "{part:?} in {one:?}");
+    }
+    assert!(learning_warnings(&[], &[written]).is_empty());
+    let capped = FlushRecord::new(
+        "cs-003",
+        FLUSH_SWITCH,
+        0,
+        &FlushReport {
+            stopped: Some(FlushStop::Cap),
+            ..Default::default()
+        },
+        Vec::new(),
+        0,
+    );
+    let warnings = learning_warnings(std::slice::from_ref(&capped), &[]);
+    assert!(
+        warnings.len() == 1
+            && warnings[0].contains("1 learning flush")
+            && warnings[0].contains("cs-003"),
+        "{warnings:?}"
+    );
+    let results = LearningResults {
+        warnings: learning_warnings(&[capped], &episodes),
+        ..Default::default()
+    };
+    assert_eq!(
+        serde_json::to_value(&results).unwrap()["warnings"]
+            .as_array()
+            .map(Vec::len),
+        Some(2),
+        "recorded in the report"
+    );
 }
 
 /// L-S feeds the suggestion sessions only; L and L0 feed everything, and a
@@ -7418,6 +7606,26 @@ fn harness_env(set: &[(&'static str, &std::ffi::OsStr)]) -> EnvGuard {
         })
         .collect();
     EnvGuard::vars(&vars)
+}
+
+/// A run's settings as the tests need them, read from no environment: L,
+/// the held-out questions, no store, no judge.
+fn settings_for_tests() -> Settings {
+    Settings {
+        system: Some(System::L),
+        report_path: PathBuf::from("/nonexistent/report.json"),
+        home_store: None,
+        llm_toml: PathBuf::from("/nonexistent/llm.toml"),
+        questions_path: eval_dir().join("questions-heldout.json"),
+        limit: None,
+        category: None,
+        judge: JudgeRequest::Off,
+        keep_scratch: false,
+        session_limit: None,
+        learn_from: None,
+        rejudge_from: None,
+        recall_mode: None,
+    }
 }
 
 /// What a panic said.
