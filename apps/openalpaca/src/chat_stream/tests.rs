@@ -669,6 +669,15 @@ fn the_inline_prompt_prints_the_preview_before_the_arguments() {
     assert!(arguments.unwrap().starts_with("Arguments: "));
 }
 
+// ── Hidden characters (the inline prompt shows them as <U+XXXX>) ─────
+//
+// Display only, and that is structural rather than a test here: rendering
+// borrows the frame (`confirmation_details(&Value)` — no interior
+// mutability), the tool runs on the sandbox's own copy of its arguments,
+// which never passes through the CLI, and the answer is built from the
+// frame's `request_id` alone, never from `ConfirmationDetails` — which
+// `the_inline_answer_is_the_request_id_and_nothing_the_prompt_showed` pins.
+
 /// Every character the inline prompt must never print raw: a bidi override,
 /// a zero-width space, a C1 CSI, a carriage return, a tag character and an
 /// isolate. (A newline is the pretty-printed arguments' own layout.)
@@ -779,17 +788,37 @@ fn the_inline_prompt_notice_counts_only_what_was_escaped() {
     assert!(arguments.contains(r#""שלום\r\nb\tc""#), "{arguments}");
 }
 
-/// Display only: the frame the answer is built from — its request id — is
-/// what the daemon sent, whatever the prompt showed.
+/// The answer is `{"approved"}` posted to the frame's `request_id` as the
+/// daemon sent it — `watch`'s and `approve`'s own path and body, so the id
+/// is one path segment — and nothing the prompt showed, escaped or not,
+/// reaches either.
 #[test]
-fn showing_the_inline_prompt_changes_nothing_in_the_frame() {
+fn the_inline_answer_is_the_request_id_and_nothing_the_prompt_showed() {
     let frame = serde_json::json!({
         "request_id": "req-1",
-        "tool_name": "srv__rm\u{202e}",
-        "tool_arguments": { "path": "/srv/\u{202e}x" },
+        "tool_name": "srv__rm\u{202e}fdp\u{200b}",
+        "tool_arguments": { "path": "/srv/allow\u{200b}ed/\u{202e}txt.exe" },
+        "per_call": false,
     });
-    let before = frame.clone();
-    let _ = confirmation_details(&frame);
-    assert_eq!(frame, before);
-    assert_eq!(frame["tool_arguments"]["path"], "/srv/\u{202e}x");
+    assert_eq!(
+        inline_answer(&frame, true),
+        (
+            "/v1/chat/confirmations/req-1".to_string(),
+            serde_json::json!({ "approved": true })
+        )
+    );
+    assert_eq!(
+        inline_answer(&frame, false),
+        (
+            "/v1/chat/confirmations/req-1".to_string(),
+            serde_json::json!({ "approved": false })
+        )
+    );
+
+    let odd = serde_json::json!({ "request_id": "a/b", "tool_name": "x" });
+    assert_eq!(
+        inline_answer(&odd, true).0,
+        "/v1/chat/confirmations/a%2Fb",
+        "one path segment, as `watch` and `approve` send it"
+    );
 }

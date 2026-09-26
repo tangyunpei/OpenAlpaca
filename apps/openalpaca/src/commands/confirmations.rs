@@ -319,7 +319,7 @@ fn refuse_entire_tool(request_id: &str, prompt: Option<&PendingPrompt>) -> Resul
 /// `approval_scope` is only meaningful on an approval, and `entire_tool` is the
 /// owner widening it deliberately — it is never inferred, and never sent with a
 /// denial.
-fn answer_body(approved: bool, entire_tool: bool) -> serde_json::Value {
+pub(crate) fn answer_body(approved: bool, entire_tool: bool) -> serde_json::Value {
     let mut body = serde_json::json!({ "approved": approved });
     if approved && entire_tool {
         body["approval_scope"] = serde_json::json!("entire_tool");
@@ -327,7 +327,7 @@ fn answer_body(approved: bool, entire_tool: bool) -> serde_json::Value {
     body
 }
 
-fn answer_path(request_id: &str) -> String {
+pub(crate) fn answer_path(request_id: &str) -> String {
     format!(
         "/v1/chat/confirmations/{}",
         urlencoding::encode(request_id)
@@ -885,6 +885,15 @@ mod tests {
     }
 
     // ── Hidden characters (approval surfaces show them as <U+XXXX>) ──
+    //
+    // Display only, and that is structural rather than a test here:
+    // rendering borrows the prompt (`&ConfirmationFrame`, `&PendingPrompt` —
+    // no interior mutability), the tool runs on the sandbox's own copy of
+    // its arguments, which never passes through the CLI, and `watch` and
+    // `approve` answer through `answer_path(&frame.request_id)` and
+    // `answer_body`, which `a_request_id_is_one_path_segment` and
+    // `the_answer_body_widens_nothing_on_its_own` pin. `--entire-tool` finds
+    // its prompt by the raw `request_id`.
 
     /// Every character an approval surface must never print raw: a bidi
     /// override, a zero-width space, a C1 CSI, a carriage return, a tag
@@ -1097,29 +1106,5 @@ mod tests {
             .to_string();
         assert!(err.contains("srv__rm<U+202E>fdp<U+200B><U+000A>"), "{err}");
         assert_no_raw(&err, false);
-    }
-
-    /// Display only: rendering takes the frame by reference, and what is
-    /// answered — the path built from the request id and the body — is
-    /// what it was.
-    #[test]
-    fn showing_a_prompt_changes_nothing_that_is_answered() {
-        let frame: ConfirmationFrame = serde_json::from_value(serde_json::json!({
-            "request_id": "req-1",
-            "tool_name": "srv__rm\u{202e}",
-            "tool_arguments": { "path": "/srv/\u{202e}x" },
-        }))
-        .expect("frame");
-        let _ = prompt_block(&frame);
-        assert_eq!(frame.tool_name, "srv__rm\u{202e}");
-        assert_eq!(frame.tool_arguments["path"], "/srv/\u{202e}x");
-        assert_eq!(
-            answer_path(&frame.request_id),
-            "/v1/chat/confirmations/req-1"
-        );
-        assert_eq!(
-            answer_body(true, false),
-            serde_json::json!({ "approved": true })
-        );
     }
 }

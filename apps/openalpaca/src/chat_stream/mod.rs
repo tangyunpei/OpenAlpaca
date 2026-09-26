@@ -482,6 +482,22 @@ pub(crate) fn confirmation_details(frame: &serde_json::Value) -> ConfirmationDet
     }
 }
 
+/// Where the inline prompt's answer goes, and what it says: `watch`'s and
+/// `approve`'s own path and body (`commands::confirmations`), so the id is
+/// one path segment and the body is `{"approved"}` with no scope — the
+/// inline prompt offers no "always". Both come from the frame's
+/// `request_id` as the daemon sent it, never from [`ConfirmationDetails`]:
+/// nothing the prompt showed, escaped or not, reaches the broker.
+pub(crate) fn inline_answer(
+    frame: &serde_json::Value,
+    approved: bool,
+) -> (String, serde_json::Value) {
+    use crate::commands::confirmations::{answer_body, answer_path};
+
+    let request_id = frame["request_id"].as_str().unwrap_or("");
+    (answer_path(request_id), answer_body(approved, false))
+}
+
 /// Every line of `text`, two spaces in.
 pub(crate) fn indent(text: &str) -> String {
     text.lines()
@@ -512,7 +528,6 @@ async fn handle_confirmation_prompt(client: &DaemonClient, event_text: &str) -> 
         }
     }
     let parsed: serde_json::Value = serde_json::from_str(&data)?;
-    let request_id = parsed["request_id"].as_str().unwrap_or("");
 
     let details = confirmation_details(&parsed);
     println!();
@@ -535,13 +550,8 @@ async fn handle_confirmation_prompt(client: &DaemonClient, event_text: &str) -> 
         matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
     });
 
-    let body = serde_json::json!({ "approved": approved });
-    client
-        .post_raw(
-            &format!("/v1/chat/confirmations/{}", request_id),
-            &body,
-        )
-        .await?;
+    let (path, body) = inline_answer(&parsed, approved);
+    client.post_raw(&path, &body).await?;
 
     let status = if approved {
         "Approved".green()
