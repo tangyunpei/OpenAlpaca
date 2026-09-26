@@ -925,13 +925,13 @@ describe("ChatView — a confirmation with hidden characters", () => {
     return ["\u{202E}", "\u{200B}"].filter((c) => text.includes(c));
   }
 
-  async function blockOnSpoofedTool(): Promise<void> {
+  async function blockOnSpoofedTool(tool: string = TOOL): Promise<void> {
     renderChat();
     const source = await sendMessage("clean up the scratch directory");
     await act(async () => {
       source.emit("confirmation_requested", {
         request_id: "req-7",
-        tool_name: TOOL,
+        tool_name: tool,
         tool_arguments: {
           command: "rm -rf /srv/allow\u{200B}ed/\u{202E}fdp.exe",
         },
@@ -1036,7 +1036,9 @@ describe("ChatView — a confirmation with hidden characters", () => {
   });
 
   it("toasts an Always allow with the tool's hidden characters escaped", async () => {
-    await blockOnSpoofedTool();
+    // An ideographic space too, which only a one-line field escapes: the
+    // toast names the tool on one line, as the card does.
+    await blockOnSpoofedTool(`${TOOL}\u{3000}`);
     fireEvent.click(screen.getByRole("button", { name: "Always allow" }));
 
     await waitFor(() => {
@@ -1050,7 +1052,7 @@ describe("ChatView — a confirmation with hidden characters", () => {
     });
     await waitFor(() =>
       expect(useUiStore.getState().toast).toBe(
-        `${SHOWN} added to the allowlist — it won't ask again`,
+        `${SHOWN}<U+3000> added to the allowlist — it won't ask again`,
       ),
     );
   });
