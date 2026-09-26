@@ -24,9 +24,10 @@
  *
  * **Hidden characters** (`lib/hidden-chars`). A candidate is where the owner
  * decides whether text the model wrote becomes theirs, so its title shows
- * every hidden character as a highlighted `<U+XXXX>` (the one-line escape),
- * as does its Note tab's text (`NoteTab`, which counts them all). A note that
- * is already in force is shown as written.
+ * every hidden character as a highlighted `<U+XXXX>` (the one-line escape).
+ * Its Note tab (`NoteTab`) shows them in its text and in the title of the
+ * note it would replace, as plain-text `<U+XXXX>`, and counts them with the
+ * title's. A note that is already in force is shown as written.
  */
 
 import { useState } from "react";

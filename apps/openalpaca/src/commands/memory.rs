@@ -1657,13 +1657,19 @@ pub(crate) fn adopt_locally(old_owner_key: &str) -> Result<()> {
 // file, and they are printed raw at a terminal: an ESC sequence in a title
 // can clear or rewrite the screen (or, through OSC, the window title and the
 // clipboard), and a bidi override reorders a line the person decides from.
-// So every title, heading, alias, tag and reason passes through `shown` /
-// `one_line` (the daemon's own approval-card rule), an excerpt line through
-// `excerpt_line`, and `memory show`'s body through `body_text`. `--raw`
-// prints the note file as it is, for redirecting — unchanged.
+// So in a listing every title, heading, alias, tag and reason passes through
+// `shown` / `one_line` (the daemon's preview rule: the escape's characters
+// dropped), an excerpt line through `excerpt_line`, and `memory show`'s body
+// through `body_text`. Where a person decides — a suggestion's line in
+// `memory suggestions` and a candidate's `memory show` — nothing is dropped:
+// the titles, the reason and a candidate's fields go through
+// `escape_hidden_line`, the texts through `escape_hidden`, and a notice
+// counts them. `--raw` prints the note file as it is, for redirecting —
+// unchanged.
 
 /// A note's words on one terminal line: whitespace runs as one space, and
-/// no control or format character (`openalpaca_core::utils::text::one_line`).
+/// none of the characters an approval's escape shows
+/// (`openalpaca_core::utils::text::one_line`, which drops `needs_escape`).
 fn shown(value: &Value) -> String {
     one_line(value.as_str().unwrap_or(""))
 }

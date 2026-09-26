@@ -53,13 +53,13 @@
  * composer's bar, the run card, the resolution row, a plugin's consent row
  * in Settings → Extensions, and the Memory view's Suggestions card,
  * Recently learned rows and a candidate's title — the span is never split
- * across two lines. The palette's Approve row, the Always-allow toast and a
- * candidate's rendered Markdown take the plain-text form, which wraps like
- * any other text and can break inside an escape (every character stays on
- * screen: the Markdown is drawn with `MessageBody`'s `wrapAnywhere`, so a
- * code block or a table wraps too instead of scrolling sideways); the run's
- * Event log, which is not an approval surface, cuts its one-line rows with
- * an ellipsis.
+ * across two lines. The palette's Approve row, the Always-allow toast, a
+ * candidate's "would replace “…”" copy and its rendered Markdown take the
+ * plain-text form, which wraps like any other text and can break inside an
+ * escape (every character stays on screen: the Markdown is drawn with
+ * `MessageBody`'s `wrapAnywhere`, so a code block or a table wraps too
+ * instead of scrolling sideways); the run's Event log, which is not an
+ * approval surface, cuts its one-line rows with an ellipsis.
  */
 
 import table from "./hidden-chars.json";
