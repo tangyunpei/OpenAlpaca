@@ -2597,15 +2597,18 @@ struct WrittenNote {
 /// One flush (design 09 §7.2): what `flush_session` reported, its latency,
 /// and the notes its bus events say it wrote. A flush that stops `BadOutput`
 /// is flushed again, up to the product's `MAX_ATTEMPTS` flushes (the L8 fix
-/// slice's H2), and the record covers every attempt: its counts, tokens and
-/// latency summed, its `stopped` the last attempt's.
+/// slice's H2) — a `turns` flush excepted, whose held window the session's
+/// next flush retries ([`retried_at_once`]) — and the record covers every
+/// attempt: its counts, tokens and latency summed, its `stopped` the last
+/// attempt's.
 #[derive(Debug, Clone, Serialize)]
 struct FlushRecord {
     session: String,
     /// `turns` | `switch` | `replay` | `forced_rerun`.
     label: &'static str,
     latency_ms: u64,
-    /// `flush_session` calls this trigger made: 1, or up to `MAX_ATTEMPTS`.
+    /// `flush_session` calls this trigger made: 1 (always, for `turns`), or
+    /// up to `MAX_ATTEMPTS`.
     attempts: usize,
     /// Each attempt's `stopped`, in order.
     attempt_stops: Vec<Option<String>>,
@@ -2788,8 +2791,9 @@ fn drain_memory_changes(
 /// The attempts a trigger's flush makes (the L8 fix slice's H2): one, then
 /// again while an attempt stops `BadOutput`, up to the product's
 /// `MAX_ATTEMPTS` — what the production queue's retries of a held window
-/// come to (ruling LR20), with no backoff: `Manual` mode waits for nothing.
-/// The request is the same each time; nothing perturbs it.
+/// that cannot grow come to (ruling LR20), with no backoff: `Manual` mode
+/// waits for nothing. Not for a `turns` flush ([`retried_at_once`]). The
+/// request is the same each time; nothing perturbs it.
 async fn with_retries<R>(
     mut attempt: impl AsyncFnMut() -> R,
     stopped: impl Fn(&R) -> Option<openalpaca_core::memory::learning::FlushStop>,
@@ -2806,9 +2810,23 @@ async fn with_retries<R>(
     }
 }
 
+/// Whether a flush of this label that stops `BadOutput` is flushed again at
+/// once ([`with_retries`]): every label but `turns` (repair round 1 of the
+/// L8 fix slice). A `turns` flush's window is held, as production holds it
+/// under a doubling backoff (60 s first) — and mid-conversation production's
+/// next attempt reads that window grown by the turns since — so the
+/// session's next flush, a `turns` or its `switch`, is its retry: the queue
+/// counts that flush's attempts on from the held one (ruling LR20, per
+/// cursor position). A `switch`, `replay`, summary or forced re-run window
+/// has no later turns to grow by: a daemon's retries of it read the same
+/// window, which is what an immediate retry reads.
+fn retried_at_once(label: &str) -> bool {
+    label != FLUSH_TURNS
+}
+
 /// `flush_session`, with the bus subscribed around it (design 09 §7.2,
-/// *Counting the two learning paths*), and flushed again while it stops
-/// `BadOutput` ([`with_retries`]).
+/// *Counting the two learning paths*), and — but for a `turns` flush —
+/// flushed again while it stops `BadOutput` ([`retried_at_once`]).
 async fn flush_one(
     queue: &openalpaca_core::memory::learning::LearningQueue,
     bus: &openalpaca_core::bus::EventBus,
@@ -2818,7 +2836,11 @@ async fn flush_one(
 ) -> FlushRecord {
     let mut rx = bus.subscribe();
     let t0 = Instant::now();
-    let attempts = with_retries(|| queue.flush_session(session_id), |r| r.stopped).await;
+    let attempts = if retried_at_once(label) {
+        with_retries(|| queue.flush_session(session_id), |r| r.stopped).await
+    } else {
+        vec![queue.flush_session(session_id).await]
+    };
     let latency_ms = t0.elapsed().as_millis() as u64;
     let (written, lagged) = drain_memory_changes(&mut rx);
     let record =
@@ -8634,10 +8656,10 @@ fn first_row_item(prompt: &str) -> String {
     .to_string()
 }
 
-/// The L8 fix slice's H2: in `Manual` mode a flush that stops `BadOutput`
-/// is flushed again, up to the product's `MAX_ATTEMPTS` flushes, as the
-/// production queue retries a held window (ruling LR20) — each attempt
-/// recorded. A window answered usably on the second attempt is learned; one
+/// The L8 fix slice's H2: in `Manual` mode a `switch` flush that stops
+/// `BadOutput` is flushed again, up to the product's `MAX_ATTEMPTS` flushes,
+/// as the production queue retries a held window (ruling LR20) — each
+/// attempt recorded (a `turns` flush is not: the next test). A window answered usably on the second attempt is learned; one
 /// never answered usably is what production's third unusable answer does to
 /// it: skipped. Nothing perturbs the prompt: the retry is the same request.
 #[tokio::test(flavor = "multi_thread")]
@@ -8720,6 +8742,98 @@ async fn a_flush_that_stops_bad_output_is_flushed_again_up_to_max_attempts() {
     );
     assert_eq!(skipped.unusable_answers.len(), max);
     assert_eq!(answers.lock().unwrap().get("coffee"), Some(&max));
+}
+
+/// The extractor's unusable answer in the stub models below: prose, no JSON.
+const UNUSABLE_ANSWER: &str = "Let me think about which facts matter here.";
+
+/// The `<conversation>` section of an extraction prompt: the transcript
+/// alone, without the known notes.
+fn conversation_of(prompt: &str) -> String {
+    prompt
+        .split("<conversation>")
+        .nth(1)
+        .and_then(|rest| rest.split("</conversation>").next())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A fixture session of `n` user turns: `explicit` at turn 0, `last` at the
+/// last, noise between.
+fn long_fixture_session(id: &str, n: usize, explicit: &str, last: &str) -> CorpusSession {
+    let turns: Vec<(String, TurnMode)> = (0..n)
+        .map(|i| match i {
+            0 => (explicit.to_string(), TurnMode::Explicit),
+            i if i + 1 == n => (last.to_string(), TurnMode::Explicit),
+            i => (format!("Noise turn {i}."), TurnMode::Noise),
+        })
+        .collect();
+    let turns: Vec<(&str, TurnMode)> = turns.iter().map(|(t, m)| (t.as_str(), *m)).collect();
+    fixture_session(id, &turns)
+}
+
+/// Repair round 1 of the L8 fix slice (the tests review's F1, the fidelity
+/// review's F2): a `turns` flush that stops `BadOutput` is **not** flushed
+/// again at once. Production holds the window under a doubling backoff (60 s
+/// first), so mid-conversation its next attempt reads the window grown; the
+/// harness's stand-in is the session's next flush — here its switch — whose
+/// attempts the queue counts on from the held one (ruling LR20: per cursor
+/// position). The stub answers as a model at temperature 0 did in L8: the
+/// same window, the same unusable answer; the grown one, a usable answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turns_window_held_on_an_unusable_answer_is_read_grown_by_the_next_flush() {
+    let (router, _stub) = stub_router(&[TEST_MODEL], |request| {
+        let prompt = prompt_of(request);
+        if !prompt.contains("You are the memory extractor") {
+            return "Noted.".to_string();
+        }
+        if conversation_of(&prompt).contains("blue bike") {
+            first_row_item(&prompt)
+        } else {
+            UNUSABLE_ANSWER.to_string()
+        }
+    });
+    let run = OfflineRun::new(router);
+    let per_flush = run.turns_per_flush as usize;
+    let session = long_fixture_session(
+        "cs-t51",
+        per_flush + 2,
+        "I keep my bike in locker 42.",
+        "One more thing: it is a blue bike.",
+    );
+    let fed = run.learner().feed(&[&session], true).await;
+    let [turns, switch] = &fed.flushes[..] else {
+        panic!("a turns flush and a switch flush: {:?}", fed.flushes);
+    };
+    assert_eq!(
+        (
+            turns.label,
+            turns.attempts,
+            turns.calls,
+            turns.skipped_unusable,
+            turns.stopped.as_deref()
+        ),
+        (FLUSH_TURNS, 1, 1, 0, Some("BadOutput")),
+        "the held window waits for the session's next flush: {turns:?}"
+    );
+    assert_eq!(
+        (
+            switch.label,
+            switch.attempts,
+            switch.calls,
+            switch.stored,
+            switch.skipped_unusable,
+            switch.stopped.as_deref()
+        ),
+        (FLUSH_SWITCH, 1, 1, 1, 0, None),
+        "the switch reads the grown window: {switch:?}"
+    );
+    let first_row = fed.transcript[0].user_rows[0];
+    let learned = dump_learned(&run.service, &run.ctx()).unwrap();
+    assert!(
+        learned.iter().any(|n| n.cites_row(first_row)),
+        "the held rows were read, the first turn learned: {learned:?}"
+    );
 }
 
 /// H2 for a conversation summary: a summary flush that stops `BadOutput`

@@ -331,10 +331,16 @@ printed as `!! WARNING` at the head of the summary block), as it does for a
 fed turn that ended in an error (`learning.cost.feed_turn_errors`).
 
 **A flush whose answer is unusable is flushed again**, as the production
-queue retries a held window (ruling LR20): a `turns`, `switch`, `replay`,
-summary or forced re-run flush that stops `BadOutput` is flushed again, up
-to the product's `MAX_ATTEMPTS` flushes (three), at once — `Manual` mode
-waits out no backoff — with the same request. Each flush record covers all
+queue retries a held window (ruling LR20): a `switch`, `replay`, summary or
+forced re-run flush that stops `BadOutput` is flushed again, up to the
+product's `MAX_ATTEMPTS` flushes (three), at once — `Manual` mode waits out
+no backoff — with the same request. **A `turns` flush is not**: production
+holds its window under a doubling backoff (60 s first), so in a
+conversation that goes on its next attempt reads the window grown, and the
+harness's stand-in is the session's next flush (the next `turns`, or its
+`switch`), whose attempts the queue counts on from the held one — in L8,
+three `turns` windows that stopped `BadOutput` were read cleanly, grown, by
+their session's `switch`. Each flush record covers all
 its attempts: `attempts`, `attempt_stops` (each attempt's stop), the counts
 and tokens summed, `stopped` the last attempt's, and `unusable_answers`, each
 answer the queue could not use with its reason (`cut at max_tokens (<n>)`
@@ -343,9 +349,10 @@ otherwise), its length, its finish reason and its first and last 400
 characters — kept in the report only, never persisted by the product. The
 third unusable answer skips the window, as in production. Read the retries
 honestly: at temperature 0 the same prompt mostly fails the same way again
-(L8's sceptics: 13 of 13 same-prompt pairs gave the same outcome), so a
-retry mirrors what a daemon does to such a window — it does not rescue it —
-and nothing perturbs the prompt to make it pass.
+(L8's sceptics: 13 of 13 same-prompt pairs gave the same outcome), so an
+immediate retry mirrors what a daemon does to a window that cannot grow —
+a finished session's — and does not rescue it; nothing perturbs the prompt
+to make it pass.
 
 Then learning is switched off and the questions are asked as D asks them. The bus is read around every flush and every turn, so the
 report counts the two learning paths apart: `extraction` (the flushes) and
