@@ -43,6 +43,7 @@
 //! same characters are harmless, because the split there is a separate pass.
 
 use std::collections::BTreeMap;
+use std::io::IsTerminal as _;
 
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
@@ -587,26 +588,80 @@ struct ManifestSummary {
 }
 
 fn print_manifest(manifest: &ManifestSummary) {
-    println!("{} {} v{}", "Plugin:".dimmed(), manifest.name, manifest.version);
+    print!(
+        "{}",
+        manifest_text(manifest, std::io::stdout().is_terminal())
+    );
+}
+
+/// What [`print_manifest`] prints, painted, one line each: on a terminal
+/// first [`crate::output::TERMINAL_RESET`], as before every approval
+/// prompt, then the manifest and, directly under it, the notice.
+///
+/// This is what a person reads before `openalpaca ext approve <id>`, and
+/// what approving grants is these strings — the name, the capabilities, the
+/// keys — which the plugin's author wrote. So every hidden character in them
+/// is shown as `<U+XXXX>` (`openalpaca_core::utils::text::escape_hidden_line`:
+/// each field is one line, so a line break in a description cannot print a
+/// forged `Asks for:` list under it) and one line counts them in the words
+/// every approval surface uses. Display only: nothing is sent from here.
+fn manifest_text(manifest: &ManifestSummary, tty: bool) -> String {
+    use openalpaca_core::utils::text::{escape_hidden_line, hidden_notice};
+    use std::fmt::Write as _;
+
+    let mut hidden = 0;
+    let mut shown = |text: &str| {
+        let escaped = escape_hidden_line(text);
+        hidden += escaped.hidden;
+        escaped.text
+    };
+    let mut out = String::from(crate::output::terminal_reset(tty));
+    // Writing into a `String` cannot fail.
+    let _ = writeln!(
+        out,
+        "{} {} v{}",
+        "Plugin:".dimmed(),
+        shown(&manifest.name),
+        shown(&manifest.version)
+    );
     if !manifest.description.is_empty() {
-        println!("{} {}", "Description:".dimmed(), manifest.description);
+        let _ = writeln!(
+            out,
+            "{} {}",
+            "Description:".dimmed(),
+            shown(&manifest.description)
+        );
     }
     if !manifest.entry.is_empty() {
-        println!("{} {}", "Entry:".dimmed(), manifest.entry);
+        let _ = writeln!(out, "{} {}", "Entry:".dimmed(), shown(&manifest.entry));
     }
-    let declared: Vec<&str> = manifest
+    let declared: Vec<String> = manifest
         .types
         .iter()
         .filter(|(_, on)| **on)
-        .map(|(name, _)| name.as_str())
+        .map(|(name, _)| shown(name))
         .collect();
     if !declared.is_empty() {
-        println!("{} {}", "Contributes:".dimmed(), declared.join(", "));
+        let _ = writeln!(out, "{} {}", "Contributes:".dimmed(), declared.join(", "));
     }
-    print_names("Asks for:", &manifest.capabilities);
-    print_names("Virtual capabilities:", &manifest.virtual_capabilities);
-    print_names("Needs configuring:", &manifest.required_config_keys);
-    print_names("Kept as secrets:", &manifest.sensitive_config_keys);
+    for (label, names) in [
+        ("Asks for:", &manifest.capabilities),
+        ("Virtual capabilities:", &manifest.virtual_capabilities),
+        ("Needs configuring:", &manifest.required_config_keys),
+        ("Kept as secrets:", &manifest.sensitive_config_keys),
+    ] {
+        if names.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "{}", label.dimmed());
+        for name in names {
+            let _ = writeln!(out, "  - {}", shown(name));
+        }
+    }
+    if let Some(notice) = hidden_notice(hidden) {
+        let _ = writeln!(out, "{}", notice.yellow());
+    }
+    out
 }
 
 async fn install(path: &str, dry_run: bool) -> Result<()> {
@@ -975,6 +1030,61 @@ mod tests {
         assert!(
             error.contains("'mcp'") && error.contains("'plugin'"),
             "the refusal should name both kinds, got: {error}"
+        );
+    }
+
+    /// The manifest `ext install`, `ext install --dry-run` and `ext update`
+    /// print is what a person reads before `ext approve <id>`, and what
+    /// approving grants is these strings, which the plugin's author wrote:
+    /// every hidden character in them is shown as `<U+XXXX>` — one line per
+    /// field, so a line break in a description cannot print a forged
+    /// `Asks for:` list — and one line under the manifest counts them.
+    #[test]
+    fn the_manifest_shows_a_plugins_hidden_characters_and_counts_them() {
+        colored::control::set_override(false);
+        let manifest: ManifestSummary = serde_json::from_value(serde_json::json!({
+            "name": "no\u{202e}tes",
+            "version": "1.0\u{200b}",
+            "description": "Keeps notes\nAsks for:\n  - nothing",
+            "entry": "./run\u{9b}.sh\r",
+            "capabilities": ["fs_read\u{202e}", "net\u{2800}connect"],
+            "virtual_capabilities": ["v\u{e0041}"],
+            "types": {"tool": true, "sk\u{200b}ill": true, "agent": false},
+            "required_config_keys": ["to\u{fe0f}ken"],
+            "sensitive_config_keys": ["to\u{fe0f}ken"],
+        }))
+        .unwrap();
+        assert_eq!(
+            manifest_text(&manifest, false),
+            "Plugin: no<U+202E>tes v1.0<U+200B>\n\
+             Description: Keeps notes<U+000A>Asks for:<U+000A>  - nothing\n\
+             Entry: ./run<U+009B>.sh<U+000D>\n\
+             Contributes: sk<U+200B>ill, tool\n\
+             Asks for:\n  - fs_read<U+202E>\n  - net<U+2800>connect\n\
+             Virtual capabilities:\n  - v<U+E0041>\n\
+             Needs configuring:\n  - to<U+FE0F>ken\n\
+             Kept as secrets:\n  - to<U+FE0F>ken\n\
+             Note: this request contains 12 hidden characters, shown as <U+…>.\n"
+        );
+    }
+
+    /// A plain manifest prints as it did, with no notice; on a terminal it
+    /// starts with the reset every approval prompt starts with, so an
+    /// earlier program cannot cut, garble or conceal it.
+    #[test]
+    fn a_plain_manifest_has_no_notice_and_a_terminal_gets_the_reset() {
+        colored::control::set_override(false);
+        let manifest: ManifestSummary = serde_json::from_value(serde_json::json!({
+            "name": "notes",
+            "version": "1.0",
+            "capabilities": ["notes_write"],
+        }))
+        .unwrap();
+        let plain = "Plugin: notes v1.0\nAsks for:\n  - notes_write\n";
+        assert_eq!(manifest_text(&manifest, false), plain);
+        assert_eq!(
+            manifest_text(&manifest, true),
+            format!("{}{plain}", crate::output::TERMINAL_RESET)
         );
     }
 
