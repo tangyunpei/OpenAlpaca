@@ -1877,14 +1877,17 @@ async fn the_preview_counts_what_the_suggestions_card_counts() {
 /// the suggestion's at 4 KiB, and a cut on a surface someone decides on
 /// says how much it left out (A6): the wire carries, beside each served
 /// text, how many characters of the Knowledge section its cut left out —
-/// 0 when it is whole — for the card to print.
+/// 0 when it is whole — for the card to print. Both texts hold a
+/// three-byte character in every word, so a count of the bytes the cut left
+/// out (about 1.3 times the characters here, three times for CJK prose)
+/// fails where the card's "N more characters" would overstate.
 #[test]
 fn a_suggestion_says_how_much_its_served_texts_leave_out() {
     let h = Harness::new();
-    let long = "word ".repeat(200);
+    let long = "word \u{8A9E} ".repeat(100);
     let target = h.user_note(ALICE, "Long", &format!("# Long\n\n## Knowledge\n{long}\n"));
     let row = typed_row(&h, "Replace it.", "2026-09-24 10:00:00");
-    let knowledge = format!("New {}", "text ".repeat(1000));
+    let knowledge = format!("New {}", "text \u{8A9E} ".repeat(500));
     let s = suggestion_for(
         &h,
         (target.0, &target.1),
@@ -1905,18 +1908,15 @@ fn a_suggestion_says_how_much_its_served_texts_leave_out() {
     let excerpt = item["target"]["excerpt"].as_str().unwrap();
     let whole = long.trim_end();
     assert!(whole.len() > 600 && excerpt.len() <= 600);
-    assert_eq!(
-        item["target"]["excerpt_left_out"],
-        whole.chars().count() - excerpt.chars().count(),
-        "{item}"
-    );
+    let left_out = whole.chars().count() - excerpt.chars().count();
+    assert_ne!(left_out, whole.len() - excerpt.len(), "the unit is pinned");
+    assert_eq!(item["target"]["excerpt_left_out"], left_out, "{item}");
     let served = item["knowledge"].as_str().unwrap();
-    assert!(served.len() <= 4096);
-    assert_eq!(
-        item["knowledge_left_out"],
-        knowledge.trim_end().chars().count() - served.chars().count(),
-        "{item}"
-    );
+    let whole = knowledge.trim_end();
+    assert!(whole.len() > 4096 && served.len() <= 4096);
+    let left_out = whole.chars().count() - served.chars().count();
+    assert_ne!(left_out, whole.len() - served.len(), "the unit is pinned");
+    assert_eq!(item["knowledge_left_out"], left_out, "{item}");
 
     // Whole texts leave nothing out.
     let short = h.user_note(ALICE, "Short", "# Short\n\n## Knowledge\nBus.\n");
