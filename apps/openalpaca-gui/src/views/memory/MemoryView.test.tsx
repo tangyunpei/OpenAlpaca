@@ -1494,6 +1494,45 @@ describe("the Memory view", () => {
   });
 
   /**
+   * A candidate that would replace a note quotes that note's title in its
+   * copy — text the owner reads before Replace — so it is escaped (the
+   * plain-text form) and counted with the candidate's own title and text.
+   */
+  it("shows the title a candidate would replace escaped, and counts it", async () => {
+    note({ id: "n-1", title: "My\u202E commute" });
+    note({
+      id: "n-2",
+      title: "Commute",
+      body: "The user cycles\u200B.\n",
+      status: "candidate",
+      origin: "extracted_user",
+      supersedes: ["n-1"],
+    });
+    renderView();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Candidates" }));
+    const list = await screen.findByRole("list", { name: "Notes" });
+    await user.click(
+      await within(list).findByRole("button", { name: "Commute" }),
+    );
+    const heading = await screen.findByRole("heading", {
+      name: "Commute",
+      level: 2,
+    });
+    const detail = heading.closest("section");
+    if (detail === null) throw new Error("no detail");
+    await waitFor(() =>
+      expect(detail).toHaveTextContent(
+        "From what you said — would replace “My<U+202E> commute”.",
+      ),
+    );
+    expect(detail.textContent).not.toMatch(PLANTED);
+    expect(detail).toHaveTextContent(
+      "Note: this request contains 2 hidden characters, shown as <U+…>.",
+    );
+  });
+
+  /**
    * Only where a decision is offered: a note that is already the owner's is
    * read as written — a joiner or a right-to-left mark can be its content.
    */
