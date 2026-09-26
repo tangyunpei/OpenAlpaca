@@ -15,9 +15,11 @@
  * This is the GUI's copy of `openalpaca_core::utils::text`'s escape
  * (`needs_escape`, `escape_hidden`, `needs_escape_in_line`,
  * `escape_hidden_line`, `hidden_notice`), which the chat connectors and the
- * CLI show. Both are derived from one table, `hidden-chars.json` beside this
- * file: this module reads its sets from it, and a test on each side holds
- * that side to every range, case, line case and notice in it.
+ * CLI show. One table, `hidden-chars.json` beside this file, serves both
+ * languages: the Rust side's predicates are its own, pinned to Unicode, and
+ * a test that reads this file holds them equal to every range, case, line
+ * case and notice in it; this module derives its sets from the table, and
+ * its own test holds it to the same entries.
  *
  * - **The arguments** take `escapeHidden`: `\n` and `\t` stay, because the
  *   pretty-printed JSON is laid out in them, and `JSON.stringify` has already
