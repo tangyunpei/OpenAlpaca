@@ -32,16 +32,19 @@
 //! [`needs_escape`]: what one drops the other shows.
 //! A one-line field — the tool's name, the agent's id — takes
 //! [`escape_hidden_line`], which shows a newline and a tab as well: the
-//! pretty-printed arguments are laid out in lines, a name is not. A model's or a tool's own text the CLI
-//! prints at a terminal — not an approval surface, but printed where the
-//! next prompt will be: a streamed answer and its reasoning, a delegated
-//! run's result, a resumed conversation's turns, a failed turn's message —
-//! takes [`escape_controls`], the same form for the control characters
+//! pretty-printed arguments are laid out in lines, a name is not. A model's
+//! or a tool's own text `openalpaca chat` prints at a terminal — not an
+//! approval surface, but printed where the next prompt will be: a streamed
+//! answer and its reasoning, a delegated run's result, a resumed
+//! conversation's turns, a failed turn's message, the usage line's model
+//! id — takes [`escape_controls`], the same form for the control characters
 //! alone, so it cannot leave the terminal in a state the prompt inherits.
-//! The CLI's JSON output (`tasks confirmations list --format json`, the
-//! payloads of `tasks log`) is the one other rendering of the escape: it
-//! writes the [`needs_escape_in_line`] set in JSON's own lossless `\u`
-//! form, reading this predicate rather than keeping a copy of the set.
+//! (Other CLI listings — `tasks status`, `tasks log`'s title and summary
+//! lines — still print a run's stored text as it comes.) The CLI's JSON
+//! output (`tasks confirmations list --format json`, a `tasks log` detail
+//! printed as JSON) is the one other rendering of the escape: it writes the
+//! [`needs_escape_in_line`] set in JSON's own lossless `\u` form, reading
+//! this predicate rather than keeping a copy of the set.
 //! The GUI mirrors the escape from one shared table,
 //! `apps/openalpaca-gui/src/lib/hidden-chars.json`, which a test here holds
 //! equal to [`needs_escape`] and [`needs_escape_in_line`] over every scalar

@@ -84,15 +84,19 @@ pub fn status_color(status: &str) -> ColoredString {
 /// elsewhere on the screen (resetting a scroll region moves the cursor), and
 /// palette colours changed with OSC 4, 10 or 11 (resetting them, OSC 104,
 /// 110 and 111, would also throw away a theme the person set at run time —
-/// base16-shell, say — at every prompt). None of it can come from what
+/// base16-shell, say — at every prompt). Nor is the encoding: a terminal
+/// another program switched out of UTF-8 (`ESC % @`, which the Linux console
+/// and a permissive xterm honour) reads the prompt's non-ASCII bytes one by
+/// one, so a continuation byte 0x9B is a CSI there; this reset selects the
+/// G0 character set, not UTF-8 (`ESC % G`). None of it can come from what
 /// `openalpaca chat` prints of the model's or a tool's text, or of a
 /// provider's model id: the answer, its reasoning, a delegated run's result,
 /// a resumed conversation's turns, a failed turn's message and the usage
 /// line's model (the REPL's `/models` too) all reach a terminal through
-/// `escape_controls` (`chat_stream::model_text`). What is left is other output in that
-/// terminal: other programs', and CLI listings that print stored or
-/// third-party text as it comes — `tasks log` and `tasks status` print a
-/// run's title, summary or waiting tool that way.
+/// `escape_controls` (`chat_stream::model_text`). What is left is other
+/// output in that terminal: other programs', and CLI listings that print
+/// stored or third-party text as it comes — `tasks log` and `tasks status`
+/// print a run's title, summary or waiting tool that way.
 pub const TERMINAL_RESET: &str = "\u{f}\u{1b}(B\u{1b}[0m\u{1b}[4l\u{1b}[?7h";
 
 /// [`TERMINAL_RESET`] on a terminal, nothing on a pipe.
@@ -106,7 +110,8 @@ pub fn terminal_reset(tty: bool) -> &'static str {
 /// set (`openalpaca_core::utils::text::needs_escape_in_line`) in JSON's own
 /// lossless form rather than `<U+XXXX>`, so the document still reads back as
 /// exactly the daemon's values — `tasks confirmations list --format json`,
-/// and the payloads of `tasks log`. No notice: it would not be JSON.
+/// and a `tasks log` detail printed as JSON. No notice: it would not be
+/// JSON.
 ///
 /// Sound on `serde_json`'s output and only there: it writes JSON's structure
 /// in ASCII laid out with `\n` and spaces, and escapes every C0 control

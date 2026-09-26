@@ -227,10 +227,10 @@ fn listing(prompts: &[PendingPrompt], format: OutputFormat, tty: bool) -> String
 
 /// A prompt's tool-controlled text as a person is shown it: the tool's name
 /// and the agent's id on one line each (`escape_hidden_line`, which also
-/// shows a line break and a tab), the arguments
-/// serialized on one line and then escaped (`escape_hidden`). The name comes
-/// from a third party (an MCP `<server>__<tool>` or plugin `<plugin>::<tool>`
-/// name), the id from a template, the arguments from the model.
+/// shows a line break and a tab), the arguments serialized on one line and
+/// then escaped (`escape_hidden`). The name comes from a third party (an MCP
+/// `<server>__<tool>` or plugin `<plugin>::<tool>` name), the id from a
+/// template, the arguments from the model.
 struct EscapedPrompt {
     name: Escaped,
     agent: Option<Escaped>,
