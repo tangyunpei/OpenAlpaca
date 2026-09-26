@@ -986,9 +986,14 @@ fn assert_clean(text: &str) {
     assert!(!text.contains('\u{200b}'), "a zero-width space: {text:?}");
 }
 
+/// The same title as a suggestion's line shows it: every hidden character
+/// as its code point, nothing dropped.
+const ESCAPED: &str = "Evil<U+001B>[2J <U+202E>eltit<U+202C> ti<U+200B>tle";
+
 /// The lines a person decides from — a suggestion to confirm or keep, a
 /// note to forget or undo, what a confirm replaced — carry a note's title
-/// and the suggestion's reason with no escape or format character.
+/// and the suggestion's reason with no escape or format character: the
+/// suggestion's line shows each as `<U+XXXX>`, the others drop them.
 #[test]
 fn the_decision_lines_carry_no_escape_or_format_character() {
     let item = serde_json::json!({
@@ -1003,7 +1008,11 @@ fn the_decision_lines_carry_no_escape_or_format_character() {
     assert_clean(&line);
     assert!(!line.contains('\u{7}'), "{line:?}");
     assert!(
-        line.contains(&format!("replace “{SHOWN}” (saved by you) → “{SHOWN}”")),
+        line.contains(&format!("replace “{ESCAPED}” (saved by you) → “{ESCAPED}”")),
+        "{line}"
+    );
+    assert!(
+        line.contains(&format!("— Because <U+001B>]0;owned<U+0007>{ESCAPED}")),
         "{line}"
     );
 
@@ -1080,7 +1089,7 @@ fn show_prints_no_escape_sequence() {
     note["body"] = serde_json::json!(format!(
         "# Build\n\nRun \u{1b}[2Jthe checks\u{9b}31m.\n\u{202e}right-to-left\u{202c}\n"
     ));
-    let text = note_text(&note);
+    let text = note_text(&note, false);
     assert!(!text.contains("\u{1b}[2J"), "{text:?}");
     assert!(!text.contains('\u{9b}'), "a C1 control: {text:?}");
     let (head, body) = text.split_once("\n\n").unwrap();
@@ -1089,6 +1098,139 @@ fn show_prints_no_escape_sequence() {
     assert!(
         body.ends_with("# Build\n\nRun [2Jthe checks31m.\n\u{202e}right-to-left\u{202c}\n"),
         "{body:?}"
+    );
+}
+
+// ── Hidden characters where the owner decides ──────────────────────────
+
+/// A suggestion is what `memory confirm <id>` makes the owner's, so its
+/// line shows every hidden character in the two titles and the reason as
+/// `<U+XXXX>` — dropped, the line would name a title the note does not have
+/// — each on one line, so a line break is shown too.
+#[test]
+fn a_suggestion_line_shows_hidden_characters_as_code_points() {
+    let item = serde_json::json!({
+        "id": SUGGESTION,
+        "title": "Com\u{200b}mute\u{fe0f}",
+        "reason": "Said\u{fffc} so\n.",
+        "origin": "extracted_user",
+        "created_at": "2026-09-25T10:00:00Z",
+        "observed_at": "2026-09-24T18:02:11Z",
+        "older_count": 0,
+        "target": { "id": TARGET, "title": "My\u{202e} commute", "origin": "user" },
+    });
+    assert_eq!(
+        suggestion_line(&item),
+        "b1c2d3e4  replace “My<U+202E> commute” (saved by you) → “Com<U+200B>mute<U+FE0F>”  from your words, 2026-09-24 — Said<U+FFFC> so<U+000A>."
+    );
+}
+
+/// Under each suggestion that holds any, one line counts its hidden
+/// characters — the titles and the reason the line shows, and both notes'
+/// texts it does not — and one line under the list says where those are
+/// shown. A clean suggestion gets no line. On a terminal the list starts
+/// with the reset every approval prompt starts with.
+#[test]
+fn the_suggestions_listing_counts_each_suggestions_hidden_characters() {
+    colored::control::set_override(false);
+    let odd = serde_json::json!({
+        "id": SUGGESTION,
+        "title": "Com\u{200b}mute",
+        "knowledge": "Cycles\u{2800} now.",
+        "reason": "Said so.",
+        "origin": "extracted_user",
+        "created_at": "2026-09-25T10:00:00Z",
+        "older_count": 0,
+        "target": {
+            "id": TARGET, "title": "My\u{202e} commute", "origin": "user",
+            "excerpt": "The\u{a0}bus.",
+        },
+    });
+    let clean = serde_json::json!({
+        "id": "c1c2d3e4-0000-4000-8000-000000000003",
+        "title": "Rice",
+        "knowledge": "Rice.",
+        "reason": null,
+        "origin": "extracted_user",
+        "created_at": "2026-09-25T10:00:00Z",
+        "older_count": 0,
+        "target": { "id": TARGET, "title": "Lunch", "origin": "user", "excerpt": "Noodles." },
+    });
+    let page = serde_json::json!({ "items": [odd, clean] });
+    let text = suggestions_text(&page, OutputFormat::Table, false);
+    assert_eq!(
+        text,
+        "b1c2d3e4  replace “My<U+202E> commute” (saved by you) → “Com<U+200B>mute”  from your words, 2026-09-25 — Said so.\n\
+         \x20 Note: this request contains 4 hidden characters, shown as <U+…>.\n\
+         c1c2d3e4  replace “Lunch” (saved by you) → “Rice”  from your words, 2026-09-25\n\
+         Each count includes both notes' texts, which this list does not print: `openalpaca memory show <id>` shows a suggestion's own with every hidden character as <U+XXXX>, and --format json prints both, each as a JSON \\u escape.\n\
+         Replace: openalpaca memory confirm <id>   Keep yours: openalpaca memory undo <id>\n"
+    );
+    assert_eq!(
+        suggestions_text(&page, OutputFormat::Table, true),
+        format!("{}{text}", crate::output::TERMINAL_RESET)
+    );
+    let quiet = serde_json::json!({ "items": [page["items"][1].clone()] });
+    assert!(
+        !suggestions_text(&quiet, OutputFormat::Table, false).contains("hidden"),
+        "a clean list says nothing about hidden characters"
+    );
+}
+
+/// `--format json` is a machine format: every hidden character is written
+/// as JSON's own `\u` escape, the document reads back as exactly the
+/// daemon's values, and there is neither a notice nor a reset.
+#[test]
+fn the_suggestions_json_writes_hidden_characters_as_json_escapes() {
+    let page = serde_json::json!({ "items": [{
+        "id": SUGGESTION,
+        "title": "Com\u{200b}mute",
+        "knowledge": "x\u{202e}y",
+        "target": { "title": "a\u{9b}b", "excerpt": "c\u{e0041}" },
+    }] });
+    let text = suggestions_text(&page, OutputFormat::Json, true);
+    assert!(
+        !text.contains(['\u{200b}', '\u{202e}', '\u{9b}', '\u{e0041}', '\u{1b}']),
+        "{text:?}"
+    );
+    assert!(text.contains("Com\\u200bmute"), "{text}");
+    assert!(!text.contains("<U+") && !text.contains("Note:"), "{text}");
+    let back: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, page);
+}
+
+/// `memory show` of a candidate is what a person reads before `memory
+/// confirm <id>`: its title, aliases, tags, fact key and text — the model's
+/// — show every hidden character as `<U+XXXX>` (a control character too, so
+/// nothing drives the terminal), and one line directly under the text
+/// counts them. On a terminal it starts with the reset.
+#[test]
+fn show_escapes_a_candidates_hidden_characters_and_counts_them() {
+    colored::control::set_override(false);
+    let mut note = suggestion_read(&[TARGET]);
+    note["effective_status"] = serde_json::json!("candidate");
+    note["title"] = serde_json::json!("Com\u{202e}mute");
+    note["frontmatter"]["aliases"] = serde_json::json!(["bi\u{200b}ke"]);
+    note["frontmatter"]["tags"] = serde_json::json!([]);
+    note["frontmatter"]["fact_key"] = serde_json::json!("commute.mode");
+    note["body"] = serde_json::json!(
+        "# Commute\n\n## Knowledge\nThe user\u{2800} cycles \u{1b}[2J\tdaily.\r\n"
+    );
+    let text = note_text(&note, false);
+    for raw in ['\u{202e}', '\u{200b}', '\u{2800}', '\u{1b}', '\r'] {
+        assert!(!text.contains(raw), "{raw:?} in {text:?}");
+    }
+    let (head, body) = text.split_once("\n\n").unwrap();
+    assert!(head.starts_with("Com<U+202E>mute\n"), "{head}");
+    assert!(head.contains("aliases bi<U+200B>ke"), "{head}");
+    assert_eq!(
+        body,
+        "# Commute\n\n## Knowledge\nThe user<U+2800> cycles <U+001B>[2J\tdaily.<U+000D>\n\
+         Note: this request contains 5 hidden characters, shown as <U+…>.\n"
+    );
+    assert_eq!(
+        note_text(&note, true),
+        format!("{}{text}", crate::output::TERMINAL_RESET)
     );
 }
 

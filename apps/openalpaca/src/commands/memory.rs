@@ -62,7 +62,9 @@ use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use colored::Colorize;
 use openalpaca_core::memory::service::{WorkspaceHint, resolve_project_root, wire};
-use openalpaca_core::utils::text::{is_hidden, one_line};
+use openalpaca_core::utils::text::{
+    escape_hidden, escape_hidden_line, hidden_notice, is_hidden, one_line,
+};
 use openalpaca_storage::memory_files::{
     self as files, ControlSnapshot, MoveSnapshotState, Note, NoteId, NoteKind, NoteSource,
     NoteStatus, Partition, SourceType,
@@ -77,7 +79,7 @@ use std::path::{Path, PathBuf};
 use super::persona::open_in_editor;
 use crate::chat_stream::encode_header_path;
 use crate::client::{DaemonClient, error_from_response};
-use crate::output::OutputFormat;
+use crate::output::{OutputFormat, json_with_hidden_escaped, terminal_reset};
 
 #[derive(Args)]
 pub struct MemoryArgs {
@@ -441,7 +443,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             if raw {
                 print!("{}", note_from_read(&note)?.serialize());
             } else {
-                print_note(&note);
+                print!("{}", note_text(&note, std::io::stdout().is_terminal()));
             }
             Ok(())
         }
@@ -579,25 +581,10 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             let page = api
                 .get(&format!("/v1/memories/suggestions?limit={limit}"))
                 .await?;
-            match format {
-                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&page)?),
-                OutputFormat::Table => {
-                    let items = page["items"].as_array().cloned().unwrap_or_default();
-                    if items.is_empty() {
-                        println!("{}", "No suggestions waiting.".dimmed());
-                    }
-                    for item in &items {
-                        println!("{}", suggestion_line(item));
-                    }
-                    if !items.is_empty() {
-                        println!(
-                            "{}",
-                            "Replace: openalpaca memory confirm <id>   Keep yours: openalpaca memory undo <id>"
-                                .dimmed()
-                        );
-                    }
-                }
-            }
+            print!(
+                "{}",
+                suggestions_text(&page, format, std::io::stdout().is_terminal())
+            );
             Ok(())
         }
         MemoryCommands::Confirm { id, at } => {
@@ -907,6 +894,13 @@ fn target_origin_label(origin: &str) -> &str {
 
 /// One `openalpaca memory suggestions` line (design 09 §3.5):
 /// `<id8>  replace “X” (saved by you) → “B”  from your words, 2026-09-24 — <reason>`.
+///
+/// The line is what a person reads before `memory confirm <id>` makes the
+/// suggestion theirs, and the titles and the reason came from the model or
+/// a file: every hidden character in them is shown as `<U+XXXX>`
+/// (`escape_hidden_line` — each is one line of this one), never dropped,
+/// which would name a title the note does not have. [`suggestions_text`]
+/// counts them under the line.
 pub(crate) fn suggestion_line(item: &Value) -> String {
     let id: String = item["id"].as_str().unwrap_or("").chars().take(8).collect();
     let target = &item["target"];
@@ -930,18 +924,91 @@ pub(crate) fn suggestion_line(item: &Value) -> String {
     };
     let mut line = format!(
         "{id}  replace “{}” ({}) → “{}”  {whence}",
-        shown(&target["title"]),
+        escape_line(&target["title"]).text,
         target_origin_label(target["origin"].as_str().unwrap_or("")),
-        shown(&item["title"]),
+        escape_line(&item["title"]).text,
     );
     if let Some(reason) = item["reason"].as_str() {
-        line.push_str(&format!(" — {}", one_line(reason)));
+        line.push_str(&format!(" — {}", escape_hidden_line(reason).text));
     }
     match item["older_count"].as_u64() {
         Some(0) | None => {}
         Some(n) => line.push_str(&format!("  (+{n} older)")),
     }
     line
+}
+
+/// A string field of the daemon's answer through the one-line escape.
+fn escape_line(value: &Value) -> openalpaca_core::utils::text::Escaped {
+    escape_hidden_line(value.as_str().unwrap_or(""))
+}
+
+/// How many hidden characters one suggestion holds: the two titles and the
+/// reason its line shows, and both notes' texts, which it does not — the
+/// count the Memory view's Suggestions card shows beside all five.
+fn suggestion_hidden(item: &Value) -> usize {
+    let text = |value: &Value| escape_hidden(value.as_str().unwrap_or("")).hidden;
+    escape_line(&item["target"]["title"]).hidden
+        + escape_line(&item["title"]).hidden
+        + escape_line(&item["reason"]).hidden
+        + text(&item["knowledge"])
+        + text(&item["target"]["excerpt"])
+}
+
+/// Under the lines, once, when any suggestion was counted: its notice counts
+/// both notes' texts, which the list does not print, so this says where
+/// they are shown.
+const SUGGESTION_COUNTS_UNPRINTED: &str = "Each count includes both notes' texts, which this \
+     list does not print: `openalpaca memory show <id>` shows a suggestion's own with every \
+     hidden character as <U+XXXX>, and --format json prints both, each as a JSON \\u escape.";
+
+/// What `openalpaca memory suggestions` prints.
+///
+/// `--format json`: the daemon's page with every hidden character written
+/// as JSON's own `\u` escape ([`json_with_hidden_escaped`]), which reads
+/// back as exactly the daemon's values; no notice and no reset, as a
+/// machine format. The list: on a terminal first
+/// [`crate::output::TERMINAL_RESET`], as before an approval prompt — this
+/// is what a person reads before `memory confirm <id>` — then each
+/// [`suggestion_line`] and, directly under one that holds any hidden
+/// character, the notice counting them ([`suggestion_hidden`]).
+pub(crate) fn suggestions_text(page: &Value, format: OutputFormat, tty: bool) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    // Writing into a `String` cannot fail.
+    if matches!(format, OutputFormat::Json) {
+        let _ = writeln!(
+            out,
+            "{}",
+            json_with_hidden_escaped(&serde_json::to_string_pretty(page).unwrap_or_default())
+        );
+        return out;
+    }
+    out.push_str(terminal_reset(tty));
+    let items = page["items"].as_array().cloned().unwrap_or_default();
+    if items.is_empty() {
+        let _ = writeln!(out, "{}", "No suggestions waiting.".dimmed());
+        return out;
+    }
+    let mut counted = false;
+    for item in &items {
+        let _ = writeln!(out, "{}", suggestion_line(item));
+        if let Some(notice) = hidden_notice(suggestion_hidden(item)) {
+            let _ = writeln!(out, "  {}", notice.yellow());
+            counted = true;
+        }
+    }
+    if counted {
+        let _ = writeln!(out, "{}", SUGGESTION_COUNTS_UNPRINTED.dimmed());
+    }
+    let _ = writeln!(
+        out,
+        "{}",
+        "Replace: openalpaca memory confirm <id>   Keep yours: openalpaca memory undo <id>"
+            .dimmed()
+    );
+    out
 }
 
 /// What `confirm` did: the daemon's answer and, for a suggestion, the
@@ -1814,18 +1881,62 @@ fn timeline_lines(found: &Value) -> Vec<String> {
     lines
 }
 
-fn print_note(note: &Value) {
-    print!("{}", note_text(note));
-}
-
 /// What `memory show` prints: the header lines, a blank line, the body.
-fn note_text(note: &Value) -> String {
-    let mut out = String::new();
+///
+/// A **candidate** — a note waiting for `memory confirm <id>` — is text the
+/// model wrote that the person is deciding to keep, so on one every hidden
+/// character in the title, the aliases, the tags, the fact key and the body
+/// is shown as `<U+XXXX>` (the fields through `escape_hidden_line`, the body
+/// through `escape_hidden`, which keeps its lines and tabs), one line
+/// directly under the body counts them, and on a terminal the text starts
+/// with [`crate::output::TERMINAL_RESET`], as an approval prompt does. Any
+/// other note is the person's own reading: its fields go through `one_line`
+/// and its body through [`body_text`], as before.
+fn note_text(note: &Value, tty: bool) -> String {
+    let deciding = note["effective_status"]
+        .as_str()
+        .or(note["status"].as_str())
+        == Some("candidate");
+    let mut hidden = 0;
+    let mut field = |text: &str| -> String {
+        if deciding {
+            let escaped = escape_hidden_line(text);
+            hidden += escaped.hidden;
+            escaped.text
+        } else {
+            one_line(text)
+        }
+    };
+    let mut out = String::from(if deciding { terminal_reset(tty) } else { "" });
+    let title = field(note["title"].as_str().unwrap_or(""));
+    let fm = &note["frontmatter"];
+    let strings = |key: &str| -> Vec<String> {
+        fm[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    };
+    let aliases: Vec<String> = strings("aliases").iter().map(|a| field(a)).collect();
+    let tags: Vec<String> = strings("tags").iter().map(|t| field(t)).collect();
+    let fact_key = fm["fact_key"].as_str().map(&mut field);
+    let supersedes: Vec<String> = strings("supersedes").iter().map(|s| field(s)).collect();
+    let raw_body = note["body"].as_str().unwrap_or("");
+    let body = if deciding {
+        let escaped = escape_hidden(raw_body);
+        hidden += escaped.hidden;
+        escaped.text
+    } else {
+        body_text(raw_body)
+    };
+
     let mut line = |text: String| {
         out.push_str(&text);
         out.push('\n');
     };
-    line(shown(&note["title"]).bold().to_string());
+    line(title.bold().to_string());
     line(
         format!(
             "id {}  revision {}  {}/{}/{}  origin {}  freshness {}",
@@ -1840,21 +1951,9 @@ fn note_text(note: &Value) -> String {
         .dimmed()
         .to_string(),
     );
-    let fm = &note["frontmatter"];
-    let list = |key: &str| -> Vec<String> {
-        fm[key]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(one_line)
-            .collect()
-    };
-    let aliases = list("aliases");
-    let tags = list("tags");
     let mut facts = Vec::new();
-    if let Some(k) = fm["fact_key"].as_str() {
-        facts.push(format!("fact_key {}", one_line(k)));
+    if let Some(k) = fact_key {
+        facts.push(format!("fact_key {k}"));
     }
     if !aliases.is_empty() {
         facts.push(format!("aliases {}", aliases.join(", ")));
@@ -1891,7 +1990,6 @@ fn note_text(note: &Value) -> String {
             .to_string(),
         );
     }
-    let supersedes = list("supersedes");
     if !supersedes.is_empty() {
         line(
             format!("supersedes {}", supersedes.join(", "))
@@ -1920,9 +2018,12 @@ fn note_text(note: &Value) -> String {
         );
     }
     line(String::new());
-    let body = body_text(note["body"].as_str().unwrap_or(""));
     out.push_str(&body);
     if !body.ends_with('\n') {
+        out.push('\n');
+    }
+    if let Some(notice) = hidden_notice(hidden) {
+        out.push_str(&notice.yellow().to_string());
         out.push('\n');
     }
     if note["truncated"].as_bool().unwrap_or(false) {
