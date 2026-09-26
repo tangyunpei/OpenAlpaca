@@ -62,6 +62,12 @@ const OWNER_PREFIX: &str = "memory-eval-owner";
 /// The router-side agent id of the judge calls (cost accounting).
 const JUDGE_AGENT_ID: &str = "memory_eval_judge";
 const JUDGE_MAX_TOKENS: u32 = 400;
+/// The coverage judge's output cap (the L8 fix slice's H5): with thinking
+/// off the model deliberates in its answer, and at the QA judge's 400 every
+/// one of L8's unparsed coverage verdicts (25 of 492 calls) was a
+/// deliberation cut before its verdict line — the longest verdict that ended
+/// on its own was 367 tokens.
+const COVERAGE_JUDGE_MAX_TOKENS: u32 = 2048;
 const JUDGE_TEMPERATURE: f32 = 0.0;
 /// An answer longer than this is cut before it reaches the judge (bounds the
 /// judge's cost; the full answer is still in the report).
@@ -1414,6 +1420,9 @@ struct LearningConditions {
     summaries: bool,
     coverage_judge_prompt_path: String,
     coverage_judge_prompt_sha256: String,
+    /// The coverage judge's output cap (the L8 fix slice's H5); the QA
+    /// judge's is `conditions.judge_max_tokens`.
+    coverage_judge_max_tokens: u32,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -2060,6 +2069,7 @@ async fn judge_call(
     gate: &mut JudgeGate,
     agent_id: &str,
     prompt: &str,
+    max_tokens: u32,
 ) -> Result<JudgeReply, String> {
     use openalpaca_llm::{ChatMessage, RequestContext, RouterRequest, ThinkingConfig};
     let request = RouterRequest {
@@ -2067,7 +2077,7 @@ async fn judge_call(
         messages: Arc::new(vec![ChatMessage::user(prompt)]),
         tools: Arc::new(Vec::new()),
         temperature: Some(JUDGE_TEMPERATURE),
-        max_tokens: Some(JUDGE_MAX_TOKENS),
+        max_tokens: Some(max_tokens),
         context: RequestContext {
             agent_id: Some(agent_id.to_string()),
             task_id: None,
@@ -2106,7 +2116,7 @@ async fn judge(
     answer: &str,
 ) -> Result<JudgeOutcome, String> {
     let prompt = fill_judge_prompt(template, q, answer);
-    let reply = judge_call(router, gate, JUDGE_AGENT_ID, &prompt).await?;
+    let reply = judge_call(router, gate, JUDGE_AGENT_ID, &prompt, JUDGE_MAX_TOKENS).await?;
     Ok(JudgeOutcome {
         verdict: parse_verdict(&reply.raw),
         raw: reply.raw,
@@ -3571,6 +3581,16 @@ struct CoverageReport {
     share: Option<f64>,
     judge_tokens_in: u64,
     judge_tokens_out: u64,
+    // ── The verdicts that are no match, apart (the L8 fix slice's H5) ─────
+    /// The judge answered `NONE`: no note states the gold knowledge.
+    none: usize,
+    /// The judge's last line was no verdict: not a miss, an unread row.
+    unparsed: usize,
+    /// Of `unparsed`: the reply ran to `COVERAGE_JUDGE_MAX_TOKENS`, cut.
+    unparsed_cut_at_max_tokens: usize,
+    /// The search returned no note, so no call was made.
+    not_found: usize,
+    judge_errors: usize,
     /// `matched` by the writer of the note the judge chose (the L8 fix
     /// slice's H3). The judge names one note, so a gold note both paths
     /// learned counts once, for the note it named.
@@ -3684,7 +3704,15 @@ async fn measure_coverage(
                 None => row.verdict = "not_judged",
                 Some(gate) => {
                     let prompt = fill_coverage_prompt(template, note, &texts);
-                    match judge_call(router, gate, COVERAGE_JUDGE_AGENT_ID, &prompt).await {
+                    match judge_call(
+                        router,
+                        gate,
+                        COVERAGE_JUDGE_AGENT_ID,
+                        &prompt,
+                        COVERAGE_JUDGE_MAX_TOKENS,
+                    )
+                    .await
+                    {
                         Ok(reply) => {
                             row.verdict = match parse_coverage_verdict(&reply.raw, row.hits.len()) {
                                 CoverageVerdict::Match(k) => {
@@ -3726,12 +3754,21 @@ async fn measure_coverage(
             share: share(matched, rows.len()),
         }
     });
+    let count = |verdict: &str| rows.iter().filter(|r| r.verdict == verdict).count();
     CoverageReport {
         gold_notes: rows.len(),
         matched,
         share: (!rows.is_empty()).then(|| matched as f64 / rows.len() as f64),
         judge_tokens_in: rows.iter().map(|r| u64::from(r.judge_tokens_in)).sum(),
         judge_tokens_out: rows.iter().map(|r| u64::from(r.judge_tokens_out)).sum(),
+        none: count("none"),
+        unparsed: count("unparsed"),
+        unparsed_cut_at_max_tokens: rows
+            .iter()
+            .filter(|r| r.verdict == "unparsed" && r.judge_tokens_out >= COVERAGE_JUDGE_MAX_TOKENS)
+            .count(),
+        not_found: count("not_found"),
+        judge_errors: count("judge_error"),
         by_surface,
         rows,
     }
@@ -4963,6 +5000,7 @@ fn learning_conditions(
         summaries: false,
         coverage_judge_prompt_path: coverage_path.to_string_lossy().into_owned(),
         coverage_judge_prompt_sha256: coverage_sha256.to_string(),
+        coverage_judge_max_tokens: COVERAGE_JUDGE_MAX_TOKENS,
     }
 }
 
@@ -5845,7 +5883,7 @@ fn print_learning(l: &LearningResults) {
     let pct = |share: Option<f64>| format!("{:.1}%", share.unwrap_or(0.0) * 100.0);
     if let Some(c) = &l.coverage {
         println!(
-            "coverage: {}/{} ({}) — by path: extraction {} ({}), model_tool {} ({})",
+            "coverage: {}/{} ({}) — by path: extraction {} ({}), model_tool {} ({}); not matched: none {}, unparsed {} ({} cut at max_tokens), not found {}, judge errors {}",
             c.matched,
             c.gold_notes,
             pct(c.share),
@@ -5853,6 +5891,11 @@ fn print_learning(l: &LearningResults) {
             pct(c.by_surface.extraction.share),
             c.by_surface.model_tool.matched,
             pct(c.by_surface.model_tool.share),
+            c.none,
+            c.unparsed,
+            c.unparsed_cut_at_max_tokens,
+            c.not_found,
+            c.judge_errors,
         );
     }
     if let Some(correct) = l.changed_facts_correct {
@@ -8522,6 +8565,83 @@ async fn every_learning_measure_is_reported_by_surface() {
     assert_eq!(
         json["restatements_by_surface"]["extraction"]["nothing_written"],
         1
+    );
+}
+
+/// The L8 fix slice's H5: the coverage judge is not cut off before its
+/// verdict — L8's unparsed verdicts were all deliberations stopped at the
+/// 400-token cap (25 of 492 calls; the longest verdict that ended on its
+/// own was 367 tokens) — and an unparsed verdict is counted apart from a
+/// `none` in the totals, as it already is per note. The QA judge keeps its
+/// cap. The frozen prompt is unchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_coverage_judge_has_room_for_its_verdict_and_unparsed_is_apart_from_none() {
+    let (router, stub) = stub_router(&[TEST_MODEL], |request| {
+        let prompt = prompt_of(request);
+        let gold = prompt
+            .split("Gold note:")
+            .nth(1)
+            .unwrap_or_default()
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or_default()
+            .to_string();
+        if gold.contains("alpha") {
+            "The first note states it.\nMATCH 1".to_string()
+        } else if gold.contains("beta") {
+            "No note states it.\nNONE".to_string()
+        } else {
+            "Note [1] states half of it and note [2] the other half; if the gold is one fact"
+                .to_string()
+        }
+    });
+    let run = OfflineRun::new(router.clone());
+    let notes: Vec<GoldNote> = ["alpha", "beta", "gamma"]
+        .iter()
+        .map(|w| GoldNote {
+            title: format!("Quokkaberry {w}"),
+            body: format!("## Knowledge\nThe quokkaberry {w}.\n"),
+            ..gold(&format!("g-{w}"), &[])
+        })
+        .collect();
+    let seeded = seed_notes(&run.service, &run.owner, &run.project, &notes);
+    assert_eq!(seeded.seeded, 3, "{seeded:?}");
+    let mut gate = JudgeGate::new(judge_guard(&router, None, Some(TEST_MODEL), None).unwrap());
+    let template =
+        String::from_utf8(read_bytes(&eval_dir().join("coverage-judge-prompt.md"))).unwrap();
+    let gold: Vec<&GoldNote> = notes.iter().collect();
+    let report = measure_coverage(
+        &router,
+        Some(&mut gate),
+        &template,
+        &run.service,
+        &run.ctx(),
+        &gold,
+        &[],
+    )
+    .await;
+    let verdicts: Vec<&str> = report.rows.iter().map(|r| r.verdict).collect();
+    assert_eq!(
+        verdicts,
+        ["match", "none", "unparsed"],
+        "per note, as before"
+    );
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        (&json["matched"], &json["none"], &json["unparsed"]),
+        (
+            &serde_json::json!(1),
+            &serde_json::json!(1),
+            &serde_json::json!(1)
+        ),
+        "{json}"
+    );
+    let caps: Vec<Option<u32>> = stub.requests().iter().map(|r| r.max_tokens).collect();
+    assert_eq!(caps.len(), 3);
+    assert!(
+        caps.iter()
+            .all(|c| c.is_some_and(|c| c >= 2048 && c > JUDGE_MAX_TOKENS)),
+        "room for a verdict after the reasoning: {caps:?}"
     );
 }
 
