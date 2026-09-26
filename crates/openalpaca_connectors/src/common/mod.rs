@@ -155,9 +155,9 @@ pub fn format_confirmation_prompt(
 /// escaped on one line like the prompt's name
 /// (`openalpaca_core::utils::text::escape_hidden_line`). It carries no
 /// notice line: it repeats a name the prompt already showed and counted.
-/// When the broker no longer holds the request (it timed out, was
-/// cancelled, or was answered elsewhere — the GUI or `openalpaca tasks
-/// confirmations`), the acknowledgement names no tool. Which request a reply answers is
+/// When the broker no longer holds the request (it timed out, was cancelled,
+/// or was answered elsewhere — the GUI or `openalpaca tasks confirmations`),
+/// the acknowledgement names no tool. Which request a reply answers is
 /// unchanged: the oldest, by request id.
 ///
 /// Returns `None` when the text is not a confirmation command or the

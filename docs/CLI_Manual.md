@@ -712,26 +712,26 @@ Notes:
   `confirm`, `undo` and `forget` print, and an ambiguous id's list — is one
   line with no control character (an escape sequence), no Unicode format
   character (a bidi override, a zero-width character) and nothing else that
-  draws as nothing or as blank space (a variation selector, a braille blank,
-  an object replacement character, a code point Unicode has not assigned). `search`'s excerpt lines drop the
-  control and format characters too but keep their own spacing and tabs;
-  `show`'s body drops control characters only and keeps its line breaks, tabs
-  and format characters, since it is the note's whole text. `--raw` prints the
-  file unchanged.
+  draws as nothing or as blank space (a variation selector, a braille blank, an
+  object replacement character, a code point Unicode has not assigned).
+  `search`'s excerpt lines drop the control and format characters too but keep
+  their own spacing and tabs; `show`'s body drops control characters only and
+  keeps its line breaks, tabs and format characters, since it is the note's
+  whole text. `--raw` prints the file unchanged.
 - Where you decide, nothing is dropped: `suggestions` and `show` of a
   **candidate** (a note waiting for `confirm`) show every hidden or invisible
   character — a control or format character, a variation selector, any space
   but a plain one, a code point Unicode has not assigned, and in a title,
   alias, tag or reason also a line break or a tab — as `<U+XXXX>`, and a line
   counts them (`Note: this request contains 2 hidden characters, shown as
-  <U+…>.`): under each suggestion that holds any, and under a candidate's
-  text, where it counts the title, aliases, tags, fact key and text — as the
-  GUI's candidate detail does, which also counts the title of the note it
-  would replace. A suggestion's count includes both notes'
-  texts, which its line does not print, and one line under the list says so;
-  `show <id>` prints the suggestion's own, and `--format json` prints both, each
-  hidden character as a JSON `\u` escape. On a terminal both start with the
-  same reset as an approval prompt (see [Approval prompts](#approval-prompts)).
+  <U+…>.`): under each suggestion that holds any, and under a candidate's text,
+  where it counts the title, aliases, tags, fact key and text — as the GUI's
+  candidate detail does, which also counts the title of the note it would
+  replace. A suggestion's count includes both notes' texts, which its line does
+  not print, and one line under the list says so; `show <id>` prints the
+  suggestion's own, and `--format json` prints both, each hidden character as a
+  JSON `\u` escape. On a terminal both start with the same reset as an approval
+  prompt (see [Approval prompts](#approval-prompts)).
 - `add` saves a note **as you**: its origin is `user`, the highest authority, and a
   tool call can never edit, archive or replace it (the model can only *forget* it,
   under the ordinary confirmation card). The body is the last argument, `-` for

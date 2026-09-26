@@ -13,15 +13,14 @@
  *   sentence would name falls back to the raw `event_type` rather than to a
  *   plausible-looking phrase.
  * - **A tool is named as the approval card names it.** A tool's name is its
- *   third party's (an MCP `<server>__<tool>`, a plugin `<plugin>::<tool>`),
- *   and the prompt's own rows sit here beside the rest of the run: a bidi
- *   override, a zero-width space or a line break in it is shown as
- *   `<U+XXXX>` (`lib/hidden-chars`), in plain text since a row is a string.
- *   The CLI's `tasks log` escapes the same rows, as JSON `\u` escapes in its
- *   detail. A `security_violation`'s reason
- *   repeats the name, so it is escaped the same way; the rows' other fields
- *   (a span's label, progress narration, titles, model ids) are as they
- *   came.
+ *   third party's (an MCP `<server>__<tool>`, a plugin `<plugin>::<tool>`), and
+ *   the prompt's own rows sit here beside the rest of the run: a bidi override,
+ *   a zero-width space or a line break in it is shown as `<U+XXXX>`
+ *   (`lib/hidden-chars`), in plain text since a row is a string. The CLI's
+ *   `tasks log` escapes the same rows, as JSON `\u` escapes in its detail. A
+ *   `security_violation`'s reason repeats the name, so it is escaped the same
+ *   way; the rows' other fields (a span's label, progress narration, titles,
+ *   model ids) are as they came.
  * - **Nothing is silently dropped, except a known duplicate.** No daemon emits
  *   `dag_node_status` any more — P9 deleted the variant in Phase 8 (T53) — but
  *   rows an older one wrote still read back from `event_log`, and each mirrors

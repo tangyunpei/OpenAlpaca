@@ -497,10 +497,10 @@ fn check_revisions(expected_revision: &str, target_revision: &str) -> Result<(),
 /// the CLI prints this raw at a terminal, where an ESC sequence could rewrite
 /// what the person approves; a bidi override reorders it anywhere; and a
 /// variation selector, U+2800, U+FFFC or an unassigned code point draws as
-/// nothing or as blank space a run of which wraps) — cut to `max` bytes with an ellipsis when it was
-/// longer. Dropped, not escaped: the preview is OpenAlpaca's prose, a
-/// summary cut to a budget for reading, and the note's exact text, which
-/// the person may want to check, is in the Memory view and
+/// nothing or as blank space a run of which wraps) — cut to `max` bytes with
+/// an ellipsis when it was longer. Dropped, not escaped: the preview is
+/// OpenAlpaca's prose, a summary cut to a budget for reading, and the note's
+/// exact text, which the person may want to check, is in the Memory view and
 /// `openalpaca memory show`.
 fn one_line(text: &str, max: usize) -> String {
     one_line_of(text, false, max)

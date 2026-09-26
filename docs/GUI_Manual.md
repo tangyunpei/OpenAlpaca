@@ -362,22 +362,22 @@ starts or ends with a space or with a combining mark (an accent stored as a
 character of its own, which sits on the space before it and draws as a speck),
 is shown as JSON too, so its quotes show where it ends. DEL and the C1 controls
 (U+007F–U+009F), which JSON does not write out, leave a command bare and are
-shown as a highlighted `<U+XXXX>`. The composer's bar, the palette's `Approve
-pending …` row and the run card's `Waiting on you: …` name the tool the same
-way, and because they show only its name, they say when the request holds hidden
-characters anywhere and that its card shows them: `its card shows 2 hidden
-characters`. The row an answer leaves, the Always-allow toast and the run's
-Event log name the tool the same way with no count (the palette row, the toast
-and the Event log show the escape as plain text). The `From OpenAlpaca` text is
-the daemon's own and is shown as it wrote it: a summary cut short for reading,
-from which the daemon leaves out every hidden character of the titles, texts and
-reason it quotes, and when it left any out, its last line says how many: `This
-preview leaves out 2 hidden characters; the Memory view shows them as <U+…>.`
-(The suggestion's exact text is in the Memory view, which shows each one.) Only
-what you see changes: approving answers the request the daemon sent. Two things
-no escape changes: right-to-left letters inside a value can still reorder the
-digits and punctuation next to them, and a character that merely looks like
-another (a Cyrillic `а` for a Latin `a`) is shown as written.
+shown as a highlighted `<U+XXXX>`. The composer's bar, the palette's
+`Approve pending …` row and the run card's `Waiting on you: …` name the tool the
+same way, and because they show only its name, they say when the request holds
+hidden characters anywhere and that its card shows them: `its card shows 2
+hidden characters`. The row an answer leaves, the Always-allow toast and the
+run's Event log name the tool the same way with no count (the palette row, the
+toast and the Event log show the escape as plain text). The `From OpenAlpaca`
+text is the daemon's own and is shown as it wrote it: a summary cut short for
+reading, from which the daemon leaves out every hidden character of the titles,
+texts and reason it quotes, and when it left any out, its last line says how
+many: `This preview leaves out 2 hidden characters; the Memory view shows them
+as <U+…>.` (The suggestion's exact text is in the Memory view, which shows each
+one.) Only what you see changes: approving answers the request the daemon sent.
+Two things no escape changes: right-to-left letters inside a value can still
+reorder the digits and punctuation next to them, and a character that merely
+looks like another (a Cyrillic `а` for a Latin `a`) is shown as written.
 
 **A suggestion raised in chat.** When learning is waiting on a change to a
 note you saved (see *Suggestions* under the Memory view), the assistant may
@@ -790,25 +790,24 @@ In a chat, `/remember`, `/forget` and `/memories` do the same without leaving
 the conversation (see *Memory commands* under Chat); a note saved with
 `/remember` is yours, exactly as one added here.
 
-**Hidden characters where you decide.** The Suggestions card, a Recently
-learned row and a candidate's detail ask you to decide on text learning or a
-file wrote, so every hidden or invisible character in it — a bidi override, a
-zero-width or control character, a variation selector, any space but a plain
-one, an object replacement character, a code point Unicode has not assigned,
-and in a title or the reason also a line break or a tab — is shown as a highlighted `<U+XXXX>` (as plain
-`<U+XXXX>` in a candidate's rendered text and in the line naming the note it
-would replace), and a line under the texts counts them:
-`Note: this request contains 2 hidden characters, shown as <U+…>.` The card
-counts both titles, both texts and the reason; a row its title and the title
-of the note it replaced; a candidate its title, the title of the note it would
-replace, its text, and the aliases, tags and fact key Confirm adopts with it,
-which its Note tab shows under the text. A text holding an escape wraps at its edge — a
-candidate's code blocks included — rather than being cut or scrolling
-sideways, and a candidate's table is drawn as its rows, one wrapping line
-each with its cells joined by ` · ` and every cell kept, so no escape a count
-names is out of sight. Any other note
-is shown as written — a joiner or a right-to-left mark can be what it says —
-and so is the Raw tab, which is the editor. Replace, Keep mine, Confirm and
+**Hidden characters where you decide.** The Suggestions card, a Recently learned
+row and a candidate's detail ask you to decide on text learning or a file wrote,
+so every hidden or invisible character in it — a bidi override, a zero-width or
+control character, a variation selector, any space but a plain one, an object
+replacement character, a code point Unicode has not assigned, and in a title or
+the reason also a line break or a tab — is shown as a highlighted `<U+XXXX>` (as
+plain `<U+XXXX>` in a candidate's rendered text and in the line naming the note
+it would replace), and a line under the texts counts them: `Note: this request
+contains 2 hidden characters, shown as <U+…>.` The card counts both titles, both
+texts and the reason; a row its title and the title of the note it replaced; a
+candidate its title, the title of the note it would replace, its text, and the
+aliases, tags and fact key Confirm adopts with it, which its Note tab shows
+under the text. A text holding an escape wraps at its edge — a candidate's code
+blocks included — rather than being cut or scrolling sideways, and a candidate's
+table is drawn as its rows, one wrapping line each with its cells joined by
+` · ` and every cell kept, so no escape a count names is out of sight. Any other
+note is shown as written — a joiner or a right-to-left mark can be what it says
+— and so is the Raw tab, which is the editor. Replace, Keep mine, Confirm and
 Undo answer the note as read.
 
 An empty list says *"Nothing remembered yet. Ask Alpaca to remember something,
