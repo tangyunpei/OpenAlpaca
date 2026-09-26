@@ -33,7 +33,10 @@
  *
  * Display only: nothing sent to the daemon, stored or matched changes — the
  * card, the composer's answer and every POST body read the raw values. The
- * GUI does not cut an approval's text, so there is no cut here.
+ * GUI does not cut an approval's text, so there is no cut here: each surface
+ * that shows it wraps a run too long for its line anywhere
+ * (`overflow-wrap: anywhere`) rather than letting it run past an edge that
+ * clips it, and an escape itself is never split across two lines.
  */
 
 import table from "./hidden-chars.json";

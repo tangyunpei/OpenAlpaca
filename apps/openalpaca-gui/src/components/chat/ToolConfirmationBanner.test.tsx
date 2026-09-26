@@ -149,6 +149,30 @@ describe("ToolConfirmationBanner — hidden characters (§3.14)", () => {
     expect(section.textContent).not.toMatch(/hidden character/);
   });
 
+  /**
+   * A run with no break opportunity — a URL's query string, base64, a padded
+   * command — longer than the box used to run past its right edge, where an
+   * overlay scrollbar draws nothing: the tail, and any escape in it, was off
+   * screen while the notice still counted it. The card wraps such a run
+   * anywhere (`overflow-wrap` inherits, so this reaches the eyebrow, the box
+   * and the agent's name), and an escape is never split across two lines.
+   */
+  it("wraps a run too long for its line instead of running past the card's edge", () => {
+    const { section, escapes } = card({
+      toolName: `srv__${"x".repeat(80)}\u{200B}`,
+      toolArguments: {
+        url: `https://api.example.com/v1/export?session=${"a".repeat(120)}\u{202E}&dest=https%3A%2F%2Fevil.example`,
+      },
+      agentName: `agent_${"y".repeat(80)}\u{200B}`,
+    });
+
+    expect(section).toHaveClass("wrap-anywhere");
+    expect(escapes).toEqual(["<U+200B>", "<U+202E>", "<U+200B>"]);
+    for (const chip of section.querySelectorAll("[data-hidden-char]")) {
+      expect(chip).toHaveClass("whitespace-nowrap");
+    }
+  });
+
   it("lays the arguments out left to right, isolated from the card around them", () => {
     const { box } = card({
       toolName: "file_write",

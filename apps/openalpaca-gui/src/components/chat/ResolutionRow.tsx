@@ -51,7 +51,7 @@ export function ResolutionRow({
       <span className="shrink-0 font-mono text-2xs-plus tracking-eyebrow text-tertiary uppercase">
         {resolutionLabel(resolution)}
       </span>
-      <span className="flex-1 text-base-plus text-secondary">
+      <span className="min-w-0 flex-1 text-base-plus wrap-anywhere text-secondary">
         <EscapedText escaped={escapeHiddenLine(note)} />
       </span>
       {time !== null && (

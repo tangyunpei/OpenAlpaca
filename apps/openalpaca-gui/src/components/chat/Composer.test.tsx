@@ -185,6 +185,21 @@ describe("Composer — blocked state (§3.16a)", () => {
     expect(bar.querySelectorAll("[data-hidden-char]")).toHaveLength(3);
   });
 
+  /**
+   * A name with no break opportunity in it (escapes included: `<`, the hex
+   * and `>` do not break) longer than the bar ran past the transcript's edge.
+   * The bar wraps it anywhere instead, right above Approve.
+   */
+  it("wraps a tool name too long for the bar instead of running past it", () => {
+    setup({ blocked: true, pendingToolName: `srv__${"x".repeat(200)}` });
+    const bar = screen.getByText(
+      (_, node) =>
+        node?.tagName === "SPAN" &&
+        (node.textContent ?? "").endsWith(" is waiting on you"),
+    );
+    expect(bar).toHaveClass("min-w-0", "wrap-anywhere");
+  });
+
   it("disables the three answers while one is in flight", () => {
     setup({ blocked: true, answering: true });
     expect(screen.getByRole("button", { name: /Approve/ })).toBeDisabled();

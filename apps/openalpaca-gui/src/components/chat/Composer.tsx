@@ -260,7 +260,7 @@ export function Composer(props: ComposerProps) {
               aria-hidden
               className="animate-pulse-oa-fast block h-[6px] w-[6px] shrink-0 rounded-full bg-red"
             />
-            <span className="font-mono text-xs-plus tracking-label text-amber-ink">
+            <span className="min-w-0 font-mono text-xs-plus tracking-label wrap-anywhere text-amber-ink">
               {/* Right above Approve: the name as the card shows it. */}
               <EscapedText escaped={escapeHiddenLine(pendingToolName)} /> is
               waiting on you

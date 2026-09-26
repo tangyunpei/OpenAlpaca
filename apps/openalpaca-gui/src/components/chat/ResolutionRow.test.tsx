@@ -57,6 +57,19 @@ describe("ResolutionRow (§3.15)", () => {
     expect(note.querySelectorAll("[data-hidden-char]")).toHaveLength(3);
     expect(screen.queryByText(/hidden character/)).toBeNull();
   });
+
+  /** A name with no break opportunity wraps rather than run past the row. */
+  it("wraps a note too long for the row instead of running past it", () => {
+    render(
+      <ResolutionRow
+        resolution="denied"
+        note={pendingResolutionNote("denied", `srv__${"x".repeat(200)}`)}
+      />,
+    );
+    expect(
+      screen.getByText(/denied · the agent was told to skip it\./),
+    ).toHaveClass("min-w-0", "wrap-anywhere");
+  });
 });
 
 /**

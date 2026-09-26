@@ -174,6 +174,18 @@ describe("RunCard (§3.19)", () => {
     expect(line.querySelectorAll("[data-hidden-char]")).toHaveLength(3);
   });
 
+  /** A name with no break opportunity wraps; the card clips what overflows. */
+  it("wraps a tool name too long for the card instead of clipping it", () => {
+    card(
+      { status: "running", note: null },
+      { blocked: true, blockedOn: `srv__${"x".repeat(200)}` },
+    );
+    expect(screen.getByText(/Waiting on you:/)).toHaveClass(
+      "min-w-0",
+      "wrap-anywhere",
+    );
+  });
+
   it("hides the parallel-work block on a run that is not running or paused", () => {
     card({ status: "queued" });
     expect(screen.queryByText("Parallel work")).not.toBeInTheDocument();

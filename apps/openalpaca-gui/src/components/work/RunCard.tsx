@@ -153,7 +153,7 @@ export function RunCard({
                   aria-hidden
                   className="mt-[5px] h-[6px] w-[6px] shrink-0 rounded-full bg-red"
                 />
-                <span>
+                <span className="min-w-0 wrap-anywhere">
                   {blockedOn === null ? (
                     "Waiting on you — approve or deny it in the chat."
                   ) : (

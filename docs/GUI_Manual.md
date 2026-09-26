@@ -329,25 +329,26 @@ chat turn, the workflow's lead, or the one subagent that raised the prompt.
 It is not remembered beyond that, and one agent's approval does not cover
 another's.
 
-**Hidden characters on an approval.** The card shows the exact values that
-will run, so every hidden or invisible character in the tool's name, its
-arguments and the asking agent's name — a bidi override such as U+202E, a
-zero-width or control character, a tag or a variation selector, and in the two
-names also a line break or any space but a plain one — is shown in its place
-as a highlighted `<U+XXXX>`, never drawn raw. A line directly under the
-arguments counts them for the whole request: `Note: this request contains 2
-hidden characters, shown as <U+…>.` A `<U+…>` that is not highlighted was
-typed into the value as text and is not counted. The arguments keep their own
-line breaks and are laid out left to right, isolated from the card around
-them. The composer's bar, the palette's `Approve pending …` row, the run
-card's `Waiting on you: …`, the row an answer leaves, the Always-allow toast
-and the run's Event log name the tool the same way, without a count of their
-own (the palette row, the toast and the Event log show the escape as plain
-text). The `From OpenAlpaca` text is the daemon's own and is shown as it wrote
-it. Only what you see changes: approving answers the request the daemon sent.
-Two things no escape changes: right-to-left letters inside a value can still
-reorder the digits and punctuation next to them, and a character that merely
-looks like another (a Cyrillic `а` for a Latin `a`) is shown as written.
+**Hidden characters on an approval.** The card shows the exact values that will
+run, so every hidden or invisible character in the tool's name, its arguments
+and the asking agent's name — a bidi override such as U+202E, a zero-width or
+control character, a tag or a variation selector, and in the two names also a
+line break or any space but a plain one — is shown in its place as a
+highlighted `<U+XXXX>`, never drawn raw. A line directly under the arguments
+counts them for the whole request: `Note: this request contains 2 hidden
+characters, shown as <U+…>.` A `<U+…>` that is not highlighted was typed into
+the value as text and is not counted. The arguments keep their own line breaks
+and are laid out left to right, isolated from the card around them, and a value
+with no space in it wraps at the card's edge instead of running past it. The
+composer's bar, the palette's `Approve pending …` row, the run card's `Waiting
+on you: …`, the row an answer leaves, the Always-allow toast and the run's
+Event log name the tool the same way, without a count of their own (the palette
+row, the toast and the Event log show the escape as plain text). The `From
+OpenAlpaca` text is the daemon's own and is shown as it wrote it. Only what you
+see changes: approving answers the request the daemon sent. Two things no
+escape changes: right-to-left letters inside a value can still reorder the
+digits and punctuation next to them, and a character that merely looks like
+another (a Cyrillic `а` for a Latin `a`) is shown as written.
 
 **A suggestion raised in chat.** When learning is waiting on a change to a
 note you saved (see *Suggestions* under the Memory view), the assistant may

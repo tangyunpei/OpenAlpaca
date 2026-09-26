@@ -22,7 +22,11 @@
  * approval surface uses. The daemon's `preview` is its own prose and is
  * shown as it wrote it. The arguments are laid out left to right and
  * bidi-isolated, so right-to-left letters in a value cannot reorder the
- * card around them. Display only: what is answered is the request id.
+ * card around them. The card wraps a run with no break opportunity in it (a
+ * URL's query string, base64, a padded command) anywhere: under `pre-wrap`
+ * alone such a run ran past the box's edge, behind a scrollbar macOS does
+ * not draw, and its tail was off screen. Display only: what is answered is
+ * the request id.
  */
 
 import { EscapedText } from "@/components/ui";
@@ -61,7 +65,7 @@ export function ToolConfirmationBanner({
   return (
     <section
       role="alert"
-      className="mb-[26px] rounded-3xl border border-amber-line bg-amber-surface px-[16px] py-[15px]"
+      className="mb-[26px] rounded-3xl border border-amber-line bg-amber-surface px-[16px] py-[15px] wrap-anywhere"
     >
       <p className="mt-0 mb-[9px] font-mono text-2xs-plus tracking-eyebrow-w text-amber-ink uppercase">
         Confirmation required · <EscapedText escaped={name} />

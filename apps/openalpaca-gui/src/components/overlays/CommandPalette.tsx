@@ -235,7 +235,9 @@ function PaletteRow({ command, active, onHover, onRun }: PaletteRowProps) {
       <span className="w-[66px] shrink-0 font-mono text-2xs tracking-tag text-muted-fg uppercase">
         {command.group}
       </span>
-      <span className="flex-1 text-md text-ink">{command.label}</span>
+      <span className="min-w-0 flex-1 text-md wrap-anywhere text-ink">
+        {command.label}
+      </span>
       {shortcut !== null && (
         <span className="font-mono text-xs text-faint">{shortcut}</span>
       )}

@@ -1,5 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render as renderRaw, screen, waitFor } from "@testing-library/react";
+import {
+  render as renderRaw,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -186,6 +191,26 @@ describe("CommandPalette (§3.33)", () => {
         screen.getByRole("option", { name: /Approve pending shell_execute/ }),
       );
     expect(onApprove).toHaveBeenCalledOnce();
+  });
+
+  /**
+   * The dialog clips what overflows it, and `Approve pending <name>` approves:
+   * a name with no break opportunity wraps inside the row instead.
+   */
+  it("wraps a row's label too long for the dialog instead of clipping it", () => {
+    render(
+      <CommandPalette
+        pendingConfirmation={{
+          toolName: `srv__${"x".repeat(200)}`,
+          onApprove: vi.fn(),
+        }}
+      />,
+    );
+    const option = screen.getByRole("option", { name: /Approve pending/ });
+    expect(within(option).getByText(/Approve pending/)).toHaveClass(
+      "min-w-0",
+      "wrap-anywhere",
+    );
   });
 
   it("offers no Find row, and asks for nothing, until something is typed", () => {
