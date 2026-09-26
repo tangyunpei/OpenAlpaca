@@ -18,7 +18,9 @@
  * some as nothing). Every such character is **shown**, never dropped:
  * dropped, `/srv/allow` + U+200B + `ed` would read as a path it is not, and
  * the person would not be told anything was there. `hiddenNotice` says how
- * many.
+ * many. The set is Unicode's classes, not what a font draws: a letter that a
+ * particular font happens to draw as an empty cell (U+16910, a Bamum letter,
+ * in JetBrains Mono) is outside it, and is drawn as that font draws it.
  *
  * This is the GUI's copy of `openalpaca_core::utils::text`'s escape
  * (`needs_escape`, `escape_hidden`, `needs_escape_in_line`,

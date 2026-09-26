@@ -341,25 +341,25 @@ the card outlined in red first. The composer's bar and the palette's row add
 place.
 
 **Hidden characters on an approval.** The card shows the exact values that will
-run, so every hidden or invisible character in the tool's name, its arguments
-and the asking agent's name — a bidi override such as U+202E, a zero-width or
-control character, a tag or a variation selector, any space but a plain one (a
-no-break, ideographic or braille blank), an object replacement character
-(U+FFFC, which macOS draws as blank space), a code point Unicode has not
-assigned or leaves to private use (which has no agreed appearance: macOS draws
-some as blank space, and Apple's system fonts some as nothing), and in the two
-names also a line break or a tab — is shown in its place as a highlighted
-`<U+XXXX>`, never drawn raw. A line directly under the arguments counts them for
-the whole request: `Note: this request contains 2 hidden characters, shown as
-<U+…>.` On the card, a `<U+…>` that is not highlighted was typed into the value
-as text and is not counted. The arguments are laid out left to right, isolated
-from the card around them, and a value with no space in it wraps at the card's
-edge instead of running past it. A single command is shown bare unless it holds
-a line break, a tab or another C0 control character (U+0000–U+001F); then the
-request is shown as JSON, which writes each one out (`\n`, `\t`), as the CLI and
-the chat apps show it — drawn as a real line break, it would look just like the
-box's own wrapping. A command that is empty, or starts or ends with a space or
-with a combining mark (an accent stored as a character of its own, which sits on
+run, so every hidden character in the tool's name, its arguments and the asking
+agent's name — a bidi override such as U+202E, a zero-width or control
+character, a tag or a variation selector, any space but a plain one (a no-break,
+ideographic or braille blank), an object replacement character (U+FFFC, which
+macOS draws as blank space), a code point Unicode has not assigned or leaves to
+private use (which has no agreed appearance: macOS draws some as blank space,
+and Apple's system fonts some as nothing), and in the two names also a line
+break or a tab — is shown in its place as a highlighted `<U+XXXX>`, never drawn
+raw. A line directly under the arguments counts them for the whole request:
+`Note: this request contains 2 hidden characters, shown as <U+…>.` On the card,
+a `<U+…>` that is not highlighted was typed into the value as text and is not
+counted. The arguments are laid out left to right, isolated from the card around
+them, and a value with no space in it wraps at the card's edge instead of
+running past it. A single command is shown bare unless it holds a line break, a
+tab or another C0 control character (U+0000–U+001F); then the request is shown
+as JSON, which writes each one out (`\n`, `\t`), as the CLI and the chat apps
+show it — drawn as a real line break, it would look just like the box's own
+wrapping. A command that is empty, or starts or ends with a space or with a
+combining mark (an accent stored as a character of its own, which sits on
 the space before it and draws as a speck), is shown as JSON too, so its quotes
 show where it ends. DEL and the C1 controls (U+007F–U+009F), which JSON does not
 write out, leave a command bare and are shown as a highlighted `<U+XXXX>`. The
@@ -375,10 +375,13 @@ hidden character of the titles, texts and reason it quotes, and when it left any
 out, its last line says how many: `This preview leaves out 2 hidden characters;
 the Memory view shows them as <U+…>.` (The suggestion's exact text is in the
 Memory view, which shows each one.) Only what you see changes: approving answers
-the request the daemon sent. Two things no escape changes: right-to-left letters
-inside a value can still reorder the digits and punctuation next to them, and a
-character that merely looks like another (a Cyrillic `а` for a Latin `a`) is
-shown as written.
+the request the daemon sent. Three things no escape changes: right-to-left
+letters inside a value can still reorder the digits and punctuation next to
+them; a character that merely looks like another (a Cyrillic `а` for a Latin
+`a`) is shown as written; and so is a letter that a particular font happens to
+draw as an empty cell, since what is hidden is decided by Unicode's classes —
+control, format, default-ignorable, unassigned and private-use characters, and
+every blank but the plain space — not by what a font draws.
 
 **A suggestion raised in chat.** When learning is waiting on a change to a
 note you saved (see *Suggestions* under the Memory view), the assistant may
@@ -793,8 +796,8 @@ the conversation (see *Memory commands* under Chat); a note saved with
 
 **Hidden characters where you decide.** The Suggestions card, a Recently learned
 row and a candidate's detail ask you to decide on text learning or a file wrote,
-so every hidden or invisible character in it — a bidi override, a zero-width or
-control character, a variation selector, any space but a plain one, an object
+so every hidden character in it — a bidi override, a zero-width or control
+character, a variation selector, any space but a plain one, an object
 replacement character, a code point Unicode has not assigned or leaves to
 private use, and in a title or the reason also a line break or a tab — is shown
 as a highlighted `<U+XXXX>` (as plain `<U+XXXX>` in a candidate's rendered text
@@ -1053,13 +1056,12 @@ whether it is on; both open an inline strip that has to be confirmed.
 A row awaiting consent shows the plugin's id, its version and what it asks
 for — its declared capabilities (a plugin you denied included, since
 `Approve` grants what it declares now), or those an update added — with
-every hidden or invisible character (a bidi override, a zero-width or control
-character, a variation selector, any space but a plain one, a line break) as
-a highlighted `<U+XXXX>`, and a line under them counts them: `Note: this
-request contains 1 hidden character, shown as <U+…>.` The id and the version
-wrap at the row's edge rather than being cut or pushing `Approve` aside.
-`Approve` grants exactly those strings, and it answers for the plugin by the
-id the daemon listed.
+every hidden character (a bidi override, a zero-width or control character, a
+variation selector, any space but a plain one, a line break) as a highlighted
+`<U+XXXX>`, and a line under them counts them: `Note: this request contains 1
+hidden character, shown as <U+…>.` The id and the version wrap at the row's edge
+rather than being cut or pushing `Approve` aside. `Approve` grants exactly those
+strings, and it answers for the plugin by the id the daemon listed.
 
 `Add extension` installs either kind:
 

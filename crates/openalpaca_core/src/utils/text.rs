@@ -200,6 +200,18 @@ pub struct Escaped {
 /// Font or Powerline icon, or an end-user-defined ideograph inside an
 /// argument shows as `<U+XXXX>`.
 ///
+/// What a set of Unicode classes cannot hold, and this does not claim: an
+/// assigned letter that a particular font happens to draw as an empty cell.
+/// U+16910 BAMUM LETTER PHASE-D NGKEURI (`Lo`) has an empty glyph with a
+/// full advance in JetBrains Mono, the default font of Ghostty, WezTerm and
+/// JetBrains' IDEs, so at such a terminal `true`+U+16910+`|| curl … | sh`
+/// prints like `true || curl … | sh` while the shell runs the `curl`; and
+/// macOS draws U+FA2E and U+FA2F blank through a font it downloads. Each
+/// has an agreed appearance — a Bamum letter, a CJK ideograph — and is
+/// blank only by one font's fault: no Unicode property names the letters
+/// some font leaves empty, and escaping every letter would defeat the
+/// surface. It is accepted residue, as a run of plain spaces is.
+///
 /// The GUI derives its copy from `apps/openalpaca-gui/src/lib/hidden-chars.json`;
 /// a test on each side holds its own to that table.
 pub fn needs_escape(c: char) -> bool {

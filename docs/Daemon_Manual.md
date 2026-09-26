@@ -1254,19 +1254,23 @@ first`), and the acknowledgement names the tool it approved or denied
 request had already timed out, been cancelled or been answered elsewhere (in
 the GUI or with `openalpaca tasks confirmations`).
 
-Every hidden or invisible character in the prompt's tool name and arguments (a
-bidi override, a zero-width or control character, a variation selector, any
-space but a plain one, an object replacement character — U+FFFC, which Apple
-devices draw as blank space — a code point Unicode has not assigned or leaves to
-private use, which has no agreed appearance and some of which Apple devices draw
-as blank space or as nothing, and in the name also a line break or a tab) is
-shown as `<U+XXXX>`, and a line under the arguments counts them
-(`Note: this request contains 2 hidden characters, shown as <U+…>.`). The
-arguments are cut after 500 bytes, and the cut says how much it left out
-(`... (31 more characters not shown)`). Discord receives the prompt with its
-Markdown characters backslash-escaped, so it reads as written, and neither
-Telegram nor Discord draws a link preview under the prompt or the
-acknowledgement.
+Every hidden character in the prompt's tool name and arguments (a bidi override,
+a zero-width or control character, a variation selector, any space but a plain
+one, an object replacement character — U+FFFC, which Apple devices draw as blank
+space — a code point Unicode has not assigned or leaves to private use, which
+has no agreed appearance and some of which Apple devices draw as blank space or
+as nothing, and in the name also a line break or a tab) is shown as `<U+XXXX>`,
+and a line under the arguments counts them (`Note: this request contains 2
+hidden characters, shown as <U+…>.`). Those are Unicode's classes — control,
+format, default-ignorable, unassigned and private-use characters, and every
+blank but the plain space — not what a device's font draws: a letter that a
+particular font happens to draw as an empty cell is sent as it is and not
+counted (a Mac can draw the CJK compatibility ideographs U+FA2E and U+FA2F so,
+through a font it downloads). The arguments are cut after 500 bytes, and
+the cut says how much it left out (`... (31 more characters not shown)`).
+Discord receives the prompt with its Markdown characters backslash-escaped, so
+it reads as written, and neither Telegram nor Discord draws a link preview under
+the prompt or the acknowledgement.
 
 ## Event Taxonomy
 
