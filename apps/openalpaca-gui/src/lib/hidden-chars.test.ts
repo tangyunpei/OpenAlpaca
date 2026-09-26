@@ -26,10 +26,21 @@ function bounds(ranges: readonly (readonly string[])[]): [number, number][] {
   });
 }
 
-function inAny(ranges: readonly [number, number][], codePoint: number) {
-  return ranges.some(
-    ([first, last]) => first <= codePoint && codePoint <= last,
-  );
+/**
+ * Which code points `ranges` lists, one flag per code point: filled once, so
+ * a check is one read rather than a scan of several hundred ranges for each
+ * of the 1.1 million scalar values (the Rust side builds its reference the
+ * same way).
+ */
+function listed(ranges: readonly [number, number][]): Uint8Array {
+  const flags = new Uint8Array(0x110000);
+  for (const [first, last] of ranges) {
+    if (!(first <= last && last <= 0x10ffff)) {
+      throw new Error(`not a range: ${hex(first)}..${hex(last)}`);
+    }
+    flags.fill(1, first, last + 1);
+  }
+  return flags;
 }
 
 /** Every Unicode scalar value: every code point but the surrogates. */
@@ -52,10 +63,10 @@ const hex = (codePoint: number) =>
  */
 describe("hidden-chars — the shared table (parity with Rust)", () => {
   it("escapes in the arguments exactly the table's ranges, over every scalar value", () => {
-    const ranges = bounds(table.ranges);
+    const flags = listed(bounds(table.ranges));
     const wrong: string[] = [];
     for (const codePoint of scalarValues()) {
-      if (needsEscape(codePoint) !== inAny(ranges, codePoint)) {
+      if (needsEscape(codePoint) !== (flags[codePoint] === 1)) {
         wrong.push(hex(codePoint));
         if (wrong.length > 8) break;
       }
@@ -64,10 +75,10 @@ describe("hidden-chars — the shared table (parity with Rust)", () => {
   });
 
   it("escapes in a one-line field exactly ranges plus line_adds, over every scalar value", () => {
-    const ranges = [...bounds(table.ranges), ...bounds(table.line_adds)];
+    const flags = listed([...bounds(table.ranges), ...bounds(table.line_adds)]);
     const wrong: string[] = [];
     for (const codePoint of scalarValues()) {
-      if (needsEscapeInLine(codePoint) !== inAny(ranges, codePoint)) {
+      if (needsEscapeInLine(codePoint) !== (flags[codePoint] === 1)) {
         wrong.push(hex(codePoint));
         if (wrong.length > 8) break;
       }
