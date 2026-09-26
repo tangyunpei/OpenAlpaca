@@ -18,17 +18,22 @@
  * title the copy quotes — is shown as `<U+XXXX>` (`lib/hidden-chars`, in the
  * plain-text form, since the Markdown renderer takes a string), and one line
  * under the text counts them with the title's, which the head shows
- * highlighted. The text is drawn `wrapAnywhere`: a code block wraps, and a
- * table is drawn as its rows, one wrapping line each with every cell kept,
- * so no counted escape sits behind a sideways scroll. A note already in
- * force is rendered as written: a joiner or a right-to-left mark can be its
- * content.
+ * highlighted. Confirm adopts the candidate's aliases, tags and fact key
+ * with its text, and the extractor writes them from model output, so they
+ * are drawn under the text, escaped and highlighted, and counted in the same
+ * line — the number `openalpaca memory show` counts, plus the replaced
+ * note's title, which it does not print. The text is drawn `wrapAnywhere`:
+ * a code block wraps, and a table is drawn as its rows, one wrapping line
+ * each with every cell kept, so no counted escape sits behind a sideways
+ * scroll. A note already in force is rendered as written: a joiner or a
+ * right-to-left mark can be its content.
  */
 
 import { MessageBody } from "@/components/chat";
-import { Eyebrow } from "@/components/ui";
+import { EscapedText, Eyebrow } from "@/components/ui";
 import type { MemoryNote } from "@/lib/api/memories";
 import {
+  type Escaped,
   escapeHidden,
   escapeHiddenLine,
   hiddenNotice,
@@ -53,6 +58,37 @@ export interface NoteTabProps {
   replaces?: string | null;
 }
 
+/** The strings a frontmatter key holds, or none. */
+function strings(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+/**
+ * What Confirm adopts with a candidate's text besides its title — its
+ * aliases, tags and fact key — each escaped as a one-line field, in the
+ * order `openalpaca memory show` prints them.
+ */
+function adoptedFields(
+  frontmatter: Record<string, unknown>,
+): { label: string; values: Escaped[] }[] {
+  const factKey = frontmatter.fact_key;
+  return [
+    { label: "Aliases", values: strings(frontmatter.aliases) },
+    { label: "Tags", values: strings(frontmatter.tags) },
+    {
+      label: "Fact key",
+      values: typeof factKey === "string" && factKey !== "" ? [factKey] : [],
+    },
+  ]
+    .filter((field) => field.values.length > 0)
+    .map((field) => ({
+      label: field.label,
+      values: field.values.map((value) => escapeHiddenLine(value)),
+    }));
+}
+
 export function NoteTab({ note, replaces = null }: NoteTabProps) {
   const focusRun = useUiStore((s) => s.focusRun);
   const openMemory = useUiStore((s) => s.openMemory);
@@ -61,10 +97,16 @@ export function NoteTab({ note, replaces = null }: NoteTabProps) {
   const title = escapeHiddenLine(note.title);
   const was = replaces === null ? null : escapeHiddenLine(replaces);
   const body = deciding ? escapeHidden(note.body) : null;
+  const adopted = deciding ? adoptedFields(note.frontmatter) : [];
+  const adoptedHidden = adopted
+    .flatMap((field) => field.values)
+    .reduce((sum, value) => sum + value.hidden, 0);
   const notice =
     body === null
       ? null
-      : hiddenNotice(title.hidden + (was?.hidden ?? 0) + body.hidden);
+      : hiddenNotice(
+          title.hidden + (was?.hidden ?? 0) + body.hidden + adoptedHidden,
+        );
 
   return (
     <div className="max-w-[660px]">
@@ -87,6 +129,25 @@ export function NoteTab({ note, replaces = null }: NoteTabProps) {
           spacing="assistant"
           wrapAnywhere={deciding}
         />
+      )}
+      {adopted.length > 0 && (
+        <p
+          aria-label="Adopted with the text"
+          className="mt-[10px] mb-0 text-base leading-[1.5] wrap-anywhere text-secondary"
+        >
+          {adopted.map((field, index) => (
+            <span key={field.label}>
+              {index > 0 && <span className="text-faint"> · </span>}
+              <span className="text-tertiary">{field.label} </span>
+              {field.values.map((value, position) => (
+                <span key={position}>
+                  {position > 0 && ", "}
+                  <EscapedText escaped={value} />
+                </span>
+              ))}
+            </span>
+          ))}
+        </p>
       )}
       {notice !== null && (
         <p className="mt-[10px] mb-0 text-base leading-[1.5] text-red-ink">

@@ -798,7 +798,8 @@ would replace), and a line under the texts counts them:
 `Note: this request contains 2 hidden characters, shown as <U+…>.` The card
 counts both titles, both texts and the reason; a row its title and the title
 of the note it replaced; a candidate its title, the title of the note it would
-replace and its text. A text holding an escape wraps at its edge — a
+replace, its text, and the aliases, tags and fact key Confirm adopts with it,
+which its Note tab shows under the text. A text holding an escape wraps at its edge — a
 candidate's code blocks included — rather than being cut or scrolling
 sideways, and a candidate's table is drawn as its rows, one wrapping line
 each with its cells joined by ` · ` and every cell kept, so no escape a count

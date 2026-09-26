@@ -60,6 +60,10 @@ interface FakeNote {
   /** A suggestion's reason, from its evidence sentence. */
   reason?: string | null;
   observed_at?: string | null;
+  /** Frontmatter a read serves beside the body. */
+  aliases?: string[];
+  tags?: string[];
+  fact_key?: string | null;
 }
 
 interface Recorded {
@@ -138,7 +142,12 @@ function readOutput(n: FakeNote, kept?: { title: string; body: string }) {
     ...listItem(n),
     title: kept?.title ?? n.title,
     body: kept?.body ?? n.body,
-    frontmatter: { updated_at: n.updated_at },
+    frontmatter: {
+      updated_at: n.updated_at,
+      aliases: n.aliases ?? [],
+      tags: n.tags ?? [],
+      fact_key: n.fact_key ?? null,
+    },
     truncated: n.truncated ?? false,
     path: `notes/${n.id}--${n.title.toLowerCase().replace(/\W+/g, "-")}.md`,
     sources: n.sources,
@@ -1503,6 +1512,53 @@ describe("the Memory view", () => {
     expect(sent("POST", "/v1/memories/n-1")[0]?.headers.get("If-Match")).toBe(
       `"${read}"`,
     );
+  });
+
+  /**
+   * Confirm adopts a candidate's aliases, tags and fact key with its text,
+   * and the extractor writes them from model output: the Note tab shows
+   * them escaped (highlighted) and counts them with the title and the text,
+   * so one candidate reads the same number here as at `openalpaca memory
+   * show`.
+   */
+  it("shows a candidate's aliases, tags and fact key escaped, and counts them", async () => {
+    note({
+      id: "n-1",
+      title: "Editor",
+      body: "The user edits with vi.\n",
+      status: "candidate",
+      origin: "extracted_user",
+      aliases: ["vi\u200B", "editor"],
+      tags: ["tools\u202E"],
+      fact_key: "editor\u200B",
+    });
+    renderView();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Candidates" }));
+    const list = await screen.findByRole("list", { name: "Notes" });
+    await user.click(
+      await within(list).findByRole("button", { name: "Editor" }),
+    );
+    const heading = await screen.findByRole("heading", {
+      name: "Editor",
+      level: 2,
+    });
+    const detail = heading.closest("section");
+    if (detail === null) throw new Error("no detail");
+    const adopted = within(detail).getByLabelText("Adopted with the text");
+    expect(adopted).toHaveTextContent(
+      "Aliases vi<U+200B>, editor · Tags tools<U+202E> · Fact key editor<U+200B>",
+    );
+    expect(
+      Array.from(
+        adopted.querySelectorAll("[data-hidden-char]"),
+        (node) => node.textContent,
+      ),
+    ).toEqual(["<U+200B>", "<U+202E>", "<U+200B>"]);
+    expect(detail).toHaveTextContent(
+      "Note: this request contains 3 hidden characters, shown as <U+…>.",
+    );
+    expect(detail.textContent).not.toMatch(PLANTED);
   });
 
   /**
