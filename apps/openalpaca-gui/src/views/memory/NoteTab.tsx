@@ -19,7 +19,8 @@
  * plain-text form, since the Markdown renderer takes a string), and one line
  * under the text counts them with the title's, which the head shows
  * highlighted. The text is drawn `wrapAnywhere`, a code block and a table
- * included, so no counted escape sits behind a sideways scroll. A note
+ * included, so no counted escape sits behind a sideways scroll, and a table
+ * keeps a row's cells past its header's width. A note
  * already in force is rendered as written: a joiner or a right-to-left mark
  * can be its content.
  */

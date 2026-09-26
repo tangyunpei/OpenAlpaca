@@ -101,4 +101,27 @@ describe("MessageBody — wrapAnywhere (a text someone decides on)", () => {
     );
     expect(container.querySelector(".wrap-anywhere")).toBeNull();
   });
+
+  /**
+   * A row wider than its header: a transcript drops the extra cells, as
+   * GitHub's tables do; a text someone decides on keeps every one.
+   */
+  it("keeps a row's cells past its header only for a text someone decides on", () => {
+    const wide = "| a |\n|---|\n| b | c<U+202E> |";
+    const decided = render(<MessageBody text={wide} wrapAnywhere />);
+    expect(
+      Array.from(decided.container.querySelectorAll("td")).map(
+        (cell) => cell.textContent,
+      ),
+    ).toEqual(["b", "c<U+202E>"]);
+    expect(decided.container.querySelectorAll("th")).toHaveLength(2);
+    decided.unmount();
+
+    const transcript = render(<MessageBody text={wide} />);
+    expect(
+      Array.from(transcript.container.querySelectorAll("td")).map(
+        (cell) => cell.textContent,
+      ),
+    ).toEqual(["b"]);
+  });
 });

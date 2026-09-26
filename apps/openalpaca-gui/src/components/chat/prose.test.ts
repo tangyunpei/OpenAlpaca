@@ -292,6 +292,34 @@ describe("tables (T3)", () => {
   it("keeps an escaped pipe inside its cell", () => {
     expect(splitTableRow("| a \\| b | c |")).toEqual(["a | b", "c"]);
   });
+
+  /**
+   * A row wider than its header: a transcript drops the extra cells, as
+   * GitHub does, but a text someone decides on keeps every one — the header
+   * is padded to the widest row — so nothing the owner confirms is out of
+   * sight (a candidate's escapes are counted over its whole text).
+   */
+  it("keeps a row's cells past its header only when asked to", () => {
+    const text = "| a |\n|---|\n| b | c | d |\n| e |";
+    const trimmed = parseProse(text)[0];
+    if (trimmed?.kind !== "table") throw new Error("expected a table");
+    expect(trimmed.header).toHaveLength(1);
+    expect(trimmed.rows.map((row) => row.length)).toEqual([1, 1]);
+
+    const kept = parseProse(text, { keepEveryCell: true })[0];
+    if (kept?.kind !== "table") throw new Error("expected a table");
+    expect(kept.header.map((cell) => cell[0]?.text ?? "")).toEqual([
+      "a",
+      "",
+      "",
+    ]);
+    expect(
+      kept.rows.map((row) => row.map((cell) => cell[0]?.text ?? "")),
+    ).toEqual([
+      ["b", "c", "d"],
+      ["e", "", ""],
+    ]);
+  });
 });
 
 describe("ordered lists across an interleaved block (T3)", () => {

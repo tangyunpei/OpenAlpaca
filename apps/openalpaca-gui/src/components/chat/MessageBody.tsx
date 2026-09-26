@@ -20,8 +20,10 @@
  * owner confirms, whose escapes (`lib/hidden-chars`) are counted under it —
  * where nothing may sit out of sight: every block wraps a run with no break
  * opportunity anywhere, a code block wraps its lines instead of scrolling
- * sideways behind a scrollbar macOS does not draw, and a table's header
- * cells may wrap. A transcript keeps its own layout.
+ * sideways behind a scrollbar macOS does not draw, a table's header cells
+ * may wrap, and a table keeps a row's cells past its header's width (the
+ * header is padded to them) where a transcript drops them. A transcript
+ * keeps its own layout.
  */
 
 import { cn } from "@/lib/cn";
@@ -35,7 +37,10 @@ export interface MessageBodyProps {
   /** Rendered at the end of the last block — the streaming caret. */
   trailing?: React.ReactNode;
   className?: string;
-  /** Wrap every block, code and table headers included (see above). */
+  /**
+   * Wrap every block, code and table headers included, and keep every table
+   * cell (see above).
+   */
   wrapAnywhere?: boolean;
 }
 
@@ -89,7 +94,7 @@ export function MessageBody({
   className: extra,
   wrapAnywhere = false,
 }: MessageBodyProps) {
-  const blocks = parseProse(text);
+  const blocks = parseProse(text, { keepEveryCell: wrapAnywhere });
   const last = blocks.length - 1;
   const className = cn(wrapAnywhere && "wrap-anywhere", extra);
 

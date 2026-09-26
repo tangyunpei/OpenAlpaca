@@ -103,9 +103,22 @@ export type ProseBlock =
       key: number;
       /** The header row's cells. */
       header: ProseSegment[][];
-      /** Body rows, each padded or trimmed to the header's width. */
+      /**
+       * Body rows, each padded or trimmed to the table's width: the header's,
+       * or — with `keepEveryCell` — the widest row's, the header padded to it.
+       */
       rows: ProseSegment[][][];
     };
+
+export interface ProseOptions {
+  /**
+   * Keep a body row's cells past its header's width, padding the header to
+   * the widest row instead of trimming the row. For a text someone decides
+   * on, where nothing may be out of sight; a transcript drops them, as
+   * GitHub's tables do.
+   */
+  keepEveryCell?: boolean;
+}
 
 /** `- item`, `* item`, `+ item`. */
 const BULLET = /^\s*[-*+]\s+(.*)$/;
@@ -355,7 +368,10 @@ function segmentText(segments: readonly ProseSegment[]): string {
 }
 
 /** Parse a whole message body into renderable blocks. */
-export function parseProse(text: string): ProseBlock[] {
+export function parseProse(
+  text: string,
+  options: ProseOptions = {},
+): ProseBlock[] {
   const blocks: ProseBlock[] = [];
   let key = 0;
 
@@ -451,18 +467,28 @@ export function parseProse(text: string): ProseBlock[] {
       while (index < lines.length) {
         const row = lines[index] ?? "";
         if (row.trim() === "" || !looksLikeTableRow(row)) break;
-        const cells = splitTableRow(row);
-        // Padded, not dropped: a row the model cut short is still a row, and a
-        // ragged `rows[i][j]` would be the renderer's problem instead.
-        while (cells.length < header.length) cells.push("");
-        rows.push(cells.slice(0, header.length));
+        rows.push(splitTableRow(row));
         index += 1;
       }
+      const width =
+        options.keepEveryCell === true
+          ? rows.reduce(
+              (wide, cells) => Math.max(wide, cells.length),
+              header.length,
+            )
+          : header.length;
+      // Padded, not dropped: a row the model cut short is still a row, and a
+      // ragged `rows[i][j]` would be the renderer's problem instead.
+      const fit = (cells: string[]): ProseSegment[][] => {
+        const fitted = cells.slice(0, width);
+        while (fitted.length < width) fitted.push("");
+        return fitted.map((cell) => parseInlineCode(cell));
+      };
       blocks.push({
         kind: "table",
         key: key++,
-        header: header.map((cell) => parseInlineCode(cell)),
-        rows: rows.map((row) => row.map((cell) => parseInlineCode(cell))),
+        header: fit(header),
+        rows: rows.map(fit),
       });
       continue;
     }

@@ -58,7 +58,8 @@
  * plain-text form, which wraps like any other text and can break inside an
  * escape (every character stays on screen: the Markdown is drawn with
  * `MessageBody`'s `wrapAnywhere`, so a code block or a table wraps too
- * instead of scrolling sideways); the run's Event log, which is not an
+ * instead of scrolling sideways, and a table keeps every cell of a row
+ * wider than its header); the run's Event log, which is not an
  * approval surface, cuts its one-line rows with an ellipsis.
  */
 
