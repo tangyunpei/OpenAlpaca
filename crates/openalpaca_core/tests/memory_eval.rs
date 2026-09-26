@@ -3692,6 +3692,8 @@ struct CoverageReport {
     unparsed_cut_at_max_tokens: usize,
     /// The search returned no note, so no call was made.
     not_found: usize,
+    /// A judge call that failed, or the historical search before it: the
+    /// row's `judge_error` says which (a failed search begins `search:`).
     judge_errors: usize,
     /// `matched` by the writer of the note the judge chose (the L8 fix
     /// slice's H3). The judge names one note, so a gold note both paths
@@ -6736,10 +6738,15 @@ struct StubModel {
     answer: Box<dyn Fn(&openalpaca_llm::ChatRequest) -> String + Send + Sync>,
     /// The tool calls a reply makes; none for [`stub_router`]'s model.
     calls: StubCalls,
+    /// The output tokens a reply reports: 5, but for
+    /// [`stub_router_with_usage`]'s model. A reply that reaches the
+    /// request's `max_tokens` finishes `MaxTokens`, as a provider's cut one.
+    output_tokens: StubTokens,
 }
 
 type StubCalls =
     Box<dyn Fn(&openalpaca_llm::ChatRequest) -> Vec<openalpaca_llm::ToolCall> + Send + Sync>;
+type StubTokens = Box<dyn Fn(&openalpaca_llm::ChatRequest) -> u32 + Send + Sync>;
 
 impl StubModel {
     fn requests(&self) -> Vec<openalpaca_llm::ChatRequest> {
@@ -6777,18 +6784,21 @@ impl openalpaca_llm::LlmProvider for StubModel {
     ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
         self.seen.lock().unwrap().push(request.clone());
         let tool_calls = (self.calls)(&request);
+        let output_tokens = (self.output_tokens)(&request);
         Ok(openalpaca_llm::ChatResponse {
             content: (self.answer)(&request),
-            finish_reason: if tool_calls.is_empty() {
-                openalpaca_llm::FinishReason::Stop
-            } else {
+            finish_reason: if !tool_calls.is_empty() {
                 openalpaca_llm::FinishReason::ToolUse
+            } else if request.max_tokens.is_some_and(|cap| output_tokens >= cap) {
+                openalpaca_llm::FinishReason::MaxTokens
+            } else {
+                openalpaca_llm::FinishReason::Stop
             },
             tool_calls,
             model: request.model.clone().unwrap_or_else(|| "stub".to_string()),
             usage: openalpaca_llm::Usage {
                 input_tokens: 10,
-                output_tokens: 5,
+                output_tokens,
                 ..Default::default()
             },
             thinking: None,
@@ -6821,18 +6831,40 @@ fn stub_router_with_calls(
     + Sync
     + 'static,
 ) -> (Arc<openalpaca_llm::LlmRouter>, Arc<StubModel>) {
-    use openalpaca_llm::{
-        ApiKey, CostTracker, KeyPool, LlmRouter, LlmRuntimeConfig, ModelInfo, ModelRegistry,
-        ProviderEntry, ProviderType, RateLimitConfig, SelectionStrategy,
-    };
     let stub = Arc::new(StubModel {
         seen: std::sync::Mutex::new(Vec::new()),
         answer: Box::new(answer),
         calls: Box::new(calls),
+        output_tokens: Box::new(|_| 5),
     });
+    (router_over(models, stub.clone()), stub)
+}
+
+/// [`stub_router`] whose replies report the output tokens `output_tokens`
+/// returns — a reply at the request's `max_tokens` finishes cut.
+fn stub_router_with_usage(
+    models: &[&str],
+    answer: impl Fn(&openalpaca_llm::ChatRequest) -> String + Send + Sync + 'static,
+    output_tokens: impl Fn(&openalpaca_llm::ChatRequest) -> u32 + Send + Sync + 'static,
+) -> (Arc<openalpaca_llm::LlmRouter>, Arc<StubModel>) {
+    let stub = Arc::new(StubModel {
+        seen: std::sync::Mutex::new(Vec::new()),
+        answer: Box::new(answer),
+        calls: Box::new(|_| Vec::new()),
+        output_tokens: Box::new(output_tokens),
+    });
+    (router_over(models, stub.clone()), stub)
+}
+
+/// The router the stub constructors share.
+fn router_over(models: &[&str], stub: Arc<StubModel>) -> Arc<openalpaca_llm::LlmRouter> {
+    use openalpaca_llm::{
+        ApiKey, CostTracker, KeyPool, LlmRouter, LlmRuntimeConfig, ModelInfo, ModelRegistry,
+        ProviderEntry, ProviderType, RateLimitConfig, SelectionStrategy,
+    };
     let key = ApiKey::new("default".to_string(), ProviderType::Ollama, String::new());
     let entry = ProviderEntry {
-        provider: stub.clone(),
+        provider: stub,
         key_pool: Arc::new(arc_swap::ArcSwap::from_pointee(KeyPool::new(
             vec![key],
             SelectionStrategy::RoundRobin,
@@ -6869,7 +6901,7 @@ fn stub_router_with_calls(
             },
         );
     }
-    (Arc::new(router), stub)
+    Arc::new(router)
 }
 
 /// LQ1: an unroutable judge is refused before any call — the ladder would
@@ -9729,27 +9761,41 @@ async fn a_turn_in_a_skipped_window_is_unread_whatever_a_later_flush_read() {
 /// cap. The frozen prompt is unchanged.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_coverage_judge_has_room_for_its_verdict_and_unparsed_is_apart_from_none() {
-    let (router, stub) = stub_router(&[TEST_MODEL], |request| {
-        let prompt = prompt_of(request);
-        let gold = prompt
+    // The gold note a coverage prompt asks about: its first line.
+    fn gold_line(request: &openalpaca_llm::ChatRequest) -> String {
+        prompt_of(request)
             .split("Gold note:")
             .nth(1)
             .unwrap_or_default()
             .lines()
             .find(|l| !l.trim().is_empty())
             .unwrap_or_default()
-            .to_string();
-        if gold.contains("alpha") {
-            "The first note states it.\nMATCH 1".to_string()
-        } else if gold.contains("beta") {
-            "No note states it.\nNONE".to_string()
-        } else {
-            "Note [1] states half of it and note [2] the other half; if the gold is one fact"
-                .to_string()
-        }
-    });
+            .to_string()
+    }
+    let (router, stub) = stub_router_with_usage(
+        &[TEST_MODEL],
+        |request| {
+            let gold = gold_line(request);
+            if gold.contains("alpha") {
+                "The first note states it.\nMATCH 1".to_string()
+            } else if gold.contains("beta") {
+                "No note states it.\nNONE".to_string()
+            } else {
+                "Note [1] states half of it and note [2] the other half; if the gold is one fact"
+                    .to_string()
+            }
+        },
+        // Gamma's deliberation runs to the cap; delta's stops short of it.
+        |request| {
+            if gold_line(request).contains("gamma") {
+                request.max_tokens.unwrap_or(0)
+            } else {
+                5
+            }
+        },
+    );
     let run = OfflineRun::new(router.clone());
-    let notes: Vec<GoldNote> = ["alpha", "beta", "gamma"]
+    let mut notes: Vec<GoldNote> = ["alpha", "beta", "gamma", "delta"]
         .iter()
         .map(|w| GoldNote {
             title: format!("Quokkaberry {w}"),
@@ -9758,7 +9804,14 @@ async fn the_coverage_judge_has_room_for_its_verdict_and_unparsed_is_apart_from_
         })
         .collect();
     let seeded = seed_notes(&run.service, &run.owner, &run.project, &notes);
-    assert_eq!(seeded.seeded, 3, "{seeded:?}");
+    assert_eq!(seeded.seeded, 4, "{seeded:?}");
+    // Never seeded, sharing no term with a seeded note: the search finds
+    // nothing, and no call is made.
+    notes.push(GoldNote {
+        title: "Zanzibar lighthouse".to_string(),
+        body: "## Knowledge\nThe Zanzibar lighthouse.\n".to_string(),
+        ..gold("g-lighthouse", &[])
+    });
     let mut gate = JudgeGate::new(judge_guard(&router, None, Some(TEST_MODEL), None).unwrap());
     let template =
         String::from_utf8(read_bytes(&eval_dir().join("coverage-judge-prompt.md"))).unwrap();
@@ -9776,21 +9829,39 @@ async fn the_coverage_judge_has_room_for_its_verdict_and_unparsed_is_apart_from_
     let verdicts: Vec<&str> = report.rows.iter().map(|r| r.verdict).collect();
     assert_eq!(
         verdicts,
-        ["match", "none", "unparsed"],
+        ["match", "none", "unparsed", "unparsed", "not_found"],
         "per note, as before"
     );
     let json = serde_json::to_value(&report).unwrap();
+    let totals = [
+        "gold_notes",
+        "matched",
+        "none",
+        "unparsed",
+        "unparsed_cut_at_max_tokens",
+        "not_found",
+        "judge_errors",
+    ]
+    .map(|k| (k, json[k].as_u64()));
     assert_eq!(
-        (&json["matched"], &json["none"], &json["unparsed"]),
-        (
-            &serde_json::json!(1),
-            &serde_json::json!(1),
-            &serde_json::json!(1)
-        ),
+        totals,
+        [
+            ("gold_notes", Some(5)),
+            ("matched", Some(1)),
+            ("none", Some(1)),
+            ("unparsed", Some(2)),
+            ("unparsed_cut_at_max_tokens", Some(1)),
+            ("not_found", Some(1)),
+            ("judge_errors", Some(0)),
+        ],
         "{json}"
     );
     let caps: Vec<Option<u32>> = stub.requests().iter().map(|r| r.max_tokens).collect();
-    assert_eq!(caps.len(), 3);
+    assert_eq!(
+        caps.len(),
+        4,
+        "no call for the gold the search did not find"
+    );
     assert!(
         caps.iter().all(|c| c.is_some_and(|c| c >= 2048)),
         "room for a verdict after the reasoning, over the QA judge's {JUDGE_MAX_TOKENS}: {caps:?}"
