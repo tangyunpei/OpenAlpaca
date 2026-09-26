@@ -2575,13 +2575,20 @@ struct WrittenNote {
 }
 
 /// One flush (design 09 §7.2): what `flush_session` reported, its latency,
-/// and the notes its bus events say it wrote.
+/// and the notes its bus events say it wrote. A flush that stops `BadOutput`
+/// is flushed again, up to the product's `MAX_ATTEMPTS` flushes (the L8 fix
+/// slice's H2), and the record covers every attempt: its counts, tokens and
+/// latency summed, its `stopped` the last attempt's.
 #[derive(Debug, Clone, Serialize)]
 struct FlushRecord {
     session: String,
     /// `turns` | `switch` | `replay` | `forced_rerun`.
     label: &'static str,
     latency_ms: u64,
+    /// `flush_session` calls this trigger made: 1, or up to `MAX_ATTEMPTS`.
+    attempts: usize,
+    /// Each attempt's `stopped`, in order.
+    attempt_stops: Vec<Option<String>>,
     calls: usize,
     chunks: usize,
     input_tokens: u64,
@@ -2651,38 +2658,71 @@ impl FlushRecord {
         written: Vec<WrittenNote>,
         events_lagged: u64,
     ) -> Self {
+        Self::from_attempts(
+            session,
+            label,
+            latency_ms,
+            std::slice::from_ref(r),
+            written,
+            events_lagged,
+        )
+    }
+
+    /// One trigger's flush, over its attempts (the L8 fix slice's H2): the
+    /// counts summed, the stop the last attempt's, each attempt's stop kept.
+    fn from_attempts(
+        session: &str,
+        label: &'static str,
+        latency_ms: u64,
+        attempts: &[openalpaca_core::memory::learning::FlushReport],
+        written: Vec<WrittenNote>,
+        events_lagged: u64,
+    ) -> Self {
+        use openalpaca_core::memory::learning::FlushReport;
+        let sum = |count: fn(&FlushReport) -> usize| attempts.iter().map(count).sum::<usize>();
         Self {
             session: session.to_string(),
             label,
             latency_ms,
-            calls: r.calls,
-            chunks: r.chunks,
-            input_tokens: r.input_tokens,
-            output_tokens: r.output_tokens,
-            stored: r.stored,
-            active: r.active,
-            candidates: r.candidates,
-            replaced: r.replaced,
-            suggestions: r.suggestions,
-            deduplicated: r.deduplicated,
-            dropped_over_cap: r.dropped_over_cap,
-            dropped_below_threshold: r.dropped_below_threshold,
-            dropped_invalid: r.dropped_invalid,
-            dropped_suppressed: r.dropped_suppressed,
-            dropped_duplicate_key: r.dropped_duplicate_key,
-            dropped_already_learned: r.dropped_already_learned,
-            dropped_unchanged: r.dropped_unchanged,
-            dropped_conflict: r.dropped_conflict,
-            replaces_unknown: r.replaces_unknown,
-            failed: r.failed,
-            skipped_short: r.skipped_short,
-            skipped_no_owner: r.skipped_no_owner,
-            skipped_unusable: r.skipped_unusable,
-            skipped_root_gone: r.skipped_root_gone,
-            stopped: r.stopped.map(|s| format!("{s:?}")),
+            attempts: attempts.len(),
+            attempt_stops: attempts
+                .iter()
+                .map(|r| r.stopped.map(|s| format!("{s:?}")))
+                .collect(),
+            calls: sum(|r| r.calls),
+            chunks: sum(|r| r.chunks),
+            input_tokens: attempts.iter().map(|r| r.input_tokens).sum(),
+            output_tokens: attempts.iter().map(|r| r.output_tokens).sum(),
+            stored: sum(|r| r.stored),
+            active: sum(|r| r.active),
+            candidates: sum(|r| r.candidates),
+            replaced: sum(|r| r.replaced),
+            suggestions: sum(|r| r.suggestions),
+            deduplicated: sum(|r| r.deduplicated),
+            dropped_over_cap: sum(|r| r.dropped_over_cap),
+            dropped_below_threshold: sum(|r| r.dropped_below_threshold),
+            dropped_invalid: sum(|r| r.dropped_invalid),
+            dropped_suppressed: sum(|r| r.dropped_suppressed),
+            dropped_duplicate_key: sum(|r| r.dropped_duplicate_key),
+            dropped_already_learned: sum(|r| r.dropped_already_learned),
+            dropped_unchanged: sum(|r| r.dropped_unchanged),
+            dropped_conflict: sum(|r| r.dropped_conflict),
+            replaces_unknown: sum(|r| r.replaces_unknown),
+            failed: sum(|r| r.failed),
+            skipped_short: sum(|r| r.skipped_short),
+            skipped_no_owner: sum(|r| r.skipped_no_owner),
+            skipped_unusable: sum(|r| r.skipped_unusable),
+            skipped_root_gone: sum(|r| r.skipped_root_gone),
+            stopped: attempts
+                .last()
+                .and_then(|r| r.stopped)
+                .map(|s| format!("{s:?}")),
             written,
             events_lagged,
-            unusable_answers: unusable_records(&r.unusable),
+            unusable_answers: attempts
+                .iter()
+                .flat_map(|r| unusable_records(&r.unusable))
+                .collect(),
         }
     }
 }
@@ -2718,8 +2758,30 @@ fn drain_memory_changes(
     (written, lagged)
 }
 
+/// The attempts a trigger's flush makes (the L8 fix slice's H2): one, then
+/// again while an attempt stops `BadOutput`, up to the product's
+/// `MAX_ATTEMPTS` — what the production queue's retries of a held window
+/// come to (ruling LR20), with no backoff: `Manual` mode waits for nothing.
+/// The request is the same each time; nothing perturbs it.
+async fn with_retries<R>(
+    mut attempt: impl AsyncFnMut() -> R,
+    stopped: impl Fn(&R) -> Option<openalpaca_core::memory::learning::FlushStop>,
+) -> Vec<R> {
+    use openalpaca_core::memory::learning::{FlushStop, MAX_ATTEMPTS};
+    let mut attempts = Vec::new();
+    loop {
+        let report = attempt().await;
+        let again = stopped(&report) == Some(FlushStop::BadOutput);
+        attempts.push(report);
+        if !again || attempts.len() >= MAX_ATTEMPTS as usize {
+            return attempts;
+        }
+    }
+}
+
 /// `flush_session`, with the bus subscribed around it (design 09 §7.2,
-/// *Counting the two learning paths*).
+/// *Counting the two learning paths*), and flushed again while it stops
+/// `BadOutput` ([`with_retries`]).
 async fn flush_one(
     queue: &openalpaca_core::memory::learning::LearningQueue,
     bus: &openalpaca_core::bus::EventBus,
@@ -2729,12 +2791,14 @@ async fn flush_one(
 ) -> FlushRecord {
     let mut rx = bus.subscribe();
     let t0 = Instant::now();
-    let report = queue.flush_session(session_id).await;
+    let attempts = with_retries(|| queue.flush_session(session_id), |r| r.stopped).await;
     let latency_ms = t0.elapsed().as_millis() as u64;
     let (written, lagged) = drain_memory_changes(&mut rx);
-    let record = FlushRecord::new(corpus_id, label, latency_ms, &report, written, lagged);
+    let record =
+        FlushRecord::from_attempts(corpus_id, label, latency_ms, &attempts, written, lagged);
     eprintln!(
-        "memory_eval: flush {corpus_id} ({label}): {} call(s), {} chunk(s), {} stored ({} active, {} candidates, {} replaced, {} suggestions), {} ms{}",
+        "memory_eval: flush {corpus_id} ({label}): {} attempt(s), {} call(s), {} chunk(s), {} stored ({} active, {} candidates, {} replaced, {} suggestions), {} ms{}",
+        record.attempts,
         record.calls,
         record.chunks,
         record.stored,
@@ -2762,6 +2826,10 @@ struct EpisodeRecord {
     /// quiet period, the switch and the drain alike.
     label: &'static str,
     latency_ms: u64,
+    /// `flush_episodes` calls: 1, or up to `MAX_ATTEMPTS` when one stops
+    /// `BadOutput` (the L8 fix slice's H2); the counts below are summed.
+    attempts: usize,
+    attempt_stops: Vec<Option<String>>,
     calls: usize,
     episodes: usize,
     input_tokens: u64,
@@ -2782,23 +2850,53 @@ impl EpisodeRecord {
         written: Vec<WrittenNote>,
         events_lagged: u64,
     ) -> Self {
+        Self::from_attempts(
+            session,
+            label,
+            latency_ms,
+            std::slice::from_ref(r),
+            written,
+            events_lagged,
+        )
+    }
+
+    fn from_attempts(
+        session: &str,
+        label: &'static str,
+        latency_ms: u64,
+        attempts: &[openalpaca_core::memory::learning::EpisodeReport],
+        written: Vec<WrittenNote>,
+        events_lagged: u64,
+    ) -> Self {
         Self {
             session: session.to_string(),
             label,
             latency_ms,
-            calls: r.calls,
-            episodes: r.episodes,
-            input_tokens: r.input_tokens,
-            output_tokens: r.output_tokens,
-            stopped: r.stopped.map(|s| format!("{s:?}")),
+            attempts: attempts.len(),
+            attempt_stops: attempts
+                .iter()
+                .map(|r| r.stopped.map(|s| format!("{s:?}")))
+                .collect(),
+            calls: attempts.iter().map(|r| r.calls).sum(),
+            episodes: attempts.iter().map(|r| r.episodes).sum(),
+            input_tokens: attempts.iter().map(|r| r.input_tokens).sum(),
+            output_tokens: attempts.iter().map(|r| r.output_tokens).sum(),
+            stopped: attempts
+                .last()
+                .and_then(|r| r.stopped)
+                .map(|s| format!("{s:?}")),
             written,
             events_lagged,
-            unusable_answers: unusable_records(&r.unusable),
+            unusable_answers: attempts
+                .iter()
+                .flat_map(|r| unusable_records(&r.unusable))
+                .collect(),
         }
     }
 }
 
-/// `flush_episodes`, with the bus subscribed around it.
+/// `flush_episodes`, with the bus subscribed around it, and flushed again
+/// while it stops `BadOutput` ([`with_retries`]).
 async fn episode_one(
     queue: &openalpaca_core::memory::learning::LearningQueue,
     bus: &openalpaca_core::bus::EventBus,
@@ -2808,26 +2906,29 @@ async fn episode_one(
 ) -> EpisodeRecord {
     let mut rx = bus.subscribe();
     let t0 = Instant::now();
-    let report = queue.flush_episodes(session_id).await;
+    let attempts = with_retries(|| queue.flush_episodes(session_id), |r| r.stopped).await;
     let latency_ms = t0.elapsed().as_millis() as u64;
     let (written, events_lagged) = drain_memory_changes(&mut rx);
-    eprintln!(
-        "memory_eval: summary {corpus_id} ({label}): {} call(s), {} episode(s), {latency_ms} ms{}",
-        report.calls,
-        report.episodes,
-        report
-            .stopped
-            .map(|s| format!(", stopped: {s:?}"))
-            .unwrap_or_default()
-    );
-    EpisodeRecord::new(
+    let record = EpisodeRecord::from_attempts(
         corpus_id,
         label,
         latency_ms,
-        &report,
+        &attempts,
         written,
         events_lagged,
-    )
+    );
+    eprintln!(
+        "memory_eval: summary {corpus_id} ({label}): {} attempt(s), {} call(s), {} episode(s), {latency_ms} ms{}",
+        record.attempts,
+        record.calls,
+        record.episodes,
+        record
+            .stopped
+            .as_deref()
+            .map(|s| format!(", stopped: {s}"))
+            .unwrap_or_default()
+    );
+    record
 }
 
 /// One fed turn: its corpus place, its user row and what the reader did.
@@ -3853,11 +3954,16 @@ struct Invariants {
     /// Forgotten notes the forced re-run brought back: must be 0.
     forgotten_resurrected: usize,
     /// The forced re-run forgot a note and its flush made an extraction
-    /// call and read its session to the end (no `stopped`), so
+    /// call and read its session to the end (no `stopped`) with no window
+    /// skipped after `MAX_ATTEMPTS` unusable answers, so
     /// `forgotten_resurrected` measured something. For L and a
     /// replay `false` is a violation: a check that never ran is no pass.
     /// L0 and L-S run no re-run.
     forced_rerun_checked: bool,
+    /// Why the forced re-run checked nothing, when it did not — above all
+    /// `unchecked after N unusable answers` (the L8 fix slice's H2), apart
+    /// from `forgotten_resurrected`; `null` when it checked, or none is due.
+    forced_rerun_unchecked: Option<String>,
     violated: bool,
 }
 
@@ -5114,7 +5220,10 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
 /// confirm, no forgotten note resurrected — and, where a forced re-run is
 /// `required` (L, a replay), that it really checked: its flush made a call
 /// and read its session to the end (`calls` counts an answer before it is
-/// parsed, so a call alone proves nothing was examined).
+/// parsed, so a call alone proves nothing was examined) with no window
+/// skipped — the product's `MAX_ATTEMPTS`-th unusable answer moves the
+/// cursor past the window and ends the flush with no stop, having read
+/// nothing (the L8 fix slice's H2).
 fn invariants(learning: &LearningResults, rerun_required: bool) -> Invariants {
     let retired = match &learning.suggestion_check {
         Some(check) => check
@@ -5132,17 +5241,35 @@ fn invariants(learning: &LearningResults, rerun_required: bool) -> Invariants {
         .forced_rerun
         .as_ref()
         .map_or(0, |r| r.resurrected.len());
-    let rerun_checked = learning.forced_rerun.as_ref().is_some_and(|r| {
-        r.skipped.is_none()
-            && r.flush
-                .as_ref()
-                .is_some_and(|f| f.calls > 0 && f.stopped.is_none())
-    });
+    let unchecked = match &learning.forced_rerun {
+        None => rerun_required.then(|| "no forced re-run ran".to_string()),
+        Some(r) => match (&r.skipped, &r.flush) {
+            (Some(why), _) => Some(format!("skipped: {why}")),
+            (None, None) => Some("no flush ran".to_string()),
+            (None, Some(f)) => forced_rerun_unchecked(f),
+        },
+    };
+    let rerun_checked = learning.forced_rerun.is_some() && unchecked.is_none();
     Invariants {
         user_notes_retired_without_confirm: retired,
         forgotten_resurrected: resurrected,
         forced_rerun_checked: rerun_checked,
+        forced_rerun_unchecked: unchecked,
         violated: retired > 0 || resurrected > 0 || (rerun_required && !rerun_checked),
+    }
+}
+
+/// Why a forced re-run's flush checked nothing, if it did not.
+fn forced_rerun_unchecked(f: &FlushRecord) -> Option<String> {
+    let unusable = f.unusable_answers.len();
+    if f.stopped.as_deref() == Some("BadOutput") || f.skipped_unusable > 0 {
+        Some(format!("unchecked after {unusable} unusable answers"))
+    } else if let Some(stop) = &f.stopped {
+        Some(format!("unchecked: the flush stopped ({stop})"))
+    } else if f.calls == 0 {
+        Some("unchecked: the flush made no extraction call".to_string())
+    } else {
+        None
     }
 }
 
@@ -5581,18 +5708,15 @@ fn print_learning(l: &LearningResults) {
     }
     if let Some(r) = &l.forced_rerun {
         println!(
-            "forced re-run: forgot {}, {} extraction call(s), {} resurrected{}{}",
+            "forced re-run: forgot {}, {} attempt(s), {} extraction call(s), {} resurrected{}",
             r.forgotten.as_deref().unwrap_or("nothing"),
+            r.flush.as_ref().map_or(0, |f| f.attempts),
             r.flush.as_ref().map_or(0, |f| f.calls),
             r.resurrected.len(),
-            r.flush
+            l.invariants
                 .as_ref()
-                .and_then(|f| f.stopped.as_deref())
-                .map(|s| format!(", stopped: {s}"))
-                .unwrap_or_default(),
-            r.skipped
-                .as_deref()
-                .map(|s| format!(", skipped: {s}"))
+                .and_then(|i| i.forced_rerun_unchecked.as_deref())
+                .map(|s| format!(", {s}"))
                 .unwrap_or_default()
         );
     }
@@ -7573,6 +7697,322 @@ async fn l_s_raises_a_suggestion_and_the_users_confirm_retires_the_old_note() {
     let inv = invariants(&learning, false);
     assert_eq!(inv.user_notes_retired_without_confirm, 0);
     assert!(!inv.violated, "{inv:?}");
+}
+
+// ─── The L8 fix slice (design 09 rev 3.26) ──────────────────────────────────
+
+/// One offline learning run's scaffolding, as `run_system` builds it for L:
+/// a scratch home store and database, an owner, the stub router's
+/// orchestrator and a manual queue. The environment guard drops last.
+struct OfflineRun {
+    project: PathBuf,
+    db: openalpaca_storage::Database,
+    owner: String,
+    bus: openalpaca_core::bus::EventBus,
+    stack: EvalStack,
+    queue: Arc<openalpaca_core::memory::learning::LearningQueue>,
+    turns_per_flush: u32,
+    _scratch: tempfile::TempDir,
+    _home: tempfile::TempDir,
+    _env: EnvGuard,
+}
+
+impl OfflineRun {
+    fn new(router: Arc<openalpaca_llm::LlmRouter>) -> Self {
+        use openalpaca_core::memory::learning::{LearningDeps, LearningQueue, QueueMode};
+        use openalpaca_storage::{Database, IdentityRepository};
+        let home = tempfile::tempdir().unwrap();
+        let env = EnvGuard::home_store(&home.path().canonicalize().unwrap());
+        let scratch = tempfile::tempdir().unwrap();
+        let project = scratch_project(scratch.path());
+        let db = Database::open(&scratch.path().join(SCRATCH_DB)).unwrap();
+        let owner = new_owner_id();
+        IdentityRepository::new(&db)
+            .create_global_user(&owner, None)
+            .unwrap();
+        let bus = openalpaca_core::bus::EventBus::default();
+        let cfg = eval_daemon_config(System::L, None);
+        let turns_per_flush = cfg.orchestrator.learning.turns_per_flush;
+        let daemon_config = Arc::new(arc_swap::ArcSwap::from_pointee(cfg));
+        let service = Arc::new(MemoryService::open_default(Some(db.clone())).with_bus(bus.clone()));
+        let stack = eval_stack(
+            router.clone(),
+            &db,
+            &bus,
+            Some(&service),
+            daemon_config.clone(),
+        );
+        let queue = LearningQueue::new(
+            LearningDeps {
+                db: db.clone(),
+                router,
+                daemon_config,
+                memory_service: service,
+            },
+            QueueMode::Manual,
+        );
+        Self {
+            project,
+            db,
+            owner,
+            bus,
+            stack,
+            queue,
+            turns_per_flush,
+            _scratch: scratch,
+            _home: home,
+            _env: env,
+        }
+    }
+
+    fn learner(&self) -> Learner {
+        Learner::new(
+            &self.stack,
+            &self.queue,
+            &self.bus,
+            &self.db,
+            &self.owner,
+            &self.project,
+            self.turns_per_flush,
+        )
+    }
+}
+
+/// A corpus session of these user turns, with no project.
+fn fixture_session(id: &str, turns: &[(&str, TurnMode)]) -> CorpusSession {
+    CorpusSession {
+        id: id.to_string(),
+        workspace: None,
+        language: Language::En,
+        narrative_date: "2026-03-02".to_string(),
+        turns: turns
+            .iter()
+            .map(|(user, mode)| CorpusTurn {
+                user: user.to_string(),
+                states: Vec::new(),
+                mode: *mode,
+            })
+            .collect(),
+    }
+}
+
+/// The stub extractor's usable answer: one item citing the chunk's first
+/// own user row.
+fn first_row_item(prompt: &str) -> String {
+    let conversation = prompt
+        .split("<conversation>")
+        .nth(1)
+        .and_then(|rest| rest.split("</conversation>").next())
+        .unwrap_or_default();
+    let first_own = conversation.lines().find_map(|line| {
+        let (n, rest) = line.strip_prefix('R')?.split_once(' ')?;
+        let (_, text) = rest.strip_prefix("user ")?.split_once(": ")?;
+        Some((n.parse::<u32>().ok()?, text.to_string()))
+    });
+    let Some((n, text)) = first_own else {
+        return r#"{"items": []}"#.to_string();
+    };
+    serde_json::json!({"items": [{
+        "title": text, "content": format!("The user said: {text}"),
+        "kind": "fact", "stated_by": "user", "confidence": 0.9, "rows": [n],
+    }]})
+    .to_string()
+}
+
+/// The L8 fix slice's H2: in `Manual` mode a flush that stops `BadOutput`
+/// is flushed again, up to the product's `MAX_ATTEMPTS` flushes, as the
+/// production queue retries a held window (ruling LR20) — each attempt
+/// recorded. A window answered usably on the second attempt is learned; one
+/// never answered usably is what production's third unusable answer does to
+/// it: skipped. Nothing perturbs the prompt: the retry is the same request.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flush_that_stops_bad_output_is_flushed_again_up_to_max_attempts() {
+    use openalpaca_core::memory::learning::MAX_ATTEMPTS;
+    let answers = Arc::new(std::sync::Mutex::new(HashMap::<&'static str, usize>::new()));
+    let seen = answers.clone();
+    let (router, _stub) = stub_router(&[TEST_MODEL], move |request| {
+        let prompt = prompt_of(request);
+        if !prompt.contains("You are the memory extractor") {
+            return "Noted.".to_string();
+        }
+        // The transcript alone: the known notes may list the other session's.
+        let conversation = prompt
+            .split("<conversation>")
+            .nth(1)
+            .and_then(|rest| rest.split("</conversation>").next())
+            .unwrap_or_default();
+        let who = if conversation.contains("Longjing") {
+            "tea"
+        } else {
+            "coffee"
+        };
+        let n = {
+            let mut seen = seen.lock().unwrap();
+            let n = seen.entry(who).or_default();
+            *n += 1;
+            *n
+        };
+        match (who, n) {
+            ("tea", 1) | ("coffee", _) => "Let me think about which facts matter here.".to_string(),
+            _ => first_row_item(&prompt),
+        }
+    });
+    let run = OfflineRun::new(router);
+    let tea = fixture_session(
+        "cs-t21",
+        &[
+            ("I only drink tea, Longjing mostly.", TurnMode::Explicit),
+            ("Thanks.", TurnMode::Noise),
+        ],
+    );
+    let coffee = fixture_session(
+        "cs-t22",
+        &[
+            ("I never drink coffee after noon.", TurnMode::Explicit),
+            ("Thanks.", TurnMode::Noise),
+        ],
+    );
+    let fed = run.learner().feed(&[&tea, &coffee], true).await;
+    let [retried, skipped] = &fed.flushes[..] else {
+        panic!("one switch flush a session: {:?}", fed.flushes);
+    };
+    let json = |r: &FlushRecord| serde_json::to_value(r).unwrap();
+
+    assert_eq!(
+        (retried.calls, retried.stored, retried.stopped.as_deref()),
+        (2, 1, None),
+        "learned on the second attempt: {retried:?}"
+    );
+    assert_eq!(json(retried)["attempts"], 2);
+    assert_eq!(
+        json(retried)["attempt_stops"],
+        serde_json::json!(["BadOutput", null])
+    );
+    assert_eq!(retried.unusable_answers.len(), 1);
+
+    let max = MAX_ATTEMPTS as usize;
+    assert_eq!(json(skipped)["attempts"], max, "{skipped:?}");
+    assert_eq!(
+        (skipped.calls, skipped.stored, skipped.skipped_unusable),
+        (max, 0, 1),
+        "the last unusable answer skips the window, as production's does: {skipped:?}"
+    );
+    let mut stops = vec![serde_json::json!("BadOutput"); max - 1];
+    stops.push(serde_json::Value::Null);
+    assert_eq!(
+        json(skipped)["attempt_stops"],
+        serde_json::Value::Array(stops)
+    );
+    assert_eq!(skipped.unusable_answers.len(), max);
+    assert_eq!(answers.lock().unwrap().get("coffee"), Some(&max));
+}
+
+/// H2 for a conversation summary: a summary flush that stops `BadOutput`
+/// is flushed again, up to `MAX_ATTEMPTS`, each attempt recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_summary_that_stops_bad_output_is_flushed_again() {
+    let recorder_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = recorder_calls.clone();
+    let (router, _stub) = stub_router(&[TEST_MODEL], move |request| {
+        let prompt = prompt_of(request);
+        if prompt.contains("You are the conversation recorder") {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return "The user talked about lockers.".to_string();
+            }
+            return serde_json::json!({
+                "topic": "Locker numbers",
+                "discussed": "The user's locker numbers this week.",
+                "decided": "",
+                "open": "",
+            })
+            .to_string();
+        }
+        if prompt.contains("You are the memory extractor") {
+            return first_row_item(&prompt);
+        }
+        "Noted.".to_string()
+    });
+    let run = OfflineRun::new(router);
+    let turns: Vec<(String, TurnMode)> = (1..=4)
+        .map(|i| {
+            (
+                format!("My locker number this week is {i}{i}{i}."),
+                TurnMode::Explicit,
+            )
+        })
+        .collect();
+    let turns: Vec<(&str, TurnMode)> = turns.iter().map(|(t, m)| (t.as_str(), *m)).collect();
+    let session = fixture_session("cs-t23", &turns);
+    let fed = run
+        .learner()
+        .with_summaries(true)
+        .feed(&[&session], true)
+        .await;
+    let [summary] = &fed.episodes[..] else {
+        panic!("one summary flush: {:?}", fed.episodes);
+    };
+    assert_eq!(
+        (summary.calls, summary.episodes, summary.stopped.as_deref()),
+        (2, 1, None),
+        "{summary:?}"
+    );
+    let json = serde_json::to_value(summary).unwrap();
+    assert_eq!(json["attempts"], 2);
+    assert_eq!(
+        json["attempt_stops"],
+        serde_json::json!(["BadOutput", null])
+    );
+}
+
+/// H2 with rev 3.11/3.12's semantics kept: a forced re-run that never read
+/// its session to the end is a violation, however it ended — and after
+/// `MAX_ATTEMPTS` unusable answers the product skips the window and ends
+/// the flush with no stop, which must not read as a check (rerun-badoutput
+/// sceptic 1). The invariant says why it is unchecked, apart from any
+/// resurrection.
+#[test]
+fn a_forced_rerun_unchecked_after_unusable_answers_says_so() {
+    use openalpaca_core::memory::learning::{FlushReport, UnusableAnswer};
+    let unusable = UnusableAnswer {
+        reason: "the answer is not JSON".to_string(),
+        chars: 12,
+        finish_reason: Some("stop"),
+        head: "Let me think".to_string(),
+        tail: String::new(),
+    };
+    let skipped_after_three = FlushRecord::new(
+        "cs-001",
+        FLUSH_FORCED_RERUN,
+        0,
+        &FlushReport {
+            calls: 3,
+            chunks: 1,
+            skipped_unusable: 1,
+            unusable: vec![unusable; 3],
+            stopped: None,
+            ..Default::default()
+        },
+        Vec::new(),
+        0,
+    );
+    let learning = LearningResults {
+        forced_rerun: Some(ForcedRerun {
+            forgotten: Some("note".to_string()),
+            flush: Some(skipped_after_three),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let inv = invariants(&learning, true);
+    assert!(
+        !inv.forced_rerun_checked && inv.violated,
+        "a skipped window checked nothing: {inv:?}"
+    );
+    assert_eq!(inv.forgotten_resurrected, 0);
+    assert_eq!(
+        serde_json::to_value(&inv).unwrap()["forced_rerun_unchecked"],
+        "unchecked after 3 unusable answers"
+    );
 }
 
 // ─── L8's recall-mode comparison (design 09 §13.4) ──────────────────────────
