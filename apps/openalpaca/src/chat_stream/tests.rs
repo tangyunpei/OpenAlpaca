@@ -1181,6 +1181,10 @@ fn a_runs_outcome_prints_the_lines_it_always_did() {
         Some("[Task completed in 42s]\nResult: Wrote notes.md\n")
     );
     assert_eq!(
+        task_outcome_text(&serde_json::json!({ "status": "completed" }), true).as_deref(),
+        Some("[Task completed]\n")
+    );
+    assert_eq!(
         task_outcome_text(&serde_json::json!({ "status": "cancelled" }), true).as_deref(),
         Some("[Task cancelled]\n")
     );
