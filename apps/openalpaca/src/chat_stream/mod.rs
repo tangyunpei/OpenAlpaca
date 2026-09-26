@@ -800,61 +800,9 @@ pub async fn poll_task_completion(client: &DaemonClient, task_id: &str) -> Resul
         };
 
         // GET /v1/tasks/{id} returns { "task": {...}, "outcome": {...}? }
-        let task = &resp["task"];
-        let status = task["status"].as_str().unwrap_or("");
-
-        match status {
-            "completed" => {
-                let summary = task["result_summary"].as_str().unwrap_or("");
-                // Calculate duration from created_at → completed_at
-                let duration_str =
-                    match (task["created_at"].as_str(), task["completed_at"].as_str()) {
-                        (Some(start), Some(end)) => {
-                            match (
-                                chrono::DateTime::parse_from_rfc3339(start),
-                                chrono::DateTime::parse_from_rfc3339(end),
-                            ) {
-                                (Ok(s), Ok(e)) => {
-                                    let secs = (e - s).num_seconds().max(0);
-                                    format!(" in {}s", secs)
-                                }
-                                _ => String::new(),
-                            }
-                        }
-                        _ => String::new(),
-                    };
-                println!("{}", format!("[Task completed{}]", duration_str).green());
-                if !summary.is_empty() {
-                    println!("{} {}", "Result:".bold(), summary);
-                }
-                return Ok(());
-            }
-            "failed" | "cancelled" => {
-                let summary = task["result_summary"].as_str().unwrap_or("");
-                println!("{}", format!("[Task {}]", status).red());
-                if !summary.is_empty() {
-                    println!("{} {}", "Error:".red(), summary);
-                }
-                return Ok(());
-            }
-            // Terminal, but not a failure: the daemon went away mid-run
-            // (§5.6b). Polling must stop — the run will never move again — and
-            // the restart verb is `rerun`, not `start` (R43).
-            "interrupted" => {
-                let summary = task["result_summary"].as_str().unwrap_or("");
-                println!("{}", "[Task interrupted — the daemon restarted]".yellow());
-                if !summary.is_empty() {
-                    println!("{} {}", "Detail:".yellow(), summary);
-                }
-                println!(
-                    "{}",
-                    "Nothing was lost — re-run it to start the same goal again.".dimmed()
-                );
-                return Ok(());
-            }
-            _ => {
-                // Still running — continue polling
-            }
+        if let Some(text) = task_outcome_text(&resp["task"], std::io::stdout().is_terminal()) {
+            print!("{text}");
+            return Ok(());
         }
     }
 
@@ -863,6 +811,80 @@ pub async fn poll_task_completion(client: &DaemonClient, task_id: &str) -> Resul
         "(stopped waiting — task still running, check /tasks)".yellow()
     );
     Ok(())
+}
+
+/// What a delegated run's outcome prints once the run has stopped, one line
+/// each, painted — or `None` while it is still running.
+///
+/// The summary is the run's `result_summary`: the lead model's own final
+/// answer, followed, when a tool was refused because nobody could approve
+/// it, by a line naming that tool — a name an MCP server or a plugin chose.
+/// In the REPL it is printed into the
+/// terminal the next turn's inline `[y/N]` prompt is printed into, so a
+/// terminal gets it as it gets the streamed answer ([`model_text`]): a
+/// scroll region or a palette change in it would outlive it, and the
+/// prompt's reset undoes neither. A pipe gets it as the daemon sent it.
+fn task_outcome_text(task: &serde_json::Value, tty: bool) -> Option<String> {
+    use std::fmt::Write as _;
+
+    let summary = model_text(tty, task["result_summary"].as_str().unwrap_or(""));
+    let mut out = String::new();
+    // Writing into a `String` cannot fail.
+    match task["status"].as_str().unwrap_or("") {
+        "completed" => {
+            // Calculate duration from created_at → completed_at
+            let duration_str = match (task["created_at"].as_str(), task["completed_at"].as_str()) {
+                (Some(start), Some(end)) => {
+                    match (
+                        chrono::DateTime::parse_from_rfc3339(start),
+                        chrono::DateTime::parse_from_rfc3339(end),
+                    ) {
+                        (Ok(s), Ok(e)) => {
+                            let secs = (e - s).num_seconds().max(0);
+                            format!(" in {}s", secs)
+                        }
+                        _ => String::new(),
+                    }
+                }
+                _ => String::new(),
+            };
+            let _ = writeln!(
+                out,
+                "{}",
+                format!("[Task completed{}]", duration_str).green()
+            );
+            if !summary.is_empty() {
+                let _ = writeln!(out, "{} {}", "Result:".bold(), summary);
+            }
+        }
+        status @ ("failed" | "cancelled") => {
+            let _ = writeln!(out, "{}", format!("[Task {}]", status).red());
+            if !summary.is_empty() {
+                let _ = writeln!(out, "{} {}", "Error:".red(), summary);
+            }
+        }
+        // Terminal, but not a failure: the daemon went away mid-run
+        // (§5.6b). Polling must stop — the run will never move again — and
+        // the restart verb is `rerun`, not `start` (R43).
+        "interrupted" => {
+            let _ = writeln!(
+                out,
+                "{}",
+                "[Task interrupted — the daemon restarted]".yellow()
+            );
+            if !summary.is_empty() {
+                let _ = writeln!(out, "{} {}", "Detail:".yellow(), summary);
+            }
+            let _ = writeln!(
+                out,
+                "{}",
+                "Nothing was lost — re-run it to start the same goal again.".dimmed()
+            );
+        }
+        // Still running — continue polling
+        _ => return None,
+    }
+    Some(out)
 }
 
 pub fn format_usage_line(info: &UsageInfo) -> String {

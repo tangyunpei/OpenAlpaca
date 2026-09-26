@@ -989,3 +989,69 @@ fn the_stream_writes_the_models_text_to_a_terminal_without_a_control_character()
     // What was streamed is still recorded as the daemon sent it.
     assert_eq!(state.shown, "x\u{9b}8my");
 }
+
+// ── A delegated run's outcome ────────────────────────────────────────
+//
+// In the REPL the run's `result_summary` is printed into the terminal the
+// next turn's inline prompt is printed into. It is the lead model's own
+// final answer, and names third-party tools nobody could approve, so it
+// takes A10's rule: at a terminal every control character but `\n` and `\t`
+// is shown as `<U+XXXX>`; a pipe gets it as the daemon sent it.
+
+/// A palette change (OSC 4 setting yellow to black) and a scroll region
+/// (`ESC [ 1 ; 2 r`) in a run's summary: neither mode is one the prompt's
+/// reset undoes, so neither may reach the terminal raw.
+const SPOOFED_SUMMARY: &str = "done\u{1b}]4;3;#000000\u{7}\u{1b}[1;2r";
+const SPOOFED_SUMMARY_SHOWN: &str = "done<U+001B>]4;3;#000000<U+0007><U+001B>[1;2r";
+
+#[test]
+fn a_runs_outcome_reaches_a_terminal_without_a_control_character() {
+    colored::control::set_override(false);
+    for (status, label) in [
+        ("completed", "Result:"),
+        ("failed", "Error:"),
+        ("cancelled", "Error:"),
+        ("interrupted", "Detail:"),
+    ] {
+        let task = serde_json::json!({ "status": status, "result_summary": SPOOFED_SUMMARY });
+        let shown = task_outcome_text(&task, true).expect("a stopped run prints its outcome");
+        assert!(
+            shown.contains(&format!("{label} {SPOOFED_SUMMARY_SHOWN}\n")),
+            "{status}: {shown:?}"
+        );
+        assert!(
+            !shown.contains(['\u{1b}', '\u{7}']),
+            "{status}: no raw control reaches the terminal: {shown:?}"
+        );
+        let piped = task_outcome_text(&task, false).expect("a stopped run prints its outcome");
+        assert!(
+            piped.contains(&format!("{label} {SPOOFED_SUMMARY}\n")),
+            "{status}: a pipe gets the daemon's text: {piped:?}"
+        );
+    }
+}
+
+/// The lines themselves are unchanged: the duration, the label, and no
+/// `Result:` line for an empty summary; a running task prints nothing yet.
+#[test]
+fn a_runs_outcome_prints_the_lines_it_always_did() {
+    colored::control::set_override(false);
+    let task = serde_json::json!({
+        "status": "completed",
+        "result_summary": "Wrote notes.md",
+        "created_at": "2026-09-25T10:00:00Z",
+        "completed_at": "2026-09-25T10:00:42Z",
+    });
+    assert_eq!(
+        task_outcome_text(&task, true).as_deref(),
+        Some("[Task completed in 42s]\nResult: Wrote notes.md\n")
+    );
+    assert_eq!(
+        task_outcome_text(&serde_json::json!({ "status": "cancelled" }), true).as_deref(),
+        Some("[Task cancelled]\n")
+    );
+    assert_eq!(
+        task_outcome_text(&serde_json::json!({ "status": "running" }), true),
+        None
+    );
+}
