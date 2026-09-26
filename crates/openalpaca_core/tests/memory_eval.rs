@@ -1063,6 +1063,9 @@ struct Settings {
     home_store: Option<PathBuf>,
     llm_toml: PathBuf,
     questions_path: PathBuf,
+    /// `OPENALPACA_MEMORY_EVAL_QUESTIONS` named the file: a replay then
+    /// writes the summaries and asks it (the L8 fix slice's H9).
+    questions_named: bool,
     limit: Option<usize>,
     category: Option<Category>,
     judge: JudgeRequest,
@@ -1200,6 +1203,7 @@ impl Settings {
             llm_toml.display()
         );
 
+        let questions_named = env_nonempty("OPENALPACA_MEMORY_EVAL_QUESTIONS").is_some();
         let questions_path = env_nonempty("OPENALPACA_MEMORY_EVAL_QUESTIONS")
             .map(PathBuf::from)
             .unwrap_or_else(|| eval_dir().join("questions-heldout.json"));
@@ -1233,6 +1237,7 @@ impl Settings {
             home_store,
             llm_toml,
             questions_path,
+            questions_named,
             limit: env_number("OPENALPACA_MEMORY_EVAL_LIMIT"),
             category,
             judge: JudgeRequest::from_env_value(env_nonempty("OPENALPACA_MEMORY_EVAL_JUDGE_MODEL")),
@@ -3344,17 +3349,24 @@ fn prepare_replay(from: &Path, into: &Path) -> Result<ReplayScratch, String> {
     })
 }
 
-/// Flush every stored session in order, whole, with no reader call.
+/// Flush every stored session in order, whole, with no reader call — and,
+/// with `summaries`, write each session's conversation summaries after its
+/// facts, as L does at its `switch` (the L8 fix slice's H9).
 async fn replay_learning(
     queue: &openalpaca_core::memory::learning::LearningQueue,
     bus: &openalpaca_core::bus::EventBus,
     transcript: &Transcript,
-) -> Vec<FlushRecord> {
+    summaries: bool,
+) -> (Vec<FlushRecord>, Vec<EpisodeRecord>) {
     let mut flushes = Vec::with_capacity(transcript.sessions.len());
+    let mut episodes = Vec::new();
     for s in &transcript.sessions {
         flushes.push(flush_one(queue, bus, &s.session_id, &s.corpus_id, FLUSH_REPLAY).await);
+        if summaries {
+            episodes.push(episode_one(queue, bus, &s.session_id, &s.corpus_id, FLUSH_REPLAY).await);
+        }
     }
-    flushes
+    (flushes, episodes)
 }
 
 // ─── What is measured (design 09 §7.3) ──────────────────────────────────────
@@ -5771,11 +5783,18 @@ async fn suggestion_check(
 
 /// A replay (design 09 §7.2): an L run's kept transcript learned again by a
 /// fresh store, with no reader call; the learning side measured as L's is.
+/// With `OPENALPACA_MEMORY_EVAL_QUESTIONS` naming a file (the L8 fix
+/// slice's H9) it also writes each session's conversation summaries and then
+/// asks the questions as D asks them, learning off — the episode split on a
+/// fixed transcript, without a three-hour live feed. Its store is still the
+/// learning queue's alone: the live reader's `memory_store` notes are not in
+/// it.
 async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>) {
     use arc_swap::ArcSwap;
     use openalpaca_core::bus::EventBus;
     use openalpaca_core::memory::learning::{LearningDeps, LearningQueue, QueueMode};
     let from = settings.learn_from.as_ref().expect("a replay has a source");
+    let asks = settings.questions_named;
     let started = Instant::now();
     let mut report = new_report(System::L);
     let dir = eval_dir();
@@ -5788,6 +5807,24 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
     let coverage_bytes = read_bytes(&coverage_prompt_path);
     let coverage_prompt_sha256 = sha256_hex(&coverage_bytes);
     let coverage_template = String::from_utf8(coverage_bytes).expect("coverage prompt is UTF-8");
+    let judge_template =
+        String::from_utf8(read_bytes(&dir.join("judge-prompt.md"))).expect("judge prompt is UTF-8");
+    let asked = asks.then(|| {
+        let (all, sha256) = load_json::<Vec<Question>>(&settings.questions_path);
+        let selected: Vec<Question> = all
+            .iter()
+            .filter(|q| settings.category.is_none_or(|c| q.category == c))
+            .take(settings.limit.unwrap_or(usize::MAX))
+            .cloned()
+            .collect();
+        assert!(!selected.is_empty(), "memory_eval: no questions selected");
+        AskedQuestions {
+            path: settings.questions_path.clone(),
+            sha256,
+            total: all.len(),
+            selected,
+        }
+    });
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let replay = prepare_replay(from, tmp.path()).unwrap_or_else(|e| panic!("memory_eval: {e}"));
@@ -5806,7 +5843,7 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
         LearningDeps {
             db: replay.db.clone(),
             router: router.clone(),
-            daemon_config,
+            daemon_config: daemon_config.clone(),
             memory_service: service.clone(),
         },
         QueueMode::Manual,
@@ -5837,6 +5874,7 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
     );
     // A replay flushes each stored session whole.
     conditions.turns_per_flush = 0;
+    conditions.summaries = asks;
     report.conditions = Some(replay_conditions(
         settings,
         &replay,
@@ -5846,19 +5884,21 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
         &heldout_sha256,
         judge_gate.as_ref(),
         conditions,
+        asked.as_ref(),
     ));
     write_report(&settings.report_path, &report);
 
-    let flushes = replay_learning(&queue, &bus, &replay.transcript).await;
+    let (flushes, episodes) = replay_learning(&queue, &bus, &replay.transcript, asks).await;
     let mut learning = LearningResults {
-        warnings: learning_warnings(&[], &flushes, &[]),
+        warnings: learning_warnings(&[], &flushes, &episodes),
         cost: Some(learning_cost(
             &[],
             &flushes,
-            &[],
+            &episodes,
             started.elapsed().as_millis() as u64,
         )),
         flushes,
+        episode_flushes: episodes,
         ..Default::default()
     };
     let ctx = service
@@ -5886,6 +5926,39 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
         &mut learning,
     )
     .await;
+
+    // H9: the questions, asked as D asks them with learning off, before the
+    // forced re-run so it changes nothing they read.
+    if let Some(asked) = &asked {
+        report.learning = Some(learning);
+        write_report(&settings.report_path, &report);
+        set_learning(&daemon_config, false);
+        let stack = eval_stack(
+            router.clone(),
+            &replay.db,
+            &bus,
+            Some(&service),
+            daemon_config.clone(),
+        );
+        ask_questions(
+            &stack.orch,
+            &stack.reads,
+            &bus,
+            &router,
+            judge_gate.as_mut(),
+            &judge_template,
+            &asked.selected,
+            &replay.project,
+            &replay.owner_id,
+            &HashMap::new(),
+            &mut report,
+            &settings.report_path,
+        )
+        .await;
+        set_learning(&daemon_config, true);
+        learning = report.learning.take().expect("just set");
+    }
+
     let rerun = forced_rerun(
         &queue,
         &bus,
@@ -5899,6 +5972,21 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
     .await;
     learning.forced_rerun = Some(rerun);
     learning.invariants = Some(invariants(&learning, true));
+    if asks {
+        let judge_cost = router
+            .cost_tracker
+            .get_agent_usage(JUDGE_AGENT_ID)
+            .await
+            .map(|u| u.total_cost_usd)
+            .unwrap_or(0.0);
+        let t = totals(
+            &report.rows,
+            judge_cost,
+            started.elapsed().as_millis() as u64,
+        );
+        print_totals(System::L, &t);
+        report.totals = Some(t);
+    }
     print_learning(&learning);
     let violated = learning.invariants.as_ref().is_some_and(|i| i.violated);
     report.learning = Some(learning);
@@ -5909,11 +5997,31 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
     if settings.keep_scratch {
         println!("scratch kept at {}", tmp.keep().display());
     }
+    if let Some(reader) = reader.as_deref() {
+        let others: Vec<&str> = report
+            .rows
+            .iter()
+            .filter(|r| r.reader_models.iter().any(|m| m != reader))
+            .map(|r| r.id.as_str())
+            .collect();
+        assert!(
+            others.is_empty(),
+            "memory_eval: rows answered by a model other than the reader {reader}: {others:?}"
+        );
+    }
     assert!(!violated, "memory_eval: a learning invariant was violated");
 }
 
-/// A replay's conditions: no questions, no seeding, the replay's own owner
-/// and scratch.
+/// The question set a replay asks (the L8 fix slice's H9).
+struct AskedQuestions {
+    path: PathBuf,
+    sha256: String,
+    total: usize,
+    selected: Vec<Question>,
+}
+
+/// A replay's conditions: no seeding, the replay's own owner and scratch,
+/// and the questions only when `asked` (the L8 fix slice's H9).
 #[allow(clippy::too_many_arguments)]
 fn replay_conditions(
     settings: &Settings,
@@ -5924,9 +6032,11 @@ fn replay_conditions(
     heldout_sha256: &str,
     judge: Option<&JudgeGate>,
     learning: LearningConditions,
+    asked: Option<&AskedQuestions>,
 ) -> Conditions {
     let cfg = eval_daemon_config(System::L, settings.recall_mode);
     let recall = RecallBudget::for_mode(cfg.orchestrator.memory.recall_mode);
+    let asks = asked.is_some();
     Conditions {
         owner_id: replay.owner_id.clone(),
         llm_toml: settings.llm_toml.to_string_lossy().into_owned(),
@@ -5953,17 +6063,20 @@ fn replay_conditions(
         notes_seeded: 0,
         notes_duplicate: 0,
         notes_failed: 0,
-        questions_path: eval_dir()
-            .join("questions-heldout.json")
+        questions_path: asked
+            .map_or_else(
+                || eval_dir().join("questions-heldout.json"),
+                |a| a.path.clone(),
+            )
             .to_string_lossy()
             .into_owned(),
-        questions_sha256: heldout_sha256.to_string(),
-        questions_total: 0,
-        questions_selected: 0,
-        limit: None,
-        category_filter: None,
-        per_turn_fts_active: false,
-        memory_search_tool_offered: false,
+        questions_sha256: asked.map_or_else(|| heldout_sha256.to_string(), |a| a.sha256.clone()),
+        questions_total: asked.map_or(0, |a| a.total),
+        questions_selected: asked.map_or(0, |a| a.selected.len()),
+        limit: settings.limit.filter(|_| asks),
+        category_filter: settings.category.filter(|_| asks),
+        per_turn_fts_active: asks,
+        memory_search_tool_offered: asks,
         unattended: true,
         extraction_disabled: false,
         workflow_cap: cfg.orchestrator.routing.max_workflows_per_lane,
@@ -5973,9 +6086,20 @@ fn replay_conditions(
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default(),
         scratch_dir: None,
-        system_description: "a replay of L's learning phase (design 09 §7.2): the kept transcript \
-                             learned again by a fresh store, with no reader call; no questions",
-        memory_tools_offered: Vec::new(),
+        system_description: if asks {
+            "a replay of L's learning phase (design 09 §7.2) with the questions: the kept \
+             transcript learned again by a fresh store with no reader call, each session's \
+             conversation summaries written, then the questions asked as D asks them, learning \
+             off (the L8 fix slice's H9); the store is extraction-only"
+        } else {
+            "a replay of L's learning phase (design 09 §7.2): the kept transcript \
+             learned again by a fresh store, with no reader call; no questions"
+        },
+        memory_tools_offered: if asks {
+            MEMORY_TOOLS.to_vec()
+        } else {
+            Vec::new()
+        },
         follow_up_search_bound: None,
         recall_mode: cfg.orchestrator.memory.recall_mode.as_str(),
         recall_total_bytes: recall.total_bytes,
@@ -7616,6 +7740,29 @@ impl Drop for EnvGuard {
 /// sessions — one with no project, one in the scratch project — whose turns
 /// were learned (their cursors at the last row), and the transcript map.
 fn fixture_scratch(dir: &Path) -> (String, PathBuf, Transcript) {
+    fixture_scratch_with(
+        dir,
+        &[
+            (
+                "cs-001",
+                false,
+                &["I only drink tea, Longjing mostly, never coffee."],
+            ),
+            (
+                "cs-002",
+                true,
+                &["Lantern listens on port 8790 locally now."],
+            ),
+        ],
+    )
+}
+
+/// [`fixture_scratch`] with these sessions: each a corpus id, whether it
+/// ran in the scratch project, and its user turns, each answered "Noted."
+fn fixture_scratch_with(
+    dir: &Path,
+    corpus: &[(&str, bool, &[&str])],
+) -> (String, PathBuf, Transcript) {
     use openalpaca_storage::{
         ConversationMessage, ConversationRepository, Database, IdentityRepository,
         LearningCursorRepository,
@@ -7630,47 +7777,41 @@ fn fixture_scratch(dir: &Path) -> (String, PathBuf, Transcript) {
     let lane = format!("{owner}:gui");
     let repo = ConversationRepository::new(&db);
     let mut sessions = Vec::new();
-    for (corpus_id, root, user) in [
-        (
-            "cs-001",
-            None,
-            "I only drink tea, Longjing mostly, never coffee.",
-        ),
-        (
-            "cs-002",
-            Some(project_str.as_str()),
-            "Lantern listens on port 8790 locally now.",
-        ),
-    ] {
+    for (corpus_id, in_project, turns) in corpus {
+        let root = in_project.then_some(project_str.as_str());
         let session = repo
             .create_session(&lane, "gui", root, Some(corpus_id))
             .unwrap();
-        let request = uuid::Uuid::new_v4().to_string();
-        let row = |role: &str, content: &str, root: Option<&str>| {
-            repo.insert(&ConversationMessage {
-                lane_key: lane.clone(),
-                role: role.to_string(),
-                content: content.to_string(),
-                source: Some("gui".to_string()),
-                session_id: Some(session.id.clone()),
-                request_id: Some(request.clone()),
-                workspace_root: root.map(str::to_string),
-                ..Default::default()
-            })
-            .unwrap()
-        };
-        let q = row("user", user, root);
-        let a = row("assistant", "Noted.", None);
-        // The L run learned it: the cursor sits at the answer.
+        let mut user_rows = Vec::new();
+        let mut last = 0;
+        for user in *turns {
+            let request = uuid::Uuid::new_v4().to_string();
+            let row = |role: &str, content: &str, root: Option<&str>| {
+                repo.insert(&ConversationMessage {
+                    lane_key: lane.clone(),
+                    role: role.to_string(),
+                    content: content.to_string(),
+                    source: Some("gui".to_string()),
+                    session_id: Some(session.id.clone()),
+                    request_id: Some(request.clone()),
+                    workspace_root: root.map(str::to_string),
+                    ..Default::default()
+                })
+                .unwrap()
+            };
+            user_rows.push(row("user", user, root));
+            last = row("assistant", "Noted.", None);
+        }
+        // The L run learned it: the cursor sits at the last answer.
         assert!(
             LearningCursorRepository::new(&db)
-                .advance_cas(&session.id, a, 0)
+                .advance_cas(&session.id, last, 0)
                 .unwrap()
         );
         sessions.push(TranscriptSession {
             corpus_id: corpus_id.to_string(),
             session_id: session.id,
-            user_rows: vec![q],
+            user_rows,
         });
     }
     let transcript = Transcript {
@@ -7755,7 +7896,8 @@ async fn replay_learns_from_a_fixture_sized_scratch_database_with_no_reader_call
         },
         QueueMode::Manual,
     );
-    let flushes = replay_learning(&queue, &bus, &replay.transcript).await;
+    let (flushes, episodes) = replay_learning(&queue, &bus, &replay.transcript, false).await;
+    assert!(episodes.is_empty(), "no summary without questions");
 
     assert_eq!(flushes.len(), 2);
     for f in &flushes {
@@ -9082,6 +9224,117 @@ async fn the_coverage_judge_has_room_for_its_verdict_and_unparsed_is_apart_from_
     );
 }
 
+/// The L8 fix slice's H9: the episode split without a three-hour live feed.
+/// A replay (`OPENALPACA_MEMORY_EVAL_LEARN_FROM`) with
+/// `OPENALPACA_MEMORY_EVAL_QUESTIONS` naming a file also writes each
+/// session's conversation summaries at its end — as L does at its switch —
+/// and then asks the questions as D asks them, learning off; without
+/// `QUESTIONS` a replay is as it was: no summary, no question. Both record
+/// `conditions.learning.summaries` and `replayed_from`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replay_with_questions_writes_summaries_and_asks_them() {
+    use std::ffi::OsStr;
+    const QUESTION: &str = "Which conversation was about my locker numbers?";
+    let home = tempfile::tempdir().unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    std::fs::write(config.path().join("llm.toml"), "").unwrap();
+    let kept = tempfile::tempdir().unwrap();
+    fixture_scratch_with(
+        kept.path(),
+        &[(
+            "cs-001",
+            false,
+            &[
+                "My locker number this week is 111.",
+                "The gym moved my locker to 222 on Tuesday.",
+                "It is 333 for the pool.",
+                "And 444 at the office.",
+            ],
+        )],
+    );
+    let out = tempfile::tempdir().unwrap();
+    let questions = out.path().join("questions.json");
+    std::fs::write(
+        &questions,
+        serde_json::to_vec(&serde_json::json!([{
+            "id": "eq-t01", "category": "exact_recall", "language": "en",
+            "question": QUESTION, "gold_answer": "The one about lockers.",
+            "relies_on": [], "expect_abstain": false,
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    for with_questions in [true, false] {
+        let report_path = out.path().join(format!("report-{with_questions}.json"));
+        let mut set: Vec<(&'static str, &OsStr)> = vec![
+            ("OPENALPACA_MEMORY_EVAL_SYSTEM", OsStr::new("L")),
+            ("OPENALPACA_MEMORY_EVAL_REPORT", report_path.as_os_str()),
+            ("OPENALPACA_MEMORY_EVAL_JUDGE_MODEL", OsStr::new("none")),
+            ("OPENALPACA_MEMORY_EVAL_LEARN_FROM", kept.path().as_os_str()),
+            ("OPENALPACA_CONFIG_DIR", config.path().as_os_str()),
+            (
+                openalpaca_storage::store::HOME_STORE_ENV,
+                home_path.as_os_str(),
+            ),
+        ];
+        if with_questions {
+            set.push(("OPENALPACA_MEMORY_EVAL_QUESTIONS", questions.as_os_str()));
+        }
+        let _env = harness_env(&set);
+        let settings = Settings::from_env();
+        let (router, stub) = stub_router(&[TEST_MODEL], |request| {
+            let prompt = prompt_of(request);
+            if prompt.contains("You are the conversation recorder") {
+                return serde_json::json!({
+                    "topic": "Locker numbers",
+                    "discussed": "The user's locker numbers this week.",
+                    "decided": "", "open": "",
+                })
+                .to_string();
+            }
+            if prompt.contains("You are the memory extractor") {
+                return first_row_item(&prompt);
+            }
+            "Noted.".to_string()
+        });
+        run_replay(&settings, router).await;
+        let (report, _) = load_json::<serde_json::Value>(&report_path);
+        let (conditions, learning) = (&report["conditions"], &report["learning"]);
+        assert_eq!(report["status"], "complete");
+        assert_eq!(
+            conditions["learning"]["replayed_from"],
+            kept.path().to_string_lossy().as_ref()
+        );
+        assert_eq!(conditions["learning"]["summaries"], with_questions);
+        let asked = stub
+            .requests()
+            .iter()
+            .any(|r| prompt_of(r).contains(QUESTION));
+        if with_questions {
+            assert_eq!(
+                learning["episode_flushes"][0]["episodes"], 1,
+                "{}",
+                learning["episode_flushes"]
+            );
+            assert_eq!(learning["episodes"].as_array().map(Vec::len), Some(1));
+            assert_eq!(report["rows"].as_array().map(Vec::len), Some(1));
+            assert_eq!(report["rows"][0]["id"], "eq-t01");
+            assert_eq!(report["totals"]["questions"], 1);
+            assert_eq!(conditions["questions_selected"], 1);
+            assert!(asked, "the question reached the reader");
+        } else {
+            assert_eq!(
+                learning["episode_flushes"].as_array().map(Vec::len),
+                Some(0)
+            );
+            assert_eq!(report["rows"].as_array().map(Vec::len), Some(0));
+            assert!(report["totals"].is_null());
+            assert!(!asked);
+        }
+    }
+}
+
 // ─── L8's recall-mode comparison (design 09 §13.4) ──────────────────────────
 
 /// Every variable `Settings::from_env` reads: a test that calls it names
@@ -9124,6 +9377,7 @@ fn settings_for_tests() -> Settings {
         home_store: None,
         llm_toml: PathBuf::from("/nonexistent/llm.toml"),
         questions_path: eval_dir().join("questions-heldout.json"),
+        questions_named: false,
         limit: None,
         category: None,
         judge: JudgeRequest::Off,
@@ -9841,6 +10095,7 @@ async fn the_recall_mode_the_run_names_is_the_one_its_report_records() {
             "heldout",
             None,
             learning,
+            None,
         );
         assert_eq!(conditions.recall_mode, recorded, "a replay's conditions");
     }
