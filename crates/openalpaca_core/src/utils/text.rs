@@ -126,19 +126,26 @@ pub struct Escaped {
 /// A character an approval surface shows as `<U+XXXX>` instead of itself:
 /// every [hidden](is_hidden) character, every code point Unicode calls
 /// default-ignorable (`Default_Ignorable_Code_Point`: drawn as nothing, so a
-/// variation selector inside a path reads as the path without it), and the
+/// variation selector inside a path reads as the path without it), the
 /// line and paragraph separators (U+2028, U+2029), which break a line where
-/// the text shows none — but not `\n` and `\t`, the two characters the
-/// surfaces' own layout (pretty-printed JSON) is written in. `\r` is
-/// escaped: at a terminal it returns the cursor and the rest of the line
-/// overwrites what was shown.
+/// the text shows none, and U+FFFC OBJECT REPLACEMENT CHARACTER — but not
+/// `\n` and `\t`, the two characters the surfaces' own layout
+/// (pretty-printed JSON) is written in. `\r` is escaped: at a terminal it
+/// returns the cursor and the rest of the line overwrites what was shown.
+///
+/// U+FFFC is a symbol (`So`), neither a control, a format character nor
+/// default-ignorable, but Apple's text engine — the GUI's WebKit, the chat
+/// apps on a Mac or an iPhone, a macOS terminal — draws it as an empty cell
+/// a space wide: a run of it is blank space a line can wrap on, and one at
+/// the end of a value is not seen at all. It is the placeholder for an
+/// embedded object, which no tool's name or argument carries for a reason.
 ///
 /// The GUI derives its copy from `apps/openalpaca-gui/src/lib/hidden-chars.json`;
 /// a test on each side holds its own to that table.
 pub fn needs_escape(c: char) -> bool {
     match c {
         '\n' | '\t' => false,
-        '\u{2028}' | '\u{2029}' => true,
+        '\u{2028}' | '\u{2029}' | '\u{fffc}' => true,
         c => is_hidden(c) || is_default_ignorable(c),
     }
 }
@@ -375,16 +382,20 @@ mod tests {
     }
 
     /// The escape's set is `is_hidden`'s and the default-ignorable code
-    /// points, plus the line and paragraph separators, less the newline and
-    /// the tab the surfaces lay JSON out with — and nothing else, so none of
-    /// them can drift from the others.
+    /// points, plus the line and paragraph separators and the object
+    /// replacement character, less the newline and the tab the surfaces lay
+    /// JSON out with — and nothing else, so none of them can drift from the
+    /// others.
     #[test]
     fn needs_escape_is_hidden_and_default_ignorable_plus_the_separators_less_newline_and_tab() {
         for c in every_char() {
-            let expected =
-                (is_hidden(c) || is_default_ignorable(c) || c == '\u{2028}' || c == '\u{2029}')
-                    && c != '\n'
-                    && c != '\t';
+            let expected = (is_hidden(c)
+                || is_default_ignorable(c)
+                || c == '\u{2028}'
+                || c == '\u{2029}'
+                || c == '\u{fffc}')
+                && c != '\n'
+                && c != '\t';
             assert_eq!(needs_escape(c), expected, "U+{:04X}", c as u32);
         }
     }
@@ -432,6 +443,13 @@ mod tests {
                 "a\u{a0}b\u{2800}c\u{2003}d\u{202f}e",
                 "a<U+00A0>b<U+2800>c<U+2003>d<U+202F>e",
                 4,
+            ),
+            // The object replacement character draws as an empty cell a
+            // space wide on Apple platforms: a run of it wraps like one.
+            (
+                "file_read\u{fffc}\u{fffc}Arguments: {}",
+                "file_read<U+FFFC><U+FFFC>Arguments: {}",
+                2,
             ),
             // The plain space stays, runs of it included (the residue
             // `needs_escape_in_line` records).
@@ -524,6 +542,9 @@ mod tests {
             ),
             // An emoji's variation selector is the same price as its joiner.
             ("\u{2764}\u{fe0f}", "\u{2764}<U+FE0F>", 1),
+            // The object replacement character is drawn as an empty cell on
+            // Apple platforms: at the end of a path it is not seen at all.
+            ("/srv/allowed\u{fffc}", "/srv/allowed<U+FFFC>", 1),
         ];
         for (input, shown, hidden) in cases {
             assert_eq!(

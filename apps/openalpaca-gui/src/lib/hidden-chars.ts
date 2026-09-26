@@ -107,8 +107,8 @@ const LINE_SET = merged([
 
 /**
  * A code point the arguments show as `<U+XXXX>`: Unicode's control, format
- * and default-ignorable code points and U+2028/U+2029, but not `\n` and
- * `\t` (Rust's `needs_escape`).
+ * and default-ignorable code points, U+2028/U+2029 and U+FFFC (which macOS
+ * draws as an empty cell), but not `\n` and `\t` (Rust's `needs_escape`).
  */
 export function needsEscape(codePoint: number): boolean {
   return contains(ARGUMENT_SET, codePoint);

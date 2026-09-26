@@ -1,5 +1,5 @@
 {
-  "about": "The characters a tool-approval surface shows as <U+XXXX> instead of themselves: Unicode's Cc, Cf and Default_Ignorable_Code_Point (16.0) plus U+2028 and U+2029, less \\n and \\t, which the pretty-printed arguments' own layout uses. Inclusive ranges of hex code points, sorted and disjoint. A one-line field (a tool name, an agent id) has no layout of its own, so it also shows line_adds escaped: every White_Space character but the plain space U+0020 (\\t, \\n, the no-break, Ogham, en to hair, narrow no-break, math and ideographic spaces) and U+2800 BRAILLE PATTERN BLANK, as ranges of the same shape, outside ranges. Its set is ranges plus line_adds, and line_cases are worked cases of it. One table for two languages: the Rust side (openalpaca_core::utils::text::needs_escape, escape_hidden, hidden_notice, needs_escape_in_line, escape_hidden_line) is held equal to every range, case and notice here by a test that reads this file; the GUI derives its set from it. Change both sides together.",
+  "about": "The characters a tool-approval surface shows as <U+XXXX> instead of themselves: Unicode's Cc, Cf and Default_Ignorable_Code_Point (16.0) plus U+2028, U+2029 and U+FFFC OBJECT REPLACEMENT CHARACTER (which Apple's text engine draws as an empty cell a space wide), less \\n and \\t, which the pretty-printed arguments' own layout uses. Inclusive ranges of hex code points, sorted and disjoint. A one-line field (a tool name, an agent id) has no layout of its own, so it also shows line_adds escaped: every White_Space character but the plain space U+0020 (\\t, \\n, the no-break, Ogham, en to hair, narrow no-break, math and ideographic spaces) and U+2800 BRAILLE PATTERN BLANK, as ranges of the same shape, outside ranges. Its set is ranges plus line_adds, and line_cases are worked cases of it. One table for two languages: the Rust side (openalpaca_core::utils::text::needs_escape, escape_hidden, hidden_notice, needs_escape_in_line, escape_hidden_line) is held equal to every range, case and notice here by a test that reads this file; the GUI derives its set from it. Change both sides together.",
   "ranges": [
     ["0000", "0008"],
     ["000B", "001F"],
@@ -22,7 +22,7 @@
     ["FE00", "FE0F"],
     ["FEFF", "FEFF"],
     ["FFA0", "FFA0"],
-    ["FFF0", "FFFB"],
+    ["FFF0", "FFFC"],
     ["110BD", "110BD"],
     ["110CD", "110CD"],
     ["13430", "1343F"],
@@ -125,6 +125,11 @@
       "input": "❤\ufe0f",
       "shown": "❤<U+FE0F>",
       "hidden": 1
+    },
+    {
+      "input": "/srv/allowed\ufffc",
+      "shown": "/srv/allowed<U+FFFC>",
+      "hidden": 1
     }
   ],
   "line_cases": [
@@ -167,6 +172,11 @@
       "input": "a\u00a0b\u2800c\u2003d\u202fe",
       "shown": "a<U+00A0>b<U+2800>c<U+2003>d<U+202F>e",
       "hidden": 4
+    },
+    {
+      "input": "file_read\ufffc\ufffcArguments: {}",
+      "shown": "file_read<U+FFFC><U+FFFC>Arguments: {}",
+      "hidden": 2
     },
     {
       "input": "files::write two  spaces",

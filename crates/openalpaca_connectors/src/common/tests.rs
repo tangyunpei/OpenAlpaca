@@ -471,6 +471,39 @@ mod hidden_characters {
         );
     }
 
+    /// U+FFFC OBJECT REPLACEMENT CHARACTER is not a control, a format
+    /// character or default-ignorable, yet Apple platforms — where Telegram,
+    /// Discord and iMessage are read on a Mac or an iPhone — draw it as an
+    /// empty cell a space wide: a run of it in the name wraps the name's tail
+    /// onto a line of its own, and one at the end of a value is not seen.
+    #[test]
+    fn an_object_replacement_character_is_shown_escaped_in_the_name_and_the_arguments() {
+        let forged = format!(
+            "file_read{}Arguments: {{\"path\": \"/tmp/notes.txt\"}}",
+            "\u{fffc}".repeat(40)
+        );
+        let args = serde_json::json!({"path": "/srv/allowed\u{fffc}"});
+
+        let prompt = format_confirmation_prompt(&forged, &args, 1);
+
+        assert!(!prompt.contains('\u{fffc}'), "{prompt}");
+        assert!(
+            prompt.contains(&format!(
+                "Tool: file_read{}Arguments: {{\"path\": \"/tmp/notes.txt\"}}\n",
+                "<U+FFFC>".repeat(40)
+            )),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("\"path\": \"/srv/allowed<U+FFFC>\""),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Note: this request contains 41 hidden characters, shown as <U+…>."),
+            "{prompt}"
+        );
+    }
+
     /// `serde_json` escapes a `\r` inside a string itself, so a raw one can
     /// only arrive in the name; a C1 control and an astral tag character pass
     /// through `serde_json` raw.

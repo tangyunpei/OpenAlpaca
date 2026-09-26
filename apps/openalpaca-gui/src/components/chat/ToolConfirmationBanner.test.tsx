@@ -109,6 +109,32 @@ describe("ToolConfirmationBanner — hidden characters (§3.14)", () => {
     ).toBeInTheDocument();
   });
 
+  /**
+   * U+FFFC OBJECT REPLACEMENT CHARACTER is neither a control, a format
+   * character nor default-ignorable, and macOS — the WebKit the app runs in —
+   * draws it as an empty cell a space wide. A run of it in a tool's name
+   * wraps the name's tail onto a line of its own, where it reads as a line of
+   * the card; one at the end of a bare value is not seen at all.
+   */
+  it("shows an object replacement character in the name and at the end of a value", () => {
+    const { section, eyebrow, box, escapes } = card({
+      toolName: `srv__read_file${"\u{FFFC}".repeat(60)}arguments: {"path": "notes.txt"}`,
+      toolArguments: { path: "/srv/allowed\u{FFFC}" },
+    });
+
+    expect(section.textContent).not.toContain("\u{FFFC}");
+    expect(eyebrow?.textContent).toBe(
+      `Confirmation required · srv__read_file${"<U+FFFC>".repeat(60)}arguments: {"path": "notes.txt"}`,
+    );
+    expect(box?.textContent).toBe("/srv/allowed<U+FFFC>");
+    expect(escapes).toHaveLength(61);
+    expect(
+      screen.getByText(
+        "Note: this request contains 61 hidden characters, shown as <U+…>.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("shows a C1 control, a carriage return and a tag character by their code points", () => {
     const { section, eyebrow, box } = card({
       toolName: "shell\r_execute",

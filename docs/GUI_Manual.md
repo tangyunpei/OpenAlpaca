@@ -343,8 +343,9 @@ place.
 **Hidden characters on an approval.** The card shows the exact values that will
 run, so every hidden or invisible character in the tool's name, its arguments
 and the asking agent's name — a bidi override such as U+202E, a zero-width or
-control character, a tag or a variation selector, and in the two names also a
-line break or any space but a plain one — is shown in its place as a
+control character, a tag or a variation selector, an object replacement
+character (U+FFFC, which macOS draws as blank space), and in the two names also
+a line break or any space but a plain one — is shown in its place as a
 highlighted `<U+XXXX>`, never drawn raw. A line directly under the arguments
 counts them for the whole request: `Note: this request contains 2 hidden
 characters, shown as <U+…>.` On the card, a `<U+…>` that is not highlighted was

@@ -763,6 +763,35 @@ fn the_inline_prompt_headline_shows_the_tool_name_on_one_line() {
     );
 }
 
+/// U+FFFC OBJECT REPLACEMENT CHARACTER is drawn as an empty cell a space
+/// wide by a macOS terminal: a run of it in the name wraps the name's tail
+/// onto a line of its own, and one at the end of a value is not seen. Both
+/// are shown and counted.
+#[test]
+fn the_inline_prompt_shows_an_object_replacement_character_escaped() {
+    let frame = serde_json::json!({
+        "request_id": "req-1",
+        "tool_name": "file_read\u{fffc}\u{fffc}\u{fffc}Arguments: {}",
+        "tool_arguments": { "path": "/srv/allowed\u{fffc}" },
+        "per_call": false,
+    });
+    let details = confirmation_details(&frame);
+    assert_eq!(
+        details.headline,
+        "Tool 'file_read<U+FFFC><U+FFFC><U+FFFC>Arguments: {}' requires confirmation"
+    );
+    let arguments = details.arguments.expect("the arguments");
+    assert!(
+        arguments.contains("\"/srv/allowed<U+FFFC>\""),
+        "{arguments}"
+    );
+    assert!(!arguments.contains('\u{fffc}'), "{arguments}");
+    assert_eq!(
+        details.notice.as_deref(),
+        Some("Note: this request contains 4 hidden characters, shown as <U+…>.")
+    );
+}
+
 /// The notice says one character in the singular, and nothing at all when
 /// nothing was escaped: a CJK path, a right-to-left letter and a line break
 /// inside a string (which `serde_json` writes as `\r\n`) are not hidden.
