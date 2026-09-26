@@ -39,7 +39,7 @@ use super::lookup;
 use super::window::{self, NextChunk};
 use super::{
     BACKOFF_BASE, BACKOFF_CAP, Budget, EPISODE_MIN_USER_TURNS, EPISODE_OUT_TOKENS, EPISODE_QUIET,
-    MAX_ATTEMPTS, MAX_CHUNKS_PER_FLUSH, RESUME_QUIET, WINDOW_READ_ROWS,
+    MAX_ATTEMPTS, MAX_CHUNKS_PER_FLUSH, RESUME_QUIET, UNUSABLE_EXCERPT_CHARS, WINDOW_READ_ROWS,
 };
 use crate::daemon_config::DaemonConfig;
 use crate::memory::service::{
@@ -187,7 +187,86 @@ pub struct FlushReport {
     /// Chunks whose project directory no longer exists: advanced past with
     /// no call, and the directory is not re-created.
     pub skipped_root_gone: usize,
+    /// Each unusable answer this flush received, in order — in memory only
+    /// (the L8 fix slice's P2).
+    pub unusable: Vec<UnusableAnswer>,
     pub stopped: Option<FlushStop>,
+}
+
+/// One answer a reachable model gave that could not be used (ruling LR20),
+/// kept in its flush's report so an evaluation can show what failed. Never
+/// persisted and never logged above DEBUG: an answer quotes the user's own
+/// words. The cursor keeps [`Self::reason`] alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnusableAnswer {
+    /// Why it was unusable: the parser's reason, or `cut at max_tokens (n)`.
+    pub reason: String,
+    /// The answer's length in characters; 0 for an `EmptyCompletion`.
+    pub chars: usize,
+    /// How the model said the answer ended — `stop`, `max_tokens`,
+    /// `tool_use` or `error`; `None` when the router answered no response
+    /// (an `EmptyCompletion`: the reasoning ate the budget).
+    pub finish_reason: Option<&'static str>,
+    /// The answer's first [`super::UNUSABLE_EXCERPT_CHARS`] characters — the
+    /// whole answer when it is at most twice that long.
+    pub head: String,
+    /// Its last [`super::UNUSABLE_EXCERPT_CHARS`] characters; empty when
+    /// `head` holds the whole answer.
+    pub tail: String,
+}
+
+impl UnusableAnswer {
+    /// An answer that came back and did not parse, cut on character
+    /// boundaries.
+    fn answered(reason: &str, response: &openalpaca_llm::ChatResponse) -> Self {
+        use openalpaca_llm::FinishReason;
+        let text = response.content.as_str();
+        let chars = text.chars().count();
+        let (head, tail) = if chars <= 2 * UNUSABLE_EXCERPT_CHARS {
+            (text.to_string(), String::new())
+        } else {
+            (
+                text.chars().take(UNUSABLE_EXCERPT_CHARS).collect(),
+                text.chars().skip(chars - UNUSABLE_EXCERPT_CHARS).collect(),
+            )
+        };
+        Self {
+            reason: reason.to_string(),
+            chars,
+            finish_reason: Some(match response.finish_reason {
+                FinishReason::Stop => "stop",
+                FinishReason::MaxTokens => "max_tokens",
+                FinishReason::ToolUse => "tool_use",
+                FinishReason::Error => "error",
+            }),
+            head,
+            tail,
+        }
+    }
+
+    /// An `EmptyCompletion`: no response, nothing to quote.
+    fn empty(reason: &str) -> Self {
+        Self {
+            reason: reason.to_string(),
+            chars: 0,
+            finish_reason: None,
+            head: String::new(),
+            tail: String::new(),
+        }
+    }
+
+    /// The answer's excerpt at DEBUG — the one place it is logged.
+    fn log(&self, session_id: &str) {
+        tracing::debug!(
+            session_id,
+            chars = self.chars,
+            finish_reason = self.finish_reason,
+            head = %self.head,
+            tail = %self.tail,
+            "memory learning: the unusable answer ({})",
+            self.reason
+        );
+    }
 }
 
 impl FlushReport {
@@ -234,6 +313,9 @@ pub struct EpisodeReport {
     pub skipped_forgotten: usize,
     /// Summaries the service refused (a cited row deleted meanwhile).
     pub refused: usize,
+    /// Each unusable answer this flush received, in order — in memory only
+    /// (the L8 fix slice's P2).
+    pub unusable: Vec<UnusableAnswer>,
     /// Why the flush stopped early; `None` when every window with enough
     /// of the user's turns was summarised.
     pub stopped: Option<FlushStop>,
@@ -1369,28 +1451,30 @@ impl LearningQueue {
             );
             let threshold = dcfg.orchestrator.memory.memory_confidence_threshold;
             drop(dcfg);
-            let (response, latency_ms) = match self
-                .call_model(request, policy, &setup, &cancel)
-                .await
-            {
-                CallOutcome::Answered(response, latency_ms) => (response, latency_ms),
-                // An answer the reasoning ate is a reachable model's bad
-                // output, not an outage (M2, ruling LR20).
-                CallOutcome::Empty(e) => {
-                    report.calls += 1;
-                    if self
-                        .count_failure(session_id, &chunk, expected, &e.to_string(), &mut report)
-                        .await
-                    {
-                        continue;
+            let (response, latency_ms) =
+                match self.call_model(request, policy, &setup, &cancel).await {
+                    CallOutcome::Answered(response, latency_ms) => (response, latency_ms),
+                    // An answer the reasoning ate is a reachable model's bad
+                    // output, not an outage (M2, ruling LR20).
+                    CallOutcome::Empty(e) => {
+                        report.calls += 1;
+                        let why = e.to_string();
+                        let unusable = UnusableAnswer::empty(&why);
+                        unusable.log(session_id);
+                        report.unusable.push(unusable);
+                        if self
+                            .count_failure(session_id, &chunk, expected, &why, &mut report)
+                            .await
+                        {
+                            continue;
+                        }
+                        return report;
                     }
-                    return report;
-                }
-                CallOutcome::Stopped(stop) => {
-                    report.stopped = Some(stop);
-                    return report;
-                }
-            };
+                    CallOutcome::Stopped(stop) => {
+                        report.stopped = Some(stop);
+                        return report;
+                    }
+                };
             report.calls += 1;
             report.input_tokens += u64::from(response.usage.input_tokens);
             report.output_tokens += u64::from(response.usage.output_tokens);
@@ -1402,6 +1486,9 @@ impl LearningQueue {
                 Ok(items) => items,
                 Err(why) => {
                     let why = unusable_reason(&response, budget.out_tokens, why);
+                    let unusable = UnusableAnswer::answered(&why, &response);
+                    unusable.log(session_id);
+                    report.unusable.push(unusable);
                     if self
                         .count_failure(session_id, &chunk, expected, &why, &mut report)
                         .await
@@ -1919,14 +2006,12 @@ impl LearningQueue {
                     CallOutcome::Answered(response, latency_ms) => (response, latency_ms),
                     CallOutcome::Empty(e) => {
                         report.calls += 1;
+                        let why = e.to_string();
+                        let unusable = UnusableAnswer::empty(&why);
+                        unusable.log(session_id);
+                        report.unusable.push(unusable);
                         if self
-                            .count_episode_failure(
-                                session_id,
-                                &chunk,
-                                expected,
-                                &e.to_string(),
-                                &mut report,
-                            )
+                            .count_episode_failure(session_id, &chunk, expected, &why, &mut report)
                             .await
                         {
                             windows += 1;
@@ -1949,6 +2034,9 @@ impl LearningQueue {
                 Ok(summary) => summary,
                 Err(why) => {
                     let why = unusable_reason(&response, out_tokens, why);
+                    let unusable = UnusableAnswer::answered(&why, &response);
+                    unusable.log(session_id);
+                    report.unusable.push(unusable);
                     if self
                         .count_episode_failure(session_id, &chunk, expected, &why, &mut report)
                         .await

@@ -1812,6 +1812,92 @@ async fn an_answer_cut_at_max_tokens_says_it_was_cut() {
     assert_eq!((report.stopped, report.stored), (None, 1), "{report:?}");
 }
 
+/// The L8 fix slice's P2: the flush report keeps each unusable answer — its
+/// reason, its length, how the model said it ended, and its first and last
+/// 400 characters, cut on character boundaries — in memory only. The cursor
+/// keeps the reason alone and the usage log its fixed string; the answer's
+/// words reach the log at DEBUG and nowhere above, since they quote the
+/// user's.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn an_unusable_answer_is_kept_in_the_flush_report_and_nowhere_else() {
+    let prose = format!("{}MIDDLE{}", "開".repeat(450), "終".repeat(450));
+    let cut = r#"{"items": [{"title": "Editor"#;
+    let scene = Scene::new(vec![
+        Say::Text(prose.clone()),
+        Say::Cut(cut.into()),
+        Say::Spent,
+        items(&[vim_item(&[1])]),
+    ]);
+    let sessions = [
+        scene.session(),
+        scene.session(),
+        scene.session(),
+        scene.session(),
+    ];
+    for s in &sessions {
+        scene.turn(s, PREF, "Noted.");
+    }
+    let mut reports = Vec::new();
+    for s in &sessions {
+        reports.push(scene.queue.flush_session(s).await);
+    }
+    let ceiling = scene.model.first_request().max_tokens.unwrap();
+
+    let [long] = &reports[0].unusable[..] else {
+        panic!("one unusable answer: {:?}", reports[0]);
+    };
+    assert_eq!(long.reason, "the answer is not JSON");
+    assert_eq!(long.chars, 906);
+    assert_eq!(long.finish_reason, Some("stop"));
+    assert_eq!(long.head, "開".repeat(UNUSABLE_EXCERPT_CHARS));
+    assert_eq!(long.tail, "終".repeat(UNUSABLE_EXCERPT_CHARS));
+
+    let [short] = &reports[1].unusable[..] else {
+        panic!("one unusable answer: {:?}", reports[1]);
+    };
+    assert_eq!(short.reason, format!("cut at max_tokens ({ceiling})"));
+    assert_eq!(short.chars, cut.chars().count());
+    assert_eq!(short.finish_reason, Some("max_tokens"));
+    assert_eq!((short.head.as_str(), short.tail.as_str()), (cut, ""));
+
+    let [empty] = &reports[2].unusable[..] else {
+        panic!("one unusable answer: {:?}", reports[2]);
+    };
+    assert_eq!(empty.chars, 0);
+    assert_eq!(empty.finish_reason, None, "the router answered no response");
+    assert!(!empty.reason.is_empty() && empty.head.is_empty() && empty.tail.is_empty());
+    assert_eq!(reports[3].stored, 1, "{:?}", reports[3]);
+    assert!(
+        reports[3].unusable.is_empty(),
+        "a usable answer leaves none"
+    );
+
+    // Nothing new is persisted: the cursor's reason and the usage log's
+    // fixed string, never the answer.
+    let cursor = LearningCursorRepository::new(&scene.db)
+        .get(&sessions[0])
+        .unwrap();
+    assert_eq!(cursor.last_error.as_deref(), Some("the answer is not JSON"));
+    let logged = openalpaca_storage::LlmUsageRepository::new(&scene.db)
+        .get_agent_usage(extractor::AGENT_LABEL, 10)
+        .unwrap();
+    assert!(
+        logged
+            .iter()
+            .all(|l| l.error_message.as_deref().is_none_or(|m| !m.contains('開'))),
+        "{logged:?}"
+    );
+    logs_assert(|lines: &[&str]| {
+        let quoting: Vec<&&str> = lines.iter().filter(|l| l.contains('開')).collect();
+        match quoting.as_slice() {
+            [] => Err("the excerpt is logged at DEBUG".to_string()),
+            q if q.iter().all(|l| l.contains("DEBUG")) => Ok(()),
+            q => Err(format!("an answer's words above DEBUG: {q:?}")),
+        }
+    });
+}
+
 /// §7b P10 and ruling LR20: a model that cannot answer holds the window,
 /// counts no attempt, backs off (60 s, doubling), and is logged once per
 /// outage — then once more when learning resumes.

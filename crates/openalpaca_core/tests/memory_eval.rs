@@ -2593,6 +2593,35 @@ struct FlushRecord {
     written: Vec<WrittenNote>,
     /// Bus events the subscription missed (a lagged receiver).
     events_lagged: u64,
+    /// Each answer the queue could not use (the L8 fix slice's P2).
+    unusable_answers: Vec<UnusableRecord>,
+}
+
+/// One unusable answer as the queue reported it (`UnusableAnswer`): why, its
+/// length in characters, how the model said it ended (`null` for an empty
+/// completion) and its first and last 400 characters.
+#[derive(Debug, Clone, Serialize)]
+struct UnusableRecord {
+    reason: String,
+    chars: usize,
+    finish_reason: Option<&'static str>,
+    head: String,
+    tail: String,
+}
+
+fn unusable_records(
+    answers: &[openalpaca_core::memory::learning::UnusableAnswer],
+) -> Vec<UnusableRecord> {
+    answers
+        .iter()
+        .map(|a| UnusableRecord {
+            reason: a.reason.clone(),
+            chars: a.chars,
+            finish_reason: a.finish_reason,
+            head: a.head.clone(),
+            tail: a.tail.clone(),
+        })
+        .collect()
 }
 
 impl FlushRecord {
@@ -2635,6 +2664,7 @@ impl FlushRecord {
             stopped: r.stopped.map(|s| format!("{s:?}")),
             written,
             events_lagged,
+            unusable_answers: unusable_records(&r.unusable),
         }
     }
 }
@@ -2721,6 +2751,33 @@ struct EpisodeRecord {
     stopped: Option<String>,
     written: Vec<WrittenNote>,
     events_lagged: u64,
+    /// Each answer the queue could not use (the L8 fix slice's P2).
+    unusable_answers: Vec<UnusableRecord>,
+}
+
+impl EpisodeRecord {
+    fn new(
+        session: &str,
+        label: &'static str,
+        latency_ms: u64,
+        r: &openalpaca_core::memory::learning::EpisodeReport,
+        written: Vec<WrittenNote>,
+        events_lagged: u64,
+    ) -> Self {
+        Self {
+            session: session.to_string(),
+            label,
+            latency_ms,
+            calls: r.calls,
+            episodes: r.episodes,
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+            stopped: r.stopped.map(|s| format!("{s:?}")),
+            written,
+            events_lagged,
+            unusable_answers: unusable_records(&r.unusable),
+        }
+    }
 }
 
 /// `flush_episodes`, with the bus subscribed around it.
@@ -2745,18 +2802,14 @@ async fn episode_one(
             .map(|s| format!(", stopped: {s:?}"))
             .unwrap_or_default()
     );
-    EpisodeRecord {
-        session: corpus_id.to_string(),
+    EpisodeRecord::new(
+        corpus_id,
         label,
         latency_ms,
-        calls: report.calls,
-        episodes: report.episodes,
-        input_tokens: report.input_tokens,
-        output_tokens: report.output_tokens,
-        stopped: report.stopped.map(|s| format!("{s:?}")),
+        &report,
         written,
         events_lagged,
-    }
+    )
 }
 
 /// One fed turn: its corpus place, its user row and what the reader did.
@@ -6294,6 +6347,64 @@ fn the_fed_sessions_follow_the_system() {
         corpus.suggestion_sessions[..2].to_vec()
     );
     assert_eq!(ids(corpus_sessions(&corpus, System::L0, Some(3))).len(), 3);
+}
+
+/// The L8 fix slice's P2, harness side: a flush's and a summary's record
+/// keep each unusable answer the queue reported — reason, length, finish
+/// and excerpt — so the next live run shows the failure's form.
+#[test]
+fn a_flush_record_keeps_each_unusable_answer() {
+    use openalpaca_core::memory::learning::{
+        EpisodeReport, FlushReport, FlushStop, UnusableAnswer,
+    };
+    let answer = UnusableAnswer {
+        reason: "cut at max_tokens (2800)".to_string(),
+        chars: 1_000,
+        finish_reason: Some("max_tokens"),
+        head: "{\"items\": [".to_string(),
+        tail: "\"content\": \"The user pre".to_string(),
+    };
+    let expected = serde_json::json!([{
+        "reason": "cut at max_tokens (2800)",
+        "chars": 1_000,
+        "finish_reason": "max_tokens",
+        "head": "{\"items\": [",
+        "tail": "\"content\": \"The user pre",
+    }]);
+    let flush = FlushRecord::new(
+        "cs-001",
+        FLUSH_SWITCH,
+        0,
+        &FlushReport {
+            calls: 1,
+            unusable: vec![answer.clone()],
+            stopped: Some(FlushStop::BadOutput),
+            ..Default::default()
+        },
+        Vec::new(),
+        0,
+    );
+    assert_eq!(
+        serde_json::to_value(&flush).unwrap()["unusable_answers"],
+        expected
+    );
+    let summary = EpisodeRecord::new(
+        "cs-001",
+        FLUSH_SWITCH,
+        0,
+        &EpisodeReport {
+            calls: 1,
+            unusable: vec![answer],
+            stopped: Some(FlushStop::BadOutput),
+            ..Default::default()
+        },
+        Vec::new(),
+        0,
+    );
+    assert_eq!(
+        serde_json::to_value(&summary).unwrap()["unusable_answers"],
+        expected
+    );
 }
 
 /// §7.3's resurrection invariant is hard, so a forced re-run that checked

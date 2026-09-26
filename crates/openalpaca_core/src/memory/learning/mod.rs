@@ -27,6 +27,7 @@ mod window;
 
 pub use queue::{
     EpisodeReport, FlushReport, FlushStop, LearningDeps, LearningQueue, QueueMode, TurnGuard,
+    UnusableAnswer,
 };
 
 // Task-output extraction shares the item fields' cleaning and the keys'
@@ -68,6 +69,9 @@ pub const MAX_CHUNKS_PER_FLUSH: usize = 4;
 /// Consecutive unusable answers to one chunk before the cursor moves past it
 /// with one WARN (ruling LR20).
 pub const MAX_ATTEMPTS: u32 = 3;
+/// An unusable answer's excerpt, kept in its flush's report only: this many
+/// characters from each end (the L8 fix slice's P2).
+pub const UNUSABLE_EXCERPT_CHARS: usize = 400;
 /// The longest the stop drain waits (ruling LR6); what it does not finish,
 /// the boot catch-up learns.
 pub const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(3);

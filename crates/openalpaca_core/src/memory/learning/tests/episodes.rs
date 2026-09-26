@@ -572,6 +572,34 @@ async fn a_summary_cut_at_max_tokens_says_it_was_cut() {
     });
 }
 
+/// The L8 fix slice's P2, for a summary: the report keeps each unusable
+/// answer — its reason, length, finish and excerpt — and nothing else does.
+#[tokio::test]
+async fn an_unusable_summary_is_kept_in_the_report() {
+    let scene = Scene::new(vec![
+        Say::Text("Here is what we talked about: Lisbon.".into()),
+        Say::Spent,
+    ]);
+    let s = scene.session();
+    four_turns(&scene, &s);
+    let first = scene.queue.flush_episodes(&s).await;
+    let [prose] = &first.unusable[..] else {
+        panic!("one unusable answer: {first:?}");
+    };
+    assert_eq!(prose.reason, "the answer is not JSON");
+    assert_eq!(prose.chars, 37);
+    assert_eq!(prose.finish_reason, Some("stop"));
+    assert_eq!(
+        (prose.head.as_str(), prose.tail.as_str()),
+        ("Here is what we talked about: Lisbon.", "")
+    );
+    let second = scene.queue.flush_episodes(&s).await;
+    let [empty] = &second.unusable[..] else {
+        panic!("one unusable answer: {second:?}");
+    };
+    assert_eq!((empty.chars, empty.finish_reason), (0, None));
+}
+
 // ── The gates (§13.3, *Cost*; §1.8) ───────────────────────────────────────
 
 /// `episode_max_per_day` binds on today's UTC episode calls in
