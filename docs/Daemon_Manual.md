@@ -820,7 +820,9 @@ note it would replace — the lane is `{owner}:gui`, which every app and CLI cha
 conversation of that owner shares. The call raises the ordinary card with a
 preview the **daemon** wrote from the notes — which note, your
 text, the new text, why, the date of the newest message you typed that it
-cites — and `per_call: true`. Only a person's **Approve** on that card, for
+cites, with every hidden character of what it quotes left out and, when any
+was, a last line saying how many (`This preview leaves out 2 hidden
+characters; the Memory view shows them as <U+…>.`) — and `per_call: true`. Only a person's **Approve** on that card, for
 that call, confirms it: the confirm is then a user-directed write (origin
 `user`, `memory_changed.surface` `"user"`), bound to the replaced note's
 revision, and it dismisses the other suggestions for the same note. The model

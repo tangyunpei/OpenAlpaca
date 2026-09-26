@@ -277,7 +277,7 @@ A tool on the confirm list suspends its run and asks. In the GUI the card is the
   - `watch` prints a line under the arguments counting them: `Note: this request contains 2 hidden characters, shown as <U+…>.` Only real escapes are counted, so text that merely looks like `<U+202E>` is not.
   - The `list` table escapes the `TOOL` column, and under the table prints the same line for each prompt that hides anything, as `<request_id> — Note: …`. Its count includes the agent id and the arguments, which the table does not print, and one line under the notices says so and points at `--format json`, which prints them — worth reading before `approve <id>`.
   - `--format json` writes those characters with JSON's own `\u` escapes instead: a JSON reader gets exactly the daemon's values, and the terminal never receives one raw.
-  - The answer line after `watch` and the refusal of `--entire-tool` show the name the same way. The preview is the daemon's own text and is printed as it comes: a summary cut short for reading, from which the daemon leaves out every hidden character of the titles and texts it quotes. A suggestion's exact text is what `openalpaca memory show <id>` prints, each hidden character as `<U+XXXX>`.
+  - The answer line after `watch` and the refusal of `--entire-tool` show the name the same way. The preview is the daemon's own text and is printed as it comes: a summary cut short for reading, from which the daemon leaves out every hidden character of the titles and texts it quotes, and when it left any out, its last line says how many (`This preview leaves out 2 hidden characters; the Memory view shows them as <U+…>.`). A suggestion's exact text is what `openalpaca memory show <id>` prints, each hidden character as `<U+XXXX>`.
   - On a terminal, `watch` resets the terminal's character set, text attributes, insert mode and line wrap before each prompt, and the `list` table does the same before its first line, so an earlier program cannot cut, garble or conceal what they print; `--format json` gets no reset. What the reset leaves alone is under [Approval prompts](#approval-prompts).
 
 A prompt is never auto-approved, and `--entire-tool` (or `a` in `watch`) is the only thing that widens one. An unanswered prompt times out on the daemon as a refusal (`confirmation_timeout_secs` under `[execution.agent_defaults]` in `daemon.toml`, default 300 s). A one-shot or piped `chat` turn declares that it *cannot* answer, and its confirm-listed tools are refused immediately rather than waiting — see [Approval prompts](#approval-prompts).
@@ -418,7 +418,12 @@ one, a line break or a tab — is shown as `<U+XXXX>`, and a line under the
 manifest counts them (`Note: this request contains 2 hidden characters, shown
 as <U+…>.`). On a terminal the manifest starts with the same reset as an
 approval prompt (see [Approval prompts](#approval-prompts)). `install
---dry-run` and `update` print it the same way.
+--dry-run` and `update` print it the same way. The lines under the manifest —
+`ok installed <id>`, the `ext approve <id>` it tells you to run, and
+`update`'s `ok updated <id>` and `now also asks for:` — show the id and each
+capability the same way, and the count under the manifest covers them: they
+are the manifest's own name and capabilities. A warning `update` prints shows
+its control characters as `<U+XXXX>` and is not counted.
 
 ```bash
 openalpaca ext install ~/src/openalpaca-notion --dry-run   # parse and report only
