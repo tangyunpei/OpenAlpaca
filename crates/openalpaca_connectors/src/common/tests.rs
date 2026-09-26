@@ -168,6 +168,27 @@ mod confirmation {
         );
     }
 
+    /// A private-use code point Apple's system fonts draw as nothing makes one
+    /// tool's name read as another's in the acknowledgement too, so it is
+    /// shown there as in the prompt.
+    #[test]
+    fn the_reply_shows_a_private_use_code_point_in_the_tool_name_escaped() {
+        let broker = ConfirmationBroker::new();
+        let _rx = broker.request(&named_request("req-1", "srv__read_file\u{f860}\u{f861}"));
+        let pending: DashMap<u64, VecDeque<String>> = DashMap::new();
+        pending
+            .entry(5u64)
+            .or_default()
+            .push_back("req-1".to_string());
+
+        let reply = intercept_confirmation_reply("/y", &5u64, &broker, &pending).unwrap();
+
+        assert_eq!(
+            reply,
+            "Approved: srv__read_file<U+F860><U+F861>. Tool execution will proceed."
+        );
+    }
+
     /// A request the broker no longer holds (it timed out, or was answered
     /// elsewhere) still takes a reply off the chat's queue, but the
     /// acknowledgement names no tool: it has none to name, and it must never
@@ -533,6 +554,48 @@ mod hidden_characters {
         );
         assert!(
             prompt.contains("Note: this request contains 41 hidden characters, shown as <U+…>."),
+            "{prompt}"
+        );
+    }
+
+    /// A private-use code point has no agreed appearance, and Apple's own
+    /// system fonts draw some of them (its corporate-use block,
+    /// U+F850–U+F87F) as nothing, with no width: in Messages or Telegram's
+    /// Apple apps `/srv/allow`+U+F860+`ed` reads `/srv/allowed`, a tool
+    /// named `srv__read_file`+U+F860+U+F861 reads `srv__read_file`, and a
+    /// run of them in a URL carries data the person approves without seeing
+    /// it. Every one is shown and counted, in the name and the arguments.
+    #[test]
+    fn a_private_use_code_point_is_shown_escaped_in_the_name_and_the_arguments() {
+        let args = serde_json::json!({
+            "path": "/srv/allow\u{f860}ed",
+            "url": "https://example.com/?q=hello\u{f860}\u{f861}\u{f861}\u{f860}",
+        });
+
+        let prompt = format_confirmation_prompt("srv__read_file\u{f860}\u{f861}", &args, 1);
+
+        assert!(
+            !prompt
+                .chars()
+                .any(|c| ('\u{e000}'..='\u{f8ff}').contains(&c)),
+            "{prompt:?}"
+        );
+        assert!(
+            prompt.contains("Tool: srv__read_file<U+F860><U+F861>\n"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("\"path\": \"/srv/allow<U+F860>ed\""),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "\"url\": \"https://example.com/?q=hello<U+F860><U+F861><U+F861><U+F860>\""
+            ),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Note: this request contains 7 hidden characters, shown as <U+…>."),
             "{prompt}"
         );
     }

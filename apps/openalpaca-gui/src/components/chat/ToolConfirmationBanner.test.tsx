@@ -206,6 +206,32 @@ describe("ToolConfirmationBanner — hidden characters (§3.14)", () => {
   });
 
   /**
+   * A private-use code point has no agreed appearance: the card's own fonts
+   * draw a box for one, but Apple's system fonts draw U+F860 and U+F861 as
+   * nothing, with no width, and the set is one table for every surface. The
+   * card shows each as it shows any other member, in the name and inside a
+   * bare path, and counts them.
+   */
+  it("shows a private-use code point in the name and inside a bare path", () => {
+    const { section, eyebrow, box, escapes } = card({
+      toolName: "srv__read_file\u{F860}\u{F861}",
+      toolArguments: { path: "/srv/allow\u{F860}ed" },
+    });
+
+    expect(section.textContent).not.toMatch(/[\u{E000}-\u{F8FF}]/u);
+    expect(eyebrow?.textContent).toBe(
+      "Confirmation required · srv__read_file<U+F860><U+F861>",
+    );
+    expect(box?.textContent).toBe("/srv/allow<U+F860>ed");
+    expect(escapes).toEqual(["<U+F860>", "<U+F861>", "<U+F860>"]);
+    expect(
+      screen.getByText(
+        "Note: this request contains 3 hidden characters, shown as <U+…>.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  /**
    * A run of blanks in a value wraps into empty lines inside the box, and the
    * chat scrolls to a new card's bottom: the benign tail is what is read,
    * the head that runs is off-screen. Every blank but the plain space is

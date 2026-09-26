@@ -23,8 +23,8 @@
 //! the agent asking. Nothing may be dropped from those, because what is
 //! dropped from the prompt still runs, so every hidden character — every
 //! code point Unicode says renders as nothing, every code point it has not
-//! assigned, and every blank but the plain space — is shown as `<U+XXXX>`
-//! and [`hidden_notice`] says how many there were. The two do not compete:
+//! assigned or leaves to private use, and every blank but the plain space —
+//! is shown as `<U+XXXX>` and [`hidden_notice`] says how many there were. The two do not compete:
 //! `one_line` is for prose OpenAlpaca composed to be read (a memory
 //! suggestion's `preview`, stripped by the daemon of every character the
 //! escape would show before any surface sees it), and the escape is for the
@@ -68,9 +68,9 @@ pub(crate) fn byte_prefix(s: &str, max_bytes: usize) -> &str {
 /// other blank Unicode calls white space among them — as one space, and none
 /// of the other characters [`escape_hidden`] would show: no
 /// [hidden](is_hidden) character, no default-ignorable one (a variation
-/// selector, a Hangul filler), no unassigned code point, no U+2800 BRAILLE
-/// PATTERN BLANK and no U+FFFC, which draw as nothing, as blank space or as
-/// whatever a font happens to hold. One set, [`needs_escape`], says
+/// selector, a Hangul filler), no unassigned or private-use code point, no
+/// U+2800 BRAILLE PATTERN BLANK and no U+FFFC, which draw as nothing, as
+/// blank space or as whatever a font happens to hold. One set, [`needs_escape`], says
 /// what hides on every surface; this drops it where the escape shows it.
 /// Dropped, not replaced with a visible mark: what is left is the text as
 /// stored, in its own order, and a mark would litter the legitimate uses (an
@@ -142,13 +142,14 @@ pub struct Escaped {
 /// default-ignorable (`Default_Ignorable_Code_Point`: drawn as nothing, so a
 /// variation selector inside a path reads as the path without it), every
 /// code point Unicode has not assigned (`Cn`, the noncharacters included),
-/// every blank but the plain space U+0020 — the line and paragraph separators
-/// (U+2028, U+2029), which break a line where the text shows none, the
-/// no-break spaces (U+00A0, U+202F), the Ogham, math and ideographic spaces
-/// (U+1680, U+205F, U+3000), the typographic ones (U+2000–U+200A), U+2800
-/// BRAILLE PATTERN BLANK, which draws as a space and wraps like a letter,
-/// and U+FFFC OBJECT REPLACEMENT CHARACTER — but not `\n` and `\t`, the two
-/// characters the surfaces' own layout (pretty-printed JSON) is written in.
+/// every private-use code point (`Co`), every blank but the plain space
+/// U+0020 — the line and paragraph separators (U+2028, U+2029), which break
+/// a line where the text shows none, the no-break spaces (U+00A0, U+202F),
+/// the Ogham, math and ideographic spaces (U+1680, U+205F, U+3000), the
+/// typographic ones (U+2000–U+200A), U+2800 BRAILLE PATTERN BLANK, which
+/// draws as a space and wraps like a letter, and U+FFFC OBJECT REPLACEMENT
+/// CHARACTER — but not `\n` and `\t`, the two characters the surfaces' own
+/// layout (pretty-printed JSON) is written in.
 /// `\r` is escaped: at a terminal it returns the cursor and the rest of the
 /// line overwrites what was shown.
 ///
@@ -183,14 +184,47 @@ pub struct Escaped {
 /// a character assigned after Unicode 16.0 (a newer emoji, a newer CJK
 /// ideograph) shows as `<U+XXXXX>` until these tables move.
 ///
+/// A private-use code point (`Co`) is assigned, but to nothing Unicode
+/// names: it looks like whatever a font puts there, and Apple's own system
+/// fonts — what Messages and Telegram's Apple apps draw a prompt in, and
+/// any web page whose first font is the system font — put nothing there,
+/// with no width, for some of them: U+F860 and U+F861 in the system font
+/// itself, and more of U+F850–U+F87F (Apple's corporate-use block) through
+/// the fonts its fallback reaches, while a macOS terminal's fallback draws
+/// U+F87F as an empty cell a space wide. So `/srv/allow`+U+F860+`ed` reads
+/// `/srv/allowed` in Messages on a Mac, and one MCP tool's name can read as
+/// another's. The whole of `Co` is escaped, for the reason the whole of
+/// `Cn` is: which private-use code points draw as nothing is decided by the
+/// installed fonts, and a person's icon font can do the same anywhere in
+/// it. The price is the escape's usual one: the Apple logo (U+F8FF), a Nerd
+/// Font or Powerline icon, or an end-user-defined ideograph inside an
+/// argument shows as `<U+XXXX>`.
+///
 /// The GUI derives its copy from `apps/openalpaca-gui/src/lib/hidden-chars.json`;
 /// a test on each side holds its own to that table.
 pub fn needs_escape(c: char) -> bool {
     match c {
         '\n' | '\t' | ' ' => false,
         '\u{2800}' | '\u{fffc}' => true,
-        c => is_hidden(c) || is_default_ignorable(c) || c.is_whitespace() || is_unassigned(c),
+        c => {
+            is_hidden(c)
+                || is_default_ignorable(c)
+                || c.is_whitespace()
+                || is_unassigned(c)
+                || is_private_use(c)
+        }
     }
+}
+
+/// A private-use code point (`Co`, Unicode 16.0: the Private Use Area
+/// U+E000–U+F8FF and the two supplementary private-use planes, less their
+/// last two code points, which are noncharacters), held equal to the
+/// `regex` crate's own `\p{Co}` by a test.
+fn is_private_use(c: char) -> bool {
+    matches!(
+        c,
+        '\u{e000}'..='\u{f8ff}' | '\u{f0000}'..='\u{ffffd}' | '\u{100000}'..='\u{10fffd}'
+    )
 }
 
 /// A code point Unicode says a renderer draws as nothing when it does not
@@ -405,8 +439,8 @@ pub fn escape_controls(text: &str) -> String {
 mod tests {
     use super::{
         Escaped, byte_prefix, cut_notice, escape_controls, escape_hidden, escape_hidden_line,
-        escape_hidden_within, hidden_notice, is_default_ignorable, is_hidden, is_unassigned,
-        needs_escape, needs_escape_in_line, one_line,
+        escape_hidden_within, hidden_notice, is_default_ignorable, is_hidden, is_private_use,
+        is_unassigned, needs_escape, needs_escape_in_line, one_line,
     };
 
     /// A model's prose reaches a terminal with every control character but
@@ -440,24 +474,27 @@ mod tests {
 
     /// The escape's set is `is_hidden`'s and the default-ignorable code
     /// points, every unassigned code point (`Cn` by the `regex` crate's
-    /// tables, the noncharacters included), every Unicode space but the
-    /// plain one (`White_Space`: the line and paragraph separators, the
-    /// no-break and ideographic spaces, …), the braille blank and the object
-    /// replacement character, less the newline and the tab the surfaces lay
-    /// JSON out with — and nothing else, so none of them can drift from the
-    /// others.
+    /// tables, the noncharacters included), every private-use code point
+    /// (`Co`), every Unicode space but the plain one (`White_Space`: the
+    /// line and paragraph separators, the no-break and ideographic spaces,
+    /// …), the braille blank and the object replacement character, less the
+    /// newline and the tab the surfaces lay JSON out with — and nothing
+    /// else, so none of them can drift from the others.
     #[test]
-    fn needs_escape_is_hidden_ignorable_unassigned_and_every_blank_less_newline_and_tab() {
+    fn needs_escape_is_hidden_ignorable_unassigned_private_and_every_blank_less_newline_and_tab() {
         let space = regex::Regex::new(r"^\p{White_Space}$").unwrap();
         let unassigned = regex::Regex::new(r"^\p{Cn}$").unwrap();
+        let private = regex::Regex::new(r"^\p{Co}$").unwrap();
         let mut buf = [0u8; 4];
         for c in every_char() {
             let blank = (space.is_match(c.encode_utf8(&mut buf)) && c != ' ')
                 || c == '\u{2800}'
                 || c == '\u{fffc}';
             let cn = unassigned.is_match(c.encode_utf8(&mut buf));
-            let expected =
-                (is_hidden(c) || is_default_ignorable(c) || cn || blank) && c != '\n' && c != '\t';
+            let co = private.is_match(c.encode_utf8(&mut buf));
+            let expected = (is_hidden(c) || is_default_ignorable(c) || cn || co || blank)
+                && c != '\n'
+                && c != '\t';
             assert_eq!(needs_escape(c), expected, "U+{:04X}", c as u32);
         }
     }
@@ -515,6 +552,13 @@ mod tests {
                 "srv__read_file<U+181A><U+181A><U+181A>Arguments: {}",
                 3,
             ),
+            // A private-use code point Apple's system fonts draw as nothing,
+            // with no width: this name reads as `srv__read_file`.
+            (
+                "srv__read_file\u{f860}\u{f861}",
+                "srv__read_file<U+F860><U+F861>",
+                2,
+            ),
             // The plain space stays, runs of it included (the residue
             // `needs_escape_in_line` records).
             ("files::write two  spaces", "files::write two  spaces", 0),
@@ -562,6 +606,23 @@ mod tests {
         for c in every_char() {
             assert_eq!(
                 is_unassigned(c),
+                unicode.is_match(c.encode_utf8(&mut buf)),
+                "U+{:04X}",
+                c as u32
+            );
+        }
+    }
+
+    /// The three private-use ranges are Unicode's `Co` by the `regex`
+    /// crate's tables, so a dependency upgrade that brings a newer Unicode
+    /// fails here rather than moving the set without a word.
+    #[test]
+    fn is_private_use_is_exactly_unicodes() {
+        let unicode = regex::Regex::new(r"^\p{Co}$").unwrap();
+        let mut buf = [0u8; 4];
+        for c in every_char() {
+            assert_eq!(
+                is_private_use(c),
                 unicode.is_match(c.encode_utf8(&mut buf)),
                 "U+{:04X}",
                 c as u32
@@ -666,8 +727,19 @@ mod tests {
                 "<U+FDD0><U+FFFE><U+10FFFF>",
                 3,
             ),
-            // Private use is assigned (`Co`) and stays as written.
-            ("\u{e000}\u{f8ff}", "\u{e000}\u{f8ff}", 0),
+            // Private use (`Co`) has no agreed appearance either, and
+            // Apple's system fonts draw some of it (U+F850–U+F87F, Apple's
+            // corporate-use block) as nothing, with no width: inside a path
+            // or at its end, `/srv/allowed` is read.
+            ("/srv/allow\u{f860}ed", "/srv/allow<U+F860>ed", 1),
+            ("/srv/allowed\u{f861}", "/srv/allowed<U+F861>", 1),
+            // All of it, not the code points that draw blank today: the
+            // Apple logo and the two supplementary planes too.
+            (
+                "\u{e000}\u{f8ff} \u{f0000}\u{10fffd}",
+                "<U+E000><U+F8FF> <U+F0000><U+10FFFD>",
+                4,
+            ),
         ];
         for (input, shown, hidden) in cases {
             assert_eq!(
@@ -970,9 +1042,9 @@ mod tests {
     /// `one_line` hides what the escape shows, and nothing else: over every
     /// scalar value, a blank between two letters is one space, any other
     /// character of the escape's set — a variation selector, a Hangul
-    /// filler, U+2800, U+FFFC and the unassigned code points among them,
-    /// which draw as nothing or as blank space and are not `Cc` or `Cf` — is
-    /// gone, and everything else stays.
+    /// filler, U+2800, U+FFFC and the unassigned and private-use code points
+    /// among them, which draw as nothing or as blank space and are not `Cc`
+    /// or `Cf` — is gone, and everything else stays.
     #[test]
     fn one_line_drops_every_character_the_escape_shows() {
         for c in every_char() {
@@ -986,7 +1058,10 @@ mod tests {
             assert_eq!(one_line(&format!("a{c}b")), expected, "U+{:04X}", c as u32);
         }
         assert_eq!(
-            one_line("/srv/allow\u{fe00}ed \u{2800}\u{2800} tail\u{fffc}\u{181a} \u{3164}x\u{34f}"),
+            one_line(
+                "/srv/allow\u{fe00}ed \u{2800}\u{2800} tail\u{fffc}\u{181a}\u{f860} \
+                 \u{3164}x\u{34f}"
+            ),
             "/srv/allowed tail x"
         );
     }

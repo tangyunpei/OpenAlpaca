@@ -822,6 +822,37 @@ fn the_inline_prompt_shows_an_unassigned_code_point_escaped() {
     );
 }
 
+/// A private-use code point has no agreed appearance: Apple's system fonts
+/// draw U+F860 and U+F861 as nothing, with no width, and a macOS terminal's
+/// fallback (Monaco) draws U+F87F as an empty cell a space wide. So
+/// `/srv/allow`+U+F860+`ed` reads `/srv/allowed`, and a run of U+F87F in the
+/// name wraps its tail onto a line of its own. Every one is shown and counted.
+#[test]
+fn the_inline_prompt_shows_a_private_use_code_point_escaped() {
+    let frame = serde_json::json!({
+        "request_id": "req-1",
+        "tool_name": "srv__read_file\u{f860}\u{f861}\u{f87f}\u{f87f}\u{f87f}Arguments: {}",
+        "tool_arguments": { "path": "/srv/allow\u{f860}ed" },
+        "per_call": false,
+    });
+    let details = confirmation_details(&frame);
+    assert_eq!(
+        details.headline,
+        "Tool 'srv__read_file<U+F860><U+F861><U+F87F><U+F87F><U+F87F>Arguments: {}' requires \
+         confirmation"
+    );
+    let arguments = details.arguments.expect("the arguments");
+    assert!(
+        arguments.contains("\"/srv/allow<U+F860>ed\""),
+        "{arguments}"
+    );
+    assert!(!arguments.contains('\u{f860}'), "{arguments}");
+    assert_eq!(
+        details.notice.as_deref(),
+        Some("Note: this request contains 6 hidden characters, shown as <U+…>.")
+    );
+}
+
 /// A run of blanks in an argument wraps, at a terminal as anywhere, into
 /// empty lines between the command's head, which runs, and a benign tail
 /// printed just above `[y/N]`: every blank but the plain space is shown in
