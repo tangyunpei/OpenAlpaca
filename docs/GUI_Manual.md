@@ -329,6 +329,17 @@ chat turn, the workflow's lead, or the one subagent that raised the prompt.
 It is not remembered beyond that, and one agent's approval does not cover
 another's.
 
+**More than one prompt pending.** A lead running subagents in parallel can
+raise several prompts at once. `Approve`, `Deny`, `Always allow`, ↵ and the
+palette's `Approve pending …` row always answer the **oldest** one, while the
+transcript scrolls to the newest card. So with more than one pending, the card
+they answer is outlined in red, like the composer's own answer box, and says
+`Approve and Deny in the composer answer this card first — 1 of 2 pending,
+oldest first.`; each other card says its place and that the composer answers
+the card outlined in red first. The composer's bar and the palette's row add
+`oldest of 2 pending`. Answer the outlined card, and the next one takes its
+place.
+
 **Hidden characters on an approval.** The card shows the exact values that will
 run, so every hidden or invisible character in the tool's name, its arguments
 and the asking agent's name — a bidi override such as U+202E, a zero-width or

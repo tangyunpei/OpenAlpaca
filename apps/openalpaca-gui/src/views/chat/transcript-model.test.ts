@@ -502,6 +502,44 @@ describe("buildTranscript", () => {
   });
 });
 
+/**
+ * The composer's Approve and Deny answer the oldest pending prompt, while the
+ * transcript orders cards by clock: each card carries its place in the answer
+ * order, so the one the composer answers can say so.
+ */
+describe("a confirmation's place in the answer order", () => {
+  const entry = (requestId: string, at: string) => ({
+    requestId,
+    toolName: "shell_execute",
+    toolArguments: { command: requestId },
+    preview: null,
+    perCall: false,
+    agentName: null,
+    at,
+  });
+
+  it("numbers the cards in the order the composer answers them", () => {
+    const items = buildTranscript(
+      input({
+        confirmations: [
+          entry("req-old", "2026-08-31T14:27:00Z"),
+          entry("req-new", "2026-08-31T14:26:00Z"),
+        ],
+      }),
+    );
+    const places = items.flatMap((item) =>
+      item.kind === "confirmation"
+        ? [[item.entry.requestId, item.position, item.total]]
+        : [],
+    );
+    // Drawn by clock, numbered by the answer order.
+    expect(places).toEqual([
+      ["req-new", 2, 2],
+      ["req-old", 1, 2],
+    ]);
+  });
+});
+
 describe("the run link and artifact chips (GAP-23)", () => {
   it("carries the run a stored assistant turn started", () => {
     const items = buildTranscript(

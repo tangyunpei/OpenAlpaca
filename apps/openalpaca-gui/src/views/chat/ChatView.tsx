@@ -112,6 +112,7 @@ export default function ChatView({
       ? {
           toolName: session.pendingToolName,
           hidden: session.pendingHidden,
+          count: session.pendingCount,
           runId: session.blockedRunId,
           approve: session.approve,
           deny: session.deny,
@@ -322,6 +323,7 @@ export default function ChatView({
           blocked={session.blocked}
           pendingToolName={session.pendingToolName ?? undefined}
           pendingHidden={session.pendingHidden}
+          pendingCount={session.pendingCount}
           answering={session.answering}
           onApprove={session.approve}
           onDeny={session.deny}

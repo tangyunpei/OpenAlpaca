@@ -39,6 +39,7 @@ describe("buildCommands (§3.33)", () => {
         pendingConfirmation: {
           toolName: "shell_execute",
           hidden: 0,
+          count: 1,
           approve: vi.fn(),
         },
       }),
@@ -66,6 +67,7 @@ describe("buildCommands (§3.33)", () => {
         pendingConfirmation: {
           toolName: "shell_execute",
           hidden: 0,
+          count: 1,
           approve: vi.fn(),
         },
       }),
@@ -85,6 +87,7 @@ describe("buildCommands (§3.33)", () => {
         pendingConfirmation: {
           toolName: "srv__rm\u{202E}fdp\u{200B}\n",
           hidden: 0,
+          count: 1,
           approve: vi.fn(),
         },
       }),
@@ -106,6 +109,7 @@ describe("buildCommands (§3.33)", () => {
           pendingConfirmation: {
             toolName: "shell_execute",
             hidden,
+            count: 1,
             approve: vi.fn(),
           },
         }),
@@ -118,6 +122,23 @@ describe("buildCommands (§3.33)", () => {
       "Approve pending shell_execute · its card shows 1 hidden character",
     );
     expect(label(0)).toBe("Approve pending shell_execute");
+  });
+
+  /** The row answers the oldest of several pending prompts: it says so. */
+  it("says the row approves the oldest of several pending prompts", () => {
+    const approve = buildCommands(
+      input({
+        pendingConfirmation: {
+          toolName: "shell_execute",
+          hidden: 0,
+          count: 3,
+          approve: vi.fn(),
+        },
+      }),
+    ).find((command) => command.group === "Approve");
+    expect(approve?.label).toBe(
+      "Approve pending shell_execute · oldest of 3 pending",
+    );
   });
 
   it("labels modifiers the way the design writes them", () => {

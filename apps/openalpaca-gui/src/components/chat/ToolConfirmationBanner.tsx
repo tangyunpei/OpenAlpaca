@@ -27,9 +27,15 @@
  * alone such a run ran past the box's edge, behind a scrollbar macOS does
  * not draw, and its tail was off screen. Display only: what is answered is
  * the request id.
+ *
+ * **Several pending** (`lib/confirmation-queue`). The composer answers the
+ * oldest prompt while the transcript scrolls to the newest card, so with more
+ * than one pending the card it answers is outlined in red, like the
+ * composer's answer box, and says so; every other card says it waits.
  */
 
 import { EscapedText } from "@/components/ui";
+import { cn } from "@/lib/cn";
 import { hiddenNotice } from "@/lib/hidden-chars";
 
 import { escapeConfirmation } from "./confirmation-escape";
@@ -41,6 +47,12 @@ export interface ToolConfirmationBannerProps {
   preview?: string | null;
   /** From the WS twin of this event; `null` when only the SSE frame arrived. */
   agentName?: string | null;
+  /**
+   * Its place in the order the composer answers prompts (1 for the one
+   * Approve answers) and how many are pending. With more than one, the card
+   * says which the composer answers (`lib/confirmation-queue`).
+   */
+  queue?: { position: number; total: number } | null;
 }
 
 export function ToolConfirmationBanner({
@@ -48,6 +60,7 @@ export function ToolConfirmationBanner({
   toolArguments,
   preview = null,
   agentName = null,
+  queue = null,
 }: ToolConfirmationBannerProps) {
   const { name, command, agent, hidden } = escapeConfirmation({
     toolName,
@@ -57,11 +70,19 @@ export function ToolConfirmationBanner({
   // The whole request, whichever line it hides in: what the person approves
   // is all three.
   const notice = hiddenNotice(hidden);
+  const queued = queue !== null && queue.total > 1;
+  const answeredNext = queued && queue.position === 1;
 
   return (
     <section
       role="alert"
-      className="mb-[26px] rounded-3xl border border-amber-line bg-amber-surface px-[16px] py-[15px] wrap-anywhere"
+      data-answered-next={answeredNext ? "" : undefined}
+      className={cn(
+        "mb-[26px] rounded-3xl border bg-amber-surface px-[16px] py-[15px] wrap-anywhere",
+        // The composer's answer box is outlined in red: so is the card it
+        // answers, when there is more than one to tell apart.
+        answeredNext ? "border-red" : "border-amber-line",
+      )}
     >
       <p className="mt-0 mb-[9px] font-mono text-2xs-plus tracking-eyebrow-w text-amber-ink uppercase">
         Confirmation required · <EscapedText escaped={name} />
@@ -91,7 +112,12 @@ export function ToolConfirmationBanner({
       )}
       <p className="mt-[9px] mb-0 text-base-plus leading-[1.5] text-tertiary">
         {agent === null ? "The agent" : <EscapedText escaped={agent} />} is
-        blocked on this. Answer in the composer to continue.
+        blocked on this.{" "}
+        {!queued
+          ? "Answer in the composer to continue."
+          : answeredNext
+            ? `Approve and Deny in the composer answer this card first — 1 of ${queue.total} pending, oldest first.`
+            : `${queue.position} of ${queue.total} pending — the composer answers the card outlined in red first.`}
       </p>
     </section>
   );

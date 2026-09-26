@@ -139,6 +139,7 @@ export function Transcript({ items, dense }: TranscriptProps) {
                 toolArguments={item.entry.toolArguments}
                 preview={item.entry.preview}
                 agentName={item.entry.agentName}
+                queue={{ position: item.position, total: item.total }}
               />
             );
 

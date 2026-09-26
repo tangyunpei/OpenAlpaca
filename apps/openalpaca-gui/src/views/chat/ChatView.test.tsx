@@ -1057,6 +1057,62 @@ describe("ChatView — a confirmation with hidden characters", () => {
 });
 
 /**
+ * Two prompts pending at once — a lead running subagents in parallel raises
+ * them. The composer's Approve, Deny, Always allow, Enter and the palette's
+ * row answer the oldest, while the view scrolls to the newest card, and two
+ * calls of one tool read alike on the bar. The card they answer says so and
+ * is outlined in red, the bar says which one it answers, and the answer goes
+ * to that card's request.
+ */
+describe("ChatView — several confirmations pending at once", () => {
+  it("marks the card the composer answers, says so on the bar, and answers it", async () => {
+    renderChat();
+    const source = await sendMessage("tidy both projects");
+    await act(async () => {
+      source.emit("confirmation_requested", {
+        request_id: "req-old",
+        tool_name: "shell_execute",
+        tool_arguments: { command: "rm -rf ~/proj" },
+      });
+      source.emit("confirmation_requested", {
+        request_id: "req-new",
+        tool_name: "shell_execute",
+        tool_arguments: { command: "ls" },
+      });
+    });
+
+    const cards = screen
+      .getAllByRole("alert")
+      .filter((node) =>
+        (node.textContent ?? "").startsWith("Confirmation required"),
+      );
+    const byCommand = (command: string) =>
+      cards.find((node) => node.querySelector("pre")?.textContent === command);
+    expect(byCommand("rm -rf ~/proj")).toHaveAttribute("data-answered-next");
+    expect(byCommand("ls")).not.toHaveAttribute("data-answered-next");
+    expect(
+      screen.getByText(
+        (_, node) =>
+          node?.tagName === "SPAN" &&
+          node.textContent ===
+            "shell_execute is waiting on you · oldest of 2 pending — its card is outlined in red",
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(useConfirmationStore.getState().pending?.count).toBe(2),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+    await waitFor(() => {
+      const posted = requests.find((request) =>
+        request.url.includes("/v1/chat/confirmations/"),
+      );
+      expect(posted?.url).toMatch(/\/v1\/chat\/confirmations\/req-old$/);
+    });
+  });
+});
+
+/**
  * G1 — a background run's confirmation, which is the only kind a workflow
  * raises.
  *

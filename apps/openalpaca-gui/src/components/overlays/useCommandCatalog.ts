@@ -24,6 +24,8 @@ export interface PendingConfirmation {
   toolName: string;
   /** The hidden characters the whole request holds — its card's count. */
   hidden: number;
+  /** How many prompts are pending: the row answers the oldest. */
+  count: number;
   onApprove: () => void;
 }
 
@@ -52,11 +54,13 @@ export function useCommandCatalog(
         : {
             toolName: published.toolName,
             hidden: published.hidden,
+            count: published.count,
             onApprove: published.approve,
           };
 
   const toolName = confirmation?.toolName;
   const hidden = confirmation?.hidden ?? 0;
+  const count = confirmation?.count ?? 1;
   const onApprove = confirmation?.onApprove;
 
   return useMemo(
@@ -72,6 +76,7 @@ export function useCommandCatalog(
             : {
                 toolName,
                 hidden,
+                count,
                 approve: () => {
                   setPaletteOpen(false);
                   onApprove();
@@ -110,6 +115,7 @@ export function useCommandCatalog(
     [
       activeRunId,
       activeRunTitle,
+      count,
       hidden,
       onApprove,
       setPaletteOpen,

@@ -18,6 +18,7 @@
  * and no matcher, so the two bindings cannot fight over the same key.
  */
 
+import { oldestOfPending } from "@/lib/confirmation-queue";
 import { escapeHiddenLine, hiddenOnCard } from "@/lib/hidden-chars";
 
 /** A key combination the palette can both draw and match. */
@@ -89,6 +90,8 @@ export interface CommandCatalogInput {
   pendingConfirmation: {
     toolName: string;
     hidden: number;
+    /** How many prompts are pending: the row answers the oldest. */
+    count: number;
     approve: () => void;
   } | null;
   goChat: () => void;
@@ -138,6 +141,7 @@ export function buildCommands(input: CommandCatalogInput): Command[] {
       // plain-text `<U+XXXX>` form.
       label: [
         `Approve pending ${escapeHiddenLine(pending.toolName).text}`,
+        oldestOfPending(pending.count),
         hiddenOnCard(pending.hidden),
       ]
         .filter((part) => part !== null)

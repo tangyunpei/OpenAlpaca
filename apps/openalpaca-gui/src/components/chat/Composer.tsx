@@ -32,6 +32,7 @@ import { Button, EscapedText } from "@/components/ui";
 import { useStopIntent } from "@/hooks/useConnection";
 import { cn } from "@/lib/cn";
 import { dragCarriesFiles } from "@/lib/drag";
+import { oldestOfPending } from "@/lib/confirmation-queue";
 import { escapeHiddenLine, hiddenOnCard } from "@/lib/hidden-chars";
 import { formatFileSize, type ModelEntry } from "@/lib/api/types";
 import type { ComposerMode } from "@/stores/ui";
@@ -91,6 +92,11 @@ export interface ComposerProps {
    * the bar says beside the name it shows (`hiddenOnCard`).
    */
   pendingHidden?: number;
+  /**
+   * How many prompts are pending. Approve and Deny answer the oldest; with
+   * more than one, the bar says so and which card that is.
+   */
+  pendingCount?: number;
   onApprove?: () => void;
   onDeny?: () => void;
   onAlwaysAllow?: () => void;
@@ -210,6 +216,7 @@ export function Composer(props: ComposerProps) {
     blocked,
     pendingToolName = "This tool",
     pendingHidden = 0,
+    pendingCount = 1,
     onApprove,
     onDeny,
     onAlwaysAllow,
@@ -259,6 +266,7 @@ export function Composer(props: ComposerProps) {
 
   if (blocked) {
     const hiddenPointer = hiddenOnCard(pendingHidden);
+    const oldest = oldestOfPending(pendingCount);
     return (
       <div className="shrink-0 border-t border-line-subtle bg-main px-[26px] pt-[14px] pb-[20px]">
         <div className="mx-auto max-w-transcript">
@@ -268,10 +276,17 @@ export function Composer(props: ComposerProps) {
               className="animate-pulse-oa-fast block h-[6px] w-[6px] shrink-0 rounded-full bg-red"
             />
             <span className="min-w-0 font-mono text-xs-plus tracking-label wrap-anywhere text-amber-ink">
-              {/* Right above Approve: the name as the card shows it, and the
-                  whole request's count, which the card draws. */}
+              {/* Right above Approve: the name as the card shows it, which
+                  of several prompts Approve answers, and the whole request's
+                  count, which the card draws. */}
               <EscapedText escaped={escapeHiddenLine(pendingToolName)} /> is
               waiting on you
+              {oldest !== null && (
+                <>
+                  {" · "}
+                  {oldest} — its card is outlined in red
+                </>
+              )}
               {hiddenPointer !== null && (
                 <>
                   {" · "}

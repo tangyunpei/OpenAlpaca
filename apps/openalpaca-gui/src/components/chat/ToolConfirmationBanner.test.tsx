@@ -210,3 +210,50 @@ describe("ToolConfirmationBanner — hidden characters (§3.14)", () => {
     expect(section.textContent).not.toMatch(/hidden character/);
   });
 });
+
+/**
+ * With two prompts pending, the composer's Approve and Deny answer the oldest,
+ * while the view scrolls to the newest card; two calls of one tool read alike
+ * on the bar. The card the composer answers says so and is outlined in red,
+ * like the composer's own answer box; every other card says it waits.
+ */
+describe("ToolConfirmationBanner — which card the composer answers", () => {
+  it("marks the card the composer answers first when more than one is pending", () => {
+    const { section } = card({
+      toolName: "shell_execute",
+      toolArguments: { command: "rm -rf ~/proj" },
+      queue: { position: 1, total: 2 },
+    });
+    expect(section).toHaveAttribute("data-answered-next");
+    expect(section).toHaveClass("border-red");
+    expect(section.lastElementChild?.textContent).toBe(
+      "The agent is blocked on this. Approve and Deny in the composer answer this card first — 1 of 2 pending, oldest first.",
+    );
+  });
+
+  it("says a later card waits for the one outlined in red", () => {
+    const { section } = card({
+      toolName: "shell_execute",
+      toolArguments: { command: "ls" },
+      agentName: "researcher",
+      queue: { position: 2, total: 2 },
+    });
+    expect(section).not.toHaveAttribute("data-answered-next");
+    expect(section).not.toHaveClass("border-red");
+    expect(section.lastElementChild?.textContent).toBe(
+      "researcher is blocked on this. 2 of 2 pending — the composer answers the card outlined in red first.",
+    );
+  });
+
+  it("reads as before when it is the only one", () => {
+    const { section } = card({
+      toolName: "shell_execute",
+      toolArguments: { command: "ls" },
+      queue: { position: 1, total: 1 },
+    });
+    expect(section).not.toHaveAttribute("data-answered-next");
+    expect(section.lastElementChild?.textContent).toBe(
+      "The agent is blocked on this. Answer in the composer to continue.",
+    );
+  });
+});

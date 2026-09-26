@@ -187,6 +187,7 @@ describe("CommandPalette (§3.33)", () => {
         pendingConfirmation={{
           toolName: "shell_execute",
           hidden: 0,
+          count: 1,
           onApprove,
         }}
       />,
@@ -200,14 +201,16 @@ describe("CommandPalette (§3.33)", () => {
   });
 
   /**
-   * The row approves with the name alone on it: the count the chat lane
-   * publishes with the confirmation — the card's — goes beside it.
+   * The row approves with the name alone on it, and answers the oldest of the
+   * prompts pending: what the chat lane publishes with the confirmation — how
+   * many are pending, and the card's hidden-character count — goes beside it.
    */
-  it("says the published request's hidden-character count on its Approve row", () => {
+  it("says the published queue and hidden-character count on its Approve row", () => {
     useConfirmationStore.setState({
       pending: {
         toolName: "shell_execute",
         hidden: 2,
+        count: 2,
         runId: null,
         approve: vi.fn(),
         deny: vi.fn(),
@@ -216,7 +219,7 @@ describe("CommandPalette (§3.33)", () => {
     render(<CommandPalette />);
     expect(
       screen.getByRole("option", {
-        name: /Approve pending shell_execute · its card shows 2 hidden characters/,
+        name: /Approve pending shell_execute · oldest of 2 pending · its card shows 2 hidden characters/,
       }),
     ).toBeInTheDocument();
   });
@@ -231,6 +234,7 @@ describe("CommandPalette (§3.33)", () => {
         pendingConfirmation={{
           toolName: `srv__${"x".repeat(200)}`,
           hidden: 0,
+          count: 1,
           onApprove: vi.fn(),
         }}
       />,

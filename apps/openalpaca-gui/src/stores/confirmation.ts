@@ -29,6 +29,11 @@ export interface PendingToolConfirmation {
    */
   hidden: number;
   /**
+   * How many prompts are pending. The composer, Enter and the palette's row
+   * answer the oldest — this one — and the row says so when there are more.
+   */
+  count: number;
+  /**
    * The run holding it — the `task_id` the confirmation frame carries, with
    * `agent_status`'s `agent_id → current_task_id` as the fallback for a frame
    * that has none. `null` when neither answers, rather than a guess.
@@ -61,6 +66,7 @@ export function usePublishConfirmation(
 ): void {
   const toolName = pending?.toolName ?? null;
   const hidden = pending?.hidden ?? 0;
+  const count = pending?.count ?? 1;
   const runId = pending?.runId ?? null;
   const approve = pending?.approve;
   const deny = pending?.deny;
@@ -71,7 +77,7 @@ export function usePublishConfirmation(
       setPending(null);
       return;
     }
-    setPending({ toolName, hidden, runId, approve, deny });
+    setPending({ toolName, hidden, count, runId, approve, deny });
     return () => setPending(null);
-  }, [toolName, hidden, runId, approve, deny]);
+  }, [toolName, hidden, count, runId, approve, deny]);
 }

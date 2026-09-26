@@ -206,6 +206,27 @@ describe("Composer — blocked state (§3.16a)", () => {
     );
   });
 
+  /**
+   * Approve and Deny answer the oldest pending prompt. With more than one,
+   * the bar says so and names the card it answers by its red outline.
+   */
+  it("says it answers the oldest of several pending prompts, and which card that is", () => {
+    setup({
+      blocked: true,
+      pendingToolName: "shell_execute",
+      pendingCount: 2,
+      pendingHidden: 1,
+    });
+    const bar = screen.getByText(
+      (_, node) =>
+        node?.tagName === "SPAN" &&
+        (node.textContent ?? "").startsWith("shell_execute is waiting on you"),
+    );
+    expect(bar.textContent).toBe(
+      "shell_execute is waiting on you · oldest of 2 pending — its card is outlined in red · its card shows 1 hidden character",
+    );
+  });
+
   it("says nothing of hidden characters when the request holds none", () => {
     setup({
       blocked: true,

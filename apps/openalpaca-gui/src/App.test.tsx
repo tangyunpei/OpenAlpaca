@@ -265,6 +265,7 @@ describe("AppFrame", () => {
       pending: {
         toolName: "shell_execute",
         hidden: 0,
+        count: 1,
         runId: "b41c8e02",
         approve,
         deny,

@@ -298,6 +298,12 @@ export interface ChatSession {
    */
   pendingHidden: number;
   /**
+   * How many prompts are pending. `approve`, `deny` and `alwaysAllow` answer
+   * the oldest — the one `pendingToolName` names — and the composer's bar and
+   * the palette's row say so when there is more than one.
+   */
+  pendingCount: number;
+  /**
    * Its approval is good for this call only (design 09 §4.2): the composer
    * offers no *Always allow*, and `alwaysAllow` does nothing.
    */
@@ -1335,6 +1341,7 @@ export function useChatSession(): ChatSession {
     blocked: stream.blocked,
     pendingToolName: firstConfirmation?.toolName ?? null,
     pendingHidden,
+    pendingCount: confirmations.length,
     pendingPerCall: firstConfirmation?.perCall ?? false,
     blockedRunId,
     answering: stream.respond.isPending,

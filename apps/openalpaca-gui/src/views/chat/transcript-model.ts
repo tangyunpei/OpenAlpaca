@@ -222,7 +222,19 @@ export type TranscriptItem =
     }
   | { kind: "report"; key: string; report: RunReportData }
   | { kind: "artifact"; key: string; entry: WrittenArtifact }
-  | { kind: "confirmation"; key: string; entry: ConfirmationEntry }
+  | {
+      kind: "confirmation";
+      key: string;
+      entry: ConfirmationEntry;
+      /**
+       * Its place in the order the composer answers prompts — the order they
+       * arrived in, 1 for the one Approve answers — and how many are
+       * pending. The transcript draws cards by clock, so this is not their
+       * place on screen.
+       */
+      position: number;
+      total: number;
+    }
   | { kind: "resolution"; key: string; entry: ResolutionEntry }
   | { kind: "error"; key: string; message: string };
 
@@ -231,6 +243,7 @@ export interface TranscriptInput {
   reports: readonly RunReportData[];
   /** Files this session watched an agent write, newest last. */
   artifacts: readonly WrittenArtifact[];
+  /** In arrival order: the first is the one the composer answers. */
   confirmations: readonly ConfirmationEntry[];
   resolutions: readonly ResolutionEntry[];
   /** Steers this client pushed to a run's own `/steer` route, newest last. */
@@ -465,13 +478,15 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
     });
   }
 
-  for (const entry of confirmations) {
+  confirmations.forEach((entry, index) => {
     push(timestamp(entry.at), {
       kind: "confirmation",
       key: `c${entry.requestId}`,
       entry,
+      position: index + 1,
+      total: confirmations.length,
     });
-  }
+  });
 
   for (const entry of resolutions) {
     push(timestamp(entry.at), {
