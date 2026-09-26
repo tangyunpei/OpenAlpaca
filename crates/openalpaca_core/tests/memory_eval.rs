@@ -1400,6 +1400,11 @@ struct LearningConditions {
     seeded_as_saved_then: Vec<String>,
     /// A replay: the L run's kept scratch directory it learned from.
     replayed_from: Option<String>,
+    /// A replay learns with no reader, so its store holds the learning
+    /// queue's notes alone: compare it with a live run's `extraction`
+    /// numbers (`*_by_surface`), never its pooled ones; only a live run
+    /// samples the whole system (the L8 fix slice's H4).
+    replay_is_extraction_only: bool,
     /// L: where the scratch database, its project and the transcript map
     /// were kept, for `OPENALPACA_MEMORY_EVAL_LEARN_FROM`.
     scratch_kept: Option<String>,
@@ -4953,6 +4958,7 @@ fn learning_conditions(
             .learn_from
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned()),
+        replay_is_extraction_only: settings.learn_from.is_some(),
         scratch_kept: None,
         summaries: false,
         coverage_judge_prompt_path: coverage_path.to_string_lossy().into_owned(),
@@ -6786,6 +6792,37 @@ fn a_learning_system_lifts_the_extraction_caps() {
     assert_eq!(conditions["episode_max_per_day"], most_accepted);
     let e = eval_daemon_config(System::E, None);
     assert_eq!(e.orchestrator.routing.main_loop_max_tools_per_round, 1);
+}
+
+/// The L8 fix slice's H4: a replay learns with no reader, so its store is
+/// extraction-only, and its conditions say so — a replay is compared with a
+/// live run's `extraction` numbers, never its pooled ones; a live run is
+/// the one sample of the whole system.
+#[test]
+fn a_replays_conditions_say_it_is_extraction_only() {
+    let conditions = |learn_from: Option<PathBuf>| {
+        let settings = Settings {
+            learn_from,
+            ..settings_for_tests()
+        };
+        serde_json::to_value(learning_conditions(
+            &eval_daemon_config(System::L, None),
+            &eval_dir().join("conversations-learning.json"),
+            "corpus",
+            &[],
+            &settings,
+            true,
+            0,
+            &eval_dir().join("coverage-judge-prompt.md"),
+            "coverage",
+        ))
+        .unwrap()
+    };
+    let replay = conditions(Some(PathBuf::from("/kept/scratch")));
+    assert_eq!(replay["replayed_from"], "/kept/scratch");
+    assert_eq!(replay["replay_is_extraction_only"], true);
+    let live = conditions(None);
+    assert_eq!(live["replay_is_extraction_only"], false);
 }
 
 /// The L8 fix slice's H1: a learning run says loudly — in the report's
