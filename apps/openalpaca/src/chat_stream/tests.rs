@@ -1081,6 +1081,49 @@ fn the_stream_writes_the_models_text_to_a_terminal_without_a_control_character()
     assert_eq!(state.shown, "x\u{9b}8my");
 }
 
+/// The usage line after every turn names the model that answered, and that
+/// id is whatever the provider's catalogue lists (a remote Ollama's
+/// `/api/tags`, a gateway's `/models`) — a third party's string, printed
+/// into the terminal the next inline `[y/N]` prompt uses. At a terminal a
+/// palette change (OSC 4) or a scroll region in it is shown as `<U+XXXX>`,
+/// since the prompt's reset undoes neither; a pipe gets the daemon's text,
+/// and what is recorded is the id as sent.
+#[test]
+fn the_usage_line_shows_the_models_id_without_a_control_character() {
+    colored::control::set_override(false);
+    let model = "x\u{1b}]4;3;#000000\u{7}\u{1b}[1;2r";
+    let frame = format!(
+        "event: done\ndata: {}",
+        serde_json::json!({
+            "content": "hi",
+            "model": model,
+            "tokens_in": 12,
+            "tokens_out": 3,
+            "duration_ms": 40,
+        })
+    );
+
+    let mut state = SseState::default();
+    let mut written = Vec::new();
+    process_sse_event_to(&frame, &terminal(), &mut state, &mut written).expect("done is shown");
+    let written = String::from_utf8(written).expect("the handler writes UTF-8");
+    assert!(
+        written.ends_with("[x<U+001B>]4;3;#000000<U+0007><U+001B>[1;2r | 12 in | 3 out | 40ms]\n"),
+        "{written:?}"
+    );
+    assert!(!written.contains(['\u{1b}', '\u{7}']), "{written:?}");
+    assert_eq!(state.usage.as_ref().map(|u| u.model.as_str()), Some(model));
+
+    let mut state = SseState::default();
+    let mut written = Vec::new();
+    process_sse_event_to(&frame, &piped(), &mut state, &mut written).expect("done is written");
+    let written = String::from_utf8(written).expect("the handler writes UTF-8");
+    assert!(
+        written.ends_with(&format!("[{model} | 12 in | 3 out | 40ms]\n")),
+        "a pipe gets the id as the daemon sent it: {written:?}"
+    );
+}
+
 // ── A delegated run's outcome ────────────────────────────────────────
 //
 // In the REPL the run's `result_summary` is printed into the terminal the

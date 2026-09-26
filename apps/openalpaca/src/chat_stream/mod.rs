@@ -364,9 +364,12 @@ fn delta_to_print(tty: bool, content: &str) -> Option<String> {
 /// delegated run's result ([`task_outcome_text`]), a resumed conversation's
 /// turns (`commands::chat::render_tail`) and a failed turn's message
 /// ([`failure_line`], `commands::chat::refuse_failed_turn`, by stderr's own
-/// terminal). So none of it can set a mode, a scroll region, the cursor or a
-/// palette colour; the prompt's reset (`crate::output::TERMINAL_RESET`) is
-/// for what other programs left in the terminal.
+/// terminal) — and so does the provider's model id, a catalogue entry a
+/// remote Ollama or a gateway names, on the usage line after every turn and
+/// in the REPL's `/models`. So none of it can set a mode, a scroll region,
+/// the cursor or a palette colour; the prompt's reset
+/// (`crate::output::TERMINAL_RESET`) is for what other programs left in the
+/// terminal.
 pub(crate) fn model_text(tty: bool, text: &str) -> std::borrow::Cow<'_, str> {
     if tty {
         std::borrow::Cow::Owned(openalpaca_core::utils::text::escape_controls(text))
@@ -764,7 +767,11 @@ fn process_sse_event_to(
                         tokens_out,
                         duration_ms,
                     };
-                    writeln!(out, "{}", format_usage_line(&info).dimmed())?;
+                    // The id is the provider catalogue's, a third party's
+                    // string printed where the next prompt will be: A10's
+                    // rule, like the model's own text.
+                    let line = format_usage_line(&info);
+                    writeln!(out, "{}", model_text(opts.tty, &line).dimmed())?;
                     state.usage = Some(info);
                 }
             }

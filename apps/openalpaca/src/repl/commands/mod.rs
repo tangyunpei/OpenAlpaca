@@ -146,14 +146,27 @@ async fn cmd_models(client: &DaemonClient) -> anyhow::Result<()> {
         if arr.is_empty() {
             println!("{}", "No models available.".dimmed());
         } else {
+            let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
             for m in arr {
-                let id = m["id"].as_str().unwrap_or("-");
-                let provider = m["provider"].as_str().unwrap_or("-");
-                println!("  {} {}", id, format!("({})", provider).dimmed());
+                println!("{}", model_row(m, tty));
             }
         }
     }
     Ok(())
+}
+
+/// One `/models` row: `  <id> (<provider>)`. The id is whatever a
+/// provider's catalogue lists, printed into the terminal the next inline
+/// prompt uses, so at a terminal it takes the model's-text rule
+/// ([`chat_stream::model_text`]); a pipe gets it as the daemon sent it.
+fn model_row(model: &serde_json::Value, tty: bool) -> String {
+    let id = model["id"].as_str().unwrap_or("-");
+    let provider = model["provider"].as_str().unwrap_or("-");
+    format!(
+        "  {} {}",
+        chat_stream::model_text(tty, id),
+        format!("({})", chat_stream::model_text(tty, provider)).dimmed()
+    )
 }
 
 async fn cmd_agents(client: &DaemonClient) -> anyhow::Result<()> {

@@ -85,10 +85,11 @@ pub fn status_color(status: &str) -> ColoredString {
 /// palette colours changed with OSC 4, 10 or 11 (resetting them, OSC 104,
 /// 110 and 111, would also throw away a theme the person set at run time —
 /// base16-shell, say — at every prompt). None of it can come from what
-/// `openalpaca chat` prints of the model's or a tool's text: the answer, its
-/// reasoning, a delegated run's result, a resumed conversation's turns and a
-/// failed turn's message all reach a terminal through `escape_controls`
-/// (`chat_stream::model_text`). What is left is other output in that
+/// `openalpaca chat` prints of the model's or a tool's text, or of a
+/// provider's model id: the answer, its reasoning, a delegated run's result,
+/// a resumed conversation's turns, a failed turn's message and the usage
+/// line's model (the REPL's `/models` too) all reach a terminal through
+/// `escape_controls` (`chat_stream::model_text`). What is left is other output in that
 /// terminal: other programs', and CLI listings that print stored or
 /// third-party text as it comes — `tasks log` and `tasks status` print a
 /// run's title, summary or waiting tool that way.
