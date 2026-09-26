@@ -69,15 +69,22 @@ pub fn status_color(status: &str) -> ColoredString {
 
 /// Print a table header row with separator.
 pub fn print_table_header(headers: &[(&str, usize)]) {
+    let (header_line, rule) = table_header_lines(headers);
+    println!("{}", header_line.dimmed());
+    println!("{}", rule.dimmed());
+}
+
+/// A table's header row and the rule under it, unpainted: what
+/// [`print_table_header`] prints, for a command that builds its output as
+/// text so a test can read it.
+pub fn table_header_lines(headers: &[(&str, usize)]) -> (String, String) {
     let header_line: String = headers
         .iter()
         .map(|(name, width)| format!("{:<width$}", name, width = width))
         .collect::<Vec<_>>()
         .join(" ");
-    println!("{}", header_line.dimmed());
-
     let total_width: usize = headers.iter().map(|(_, w)| w + 1).sum::<usize>();
-    println!("{}", "-".repeat(total_width).dimmed());
+    (header_line, "-".repeat(total_width))
 }
 
 /// Fit a cell to `max` **characters**, ellipsis included.

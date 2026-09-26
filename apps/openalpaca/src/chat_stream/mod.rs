@@ -446,6 +446,30 @@ pub(crate) struct ConfirmationDetails {
     pub notice: Option<String>,
 }
 
+impl ConfirmationDetails {
+    /// Everything the inline prompt writes before it asks, painted, one line
+    /// each: a blank line, the headline, the preview, the arguments and,
+    /// directly under them, the notice.
+    pub(crate) fn text(&self) -> String {
+        use std::fmt::Write as _;
+
+        let mut out = String::new();
+        // Writing into a `String` cannot fail.
+        let _ = writeln!(out);
+        let _ = writeln!(out, "{}", self.headline.yellow().bold());
+        if let Some(preview) = &self.preview {
+            let _ = writeln!(out, "{preview}");
+        }
+        if let Some(arguments) = &self.arguments {
+            let _ = writeln!(out, "{}", arguments.dimmed());
+        }
+        if let Some(notice) = &self.notice {
+            let _ = writeln!(out, "{}", notice.yellow());
+        }
+        out
+    }
+}
+
 /// What the inline prompt prints (design 09 §4.4): the headline naming the
 /// tool, the daemon-authored preview, labelled as OpenAlpaca's own text, then
 /// the literal arguments, which stay. Either of the last two may be absent.
@@ -529,18 +553,7 @@ async fn handle_confirmation_prompt(client: &DaemonClient, event_text: &str) -> 
     }
     let parsed: serde_json::Value = serde_json::from_str(&data)?;
 
-    let details = confirmation_details(&parsed);
-    println!();
-    println!("{}", details.headline.yellow().bold());
-    if let Some(preview) = details.preview {
-        println!("{preview}");
-    }
-    if let Some(arguments) = details.arguments {
-        println!("{}", arguments.dimmed());
-    }
-    if let Some(notice) = details.notice {
-        println!("{}", notice.yellow());
-    }
+    print!("{}", confirmation_details(&parsed).text());
 
     let approved = tokio::task::block_in_place(|| {
         print!("Allow execution? [y/N] ");

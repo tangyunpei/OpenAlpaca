@@ -788,6 +788,41 @@ fn the_inline_prompt_notice_counts_only_what_was_escaped() {
     assert!(arguments.contains(r#""שלום\r\nb\tc""#), "{arguments}");
 }
 
+/// What the prompt writes is `ConfirmationDetails::text`, all of it and in
+/// order: a blank line, the escaped headline, the preview, the escaped
+/// arguments and, directly under them, the notice (spec item 3).
+#[test]
+fn the_inline_prompt_writes_its_lines_in_order_with_the_notice_under_the_arguments() {
+    colored::control::set_override(false);
+    let frame = serde_json::json!({
+        "request_id": "req-1",
+        "tool_name": "srv__rm\u{202e}fdp",
+        "tool_arguments": { "path": "a\u{200b}" },
+        "preview": "Keep it?",
+        "per_call": true,
+    });
+    let text = confirmation_details(&frame).text();
+    assert_no_raw(&text);
+    assert_eq!(
+        text,
+        "\nTool 'srv__rm<U+202E>fdp' requires confirmation\n\
+         From OpenAlpaca:\n  Keep it?\n\
+         Arguments: {\n  \"path\": \"a<U+200B>\"\n}\n\
+         Note: this request contains 2 hidden characters, shown as <U+…>.\n"
+    );
+
+    let clean = serde_json::json!({
+        "request_id": "req-2",
+        "tool_name": "file_write",
+        "tool_arguments": { "path": "notes.md" },
+    });
+    assert_eq!(
+        confirmation_details(&clean).text(),
+        "\nTool 'file_write' requires confirmation\nArguments: {\n  \"path\": \"notes.md\"\n}\n",
+        "no preview, no notice"
+    );
+}
+
 /// The answer is `{"approved"}` posted to the frame's `request_id` as the
 /// daemon sent it — `watch`'s and `approve`'s own path and body, so the id
 /// is one path segment — and nothing the prompt showed, escaped or not,

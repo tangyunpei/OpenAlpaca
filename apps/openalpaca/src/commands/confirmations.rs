@@ -42,7 +42,7 @@ use std::io::Write;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::client::DaemonClient;
-use crate::output::{OutputFormat, TableRow, print_list};
+use crate::output::{OutputFormat, TableRow, table_header_lines};
 
 #[derive(Subcommand)]
 pub enum ConfirmationCommands {
@@ -172,25 +172,42 @@ fn listing_note(count: usize) -> String {
 async fn list(format: OutputFormat) -> Result<()> {
     let client = DaemonClient::connect()?;
     let page: PendingPrompts = client.get("/v1/chat/confirmations").await?;
-    let prompts = pending_prompts(page);
-
-    if matches!(format, OutputFormat::Json) {
-        println!("{}", listing_json(&prompts));
-        return Ok(());
-    }
-    println!("{}", listing_note(prompts.len()).dimmed());
-    if prompts.is_empty() {
-        return Ok(());
-    }
-    print_list(&prompts, OutputFormat::Table);
-    for line in notice_lines(&prompts) {
-        println!("{}", line.yellow());
-    }
-    for block in preview_blocks(&prompts) {
-        println!();
-        println!("{block}");
-    }
+    print!("{}", listing(&pending_prompts(page), format));
     Ok(())
+}
+
+/// Everything `list` prints, painted, one line each: `--format json`'s
+/// document alone ([`listing_json`] — never the generic `print_list`, whose
+/// JSON passes a bidi override or a C1 control through raw); or the note,
+/// the table with its `TOOL` cell escaped, one notice for each request that
+/// hides anything ([`notice_lines`]) and the previews.
+fn listing(prompts: &[PendingPrompt], format: OutputFormat) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    // Writing into a `String` cannot fail.
+    if matches!(format, OutputFormat::Json) {
+        let _ = writeln!(out, "{}", listing_json(prompts));
+        return out;
+    }
+    let _ = writeln!(out, "{}", listing_note(prompts.len()).dimmed());
+    if prompts.is_empty() {
+        return out;
+    }
+    let (header, rule) = table_header_lines(&PendingPrompt::headers());
+    let _ = writeln!(out, "{}", header.dimmed());
+    let _ = writeln!(out, "{}", rule.dimmed());
+    for prompt in prompts {
+        let _ = writeln!(out, "{}", prompt.table_row());
+    }
+    for line in notice_lines(prompts) {
+        let _ = writeln!(out, "{}", line.yellow());
+    }
+    for block in preview_blocks(prompts) {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "{block}");
+    }
+    out
 }
 
 /// A prompt's tool-controlled text as a person is shown it: the tool's name
@@ -986,6 +1003,39 @@ mod tests {
                 "req-args — Note: this request contains 1 hidden character, shown as <U+…>."
                     .to_string(),
             ]
+        );
+    }
+
+    /// What `list` prints is `listing`, whichever the format: a spoofed
+    /// prompt reaches the terminal escaped in both, the JSON never through
+    /// the generic `print_list` (which writes the characters raw), and the
+    /// table with its notice under the rows.
+    #[test]
+    fn list_prints_a_spoofed_prompt_escaped_in_either_format() {
+        colored::control::set_override(false);
+        let prompts = vec![spoofed_prompt()];
+
+        let json = listing(&prompts, OutputFormat::Json);
+        assert_no_raw(&json, true);
+        assert_eq!(json, format!("{}\n", listing_json(&prompts)));
+
+        let table = listing(&prompts, OutputFormat::Table);
+        assert_no_raw(&table, true);
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines[0], listing_note(1));
+        assert!(lines[1].starts_with("REQUEST_ID"), "{table}");
+        assert!(lines[3].starts_with("req-spoof"), "{table}");
+        assert!(lines[3].contains("srv__rm<U+202E>fdp<U+200B>"), "{table}");
+        assert_eq!(
+            lines[4],
+            "req-spoof — Note: this request contains 7 hidden characters, shown as <U+…>."
+        );
+        assert_eq!(lines.len(), 5, "{table}");
+
+        assert_eq!(
+            listing(&[], OutputFormat::Table),
+            format!("{}\n", listing_note(0)),
+            "nothing waiting: the note alone"
         );
     }
 
