@@ -81,15 +81,6 @@ export function targetOriginLabel(origin: NoteOrigin): string {
   }
 }
 
-/** Design 09 §3.5: “Replace “X” (saved by you) with “B”?” */
-export function suggestionQuestion(
-  target: string,
-  targetOrigin: NoteOrigin,
-  suggested: string,
-): string {
-  return `Replace “${target}” (${targetOriginLabel(targetOrigin)}) with “${suggested}”?`;
-}
-
 /**
  * The label beside the text a suggestion would replace: “Yours” only when
  * the owner wrote it — saved, edited by hand or imported — and “Current”
@@ -127,14 +118,6 @@ export function replacedToast(target: string): string {
 
 /** The toast after Keep mine. */
 export const KEPT_YOUR_NOTE = "Kept your note";
-
-/**
- * A recently-learned replacement's row (design 09 §3.5): “Learned from what
- * you said · replaced “A” · Undo” — these are the words before the button.
- */
-export function learnedReplacing(replaced: string): string {
-  return `${LEARNED_FROM_YOU} · replaced “${replaced}”`;
-}
 
 /** The toast after undoing a replacement: the note it replaced is back. */
 export function undoneToast(replaced: string | null, title: string): string {

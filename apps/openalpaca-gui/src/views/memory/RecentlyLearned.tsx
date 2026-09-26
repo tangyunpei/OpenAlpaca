@@ -15,12 +15,20 @@
  * A withdrawal forgets nothing else the owner said, and a learned note that
  * **replaced** an older one says so — "Learned from what you said · replaced
  * “A” · Undo" — because its undo brings that note back.
+ *
+ * **Hidden characters** (`lib/hidden-chars`). Undo is the owner's decision
+ * on a note learning wrote, so the row shows every hidden character in its
+ * title and in the replaced note's as a highlighted `<U+XXXX>` (the one-line
+ * escape) and, under them, one line counting them in the words every
+ * approval surface uses. Display only: Undo answers the note by id and
+ * revision.
  */
 
-import { Eyebrow } from "@/components/ui";
+import { EscapedText, Eyebrow } from "@/components/ui";
 import type { MemoryListItem } from "@/lib/api/memories";
+import { escapeHiddenLine, hiddenNotice } from "@/lib/hidden-chars";
 
-import { LEARNED_FROM_YOU, learnedReplacing } from "./copy";
+import { LEARNED_FROM_YOU } from "./copy";
 
 export interface RecentlyLearnedProps {
   items: readonly MemoryListItem[];
@@ -56,6 +64,9 @@ export function RecentlyLearned({
             replacedId === undefined
               ? null
               : (replacedTitles.get(replacedId) ?? null);
+          const title = escapeHiddenLine(item.title);
+          const was = replaced === null ? null : escapeHiddenLine(replaced);
+          const notice = hiddenNotice(title.hidden + (was?.hidden ?? 0));
           return (
             <li key={item.id} className="min-w-0">
               <button
@@ -63,16 +74,21 @@ export function RecentlyLearned({
                 onClick={() => onOpen(item.id)}
                 className="block max-w-full cursor-pointer truncate border-none bg-transparent p-0 text-left text-base font-medium text-ink hover:underline"
               >
-                {item.title}
+                <EscapedText escaped={title} />
               </button>
               <span className="mt-[2px] block font-mono text-2xs-plus text-muted-fg">
-                {replaced === null
-                  ? LEARNED_FROM_YOU
-                  : learnedReplacing(replaced)}{" "}
+                {/* Design 09 §3.5: “Learned from what you said · replaced “A” · Undo” */}
+                {LEARNED_FROM_YOU}
+                {was !== null && (
+                  <>
+                    {" "}
+                    · replaced “<EscapedText escaped={was} />”
+                  </>
+                )}{" "}
                 ·{" "}
                 <button
                   type="button"
-                  aria-label={`Undo ${item.title}`}
+                  aria-label={`Undo ${title.text}`}
                   disabled={pendingId === item.id}
                   onClick={() => onUndo(item, replaced)}
                   className="cursor-pointer border-none bg-transparent p-0 font-mono text-2xs-plus text-blue underline hover:text-blue-hover disabled:cursor-default disabled:text-faint"
@@ -80,6 +96,11 @@ export function RecentlyLearned({
                   Undo
                 </button>
               </span>
+              {notice !== null && (
+                <span className="mt-[2px] block text-2xs-plus text-red-ink">
+                  {notice}
+                </span>
+              )}
             </li>
           );
         })}

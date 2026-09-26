@@ -18,12 +18,26 @@
  *             else the owner said.
  *
  * The section hides when nothing is waiting.
+ *
+ * **Hidden characters** (`lib/hidden-chars`). The row is where the owner
+ * decides, and every text on it came from a file or from the model — the two
+ * titles, both texts and the reason — so each hidden character in them is a
+ * highlighted `<U+XXXX>`, never drawn raw (the titles and the one-line reason
+ * take the one-line escape, the texts the arguments' one), and one line
+ * under the texts counts them in the words every approval surface uses.
+ * Display only: Replace and Keep mine answer the notes by id and revision,
+ * as read.
  */
 
-import { Button, Eyebrow } from "@/components/ui";
+import { Button, EscapedText, Eyebrow } from "@/components/ui";
 import type { MemorySuggestion } from "@/lib/api/memories";
+import {
+  escapeHidden,
+  escapeHiddenLine,
+  hiddenNotice,
+} from "@/lib/hidden-chars";
 
-import { suggestionQuestion, suggestionWhence, targetTextLabel } from "./copy";
+import { suggestionWhence, targetOriginLabel, targetTextLabel } from "./copy";
 
 export interface SuggestionsProps {
   items: readonly MemorySuggestion[];
@@ -78,33 +92,54 @@ function SuggestionRow({
   onOpen: (id: string) => void;
 }) {
   const when = item.observed_at ?? item.created_at;
+  const target = escapeHiddenLine(item.target.title);
+  const title = escapeHiddenLine(item.title);
+  const excerpt = escapeHidden(item.target.excerpt);
+  const knowledge = escapeHidden(item.knowledge);
+  const reason = item.reason === null ? null : escapeHiddenLine(item.reason);
+  const notice = hiddenNotice(
+    target.hidden +
+      title.hidden +
+      excerpt.hidden +
+      knowledge.hidden +
+      (reason?.hidden ?? 0),
+  );
   return (
-    <li className="min-w-0 text-base leading-[1.5] text-amber-ink">
+    <li className="min-w-0 text-base leading-[1.5] wrap-anywhere text-amber-ink">
+      {/* Design 09 §3.5: “Replace “X” (saved by you) with “B”?” */}
       <button
         type="button"
         onClick={() => onOpen(item.id)}
         className="block max-w-full cursor-pointer border-none bg-transparent p-0 text-left font-medium text-ink hover:underline"
       >
-        {suggestionQuestion(item.target.title, item.target.origin, item.title)}
+        Replace “<EscapedText escaped={target} />” (
+        {targetOriginLabel(item.target.origin)}) with “
+        <EscapedText escaped={title} />
+        ”?
       </button>
       <dl className="m-0 mt-[4px] grid grid-cols-[auto_1fr] gap-x-[8px] gap-y-[2px]">
         <dt className="font-mono text-2xs-plus text-muted-fg">
           {targetTextLabel(item.target.origin)}
         </dt>
         <dd className="m-0 min-w-0 break-words text-secondary">
-          {item.target.excerpt}
+          <EscapedText escaped={excerpt} />
         </dd>
         <dt className="font-mono text-2xs-plus text-muted-fg">New</dt>
-        <dd className="m-0 min-w-0 break-words text-ink">{item.knowledge}</dd>
-        {item.reason !== null && (
+        <dd className="m-0 min-w-0 break-words text-ink">
+          <EscapedText escaped={knowledge} />
+        </dd>
+        {reason !== null && (
           <>
             <dt className="font-mono text-2xs-plus text-muted-fg">Why</dt>
             <dd className="m-0 min-w-0 break-words text-secondary">
-              {item.reason}
+              <EscapedText escaped={reason} />
             </dd>
           </>
         )}
       </dl>
+      {notice !== null && (
+        <p className="mt-[3px] mb-0 text-red-ink">{notice}</p>
+      )}
       <span className="mt-[3px] block font-mono text-2xs-plus text-muted-fg">
         {suggestionWhence(item.origin, when)}
         {item.older_count > 0 &&
@@ -113,7 +148,7 @@ function SuggestionRow({
       <div className="mt-[6px] flex gap-[6px]">
         <Button
           variant="primarySm"
-          aria-label={`Replace ${item.target.title}`}
+          aria-label={`Replace ${target.text}`}
           disabled={busy}
           onClick={() => onReplace(item)}
         >
@@ -121,7 +156,7 @@ function SuggestionRow({
         </Button>
         <Button
           variant="ghostSm"
-          aria-label={`Keep mine: ${item.target.title}`}
+          aria-label={`Keep mine: ${target.text}`}
           disabled={busy}
           onClick={() => onKeep(item)}
         >

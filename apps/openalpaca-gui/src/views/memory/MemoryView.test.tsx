@@ -1320,4 +1320,189 @@ describe("the Memory view", () => {
       expect(useUiStore.getState().toast).toBe("Undone — “Old editor” is back"),
     );
   });
+
+  // ── Hidden characters where the owner decides (lib/hidden-chars) ──────
+
+  /** Every escape drawn set apart under `root`, in order. */
+  const escapesIn = (root: Element) =>
+    Array.from(
+      root.querySelectorAll("[data-hidden-char]"),
+      (node) => node.textContent,
+    );
+  const PLANTED = /[\u202E\u200B\u2800\uFE0F\uFFFC]/;
+
+  /**
+   * A suggestion's card is where the owner decides whether learning's text
+   * replaces theirs, and both texts come from a file or from the model:
+   * every hidden character in the titles, both texts and the reason is a
+   * highlighted `<U+XXXX>`, never drawn raw, and one line under them counts
+   * them. Replace still answers the notes as they were read.
+   */
+  it("shows a suggestion's hidden characters as <U+XXXX>, and counts them", async () => {
+    const saved = note({
+      id: "n-1",
+      title: "My\u202E commute",
+      body: "The user takes the\u200B bus.\n",
+    });
+    const suggestion = note({
+      id: "n-2",
+      title: "Com\u2800mute",
+      body: "# Commute\n",
+      knowledge: "Since March\uFE0F the user cycles.",
+      reason: "The user said\uFFFC so.",
+      status: "candidate",
+      origin: "extracted_user",
+      observed_at: "2026-09-23T18:02:11Z",
+      supersedes: ["n-1"],
+    });
+    renderView();
+    const user = userEvent.setup();
+    const section = await screen.findByRole("region", { name: "Suggestions" });
+
+    expect(section.textContent).not.toMatch(PLANTED);
+    expect(escapesIn(section)).toEqual([
+      "<U+202E>",
+      "<U+2800>",
+      "<U+200B>",
+      "<U+FE0F>",
+      "<U+FFFC>",
+    ]);
+    expect(section).toHaveTextContent(
+      "Replace “My<U+202E> commute” (saved by you) with “Com<U+2800>mute”?",
+    );
+    expect(section).toHaveTextContent("YoursThe user takes the<U+200B> bus.");
+    expect(section).toHaveTextContent(
+      "Note: this request contains 5 hidden characters, shown as <U+…>.",
+    );
+
+    const [read, target] = [suggestion.revision, saved.revision];
+    await user.click(
+      within(section).getByRole("button", {
+        name: "Replace My<U+202E> commute",
+      }),
+    );
+    await waitFor(() =>
+      expect(sent("POST", "/v1/memories/n-2")).toHaveLength(1),
+    );
+    const confirm = sent("POST", "/v1/memories/n-2")[0];
+    expect(confirm?.headers.get("If-Match")).toBe(`"${read}"`);
+    expect(confirm?.body).toEqual({
+      action: "confirm",
+      target_revision: target,
+    });
+  });
+
+  it("says nothing about hidden characters on a suggestion that holds none", async () => {
+    savedAndSuggested();
+    renderView();
+    const section = await screen.findByRole("region", { name: "Suggestions" });
+    expect(escapesIn(section)).toEqual([]);
+    expect(section).not.toHaveTextContent("hidden character");
+  });
+
+  /** Undo takes back a note learning wrote: its title is the model's. */
+  it("shows a recently learned note's hidden characters beside its Undo", async () => {
+    note({ id: "n-1", title: "Old\u200B editor", status: "archived" });
+    note({
+      id: "n-2",
+      title: "Prefers\u202E espresso",
+      kind: "preference",
+      origin: "extracted_user",
+      supersedes: ["n-1"],
+    });
+    renderView();
+    const user = userEvent.setup();
+    const section = await screen.findByRole("region", {
+      name: "Recently learned",
+    });
+    const row = within(section).getByRole("listitem");
+    await waitFor(() =>
+      expect(row).toHaveTextContent(
+        "Prefers<U+202E> espresso" +
+          "Learned from what you said · replaced “Old<U+200B> editor” · Undo" +
+          "Note: this request contains 2 hidden characters, shown as <U+…>.",
+      ),
+    );
+    expect(row.textContent).not.toMatch(PLANTED);
+    expect(escapesIn(row)).toEqual(["<U+202E>", "<U+200B>"]);
+
+    await user.click(
+      within(row).getByRole("button", {
+        name: "Undo Prefers<U+202E> espresso",
+      }),
+    );
+    await waitFor(() =>
+      expect(sent("POST", "/v1/memories/n-2/undo")).toHaveLength(1),
+    );
+  });
+
+  /**
+   * A candidate is confirmed from its detail: its title and its text — the
+   * model's — show every hidden character, and one line under the text
+   * counts them (the note's title included). Confirm sends what it sent.
+   */
+  it("shows a candidate's hidden characters where it is confirmed", async () => {
+    const candidate = note({
+      id: "n-1",
+      title: "Likes\u202E dark mode",
+      body: "The user\u200B likes dark\u2800 themes.\n",
+      status: "candidate",
+      origin: "extracted_other",
+    });
+    renderView();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Candidates" }));
+    const list = await screen.findByRole("list", { name: "Notes" });
+    await user.click(
+      await within(list).findByRole("button", {
+        name: "Likes\u202E dark mode",
+      }),
+    );
+    const heading = await screen.findByRole("heading", {
+      name: "Likes<U+202E> dark mode",
+      level: 2,
+    });
+    const detail = heading.closest("section");
+    if (detail === null) throw new Error("no detail");
+    expect(detail.textContent).not.toMatch(PLANTED);
+    expect(escapesIn(heading)).toEqual(["<U+202E>"]);
+    expect(detail).toHaveTextContent(
+      "The user<U+200B> likes dark<U+2800> themes.",
+    );
+    expect(detail).toHaveTextContent(
+      "Note: this request contains 3 hidden characters, shown as <U+…>.",
+    );
+
+    const read = candidate.revision;
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() =>
+      expect(sent("POST", "/v1/memories/n-1")).toHaveLength(1),
+    );
+    expect(sent("POST", "/v1/memories/n-1")[0]?.body).toEqual({
+      action: "confirm",
+    });
+    expect(sent("POST", "/v1/memories/n-1")[0]?.headers.get("If-Match")).toBe(
+      `"${read}"`,
+    );
+  });
+
+  /**
+   * Only where a decision is offered: a note that is already the owner's is
+   * read as written — a joiner or a right-to-left mark can be its content.
+   */
+  it("shows an active note's text as written, with no count", async () => {
+    note({
+      id: "n-1",
+      title: "Family",
+      body: "👩\u200D👧 at home.\n",
+    });
+    renderView();
+    await openNote("Family");
+    const detail = screen
+      .getByRole("heading", { name: "Family", level: 2 })
+      .closest("section");
+    if (detail === null) throw new Error("no detail");
+    expect(detail.textContent).toContain("👩\u200D👧 at home.");
+    expect(detail).not.toHaveTextContent("hidden character");
+  });
 });

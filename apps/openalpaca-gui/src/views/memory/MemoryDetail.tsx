@@ -21,11 +21,17 @@
  * or dismissed with *Keep mine* — the undo route, a withdrawal. The
  * Suggestions card lists only a suggestion whose note is still in force, so
  * one whose note was retired another way is dismissed here or nowhere.
+ *
+ * **Hidden characters** (`lib/hidden-chars`). A candidate is where the owner
+ * decides whether text the model wrote becomes theirs, so its title shows
+ * every hidden character as a highlighted `<U+XXXX>` (the one-line escape),
+ * as does its Note tab's text (`NoteTab`, which counts them all). A note that
+ * is already in force is shown as written.
  */
 
 import { useState } from "react";
 
-import { Button, SectionEmpty, Tab, Tag } from "@/components/ui";
+import { Button, EscapedText, SectionEmpty, Tab, Tag } from "@/components/ui";
 import {
   useForgetMemory,
   useMemoryNote,
@@ -37,6 +43,7 @@ import {
   type MemoryNote,
   type MemoryUpdate,
 } from "@/lib/api/memories";
+import { escapeHiddenLine } from "@/lib/hidden-chars";
 import { ApiError } from "@/lib/http";
 import { useUiStore, type MemoryTab } from "@/stores/ui";
 import { relativeTime } from "@/views/library/format";
@@ -225,8 +232,12 @@ export function MemoryDetail({
         <div>
           <div className="flex items-start gap-[12px]">
             <div className="min-w-0 flex-1">
-              <h2 className="m-0 text-2xl font-semibold tracking-tighter text-ink">
-                {model.title}
+              <h2 className="m-0 text-2xl font-semibold tracking-tighter wrap-anywhere text-ink">
+                {status === "candidate" ? (
+                  <EscapedText escaped={escapeHiddenLine(model.title)} />
+                ) : (
+                  model.title
+                )}
               </h2>
               <div className="mt-[6px] flex flex-wrap items-center gap-[10px] font-mono text-xs text-muted-fg">
                 <span>{model.kind}</span>

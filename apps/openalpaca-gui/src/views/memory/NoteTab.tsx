@@ -12,11 +12,24 @@
  * transcript has no route to one row), the notes it replaces or that replace
  * it, and its file. It is a claim, not proof (design §4), and says so only by
  * being a list of handles rather than a verdict.
+ *
+ * **A candidate's text** is what the owner confirms or keeps out, and the
+ * model wrote it: every hidden character in it — and in the replaced note's
+ * title the copy quotes — is shown as `<U+XXXX>` (`lib/hidden-chars`, in the
+ * plain-text form, since the Markdown renderer takes a string), and one line
+ * under the text counts them with the title's, which the head shows
+ * highlighted. A note already in force is rendered as written: a joiner or a
+ * right-to-left mark can be its content.
  */
 
 import { MessageBody } from "@/components/chat";
 import { Eyebrow } from "@/components/ui";
 import type { MemoryNote } from "@/lib/api/memories";
+import {
+  escapeHidden,
+  escapeHiddenLine,
+  hiddenNotice,
+} from "@/lib/hidden-chars";
 import { useUiStore } from "@/stores/ui";
 import { relativeTime } from "@/views/library/format";
 
@@ -41,12 +54,20 @@ export function NoteTab({ note, replaces = null }: NoteTabProps) {
   const focusRun = useUiStore((s) => s.focusRun);
   const openMemory = useUiStore((s) => s.openMemory);
   const freshness = freshnessNote(note.freshness);
+  const deciding = note.effective_status === "candidate";
+  const title = escapeHiddenLine(note.title);
+  const was = replaces === null ? null : escapeHiddenLine(replaces);
+  const body = deciding ? escapeHidden(note.body) : null;
+  const notice =
+    body === null
+      ? null
+      : hiddenNotice(title.hidden + (was?.hidden ?? 0) + body.hidden);
 
   return (
     <div className="max-w-[660px]">
-      {note.effective_status === "candidate" && (
-        <p className="mt-0 mb-[14px] rounded-2xl border border-amber-line bg-amber-surface px-[12px] py-[9px] text-base leading-[1.5] text-amber-ink">
-          {candidateNote(note.origin, replaces)}
+      {deciding && (
+        <p className="mt-0 mb-[14px] rounded-2xl border border-amber-line bg-amber-surface px-[12px] py-[9px] text-base leading-[1.5] wrap-anywhere text-amber-ink">
+          {candidateNote(note.origin, was?.text ?? null)}
         </p>
       )}
       {note.effective_status === "superseded" && (
@@ -58,7 +79,12 @@ export function NoteTab({ note, replaces = null }: NoteTabProps) {
       {note.body.trim() === "" ? (
         <p className="m-0 text-md text-muted-fg">This note has no text.</p>
       ) : (
-        <MessageBody text={note.body} spacing="assistant" />
+        <MessageBody text={body?.text ?? note.body} spacing="assistant" />
+      )}
+      {notice !== null && (
+        <p className="mt-[10px] mb-0 text-base leading-[1.5] text-red-ink">
+          {notice}
+        </p>
       )}
       {note.truncated && (
         <p className="mt-[10px] mb-0 font-mono text-2xs-plus text-faint">
