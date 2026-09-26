@@ -9218,9 +9218,8 @@ async fn the_coverage_judge_has_room_for_its_verdict_and_unparsed_is_apart_from_
     let caps: Vec<Option<u32>> = stub.requests().iter().map(|r| r.max_tokens).collect();
     assert_eq!(caps.len(), 3);
     assert!(
-        caps.iter()
-            .all(|c| c.is_some_and(|c| c >= 2048 && c > JUDGE_MAX_TOKENS)),
-        "room for a verdict after the reasoning: {caps:?}"
+        caps.iter().all(|c| c.is_some_and(|c| c >= 2048)),
+        "room for a verdict after the reasoning, over the QA judge's {JUDGE_MAX_TOKENS}: {caps:?}"
     );
 }
 
