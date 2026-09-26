@@ -254,7 +254,9 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
       screen.getByText("Asks for: fs_write — starts on approval"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("You denied this plugin — stays off after approval"),
+      screen.getByText(
+        "You denied this plugin. Declares no capabilities — stays off after approval",
+      ),
     ).toBeInTheDocument();
   });
 

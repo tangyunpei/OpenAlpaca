@@ -162,8 +162,40 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
     });
     expect(view.actions).toEqual(["approve"]);
     expect(view.description).toBe(
-      "You denied this plugin — starts on approval",
+      "You denied this plugin. Declares no capabilities — starts on approval",
     );
+  });
+
+  /**
+   * Approve on a denied row grants the capabilities the plugin's manifest
+   * declares now — a denied plugin stays denied whatever it declares, so an
+   * update after the denial is granted by this click — so the row says what
+   * they are, escaped and counted like a never-seen plugin's (A8: a row
+   * that shows part of what is approved still counts the whole).
+   */
+  it("unapproved/denied — what Approve grants is shown, escaped and counted", () => {
+    const view = extensionRowView(
+      extensionRow({
+        id: "notes",
+        version: "2.0",
+        state: "unapproved",
+        reason: "denied",
+        enabled: true,
+        declared: {
+          capabilities: ["notes_write", "shell\u202E_exec\u200B"],
+          virtual_capabilities: [],
+          types: { tool: true },
+        },
+      }),
+    );
+
+    expect(view.description).toBe(
+      "You denied this plugin. Asks for: notes_write, shell<U+202E>_exec<U+200B> — starts on approval",
+    );
+    expect(view.consent?.notice).toBe(
+      "Note: this request contains 2 hidden characters, shown as <U+…>.",
+    );
+    expect(view.actions).toEqual(["approve"]);
   });
 
   /**
@@ -234,7 +266,7 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
 
     expect(view.consent?.name.text).toBe("tri<U+FE0F>cky");
     expect(view.description).toBe(
-      "You denied this plugin — starts on approval",
+      "You denied this plugin. Declares no capabilities — starts on approval",
     );
     expect(view.consent?.notice).toBe(
       "Note: this request contains 1 hidden character, shown as <U+…>.",

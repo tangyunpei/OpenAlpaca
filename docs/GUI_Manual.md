@@ -1043,13 +1043,15 @@ because nothing is wrong and the last two change what is *installed* rather than
 whether it is on; both open an inline strip that has to be confirmed.
 
 A row awaiting consent shows the plugin's id, its version and what it asks
-for — its declared capabilities, or those an update added — with every hidden
-or invisible character (a bidi override, a zero-width or control character, a
-variation selector, any space but a plain one, a line break) as a highlighted
-`<U+XXXX>`, and a line under them counts them: `Note: this request contains 1
-hidden character, shown as <U+…>.` The id and the version wrap at the row's
-edge rather than being cut or pushing `Approve` aside. `Approve` grants exactly
-those strings, and it answers for the plugin by the id the daemon listed.
+for — its declared capabilities (a plugin you denied included, since
+`Approve` grants what it declares now), or those an update added — with
+every hidden or invisible character (a bidi override, a zero-width or control
+character, a variation selector, any space but a plain one, a line break) as
+a highlighted `<U+XXXX>`, and a line under them counts them: `Note: this
+request contains 1 hidden character, shown as <U+…>.` The id and the version
+wrap at the row's edge rather than being cut or pushing `Approve` aside.
+`Approve` grants exactly those strings, and it answers for the plugin by the
+id the daemon listed.
 
 `Add extension` installs either kind:
 

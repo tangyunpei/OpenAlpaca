@@ -258,11 +258,26 @@ type Base = Omit<
 >;
 
 /**
+ * What `Approve` grants a never-seen or denied plugin: the capabilities its
+ * manifest declares. Listed from the row's **static** `declared` object,
+ * never from runtime `tools`, which is empty here (X-19).
+ */
+function asksFor(row: ExtensionRow): string {
+  const declared = row.declared?.capabilities ?? [];
+  return declared.length > 0
+    ? `Asks for: ${declared.join(", ")}`
+    : "Declares no capabilities";
+}
+
+/**
  * Consent pre-empts the switch: a switch would misrepresent the gate.
  *
  * The description is escaped whole with the one-line escape. The row's own
  * words hold no character of the escape's set, so what is shown escaped and
- * counted is exactly the plugin's: the capabilities it names.
+ * counted is exactly the plugin's: the capabilities it names. Every consent
+ * row names what `Approve` grants — a denied one too, because a denied
+ * plugin stays denied whatever its manifest declares since, and `Approve`
+ * grants what it declares now (A8).
  */
 function unapproved(row: ExtensionRow, base: Base): ExtensionRowView {
   const shared = {
@@ -293,7 +308,9 @@ function unapproved(row: ExtensionRow, base: Base): ExtensionRowView {
       ...shared,
       tag: "denied",
       tone: "neutral",
-      ...consented(`You denied this plugin${approvalSuffix(row)}`),
+      ...consented(
+        `You denied this plugin. ${asksFor(row)}${approvalSuffix(row)}`,
+      ),
       actions: ["approve"],
     };
   }
@@ -310,18 +327,12 @@ function unapproved(row: ExtensionRow, base: Base): ExtensionRowView {
     };
   }
 
-  // `never_seen`. Listed from the row's **static** `declared` object, never
-  // from runtime `tools`, which is empty here (X-19).
-  const declared = row.declared?.capabilities ?? [];
-  const asks =
-    declared.length > 0
-      ? `Asks for: ${declared.join(", ")}`
-      : "Declares no capabilities";
+  // `never_seen`.
   return {
     ...shared,
     tag: "waiting-approval",
     tone: "asks",
-    ...consented(`${asks}${approvalSuffix(row)}`),
+    ...consented(`${asksFor(row)}${approvalSuffix(row)}`),
     actions: ["approve", "deny"],
   };
 }
