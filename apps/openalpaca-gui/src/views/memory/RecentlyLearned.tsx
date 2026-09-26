@@ -26,6 +26,7 @@
 
 import { EscapedText, Eyebrow } from "@/components/ui";
 import type { MemoryListItem } from "@/lib/api/memories";
+import { cn } from "@/lib/cn";
 import { escapeHiddenLine, hiddenNotice } from "@/lib/hidden-chars";
 
 import { LEARNED_FROM_YOU } from "./copy";
@@ -72,7 +73,12 @@ export function RecentlyLearned({
               <button
                 type="button"
                 onClick={() => onOpen(item.id)}
-                className="block max-w-full cursor-pointer truncate border-none bg-transparent p-0 text-left text-base font-medium text-ink hover:underline"
+                className={cn(
+                  "block max-w-full cursor-pointer border-none bg-transparent p-0 text-left text-base font-medium text-ink hover:underline",
+                  // A title holding an escape wraps: an ellipsis could cut
+                  // off one the count says is there.
+                  title.hidden > 0 ? "wrap-anywhere" : "truncate",
+                )}
               >
                 <EscapedText escaped={title} />
               </button>

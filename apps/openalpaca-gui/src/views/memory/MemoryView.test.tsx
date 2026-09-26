@@ -1425,6 +1425,13 @@ describe("the Memory view", () => {
     );
     expect(row.textContent).not.toMatch(PLANTED);
     expect(escapesIn(row)).toEqual(["<U+202E>", "<U+200B>"]);
+    // A title holding an escape wraps rather than being cut with an
+    // ellipsis, which could hide one the count says is there.
+    const title = within(row).getByRole("button", {
+      name: "Prefers<U+202E> espresso",
+    });
+    expect(title.className).toContain("wrap-anywhere");
+    expect(title.className).not.toContain("truncate");
 
     await user.click(
       within(row).getByRole("button", {

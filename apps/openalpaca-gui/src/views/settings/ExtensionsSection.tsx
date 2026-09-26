@@ -133,6 +133,7 @@ export function ExtensionsSection() {
             <EscapedText escaped={view.consent.name} />
           )
         }
+        wrapName={view.consent !== null}
         tags={
           <>
             <Tag value={row.kind === "mcp" ? "MCP" : "Plugin"} />

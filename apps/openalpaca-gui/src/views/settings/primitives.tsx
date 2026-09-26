@@ -234,6 +234,12 @@ export function ListCard({
 
 export interface ListRowProps {
   name: React.ReactNode;
+  /**
+   * Wrap the name at the row's edge instead of cutting it with an ellipsis —
+   * for a name a person approves, whose cut tail could hide an escape
+   * (`lib/hidden-chars`) the row's count says is there.
+   */
+  wrapName?: boolean;
   /** Tags sit beside the name. */
   tags?: React.ReactNode;
   description?: React.ReactNode;
@@ -247,6 +253,7 @@ export interface ListRowProps {
 
 export function ListRow({
   name,
+  wrapName = false,
   tags,
   description,
   chips,
@@ -257,7 +264,14 @@ export function ListRow({
     <div className="flex items-center gap-[12px] border-b border-line-hair-2 px-[16px] py-[13px]">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-[8px]">
-          <span className="truncate text-md font-medium text-ink">{name}</span>
+          <span
+            className={cn(
+              wrapName ? "min-w-0 wrap-anywhere" : "truncate",
+              "text-md font-medium text-ink",
+            )}
+          >
+            {name}
+          </span>
           {tags}
         </div>
         {description !== undefined && (

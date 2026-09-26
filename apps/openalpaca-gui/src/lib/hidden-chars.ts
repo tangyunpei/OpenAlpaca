@@ -47,12 +47,14 @@
  * that shows it wraps a run too long for its line anywhere
  * (`overflow-wrap: anywhere`) rather than letting it run past an edge that
  * clips it. Where an escape is drawn as a highlighted span — the card, the
- * composer's bar, the run card, the resolution row — the span is never
- * split across two lines. The palette's Approve row and the Always-allow
- * toast take the plain-text form, which wraps like any other text and can
- * break inside an escape (every character stays on screen); the run's
- * Event log, which is not an approval surface, cuts its one-line rows with
- * an ellipsis.
+ * composer's bar, the run card, the resolution row, a plugin's consent row
+ * in Settings → Extensions, and the Memory view's Suggestions card,
+ * Recently learned rows and a candidate's title — the span is never split
+ * across two lines. The palette's Approve row, the Always-allow toast and a
+ * candidate's rendered Markdown take the plain-text form, which wraps like
+ * any other text and can break inside an escape (every character stays on
+ * screen); the run's Event log, which is not an approval surface, cuts its
+ * one-line rows with an ellipsis.
  */
 
 import table from "./hidden-chars.json";

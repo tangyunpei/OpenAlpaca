@@ -295,11 +295,22 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
         "Note: this request contains 2 hidden characters, shown as <U+…>.",
       ),
     ).toBeInTheDocument();
+    // The id wraps at the row's edge instead of being cut with an ellipsis,
+    // which could hide an escape the count says is there.
+    const name = container.querySelector("[data-hidden-char]")?.parentElement;
+    expect(name?.className).toContain("wrap-anywhere");
+    expect(name?.className).not.toContain("truncate");
 
     await userEvent
       .setup()
       .click(screen.getByRole("button", { name: "Approve" }));
     expect(state.calls).toEqual([{ id: "no‮tes", verb: "approve" }]);
+  });
+
+  it("still cuts an ordinary row's name with an ellipsis", () => {
+    state.rows = [extensionRow({ kind: "mcp", id: "github" })];
+    render(<ExtensionsSection />);
+    expect(screen.getByText("github").className).toContain("truncate");
   });
 
   it("removes an orphan, and offers Remove nowhere else", async () => {
