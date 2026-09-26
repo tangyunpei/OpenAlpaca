@@ -277,7 +277,7 @@ A tool on the confirm list suspends its run and asks. In the GUI the card is the
   - `watch` prints a line under the arguments counting them: `Note: this request contains 2 hidden characters, shown as <U+…>.` Only real escapes are counted, so text that merely looks like `<U+202E>` is not.
   - The `list` table escapes the `TOOL` column, and under the table prints the same line for each prompt that hides anything, as `<request_id> — Note: …`. Its count includes the agent id and the arguments, which the table does not print, and one line under the notices says so and points at `--format json`, which prints them — worth reading before `approve <id>`.
   - `--format json` writes those characters with JSON's own `\u` escapes instead: a JSON reader gets exactly the daemon's values, and the terminal never receives one raw.
-  - The answer line after `watch` and the refusal of `--entire-tool` show the name the same way. The preview is the daemon's own text and is printed as it comes.
+  - The answer line after `watch` and the refusal of `--entire-tool` show the name the same way. The preview is the daemon's own text and is printed as it comes: a summary cut short for reading, from which the daemon leaves out every hidden character of the titles and texts it quotes. A suggestion's exact text is what `openalpaca memory show <id>` prints, each hidden character as `<U+XXXX>`.
   - On a terminal, `watch` resets the terminal's character set, text attributes, insert mode and line wrap before each prompt, and the `list` table does the same before its first line, so an earlier program cannot cut, garble or conceal what they print; `--format json` gets no reset. What the reset leaves alone is under [Approval prompts](#approval-prompts).
 
 A prompt is never auto-approved, and `--entire-tool` (or `a` in `watch`) is the only thing that widens one. An unanswered prompt times out on the daemon as a refusal (`confirmation_timeout_secs` under `[execution.agent_defaults]` in `daemon.toml`, default 300 s). A one-shot or piped `chat` turn declares that it *cannot* answer, and its confirm-listed tools are refused immediately rather than waiting — see [Approval prompts](#approval-prompts).
@@ -411,7 +411,14 @@ default (on) and *no consent decision*, so it sits `unapproved`/`never_seen`
 and nothing runs. `ext approve <id>` is the single action that starts it. The
 command prints the manifest first — what it contributes, what capabilities it
 asks for, which config keys it needs — because that is the decision approving
-makes.
+makes. Every hidden or invisible character the plugin's author put in it — in
+the name, version, description, entry, capabilities or keys: a bidi override, a
+zero-width or control character, a variation selector, any space but a plain
+one, a line break or a tab — is shown as `<U+XXXX>`, and a line under the
+manifest counts them (`Note: this request contains 2 hidden characters, shown
+as <U+…>.`). On a terminal the manifest starts with the same reset as an
+approval prompt (see [Approval prompts](#approval-prompts)). `install
+--dry-run` and `update` print it the same way.
 
 ```bash
 openalpaca ext install ~/src/openalpaca-notion --dry-run   # parse and report only
@@ -696,14 +703,27 @@ Notes:
   five revisions the daemon wrote (a hand edit is not one of them) — `--raw` of a
   revision is that revision's file.
 - What a note holds is printed so it cannot drive your terminal. Every title,
-  heading, alias, tag and suggestion reason — in `list`, `search`, `timeline`,
-  `suggestions`, `show`, the lines `confirm`, `undo` and `forget` print, and an
-  ambiguous id's list — is one line with no control character (an escape
-  sequence) and no Unicode format character (a bidi override, a zero-width
-  character). `search`'s excerpt lines drop both kinds too but keep their own
-  spacing and tabs; `show`'s body drops control characters only and keeps its
-  line breaks, tabs and format characters, since it is the note's whole text.
-  `--raw` prints the file unchanged.
+  heading, alias and tag — in `list`, `search`, `timeline`, `show`, the lines
+  `confirm`, `undo` and `forget` print, and an ambiguous id's list — is one
+  line with no control character (an escape sequence), no Unicode format
+  character (a bidi override, a zero-width character) and nothing else that
+  draws as nothing or as blank space (a variation selector, a braille blank,
+  an object replacement character). `search`'s excerpt lines drop the
+  control and format characters too but keep their own spacing and tabs;
+  `show`'s body drops control characters only and keeps its line breaks, tabs
+  and format characters, since it is the note's whole text. `--raw` prints the
+  file unchanged.
+- Where you decide, nothing is dropped: `suggestions` and `show` of a
+  **candidate** (a note waiting for `confirm`) show every hidden or invisible
+  character — a control or format character, a variation selector, any space
+  but a plain one, and in a title, alias, tag or reason also a line break or a
+  tab — as `<U+XXXX>`, and a line counts them (`Note: this request contains 2
+  hidden characters, shown as <U+…>.`): under each suggestion that holds any,
+  and under a candidate's text. A suggestion's count includes both notes'
+  texts, which its line does not print, and one line under the list says so;
+  `show <id>` prints the suggestion's own, and `--format json` prints both, each
+  hidden character as a JSON `\u` escape. On a terminal both start with the
+  same reset as an approval prompt (see [Approval prompts](#approval-prompts)).
 - `add` saves a note **as you**: its origin is `user`, the highest authority, and a
   tool call can never edit, archive or replace it (the model can only *forget* it,
   under the ordinary confirmation card). The body is the last argument, `-` for

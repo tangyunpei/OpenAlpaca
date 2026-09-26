@@ -365,8 +365,11 @@ hidden characters anywhere and that its card shows them: `its card shows 2
 hidden characters`. The row an answer leaves, the Always-allow toast and the
 run's Event log name the tool the same way with no count (the palette row, the
 toast and the Event log show the escape as plain text). The `From OpenAlpaca`
-text is the daemon's own and is shown as it wrote it. Only what you see
-changes: approving answers the request the daemon sent. Two things no escape
+text is the daemon's own and is shown as it wrote it: a summary cut short for
+reading, from which the daemon leaves out every hidden character of the titles
+and texts it quotes (the suggestion's exact text is in the Memory view, which
+shows each one). Only what you see changes: approving answers the request the
+daemon sent. Two things no escape
 changes: right-to-left letters inside a value can still reorder the digits and
 punctuation next to them, and a character that merely looks like another (a
 Cyrillic `а` for a Latin `a`) is shown as written.
@@ -779,6 +782,21 @@ In a chat, `/remember`, `/forget` and `/memories` do the same without leaving
 the conversation (see *Memory commands* under Chat); a note saved with
 `/remember` is yours, exactly as one added here.
 
+**Hidden characters where you decide.** The Suggestions card, a Recently
+learned row and a candidate's detail ask you to decide on text learning or a
+file wrote, so every hidden or invisible character in it — a bidi override, a
+zero-width or control character, a variation selector, any space but a plain
+one, an object replacement character, and in a title also a line break or a
+tab — is shown as a highlighted `<U+XXXX>` (as plain `<U+XXXX>` in a
+candidate's rendered text and in the line naming the note it would replace),
+and a line under the texts counts them:
+`Note: this request contains 2 hidden characters, shown as <U+…>.` The card
+counts both titles, both texts and the reason; a row its title and the title
+of the note it replaced; a candidate its title, the title of the note it would
+replace and its text. Any other note is shown as written — a joiner or a
+right-to-left mark can be what it says — and so is the Raw tab, which is the
+editor. Replace, Keep mine, Confirm and Undo answer the note as read.
+
 An empty list says *"Nothing remembered yet. Ask Alpaca to remember something,
 or add a note."* After a forget, the detail says, in the daemon's words, what a
 forget does not erase: the transcript messages and runs the note cited, the
@@ -1017,6 +1035,14 @@ second call), `Retry` on a crashed or unreachable one, and `Remove` on an orphan
 row. `Reload`, `Update` and `Uninstall` live in the row's overflow menu instead,
 because nothing is wrong and the last two change what is *installed* rather than
 whether it is on; both open an inline strip that has to be confirmed.
+
+A row awaiting consent shows the plugin's id and what it asks for — its
+declared capabilities, or those an update added — with every hidden or
+invisible character (a bidi override, a zero-width or control character, a
+variation selector, any space but a plain one, a line break) as a highlighted
+`<U+XXXX>`, and a line under them counts them: `Note: this request contains 1
+hidden character, shown as <U+…>.` `Approve` grants exactly those strings, and
+it answers for the plugin by the id the daemon listed.
 
 `Add extension` installs either kind:
 

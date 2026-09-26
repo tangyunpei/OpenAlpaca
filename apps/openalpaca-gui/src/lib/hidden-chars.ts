@@ -39,7 +39,9 @@
  * - **The daemon-authored `preview`** is not escaped. It is OpenAlpaca's own
  *   prose, composed to be read, and the daemon drops from it every character
  *   this module would escape before any surface sees it; the values that
- *   decide what runs are the arguments beside it, which this escapes.
+ *   decide what runs are the arguments beside it, which this escapes — and
+ *   for `memory_confirm`, whose arguments are three ids, the suggestion's
+ *   exact text is in the Memory view, which escapes it.
  *
  * Display only: nothing sent to the daemon, stored or matched changes — the
  * card, the composer's answer and every POST body read the raw values. The
