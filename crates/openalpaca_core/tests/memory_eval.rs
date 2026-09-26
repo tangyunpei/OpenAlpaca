@@ -2597,19 +2597,20 @@ struct WrittenNote {
 
 /// One flush (design 09 §7.2): what `flush_session` reported, its latency,
 /// and the notes its bus events say it wrote. A flush that stops `BadOutput`
-/// is flushed again, up to the product's `MAX_ATTEMPTS` flushes (the L8 fix
-/// slice's H2) — a `turns` flush excepted, whose held window the session's
-/// next flush retries ([`retried_at_once`]) — and the record covers every
-/// attempt: its counts, tokens and latency summed, its `stopped` the last
-/// attempt's.
+/// is flushed again until each window is read or skipped (the L8 fix
+/// slice's H2; [`with_retries`]) — a `turns` flush excepted, whose held
+/// window the session's next flush retries ([`retried_at_once`]) — and the
+/// record covers every attempt: its counts, tokens and latency summed, its
+/// `stopped` the last attempt's.
 #[derive(Debug, Clone, Serialize)]
 struct FlushRecord {
     session: String,
     /// `turns` | `switch` | `replay` | `forced_rerun`.
     label: &'static str,
     latency_ms: u64,
-    /// `flush_session` calls this trigger made: 1 (always, for `turns`), or
-    /// up to `MAX_ATTEMPTS`.
+    /// `flush_session` calls this trigger made: 1 (always, for `turns`),
+    /// or as many as the window needs — at most `MAX_ATTEMPTS` for each of
+    /// its chunks (repair round 2 of the L8 fix slice).
     attempts: usize,
     /// Each attempt's `stopped`, in order.
     attempt_stops: Vec<Option<String>>,
@@ -2803,42 +2804,71 @@ fn drain_memory_changes(
 }
 
 /// The attempts a trigger's flush makes (the L8 fix slice's H2), each
-/// timed: one, then again while an attempt stops `BadOutput`, up to `max` —
-/// the product's `MAX_ATTEMPTS` for a window that cannot grow, what the
-/// production queue's retries of it come to (ruling LR20), with no backoff:
-/// `Manual` mode waits for nothing; one for a `turns` flush
-/// ([`retried_at_once`]). The request is the same each time; nothing
-/// perturbs it.
+/// timed: one, then again while an attempt stops `BadOutput` — at once, with
+/// no backoff (`Manual` mode waits for nothing) and the same request (nothing
+/// perturbs it) — until the product has read or skipped every window, as
+/// the production queue's retries of a held window come to (ruling LR20).
+/// `position` reads the cursor the queue counts unusable answers against:
+/// on its `MAX_ATTEMPTS`-th answer at one position the queue skips that
+/// chunk and goes on to the next in the same call, so a flush of several
+/// chunks may stop `BadOutput` at a later one after its third attempt
+/// (repair round 2 of the L8 fix slice, the fidelity review's M2; the cap
+/// was `MAX_ATTEMPTS` attempts in all). `per_window` bounds the attempts
+/// that stop `BadOutput` at one position: `MAX_ATTEMPTS`, which binds only
+/// if the queue did not count an answer (its cursor moved under it), and 1
+/// for a `turns` flush ([`retried_at_once`]). Positions only move forward
+/// over a finite window, so the loop ends.
 async fn with_retries<R>(
-    max: usize,
+    per_window: usize,
     mut attempt: impl AsyncFnMut() -> R,
     stopped: impl Fn(&R) -> Option<openalpaca_core::memory::learning::FlushStop>,
+    position: impl Fn() -> Option<i64>,
 ) -> (Vec<R>, Vec<u64>) {
     use openalpaca_core::memory::learning::FlushStop;
     let mut attempts = Vec::new();
     let mut latencies_ms = Vec::new();
+    // The position the last attempt stopped at, and how many stopped there.
+    let mut held: Option<(Option<i64>, usize)> = None;
     loop {
         let t0 = Instant::now();
         let report = attempt().await;
         latencies_ms.push(t0.elapsed().as_millis() as u64);
-        let again = stopped(&report) == Some(FlushStop::BadOutput);
+        let bad = stopped(&report) == Some(FlushStop::BadOutput);
         attempts.push(report);
-        if !again || attempts.len() >= max {
+        if !bad {
             return (attempts, latencies_ms);
         }
+        let at = position();
+        let there = match held {
+            Some((p, n)) if p == at => n + 1,
+            _ => 1,
+        };
+        if there >= per_window {
+            return (attempts, latencies_ms);
+        }
+        held = Some((at, there));
     }
 }
 
 /// Whether a flush of this label that stops `BadOutput` is flushed again at
 /// once ([`with_retries`]): every label but `turns` (repair round 1 of the
 /// L8 fix slice). A `turns` flush's window is held, as production holds it
-/// under a doubling backoff (60 s first) — and mid-conversation production's
-/// next attempt reads that window grown by the turns since — so the
-/// session's next flush, a `turns` or its `switch`, is its retry: the queue
-/// counts that flush's attempts on from the held one (ruling LR20, per
-/// cursor position). A `switch`, `replay`, summary or forced re-run window
-/// has no later turns to grow by: a daemon's retries of it read the same
-/// window, which is what an immediate retry reads.
+/// under a doubling backoff — and mid-conversation production's next
+/// attempt reads that window grown by the turns since — so the session's
+/// next flush, a `turns` or its `switch`, is its retry: the queue counts
+/// that flush's attempts on from the held one (ruling LR20, per cursor
+/// position). The stand-in differs in pace (repair round 2, the fidelity
+/// review's N2): production retries after 60 s and then 120 s, at a 20 s
+/// quiet gap — on a local model about one to three turns later — where the
+/// harness retries at the session's next tenth turn or its switch, so its
+/// retry sees a window grown further and, if every attempt fails, skips a
+/// larger one; which way that biases coverage is unknown. A `switch`,
+/// `replay`, summary or forced re-run window has no later turns to grow
+/// by: a daemon's retries read the same rows an immediate retry reads, but
+/// not the same prompt — each attempt rebuilds its known-notes section
+/// (`learning_view`), and a daemon retries 60 s or more later, after the
+/// next conversation's learning — so the immediate retry is the stricter
+/// one, and the harness rescues fewer windows than a daemon might.
 fn retried_at_once(label: &str) -> bool {
     label != FLUSH_TURNS
 }
@@ -2854,8 +2884,9 @@ fn cursor_of(db: &openalpaca_storage::Database, session_id: &str) -> Option<i64>
 
 /// `flush_session`, with the bus subscribed around it (design 09 §7.2,
 /// *Counting the two learning paths*), and — but for a `turns` flush —
-/// flushed again while it stops `BadOutput` ([`retried_at_once`]); the
-/// session's cursor read before and after.
+/// flushed again while it stops `BadOutput`, until each window is read or
+/// skipped ([`with_retries`], [`retried_at_once`]); the session's cursor
+/// read before and after.
 async fn flush_one(
     queue: &openalpaca_core::memory::learning::LearningQueue,
     bus: &openalpaca_core::bus::EventBus,
@@ -2867,13 +2898,18 @@ async fn flush_one(
     let mut rx = bus.subscribe();
     let cursor_before = cursor_of(db, session_id);
     let t0 = Instant::now();
-    let max = if retried_at_once(label) {
+    let per_window = if retried_at_once(label) {
         openalpaca_core::memory::learning::MAX_ATTEMPTS as usize
     } else {
         1
     };
-    let (attempts, attempt_latencies_ms) =
-        with_retries(max, || queue.flush_session(session_id), |r| r.stopped).await;
+    let (attempts, attempt_latencies_ms) = with_retries(
+        per_window,
+        || queue.flush_session(session_id),
+        |r| r.stopped,
+        || cursor_of(db, session_id),
+    )
+    .await;
     let latency_ms = t0.elapsed().as_millis() as u64;
     let (written, lagged) = drain_memory_changes(&mut rx);
     let mut record =
@@ -2912,8 +2948,9 @@ struct EpisodeRecord {
     /// asked questions, after each session's flush (the L8 fix slice's H9).
     label: &'static str,
     latency_ms: u64,
-    /// `flush_episodes` calls: 1, or up to `MAX_ATTEMPTS` when one stops
-    /// `BadOutput` (the L8 fix slice's H2); the counts below are summed.
+    /// `flush_episodes` calls: 1, or more while one stops `BadOutput` —
+    /// at most `MAX_ATTEMPTS` for each window (the L8 fix slice's H2 and
+    /// its repair round 2); the counts below are summed.
     attempts: usize,
     attempt_stops: Vec<Option<String>>,
     /// Each attempt's latency, in order; `latency_ms` is over them all.
@@ -2990,10 +3027,13 @@ impl EpisodeRecord {
 }
 
 /// `flush_episodes`, with the bus subscribed around it, and flushed again
-/// while it stops `BadOutput` ([`with_retries`]).
+/// while it stops `BadOutput`, until each window is read or skipped
+/// ([`with_retries`]; the queue counts a summary's unusable answers against
+/// the session's episode cursor).
 async fn episode_one(
     queue: &openalpaca_core::memory::learning::LearningQueue,
     bus: &openalpaca_core::bus::EventBus,
+    db: &openalpaca_storage::Database,
     session_id: &str,
     corpus_id: &str,
     label: &'static str,
@@ -3004,6 +3044,11 @@ async fn episode_one(
         openalpaca_core::memory::learning::MAX_ATTEMPTS as usize,
         || queue.flush_episodes(session_id),
         |r| r.stopped,
+        || {
+            openalpaca_storage::LearningCursorRepository::new(db)
+                .episode_through(session_id)
+                .ok()
+        },
     )
     .await;
     let latency_ms = t0.elapsed().as_millis() as u64;
@@ -3316,6 +3361,7 @@ impl Learner {
                         episode_one(
                             &self.queue,
                             &self.bus,
+                            &self.db,
                             &created.id,
                             &session.id,
                             FLUSH_SWITCH,
@@ -3439,7 +3485,8 @@ async fn replay_learning(
     for s in &transcript.sessions {
         flushes.push(flush_one(queue, bus, db, &s.session_id, &s.corpus_id, FLUSH_REPLAY).await);
         if summaries {
-            episodes.push(episode_one(queue, bus, &s.session_id, &s.corpus_id, FLUSH_REPLAY).await);
+            episodes
+                .push(episode_one(queue, bus, db, &s.session_id, &s.corpus_id, FLUSH_REPLAY).await);
         }
     }
     (flushes, episodes)
@@ -4332,17 +4379,22 @@ struct LearningCost {
     /// Windows skipped after `MAX_ATTEMPTS` unusable answers: their turns
     /// are never learned. `warnings` names each session.
     windows_skipped_unusable: usize,
+    /// Sessions whose last learning flush ended with a stop, a daily cap's
+    /// among them: a window each left unread when the run ended (repair
+    /// round 2 of the L8 fix slice). `warnings` names each with its stop.
+    windows_left_unread: usize,
     /// The conversation summaries' calls and tokens (L, and a replay asked
     /// questions).
     episode_calls: usize,
     episodes_written: usize,
     episode_tokens_in: u64,
     episode_tokens_out: u64,
-    /// The same four for the conversation summaries.
+    /// The same five for the conversation summaries.
     episode_flush_attempts: usize,
     episode_unusable_answers: usize,
     episode_unusable_answers_by_reason: BTreeMap<String, usize>,
     episode_windows_skipped_unusable: usize,
+    episode_windows_left_unread: usize,
     /// The two learning paths: `extraction` from the flushes' events,
     /// `model_tool` (the reader's own writes) from the fed turns'.
     memory_changes_by_surface: BTreeMap<String, usize>,
@@ -4389,13 +4441,56 @@ fn feed_turn_errors(turns: &[TurnRecord]) -> Vec<String> {
         .collect()
 }
 
+/// Each session whose last flush ended with a stop, and the stop, in feed
+/// order: its window — or the rest of it — was left unread when the run
+/// ended (repair round 2 of the L8 fix slice, the fidelity review's M2). A
+/// daemon would come back to it after its backoff, or after 00:00 UTC for a
+/// cap; a run ends first, and no later flush reads it. `flushes` is `(session,
+/// stopped)` for one kind — learning's or the summaries' — in order.
+fn left_unread<'a>(
+    flushes: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+) -> Vec<(&'a str, &'a str)> {
+    let mut last: Vec<(&str, Option<&str>)> = Vec::new();
+    for (session, stopped) in flushes {
+        match last.iter_mut().find(|(s, _)| *s == session) {
+            Some(entry) => entry.1 = stopped,
+            None => last.push((session, stopped)),
+        }
+    }
+    last.into_iter()
+        .filter_map(|(session, stopped)| Some((session, stopped?)))
+        .collect()
+}
+
+/// [`left_unread`] over a session's learning flushes — the forced re-run
+/// is a check, not the session's learning.
+fn learning_left_unread(flushes: &[FlushRecord]) -> Vec<(&str, &str)> {
+    left_unread(
+        flushes
+            .iter()
+            .filter(|f| [FLUSH_TURNS, FLUSH_SWITCH, FLUSH_REPLAY].contains(&f.label))
+            .map(|f| (f.session.as_str(), f.stopped.as_deref())),
+    )
+}
+
+/// [`left_unread`] over the conversation summaries' flushes.
+fn summaries_left_unread(episodes: &[EpisodeRecord]) -> Vec<(&str, &str)> {
+    left_unread(
+        episodes
+            .iter()
+            .map(|e| (e.session.as_str(), e.stopped.as_deref())),
+    )
+}
+
 /// The learning phase's loud warnings: the fed turns that ended in an error
 /// (the L8 fix slice's H8) — their transcript is not the reader's answer —
 /// the flushes a daily cap stopped, learning's and the conversation
 /// summaries' apart (H1) — a daemon would learn those windows after 00:00
-/// UTC; a run ends first — and the windows skipped after `MAX_ATTEMPTS`
+/// UTC; a run ends first — the windows skipped after `MAX_ATTEMPTS`
 /// unusable answers, whose turns are never learned or summarised (repair
-/// round 1).
+/// round 1), and the sessions whose last flush left a window unread for any
+/// other stop ([`left_unread`]; repair round 2 — a cap's session is named
+/// by the cap's line).
 fn learning_warnings(
     turns: &[TurnRecord],
     flushes: &[FlushRecord],
@@ -4475,6 +4570,28 @@ fn learning_warnings(
             sessions.join(", ")
         ));
     }
+    let unread = |left: Vec<(&str, &str)>| -> Vec<String> {
+        left.into_iter()
+            .filter(|(_, stop)| *stop != "Cap")
+            .map(|(session, stop)| format!("{session} ({stop})"))
+            .collect()
+    };
+    let sessions = unread(learning_left_unread(flushes));
+    if !sessions.is_empty() {
+        warnings.push(format!(
+            "{} session(s) ended with a learning window left unread, their last flush stopped: {}",
+            sessions.len(),
+            sessions.join(", ")
+        ));
+    }
+    let sessions = unread(summaries_left_unread(episodes));
+    if !sessions.is_empty() {
+        warnings.push(format!(
+            "{} session(s) ended with a conversation-summary window left unread, their last summary flush stopped: {}",
+            sessions.len(),
+            sessions.join(", ")
+        ));
+    }
     warnings
 }
 
@@ -4522,6 +4639,7 @@ fn learning_cost(
             flushes.iter().flat_map(|f| &f.unusable_answers),
         ),
         windows_skipped_unusable: flushes.iter().map(|f| f.skipped_unusable).sum(),
+        windows_left_unread: learning_left_unread(flushes).len(),
         episode_calls: episodes.iter().map(|e| e.calls).sum(),
         episodes_written: episodes.iter().map(|e| e.episodes).sum(),
         episode_tokens_in: episodes.iter().map(|e| e.input_tokens).sum(),
@@ -4532,6 +4650,7 @@ fn learning_cost(
             episodes.iter().flat_map(|e| &e.unusable_answers),
         ),
         episode_windows_skipped_unusable: episodes.iter().map(|e| e.skipped_unusable).sum(),
+        episode_windows_left_unread: summaries_left_unread(episodes).len(),
         memory_changes_by_surface: by_surface,
         reader_llm_calls: turns.iter().map(|t| t.reader_llm_calls).sum(),
         reader_tokens_in: turns.iter().map(|t| t.reader_tokens_in).sum(),
@@ -4578,8 +4697,9 @@ struct SuggestionCheck {
 struct LearningResults {
     /// What a reader of the numbers must know first: fed turns that ended
     /// in an error (the L8 fix slice's H8), flushes a daily cap stopped
-    /// (H1) and windows skipped after `MAX_ATTEMPTS` unusable answers (its
-    /// repair round 1). Printed at the head of the summary.
+    /// (H1), windows skipped after `MAX_ATTEMPTS` unusable answers (its
+    /// repair round 1) and windows a session's last flush left unread (its
+    /// repair round 2). Printed at the head of the summary.
     warnings: Vec<String>,
     turns: Vec<TurnRecord>,
     flushes: Vec<FlushRecord>,
@@ -6471,17 +6591,19 @@ fn print_learning(l: &LearningResults) {
             c.feed_turn_errors
         );
         println!(
-            "  unusable answers: {} of {} extraction calls over {} flush attempts {:?}, {} window(s) skipped; summaries: {} of {} calls over {} attempts {:?}, {} window(s) skipped",
+            "  unusable answers: {} of {} extraction calls over {} flush attempts {:?}, {} window(s) skipped, {} left unread; summaries: {} of {} calls over {} attempts {:?}, {} window(s) skipped, {} left unread",
             c.unusable_answers,
             c.extraction_calls,
             c.flush_attempts,
             c.unusable_answers_by_reason,
             c.windows_skipped_unusable,
+            c.windows_left_unread,
             c.episode_unusable_answers,
             c.episode_calls,
             c.episode_flush_attempts,
             c.episode_unusable_answers_by_reason,
             c.episode_windows_skipped_unusable,
+            c.episode_windows_left_unread,
         );
     }
     if let Some(r) = &l.forced_rerun {
@@ -7812,6 +7934,95 @@ fn unusable_answers_and_skipped_windows_are_counted_and_warned_about() {
     assert!(
         !warnings.iter().any(|w| w.contains("cs-007")),
         "a clean flush warns about nothing: {warnings:?}"
+    );
+}
+
+/// Repair round 2 of the L8 fix slice (the fidelity review's M2): a
+/// session's last learning flush, or its last summary flush, that ended
+/// with any stop left its window — or the rest of it — unread when the run
+/// ended: a daemon would come back to it after its backoff (or, for a cap,
+/// after 00:00 UTC), and a run ends first. The learning cost counts such
+/// sessions, a cap's among them, and `learning.warnings` names each with
+/// its stop — a cap's in the cap's own line, not twice. A window held at a
+/// `turns` flush and read by its session's `switch` is not one, and the
+/// forced re-run is not the session's learning.
+#[test]
+fn a_window_a_sessions_last_flush_left_unread_is_counted_and_warned_about() {
+    use openalpaca_core::memory::learning::{EpisodeReport, FlushReport, FlushStop};
+    let flush = |session: &str, label: &'static str, stopped: Option<FlushStop>| {
+        FlushRecord::new(
+            session,
+            label,
+            0,
+            &FlushReport {
+                calls: 1,
+                stopped,
+                ..Default::default()
+            },
+            Vec::new(),
+            0,
+        )
+    };
+    let summary = |session: &str, stopped: Option<FlushStop>| {
+        EpisodeRecord::new(
+            session,
+            FLUSH_SWITCH,
+            0,
+            &EpisodeReport {
+                calls: 1,
+                stopped,
+                ..Default::default()
+            },
+            Vec::new(),
+            0,
+        )
+    };
+    let flushes = [
+        flush("cs-001", FLUSH_TURNS, Some(FlushStop::BadOutput)),
+        flush("cs-001", FLUSH_SWITCH, None),
+        flush("cs-002", FLUSH_TURNS, None),
+        flush("cs-002", FLUSH_SWITCH, Some(FlushStop::BadOutput)),
+        flush("cs-003", FLUSH_REPLAY, Some(FlushStop::Unavailable)),
+        flush("cs-004", FLUSH_SWITCH, Some(FlushStop::Cap)),
+        flush("cs-005", FLUSH_SWITCH, None),
+        flush("cs-005", FLUSH_FORCED_RERUN, Some(FlushStop::BadOutput)),
+    ];
+    let episodes = [
+        summary("cs-001", None),
+        summary("cs-002", Some(FlushStop::StoreError)),
+    ];
+    let cost = serde_json::to_value(learning_cost(&[], &flushes, &episodes, 0)).unwrap();
+    assert_eq!(
+        (
+            &cost["windows_left_unread"],
+            &cost["episode_windows_left_unread"]
+        ),
+        (&serde_json::json!(3), &serde_json::json!(1)),
+        "{cost}"
+    );
+    let warnings = learning_warnings(&[], &flushes, &episodes);
+    let line = |what: &str| {
+        warnings
+            .iter()
+            .find(|w| w.contains(what) && w.contains("left unread"))
+            .unwrap_or_else(|| panic!("a {what} line: {warnings:?}"))
+    };
+    let learning = line("learning window");
+    for part in ["2 session", "cs-002 (BadOutput)", "cs-003 (Unavailable)"] {
+        assert!(learning.contains(part), "{part:?} in {learning:?}");
+    }
+    for session in ["cs-001", "cs-004", "cs-005"] {
+        assert!(!learning.contains(session), "{session} in {learning:?}");
+    }
+    let summaries = line("summary window");
+    assert!(
+        summaries.contains("1 session") && summaries.contains("cs-002 (StoreError)"),
+        "{summaries:?}"
+    );
+    assert_eq!(
+        warnings.iter().filter(|w| w.contains("cs-004")).count(),
+        1,
+        "a cap's session is named by the cap's line alone: {warnings:?}"
     );
 }
 
@@ -9252,6 +9463,93 @@ async fn a_turns_window_held_on_an_unusable_answer_is_read_grown_by_the_next_flu
     assert!(
         learned.iter().any(|n| n.cites_row(first_row)),
         "the held rows were read, the first turn learned: {learned:?}"
+    );
+}
+
+/// Repair round 2 of the L8 fix slice (the fidelity review's M2): a final
+/// flush is retried until the product has read or skipped every window,
+/// not for `MAX_ATTEMPTS` attempts in all. The queue counts unusable
+/// answers per cursor position, and on the third it skips that chunk and
+/// goes on to the next in the same call — so a switch over two chunks
+/// whose first is never usable spends its three attempts on the first and
+/// its third attempt's second call on the second, and a cap of three in all
+/// would leave the second chunk after one answer, never read (the session
+/// has no later flush), where a daemon retries it twice more. Here the
+/// second chunk answers usably on its second attempt and is learned.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_final_flush_is_retried_until_each_window_is_read_or_skipped() {
+    let omega_answers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = omega_answers.clone();
+    let (router, _stub) = stub_router(&[TEST_MODEL], move |request| {
+        let prompt = prompt_of(request);
+        if !prompt.contains("You are the memory extractor") {
+            return "Noted.".to_string();
+        }
+        let conversation = conversation_of(&prompt);
+        if conversation.contains("marker-alpha")
+            || seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            return UNUSABLE_ANSWER.to_string();
+        }
+        // The turn is too long for a title: one short item citing it.
+        let row = conversation.lines().find_map(|line| {
+            let (n, rest) = line.strip_prefix('R')?.split_once(' ')?;
+            rest.starts_with("user ").then(|| n.parse::<u32>().ok())?
+        });
+        serde_json::json!({"items": [{
+            "title": "The omega marker", "content": "The user named the omega marker.",
+            "kind": "fact", "stated_by": "user", "confidence": 0.9, "rows": [row],
+        }]})
+        .to_string()
+    });
+    let run = OfflineRun::new(router);
+    // Four turns of about 7 KB each: the first three fill one chunk's 24 KiB
+    // of transcript, the fourth is a second chunk.
+    let filler = "lorem ipsum ".repeat(580);
+    let turns: Vec<(String, TurnMode)> = (0..4)
+        .map(|i| match i {
+            0 => (format!("marker-alpha {filler}"), TurnMode::Explicit),
+            3 => (format!("marker-omega {filler}"), TurnMode::Explicit),
+            i => (format!("Noise turn {i}. {filler}"), TurnMode::Noise),
+        })
+        .collect();
+    let turns: Vec<(&str, TurnMode)> = turns.iter().map(|(t, m)| (t.as_str(), *m)).collect();
+    let session = fixture_session("cs-t61", &turns);
+    let fed = run.learner().feed(&[&session], true).await;
+    let [switch] = &fed.flushes[..] else {
+        panic!("one switch flush: {:?}", fed.flushes);
+    };
+    let json = serde_json::to_value(switch).unwrap();
+    assert_eq!(
+        json["attempt_stops"],
+        serde_json::json!(["BadOutput", "BadOutput", "BadOutput", null]),
+        "three on the first chunk (the third skips it and fails the second), one more reads the second: {switch:?}"
+    );
+    assert_eq!(
+        (
+            switch.attempts,
+            switch.calls,
+            switch.skipped_unusable,
+            switch.stored,
+            switch.stopped.as_deref()
+        ),
+        (4, 5, 1, 1, None),
+        "{switch:?}"
+    );
+    let rows = &fed.transcript[0].user_rows;
+    assert!(
+        switch.cursor_after >= rows.last().copied(),
+        "the cursor passed the last turn: {switch:?}"
+    );
+    let learned = dump_learned(&run.service, &run.ctx()).unwrap();
+    assert!(
+        learned.iter().any(|n| n.cites_row(rows[3])),
+        "the second chunk was read: {learned:?}"
+    );
+    let warnings = learning_warnings(&fed.turns, &fed.flushes, &fed.episodes);
+    assert!(
+        !warnings.iter().any(|w| w.contains("left unread")),
+        "{warnings:?}"
     );
 }
 
