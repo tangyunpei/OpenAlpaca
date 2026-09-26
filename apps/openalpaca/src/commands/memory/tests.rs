@@ -1200,10 +1200,11 @@ fn the_suggestions_json_writes_hidden_characters_as_json_escapes() {
 }
 
 /// `memory show` of a candidate is what a person reads before `memory
-/// confirm <id>`: its title, aliases, tags, fact key and text — the model's
-/// — show every hidden character as `<U+XXXX>` (a control character too, so
-/// nothing drives the terminal), and one line directly under the text
-/// counts them. On a terminal it starts with the reset.
+/// confirm <id>`: its title, aliases, tags, fact key, the notes it would
+/// replace and its text — the model's — show every hidden character as
+/// `<U+XXXX>` (a control character too, so nothing drives the terminal),
+/// and one line directly under the text counts them all. On a terminal it
+/// starts with the reset.
 #[test]
 fn show_escapes_a_candidates_hidden_characters_and_counts_them() {
     colored::control::set_override(false);
@@ -1211,8 +1212,9 @@ fn show_escapes_a_candidates_hidden_characters_and_counts_them() {
     note["effective_status"] = serde_json::json!("candidate");
     note["title"] = serde_json::json!("Com\u{202e}mute");
     note["frontmatter"]["aliases"] = serde_json::json!(["bi\u{200b}ke"]);
-    note["frontmatter"]["tags"] = serde_json::json!([]);
-    note["frontmatter"]["fact_key"] = serde_json::json!("commute.mode");
+    note["frontmatter"]["tags"] = serde_json::json!(["da\u{202e}ily", "tra\u{200b}vel"]);
+    note["frontmatter"]["fact_key"] = serde_json::json!("commute.\u{202e}mode");
+    note["frontmatter"]["supersedes"] = serde_json::json!([format!("{TARGET}\u{200b}")]);
     note["body"] = serde_json::json!(
         "# Commute\n\n## Knowledge\nThe user\u{2800} cycles \u{1b}[2J\tdaily.\r\n"
     );
@@ -1223,10 +1225,19 @@ fn show_escapes_a_candidates_hidden_characters_and_counts_them() {
     let (head, body) = text.split_once("\n\n").unwrap();
     assert!(head.starts_with("Com<U+202E>mute\n"), "{head}");
     assert!(head.contains("aliases bi<U+200B>ke"), "{head}");
+    assert!(
+        head.contains("tags da<U+202E>ily, tra<U+200B>vel"),
+        "{head}"
+    );
+    assert!(head.contains("fact_key commute.<U+202E>mode"), "{head}");
+    assert!(
+        head.contains(&format!("supersedes {TARGET}<U+200B>")),
+        "{head}"
+    );
     assert_eq!(
         body,
         "# Commute\n\n## Knowledge\nThe user<U+2800> cycles <U+001B>[2J\tdaily.<U+000D>\n\
-         Note: this request contains 5 hidden characters, shown as <U+…>.\n"
+         Note: this request contains 9 hidden characters, shown as <U+…>.\n"
     );
     assert_eq!(
         note_text(&note, true),
