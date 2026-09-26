@@ -752,7 +752,7 @@ async fn the_extractor_asks_for_no_reasoning() {
     assert_eq!(request.temperature, Some(0.0));
     assert_eq!(
         request.max_tokens,
-        Some(2800),
+        Some(MAX_OUTPUT_TOKENS as u32),
         "a large window's output budget"
     );
 }
@@ -1627,15 +1627,64 @@ async fn a_chunk_under_the_minimum_is_advanced_past_with_no_call() {
 
 // ── The budget (§1.6) ───────────────────────────────────────────────────
 
+/// The L8 fix slice's P3: the largest answer the prompt permits — the JSON
+/// around the items and every item it allows at the per-item output L8
+/// measured — fits the call's output ceiling, whatever the window and the
+/// `extract_max_items_per_call` cap; and a large window still gets the
+/// cap's default, twelve. The measurement: on the successful single-call
+/// flushes of L, L-episodes and the three replays, output tokens per item
+/// ran at a median of 205–232 and a p90 of 242–319 per run; the JSON
+/// around them fits a 300-token allowance (a line fitted over 229 flushes
+/// crosses zero items at 84 tokens).
+#[test]
+fn the_largest_answer_the_prompt_permits_fits_the_ceiling() {
+    const MEASURED_P90_TOKENS_PER_ITEM: usize = 319;
+    const MEASURED_ANSWER_OVERHEAD_TOKENS: usize = 84;
+    for window in [
+        None,
+        Some(4096),
+        Some(8192),
+        Some(16_384),
+        Some(32_768),
+        Some(128_000),
+    ] {
+        for cap in [1, 5, 12, 50] {
+            let b = Budget::for_window(window, cap, None);
+            assert!(
+                b.items >= 1 && b.items <= cap,
+                "{window:?}, cap {cap}: {b:?}"
+            );
+            let largest = MEASURED_ANSWER_OVERHEAD_TOKENS + b.items * MEASURED_P90_TOKENS_PER_ITEM;
+            assert!(
+                largest <= b.out_tokens as usize,
+                "{window:?}, cap {cap}: {} items at the measured p90 need {largest} tokens, over the ceiling of {}",
+                b.items,
+                b.out_tokens
+            );
+        }
+    }
+    let default_cap = DaemonConfig::default()
+        .orchestrator
+        .costs
+        .extract_max_items_per_call;
+    assert_eq!(
+        Budget::for_window(Some(128_000), default_cap, None).items,
+        default_cap,
+        "a large window keeps the default cap"
+    );
+}
+
 /// An 8,192-token local model gets 7,201 bytes of transcript, 3,086 bytes
-/// of known notes and 9 items; a 128K model gets 24 KiB, 8 KiB and 12.
+/// of known notes and 5 items (9 until the L8 fix slice's P3, which would
+/// not fit its 2,048 output tokens at the measured p90); a 128K model gets
+/// 24 KiB, 8 KiB and 12 items under a 4,140-token ceiling.
 #[test]
 fn budget_for_an_8k_window() {
     assert_eq!(
         Budget::for_window(Some(8192), 12, None),
         Budget {
             out_tokens: 2048,
-            items: 9,
+            items: 5,
             transcript_bytes: 7201,
             known_bytes: 3086,
         }
@@ -1648,7 +1697,7 @@ fn budget_for_an_8k_window() {
     assert_eq!(
         Budget::for_window(Some(128_000), 12, None),
         Budget {
-            out_tokens: 2800,
+            out_tokens: 4140,
             items: 12,
             transcript_bytes: 24 * 1024,
             known_bytes: 8 * 1024,
