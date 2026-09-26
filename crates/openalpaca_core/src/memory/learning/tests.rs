@@ -1645,10 +1645,10 @@ async fn a_chunk_under_the_minimum_is_advanced_past_with_no_call() {
 #[test]
 fn the_largest_answer_the_prompt_permits_fits_the_ceiling() {
     // The p90 output tokens of an answer of `n` items, for each size with
-    // at least four answers.
+    // at least four answers, over the same 230 flushes.
     const MEASURED_P90_BY_ITEMS: [(usize, usize); 7] = [
-        (1, 308),
-        (2, 526),
+        (1, 307),
+        (2, 528),
         (3, 732),
         (4, 937),
         (5, 1105),

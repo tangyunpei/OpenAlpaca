@@ -1412,9 +1412,13 @@ struct LearningConditions {
     /// A replay: the L run's kept scratch directory it learned from.
     replayed_from: Option<String>,
     /// A replay learns with no reader, so its store holds the learning
-    /// queue's notes alone: compare it with a live run's `extraction`
-    /// numbers (`*_by_surface`), never its pooled ones; only a live run
-    /// samples the whole system (the L8 fix slice's H4).
+    /// queue's notes alone: compare it with a live run's per-note
+    /// `extraction` shares only (`aliases_by_surface`,
+    /// `fact_keys_by_surface`) — a live run's coverage and noise by path
+    /// are the judge's single pick under the reader's pre-emption, not the
+    /// extraction path's own — and never with its pooled numbers; only a
+    /// live run samples the whole system (the L8 fix slice's H4, narrowed
+    /// by its repair round 1).
     replay_is_extraction_only: bool,
     /// L: where the scratch database, its project and the transcript map
     /// were kept, for `OPENALPACA_MEMORY_EVAL_LEARN_FROM`.
@@ -4503,7 +4507,7 @@ struct LearningCost {
     /// Over the attempts of the flushes that made a call: each attempt is
     /// one flush as a daemon runs it, a backoff apart, and one L8 flush
     /// (repair round 1 of the L8 fix slice) — a trigger's retries summed
-    /// would read up to `MAX_ATTEMPTS` times as long.
+    /// would read up to `MAX_ATTEMPTS` times as long for each chunk.
     flush_latency_p50_ms: u64,
     flush_latency_p95_ms: u64,
     flushes_by_trigger: BTreeMap<String, usize>,
@@ -8078,7 +8082,9 @@ fn a_feed_turn_error_is_counted_and_warned_about() {
 
 /// The L8 fix slice's H4: a replay learns with no reader, so its store is
 /// extraction-only, and its conditions say so — a replay is compared with a
-/// live run's `extraction` numbers, never its pooled ones; a live run is
+/// live run's per-note `extraction` shares only (aliases and keys by path;
+/// a live run's coverage and noise by path are the judge's single pick
+/// under the reader's pre-emption), never its pooled numbers; a live run is
 /// the one sample of the whole system.
 #[test]
 fn a_replays_conditions_say_it_is_extraction_only() {
@@ -9675,9 +9681,10 @@ fn first_row_item(prompt: &str) -> String {
 }
 
 /// The L8 fix slice's H2: in `Manual` mode a `switch` flush that stops
-/// `BadOutput` is flushed again, up to the product's `MAX_ATTEMPTS` flushes,
-/// as the production queue retries a held window (ruling LR20) — each
-/// attempt recorded (a `turns` flush is not: the next test). A window answered usably on the second attempt is learned; one
+/// `BadOutput` is flushed again — for a window of one chunk, up to the
+/// product's `MAX_ATTEMPTS` flushes — as the production queue retries a
+/// held window (ruling LR20), each attempt recorded (a `turns` flush is
+/// not: the next test). A window answered usably on the second attempt is learned; one
 /// never answered usably is what production's third unusable answer does to
 /// it: skipped. Nothing perturbs the prompt: the retry is the same request.
 #[tokio::test(flavor = "multi_thread")]
@@ -9969,7 +9976,7 @@ fn every_flush_but_turns_is_retried_at_once() {
 }
 
 /// H2 for a conversation summary: a summary flush that stops `BadOutput`
-/// is flushed again, up to `MAX_ATTEMPTS`, each attempt recorded.
+/// is flushed again, up to `MAX_ATTEMPTS` a window, each attempt recorded.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_summary_that_stops_bad_output_is_flushed_again() {
     let recorder_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
