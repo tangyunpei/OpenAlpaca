@@ -94,6 +94,13 @@ describe("ToolConfirmationBanner — hidden characters (§3.14)", () => {
     expect(section.lastElementChild?.textContent).toBe(
       "review<U+202E>_agent<U+3000> is blocked on this. Answer in the composer to continue.",
     );
+    // Set apart as escapes, not drawn as the text a typed `<U+202E>` would be.
+    expect(
+      Array.from(
+        section.lastElementChild?.querySelectorAll("[data-hidden-char]") ?? [],
+        (node) => node.textContent,
+      ),
+    ).toEqual(["<U+202E>", "<U+3000>"]);
     expect(
       screen.getByText(
         "Note: this request contains 2 hidden characters, shown as <U+…>.",
