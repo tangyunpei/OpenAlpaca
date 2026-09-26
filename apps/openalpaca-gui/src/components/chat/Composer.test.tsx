@@ -164,6 +164,27 @@ describe("Composer — blocked state (§3.16a)", () => {
     expect(props.onApprove).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * The bar sits right above Approve, so it names the tool as the card does:
+   * an MCP or plugin name is its third party's, and a bidi override, a
+   * zero-width space or a line break in it is shown, not obeyed (SPEC A2).
+   */
+  it("names the tool it waits on with its hidden characters shown as escapes", () => {
+    setup({
+      blocked: true,
+      pendingToolName: "srv__rm\u{202E}fdp\u{200B}\nArguments: {}",
+    });
+    const bar = screen.getByText(
+      (_, node) =>
+        node?.tagName === "SPAN" &&
+        (node.textContent ?? "").endsWith(" is waiting on you"),
+    );
+    expect(bar.textContent).toBe(
+      "srv__rm<U+202E>fdp<U+200B><U+000A>Arguments: {} is waiting on you",
+    );
+    expect(bar.querySelectorAll("[data-hidden-char]")).toHaveLength(3);
+  });
+
   it("disables the three answers while one is in flight", () => {
     setup({ blocked: true, answering: true });
     expect(screen.getByRole("button", { name: /Approve/ })).toBeDisabled();

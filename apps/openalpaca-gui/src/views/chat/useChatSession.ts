@@ -76,6 +76,7 @@ import {
   useQueueFollowup,
 } from "@/hooks/useFollowups";
 import { useTasks } from "@/hooks/useTasks";
+import { escapeHiddenLine } from "@/lib/hidden-chars";
 import { followupErrorMessage, type FollowupRecord } from "@/lib/api/followups";
 import { sessionErrorMessage } from "@/lib/api/sessions";
 import { steerErrorMessage, steerTask } from "@/lib/api/tasks";
@@ -1286,8 +1287,12 @@ export function useChatSession(): ChatSession {
     answer("approved", "entire_tool");
     // §4.4's own copy — the daemon now caches `EntireTool` for the rest of
     // the session, so this is no longer a polite lie.
+    // The name as the card showed it; a toast is a string, so the escapes
+    // are the plain-text `<U+XXXX>` form.
     if (toolName !== null) {
-      showToast(`${toolName} added to the allowlist — it won't ask again`);
+      showToast(
+        `${escapeHiddenLine(toolName).text} added to the allowlist — it won't ask again`,
+      );
     }
   }, [answer, firstConfirmation, showToast]);
 

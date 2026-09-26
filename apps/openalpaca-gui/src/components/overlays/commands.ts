@@ -18,6 +18,8 @@
  * and no matcher, so the two bindings cannot fight over the same key.
  */
 
+import { escapeHiddenLine } from "@/lib/hidden-chars";
+
 /** A key combination the palette can both draw and match. */
 export interface Shortcut {
   /** `event.key`, compared case-insensitively. */
@@ -123,7 +125,9 @@ export function buildCommands(input: CommandCatalogInput): Command[] {
     commands.push({
       id: "approve.pending",
       group: "Approve",
-      label: `Approve pending ${pending.toolName}`,
+      // The row approves, so it names the tool as the card does. A label is
+      // a string: the escapes are the plain-text `<U+XXXX>` form.
+      label: `Approve pending ${escapeHiddenLine(pending.toolName).text}`,
       // Enter is already the global approve binding (§4.5); drawing it here
       // documents the key without claiming a second owner for it.
       shortcutLabel: "↵",

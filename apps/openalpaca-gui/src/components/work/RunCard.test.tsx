@@ -161,6 +161,19 @@ describe("RunCard (§3.19)", () => {
     expect(screen.queryByText(/Waiting on you/)).toBeNull();
   });
 
+  /** The tool is a third party's name: shown as the approval card shows it. */
+  it("names the tool a blocked run waits on with its hidden characters shown as escapes", () => {
+    card(
+      { status: "running", note: null },
+      { blocked: true, blockedOn: "srv\u{202E}__x\u{200B}\u{3000}" },
+    );
+    const line = screen.getByText(/Waiting on you:/);
+    expect(line.textContent).toBe(
+      "Waiting on you: srv<U+202E>__x<U+200B><U+3000> — approve or deny it in the chat.",
+    );
+    expect(line.querySelectorAll("[data-hidden-char]")).toHaveLength(3);
+  });
+
   it("hides the parallel-work block on a run that is not running or paused", () => {
     card({ status: "queued" });
     expect(screen.queryByText("Parallel work")).not.toBeInTheDocument();

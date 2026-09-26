@@ -15,6 +15,7 @@
 
 import {
   Button,
+  EscapedText,
   Eyebrow,
   FileBadge,
   languageFromName,
@@ -23,6 +24,7 @@ import {
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import type { TaskTimeline } from "@/lib/api/tasks";
+import { escapeHiddenLine } from "@/lib/hidden-chars";
 
 import { ParallelWorkBlock } from "./ParallelWork";
 import { RunActionBar, TerminalRunRow } from "./RunActionBar";
@@ -152,9 +154,15 @@ export function RunCard({
                   className="mt-[5px] h-[6px] w-[6px] shrink-0 rounded-full bg-red"
                 />
                 <span>
-                  {blockedOn === null
-                    ? "Waiting on you — approve or deny it in the chat."
-                    : `Waiting on you: ${blockedOn} — approve or deny it in the chat.`}
+                  {blockedOn === null ? (
+                    "Waiting on you — approve or deny it in the chat."
+                  ) : (
+                    <>
+                      Waiting on you:{" "}
+                      <EscapedText escaped={escapeHiddenLine(blockedOn)} /> —
+                      approve or deny it in the chat.
+                    </>
+                  )}
                 </span>
               </p>
             )}

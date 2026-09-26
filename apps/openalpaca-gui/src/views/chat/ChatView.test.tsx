@@ -907,6 +907,112 @@ describe("ChatView — tool confirmation (§3.14, §3.16a)", () => {
 });
 
 /**
+ * Hidden characters on the approval flow (SPEC items 1–5). The tool name and
+ * the arguments are the model's, an MCP server's or a plugin's: every place
+ * this view shows them — the card, the composer's bar, the row the answer
+ * leaves, the allowlist toast — shows a bidi override or a zero-width space
+ * as `<U+XXXX>`, and what is answered is the request id and `{approved}`
+ * alone, exactly as for a card with nothing hidden.
+ */
+describe("ChatView — a confirmation with hidden characters", () => {
+  const TOOL = "srv__rm\u{202E}fdp\u{200B}";
+  const SHOWN = "srv__rm<U+202E>fdp<U+200B>";
+
+  /** The two characters this block plants, wherever they still are raw. */
+  function rawHidden(): string[] {
+    const text = document.body.textContent ?? "";
+    return ["\u{202E}", "\u{200B}"].filter((c) => text.includes(c));
+  }
+
+  async function blockOnSpoofedTool(): Promise<void> {
+    renderChat();
+    const source = await sendMessage("clean up the scratch directory");
+    await act(async () => {
+      source.emit("confirmation_requested", {
+        request_id: "req-7",
+        tool_name: TOOL,
+        tool_arguments: {
+          command: "rm -rf /srv/allow\u{200B}ed/\u{202E}fdp.exe",
+        },
+      });
+    });
+  }
+
+  it("shows them escaped on the card and the bar, and Approve answers the request id alone", async () => {
+    await blockOnSpoofedTool();
+
+    expect(
+      screen.getByText(
+        (_, node) =>
+          node?.tagName === "P" &&
+          node.textContent === `Confirmation required · ${SHOWN}`,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        (_, node) =>
+          node?.tagName === "PRE" &&
+          node.textContent === "rm -rf /srv/allow<U+200B>ed/<U+202E>fdp.exe",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Note: this request contains 4 hidden characters, shown as <U+…>.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        (_, node) =>
+          node?.tagName === "SPAN" &&
+          node.textContent === `${SHOWN} is waiting on you`,
+      ),
+    ).toBeInTheDocument();
+    expect(rawHidden()).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+    await waitFor(() => {
+      const posted = requests.find((request) =>
+        request.url.includes("/v1/chat/confirmations/"),
+      );
+      expect(posted?.url).toMatch(/\/v1\/chat\/confirmations\/req-7$/);
+      expect(posted?.method).toBe("POST");
+      expect(posted?.body).toEqual({ approved: true });
+    });
+
+    // The row the answer leaves names the tool the same way.
+    expect(
+      await screen.findByText(
+        (_, node) =>
+          node?.tagName === "SPAN" &&
+          node.textContent ===
+            `${SHOWN} approved · waiting for the tool to run…`,
+      ),
+    ).toBeInTheDocument();
+    expect(rawHidden()).toEqual([]);
+  });
+
+  it("toasts an Always allow with the tool's hidden characters escaped", async () => {
+    await blockOnSpoofedTool();
+    fireEvent.click(screen.getByRole("button", { name: "Always allow" }));
+
+    await waitFor(() => {
+      const posted = requests.find((request) =>
+        request.url.includes("/v1/chat/confirmations/req-7"),
+      );
+      expect(posted?.body).toEqual({
+        approved: true,
+        approval_scope: "entire_tool",
+      });
+    });
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        `${SHOWN} added to the allowlist — it won't ask again`,
+      ),
+    );
+  });
+});
+
+/**
  * G1 — a background run's confirmation, which is the only kind a workflow
  * raises.
  *

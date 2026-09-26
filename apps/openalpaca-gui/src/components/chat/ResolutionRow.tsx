@@ -11,7 +11,18 @@
  * the tool does not run, and the card that was on screen settles into this row
  * rather than staying up for ever. It is a resolution — it just is not an
  * answer.
+ *
+ * The note names the tool, and a tool's name is its third party's: the row
+ * shows it as the card did, a bidi override or a zero-width space in it as a
+ * styled `<U+XXXX>` (`lib/hidden-chars`), with no notice of its own — the
+ * card counted it. The note is escaped whole, on one line, when it is drawn:
+ * OpenAlpaca's own words in it carry nothing the escape touches, and the
+ * stored note keeps the name as the daemon sent it, which is what
+ * `noteToolRun` matches a `tool_executed` frame against.
  */
+
+import { EscapedText } from "@/components/ui";
+import { escapeHiddenLine } from "@/lib/hidden-chars";
 
 export type Resolution = "approved" | "denied" | "timed_out";
 
@@ -40,7 +51,9 @@ export function ResolutionRow({
       <span className="shrink-0 font-mono text-2xs-plus tracking-eyebrow text-tertiary uppercase">
         {resolutionLabel(resolution)}
       </span>
-      <span className="flex-1 text-base-plus text-secondary">{note}</span>
+      <span className="flex-1 text-base-plus text-secondary">
+        <EscapedText escaped={escapeHiddenLine(note)} />
+      </span>
       {time !== null && (
         <span className="shrink-0 font-mono text-xs text-faint">{time}</span>
       )}

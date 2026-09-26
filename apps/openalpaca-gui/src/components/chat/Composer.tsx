@@ -28,10 +28,11 @@
 
 import { useLayoutEffect, useRef } from "react";
 
-import { Button } from "@/components/ui";
+import { Button, EscapedText } from "@/components/ui";
 import { useStopIntent } from "@/hooks/useConnection";
 import { cn } from "@/lib/cn";
 import { dragCarriesFiles } from "@/lib/drag";
+import { escapeHiddenLine } from "@/lib/hidden-chars";
 import { formatFileSize, type ModelEntry } from "@/lib/api/types";
 import type { ComposerMode } from "@/stores/ui";
 
@@ -260,7 +261,9 @@ export function Composer(props: ComposerProps) {
               className="animate-pulse-oa-fast block h-[6px] w-[6px] shrink-0 rounded-full bg-red"
             />
             <span className="font-mono text-xs-plus tracking-label text-amber-ink">
-              {pendingToolName} is waiting on you
+              {/* Right above Approve: the name as the card shows it. */}
+              <EscapedText escaped={escapeHiddenLine(pendingToolName)} /> is
+              waiting on you
             </span>
           </div>
 

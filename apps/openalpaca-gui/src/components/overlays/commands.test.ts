@@ -67,6 +67,25 @@ describe("buildCommands (§3.33)", () => {
     expect(shortcutLabel(approve as never)).toBe("↵");
   });
 
+  /**
+   * The row approves, so it names the tool as the card does. A label is a
+   * string, so the escapes are the plain-text `<U+XXXX>` form.
+   */
+  it("names the pending tool with its hidden characters shown as escapes", () => {
+    const commands = buildCommands(
+      input({
+        pendingConfirmation: {
+          toolName: "srv__rm\u{202E}fdp\u{200B}\n",
+          approve: vi.fn(),
+        },
+      }),
+    );
+    const approve = commands.find((command) => command.group === "Approve");
+    expect(approve?.label).toBe(
+      "Approve pending srv__rm<U+202E>fdp<U+200B><U+000A>",
+    );
+  });
+
   it("labels modifiers the way the design writes them", () => {
     const commands = buildCommands(input());
     const density = commands.find((command) => command.id === "view.density");
