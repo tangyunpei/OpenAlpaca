@@ -139,4 +139,24 @@ describe("formatToolArguments (§3.14)", () => {
   it("passes a bare string through", () => {
     expect(formatToolArguments("ls -la")).toBe("ls -la");
   });
+
+  /**
+   * A value's own line break would reach the box as layout, where it looks
+   * exactly like a soft wrap: `echo … wait` then `rm -rf ~` on the next line
+   * reads as one long echo while the shell runs two commands. A string with
+   * any control character JSON escapes is shown as JSON — `\n`, `\t`, `\r`
+   * written out — as every other approval surface shows it.
+   */
+  it("shows a value holding a line break, a tab or another control character as JSON", () => {
+    const command = "echo please wait\nrm -rf ~";
+    expect(formatToolArguments({ command })).toBe(
+      '{\n  "command": "echo please wait\\nrm -rf ~"\n}',
+    );
+    expect(formatToolArguments({ path: "/srv/allowed\tfile" })).toBe(
+      '{\n  "path": "/srv/allowed\\tfile"\n}',
+    );
+    expect(formatToolArguments("done\r x\u{1B}[2J")).toBe(
+      '"done\\r x\\u001b[2J"',
+    );
+  });
 });

@@ -102,20 +102,44 @@ describe("ToolConfirmationBanner — hidden characters (§3.14)", () => {
   });
 
   it("shows a C1 control, a carriage return and a tag character by their code points", () => {
-    const { section, box } = card({
-      toolName: "shell_execute",
-      toolArguments: { command: "printf 'a\u{9B}31m' done\r x\u{E0041}" },
+    const { section, eyebrow, box } = card({
+      toolName: "shell\r_execute",
+      toolArguments: { command: "printf 'a\u{9B}31m' done x\u{E0041}" },
     });
 
     expect(raw(section.textContent ?? "")).toEqual([]);
-    expect(box?.textContent).toBe(
-      "printf 'a<U+009B>31m' done<U+000D> x<U+E0041>",
+    expect(eyebrow?.textContent).toBe(
+      "Confirmation required · shell<U+000D>_execute",
     );
+    expect(box?.textContent).toBe("printf 'a<U+009B>31m' done x<U+E0041>");
     expect(
       screen.getByText(
         "Note: this request contains 3 hidden characters, shown as <U+…>.",
       ),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * A command's own line break drawn as a line break looks exactly like the
+   * box's soft wrap: `rm -rf ~` would read as the tail of the echo before it
+   * while the shell runs it as a second command. Such a value is shown as
+   * JSON, `\n` written out, as every other approval surface shows it — and
+   * JSON's own escape is not counted as hidden, there as here.
+   */
+  it("writes a command's own line break, tab or carriage return out, as JSON does", () => {
+    const { box } = card({
+      toolName: "shell_execute",
+      toolArguments: {
+        command: "echo please wait\nrm -rf ~\tdone\r",
+      },
+    });
+
+    expect(box?.textContent?.split("\n")).toEqual([
+      "{",
+      '  "command": "echo please wait\\nrm -rf ~\\tdone\\r"',
+      "}",
+    ]);
+    expect(screen.queryByText(/hidden character/)).toBeNull();
   });
 
   it("keeps the pretty-printed arguments' own lines", () => {

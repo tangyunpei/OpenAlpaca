@@ -20,8 +20,11 @@
  * that side to every range, case, line case and notice in it.
  *
  * - **The arguments** take `escapeHidden`: `\n` and `\t` stay, because the
- *   pretty-printed JSON is laid out in them (and `JSON.stringify` has already
- *   escaped every newline inside a string).
+ *   pretty-printed JSON is laid out in them, and `JSON.stringify` has already
+ *   written out every control character inside a string — the card's
+ *   bare-string shortcut (`formatToolArguments`: a lone `command`, `path`,
+ *   `url`, …) steps aside for a value holding one, so a value's own line
+ *   break or tab never reaches the card as layout.
  * - **A one-line field** — the tool's name, the agent's name — takes
  *   `escapeHiddenLine`, which also shows a newline, a tab and every space
  *   but the plain one: a name has no layout of its own, and a line break or
