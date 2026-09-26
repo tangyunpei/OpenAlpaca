@@ -1472,6 +1472,88 @@ async fn the_preview_is_daemon_authored_and_bounded() {
     }
 }
 
+/// The bound's worst case, which the budgets are sized for (A19): the
+/// replaced note edited by hand — "your note (edited by hand)", the longest
+/// fixed wording — every field past its budget, and a two-digit count. The
+/// date, the last line and the count still fit within 1 KiB, and with
+/// nothing hidden the five lines do. A title, reason or text budget a few
+/// bytes longer lets the whole-preview cut take the date and the last line
+/// again, on exactly the cards where something was hidden.
+#[tokio::test]
+async fn the_preview_keeps_its_tail_at_its_worst_case() {
+    use sha2::Digest;
+    let h = Harness::new();
+    let tool = MemoryConfirmTool::new(h.service.clone());
+    let long = "word ".repeat(2000);
+    let reason = format!("the user said so {}", "r".repeat(200));
+    let row = typed_row(&h, "Replace it.", "2026-09-24 10:00:00");
+    for hidden in [10, 0] {
+        // The zero-width spaces sit past byte 80 of the title, which the
+        // preview cuts: counted, not quoted.
+        let target = h.user_note(
+            ALICE,
+            &format!(
+                "A very long title {}{}",
+                "x".repeat(150),
+                "\u{200b}".repeat(hidden)
+            ),
+            &format!("# Long\n\n## Knowledge\n{long}\n"),
+        );
+        let s = suggestion_saying(
+            &h,
+            (target.0, &target.1),
+            &format!("Another long title {}", "y".repeat(150)),
+            &long,
+            &reason,
+            &[row],
+            crate::memory::service::ExtractionProvenance::UserWords,
+        );
+        // Edit the replaced note by hand: its origin becomes `external`.
+        let file = file_for(&h.notes_dir(ALICE_KEY), &target.0.to_string()).unwrap();
+        let text = String::from_utf8(fs::read(&file).unwrap())
+            .unwrap()
+            .replacen("## Knowledge\nword", "## Knowledge\nWord", 1);
+        fs::write(&file, text.as_bytes()).unwrap();
+        let revision = format!("{:x}", sha2::Sha256::digest(text.as_bytes()));
+        let preview = tool
+            .confirmation_preview(
+                &serde_json::json!({"id": s.id.to_string(), "expected_revision": s.revision, "target_revision": revision}),
+                &h.tool_ctx(ALICE),
+            )
+            .await
+            .unwrap()
+            .expect("a preview");
+        assert!(
+            preview.len() <= crate::memory::service::PREVIEW_MAX_BYTES,
+            "{} bytes",
+            preview.len()
+        );
+        let lines: Vec<&str> = preview.lines().collect();
+        assert!(
+            lines[0].starts_with("Replace your note (edited by hand) “A very long title xxx"),
+            "{preview}"
+        );
+        assert!(
+            lines[3].ends_with("r… (from what you said on 2026-09-24)"),
+            "{preview}"
+        );
+        assert_eq!(
+            lines[4], "Your note is kept as history in the Memory view.",
+            "{preview}"
+        );
+        if hidden == 0 {
+            assert_eq!(lines.len(), 5, "{preview}");
+        } else {
+            assert_eq!(lines.len(), 6, "{preview}");
+            assert_eq!(
+                lines[5],
+                "This preview leaves out 10 hidden characters; the Memory view shows them as <U+…>.",
+                "{preview}"
+            );
+        }
+    }
+}
+
 /// Review finding 4 (L4): a note's title and body may hold control
 /// characters, and the CLI prints the preview raw at a terminal — an ESC
 /// sequence could rewrite the text the person approves. The preview and the
