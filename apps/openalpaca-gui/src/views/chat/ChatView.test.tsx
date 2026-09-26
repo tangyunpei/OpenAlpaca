@@ -1036,6 +1036,46 @@ describe("ChatView — a confirmation with hidden characters", () => {
     expect(paneHidden).toBe(2);
   });
 
+  /**
+   * The asking agent's name is the third field the card counts, and the count
+   * beside the name on the bar is the card's own: with a hidden character in
+   * the agent's name alone — the tool's name and the arguments clean — the bar
+   * and the palette's row say the same 1 the card's notice does.
+   */
+  it("counts a hidden character in the asking agent's name on the bar, as the card does", async () => {
+    renderChat();
+    expect(await screen.findByLabelText("Message")).toBeInTheDocument();
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_confirmation_requested",
+        request_id: "req-agent",
+        tool_name: "artifact_write",
+        tool_arguments: { name: "01-alpaca-facts.md" },
+        agent_id: "rev\u{202E}iew",
+        task_id: "run-1",
+        lane_key: null,
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        "Note: this request contains 1 hidden character, shown as <U+…>.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        (_, node) =>
+          node?.tagName === "SPAN" &&
+          node.textContent ===
+            "artifact_write is waiting on you · its card shows 1 hidden character",
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(useConfirmationStore.getState().pending?.hidden).toBe(1),
+    );
+    expect(rawHidden()).toEqual([]);
+  });
+
   it("toasts an Always allow with the tool's hidden characters escaped", async () => {
     // An ideographic space too, which only a one-line field escapes: the
     // toast names the tool on one line, as the card does.
@@ -1064,23 +1104,27 @@ describe("ChatView — a confirmation with hidden characters", () => {
  * them. The composer's Approve, Deny, Always allow, Enter and the palette's
  * row answer the oldest, while the view scrolls to the newest card, and two
  * calls of one tool read alike on the bar. The card they answer says so and
- * is outlined in red, the bar says which one it answers, and the answer goes
- * to that card's request.
+ * is outlined in red, the bar says which one it answers — and counts that
+ * card's hidden characters, not another's — and the answer goes to that
+ * card's request.
  */
 describe("ChatView — several confirmations pending at once", () => {
   it("marks the card the composer answers, says so on the bar, and answers it", async () => {
     renderChat();
     const source = await sendMessage("tidy both projects");
     await act(async () => {
+      // Each card holds its own number of hidden characters — one in the
+      // oldest, two in the newest — so the count beside the name can only
+      // be the answered card's.
       source.emit("confirmation_requested", {
         request_id: "req-old",
         tool_name: "shell_execute",
-        tool_arguments: { command: "rm -rf ~/proj" },
+        tool_arguments: { command: "rm -rf ~/pro\u{202E}j" },
       });
       source.emit("confirmation_requested", {
         request_id: "req-new",
         tool_name: "shell_execute",
-        tool_arguments: { command: "ls" },
+        tool_arguments: { command: "ls\u{200B}\u{200B}" },
       });
     });
 
@@ -1091,19 +1135,25 @@ describe("ChatView — several confirmations pending at once", () => {
       );
     const byCommand = (command: string) =>
       cards.find((node) => node.querySelector("pre")?.textContent === command);
-    expect(byCommand("rm -rf ~/proj")).toHaveAttribute("data-answered-next");
-    expect(byCommand("ls")).not.toHaveAttribute("data-answered-next");
+    expect(byCommand("rm -rf ~/pro<U+202E>j")).toHaveAttribute(
+      "data-answered-next",
+    );
+    expect(byCommand("ls<U+200B><U+200B>")).not.toHaveAttribute(
+      "data-answered-next",
+    );
     expect(
       screen.getByText(
         (_, node) =>
           node?.tagName === "SPAN" &&
           node.textContent ===
-            "shell_execute is waiting on you · oldest of 2 pending — its card is outlined in red",
+            "shell_execute is waiting on you · oldest of 2 pending — its card is outlined in red · its card shows 1 hidden character",
       ),
     ).toBeInTheDocument();
-    await waitFor(() =>
-      expect(useConfirmationStore.getState().pending?.count).toBe(2),
-    );
+    await waitFor(() => {
+      const pending = useConfirmationStore.getState().pending;
+      expect(pending?.count).toBe(2);
+      expect(pending?.hidden).toBe(1);
+    });
 
     fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
     await waitFor(() => {
