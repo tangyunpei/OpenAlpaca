@@ -9255,6 +9255,26 @@ async fn a_turns_window_held_on_an_unusable_answer_is_read_grown_by_the_next_flu
     );
 }
 
+/// Repair round 2 of the L8 fix slice (the tests review's F1): which
+/// flushes are flushed again at once. The `switch` and `turns` rows are
+/// driven end to end by the two tests above; the `replay` and forced re-run
+/// flushes share `flush_one`'s wiring and depend on this predicate alone —
+/// a forced re-run not retried would read "unchecked after 1 unusable
+/// answers", and a replay would no longer stand for a live `switch`.
+#[test]
+fn every_flush_but_turns_is_retried_at_once() {
+    let labels = [FLUSH_TURNS, FLUSH_SWITCH, FLUSH_REPLAY, FLUSH_FORCED_RERUN];
+    assert_eq!(
+        labels.map(|label| (label, retried_at_once(label))),
+        [
+            (FLUSH_TURNS, false),
+            (FLUSH_SWITCH, true),
+            (FLUSH_REPLAY, true),
+            (FLUSH_FORCED_RERUN, true),
+        ]
+    );
+}
+
 /// H2 for a conversation summary: a summary flush that stops `BadOutput`
 /// is flushed again, up to `MAX_ATTEMPTS`, each attempt recorded.
 #[tokio::test(flavor = "multi_thread")]
