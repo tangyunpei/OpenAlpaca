@@ -291,8 +291,9 @@ mod tests {
 
     /// The GUI's Suggestions card counts one suggestion with its own copy of
     /// [`suggestion_hidden`]; both are held to `hidden-chars.json`'s
-    /// `suggestion_cases`, whose fields tell the two escapes apart (a tab
-    /// counts in a title or the reason, not in a text).
+    /// `suggestion_cases`, whose fields tell the two escapes apart: each
+    /// title and the reason holds a tab or a line break, which counts there
+    /// and not in a text, so a field counted with the wrong escape fails.
     #[test]
     fn suggestion_hidden_is_the_gui_tables_suggestion_cases() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

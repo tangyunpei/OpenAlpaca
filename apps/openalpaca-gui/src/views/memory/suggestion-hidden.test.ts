@@ -7,7 +7,9 @@ import { suggestionHidden } from "./suggestion-hidden";
 /**
  * Parity with the Rust count (`suggestion_hidden`), which the chat preview
  * and `openalpaca memory suggestions` read: both are held to the shared
- * table's worked cases.
+ * table's worked cases. Each title and the reason there holds a tab or a line
+ * break, which the one-line escape counts and the texts' does not, so a field
+ * counted with the wrong escape fails.
  */
 describe("suggestionHidden — the shared table's suggestion cases", () => {
   it("counts every case as Rust counts it", () => {

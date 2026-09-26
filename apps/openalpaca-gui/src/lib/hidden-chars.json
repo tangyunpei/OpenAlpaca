@@ -920,12 +920,12 @@
   ],
   "suggestion_cases": [
     {
-      "target_title": "My\u202e commute",
-      "title": "Com\u2800mute",
+      "target_title": "My\u202e\tcommute",
+      "title": "Com\u2800mute\n",
       "reason": "The user said\tso.",
       "excerpt": "The user takes\u200b the bus.\nDaily\tat 8.",
       "knowledge": "Since March\ufe0f the user cycles.\n\tMostly.",
-      "hidden": 5
+      "hidden": 7
     },
     {
       "target_title": "Commute",
