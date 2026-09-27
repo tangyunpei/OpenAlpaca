@@ -203,6 +203,23 @@ fn a_replacement_named_from_a_project_chat_goes_to_the_saved_notes_partition() {
         .unwrap();
     assert!(out.suggestion);
     assert_eq!(out.scope, NoteScope::Global);
+
+    // Every other surface keeps ruling R4: a target in the other partition
+    // is `invalid_input`, and the caller names the scope.
+    let err = h
+        .service
+        .store(
+            &h.user(ALICE, Some(&ws)),
+            StoreInput {
+                title: "Laptop".into(),
+                body: "# Laptop\n\nA Framework 13.\n".into(),
+                kind: Some(NoteKind::Fact),
+                supersedes: Some((laptop.id, laptop.revision.clone())),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "invalid_input");
 }
 
 /// The lead's reading of LQ11: a store with no `supersedes` whose

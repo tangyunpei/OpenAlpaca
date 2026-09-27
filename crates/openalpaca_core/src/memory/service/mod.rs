@@ -1857,8 +1857,9 @@ impl MemoryService {
 
     /// `memory_store` (design §7a): a new note in the partition the scope
     /// rule picks, or the exact duplicate's id; with `supersedes`, the
-    /// successor of a note in the same partition (design §6) — with no
-    /// `scope`, in that note's partition (ruling LR10).
+    /// successor of a note in the same partition (design §6) — on the chat
+    /// model's surface with no `scope`, in that note's partition (ruling
+    /// LR10).
     ///
     /// Owner decision LQ11 (2026-09-26): on the chat model's surface a
     /// replacement of a note the user saved, edited by hand or imported is
@@ -1885,10 +1886,12 @@ impl MemoryService {
         if ctx.surface == Surface::ModelTool {
             self.route_tool_replacement(ctx, &resolved, &mut input)?;
         }
-        // Ruling LR10: a replacement that names no scope goes to the
-        // partition of the note it replaces.
-        let replaced_scope = match (&input.supersedes, input.scope) {
-            (Some((target, _)), None) => {
+        // Ruling LR10 on the chat model's surface, as learning applies it: a
+        // replacement that names no scope goes to the partition of the note
+        // it replaces. Every other surface keeps ruling R4 (03 §7c): a
+        // target in the other partition is `invalid_input`.
+        let replaced_scope = match (&input.supersedes, input.scope, ctx.surface) {
+            (Some((target, _)), None, Surface::ModelTool) => {
                 Self::find_note(&resolved, target)?.map(|(p, _)| scope_of(p))
             }
             _ => None,
