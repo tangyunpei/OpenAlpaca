@@ -2,11 +2,11 @@
   "row": {
     "id": "q1",
     "scenario": "slice-2 query fixture: \"what editor do I prefer?\" recalls \"User prefers vim for editing\"",
-    "required_outcome": "The natural question finds the note through the trigram companion (`prefer` inside `prefers`); under plain unicode61 it finds nothing (07 G23, reproduced on SQLite 3.51: 0 rows unicode61, 1 row trigram). Supports matrix rows 12 and 13 and plan 3.3's per-turn recall test."
+    "required_outcome": "The natural question finds the note by the words the question and the note share: `editor`, a whole token of the title, and `prefer` as the beginning of the title's `preference` and the body's `prefers` (the `unicode61` table's prefix query, 09 §6.5, LQ17). Step 1 carries `term` and `prefix`. Supports matrix rows 12 and 13 and plan 3.3's per-turn recall test; fixture 26 is the body-only variant."
   },
-  "design": ["§5 step 3: union of terms, never the whole message ANDed", "§5 step 4: every normalized term of three or more characters is ORed against both tables, a trigram-only hit weighted below a whole-token hit; no stemmer", "plan slice 2: the fixture passes only because `prefer` reaches the trigram table — it is the test of the routing rule"],
+  "design": ["§5 step 3: union of terms, never the whole message ANDed", "§5 step 4 (03 rev 7.8, 09 §6.5.2): the `unicode61` table takes every term, as a prefix query when its last token has three or more characters; a word-beginning hit has a trigram-only hit's coverage weight, below a whole-token hit, and is reported as `prefix`; no stemmer", "§7a MatchReason: `prefix` (09 §6.5.3)"],
   "loads_in": ["slice-2", "slice-3"],
-  "notes_for_implementer": "One note, one decoy. The question shares no whole token with the note except through the trigram table: `editor` matches `editing` only as a trigram, `prefer` matches `prefers` only as a trigram, `what`/`do`/`i` match nothing. The expected match reasons therefore include `trigram` and must not require `term`. `unicode61_only_would_return` documents the negative control from 07 G23 for the implementer; the loader does not run it. Step 3 is the same question with a stop-word-free phrasing; step 4 the whole-token form, which must carry `term`.",
+  "notes_for_implementer": "One note, one decoy. Before LQ17 this file said the note was found only through the trigram table and that plain `unicode61` returned nothing; that was the G23 reproduction under the whole-message AND the design removed. With the terms ORed, `editor` is a whole token of the title \"Editor preference\", so the word table alone finds the note, and `prefer*` finds the title's `preference` and the body's `prefers` as word beginnings: step 1 carries `term` and `prefix`. `what`/`do`/`i` are stop words and match nothing; `editor` does not match the body's `editing` (neither begins the other). `unicode61_only_would_return` records that the word table alone now returns the note; the loader does not run it. Step 3 is the same question with a stop-word-free phrasing (`preferred*` matches nothing; `editor` does); step 4 the whole-token form, which must carry `term`. Fixture 26 is the body-only test: there the title does not help.",
   "owners": [
     { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
   ],
@@ -45,7 +45,7 @@
   "contexts": {
     "alice_tool": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } }
   },
-  "unicode61_only_would_return": { "what editor do I prefer?": [] },
+  "unicode61_only_would_return": { "what editor do I prefer?": ["00000021-0000-4000-8000-000000000001"] },
   "operations": [
     {
       "step": 1,
@@ -56,7 +56,7 @@
         "ids": ["00000021-0000-4000-8000-000000000001"],
         "ids_absent": ["00000021-0000-4000-8000-000000000002"],
         "count": 1,
-        "results": { "00000021-0000-4000-8000-000000000001": { "match_includes": ["trigram"], "excerpt_contains": "User prefers vim for editing", "freshness": "verified" } },
+        "results": { "00000021-0000-4000-8000-000000000001": { "match_includes": ["term", "prefix"], "excerpt_contains": "User prefers vim for editing", "freshness": "verified" } },
         "partial": false
       }
     },

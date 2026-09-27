@@ -3,13 +3,25 @@
 //!
 //! One SQLite file at `state/cache/memory-index-v1.sqlite` holds, per note, a
 //! catalog row (identity, revision, relative path, the pre-computed filter
-//! fields), its chunks with line spans, and two FTS5 indexes over the chunks:
-//! a `unicode61` table for whole-token hits and a `trigram` companion for
-//! substring hits (`prefer` inside `prefers`, any CJK run of three or more
-//! characters). Every search ORs every normalized term of three or more
-//! characters against **both** tables; a trigram-only hit is weighted below a
-//! whole-token hit; one- and two-character queries go through a bounded
-//! substring pass that reports `partial` when its cap is hit; no stemmer.
+//! fields, the normalized title, aliases and tags), its chunks with line spans
+//! and their normalized text — the one copy of the text in the cache — and
+//! three contentless FTS5 indexes over the chunks (index schema 4, design 09
+//! §6.5, LQ17):
+//!
+//! - `fts_word`, `unicode61` over title, aliases, tags and body, the text
+//!   split at script boundaries ([`query::split_scripts`]): whole tokens, and
+//!   a word's beginning through a prefix query (`prefer` finds `prefers`);
+//! - `fts_tri_head`, `trigram` over title, aliases and tags: substrings of the
+//!   header;
+//! - `fts_tri`, `trigram` over the body of a chunk that carries a character of
+//!   a script `unicode61` cannot split ([`query::is_unsegmented`]: CJK, Thai,
+//!   Lao, Myanmar, Khmer): substrings of that text.
+//!
+//! [`query`] says which term goes where. A word-beginning or substring hit is
+//! weighted below a whole-token hit; one- and two-character queries go
+//! through a bounded substring pass that reports `partial` when its cap is
+//! hit; no stemmer. Nothing finds a term inside a word of a body written in a
+//! space-separated script; a title, an alias or a tag still does.
 //!
 //! **What this module is not.** It reads no note file, computes no revision,
 //! derives no supersession and holds no snapshot: those are `memory_files`.
@@ -50,7 +62,10 @@ pub const INDEX_FILE_NAME: &str = "memory-index-v1.sqlite";
 /// lookup reads a note's links and citations without parsing a partition.
 /// Version 3 (design 09 §13.1, MD-14) added the note's dates — `created_at`,
 /// `observed_at` and `date`, the one a search filters and orders by and a
-/// timeline walks.
+/// timeline walks. Version 4 (design 09 §6.5, LQ17) is the layout revision:
+/// `note.norm_aliases` and `norm_tags`, `chunk` holding only its normalized
+/// text, the header trigram table `fts_tri_head`, `fts_tri` only over
+/// unsegmented-script chunks, and all three FTS tables contentless.
 ///
 /// **It versions what a row holds, not only the tables.** Since scale slice
 /// S1 the service re-indexes a note only when its bytes, its file's stat or
@@ -59,10 +74,12 @@ pub const INDEX_FILE_NAME: &str = "memory-index-v1.sqlite";
 /// until their note changes. Any change to what a row holds for the same
 /// note bytes — the chunker, [`query::normalize`], `authority_rank`, the
 /// service's `record_for`, how `date` or `norm_title` is derived, the FTS
-/// tokenizers — must bump this too, or the old rows are served for good;
-/// the bump is what re-derives every row, by a rebuild off the request
-/// path.
-pub const SCHEMA_VERSION: i64 = 3;
+/// tokenizers, the script-boundary split ([`query::split_scripts`]) and the
+/// ranges of [`query::is_unsegmented`], which decide what `fts_word` and
+/// `fts_tri` hold — must bump this too, or the old rows are served for
+/// good; the bump is what re-derives every row, by a rebuild off the
+/// request path.
+pub const SCHEMA_VERSION: i64 = 4;
 /// Design §4: a note is at most 32 KiB. A larger body is refused by
 /// [`MemoryIndex::upsert`] so the cache stays bounded by what `memory_files`
 /// would have written.
@@ -403,6 +420,8 @@ CREATE TABLE IF NOT EXISTS note (
     norm_title       TEXT NOT NULL,
     aliases          TEXT NOT NULL,
     tags             TEXT NOT NULL,
+    norm_aliases     TEXT NOT NULL,
+    norm_tags        TEXT NOT NULL,
     kind             TEXT NOT NULL,
     status           TEXT NOT NULL,
     effective_status TEXT NOT NULL,
@@ -452,41 +471,41 @@ CREATE TABLE IF NOT EXISTS chunk (
     heading       TEXT,
     line_from     INTEGER NOT NULL,
     line_to       INTEGER NOT NULL,
-    excerpt       TEXT NOT NULL,
-    title         TEXT NOT NULL,
-    aliases       TEXT NOT NULL,
-    tags          TEXT NOT NULL,
     body          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chunk_note ON chunk(note_rowid, ordinal);
 CREATE INDEX IF NOT EXISTS chunk_partition ON chunk(partition_key, id);
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_word USING fts5(
     title, aliases, tags, body,
-    content='chunk', content_rowid='id',
+    content='', contentless_delete=1,
     tokenize='unicode61 remove_diacritics 2'
 );
-CREATE VIRTUAL TABLE IF NOT EXISTS fts_tri USING fts5(
-    title, aliases, tags, body,
-    content='chunk', content_rowid='id',
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_tri_head USING fts5(
+    title, aliases, tags,
+    content='', contentless_delete=1,
     tokenize='trigram'
 );
-CREATE TRIGGER IF NOT EXISTS chunk_ai AFTER INSERT ON chunk BEGIN
-    INSERT INTO fts_word(rowid, title, aliases, tags, body)
-        VALUES (new.id, new.title, new.aliases, new.tags, new.body);
-    INSERT INTO fts_tri(rowid, title, aliases, tags, body)
-        VALUES (new.id, new.title, new.aliases, new.tags, new.body);
-END;
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_tri USING fts5(
+    body,
+    content='', contentless_delete=1,
+    tokenize='trigram'
+);
 CREATE TRIGGER IF NOT EXISTS chunk_ad AFTER DELETE ON chunk BEGIN
-    INSERT INTO fts_word(fts_word, rowid, title, aliases, tags, body)
-        VALUES ('delete', old.id, old.title, old.aliases, old.tags, old.body);
-    INSERT INTO fts_tri(fts_tri, rowid, title, aliases, tags, body)
-        VALUES ('delete', old.id, old.title, old.aliases, old.tags, old.body);
+    DELETE FROM fts_word WHERE rowid = old.id;
+    DELETE FROM fts_tri_head WHERE rowid = old.id;
+    DELETE FROM fts_tri WHERE rowid = old.id;
 END;
 "#;
 
 /// BM25 column weights: title, aliases, tags, body. Pinned by
 /// `search::tests`; not claimed optimal (design §5 step 6).
 const RANK_WEIGHTS: &str = "bm25(4.0, 3.0, 1.5, 1.0)";
+/// The same weights for the header trigram table: title, aliases, tags.
+/// `fts_tri`, one column, ranks with the default `bm25()`.
+const HEAD_RANK_WEIGHTS: &str = "bm25(4.0, 3.0, 1.5)";
+/// The full-text tables, for the passes that treat them alike: `optimize`
+/// after a rebuild or a replace, and the maintenance `merge`.
+const FTS_TABLES: [&str; 3] = ["fts_word", "fts_tri_head", "fts_tri"];
 
 const META_SCHEMA: &str = "schema_version";
 const META_STATE: &str = "state";
@@ -510,6 +529,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "note_source",
     "chunk",
     "fts_word",
+    "fts_tri_head",
     "fts_tri",
 ];
 
@@ -749,10 +769,7 @@ impl MemoryIndex {
         let tx = conn.transaction()?;
         // A bulk load leaves each FTS index as several segments; one merged
         // segment per index makes every later term lookup one doclist read.
-        tx.execute_batch(
-            "INSERT INTO fts_word(fts_word) VALUES ('optimize');
-             INSERT INTO fts_tri(fts_tri) VALUES ('optimize');",
-        )?;
+        optimize_fts(&tx)?;
         write_state(&tx, IndexState::Ready)?;
         // The size the cache is judged against until the next rebuild
         // (scale slice S5): the database's pages, the WAL's included.
@@ -788,7 +805,7 @@ impl MemoryIndex {
             let mut worked = false;
             {
                 let conn = self.lock();
-                for table in ["fts_word", "fts_tri"] {
+                for table in FTS_TABLES {
                     let before = conn.total_changes();
                     conn.execute(
                         &format!(
@@ -852,11 +869,8 @@ impl MemoryIndex {
             report.notes += 1;
         }
         tx.commit()?;
-        conn.execute_batch(
-            "INSERT INTO fts_word(fts_word) VALUES ('optimize');
-             INSERT INTO fts_tri(fts_tri) VALUES ('optimize');
-             PRAGMA wal_checkpoint(TRUNCATE);",
-        )?;
+        optimize_fts(&conn)?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(report)
     }
 
@@ -1425,6 +1439,10 @@ fn upsert_in(tx: &rusqlite::Transaction<'_>, record: &IndexRecord) -> Result<usi
         .map(|t| query::normalize_exact(t))
         .filter(|t| !t.is_empty())
         .collect();
+    // The header's text for the ranker and the short-term pass, once per
+    // note, one alias or tag per line (design 09 §6.5.1).
+    let header_aliases = norm_aliases.join("\n");
+    let header_tags = norm_tags.join("\n");
     let aliases_json = serde_json::to_string(&record.aliases).unwrap_or_else(|_| "[]".into());
     let tags_json = serde_json::to_string(&record.tags).unwrap_or_else(|_| "[]".into());
     let superseded_json =
@@ -1437,10 +1455,11 @@ fn upsert_in(tx: &rusqlite::Transaction<'_>, record: &IndexRecord) -> Result<usi
             aliases, tags, kind, status, effective_status, origin, authority,
             fact_key, valid_from, valid_to, updated_at, pinned, source_forgotten,
             conflict, same_key_loser, superseded_by, supersedes, body_line_offset,
-            mtime_ns, size, inode, created_at, observed_at, date
+            mtime_ns, size, inode, created_at, observed_at, date, norm_aliases, norm_tags
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-            ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31
+            ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31,
+            ?32, ?33
         )",
         params![
             record.partition_key,
@@ -1474,6 +1493,8 @@ fn upsert_in(tx: &rusqlite::Transaction<'_>, record: &IndexRecord) -> Result<usi
             created_at,
             observed_at,
             date,
+            header_aliases,
+            header_tags,
         ],
     )?;
     let note_rowid = tx.last_insert_rowid();
@@ -1507,14 +1528,27 @@ fn upsert_in(tx: &rusqlite::Transaction<'_>, record: &IndexRecord) -> Result<usi
             text: String::new(),
         });
     }
-    let fts_aliases = norm_aliases.join("\n");
-    let fts_tags = norm_tags.join("\n");
+    // The FTS tables are contentless: the upsert writes each chunk's rows
+    // itself, keyed by the chunk's id, and the `chunk_ad` trigger removes
+    // them however the chunk row goes (design 09 §6.5.1). The word table
+    // reads the text split at script boundaries; the header trigram table
+    // the header as it is; the body trigram table only a chunk that carries
+    // an unsegmented character.
+    let word_title = query::split_scripts(&norm_title);
+    let word_aliases = query::split_scripts(&header_aliases);
+    let word_tags = query::split_scripts(&header_tags);
     let mut chunk_stmt = tx.prepare_cached(
         "INSERT INTO chunk (
-            note_rowid, partition_key, ordinal, heading, line_from, line_to,
-            excerpt, title, aliases, tags, body
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            note_rowid, partition_key, ordinal, heading, line_from, line_to, body
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
+    let mut word_stmt = tx.prepare_cached(
+        "INSERT INTO fts_word (rowid, title, aliases, tags, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    let mut head_stmt = tx.prepare_cached(
+        "INSERT INTO fts_tri_head (rowid, title, aliases, tags) VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    let mut body_stmt = tx.prepare_cached("INSERT INTO fts_tri (rowid, body) VALUES (?1, ?2)")?;
     let offset = record.body_line_offset;
     for chunk in &chunks {
         let (line_from, line_to) = if chunk.line_from == 0 {
@@ -1522,6 +1556,7 @@ fn upsert_in(tx: &rusqlite::Transaction<'_>, record: &IndexRecord) -> Result<usi
         } else {
             (chunk.line_from + offset, chunk.line_to + offset)
         };
+        let body = query::normalize(&chunk.text);
         chunk_stmt.execute(params![
             note_rowid,
             record.partition_key,
@@ -1529,14 +1564,31 @@ fn upsert_in(tx: &rusqlite::Transaction<'_>, record: &IndexRecord) -> Result<usi
             chunk.heading,
             line_from as i64,
             line_to as i64,
-            chunk.text,
-            norm_title,
-            fts_aliases,
-            fts_tags,
-            query::normalize(&chunk.text),
+            body,
         ])?;
+        let chunk_id = tx.last_insert_rowid();
+        word_stmt.execute(params![
+            chunk_id,
+            word_title,
+            word_aliases,
+            word_tags,
+            query::split_scripts(&body),
+        ])?;
+        head_stmt.execute(params![chunk_id, norm_title, header_aliases, header_tags])?;
+        if body.chars().any(query::is_unsegmented) {
+            body_stmt.execute(params![chunk_id, body])?;
+        }
     }
     Ok(chunks.len())
+}
+
+/// `optimize` on every FTS table: one merged segment each, and a
+/// contentless-delete table's tombstones folded in.
+fn optimize_fts(conn: &Connection) -> rusqlite::Result<()> {
+    for table in FTS_TABLES {
+        conn.execute(&format!("INSERT INTO {table}({table}) VALUES ('optimize')"), [])?;
+    }
+    Ok(())
 }
 
 /// Deletes one note's chunks (the delete trigger removes their FTS rows),
@@ -1646,8 +1698,8 @@ fn create_schema(conn: &Connection) -> rusqlite::Result<()> {
         params![RANK_WEIGHTS],
     )?;
     conn.execute(
-        "INSERT INTO fts_tri(fts_tri, rank) VALUES ('rank', ?1)",
-        params![RANK_WEIGHTS],
+        "INSERT INTO fts_tri_head(fts_tri_head, rank) VALUES ('rank', ?1)",
+        params![HEAD_RANK_WEIGHTS],
     )?;
     Ok(())
 }

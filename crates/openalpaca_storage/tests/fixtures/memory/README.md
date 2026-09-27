@@ -17,7 +17,8 @@ landed these files lists each such point.
 
 One JSON file per matrix row, numbered by the row's position in the table, plus
 four query fixtures the plan names for slice 2 (`04-implementation-plan.md`,
-*Slice 2*, "the query fixtures").
+*Slice 2*, "the query fixtures"), and a fifth that the index layout revision
+added (design 09 §6.5.6, LQ17).
 
 | File | Matrix row (plan §5) | Loads in |
 |---|---|---|
@@ -46,6 +47,7 @@ four query fixtures the plan names for slice 2 (`04-implementation-plan.md`,
 | `23-query-cjk-lengths.json` | slice-2 query fixture: CJK queries of 1, 2 and 3+ characters | slice 2 |
 | `24-forgotten-replacement-not-revived.json` | slice-2 query fixture: a forgotten or archived replacement does not revive its predecessor | slice 2 |
 | `25-suggestion-lifecycle.json` | Learning v2 L3 (design 09 §3): a suggestion retires nothing until a confirm bound to its target's revision; an automatic replacement's withdrawal brings the old note back; a suggestion is never archived or edited by a tool call | slice 2 (the file-level loader) |
+| `26-query-prefix-in-body.json` | LQ17 query fixture (design 09 §6.5.6): "what do I prefer?" finds "User prefers kitty" through its body alone (`prefix`); a term inside a body word (`presso`, `now` in a Chinese note's heading) finds nothing; a Latin word glued to Chinese is a `term`; a literal's last token is a prefix only from three characters | slice 2 |
 
 Rows 05 and 06 are about the database opener, not the memory library; their files
 state the expectation so the matrix is complete, and the loader that runs them is
@@ -76,7 +78,7 @@ library.
 
 | Key | Required | Meaning |
 |---|---|---|
-| `row` | yes | `{ "id": <1..20 or "q1".."q4">, "scenario": <matrix text>, "required_outcome": <matrix text> }` |
+| `row` | yes | `{ "id": <1..20 or "q1".."q5">, "scenario": <matrix text>, "required_outcome": <matrix text> }` |
 | `design` | yes | the design sections the expectations are read from |
 | `loads_in` | yes | `["slice-2"]`, `["slice-3"]` or both — which slice's test suite loads the file; `"slice-0"` marks the already-landed 0.5 refusal (file 06), whose test exists today |
 | `notes_for_implementer` | no | prose: readings the file had to pin, and why |

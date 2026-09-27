@@ -483,13 +483,9 @@ async fn store_search_read_update_forget_round_trip() {
     assert_eq!(hit["sources_status"], "intact");
     assert!(hit["excerpt"].as_str().unwrap().contains("vim"));
     assert!(hit["path"].as_str().unwrap().starts_with("notes/"));
-    assert!(
-        hit["match"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m == "term" || m == "trigram")
-    );
+    // `editor` is a whole word of the title; `prefer` begins the title's
+    // `Preferred` and the body's `prefers` (design 09 §6.5.3).
+    assert_eq!(hit["match"], serde_json::json!(["term", "prefix"]));
     let alias = h
         .call(
             &*search,

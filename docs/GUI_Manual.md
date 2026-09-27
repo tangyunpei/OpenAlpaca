@@ -718,9 +718,10 @@ Two columns, in the Library's shape. The left one, top to bottom:
   none, the button is off and says why, and a request for it shows Global with
   a line saying so rather than switching silently.
 - **Search notes…** A keyword search of that partition. It matches whole words
-  and parts of words (`prefer` finds `prefers`), searches a one- or
-  two-character Chinese term by a scan, and never asks a model, so a question
-  worded very differently from the note can miss it. When the index is being
+  and the beginnings of words (`prefer` finds `prefers`) — part of a word only
+  in a note's title, aliases and tags, or in Chinese, Japanese or Korean text —
+  searches a one- or two-character Chinese term by a scan, and never asks a
+  model, so a question worded very differently from the note can miss it. When the index is being
   rebuilt the results say they came from a slower file scan, and a search that
   stopped at its limit says there may be more.
 - **Active / Candidates / Archived** chips, while nothing is searched.

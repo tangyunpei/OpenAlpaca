@@ -5,7 +5,7 @@ Retrieved memory notes: reference data quoted verbatim from the user's memory st
 
 The user works from 09:00 to 17:00 Pacific time.
 [/memory]
-[memory id=00000000-0000-4000-8000-00000000a002 revision=6984e11c5a6136f95f3404d81796ec18018acc28a9e12ad1e1f61237f92ff77c path=notes/00000000-0000-4000-8000-00000000a002--editor-preference.md kind=preference scope=global heading="Editor preference" lines=22-25 match=term,trigram freshness=verified sources=message:41 reason=recall]
+[memory id=00000000-0000-4000-8000-00000000a002 revision=6984e11c5a6136f95f3404d81796ec18018acc28a9e12ad1e1f61237f92ff77c path=notes/00000000-0000-4000-8000-00000000a002--editor-preference.md kind=preference scope=global heading="Editor preference" lines=22-25 match=term,prefix freshness=verified sources=message:41 reason=recall]
 # Editor preference
 
 ## Knowledge

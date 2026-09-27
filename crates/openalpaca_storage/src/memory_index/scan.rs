@@ -9,14 +9,20 @@
 //! the index's own filters (design §5 step 5) and its own ranking (§5 step
 //! 6, [`super::search`]'s `rank`) to them, in memory: no SQL, no FTS, so
 //! it waits on nothing the rebuild holds. A term is matched in the note's
-//! normalized title, aliases, tags and body chunks — as a whole token
-//! (`term`), else as a substring (`trigram`: what the trigram table finds,
-//! `prefer` inside `prefers`), a literal as a phrase, a one- or
-//! two-character term by the substring rule — and the whole query is
-//! compared with the title, the aliases and the `fact_key`. What it cannot
-//! have is BM25 (no index statistics), so it orders hits by the same term
-//! and authority weights with no relevance tie-break but recency; and every
-//! answer says `rebuilding`, and `partial` when the caller left notes out.
+//! normalized title, aliases, tags and body chunks with the index's own
+//! evidence (design 09 §6.5.3), through the same `ChunkText`: as a whole
+//! token of the text split at script boundaries (`term`), else as a token's
+//! beginning (`prefix`: `prefer` in `prefers`), else as a substring where
+//! the trigram tables find one (`trigram`: in a title, an alias or a tag,
+//! or a term carrying an unsegmented character in unsegmented text); a
+//! literal as a phrase; a one- or two-character term by the substring rule
+//! — and the whole query is compared with the title, the aliases and the
+//! `fact_key`. So an answer given during a rebuild finds what the index
+//! finds. The scan reads every note, so it has no cap and needs no
+//! whole-word query. What it cannot have is BM25 (no index statistics), so
+//! it orders hits by the same term and authority weights with no relevance
+//! tie-break but recency; and every answer says `rebuilding`, and `partial`
+//! when the caller left notes out.
 
 use std::collections::HashMap;
 
@@ -105,7 +111,6 @@ impl MemoryIndex {
                     line_from,
                     line_to,
                     body: query::normalize(&chunk.text),
-                    excerpt: chunk.text,
                     title: norm_title.clone(),
                     aliases: norm_aliases.join("\n"),
                     tags: norm_tags.join("\n"),
@@ -137,7 +142,7 @@ impl MemoryIndex {
             let text = ChunkText::new(chunk);
             let matched = words
                 .iter()
-                .any(|w| text.has_token(w) || (w.chars().count() >= 3 && text.contains(w)))
+                .any(|w| text.has_token(w) || text.has_prefix(w) || text.contains_indexed(w))
                 || parsed.literals.iter().any(|l| text.has_phrase(&l.text))
                 || parsed.shorts.iter().any(|s| text.contains(s));
             if matched {
@@ -145,8 +150,7 @@ impl MemoryIndex {
                     chunk.id,
                     ChunkEvidence {
                         note_rowid: chunk.note_rowid,
-                        word_rank: None,
-                        tri_rank: None,
+                        ..ChunkEvidence::default()
                     },
                 );
             }

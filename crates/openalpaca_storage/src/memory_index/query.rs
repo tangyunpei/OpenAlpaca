@@ -1,31 +1,56 @@
-//! Query normalization and the literal query builder (design §5 steps 3–4).
+//! Query normalization and the literal query builder (design §5 steps 3–4;
+//! the routing is design 09 §6.5.2, LQ17, index schema 4).
 //!
 //! A query is normalized — NFKC, lowercase, Latin diacritics stripped — and
 //! split into terms. Each term is one of:
 //!
-//! - a **word**: a run of alphanumeric characters, three or more of them —
-//!   routed to both FTS tables;
+//! - a **word**: a run of alphanumeric characters, three or more of them;
 //! - a **literal**: a token with punctuation inside it, an identifier or a
 //!   path (`OPENALPACA_HOME_STORE`, `crate::module`, `p50/p95`) — kept whole
-//!   as a phrase on both tables; its alphanumeric parts of three or more
-//!   characters are the **fallback** the search routes as words only when
-//!   the literal itself matches no eligible note (`title:tabs` finds a note
-//!   about tabs; `OPENALPACA_HOME_STORE` does not drag in every note that
-//!   says `openalpaca`);
+//!   as a phrase; its alphanumeric parts of three or more characters are the
+//!   **fallback** the search routes as words only when the literal itself
+//!   matches no eligible note (`title:tabs` finds a note about tabs;
+//!   `OPENALPACA_HOME_STORE` does not drag in every note that says
+//!   `openalpaca`);
 //! - a **short** term: one or two characters — routed to the bounded
 //!   substring pass when it is CJK, or when the query has no other term.
 //!
+//! Words and literals go to the three FTS tables as follows:
+//!
+//! - **`fts_word`** (`unicode61`) takes every one, as a phrase split at
+//!   script boundaries ([`split_scripts`]) — and as a **prefix query**
+//!   (`"prefer"*`) when its last token has three or more characters, unless
+//!   the term carries an unsegmented character ([`is_unsegmented`]) or that
+//!   token is a stop word ([`is_prefix_term`]). So `prefer` finds `prefers`
+//!   and `preference`, `memory_file` finds `memory_files`, and `partner's`,
+//!   `用户喜欢` and `and` match exactly. When that query fills its candidate
+//!   cap, the terms it sent as prefixes are searched again as whole words in
+//!   titles, aliases and tags ([`ParsedQuery::word_match_head_exact`]).
+//! - **`fts_tri_head`** (`trigram` over titles, aliases and tags) takes every
+//!   one of three or more characters, as a substring.
+//! - **`fts_tri`** (`trigram` over the bodies of chunks carrying an
+//!   unsegmented character) takes only those of three or more characters
+//!   that carry such a character.
+//!
+//! So nothing finds a term **inside** a word of a body written in a
+//! space-separated script (`presso` in `espresso`); a title, an alias or a
+//! tag still does, and a Chinese, Japanese, Korean, Thai, Lao, Myanmar or
+//! Khmer body keeps substring search.
+//!
 //! The MATCH strings are built from these terms only: every term is a
-//! double-quoted FTS5 string with embedded quotes doubled, joined by `OR`, so
-//! `AND`, `NOT`, `NEAR`, `column:`, `*`, parentheses and an unbalanced quote
-//! are text, never syntax — the F4 class of defect.
+//! double-quoted FTS5 string with embedded quotes doubled, joined by `OR` —
+//! the only syntax added is the index's own `*` after a closing quote and
+//! the whole-word query's column filter — so `AND`, `NOT`, `NEAR`,
+//! `column:`, a caller's `*`, parentheses and an unbalanced quote are text,
+//! never syntax: the F4 class of defect.
 //!
 //! English function words are dropped from routing when any other term
 //! remains, so "the" does not recall every English note on the automatic path;
 //! a query made only of them (`and`) still searches them literally. No
-//! stemmer: `prefer` finds `prefers` through the trigram table, not through a
-//! rule that changes what an identifier or a CJK run means.
+//! stemmer: a prefix query changes no token and no identifier — an exact word
+//! is its own prefix.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use unicode_normalization::UnicodeNormalization;
@@ -82,38 +107,71 @@ impl ParsedQuery {
         out
     }
 
-    /// The `unicode61` table's MATCH string over `words` and the literals:
-    /// every term a quoted phrase, ORed. `None` when there is nothing to
-    /// route.
-    pub(crate) fn word_match(&self, words: &[String]) -> Option<String> {
-        let parts: Vec<String> = words
+    /// `words` then the literals' texts: every term a search routes.
+    fn routed<'a>(&'a self, words: &'a [String]) -> impl Iterator<Item = &'a str> {
+        words
             .iter()
             .map(String::as_str)
             .chain(self.literals.iter().map(|l| l.text.as_str()))
-            .map(quote)
-            .collect();
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join(" OR "))
-        }
     }
 
-    /// The trigram table's MATCH string: the same terms, restricted to those
-    /// of three or more characters (a shorter phrase matches nothing there).
-    pub(crate) fn trigram_match(&self, words: &[String]) -> Option<String> {
-        let parts: Vec<String> = words
-            .iter()
-            .map(String::as_str)
-            .chain(self.literals.iter().map(|l| l.text.as_str()))
-            .filter(|t| t.chars().count() >= 3)
-            .map(quote)
-            .collect();
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join(" OR "))
-        }
+    /// The `unicode61` table's MATCH string over `words` and the literals:
+    /// every term a quoted phrase split at script boundaries, a prefix when
+    /// [`is_prefix_term`] says so, ORed. `None` when there is nothing to
+    /// route.
+    pub(crate) fn word_match(&self, words: &[String]) -> Option<String> {
+        or_join(self.routed(words).map(|t| {
+            let phrase = quote(&split_scripts(t));
+            if is_prefix_term(t) {
+                format!("{phrase}*")
+            } else {
+                phrase
+            }
+        }))
+    }
+
+    /// The whole-word query the search runs when [`Self::word_match`] fills
+    /// its candidate cap (design 09 §6.5.2): the terms that went out as
+    /// prefixes, as whole words, in titles, aliases and tags only. `None`
+    /// when no term was a prefix — the first query was already this one.
+    pub(crate) fn word_match_head_exact(&self, words: &[String]) -> Option<String> {
+        or_join(
+            self.routed(words)
+                .filter(|t| is_prefix_term(t))
+                .map(|t| quote(&split_scripts(t))),
+        )
+        .map(|m| format!("{{title aliases tags}} : ({m})"))
+    }
+
+    /// The header trigram table's MATCH string: every term of three or more
+    /// characters (a shorter phrase matches nothing there), as it is.
+    pub(crate) fn head_trigram_match(&self, words: &[String]) -> Option<String> {
+        or_join(
+            self.routed(words)
+                .filter(|t| t.chars().count() >= 3)
+                .map(quote),
+        )
+    }
+
+    /// The body trigram table's MATCH string: only the terms of three or
+    /// more characters that carry an unsegmented character. A Latin term is
+    /// matched in a body only as a word or a word's beginning, on the word
+    /// table (design 09 §6.5.2).
+    pub(crate) fn body_trigram_match(&self, words: &[String]) -> Option<String> {
+        or_join(
+            self.routed(words)
+                .filter(|t| t.chars().count() >= 3 && t.chars().any(is_unsegmented))
+                .map(quote),
+        )
+    }
+}
+
+fn or_join(parts: impl Iterator<Item = String>) -> Option<String> {
+    let parts: Vec<String> = parts.collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" OR "))
     }
 }
 
@@ -151,6 +209,104 @@ pub fn normalize_exact(text: &str) -> String {
 pub(crate) fn tokens(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
+}
+
+/// A character of a script `unicode61` cannot split into words: CJK (as
+/// [`is_cjk`]), Thai, Lao, Myanmar and Khmer. `unicode61` reads a run of them
+/// as one token, so a word inside the run is found only as a substring: a
+/// chunk carrying one keeps its body in the trigram table, and a term
+/// carrying one is matched exactly on the word table, never as a prefix
+/// (design 09 §6.5.1).
+///
+/// **The one predicate.** The upsert, the query builder, the ranker and the
+/// file scan all call it, and it decides what `fts_tri` and the script split
+/// hold: a change to its ranges changes the index's contents and must bump
+/// [`super::SCHEMA_VERSION`].
+pub(crate) fn is_unsegmented(c: char) -> bool {
+    is_cjk(c)
+        || matches!(
+            c as u32,
+            0x0E00..=0x0E7F     // Thai
+            | 0x0E80..=0x0EFF   // Lao
+            | 0x1000..=0x109F   // Myanmar
+            | 0x1780..=0x17FF   // Khmer
+            | 0x19E0..=0x19FF   // Khmer symbols
+            | 0xA9E0..=0xA9FF   // Myanmar extended-B
+            | 0xAA60..=0xAA7F   // Myanmar extended-A
+        )
+}
+
+/// `a` then `b`, adjacent alphanumeric characters, sit on a script boundary:
+/// exactly one of them is unsegmented.
+fn script_boundary(a: char, b: char) -> bool {
+    a.is_alphanumeric() && b.is_alphanumeric() && is_unsegmented(a) != is_unsegmented(b)
+}
+
+/// `text` with a space at every script boundary — the text the word table
+/// indexes and the phrases it is queried with, so `和commit` holds the word
+/// `commit` and `2026年7月` reads `2026 年 7 月` (design 09 §6.5.1). A run of
+/// unsegmented characters stays one token. Borrowed when there is no
+/// boundary.
+pub(crate) fn split_scripts(text: &str) -> Cow<'_, str> {
+    let mut chars = text.chars();
+    let Some(mut prev) = chars.next() else {
+        return Cow::Borrowed(text);
+    };
+    if !chars.any(|c| {
+        let boundary = script_boundary(prev, c);
+        prev = c;
+        boundary
+    }) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut last: Option<char> = None;
+    for c in text.chars() {
+        if last.is_some_and(|p| script_boundary(p, c)) {
+            out.push(' ');
+        }
+        out.push(c);
+        last = Some(c);
+    }
+    Cow::Owned(out)
+}
+
+/// The tokens of [`split_scripts`]`(text)`, as slices of `text`: the
+/// alphanumeric runs, each cut again at its script boundaries — what the
+/// ranker and the file scan compare terms with, so they read the word
+/// table's tokens.
+pub(crate) fn tokens_split(text: &str) -> impl Iterator<Item = &str> {
+    tokens(text).flat_map(|token| {
+        let mut pieces: Vec<&str> = Vec::new();
+        let mut start = 0usize;
+        let mut prev: Option<char> = None;
+        for (i, c) in token.char_indices() {
+            if prev.is_some_and(|p| script_boundary(p, c)) {
+                pieces.push(&token[start..i]);
+                start = i;
+            }
+            prev = Some(c);
+        }
+        pieces.push(&token[start..]);
+        pieces
+    })
+}
+
+/// The shortest last token a prefix query is sent for — the threshold of
+/// the rest of routing (design 09 §6.5.2: from 4 the proxy was worse).
+pub(crate) const PREFIX_MIN_CHARS: usize = 3;
+
+/// Whether a word or a literal goes to the word table as a prefix query
+/// (design 09 §6.5.2): its last token has at least [`PREFIX_MIN_CHARS`]
+/// characters and is not a stop word, and the term carries no unsegmented
+/// character — such a term matches a whole run there, and anywhere inside a
+/// run through the trigram tables, so its reason does not depend on where
+/// in the run it stands.
+pub(crate) fn is_prefix_term(term: &str) -> bool {
+    !term.chars().any(is_unsegmented)
+        && tokens(term)
+            .last()
+            .is_some_and(|t| t.chars().count() >= PREFIX_MIN_CHARS && !STOP_WORDS.contains(&t))
 }
 
 pub(crate) fn is_cjk(c: char) -> bool {

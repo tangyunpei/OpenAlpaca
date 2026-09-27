@@ -683,9 +683,11 @@ Notes:
   extractor's unconfirmed inferences. The table's STATUS column is the *effective*
   status (a note listed as `superseded` still says `active` in its own file — being
   replaced is derived from the replacement, never written into the old note).
-- `search` is literal: every term of three or more characters is matched whole and
-  as a substring, so `prefer` finds `prefers`; a one- or two-character query (a
-  short Chinese term) is a substring scan. Results are cited — the heading and line
+- `search` is literal: a term is matched as a whole word or as the beginning of
+  one, so `prefer` finds `prefers` (the result says `prefix`); inside a word it is
+  matched only in a title, an alias or a tag, or in Chinese, Japanese, Korean,
+  Thai, Lao, Myanmar or Khmer text, so `presso` does not find a body's `espresso`;
+  a one- or two-character query (a short Chinese term) is a substring scan. Results are cited — the heading and line
   range the excerpt came from, why it matched, and its freshness — and a result
   flagged `conflict` or `same-key loser` is one `doctor` also names. Candidates are
   never returned. `--historical` includes superseded, archived and ended-window

@@ -343,7 +343,8 @@ fn a_row_the_seeding_cannot_read_is_removed_or_written_again() {
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         let columns = "partition_key, id, scope, revision, relative_path, title, norm_title, \
-             aliases, tags, kind, status, effective_status, origin, authority, fact_key, \
+             aliases, tags, norm_aliases, norm_tags, kind, status, effective_status, origin, \
+             authority, fact_key, \
              valid_from, valid_to, updated_at, created_at, observed_at, date, pinned, \
              source_forgotten, conflict, same_key_loser, superseded_by, supersedes, \
              body_line_offset, mtime_ns, size, inode";
@@ -387,27 +388,30 @@ fn a_row_the_seeding_cannot_read_is_removed_or_written_again() {
 
 /// Everything the index holds about the notes of the cache file at `path`
 /// — every `note` column but the rowid, every chunk, alias and source keyed
-/// by its note — one line per row, sorted; and FTS5's own check that each
-/// full-text index matches the chunks it indexes.
+/// by its note — one line per row, sorted; FTS5's own structural check of
+/// each full-text index; and what each full-text table indexes, term by
+/// term (`fts5vocab`'s `instance` rows keyed by note id and chunk ordinal:
+/// the tables are contentless, so a row count would pass with text written
+/// into the wrong column — design 09 §6.5.7).
 fn index_contents(path: &Path) -> Vec<String> {
     let conn = rusqlite::Connection::open(path).unwrap();
-    for table in ["fts_word", "fts_tri"] {
+    for table in FTS_TABLES {
         conn.execute(
-            &format!("INSERT INTO {table}({table}, rank) VALUES ('integrity-check', 1)"),
+            &format!("INSERT INTO {table}({table}, rank) VALUES ('integrity-check', 0)"),
             [],
         )
-        .unwrap_or_else(|e| panic!("{table} matches its chunks: {e}"));
+        .unwrap_or_else(|e| panic!("{table} is intact: {e}"));
     }
     let mut out = Vec::new();
     for sql in [
         "SELECT partition_key, id, scope, revision, relative_path, title, norm_title, aliases,
-                tags, kind, status, effective_status, origin, authority, fact_key, valid_from,
-                valid_to, updated_at, created_at, observed_at, date, pinned, source_forgotten,
-                conflict, same_key_loser, superseded_by, supersedes, body_line_offset,
-                mtime_ns, size, inode
+                tags, norm_aliases, norm_tags, kind, status, effective_status, origin,
+                authority, fact_key, valid_from, valid_to, updated_at, created_at,
+                observed_at, date, pinned, source_forgotten, conflict, same_key_loser,
+                superseded_by, supersedes, body_line_offset, mtime_ns, size, inode
          FROM note",
         "SELECT n.partition_key, n.id, c.partition_key, c.ordinal, c.heading, c.line_from,
-                c.line_to, c.excerpt, c.title, c.aliases, c.tags, c.body
+                c.line_to, c.body
          FROM chunk c JOIN note n ON n.rowid = c.note_rowid",
         "SELECT n.partition_key, n.id, a.norm_alias
          FROM note_alias a JOIN note n ON n.rowid = a.note_rowid",
@@ -428,8 +432,54 @@ fn index_contents(path: &Path) -> Vec<String> {
         out.push(format!("-- {} rows", lines.len()));
         out.extend(lines);
     }
+    for table in FTS_TABLES {
+        conn.execute_batch(&format!(
+            "CREATE VIRTUAL TABLE temp.vocab_{table} USING fts5vocab(main, {table}, instance);"
+        ))
+        .unwrap();
+        let orphans: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM temp.vocab_{table} v
+                     WHERE NOT EXISTS (SELECT 1 FROM chunk c WHERE c.id = v.doc)"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0, "{table} holds no row of a deleted chunk");
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT n.partition_key, n.id, c.ordinal, v.term, v.col, v.offset
+                 FROM temp.vocab_{table} v
+                 JOIN chunk c ON c.id = v.doc
+                 JOIN note n ON n.rowid = c.note_rowid"
+            ))
+            .unwrap();
+        let mut lines: Vec<String> = stmt
+            .query_map([], |r| {
+                Ok(format!(
+                    "{table} {} {} {} {:?} {} {}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        lines.sort();
+        out.push(format!("-- {table}: {} instances", lines.len()));
+        out.extend(lines);
+    }
     out
 }
+
+/// The index's three full-text tables (design 09 §6.5.1).
+const FTS_TABLES: [&str; 3] = ["fts_word", "fts_tri_head", "fts_tri"];
 
 /// The notes on disk now, with their current revisions: every status, the
 /// candidates and the superseded included.
@@ -1088,21 +1138,48 @@ fn the_daemon_open_returns_at_once_and_search_reads_the_files_while_it_rebuilds(
 
 /// Damage to the cache met on use — there is no integrity check at open —
 /// owes a rebuild: recall and search read the files from then on, and the
-/// next reconciliation tick rebuilds the cache from a new file.
+/// next reconciliation tick rebuilds the cache from a new file. Two cases:
+/// the full-text index's pages, and `chunk`'s — since index schema 4 the one
+/// copy of the text, read by the ranker on every search (design 09 §6.5.1).
 #[test]
 fn a_damaged_cache_met_on_use_is_rebuilt_by_the_next_tick() {
+    for table in ["fts_word_data", "chunk"] {
+        damaged_cache_is_rebuilt_by_the_next_tick(table);
+    }
+}
+
+/// The pages `dbstat` names as `table`'s, as `(page number, page size)`.
+fn pages_of(path: &Path, table: &str) -> (Vec<i64>, i64) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT pageno FROM dbstat WHERE name = ?1 ORDER BY pageno")
+        .unwrap();
+    let pages: Vec<i64> = stmt
+        .query_map([table], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(!pages.is_empty(), "dbstat names pages of {table}");
+    (pages, page_size)
+}
+
+fn damaged_cache_is_rebuilt_by_the_next_tick(table: &str) {
     let h = Harness::new();
     cedar_notes(&h, 60);
     let path = MemoryIndex::default_path().unwrap();
     drop(MemoryService::open_default(Some(h.db.clone())));
-    // Scribble over the second half of the file, where the full-text index
-    // lies; the catalog and the schema version, at its start, still read.
+    // Scribble over every page of `table`; the catalog and the schema
+    // version, which open reads, are elsewhere and still read.
     {
         use std::io::{Seek, SeekFrom, Write};
-        let len = std::fs::metadata(&path).unwrap().len();
+        let (pages, page_size) = pages_of(&path, table);
         let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        file.seek(SeekFrom::Start(len / 2)).unwrap();
-        file.write_all(&vec![0xAB; (len - len / 2) as usize]).unwrap();
+        for page in pages {
+            file.seek(SeekFrom::Start(((page - 1) * page_size) as u64))
+                .unwrap();
+            file.write_all(&vec![0xAB; page_size as usize]).unwrap();
+        }
     }
     let service = MemoryService::open_default_deferred(Some(h.db.clone()));
     assert!(!service.rebuild_pending(), "open does not look");
@@ -1124,7 +1201,7 @@ fn a_damaged_cache_met_on_use_is_rebuilt_by_the_next_tick() {
             },
         )
         .expect_err("the damaged pages are read");
-    assert!(err.is_index_corruption(), "{err}");
+    assert!(err.is_index_corruption(), "{table}: {err}");
     assert!(service.rebuild_pending(), "damage owes a rebuild");
     let found = search_cedar(&service, &tool);
     assert_eq!(found.index_state, IndexState::Rebuilding);
@@ -1897,8 +1974,9 @@ fn damage_met_by_learnings_lookup_owes_a_rebuild() {
 // ============================================================================
 
 /// How many segments each full-text index of the cache file at `path`
-/// holds, `(fts_word, fts_tri)`, read on a connection of the test's own.
-fn fts_segments(path: &Path) -> (i64, i64) {
+/// holds, `(fts_word, fts_tri_head, fts_tri)`, read on a connection of the
+/// test's own.
+fn fts_segments(path: &Path) -> (i64, i64, i64) {
     let conn = rusqlite::Connection::open(path).unwrap();
     let count = |table: &str| -> i64 {
         conn.query_row(
@@ -1908,7 +1986,7 @@ fn fts_segments(path: &Path) -> (i64, i64) {
         )
         .unwrap()
     };
-    (count("fts_word"), count("fts_tri"))
+    (count("fts_word"), count("fts_tri_head"), count("fts_tri"))
 }
 
 fn wal_len(path: &Path) -> u64 {
@@ -1935,8 +2013,10 @@ fn store_many(service: &MemoryService, prefix: &str, n: usize) {
                 &user,
                 StoreInput {
                     title: format!("{prefix} {i}"),
+                    // A Chinese line, so the body trigram table takes rows
+                    // too (design 09 §6.5.1).
                     body: format!(
-                        "# {prefix} {i}\n\n{} {i}\n",
+                        "# {prefix} {i}\n\n{} {i}\n\n核桃园的账本 {i}\n",
                         "the walnut orchard keeps its ledger ".repeat(40)
                     ),
                     kind: Some(NoteKind::Fact),
@@ -1965,19 +2045,23 @@ fn an_idle_tick_merges_the_index_and_truncates_its_wal() {
         .rebuilt_bytes;
     store_many(&service, "Pecan", 4);
     assert!(wal_len(&path) > 0, "the writes are in the WAL");
-    let (word, tri) = fts_segments(&path);
+    let (word, head, tri) = fts_segments(&path);
     assert!(
-        word > 1 && tri > 1,
-        "the writes left segments to merge: {word}, {tri}"
+        word > 1 && head > 1 && tri > 1,
+        "the writes left segments to merge: {word}, {head}, {tri}"
     );
     service.reconcile_owner(ALICE).unwrap();
     assert!(wal_len(&path) > 0, "a tick right after writes leaves it");
-    assert_eq!(fts_segments(&path), (word, tri), "and merges nothing");
+    assert_eq!(
+        fts_segments(&path),
+        (word, head, tri),
+        "and merges nothing"
+    );
     service.reconcile_owner(ALICE).unwrap();
     assert_eq!(wal_len(&path), 0, "the idle tick truncated it");
     assert_eq!(
         fts_segments(&path),
-        (1, 1),
+        (1, 1, 1),
         "and merged each full-text index into one segment"
     );
     let pass = service

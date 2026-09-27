@@ -16,6 +16,11 @@
 //! test-side stand-in for `memory_files`' computation, kept minimal; the
 //! revision is a stand-in too (a hash over id and body), since no step below
 //! reads one. Nothing here is the design's authority on either.
+//!
+//! An `excerpt_contains` expectation is read from the note's own body, at
+//! the chunk the hit names — as the service reads it from the re-read file
+//! (`memory::service::recall`, `chunk_at`): the index keeps the text only
+//! normalized, for ranking, and serves no excerpt (design 09 §6.5.1).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -380,7 +385,7 @@ fn run(name: &str) -> RunSummary {
                     q
                 };
                 let result = index.as_ref().unwrap().search(&query);
-                check_search(&label, result, &expect);
+                check_search(&label, result, &expect, &loaded.records);
                 if verb == "search" {
                     summary.searched += 1;
                 } else {
@@ -484,7 +489,12 @@ fn resolve_id(v: &Value) -> String {
     s.to_string()
 }
 
-fn check_search(label: &str, result: Result<SearchResults>, expect: &Value) {
+fn check_search(
+    label: &str,
+    result: Result<SearchResults>,
+    expect: &Value,
+    records: &[IndexRecord],
+) {
     if let Some(class) = expect.get("refused").and_then(Value::as_str) {
         assert_eq!(
             class, "invalid_input",
@@ -554,12 +564,28 @@ fn check_search(label: &str, result: Result<SearchResults>, expect: &Value) {
                 .iter()
                 .find(|h| h.id == id)
                 .unwrap_or_else(|| panic!("{label}: results names {id}, got {got:?}"));
-            check_hit(&format!("{label} result {id}"), hit, fields);
+            let record = records
+                .iter()
+                .find(|r| r.id == hit.id && r.partition_key == hit.partition_key)
+                .unwrap_or_else(|| panic!("{label}: no record for {id}"));
+            check_hit(&format!("{label} result {id}"), hit, record, fields);
         }
     }
 }
 
-fn check_hit(label: &str, hit: &SearchHit, fields: &Value) {
+/// The text of the chunk a hit names, from the note's body: what the
+/// service delivers after re-reading the file.
+fn chunk_text(record: &IndexRecord, ordinal: u32) -> String {
+    let chunks = chunker::chunk_body(&record.body);
+    chunks
+        .iter()
+        .find(|c| c.ordinal == ordinal)
+        .or(chunks.last())
+        .map(|c| c.text.clone())
+        .unwrap_or_default()
+}
+
+fn check_hit(label: &str, hit: &SearchHit, record: &IndexRecord, fields: &Value) {
     for (key, value) in fields.as_object().unwrap() {
         match key.as_str() {
             "match_includes" => {
@@ -576,12 +602,14 @@ fn check_hit(label: &str, hit: &SearchHit, fields: &Value) {
             "status" => assert_eq!(hit.status, value.as_str().unwrap(), "{label}: status"),
             "origin" => assert_eq!(hit.origin, value.as_str().unwrap(), "{label}: origin"),
             "scope" => assert_eq!(hit.scope, value.as_str().unwrap(), "{label}: scope"),
-            "excerpt_contains" => assert!(
-                hit.excerpt.contains(value.as_str().unwrap()),
-                "{label}: excerpt {:?} lacks {:?}",
-                hit.excerpt,
-                value
-            ),
+            "excerpt_contains" => {
+                let excerpt = chunk_text(record, hit.chunk_ordinal);
+                assert!(
+                    excerpt.contains(value.as_str().unwrap()),
+                    "{label}: excerpt {excerpt:?} (chunk {}) lacks {value:?}",
+                    hit.chunk_ordinal
+                );
+            }
             "superseded_by" => {
                 let want: Vec<String> = value.as_array().unwrap().iter().map(resolve_id).collect();
                 assert_eq!(hit.superseded_by, want, "{label}: superseded_by");
@@ -605,7 +633,7 @@ fn check_hit(label: &str, hit: &SearchHit, fields: &Value) {
 // ============================================================================
 
 #[test]
-fn fixture_21_natural_question_recalls_prefer_vim_through_the_trigram_table() {
+fn fixture_21_natural_question_recalls_prefer_vim_through_a_word_beginning() {
     let s = run("21-query-natural-question-prefer-vim.json");
     assert_eq!((s.searched, s.recalled), (4, 1), "{s:?}");
     assert!(s.stopped_at.is_none(), "{s:?}");
@@ -614,15 +642,22 @@ fn fixture_21_natural_question_recalls_prefer_vim_through_the_trigram_table() {
 #[test]
 fn fixture_22_literal_and_case_never_reaches_fts_syntax() {
     let s = run("22-query-literal-and.json");
-    assert_eq!(s.searched, 18, "{s:?}");
+    assert_eq!(s.searched, 20, "{s:?}");
     assert!(s.stopped_at.is_none(), "{s:?}");
 }
 
 #[test]
 fn fixture_23_cjk_queries_of_one_two_and_more_characters() {
     let s = run("23-query-cjk-lengths.json");
-    assert_eq!(s.searched, 11, "{s:?}");
+    assert_eq!(s.searched, 12, "{s:?}");
     assert_eq!(s.skipped.len(), 1, "{s:?}"); // step 12 is a read
+    assert!(s.stopped_at.is_none(), "{s:?}");
+}
+
+#[test]
+fn fixture_26_a_word_beginning_in_a_body_and_the_boundary_of_a_body_search() {
+    let s = run("26-query-prefix-in-body.json");
+    assert_eq!((s.searched, s.recalled), (8, 1), "{s:?}");
     assert!(s.stopped_at.is_none(), "{s:?}");
 }
 

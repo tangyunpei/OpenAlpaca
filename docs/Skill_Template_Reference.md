@@ -991,7 +991,7 @@ These are the tool names usable in `tools.allow` / `tools.deny`. Names must matc
 | `shell_execute` | `shell_execute` | Execute shell commands | Always registered |
 | `web_search` | `web_access` | Search the web | Always registered; needs the `[web_search]` section (API key) in `config/llm.toml` |
 | `web_fetch` | `web_access` | Fetch and read content from a URL | Always registered |
-| `memory_search` | `memory_read` | Search the owner's memory notes by keyword — whole words and substrings; no meaning-based search. Answers an index (one row per note: id, date, kind, status, title, why it matched, size) by default, or cited excerpts with `detail: "snippets"`; filters by date range, sorts by relevance or date | Registered by the daemon over its memory service |
+| `memory_search` | `memory_read` | Search the owner's memory notes by keyword — whole words and word beginnings, and substrings of titles, aliases, tags and Chinese, Japanese or Korean text; no meaning-based search. Answers an index (one row per note: id, date, kind, status, title, why it matched, size) by default, or cited excerpts with `detail: "snippets"`; filters by date range, sorts by relevance or date | Registered by the daemon over its memory service |
 | `memory_read` | `memory_read` | Read the notes picked from an index, 1–10 ids in one call, the bodies sharing 32 KiB (one id may take a single section) | Same |
 | `memory_list` | `memory_read` | List memory notes by kind, status and scope, paged | Same |
 | `memory_timeline` | `memory_read` | The notes dated around one note, a search's best match or a date, in time order, as index rows — superseded, archived and ended ones marked, candidates never listed | Same |

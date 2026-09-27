@@ -651,10 +651,12 @@ and its `tools.deny` does not) —
 none of the shipped skills can, and a list it cannot open would only take the
 room of excerpts. The key is read on every turn, so a reloaded `daemon.toml`
 applies to the next one. A workflow's lead gets the same
-recall, in the same mode, once at its start. Search is literal: every term of
-three or more characters is matched as a whole word and as a substring, a
-one- or two-character query (a short Chinese word) goes through a bounded
-scan, and nothing asks a model. A reply waits at most 1.5 s for its recall
+recall, in the same mode, once at its start. Search is literal: a term is
+matched as a whole word or as the beginning of one (`prefer` finds
+`prefers`), and inside a word only in a note's title, aliases and tags, or in
+Chinese, Japanese, Korean, Thai, Lao, Myanmar or Khmer text — `presso` does
+not find a body's `espresso`; a one- or two-character query (a short Chinese
+word) goes through a bounded scan, and nothing asks a model. A reply waits at most 1.5 s for its recall
 (and, apart, for the suggestions it is told about): past that the turn goes
 on without them, as it does when memory fails, and the daemon logs one
 warning.

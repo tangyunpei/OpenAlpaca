@@ -1,5 +1,7 @@
-//! Search: candidate generation from both FTS tables, the substring pass and
-//! the exact lookups; the filters, applied before the limit; ranking.
+//! Search: candidate generation from the three FTS tables (design 09 §6.5:
+//! the word table, the header trigram table, the unsegmented-body trigram
+//! table), the substring pass and the exact lookups; the filters, applied
+//! before the limit; ranking.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -23,9 +25,16 @@ pub enum MatchReason {
     Alias,
     /// The query equals the note's `fact_key`.
     FactKey,
-    /// A term matched a whole token (the `unicode61` table).
+    /// A term matched a whole token of the text split at script boundaries
+    /// (the `unicode61` table).
     Term,
-    /// A term matched only as a substring (the trigram table).
+    /// A term matched only as the beginning of such a token, and nowhere as
+    /// a whole one (the `unicode61` table's prefix query; design 09 §6.5.3,
+    /// LQ17).
+    Prefix,
+    /// A term matched only as a substring the trigram tables find: in a
+    /// title, an alias or a tag — or, for a term carrying an unsegmented
+    /// character, in unsegmented text.
     Trigram,
     /// An identifier or path literal matched as a phrase.
     Phrase,
@@ -38,6 +47,7 @@ impl MatchReason {
             Self::Alias => "alias",
             Self::FactKey => "fact_key",
             Self::Term => "term",
+            Self::Prefix => "prefix",
             Self::Trigram => "trigram",
             Self::Phrase => "phrase",
         }
@@ -169,8 +179,9 @@ pub struct SearchHit {
     pub same_key_loser: bool,
     pub source_forgotten: bool,
     pub superseded_by: Vec<String>,
-    /// The best chunk's text — the lines `line_range` names.
-    pub excerpt: String,
+    /// The best chunk's heading. The index keeps no excerpt (design 09
+    /// §6.5.1: its one copy of the text is normalized, for ranking); the
+    /// caller reads the chunk at `chunk_ordinal` from the file it verifies.
     pub heading: Option<String>,
     /// 1-based file lines, inclusive.
     pub line_range: (u32, u32),
@@ -208,12 +219,17 @@ pub(crate) const W_TERM: f64 = 10.0;
 /// Per word matched only as a substring — the trigram-only hit, below a
 /// whole-token hit (design §5 step 4).
 pub(crate) const W_TRIGRAM: f64 = 5.0;
+/// Per word matched only as the beginning of a token — a trigram-only hit's
+/// coverage, below a whole-token hit (design 09 §6.5.3). Its relevance is
+/// the word table's BM25, as a whole token's is.
+pub(crate) const W_PREFIX: f64 = 5.0;
 /// Per one- or two-character term found by the substring pass.
 pub(crate) const W_SHORT: f64 = 5.0;
 /// BM25 relevance from the `unicode61` table, normalized to 0..=1 over the
 /// candidates.
 pub(crate) const W_BM25_WORD: f64 = 2.0;
-/// BM25 relevance from the trigram table, normalized likewise.
+/// BM25 relevance from the trigram tables — the larger of the header
+/// table's and the unsegmented-body table's, each normalized likewise.
 pub(crate) const W_BM25_TRIGRAM: f64 = 1.0;
 /// Per authority rank (design §4: `user` = 4 … `extracted_other` = 0).
 pub(crate) const W_AUTHORITY: f64 = 0.5;
@@ -299,11 +315,18 @@ fn placeholders_unnumbered(n: usize) -> String {
     vec!["?"; n].join(", ")
 }
 
-/// A candidate chunk with the evidence each generator produced.
+/// A candidate chunk with the evidence each generator produced. A chunk
+/// only the whole-word query at the cap or the substring pass found carries
+/// no rank: its coverage decides (design 09 §6.5.3).
 #[derive(Default)]
 pub(super) struct ChunkEvidence {
     pub(super) note_rowid: i64,
+    /// `fts_word`'s rank.
     pub(super) word_rank: Option<f64>,
+    /// `fts_tri_head`'s rank.
+    pub(super) head_rank: Option<f64>,
+    /// `fts_tri`'s rank — only terms carrying an unsegmented character query
+    /// it.
     pub(super) tri_rank: Option<f64>,
 }
 
@@ -339,6 +362,8 @@ pub(super) struct NoteRow {
     pub(super) authority: i64,
 }
 
+/// A candidate chunk with the text the ranker compares: its note's
+/// normalized header and its own normalized body.
 pub(super) struct ChunkRow {
     pub(super) id: i64,
     pub(super) note_rowid: i64,
@@ -346,7 +371,6 @@ pub(super) struct ChunkRow {
     pub(super) heading: Option<String>,
     pub(super) line_from: u32,
     pub(super) line_to: u32,
-    pub(super) excerpt: String,
     pub(super) title: String,
     pub(super) aliases: String,
     pub(super) tags: String,
@@ -387,7 +411,7 @@ impl MemoryIndex {
         // no eligible note.
         let mut words: Vec<String> = parsed.words.clone();
         for literal in &parsed.literals {
-            if !literal_has_hit(&conn, &literal.text, &filter)? {
+            if !literal_has_hit(&conn, literal, &filter)? {
                 for part in &literal.parts {
                     if !words.contains(part) {
                         words.push(part.clone());
@@ -398,20 +422,37 @@ impl MemoryIndex {
 
         if let Some(m) = parsed.word_match(&words) {
             let rows = fts_candidates(&conn, "fts_word", &m, &filter)?;
-            if rows.len() >= CANDIDATE_CAP {
-                partial = true;
-            }
+            let capped = rows.len() >= CANDIDATE_CAP;
+            partial |= capped;
             for (chunk_id, note_rowid, rank) in rows {
                 let e = chunks.entry(chunk_id).or_default();
                 e.note_rowid = note_rowid;
                 e.word_rank = Some(rank);
             }
-        }
-        if let Some(m) = parsed.trigram_match(&words) {
-            let rows = fts_candidates(&conn, "fts_tri", &m, &filter)?;
-            if rows.len() >= CANDIDATE_CAP {
-                partial = true;
+            // A word beginning shared by many longer words can fill the cap
+            // with them and crowd out a note whose one match is the whole
+            // word in its header — `work*` and the tag `work` (design 09
+            // §6.5.2). Below the cap the first query already holds it. The
+            // chunks this finds carry no rank: their coverage decides.
+            if capped && let Some(m) = parsed.word_match_head_exact(&words) {
+                let rows = fts_candidates(&conn, "fts_word", &m, &filter)?;
+                for (chunk_id, note_rowid, _) in rows {
+                    chunks.entry(chunk_id).or_default().note_rowid = note_rowid;
+                }
             }
+        }
+        if let Some(m) = parsed.head_trigram_match(&words) {
+            let rows = fts_candidates(&conn, "fts_tri_head", &m, &filter)?;
+            partial |= rows.len() >= CANDIDATE_CAP;
+            for (chunk_id, note_rowid, rank) in rows {
+                let e = chunks.entry(chunk_id).or_default();
+                e.note_rowid = note_rowid;
+                e.head_rank = Some(rank);
+            }
+        }
+        if let Some(m) = parsed.body_trigram_match(&words) {
+            let rows = fts_candidates(&conn, "fts_tri", &m, &filter)?;
+            partial |= rows.len() >= CANDIDATE_CAP;
             for (chunk_id, note_rowid, rank) in rows {
                 let e = chunks.entry(chunk_id).or_default();
                 e.note_rowid = note_rowid;
@@ -517,7 +558,7 @@ fn substring_candidates(
     filter: &Filter,
 ) -> Result<(Vec<(i64, i64)>, bool)> {
     let sql = format!(
-        "SELECT c.id, c.note_rowid, c.title, c.aliases, c.tags, c.body
+        "SELECT c.id, c.note_rowid, n.norm_title, n.norm_aliases, n.norm_tags, c.body
          FROM chunk c
          CROSS JOIN note n ON n.rowid = c.note_rowid
          WHERE {filter}
@@ -549,15 +590,22 @@ fn substring_candidates(
     Ok((hits, false))
 }
 
-/// Whether a literal, as a phrase, matches any eligible note on either
-/// table — the probe that decides whether its parts are routed.
-fn literal_has_hit(conn: &Connection, literal: &str, filter: &Filter) -> Result<bool> {
-    let phrase = format!("\"{}\"", literal.replace('"', "\"\""));
-    let mut tables = vec!["fts_word"];
-    if literal.chars().count() >= 3 {
-        tables.push("fts_tri");
-    }
-    for table in tables {
+/// Whether a literal, routed as the search routes it, matches any eligible
+/// note on any table — the probe that decides whether its parts are routed.
+fn literal_has_hit(conn: &Connection, literal: &query::Literal, filter: &Filter) -> Result<bool> {
+    let only = ParsedQuery {
+        literals: vec![literal.clone()],
+        ..ParsedQuery::default()
+    };
+    let probes = [
+        ("fts_word", only.word_match(&[])),
+        ("fts_tri_head", only.head_trigram_match(&[])),
+        ("fts_tri", only.body_trigram_match(&[])),
+    ];
+    for (table, phrase) in probes {
+        let Some(phrase) = phrase else {
+            continue;
+        };
         let sql = format!(
             "SELECT EXISTS(
                 SELECT 1 FROM {table}
@@ -567,7 +615,7 @@ fn literal_has_hit(conn: &Connection, literal: &str, filter: &Filter) -> Result<
             filter = filter.clause
         );
         let mut params: Vec<Value> = Vec::with_capacity(filter.params.len() + 1);
-        params.push(Value::Text(phrase.clone()));
+        params.push(Value::Text(phrase));
         params.extend(filter.params.iter().cloned());
         let mut stmt = conn.prepare_cached(&sql)?;
         let hit: bool = stmt.query_row(params_from_iter(params.iter()), |r| r.get(0))?;
@@ -667,8 +715,10 @@ fn load_notes(conn: &Connection, rowids: &BTreeSet<i64>) -> Result<HashMap<i64, 
     Ok(out)
 }
 
-const CHUNK_COLUMNS: &str =
-    "id, note_rowid, ordinal, heading, line_from, line_to, excerpt, title, aliases, tags, body";
+/// A chunk's columns with its note's normalized header — held once per
+/// note since index schema 4 (design 09 §6.5.1).
+const CHUNK_COLUMNS: &str = "c.id, c.note_rowid, c.ordinal, c.heading, c.line_from, c.line_to, \
+     n.norm_title, n.norm_aliases, n.norm_tags, c.body";
 
 fn chunk_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRow> {
     Ok(ChunkRow {
@@ -678,11 +728,10 @@ fn chunk_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRow> {
         heading: r.get(3)?,
         line_from: r.get::<_, i64>(4)? as u32,
         line_to: r.get::<_, i64>(5)? as u32,
-        excerpt: r.get(6)?,
-        title: r.get(7)?,
-        aliases: r.get(8)?,
-        tags: r.get(9)?,
-        body: r.get(10)?,
+        title: r.get(6)?,
+        aliases: r.get(7)?,
+        tags: r.get(8)?,
+        body: r.get(9)?,
     })
 }
 
@@ -690,7 +739,8 @@ fn load_chunks(conn: &Connection, ids: &[i64]) -> Result<Vec<ChunkRow>> {
     let mut out = Vec::with_capacity(ids.len());
     for batch in ids.chunks(IN_BATCH) {
         let sql = format!(
-            "SELECT {CHUNK_COLUMNS} FROM chunk WHERE id IN ({})",
+            "SELECT {CHUNK_COLUMNS} FROM chunk c JOIN note n ON n.rowid = c.note_rowid
+             WHERE c.id IN ({})",
             placeholders(batch.len())
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -707,7 +757,8 @@ fn load_first_chunks(conn: &Connection, note_rowids: &[i64]) -> Result<Vec<Chunk
     let mut out = Vec::with_capacity(note_rowids.len());
     for batch in note_rowids.chunks(IN_BATCH) {
         let sql = format!(
-            "SELECT {CHUNK_COLUMNS} FROM chunk WHERE ordinal = 0 AND note_rowid IN ({})",
+            "SELECT {CHUNK_COLUMNS} FROM chunk c JOIN note n ON n.rowid = c.note_rowid
+             WHERE c.ordinal = 0 AND c.note_rowid IN ({})",
             placeholders(batch.len())
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -723,11 +774,16 @@ fn load_first_chunks(conn: &Connection, note_rowids: &[i64]) -> Result<Vec<Chunk
 // Ranking
 // ============================================================================
 
-/// The normalized text fields of one chunk, tokenized once.
+/// The normalized text fields of one chunk — title, aliases, tags, body —
+/// tokenized once, as the word table reads them: split at script boundaries
+/// (design 09 §6.5.1). The ranker and the file scan both read a chunk
+/// through this, with the index's evidence (§6.5.3).
 pub(super) struct ChunkText<'a> {
     fields: [&'a str; 4],
     tokens: [HashSet<&'a str>; 4],
     token_lists: [Vec<&'a str>; 4],
+    /// The body carries an unsegmented character, so it is in `fts_tri`.
+    unsegmented: bool,
 }
 
 impl<'a> ChunkText<'a> {
@@ -738,7 +794,7 @@ impl<'a> ChunkText<'a> {
             c.tags.as_str(),
             c.body.as_str(),
         ];
-        let token_lists = fields.map(|f| query::tokens(f).collect::<Vec<_>>());
+        let token_lists = fields.map(|f| query::tokens_split(f).collect::<Vec<_>>());
         let tokens = token_lists
             .iter()
             .map(|l| l.iter().copied().collect::<HashSet<_>>())
@@ -749,29 +805,60 @@ impl<'a> ChunkText<'a> {
             fields,
             tokens,
             token_lists,
+            unsegmented: c.body.chars().any(query::is_unsegmented),
         }
     }
 
+    /// `term` is a whole token of some field.
     pub(super) fn has_token(&self, term: &str) -> bool {
         self.tokens.iter().any(|set| set.contains(term))
     }
 
+    /// A token of some field begins with `term`, which the word table
+    /// queries as a prefix ([`query::is_prefix_term`]).
+    pub(super) fn has_prefix(&self, term: &str) -> bool {
+        query::is_prefix_term(term)
+            && self
+                .token_lists
+                .iter()
+                .any(|list| list.iter().any(|t| t.starts_with(term)))
+    }
+
+    /// `text` is a substring where the trigram tables find one: in a title,
+    /// an alias or a tag; in the body only when both the text and the body
+    /// carry an unsegmented character.
+    pub(super) fn contains_indexed(&self, text: &str) -> bool {
+        text.chars().count() >= 3
+            && (self.fields[..3].iter().any(|f| f.contains(text))
+                || (self.unsegmented
+                    && text.chars().any(query::is_unsegmented)
+                    && self.fields[3].contains(text)))
+    }
+
+    /// `text` is a substring of any field — the one- and two-character
+    /// pass, which scans every field.
     pub(super) fn contains(&self, text: &str) -> bool {
         self.fields.iter().any(|f| f.contains(text))
     }
 
-    /// A literal as a phrase: a substring, or its tokens in sequence.
+    /// A literal as a phrase, as the tables find it: a substring where the
+    /// trigram tables find one, or its tokens in sequence — the last one as
+    /// a prefix when the word table queries it as one.
     pub(super) fn has_phrase(&self, literal: &str) -> bool {
-        if self.contains(literal) {
+        if self.contains_indexed(literal) {
             return true;
         }
-        let needle: Vec<&str> = query::tokens(literal).collect();
-        if needle.is_empty() {
+        let needle: Vec<&str> = query::tokens_split(literal).collect();
+        let Some((last, lead)) = needle.split_last() else {
             return false;
-        }
-        self.token_lists
-            .iter()
-            .any(|list| list.windows(needle.len()).any(|w| w == needle.as_slice()))
+        };
+        let prefix = query::is_prefix_term(literal);
+        self.token_lists.iter().any(|list| {
+            list.windows(needle.len()).any(|w| {
+                let (w_last, w_lead) = w.split_last().unwrap_or_else(|| unreachable!("non-empty"));
+                w_lead == lead && (w_last == last || (prefix && w_last.starts_with(last)))
+            })
+        })
     }
 }
 
@@ -779,6 +866,9 @@ impl<'a> ChunkText<'a> {
 struct NoteScore {
     reasons: BTreeSet<MatchReason>,
     terms: HashSet<String>,
+    /// Words matched as a beginning and nowhere as a whole token.
+    prefix_only: HashSet<String>,
+    /// Words matched as a substring and nowhere as a token or a beginning.
     trigram_only: HashSet<String>,
     phrases: HashSet<String>,
     shorts: HashSet<String>,
@@ -806,11 +896,19 @@ pub(super) fn rank(
         .filter_map(|e| e.word_rank)
         .map(|r| -r)
         .fold(0.0_f64, f64::max);
+    let max_head = evidence
+        .values()
+        .filter_map(|e| e.head_rank)
+        .map(|r| -r)
+        .fold(0.0_f64, f64::max);
     let max_tri = evidence
         .values()
         .filter_map(|e| e.tri_rank)
         .map(|r| -r)
         .fold(0.0_f64, f64::max);
+    let normalized = |rank: Option<f64>, max: f64| -> f64 {
+        rank.map(|r| -r / max.max(f64::MIN_POSITIVE)).unwrap_or(0.0)
+    };
 
     let mut scores: HashMap<i64, NoteScore> = HashMap::new();
     for (i, chunk) in chunk_rows.iter().enumerate() {
@@ -821,6 +919,7 @@ pub(super) fn rank(
         let entry = scores.entry(note.rowid).or_insert_with(|| NoteScore {
             reasons: BTreeSet::new(),
             terms: HashSet::new(),
+            prefix_only: HashSet::new(),
             trigram_only: HashSet::new(),
             phrases: HashSet::new(),
             shorts: HashSet::new(),
@@ -828,17 +927,27 @@ pub(super) fn rank(
             tri_rel: 0.0,
             best: None,
         });
+        // Per word, a note keeps its strongest evidence: a whole token,
+        // then a beginning, then a substring (design 09 §6.5.3).
         let mut coverage = 0.0;
         for word in words {
             let word = word.as_str();
             if text.has_token(word) {
                 entry.reasons.insert(MatchReason::Term);
                 entry.terms.insert(word.to_string());
+                entry.prefix_only.remove(word);
                 entry.trigram_only.remove(word);
                 coverage += W_TERM;
-            } else if word.chars().count() >= 3 && text.contains(word) {
-                entry.reasons.insert(MatchReason::Trigram);
+            } else if text.has_prefix(word) {
+                entry.reasons.insert(MatchReason::Prefix);
                 if !entry.terms.contains(word) {
+                    entry.prefix_only.insert(word.to_string());
+                    entry.trigram_only.remove(word);
+                }
+                coverage += W_PREFIX;
+            } else if text.contains_indexed(word) {
+                entry.reasons.insert(MatchReason::Trigram);
+                if !entry.terms.contains(word) && !entry.prefix_only.contains(word) {
                     entry.trigram_only.insert(word.to_string());
                 }
                 coverage += W_TRIGRAM;
@@ -857,14 +966,13 @@ pub(super) fn rank(
                 coverage += W_SHORT;
             }
         }
+        // Trigram relevance is the larger of the header table's and the
+        // unsegmented-body table's, so a Latin body word is not counted
+        // twice (design 09 §6.5.3).
         let (wr, tr) = match evidence.get(&chunk.id) {
             Some(e) => (
-                e.word_rank
-                    .map(|r| -r / max_word.max(f64::MIN_POSITIVE))
-                    .unwrap_or(0.0),
-                e.tri_rank
-                    .map(|r| -r / max_tri.max(f64::MIN_POSITIVE))
-                    .unwrap_or(0.0),
+                normalized(e.word_rank, max_word),
+                normalized(e.head_rank, max_head).max(normalized(e.tri_rank, max_tri)),
             ),
             None => (0.0, 0.0),
         };
@@ -890,6 +998,7 @@ pub(super) fn rank(
         let chunk = &chunk_rows[chunk_index];
         let mut reasons = s.reasons;
         let mut score = W_TERM * s.terms.len() as f64
+            + W_PREFIX * s.prefix_only.len() as f64
             + W_TRIGRAM * s.trigram_only.len() as f64
             + W_PHRASE * s.phrases.len() as f64
             + W_SHORT * s.shorts.len() as f64
@@ -922,10 +1031,14 @@ pub(super) fn rank(
         if explicit && effective_now {
             score += W_VALID_NOW;
         }
-        // A trigram-only hit only ever carries the trigram reason; a word
-        // matched whole somewhere in the note drops it.
-        if reasons.contains(&MatchReason::Trigram) && s.trigram_only.is_empty() {
+        // A reason stays only for a word the note has no stronger evidence
+        // for: a word matched whole somewhere in the note drops `prefix` and
+        // `trigram`, a beginning drops `trigram`.
+        if s.trigram_only.is_empty() {
             reasons.remove(&MatchReason::Trigram);
+        }
+        if s.prefix_only.is_empty() {
+            reasons.remove(&MatchReason::Prefix);
         }
         hits.push(SearchHit {
             id: note.id.clone(),
@@ -956,7 +1069,6 @@ pub(super) fn rank(
             same_key_loser: note.same_key_loser,
             source_forgotten: note.source_forgotten,
             superseded_by: note.superseded_by.clone(),
-            excerpt: chunk.excerpt.clone(),
             heading: chunk.heading.clone(),
             line_range: (chunk.line_from, chunk.line_to),
             chunk_ordinal: chunk.ordinal,

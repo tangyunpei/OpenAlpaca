@@ -1,0 +1,126 @@
+{
+  "row": {
+    "id": "q5",
+    "scenario": "LQ17 query fixture: the body-only variant of q1 — a word's beginning inside a body word with no help from the title — and the boundary of what a body search finds",
+    "required_outcome": "\"what do I prefer?\" finds \"User prefers kitty over iTerm\" through its body alone, as a word beginning (`prefix`); a term inside a body word of a space-separated script (`presso` in `espresso`, `now` in a Chinese note's `## Knowledge` heading) finds nothing; a Latin word glued to Chinese text is a whole word (`term`); a literal's last token is a prefix only when it has three or more characters (`memory_file` finds `memory_files`, `partner's` does not find `partner store`). Supports matrix row 12 and 09 §6.5's measured loss (§6.5.4)."
+  },
+  "design": ["§5 step 4 (03 rev 7.8, 09 §6.5.2): the unicode61 table takes every term, its text and phrases split at script boundaries, as a prefix query when its last token has three or more characters, unless the term carries an unsegmented character or that token is a stop word; the body trigram table holds only chunks carrying a character of a script unicode61 cannot split, and only a term carrying such a character searches it", "§5 step 4: what no table finds is a term inside a word of a body written in a space-separated script", "§7a MatchReason: `prefix` (09 §6.5.3)"],
+  "loads_in": ["slice-2", "slice-3"],
+  "notes_for_implementer": "Seven notes: \"Terminal\" (the target: its title shares nothing with the question), the espresso decoy, a Chinese note under a `## Knowledge` heading, a Chinese note with `commit` glued to it (`一遍commit`), \"Birthday\" (`partner's`), \"Shopping\" (`partner store`) and \"Storage crate\" (`memory_files`). Step 1: `what`, `do` and `I` are stop words or short and are dropped; `prefer` goes to the unicode61 table as `\"prefer\"*` and finds the body's `prefers`, which reports `prefix` (not `term`: no token is `prefer`; not `trigram`: no trigram table holds an English body). Step 2 recalls it on the automatic path. Step 3's `prefers` is a whole token, `term`. Step 4's `presso` is inside `espresso` and begins no word, so nothing is found: this is the loss 09 §6.5.4 measures, and a title, an alias or a tag is the remedy. Step 5's `espresso` finds the decoy. Step 6's `now` begins no word and is not searched in the Chinese note's body (a Latin term is matched in a body only as a word or a word's beginning, 09 §6.5.2), so the heading `## Knowledge` does not match. Step 7's `commit` is a whole word once the text is split at the boundary between Chinese and Latin, so it reports `term`. Step 8's `partner's` ends in a one-character token, so it stays the exact phrase `partner s` and does not find `partner store`. Step 9's `memory_file` ends in `file`, which is a prefix, so the phrase `memory file*` finds `memory_files` and reports `phrase`. Steps 8 and 9 each fail under one broken rule: every literal's last token a prefix (8), no literal prefix at all (9).",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000026-0000-4000-8000-000000000001",
+          "title": "Terminal",
+          "kind": "preference",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Terminal\n\nUser prefers kitty over iTerm.\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000026-0000-4000-8000-000000000002",
+          "title": "Coffee",
+          "kind": "preference",
+          "status": "active",
+          "created_at": "2026-09-23T10:01:00Z",
+          "updated_at": "2026-09-23T10:01:00Z",
+          "body": "# Coffee\n\nUser drinks espresso after lunch.\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000026-0000-4000-8000-000000000003",
+          "title": "通勤",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:02:00Z",
+          "updated_at": "2026-09-23T10:02:00Z",
+          "body": "# 通勤\n\n## Knowledge\n每天坐地铁 5 号线上班。\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000026-0000-4000-8000-000000000004",
+          "title": "发版",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:03:00Z",
+          "updated_at": "2026-09-23T10:03:00Z",
+          "body": "# 发版\n\n发版前先看一遍commit 记录。\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000026-0000-4000-8000-000000000005",
+          "title": "Birthday",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:04:00Z",
+          "updated_at": "2026-09-23T10:04:00Z",
+          "body": "# Birthday\n\nMy partner's birthday is in May.\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000026-0000-4000-8000-000000000006",
+          "title": "Shopping",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:05:00Z",
+          "updated_at": "2026-09-23T10:05:00Z",
+          "body": "# Shopping\n\nThe partner store opens at nine.\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000026-0000-4000-8000-000000000007",
+          "title": "Storage crate",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:06:00Z",
+          "updated_at": "2026-09-23T10:06:00Z",
+          "body": "# Storage crate\n\nRead memory_files before you edit a note.\n",
+          "origin": "user"
+        }
+      ]
+    }
+  ],
+  "contexts": {
+    "alice_tool": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "what do I prefer?" },
+      "expect": {
+        "ids": ["00000026-0000-4000-8000-000000000001"],
+        "ids_absent": ["00000026-0000-4000-8000-000000000002"],
+        "count": 1,
+        "results": { "00000026-0000-4000-8000-000000000001": { "match_includes": ["prefix"], "excerpt_contains": "User prefers kitty over iTerm", "freshness": "verified" } },
+        "partial": false
+      }
+    },
+    {
+      "step": 2,
+      "op": "recall",
+      "context": "alice_tool",
+      "input": { "message": "what do I prefer?" },
+      "expect": { "ids": ["00000026-0000-4000-8000-000000000001"], "memory_used": [{ "id": "00000026-0000-4000-8000-000000000001", "reason": "recall" }] }
+    },
+    { "step": 3, "op": "search", "context": "alice_tool", "input": { "query": "prefers" }, "expect": { "ids": ["00000026-0000-4000-8000-000000000001"], "results": { "00000026-0000-4000-8000-000000000001": { "match_includes": ["term"] } } } },
+    { "step": 4, "op": "search", "context": "alice_tool", "input": { "query": "presso" }, "expect": { "ids_unordered": [], "count": 0 } },
+    { "step": 5, "op": "search", "context": "alice_tool", "input": { "query": "espresso" }, "expect": { "ids": ["00000026-0000-4000-8000-000000000002"], "ids_absent": ["00000026-0000-4000-8000-000000000001"] } },
+    { "step": 6, "op": "search", "context": "alice_tool", "input": { "query": "now" }, "expect": { "ids_unordered": [], "count": 0 } },
+    { "step": 7, "op": "search", "context": "alice_tool", "input": { "query": "commit" }, "expect": { "ids": ["00000026-0000-4000-8000-000000000004"], "results": { "00000026-0000-4000-8000-000000000004": { "match_includes": ["term"] } } } },
+    { "step": 8, "op": "search", "context": "alice_tool", "input": { "query": "partner's" }, "expect": { "ids": ["00000026-0000-4000-8000-000000000005"], "ids_absent": ["00000026-0000-4000-8000-000000000006"] } },
+    { "step": 9, "op": "search", "context": "alice_tool", "input": { "query": "memory_file" }, "expect": { "ids": ["00000026-0000-4000-8000-000000000007"], "results": { "00000026-0000-4000-8000-000000000007": { "match_includes": ["phrase"] } } } }
+  ]
+}

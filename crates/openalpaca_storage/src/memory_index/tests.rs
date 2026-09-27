@@ -329,6 +329,7 @@ mod chunker_tests {
 
 mod query_tests {
     use super::super::query::*;
+    use std::borrow::Cow;
 
     fn parsed(q: &str) -> ParsedQuery {
         parse_query(q).unwrap()
@@ -442,38 +443,130 @@ mod query_tests {
         assert!(parsed("; -- ").terms().is_empty());
     }
 
+    /// Design 09 §6.5.2: on the word table every term is a quoted phrase —
+    /// a prefix (`"w"*`) when its last token has three or more characters,
+    /// exact for a stop word or a term carrying an unsegmented character —
+    /// split at script boundaries; the header trigram table takes every term
+    /// of three or more characters as it is. All ORed, never syntax.
     #[test]
     fn match_strings_are_quoted_literals_joined_by_or() {
         let p = parsed("tabs AND spaces");
         assert_eq!(
             p.word_match(&p.words).as_deref(),
-            Some("\"tabs\" OR \"spaces\"")
+            Some("\"tabs\"* OR \"spaces\"*")
         );
         assert_eq!(
-            p.trigram_match(&p.words).as_deref(),
+            p.head_trigram_match(&p.words).as_deref(),
             Some("\"tabs\" OR \"spaces\"")
         );
         let p = parsed("{tabs} [spaces] ; DROP TABLE notes; --");
         assert_eq!(
             p.word_match(&p.words).as_deref(),
-            Some("\"tabs\" OR \"spaces\" OR \"drop\" OR \"table\" OR \"notes\"")
+            Some("\"tabs\"* OR \"spaces\"* OR \"drop\"* OR \"table\"* OR \"notes\"*")
         );
-        // A quote inside a literal is doubled, never a delimiter.
+        // A quote inside a literal is doubled, never a delimiter; a
+        // one-character last token is never a prefix.
         let p = parsed("a\"b\"c");
         assert_eq!(p.word_match(&p.words).as_deref(), Some("\"a\"\"b\"\"c\""));
         // A literal rides beside the words; the search adds its parts to the
         // word list when the literal matches nothing.
         let p = parsed("title:tabs");
-        assert_eq!(p.word_match(&p.words).as_deref(), Some("\"title:tabs\""));
+        assert_eq!(p.word_match(&p.words).as_deref(), Some("\"title:tabs\"*"));
         assert_eq!(
             p.word_match(&p.literals[0].parts).as_deref(),
-            Some("\"title\" OR \"tabs\" OR \"title:tabs\"")
+            Some("\"title\"* OR \"tabs\"* OR \"title:tabs\"*")
         );
+        assert_eq!(
+            parsed("partner's").word_match(&[]).as_deref(),
+            Some("\"partner's\"")
+        );
+        // A stop word routed alone, and a CJK term, match exactly; a word
+        // glued to CJK is split at the boundary.
+        let p = parsed("and");
+        assert_eq!(p.word_match(&p.words).as_deref(), Some("\"and\""));
+        let p = parsed("简洁的回答");
+        assert_eq!(p.word_match(&p.words).as_deref(), Some("\"简洁的回答\""));
+        let p = parsed("看一遍commit");
+        assert_eq!(p.word_match(&p.words).as_deref(), Some("\"看一遍 commit\""));
+        assert_eq!(p.head_trigram_match(&p.words).as_deref(), Some("\"看一遍commit\""));
         // Nothing routed: no MATCH at all.
         let p = parsed("or");
         assert_eq!(p.word_match(&p.words), None);
         let p = parsed("???");
-        assert_eq!(p.trigram_match(&p.words), None);
+        assert_eq!(p.head_trigram_match(&p.words), None);
+    }
+
+    /// Design 09 §6.5.1: a space goes where an unsegmented character meets
+    /// a letter or digit of another script; a run of unsegmented
+    /// characters stays one token, and punctuation is no boundary.
+    #[test]
+    fn scripts_split_where_an_unsegmented_character_meets_another_script() {
+        assert_eq!(split_scripts("看一遍commit 记录"), "看一遍 commit 记录");
+        assert_eq!(split_scripts("2026年7月"), "2026 年 7 月");
+        assert_eq!(split_scripts("在gui里"), "在 gui 里");
+        assert_eq!(split_scripts("用户喜欢简洁的回答"), "用户喜欢简洁的回答");
+        assert_eq!(split_scripts("ภาษาไทยabc"), "ภาษาไทย abc");
+        assert!(matches!(split_scripts("plain english"), Cow::Borrowed(_)));
+        assert_eq!(split_scripts("简\"洁"), "简\"洁");
+        assert_eq!(split_scripts(""), "");
+        let text = "发版前先看一遍commit记录, 2026年7月";
+        assert_eq!(
+            tokens_split(text).collect::<Vec<_>>(),
+            vec!["发版前先看一遍", "commit", "记录", "2026", "年", "7", "月"]
+        );
+        // The tokens of the split text are the split tokens.
+        assert_eq!(
+            tokens(&split_scripts(text)).collect::<Vec<_>>(),
+            tokens_split(text).collect::<Vec<_>>()
+        );
+        for c in ['中', 'あ', '한', 'ก', 'ກ', 'က', 'ក'] {
+            assert!(is_unsegmented(c), "{c}");
+        }
+        for c in ['a', 'é', 'я', 'α', 'ע', 'ب', 'क', '1'] {
+            assert!(!is_unsegmented(c), "{c}");
+        }
+    }
+
+    /// Design 09 §6.5.2: a term is a prefix when its last token has three
+    /// or more characters and is not a stop word, and it carries no
+    /// unsegmented character.
+    #[test]
+    fn a_term_is_a_prefix_only_by_its_last_token() {
+        for term in ["prefer", "memory_file", "title:tabs", "rustfmt::skip", "p50/p950"] {
+            assert!(is_prefix_term(term), "{term}");
+        }
+        for term in ["partner's", "x_ab", "and", "for/the", "用户喜欢", "看一遍commit", "a\"b\"c"] {
+            assert!(!is_prefix_term(term), "{term}");
+        }
+    }
+
+    /// The whole-word query at the cap names only the terms that went out
+    /// as prefixes, in the header columns; the body trigram table only
+    /// terms carrying an unsegmented character.
+    #[test]
+    fn the_cap_query_and_the_body_trigram_query_take_their_own_terms() {
+        let p = parsed("work at 公司 partner's memory_file 用户喜欢");
+        assert_eq!(p.words, vec!["work", "用户喜欢"]);
+        assert_eq!(
+            p.word_match(&p.words).as_deref(),
+            Some("\"work\"* OR \"用户喜欢\" OR \"partner's\" OR \"memory_file\"*")
+        );
+        assert_eq!(
+            p.word_match_head_exact(&p.words).as_deref(),
+            Some("{title aliases tags} : (\"work\" OR \"memory_file\")")
+        );
+        assert_eq!(
+            p.head_trigram_match(&p.words).as_deref(),
+            Some("\"work\" OR \"用户喜欢\" OR \"partner's\" OR \"memory_file\"")
+        );
+        assert_eq!(
+            p.body_trigram_match(&p.words).as_deref(),
+            Some("\"用户喜欢\"")
+        );
+        let p = parsed("用户喜欢");
+        assert_eq!(p.word_match_head_exact(&p.words), None);
+        let p = parsed("presso");
+        assert_eq!(p.body_trigram_match(&p.words), None);
     }
 
     #[test]
@@ -565,40 +658,44 @@ fn upsert_refuses_an_over_size_body_and_bad_timestamps() {
     assert_eq!(index.index_state().unwrap().notes, 1);
 }
 
+/// The header — title, aliases, tags — is held once per note, normalized,
+/// and the chunk holds only its own text (design 09 §6.5.1); a note with no
+/// body still has one empty chunk, so its header is searched.
 #[test]
 fn an_empty_body_still_indexes_title_aliases_and_tags() {
     let index = ready_index();
-    let mut rec = record("n1", "Only a title", "");
-    rec.aliases = vec!["alias one".into()];
+    let mut rec = record("n1", "Only a Title", "");
+    rec.aliases = vec!["Alias  One".into(), "second alias".into()];
     rec.tags = vec!["dev".into()];
     assert_eq!(index.upsert(&rec).unwrap(), 1);
-    let conn = index.lock();
-    let (title, aliases, tags, body, lf, lt): (String, String, String, String, i64, i64) = conn
-        .query_row(
-            "SELECT title, aliases, tags, body, line_from, line_to FROM chunk",
-            [],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
-            },
-        )
-        .unwrap();
-    assert_eq!(
-        (
-            title.as_str(),
-            aliases.as_str(),
-            tags.as_str(),
-            body.as_str()
-        ),
-        ("only a title", "alias one", "dev", "")
-    );
-    assert_eq!((lf, lt), (0, 0));
+    {
+        let conn = index.lock();
+        let (title, aliases, tags): (String, String, String) = conn
+            .query_row("SELECT norm_title, norm_aliases, norm_tags FROM note", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(
+            (title.as_str(), aliases.as_str(), tags.as_str()),
+            ("only a title", "alias one\nsecond alias", "dev")
+        );
+        let (body, lf, lt): (String, i64, i64) = conn
+            .query_row("SELECT body, line_from, line_to FROM chunk", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!((body.as_str(), lf, lt), ("", 0, 0));
+    }
+    for (query, reason) in [
+        ("title", MatchReason::Term),
+        ("second", MatchReason::Term),
+        ("dev", MatchReason::Term),
+        ("itle", MatchReason::Trigram),
+    ] {
+        let r = index.search(&q(query)).unwrap();
+        assert_eq!(ids(&r), vec!["n1"], "{query}");
+        assert!(hit(&r, "n1").matches.contains(&reason), "{query}: {:?}", hit(&r, "n1").matches);
+    }
 }
 
 #[test]
@@ -1164,8 +1261,13 @@ fn search_validates_the_limit_and_the_query() {
     assert_eq!(r.index_state, IndexState::Ready);
 }
 
+/// Design 09 §6.5.2 (LQ17): `prefer` finds `prefers` as the beginning of a
+/// word — the word table's prefix query — reported `prefix` and ranked below
+/// a whole-token hit. A term inside a word of an English body finds nothing
+/// (`presso` in `espresso`, `refer` in `prefers`); in a title it is still a
+/// substring, `trigram`.
 #[test]
-fn a_trigram_only_hit_finds_prefer_inside_prefers_and_ranks_below_a_whole_token_hit() {
+fn a_prefix_hit_finds_prefer_inside_prefers_and_ranks_below_a_whole_token_hit() {
     let index = ready_index();
     index
         .upsert_many(&[
@@ -1176,15 +1278,168 @@ fn a_trigram_only_hit_finds_prefer_inside_prefers_and_ranks_below_a_whole_token_
             ),
             record("sub", "Note B", "User prefers vim for editing.\n"),
             record("none", "Coffee", "User drinks espresso after lunch.\n"),
+            record("head", "Espresso machine", "Descale it every month.\n"),
         ])
         .unwrap();
     let r = index.search(&q("prefer")).unwrap();
     assert_eq!(ids(&r), vec!["whole", "sub"]);
     assert_eq!(hit(&r, "whole").matches, vec![MatchReason::Term]);
-    assert_eq!(hit(&r, "sub").matches, vec![MatchReason::Trigram]);
+    assert_eq!(hit(&r, "sub").matches, vec![MatchReason::Prefix]);
     assert!(hit(&r, "whole").score > hit(&r, "sub").score);
     assert_eq!(r.index_state, IndexState::Ready);
     assert!(!r.partial);
+    // Inside a body word: nothing. Inside a title: a substring.
+    assert_eq!(ids(&index.search(&q("refer")).unwrap()), Vec::<&str>::new());
+    let r = index.search(&q("presso")).unwrap();
+    assert_eq!(ids(&r), vec!["head"]);
+    assert_eq!(hit(&r, "head").matches, vec![MatchReason::Trigram]);
+}
+
+/// Design 09 §6.5.2: a Latin term is matched in a Chinese body only as a
+/// word or a word's beginning — the text is split where Chinese meets Latin,
+/// so a glued word is a whole word — and never inside a word: the note
+/// template's `## Knowledge` heading does not match `now`.
+#[test]
+fn a_latin_term_meets_a_chinese_body_only_as_a_word() {
+    let index = ready_index();
+    index
+        .upsert_many(&[
+            record("heading", "通勤", "# 通勤\n\n## Knowledge\n每天坐地铁上班。\n"),
+            record("glued", "发版", "# 发版\n\n发版前先看一遍commit 记录。\n"),
+            record("latin", "Deploy", "# Deploy\n\nRead the commit log first.\n"),
+        ])
+        .unwrap();
+    assert_eq!(ids(&index.search(&q("now")).unwrap()), Vec::<&str>::new());
+    assert_eq!(ids(&index.search(&q("mmit")).unwrap()), Vec::<&str>::new());
+    let r = index.search(&q("commit")).unwrap();
+    let mut got = ids(&r);
+    got.sort();
+    assert_eq!(got, vec!["glued", "latin"]);
+    assert_eq!(hit(&r, "glued").matches, vec![MatchReason::Term]);
+    assert_eq!(hit(&r, "latin").matches, vec![MatchReason::Term]);
+    // `know` begins `knowledge`: a prefix hit, in any script's note.
+    let r = index.search(&q("know")).unwrap();
+    assert_eq!(ids(&r), vec!["heading"]);
+    assert_eq!(hit(&r, "heading").matches, vec![MatchReason::Prefix]);
+}
+
+/// Design 09 §6.5.2: a term carrying an unsegmented character is never a
+/// prefix; it is a substring wherever it stands in a run, the start
+/// included, and a mixed Latin and Chinese chunk keeps its body in the
+/// trigram table.
+#[test]
+fn a_cjk_term_is_a_substring_wherever_it_stands_in_a_run() {
+    let index = ready_index();
+    index
+        .upsert_many(&[
+            record("style", "回答风格", "# 回答风格\n\n用户喜欢简洁的回答\n"),
+            record(
+                "mixed",
+                "Release notes",
+                "# Release notes\n\nFor every version, 发布说明写成要点 and link the tag.\n",
+            ),
+        ])
+        .unwrap();
+    for (query, id) in [
+        ("用户喜欢", "style"),
+        ("简洁的回答", "style"),
+        ("说明写成", "mixed"),
+        ("发布说明写成要点", "mixed"),
+    ] {
+        let r = index.search(&q(query)).unwrap();
+        assert_eq!(ids(&r), vec![id], "{query}");
+        let want = if query == "发布说明写成要点" {
+            vec![MatchReason::Term]
+        } else {
+            vec![MatchReason::Trigram]
+        };
+        assert_eq!(hit(&r, id).matches, want, "{query}");
+    }
+}
+
+/// Design 09 §6.5.2: a literal's last token is a prefix only when it has
+/// three or more characters — `memory_file` finds `memory_files`, while
+/// `partner's` stays the phrase `partner s` and `x_ab*` (a caller's `*`)
+/// never finds `x_abc`.
+#[test]
+fn a_literal_ends_in_a_prefix_only_from_three_characters() {
+    let index = ready_index();
+    index
+        .upsert_many(&[
+            record("files", "Storage crate", "Read memory_files before you edit a note.\n"),
+            record("birthday", "Birthday", "My partner's birthday is in May.\n"),
+            record("store", "Shopping", "The partner store opens at nine.\n"),
+            record("flag", "Linker flag", "Pass x_abc to the linker.\n"),
+        ])
+        .unwrap();
+    let r = index.search(&q("memory_file")).unwrap();
+    assert_eq!(ids(&r), vec!["files"]);
+    assert_eq!(hit(&r, "files").matches, vec![MatchReason::Phrase]);
+    assert_eq!(ids(&index.search(&q("partner's")).unwrap()), vec!["birthday"]);
+    assert_eq!(ids(&index.search(&q("x_ab*")).unwrap()), Vec::<&str>::new());
+    assert_eq!(ids(&index.search(&q("x_abc")).unwrap()), vec!["flag"]);
+}
+
+/// Design 09 §6.5.2: when the word table's query fills its candidate cap
+/// with notes a prefix found (`work*` → `worker`, `workspace`), the terms
+/// sent as prefixes are searched again as whole words in titles, aliases
+/// and tags — so a note whose one match is the tag `work` is still a
+/// candidate. The trigram header table cannot save it: `work` is a
+/// substring of every `Worker` title.
+#[test]
+fn a_whole_word_in_a_header_is_not_crowded_out_by_a_prefix_that_fills_the_cap() {
+    let index = ready_index();
+    let mut records: Vec<IndexRecord> = (0..CANDIDATE_CAP + 40)
+        .map(|i| {
+            record(
+                &format!("w{i:03}"),
+                &format!("Worker rota {i}"),
+                "The worker rota lives in the shared workspace; workers swap shifts.\n",
+            )
+        })
+        .collect();
+    let mut job = record("job", "Current employer", "Quillpay, since March, as a designer.\n");
+    job.tags = vec!["work".into()];
+    records.push(job);
+    index.rebuild(&records).unwrap();
+    let mut sq = q("where do I work?");
+    sq.limit = MAX_LIMIT;
+    let r = index.search(&sq).unwrap();
+    assert!(r.partial, "the word table's query filled its cap");
+    assert_eq!(ids(&r)[0], "job", "{:?}", ids(&r));
+    assert_eq!(hit(&r, "job").matches, vec![MatchReason::Term]);
+}
+
+/// Every way a chunk row goes takes its full-text rows with it — a cascade
+/// from `note` too — so a reused chunk id never inherits a deleted note's
+/// terms (design 09 §6.5.1: the `AFTER DELETE ON chunk` trigger).
+#[test]
+fn a_note_row_deleted_by_cascade_leaves_no_full_text_row() {
+    let index = ready_index();
+    index
+        .upsert(&record("gone", "Zebra crossing", "斑马线在学校门口 zebra.\n"))
+        .unwrap();
+    {
+        let conn = index.lock();
+        let deleted = conn
+            .execute("DELETE FROM note WHERE id = 'gone'", [])
+            .unwrap();
+        assert_eq!(deleted, 1);
+        for table in ["chunk", "fts_word", "fts_tri_head", "fts_tri"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table} keeps no row of the deleted note");
+        }
+    }
+    // The next chunk takes the freed id and none of the old terms.
+    index
+        .upsert(&record("next", "Garden", "Tomatoes ripen in August.\n"))
+        .unwrap();
+    for query in ["zebra", "斑马线", "crossing"] {
+        assert_eq!(ids(&index.search(&q(query)).unwrap()), Vec::<&str>::new(), "{query}");
+    }
+    assert_eq!(ids(&index.search(&q("tomatoes")).unwrap()), vec!["next"]);
 }
 
 #[test]
@@ -1224,23 +1479,36 @@ fn exact_title_alias_and_fact_key_hits_carry_their_reasons_and_outrank_term_hits
     assert!(hit(&r, "key").matches.contains(&MatchReason::FactKey));
 }
 
+/// The text of the chunk a hit names, read from the note's body — what the
+/// service delivers from the re-read file (design 09 §6.5.1: the index
+/// serves no excerpt).
+fn chunk_text(record: &IndexRecord, ordinal: u32) -> String {
+    let chunks = chunker::chunk_body(&record.body);
+    chunks
+        .iter()
+        .find(|c| c.ordinal == ordinal)
+        .map(|c| c.text.clone())
+        .unwrap_or_default()
+}
+
 #[test]
-fn identifiers_match_as_phrases_and_the_excerpt_keeps_the_original_text() {
+fn identifiers_match_as_phrases_and_the_hit_names_the_chunk_holding_them() {
     let index = ready_index();
+    let env = record(
+        "env",
+        "Scratch store location",
+        "Set `OPENALPACA_HOME_STORE` to an absolute scratch path; the library lives in `openalpaca_storage::memory_files`.\n",
+    );
     index
         .upsert_many(&[
-            record(
-                "env",
-                "Scratch store location",
-                "Set `OPENALPACA_HOME_STORE` to an absolute scratch path; the library lives in `openalpaca_storage::memory_files`.\n",
-            ),
+            env.clone(),
             record("decoy", "Fruit", "Apples are in season in October.\n"),
         ])
         .unwrap();
     let r = index.search(&q("OPENALPACA_HOME_STORE")).unwrap();
     assert_eq!(ids(&r), vec!["env"]);
     assert!(hit(&r, "env").matches.contains(&MatchReason::Phrase));
-    assert!(hit(&r, "env").excerpt.contains("OPENALPACA_HOME_STORE"));
+    assert!(chunk_text(&env, hit(&r, "env").chunk_ordinal).contains("OPENALPACA_HOME_STORE"));
     let r = index
         .search(&q("openalpaca_storage::memory_files"))
         .unwrap();
@@ -1771,7 +2039,7 @@ fn the_hit_names_the_chunk_its_excerpt_came_from() {
     let r = index.search(&q("blue-green deploy script")).unwrap();
     let h = hit(&r, "guide");
     assert_eq!(h.heading.as_deref(), Some("Deployment"));
-    assert!(h.excerpt.contains("blue-green script"));
+    assert!(chunk_text(&rec, h.chunk_ordinal).contains("blue-green script"));
     assert!(h.chunk_ordinal >= 1);
     assert_eq!(h.line_range, (25, 27));
     assert!(h.matches.contains(&MatchReason::Phrase));
@@ -1785,8 +2053,11 @@ fn a_stop_word_query_is_searched_when_nothing_else_remains() {
         .upsert_many(&[
             record("with", "Tabs", "Use tabs and spaces together.\n"),
             record("without", "Garden", "Tomatoes ripen.\n"),
+            record("phone", "Phone", "My phone runs Android 15.\n"),
         ])
         .unwrap();
+    // A stop word routed alone is matched exactly, never as a prefix
+    // (design 09 §6.5.2): `and` does not find `Android`.
     assert_eq!(ids(&index.search(&q("and")).unwrap()), vec!["with"]);
     assert_eq!(ids(&index.search(&q("the tabs")).unwrap()), vec!["with"]);
 }
@@ -1931,24 +2202,82 @@ fn reconcile_propagates_the_scanner_error_and_records_no_scan() {
 
 /// The comparable part of a hit: everything but the float score, which is
 /// compared separately to a tolerance.
-fn shape(
-    h: &SearchHit,
-) -> (
+/// A hit's id, reasons, chunk ordinal, heading, line range, superseded-by
+/// list and conflict flag.
+type HitShape = (
     String,
     Vec<MatchReason>,
-    String,
+    u32,
+    Option<String>,
     (u32, u32),
     Vec<String>,
     bool,
-) {
+);
+
+fn shape(h: &SearchHit) -> HitShape {
     (
         h.id.clone(),
         h.matches.clone(),
-        h.excerpt.clone(),
+        h.chunk_ordinal,
+        h.heading.clone(),
         h.line_range,
         h.superseded_by.clone(),
         h.conflict,
     )
+}
+
+/// What each full-text table holds, term by term — `fts5vocab`'s
+/// `instance` rows (term, column, offset), each keyed by the note id and
+/// chunk ordinal of its rowid — sorted. Contentless tables hold no text, so
+/// comparing their row counts would pass with text written into the wrong
+/// column; this compares what they index (design 09 §6.5.7).
+pub(super) fn fts_contents(conn: &rusqlite::Connection) -> Vec<String> {
+    let mut out = Vec::new();
+    for table in ["fts_word", "fts_tri_head", "fts_tri"] {
+        conn.execute_batch(&format!(
+            "DROP TABLE IF EXISTS temp.vocab_{table};
+             CREATE VIRTUAL TABLE temp.vocab_{table} USING fts5vocab(main, {table}, instance);"
+        ))
+        .unwrap();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT n.partition_key, n.id, c.ordinal, v.term, v.col, v.offset
+                 FROM temp.vocab_{table} v
+                 JOIN chunk c ON c.id = v.doc
+                 JOIN note n ON n.rowid = c.note_rowid"
+            ))
+            .unwrap();
+        let mut rows: Vec<String> = stmt
+            .query_map([], |r| {
+                Ok(format!(
+                    "{table} {} {} {} {:?} {} {}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let orphans: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM temp.vocab_{table} v
+                     WHERE NOT EXISTS (SELECT 1 FROM chunk c WHERE c.id = v.doc)"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0, "{table} holds no row of a deleted chunk");
+        rows.sort();
+        out.push(format!("-- {table}: {} instances", rows.len()));
+        out.extend(rows);
+    }
+    out
 }
 
 #[test]
@@ -2013,18 +2342,19 @@ fn an_index_built_incrementally_equals_one_rebuilt_from_the_final_records() {
         (sx.notes, sx.chunks, sx.partitions),
         (sy.notes, sy.chunks, sy.partitions)
     );
-    // No orphaned FTS rows on either side.
-    for index in [&incremental, &rebuilt] {
-        let conn = index.lock();
-        let (w, t, c): (i64, i64, i64) = conn
-            .query_row(
-                "SELECT (SELECT COUNT(*) FROM fts_word), (SELECT COUNT(*) FROM fts_tri), (SELECT COUNT(*) FROM chunk)",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!((w, t), (c, c));
-    }
+    // The full-text tables index the same terms in the same columns, for
+    // the same chunks, and no orphaned row is left on either side.
+    let x = fts_contents(&incremental.lock());
+    let y = fts_contents(&rebuilt.lock());
+    assert_eq!(x, y);
+    assert!(
+        x.iter().any(|l| l.starts_with("fts_tri ")),
+        "the Chinese note's body is in the trigram table"
+    );
+    assert!(
+        !x.iter().any(|l| l.starts_with("fts_tri ") && l.contains(" c ")),
+        "an English body is not"
+    );
 }
 
 /// Design 09 §3.5 (LR18): the pending suggestions are read from the catalog
@@ -2269,7 +2599,7 @@ fn an_index_at_schema_2_is_rebuilt() {
     let index = MemoryIndex::open(&path).unwrap();
     let report = index.index_state().unwrap();
     assert_eq!(report.state, IndexState::Rebuilding);
-    assert_eq!(report.schema_version, 3);
+    assert_eq!(report.schema_version, SCHEMA_VERSION);
     assert_eq!(report.notes, 0, "nothing of the v2 cache is served");
     let conn = index.lock();
     for column in ["date", "created_at", "observed_at"] {
@@ -2281,6 +2611,59 @@ fn an_index_at_schema_2_is_rebuilt() {
             )
             .unwrap();
         assert!(present, "note.{column}");
+    }
+}
+
+/// Schema 4 (design 09 §6.5, LQ17) narrows the trigram index and keeps one
+/// copy of the text: a cache written at schema 3 is recreated on open —
+/// nothing of it is served — and the fresh one has the new tables: the
+/// header trigram table, `chunk` without its copies, and three contentless
+/// full-text tables.
+#[test]
+fn an_index_at_schema_3_is_rebuilt_with_the_revised_tables() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(INDEX_FILE_NAME);
+    {
+        let index = MemoryIndex::open(&path).unwrap();
+        index.rebuild(&[record("n1", "One", "one")]).unwrap();
+        let conn = index.lock();
+        conn.execute(
+            "UPDATE meta SET value = '3' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    }
+    let index = MemoryIndex::open(&path).unwrap();
+    let report = index.index_state().unwrap();
+    assert_eq!(report.state, IndexState::Rebuilding);
+    assert_eq!(report.schema_version, 4);
+    assert_eq!(report.notes, 0, "nothing of the v3 cache is served");
+    let conn = index.lock();
+    let column = |table: &str, column: &str| -> bool {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+            [table, column],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    for gone in ["excerpt", "title", "aliases", "tags"] {
+        assert!(!column("chunk", gone), "chunk.{gone} is gone");
+    }
+    assert!(column("chunk", "body"));
+    assert!(column("note", "norm_aliases") && column("note", "norm_tags"));
+    for table in ["fts_word", "fts_tri_head", "fts_tri"] {
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = ?1",
+                [table],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.contains("content=''") && sql.contains("contentless_delete=1"),
+            "{table} is contentless: {sql}"
+        );
     }
 }
 
@@ -2496,10 +2879,12 @@ fn a_rebuild_starts_from_a_new_file() {
 }
 
 /// The file scan a search falls back to while the index is rebuilt answers
-/// with the index's own filters: the same notes, for word, substring,
-/// literal, short CJK and exact-title queries, on both filter sets and with
-/// the historical, kind, validity and date switches. It says `rebuilding`,
-/// and `partial` when the caller left notes out.
+/// with the index's own filters and evidence: the same notes and reasons,
+/// for word, word-beginning, header-substring, glued-word, CJK, literal,
+/// short CJK and exact-title queries — and nothing for a term inside a body
+/// word — on both filter sets and with the historical, kind, validity and
+/// date switches (design 09 §6.5.3). It says `rebuilding`, and `partial`
+/// when the caller left notes out.
 #[test]
 fn the_file_scan_finds_what_the_index_finds() {
     let at = |s: &str| {
@@ -2520,6 +2905,8 @@ fn the_file_scan_finds_what_the_index_finds() {
         record("ended", "Ended plan", "Editing sprint that is over.\n"),
         record("soon", "Upcoming plan", "Editing sprint next month.\n"),
         record("other", "Other partition", "Editing elsewhere.\n"),
+        record("glued", "发版 checklist", "发版前先看一遍commit 记录。\n## Knowledge\n周五不发版。\n"),
+        record("espresso", "Espresso machine", "Descale the espresso machine monthly; `memory_files` too.\n"),
     ];
     records[3].effective_status = EffectiveStatus::Superseded;
     records[4].same_key_loser = true;
@@ -2545,6 +2932,13 @@ fn the_file_scan_finds_what_the_index_finds() {
         "sprint",
         "green tea",
         "nothing matches this",
+        "commit",
+        "now",
+        "presso",
+        "check",
+        "发版前",
+        "memory_file",
+        "machine descale",
     ] {
         for mode in [SearchMode::Explicit, SearchMode::Automatic] {
             let mut q = SearchQuery::new(text, keys.clone());
@@ -2585,12 +2979,18 @@ fn the_file_scan_finds_what_the_index_finds() {
         }
     }
     assert!(found > 60, "the queries exercise the filters ({found} hits)");
-    // The prefix of a word is found as a substring, below whole tokens.
+    // The beginning of a word is found as a prefix, below whole tokens; a
+    // term inside a body word is not found, in a title it is.
     let q = SearchQuery::new("prefer", keys.clone());
     let hits = index.scan_search(&records, &q, true).unwrap();
     assert_eq!(ids(&hits), ["vim"]);
-    assert_eq!(hits.hits[0].matches, [MatchReason::Trigram]);
+    assert_eq!(hits.hits[0].matches, [MatchReason::Prefix]);
     assert!(hits.partial, "a caller's bound is reported");
+    for (text, want) in [("now", vec![]), ("presso", vec!["espresso"]), ("check", vec!["glued"])] {
+        let q = SearchQuery::new(text, keys.clone());
+        let from_files = index.scan_search(&records, &q, false).unwrap();
+        assert_eq!(ids(&from_files), want, "{text}");
+    }
 
     // Pinned notes, as the index lists them.
     records[0].pinned = true;
@@ -2617,13 +3017,18 @@ fn wal_bytes(path: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Bulky notes, every one carrying a Chinese sentence, so all three
+/// full-text tables take rows (design 09 §6.5.1).
 fn bulky(prefix: &str, n: usize, partition: &str) -> Vec<IndexRecord> {
     (0..n)
         .map(|i| {
             let mut r = record(
                 &format!("{prefix}{i}"),
                 &format!("Bulky {prefix} {i}"),
-                &format!("{} {i}\n", "lorem ipsum dolor sit amet ".repeat(60)),
+                &format!(
+                    "{} {i}\n\n用户每天早上喝一杯咖啡 {i}\n",
+                    "lorem ipsum dolor sit amet ".repeat(60)
+                ),
             );
             r.partition_key = partition.to_string();
             r.relative_path = format!("notes/{prefix}{i}--bulky.md");
@@ -2649,9 +3054,9 @@ fn a_full_replace_leaves_the_wal_truncated() {
     assert_eq!(index.index_state().unwrap().notes, 300);
 }
 
-/// How many segments each full-text index holds, `(fts_word, fts_tri)`:
-/// one after a rebuild's `optimize`, more after later writes.
-fn fts_segments(index: &MemoryIndex) -> (i64, i64) {
+/// How many segments each full-text index holds, `(fts_word, fts_tri_head,
+/// fts_tri)`: one after a rebuild's `optimize`, more after later writes.
+fn fts_segments(index: &MemoryIndex) -> (i64, i64, i64) {
     let conn = index.lock();
     let count = |table: &str| -> i64 {
         conn.query_row(
@@ -2661,7 +3066,7 @@ fn fts_segments(index: &MemoryIndex) -> (i64, i64) {
         )
         .unwrap()
     };
-    (count("fts_word"), count("fts_tri"))
+    (count("fts_word"), count("fts_tri_head"), count("fts_tri"))
 }
 
 /// Maintenance merges the FTS segments writes left, folds the WAL back and
@@ -2685,24 +3090,33 @@ fn maintenance_merges_truncates_and_reports_the_growth() {
         }
     }
     index.upsert_many(&bulky("b", 60, "home-p")).unwrap();
+    // Contentless-delete tables fold a replacement's delete into the old
+    // segment as a tombstone and merge a segment most of whose rows are
+    // gone, so the replacements alone can leave one segment; notes added in
+    // their own transactions leave one new segment each.
+    for batch in 0..3 {
+        index
+            .upsert_many(&bulky(&format!("c{batch}-"), 5, "home-p"))
+            .unwrap();
+    }
     assert!(index.writes() > writes, "writes are counted");
     assert!(wal_bytes(&path) > 0);
-    let (word, tri) = fts_segments(&index);
+    let (word, head, tri) = fts_segments(&index);
     assert!(
-        word > 1 && tri > 1,
-        "the writes left segments to merge: {word}, {tri}"
+        word > 1 && head > 1 && tri > 1,
+        "the writes left segments to merge: {word}, {head}, {tri}"
     );
     let after = index.maintain(std::time::Duration::from_secs(5)).unwrap();
     assert!(after.merge_steps > 0, "the merge did work: {after:?}");
     assert_eq!(
         fts_segments(&index),
-        (1, 1),
+        (1, 1, 1),
         "each full-text index is one segment again"
     );
     assert_eq!(wal_bytes(&path), 0, "the WAL is truncated");
     assert!(after.bytes > rebuilt.rebuilt_bytes, "{after:?}");
     assert_eq!(after.rebuilt_bytes, rebuilt.rebuilt_bytes);
-    assert_eq!(index.index_state().unwrap().notes, 80);
+    assert_eq!(index.index_state().unwrap().notes, 95);
     // A search still finds what the writes left.
     let found = index.search(&q("round 5")).unwrap();
     assert!(!found.hits.is_empty());
