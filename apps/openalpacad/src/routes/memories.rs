@@ -1079,16 +1079,19 @@ fn with_etag(mut response: Response, revision: &str) -> Response {
     response
 }
 
-/// The service's refusal as the §7a status and code. A revision conflict
-/// carries the current revision in its message and as `ETag`, so a client
-/// can re-read or retry without a second request; what the client kept and
-/// what it should do next are the client's words, not the daemon's.
-/// `503 MEMORY_INDEX_REBUILDING`'s message: the timeline waits for the
-/// rebuild, and searching and reading notes do not.
+/// `503 MEMORY_INDEX_REBUILDING`'s message, for a person: the timeline is
+/// refused until the rebuild ends; searching and reading notes are not.
 const INDEX_REBUILDING_MESSAGE: &str = "the memory search index is being rebuilt, so the \
      timeline cannot be read now; try again in a minute. Searching and reading notes work \
      meanwhile.";
 
+/// The service's refusal as the §7a status and code. A revision conflict
+/// carries the current revision in its message and as `ETag`, so a client
+/// can re-read or retry without a second request; what the client kept of
+/// its edit and what it should do next are the client's words, not the
+/// daemon's. The one refusal whose message names a next step is
+/// `503 MEMORY_INDEX_REBUILDING` ([`INDEX_REBUILDING_MESSAGE`]), which no
+/// client state decides.
 fn refusal(e: MemoryError) -> Response {
     match e {
         MemoryError::InvalidInput(m) => invalid(m).into_response(),
