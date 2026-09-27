@@ -670,6 +670,109 @@ fn incremental_passes_after_restarts_leave_the_rows_a_rebuild_writes() {
     }
 }
 
+/// The L8 product slice's P5 (the scale slice's round-3 test review): what
+/// only the fingerprint's path and file stat see is caught by the
+/// incremental path exactly as a whole rebuild catches it — a note renamed
+/// by hand to another slug with its bytes kept (only `relative_path`
+/// differs), a same-size edit in place, and a rewrite of the same bytes that
+/// moves the file's stat (only the stat differs) — before a restart and
+/// after one. At each step a search's stat scan and a tick run, and the
+/// index holds what a separate cache rebuilt from the same files holds; the
+/// renamed note is found, and the rewritten one is `stale` once, then
+/// `verified`.
+#[test]
+fn a_hand_rename_and_a_same_size_rewrite_are_caught_as_a_rebuild_catches_them() {
+    let h = Harness::new();
+    let path = h.root.path().join("cache").join("incremental.sqlite");
+    let rebuilt = h.root.path().join("cache").join("rebuilt.sqlite");
+    let user = h.user(ALICE, None);
+    let tool = h.tool(ALICE, None);
+    file_service(&h, &path).rebuild_index().unwrap();
+    let mut service = file_service(&h, &path);
+    let notes: Vec<StoreOutput> = (0..4)
+        .map(|i| {
+            service
+                .store(
+                    &user,
+                    StoreInput {
+                        title: format!("Quince {i}"),
+                        body: format!("# Quince {i}\n\nThe quince tree number {i} fruits.\n"),
+                        kind: Some(NoteKind::Fact),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+        })
+        .collect();
+    let search = |service: &MemoryService, query: &str| {
+        service
+            .search(
+                &tool,
+                SearchInput {
+                    query: query.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .results
+    };
+    let as_rebuilt = |service: &MemoryService, what: &str| {
+        search(service, "quince");
+        service.reconcile_owner(ALICE).unwrap();
+        let reference = file_service(&h, &rebuilt);
+        reference.rebuild_index().unwrap();
+        drop(reference);
+        assert_eq!(
+            index_contents(&path),
+            index_contents(&rebuilt),
+            "{what}: the incremental index is the rebuilt one"
+        );
+    };
+    let rename = |id: NoteId, slug: &str| {
+        let file = file_of(&h, &user.owner_key, id);
+        std::fs::rename(&file, file.with_file_name(format!("{id}--{slug}.md"))).unwrap();
+    };
+    as_rebuilt(&service, "at the start");
+
+    rename(notes[0].id, "renamed-by-hand");
+    as_rebuilt(&service, "after a hand rename");
+    let found = search(&service, "quince number 0");
+    let hit = found.iter().find(|r| r.id == notes[0].id).expect("found");
+    assert!(hit.path.ends_with("--renamed-by-hand.md"), "{}", hit.path);
+
+    let file = file_of(&h, &user.owner_key, notes[1].id);
+    let text = std::fs::read_to_string(&file).unwrap();
+    let edited = text.replace("fruits", "blooms");
+    assert_eq!(edited.len(), text.len());
+    std::fs::write(&file, edited).unwrap();
+    as_rebuilt(&service, "after a same-size edit in place");
+
+    let file = file_of(&h, &user.owner_key, notes[2].id);
+    let bytes = std::fs::read(&file).unwrap();
+    std::fs::write(&file, &bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000))
+        .unwrap();
+    let freshness = |service: &MemoryService| {
+        search(service, "quince number 2")
+            .into_iter()
+            .find(|r| r.id == notes[2].id)
+            .map(|r| r.freshness)
+    };
+    assert_eq!(freshness(&service), Some(Freshness::Stale));
+    assert_eq!(freshness(&service), Some(Freshness::Verified));
+    as_rebuilt(&service, "after a rewrite of the same bytes");
+
+    drop(service);
+    service = file_service(&h, &path);
+    rename(notes[3].id, "renamed-after-a-restart");
+    as_rebuilt(&service, "after a restart and a hand rename");
+    assert_eq!(freshness(&service), Some(Freshness::Verified));
+}
+
 // ============================================================================
 // S3 — a forgotten note stays forgotten when its file comes back (O3)
 // ============================================================================
