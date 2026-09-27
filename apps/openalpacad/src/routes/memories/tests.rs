@@ -1141,6 +1141,10 @@ impl Fixture {
                         "# Commute\n\n## Knowledge\n{knowledge}\n\n## Evidence and limits\nFrom what you said on 2026-09-24. Replaces “Commute” (saved by you): The user said so.\n"
                     ),
                     kind: Some(NoteKind::Fact),
+                    // As learning stamps every note it writes (design 09
+                    // §2.5; LQ14's datum, which tells its suggestions from
+                    // the chat model's, whose reason is not read).
+                    observed_at: Some(chrono::Utc::now()),
                     supersedes: Some((target, target_revision.to_string())),
                     replace_policy: ReplacePolicy::SuggestUnlessLearned,
                     provenance: Some(ExtractionProvenance::UserWords),
