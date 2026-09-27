@@ -1,6 +1,6 @@
 # Learning v2 — design and implementation plan
 
-**Status: rev 3.36 (2026-09-27): implemented; the evaluation (L8) is running, not finished.** The owner answered LQ1–LQ4 and approved this design (§10); LQ5–LQ10, raised while building it, are pending (§10) and none is adopted; LQ11–LQ17, raised by the L8 evaluation, were taken on 2026-09-26 (§10), and the **L8 product slice** `6120812b..79f00f49` and `30689e20` builds LQ11, LQ13, LQ14 and LQ16 (rev 3.33), with its repair rounds 1 `f4a1e5e6..76127cbf` (rev 3.34) and 2 `04df5bce..1a6a69b8` (rev 3.35); LQ17's index-layout revision is §6.5 (rev 3.36), designed and measured on a prototype, not yet built. Every slice is on `feat/markdown-memory`, unpushed, and each names the revision-log entries that record its deviations: **L1** `48f50793..f5cfc80b`, review fixes `21a8954f..f00bbc9a` (revs 3.1, 3.2); **L2** `33bf9226..fa9f4f1b`, review fixes `388ed329..cfb05abf`, one commit per finding (revs 3.3, 3.4); **L3** `9e533a66..c1794c42`, review fixes `5774e8cc..9b3dff27` and the re-review's `3f356e56` (revs 3.5, 3.6); **L4** `63b29ba9..31af54c4`, review fixes `d2f82075..d347c246` (rev 3.7); **L5** `5942c12f..e64151f2` (rev 3.8); **L6** `9ade5905..f35339de`, review fixes `57a7065d..77fdcf8f` (rev 3.9); **L7** `6b1f1d5d..aabbbd97`, review fixes `bfa78da3..fcc825f2` and the re-review's `2f685ca3` (revs 3.10–3.12); **L9** (§12, MD-13) `15318ddd..03c253d4` (rev 3.13); **L10a** (§13.1, MD-14) `b71d6e9d..95978e31`, review fixes `b7b87266`, `a90202ed` (rev 3.14); **L10b** (§13.2, MD-15) `19f46c61..9df70cf7`, review fixes `ac9d6bd9..3db79ce1` (revs 3.15, 3.16); **L10c** (§13.3, MD-16) `52668aca..fc5f5cce`, review fixes `5da63a2e..fa09dc0c` (revs 3.17–3.19); **L8-prep** (§13.4) `bee1bd27..50cf878d` (rev 3.20); the §7.1 second-session corpus review `7b240b27` (rev 3.21); and the **residue slice** R1–R8 `4f2eb5e5..da53e1a2` (rev 3.22; rev 3.23 corrects two lines of it). L8 — the runs and `10-learning-evaluation.md` — is running from a pinned worktree. Rev 2 applies a verified review of rev 1 (29 findings, all accepted, two of them in part; the revision log lists each). The design is written for the owner decisions MD-10, MD-11 and MD-12 and the adopted scope in [03](03-design.md) §0 (rev 5), and for MD-13…MD-16 (§12, §13); it was first written for the recommended answers to LQ1–LQ4, and rev 3 applied the owner's answers, which differ on LQ1.**
+**Status: rev 3.37 (2026-09-27): implemented; the evaluation (L8) is running, not finished.** The owner answered LQ1–LQ4 and approved this design (§10); LQ5–LQ10, raised while building it, are pending (§10) and none is adopted; LQ11–LQ17, raised by the L8 evaluation, were taken on 2026-09-26 (§10), and the **L8 product slice** `6120812b..79f00f49` and `30689e20` builds LQ11, LQ13, LQ14 and LQ16 (rev 3.33), with its repair rounds 1 `f4a1e5e6..76127cbf` (rev 3.34) and 2 `04df5bce..1a6a69b8` (rev 3.35); LQ17's index-layout revision is §6.5 (rev 3.36, revised by rev 3.37 after its review), designed and measured on a prototype, not yet built; it loses one row on one of the eight proxy totals, which awaits the lead's ruling (§6.5.5). Every slice is on `feat/markdown-memory`, unpushed, and each names the revision-log entries that record its deviations: **L1** `48f50793..f5cfc80b`, review fixes `21a8954f..f00bbc9a` (revs 3.1, 3.2); **L2** `33bf9226..fa9f4f1b`, review fixes `388ed329..cfb05abf`, one commit per finding (revs 3.3, 3.4); **L3** `9e533a66..c1794c42`, review fixes `5774e8cc..9b3dff27` and the re-review's `3f356e56` (revs 3.5, 3.6); **L4** `63b29ba9..31af54c4`, review fixes `d2f82075..d347c246` (rev 3.7); **L5** `5942c12f..e64151f2` (rev 3.8); **L6** `9ade5905..f35339de`, review fixes `57a7065d..77fdcf8f` (rev 3.9); **L7** `6b1f1d5d..aabbbd97`, review fixes `bfa78da3..fcc825f2` and the re-review's `2f685ca3` (revs 3.10–3.12); **L9** (§12, MD-13) `15318ddd..03c253d4` (rev 3.13); **L10a** (§13.1, MD-14) `b71d6e9d..95978e31`, review fixes `b7b87266`, `a90202ed` (rev 3.14); **L10b** (§13.2, MD-15) `19f46c61..9df70cf7`, review fixes `ac9d6bd9..3db79ce1` (revs 3.15, 3.16); **L10c** (§13.3, MD-16) `52668aca..fc5f5cce`, review fixes `5da63a2e..fa09dc0c` (revs 3.17–3.19); **L8-prep** (§13.4) `bee1bd27..50cf878d` (rev 3.20); the §7.1 second-session corpus review `7b240b27` (rev 3.21); and the **residue slice** R1–R8 `4f2eb5e5..da53e1a2` (rev 3.22; rev 3.23 corrects two lines of it). L8 — the runs and `10-learning-evaluation.md` — is running from a pinned worktree. Rev 2 applies a verified review of rev 1 (29 findings, all accepted, two of them in part; the revision log lists each). The design is written for the owner decisions MD-10, MD-11 and MD-12 and the adopted scope in [03](03-design.md) §0 (rev 5), and for MD-13…MD-16 (§12, §13); it was first written for the recommended answers to LQ1–LQ4, and rev 3 applied the owner's answers, which differ on LQ1.**
 
 - **Source:** `feat/markdown-memory` at `55a1dc4c`. That is design rev 5 and plan rev 4.3, with slices 0–3 implemented. Every claim about current code cites `path:line` at that commit.
 - **Where the facts come from:** three read-only surveys, of the learning pipeline, of the surfaces MD-11 and MD-12 touch, and of the six smaller items. They live in the session scratchpad and are not tracked. Everything this document relies on is restated here with its citation, so it stands without them.
@@ -824,13 +824,31 @@ Six shipped templates grant `memory_read`: `lead_agent`, `general_agent`, `code_
 
 > **Owner, 2026-09-26 (LQ17):** "Write the layout revision." §6.4's rule fired in L8. At 100K notes of the average mix, index search + verification is p95 150 ms and the cache 1,065 MiB, of which `fts_tri_data` is 534 MiB and `chunk` 354 MiB. The profile puts 57 % of search in the trigram leg and 42 % of FTS time in `pread`, because the file is four times the 256 MiB mmap window (the session scratchpad's `memeval/l8/bench/scale/analysis.md` and its sceptic review).
 
-This section is the revision. It narrows the trigram index to titles, aliases, tags and the text of scripts `unicode61` cannot split, adds a `unicode61` prefix query, keeps one copy of the text, and adds `prefix` to `MatchReason`. It amends 03 §5 step 4, §7a's `MatchReason` and §7c Q9 and Q12 (03 rev 7.7). Nothing outside the disposable cache changes shape: no migration, no route, and no wire field beyond the one enum value.
+This section is the revision. It does five things:
+- it narrows the trigram index to titles, aliases, tags and the text of scripts `unicode61` cannot split;
+- it queries the word table for the beginnings of words;
+- it lets the word table see a script boundary as a word boundary;
+- it keeps one copy of the text;
+- it adds `prefix` to `MatchReason`.
 
-**Where the numbers come from.** A prototype of this layout was built in a scratch copy of `f6f40feb`, outside the repository, and measured against the same commit on the same machine (the M5 Max). Two measures were used:
-- the index benches of §6.4;
-- the **retrieval proxy**, the evaluation harness's dry run (`scripts/eval/memory/README.md`, *A dry run with no model*): system D with no model, no judge and outbound networking denied, which measures what the per-turn recall alone delivers, over the 470 held-out and 150 tuning questions in both recall modes.
+It amends 03 §5 step 4, §7a's `MatchReason` and §7c Q9 and Q12 (03 revs 7.7 and 7.8). Nothing outside the disposable cache changes shape: no migration, no route, and no wire field beyond the one enum value.
 
-The build, phase 2 of the LQ17 slice, measures everything again on the real code. The notes, the reports and the prototype are in the session scratchpad (`memeval/l8/layout/`).
+*Rev 3.37 answers a review of rev 3.36, and the revision log takes the findings one by one. What changed:*
+- *A Latin term no longer matches inside a Latin word of a Chinese body (§6.5.2).*
+- *When the word table's query fills its cap, the terms it sent as prefixes are searched again as whole words in titles, aliases and tags (§6.5.2).*
+- *A term carrying an unsegmented character, or a stop word, is never a prefix.*
+- *A trigger keeps the FTS rows in step with `chunk` (§6.5.1).*
+- *The measured case now includes 30,000 distractors, a dense bench mix, the learning lookup and L8's coverage search (§6.5.5).*
+- *One of the eight proxy totals loses a row. Rev 3.36 counted that as no loss; it is now stated (§6.5.5) for the lead to rule on.*
+
+**Where the numbers come from.** A prototype of this layout was built in a scratch copy of `f6f40feb`, outside the repository, and measured against the same commit on the same machine (the M5 Max). Its final form is the variant the notes call E6; rev 3.36 measured E2. Five measures were used:
+- the index benches of §6.4, with a 30K run and a *dense* mix added;
+- the **retrieval proxy**, the evaluation harness's dry run (`scripts/eval/memory/README.md`, *A dry run with no model*): system D with no model, no judge and outbound networking denied, which measures what the per-turn recall alone delivers, over the 470 held-out and 150 tuning questions in both recall modes;
+- the **scale proxy**: the same 620 questions searched at the index level, as the per-turn recall searches them (automatic mode, its 20 candidates), over the 83 gold notes as the proxy seeds them. The notes are searched alone, then pooled in one partition with 30,000 notes of the bench's average mix, then with those and the 319 notes two L8 runs learned (`store-L`, `store-L-episodes`). Each relied-on note's rank is read off the whole ranking;
+- the **learning lookup** (`learning_view`'s search), without a model;
+- **L8's coverage search**, without a model.
+
+The build, phase 2 of the LQ17 slice, measures everything again on the real code. The notes, the reports, the harness and the prototype are in the session scratchpad (`memeval/l8/layout/`: `design.md`, `proto/`, `scale/`, `work/`).
 
 #### 6.5.1 What each table holds (index schema 4)
 
@@ -838,16 +856,29 @@ The build, phase 2 of the LQ17 slice, measures everything again on the real code
 |---|---|---|
 | `note` | the catalog row, plus `norm_aliases` and `norm_tags` (the normalized aliases and tags, one per line) | the header text is kept once per note, for the ranker and the short-term pass |
 | `chunk` | id, note, partition, ordinal, heading, line span, and `body`: the chunk's text, normalized (`query::normalize`) | `excerpt` (the text as written) and the per-chunk `title`, `aliases` and `tags` go; `body` is the one copy of the text in the cache |
-| `fts_word` | `unicode61 remove_diacritics 2` over title, aliases, tags and body, for every chunk | contentless |
+| `fts_word` | `unicode61 remove_diacritics 2` over title, aliases, tags and body, for every chunk, each split at script boundaries | contentless; the text is split |
 | `fts_tri_head` (new) | `trigram` over title, aliases and tags, for every chunk | the header's trigram index |
 | `fts_tri` | `trigram` over the body, only for a chunk whose text carries a character of an **unsegmented script** | was every chunk's four columns |
 
-- **Unsegmented scripts.** These are the scripts `unicode61` cannot split into words: CJK, as `query::is_cjk` already defines it (`memory_index/query.rs:156`), plus Thai, Lao, Myanmar and Khmer. `unicode61` reads a run of any of them as one token, so a word inside the run is found only as a substring. Latin, Cyrillic, Greek and the other space-separated scripts are split into words, and the word table serves them.
+- **Unsegmented scripts.** These are the scripts `unicode61` cannot split into words: CJK, as `query::is_cjk` already defines it (`memory_index/query.rs:156`), plus Thai, Lao, Myanmar and Khmer.
+  - `unicode61` reads a run of any of them as one token, so a word inside the run is found only as a substring.
+  - Latin, Cyrillic, Greek and the other space-separated scripts are split into words, and the word table serves them.
+  - `query::is_unsegmented` is the one predicate. The upsert, the query builder, the ranker and the file scan all call it, and it decides what `fts_tri` and the split hold. A change to its ranges is therefore a change to the index's contents (§6.5.7).
+- **Script boundaries.** `unicode61` reads a run of letters and digits as one token whatever its scripts, so in `和commit` the word `commit` is not a token at all.
+  - Where an unsegmented character meets a letter or digit of another script, `query::split_scripts` puts a space. `fts_word` indexes `和 commit`, and the word table's phrases are split the same way, as `normalize` already is on both sides.
+  - The ranker and the file scan read the same tokens (`query::tokens_split`, slices of the text cut at those boundaries).
+  - A CJK run stays one token; `2026年7月` becomes `2026 年 7 月`.
+  - This is not rare. In the L8 stores, 7 of the 114 notes carrying Chinese have Latin words glued to it (29 occurrences: `在GUI`, `和commit`, `用bullet`).
+  - `fts_tri` holds the text unsplit, so a substring across the boundary (`在gui`) is still found there.
 - **Contentless.** All three FTS tables are `content='', contentless_delete=1` (SQLite 3.43 or later; the bundled library is 3.51.1).
   - Today both tables are external-content over `chunk`, with insert and delete triggers (`memory_index/mod.rs:463-484`). Deleting a row needs the four text columns in `chunk`.
-  - Instead, the upsert writes each chunk's FTS rows itself — two, or three for an unsegmented chunk — using the chunk's id as the rowid. A delete removes them by rowid before the chunk rows go.
+  - Instead, the upsert writes each chunk's FTS rows itself — two, or three for an unsegmented chunk — using the chunk's id as the rowid.
+  - One `AFTER DELETE ON chunk` trigger removes them: `DELETE FROM fts_word WHERE rowid = old.id`, and the same for the other two tables. `contentless_delete=1` allows it; this was verified on SQLite 3.51, through a cascade too.
+  - So every way a chunk row goes takes its FTS rows with it: the explicit deletes, and a cascade from `note` alike (`chunk.note_rowid … ON DELETE CASCADE` under `PRAGMA foreign_keys = ON`, `mod.rs:449`, `:1599`).
+  - That matters because chunk ids are reused (`INTEGER PRIMARY KEY` without `AUTOINCREMENT`): an orphaned FTS row would attach to the next chunk that takes its id.
+  - No path relies on the cascade today, since every delete removes the chunk rows first (`mod.rs:1544-1585`). The trigger keeps it that way by construction. Rev 3.36 deleted the FTS rows by hand before each of those deletes.
   - BM25 and the `rank` configuration work on contentless tables. `highlight()` and `snippet()` would not, and nothing calls them.
-- **The one copy is the normalized text.** The ranker compares every candidate chunk's text with the query terms (`ChunkText`, `memory_index/search.rs:727`). The one- and two-character pass scans up to 4,096 chunks' text (`search.rs:514`). Both work on normalized text.
+- **The one copy is the normalized text.** The ranker compares every candidate chunk's text with the query terms (`ChunkText`, `memory_index/search.rs:726`). The one- and two-character pass scans up to 4,096 chunks' text (`search.rs:514`). Both work on normalized text.
   - Keeping the text as written instead would mean normalizing every candidate chunk per query (up to 256 per FTS query) and up to 4,096 in the short-term pass.
   - Keeping no text would move ranking after verification. The index would then read files (§7c Q11): one per candidate note, hundreds per search, not only the ≤ `limit` notes the service verifies now.
   - The text as written belongs to the file. The service already takes an excerpt from the re-read file at the hit's chunk ordinal and never reads the index's copy (`memory/service/recall.rs:576`). So `SearchHit.excerpt` (`search.rs:173`) goes, and nothing on the request path changes.
@@ -862,43 +893,84 @@ The query parser is unchanged (`query.rs:174`): words, literals and short terms,
 
 | Term | `fts_word` | `fts_tri_head` | `fts_tri` (unsegmented bodies) |
 |---|---|---|---|
-| a word of ≥ 3 characters | as a **prefix query**, `"w"*`: the whole token and every token it begins | as a phrase (a substring) | as a phrase; its BM25 counts in ranking only when the word carries an unsegmented character |
-| a literal (an identifier or a path) | as a phrase; its last token is a prefix when that token has ≥ 3 characters | as a phrase | as a phrase; ranked, as for a word, only when it carries an unsegmented character |
+| a word of ≥ 3 characters | as a **prefix query**, `"w"*`: the whole token and every token it begins. A word that carries an unsegmented character, or is a stop word, goes exactly, `"w"` | as a phrase (a substring) | only a word that carries an unsegmented character, as a phrase, ranked |
+| a literal (an identifier or a path) | as a phrase; its last token is a prefix under the word's rule, when that token has ≥ 3 characters | as a phrase | as for a word |
 | a one- or two-character term | unchanged: the bounded substring pass over the note's normalized title, aliases and tags and each chunk's body | ← | ← |
+
+Every phrase sent to `fts_word` is split at script boundaries first, as its text was (§6.5.1).
 
 - **What `prefer` finds.**
   - `"prefer"*` matches `prefer`, `prefers`, `preferred` and `preference`, whether in a body, a title, an alias or a tag.
   - `config` finds `configure` and `configuration`, and no longer finds `reconfigure`.
   - `memory_file` (a literal) is the phrase `memory` `file*`, so it still finds `memory_files`.
   - `partner's` stays the exact phrase `partner` `s`, because its last token is one character. As a prefix it matched `partner store` in another note, so the literal counted as found and its part `partner` was never searched; the prototype lost hq-0009 ("The user's partner Tomas") to that.
+  - `and`, in a query of nothing but stop words (kept then, §7c Q9), matches `and` and not `android`.
+  - `commit` finds `和commit` as a whole word (`term`), and `用户喜欢` finds `用户喜欢简洁的回答` as a substring (`trigram`).
+- **The whole-word query at the cap.** When the word table's query fills its candidate cap (256) and some term went to it as a prefix, those terms are searched again as whole words in titles, aliases and tags (`{title aliases tags} : (…)`), with a cap of their own. Below the cap the first query already holds every such match, so a small store never runs the second.
+  - **Why.** A beginning shared by many longer words fills the cap with them. In the scale proxy at 30,000 notes, `work*` filled it: the synthetic vocabulary has `worker` and `workspace` but never `work`. That pushed out "The user's current job at Quillpay", whose one match for "Where do I work and what is my role?" is its tag `work`. "用户之前在 Norden Labs 工作" fell out the same way. The current layout kept both, through the trigram companion's own 256. Without the second query, two relied-on notes leave the pool; with it, none does (§6.5.5).
+  - **Why only the header.** The notes a prefix crowds out are those whose match is short and strong: a title, an alias, a tag. The header is also short, so far fewer rows match this query than a whole-word query over every column. Over every column it recovered the same two notes but cost 12 ms of p95 at 30K and 32 ms at 100K; over the header it costs at most 3.4 ms (§6.5.5).
+  - **A larger cap alone does not do it.** At 512 both notes stayed out, and at 1,024 one did. A tag hit ranks too low among hundreds of `worker` bodies for any cap that bounds the work.
 - **Why always a prefix, and not only when the exact token misses.** A per-term fallback depends on the corpus. In a large store almost every word occurs exactly somewhere, so the fallback would never fire where it matters, and a small test store would pass what a real one fails.
-- **Why from 3 characters.** It is the same threshold as the rest of routing. With prefixes only from 4 characters the proxy was worse (index held-out 250 rows against 255), and at 100K the p95 is 40 ms with 3.
-- **Why a Latin term still searches unsegmented bodies.** A Latin word glued to Chinese text (`和commit`, `用bullet`) is one `unicode61` token. The L8 stores had such words in 7 of the 114 notes carrying Chinese, and the body table finds them.
-  - The body table does not *rank* them. A Latin term's relevance comes from the word table and the header table, which are the same tables for every note.
-  - So a Chinese note that mentions `Lantern` in its body does not outrank an English one that says it as often. The prototype variant that ranked them lost tq-0073 that way.
-- **Still no stemmer.** A prefix query changes no token and no identifier: an exact word is its own prefix, and a CJK run matches as before.
+- **Why from 3 characters.** It is the same threshold as the rest of routing. With prefixes only from 4 characters the proxy was worse (index held-out 250 rows against 255), and the latencies of §6.5.5 are measured with 3.
+- **A Latin term is matched in a body only as a word or a word's beginning.** That holds in an unsegmented body as well, where the split has made `commit` a word of `和commit`.
+  - Rev 3.36 searched the body trigram table for every term, and credited a Latin substring inside any chunk that carried one CJK character. The note template's headings then matched on every Chinese or mixed note and on no English one: `now` inside `knowledge` and `check` inside `recheck`, 287 question–note pairs over 25 questions of the evaluation set.
+  - For hq-0090 ("…open right now?"), every note below its three real matches was a Chinese note found by that `now` alone. The current layout interleaves English and Chinese notes there.
+  - For hq-0120, an English note that names 林薇 rose from 12th to 5th on `now` inside `knowledge`.
+  - On the revised rule, neither list holds a note found only by the letters of a heading.
+  - The split also gives a glued word the evidence it has in an English note: `term`, and the word table's BM25. Rev 3.36 gave it a substring's weight and no BM25.
+  - So the body trigram table serves only terms carrying an unsegmented character, and ranks them. A Latin term's relevance comes from the word table and the header table, the same tables for every note, so a Chinese note that mentions `Lantern` in its body does not outrank an English one that says it as often. Rev 3.36's variant that ranked Latin terms in that table lost tq-0073 that way.
+- **Still no stemmer.** A prefix query changes no token and no identifier: an exact word is its own prefix.
+  - A term that carries an unsegmented character is never a prefix. It matches a whole run on the word table and anywhere inside a run through the trigram tables, so its reason and its score do not depend on where in the run it stands.
+  - Rev 3.36 prefixed it too. `用户喜欢`, at the start of `用户喜欢简洁的回答`, then reported `prefix` with the word table's BM25, while `简洁的回答` in the same run reported `trigram` (fixture 23, steps 5 and 6).
+  - A stop word is never a prefix either. It is routed only when nothing else is (§7c Q9), and then `and` would otherwise find `android`.
 
 #### 6.5.3 Ranking and `MatchReason` (03 §7a, revised)
 
 - **`MatchReason` gains `prefix`**: `title | alias | fact_key | term | prefix | trigram | phrase`.
-  - A word matched as the beginning of a token, and nowhere as a whole token, reports `prefix`.
-  - `trigram` keeps its meaning, a substring the trigram tables found. Those substrings are now in a title, an alias, a tag or unsegmented text.
-  - For each word, a note keeps its strongest evidence: a whole token, then a beginning, then a substring. Today a whole token already drops `trigram` (`search.rs:792`).
+  - `term` is a word matched as a whole token of the text split at script boundaries.
+  - A word matched as the beginning of such a token, and nowhere as a whole token, reports `prefix`.
+  - `trigram` keeps its meaning, a substring the trigram tables found: in a title, an alias or a tag, or — for a term carrying an unsegmented character — in unsegmented text.
+  - For each word, a note keeps its strongest evidence: a whole token, then a beginning, then a substring. Today a whole token already drops `trigram` (`search.rs:837`, `:928`).
 - **Why a new value.** Reporting a prefix hit as `term` would claim a whole word, which it is not, and a reader weighs a whole-word match higher. Reporting it as `trigram` would name a table that did not find it.
-  - Printing the new value costs nothing. Every surface maps `MatchReason::as_str`: the recall header's `match=`, the index lines' reason, `memory_search`'s `match` (tool and route), `openalpaca memory search`'s "matched on" and `/memories`.
+  - Printing the new value costs nothing. Every surface maps `MatchReason::as_str`:
+    - the recall header's `match=`, and the index lines' reason;
+    - `memory_search`'s `match`, for the tool and the route (`memory/service/wire.rs:141`);
+    - `openalpaca memory search`'s "matched on" (`commands/memory.rs:1821`);
+    - `/memories` (`orchestrator/memory_commands.rs:412`).
+  - `memory_used` carries `UsedReason`, not `MatchReason`.
   - The GUI types `match` as `string[]` and draws no reason (`apps/openalpaca-gui/src/lib/api/memories.ts:121`). A client that switched on the frozen list would meet a new value; none does.
-- **Weights.** `W_PREFIX` is 5.0, the same as `W_TRIGRAM` (`search.rs:210`), so a note that `prefer` found inside `prefers` scores as it did. Weights 3 and 8 were measured on the one-table variant, and neither did better overall: 253 / 282 / 81 / 91 and 253 / 283 / 83 / 91, against 255 / 284 / 82 / 91 at 5 (§6.5.5's order).
-- **Trigram relevance** is the larger of two normalized BM25s: the header table's, and the body table's for unsegmented terms. Today it is one table's BM25 over every body (`search.rs:217`), which counted a Latin body word twice, once in each table. The one proxy row that fell for that reason, hq-0318, is in §6.5.5.
-- **The file scan agrees with the index.** While the index is rebuilt, search answers from the files with the index's own evidence (`memory_index/scan.rs:140`). A word matches a chunk as a whole token, as a beginning, or as a substring of the header or of an unsegmented body; it no longer matches as a substring of any body. So an answer given during a rebuild finds what the index finds.
+- **Weights.** `W_PREFIX` is 5.0, the same as `W_TRIGRAM` (`search.rs:210`), so a prefix hit's coverage is what a substring hit's was. Its relevance is not the same:
+  - A prefix hit comes from the word table's query, so it earns that table's BM25, weighted 2.0 (`W_BM25_WORD`). A substring hit earned the trigram table's, weighted 1.0.
+  - The word table's column weights also favour a title (4.0) over a body (1.0).
+  - That difference is tq-0032 (§6.5.5): `use*` lifts titles that begin "The user's".
+  - Rev 3.36 said that a note which `prefer` found inside `prefers` "scores as it did". Its coverage does; its relevance does not.
+  - Weights 3 and 8, measured on the one-table variant, did no better overall: 253 / 282 / 81 / 91 and 253 / 283 / 83 / 91, against 255 / 284 / 82 / 91 at 5 (§6.5.5's order).
+  - A variant that gave a prefix hit a substring's relevance (E4) is in §6.5.8.
+- **Relevance.**
+  - Word relevance is the word table query's BM25, normalized over its candidates.
+  - A chunk that only the whole-word query at the cap kept takes no word relevance: the first query ranked it below its 256, and its coverage decides. Taking that query's own BM25, normalized over its own candidates, cost 1–3 rows at each threshold of the scale proxy.
+  - Trigram relevance is the larger of two normalized BM25s: the header table's, and the body table's for unsegmented terms. Today it is one table's BM25 over every body (`search.rs:217`), which counted a Latin body word twice, once in each table. The one proxy row that fell for that reason, hq-0318, is in §6.5.5.
+- **The file scan agrees with the index.** While the index is rebuilt, search answers from the files with the index's own evidence (`memory_index/scan.rs:140`), through the same `ChunkText`.
+  - A word matches a chunk as a whole token or a word's beginning of its text split at script boundaries, or as a substring of the header. A term carrying an unsegmented character also matches as a substring of an unsegmented body.
+  - So an answer given during a rebuild finds what the index finds.
+  - The scan reads every note, so it has no cap and needs no whole-word query.
 
 #### 6.5.4 What is lost, measured
 
-The layout no longer finds a term **inside** a word of a body written in a space-separated script: a suffix, an infix, or a substring across words. Over the 620 evaluation questions and the 83 gold notes, 641 question-term–note matches exist only in that form (counted by a script that mirrors the routing, in the scratchpad's `work/infix_loss.py`):
-- **452 of them (70.5 %)** are `check` inside `recheck` and `now` inside `knowledge`. These are the note template's own section headings, `## Knowledge` and `## Recheck when` — a learned note's body has the first too (§2.6) — which the trigram companion matched in nearly every note.
-- The rest include `ever` in `never`, `port` in `support`, `call` in `locally`, `book` in `runbook` and `MacBook`, `test` in `nextest`, `script` in `transcript`, `file` in `justfile` and `password` in `1password`.
-- **6** fall on a note that a question relies on, and all six are `check` or `now`.
+The layout no longer finds a term **inside** a word written in a space-separated script, in a body: a suffix, an infix, or a substring across words. That now holds in a Chinese note's body too, where a Latin word is matched only whole or by its beginning. Over the 620 evaluation questions and the 83 gold notes, 928 question-term–note matches that the current layout makes are no longer made (counted by a script that mirrors the revised routing, in the scratchpad's `work/infix_loss_e3.py`):
+- **722 of them (77.8 %)** are `check` inside `recheck` and `now` inside `knowledge`. These are the note template's own section headings, `## Knowledge` and `## Recheck when` — a learned note's body has the first too (§2.6) — which the trigram companion matched in nearly every note.
+- **287 of the 928** are in a body that carries an unsegmented character, over 25 questions. Rev 3.36's count, 641, still made those matches. They are what the review's first finding was about (revision log, rev 3.37).
+- The rest include `ever` in `never`, `port` in `support`, `call` in `locally`, `book` in `runbook` and `MacBook`, `name` in `renamed`, `test` in `nextest`, `script` in `transcript`, `file` in `justfile`, `password` in `1password` and `host` in `localhost`.
+- **7** fall on a note that a question relies on, and all seven are `check` or `now`. None of them is among the proxy's lost rows: each of those notes shares a real word with its question.
 
-The real losses are compounds and camelCase identifiers in a body, such as `runbook`, `nextest`, `justfile`, `1password` and `homeStore`. In a title, an alias or a tag they are still found. Aliases are the remedy the design already names for a wording a note does not contain (MD-1, 03 §5). Text in Chinese, Japanese, Korean, Thai, Lao, Myanmar or Khmer keeps substring search.
+**Whom it costs.** The loss falls on words written joined to other words, in a body:
+- **English:** compounds (`runbook`, `nextest`, `justfile`, `1password`) and camelCase identifiers (`homeStore`).
+- **German and Swedish:** there it is ordinary text, since compounds are written as one word. `wechsel` is not found in `Zeitzonenwechsel`, nor `resa` in `affärsresa`. The owner keeps notes about Stockholm.
+- **Arabic and Hebrew:** articles and prepositions are written attached, so the bare word is inside the written one (`كتاب` in `الكتاب`, `בית` in `בבית`).
+
+A word's *beginning* is still found in all of these, `Zeitzone` in `Zeitzonenwechsel` among them. Rev 3.36 described the loss as English compounds and camelCase only.
+
+In a title, an alias or a tag, all of them are still found. Aliases are the remedy the design already names for a wording a note does not contain (MD-1, 03 §5), and the extractor proposes them, in the other language too (§2.2). Text in Chinese, Japanese, Korean, Thai, Lao, Myanmar or Khmer keeps substring search.
 
 #### 6.5.5 The measured case
 
@@ -908,16 +980,22 @@ The real losses are compounds and camelCase identifiers in a body, such as `runb
 |---|---|---|---|
 | index, held-out (470) | 254 / 293 | **257 / 293** | 305 / 47 → 308 / 44 |
 | excerpts, held-out (470) | 286 | **288** | 344 → 345 |
-| index, tuning (150) | 82 / 95 | **82 / 94** | 97 / 17 → 97 / 16 |
+| index, tuning (150) | 82 / 95 | 82 / **94** | 97 / 17 → 97 / 16 |
 | excerpts, tuning (150) | 93 | **94** | 112 → 113 |
 
-- **Repeatability.** Repeated runs of the current layout were identical row for row, but for one index held-out row (hq-0045) in one run of four: a score tie broken by `updated_at`, which seeding stamps at wall-clock time. Two runs of the prototype were identical.
-- **No net loss.** Five questions lost a relied-on note in some run (eight rows over the four runs), and eleven gained one, delivered or listed. The one total that falls, index tuning's listed-or-delivered (95 → 94), is tq-0032 below.
+- **Repeatability.** Repeated runs of the current layout were identical row for row, but for one index held-out row (hq-0045) in one run of four: a score tie broken by `updated_at`, which seeding stamps at wall-clock time. The prototype's three index runs of each set agree but for the same row, which was delivered in one held-out run of three (258).
+- **Rev 3.37's changes move no proxy row.** The script-boundary split, the body table confined to unsegmented terms, the exact CJK and stop-word terms, and the trigger give the same rows as rev 3.36's prototype, but for hq-0045. The whole-word query runs only at the cap, which 83 notes never reach.
+- **One total falls: a net loss of one row, for the lead to rule on.**
+  - Five questions lose a relied-on note in some run (eight rows over the four runs), and eleven gain one.
+  - Seven of the eight totals rise or hold, including the held-out gate set's: +3 / 0 in index mode, +2 in excerpts mode.
+  - Index tuning's listed-or-delivered falls from 95 to 94, in every run on both sides. The row is tq-0032, below.
+  - Rev 3.36 called the totals "no net loss". On that one total it is a loss, and LQ17's rule makes a net loss a stop, so the revision goes to the lead with the row.
+  - The one variant that recovered it (E4, §6.5.8) gave back more on the held-out questions.
 - **Every lost row, explained** from both layouts' rankings:
   - **hq-0131** (both modes), note "Lantern 本地环境". The question's Chinese words match nothing. The 24 notes that mention Lantern share its one matching term, `lantern`, and BM25 detail orders the tie.
   - **hq-0152 and hq-0228** (excerpts), note "No analytics and no comments on Moss". The question (`visitor numbers`, `访问统计`) paraphrases a word the note does not contain, so it ties on `moss` with the other notes that mention Moss. It was 8th of 8 in that tie, within 0.1 of the notes around it, and is now 9th.
   - **hq-0318** (both modes), note "Python tooling: uv and ruff". It loses exactly the trigram weight, 1.0. The `dependencies` in its body had earned the best trigram BM25 on top of the word table's BM25 for the same whole word.
-  - **tq-0032** (both modes), note "Editor: Helix". The question's distinctive term, `hx`, is two Latin characters, and a term that short is dropped when longer terms exist (§7c Q9, unchanged). What remains is `use`, a substring of `uses`, `used` and `user` in 27 of the 83 notes. As a prefix, `use` now favours titles that begin "The user's".
+  - **tq-0032** (both modes), note "Editor: Helix". The question's distinctive term, `hx`, is two Latin characters, and a term that short is dropped when longer terms exist (§7c Q9, unchanged). What remains is `use`, a substring of `uses`, `used` and `user` in 27 of the 83 notes. Before, this note's `uses` and `used` won the trigram BM25. Now `use*` earns the word table's BM25, where a title counts four times a body, so titles that begin "The user's" win. The note falls from 5th to 11th, out of the ten lines.
 - **The gained rows** are the same mechanism in reverse, plus prefix hits (hq-0381: `book` finds `booking`).
 - **Variants measured and not taken.** Each is given as the rows with every relied-on note delivered, in the order index held-out / excerpts held-out / index tuning / excerpts tuning; the current layout is 254 / 286 / 82 / 93.
   - One trigram table, with a prefix on every literal: 252 / 283 / 81 / 91.
@@ -925,78 +1003,178 @@ The real losses are compounds and camelCase identifiers in a body, such as `runb
   - No prefix at all: 247 / 283 / 81 / 91.
   - Prefixes only from 4 characters: 250 / 284 / 82 / 91.
   - Two trigram tables, with the body table ranking every term: 256 / 289 / 82 / 93. It lost tq-0073 to the bias described in §6.5.2.
+  - A prefix hit's relevance in the trigram slot (E4): 254 / 288 / 82 / 93, with listed-or-delivered at 292 and 95 (§6.5.8).
 
-**The index benches.** These are §6.4's benches, run in release under `/usr/bin/time -l`, the prototype against the same commit.
+**The scale proxy.** The proxy's questions are searched at the index level (automatic mode, the recall's 20 candidates, and no truncation, so each rank is read off the whole ranking).
+- A row counts when every relied-on note ranks within 2 (index mode's excerpts), 8 (excerpts mode), 10 (index mode's excerpts and lines) or 20 (the recall's candidates).
+- *Unranked* counts the relied-on notes that no leg retrieved at all.
+
+| Store | Set | Within 2 | Within 8 | Within 10 | Within 20 | Unranked |
+|---|---|---|---|---|---|---|
+| 83 gold notes | held-out | 254 → 257 | 286 → 288 | 293 → 292 | 309 → 309 | 124 → 124 |
+| | tuning | 82 → 82 | 93 → 94 | 95 → 94 | 98 → 98 | 38 → 38 |
+| + 30,000 bench notes | held-out | 246 → 251 | 275 → 277 | 284 → 284 | 298 → 299 | 126 → 124 |
+| | tuning | 80 → 80 | 88 → 89 | 89 → 89 | 93 → 94 | 39 → 38 |
+| + 30,000 + 319 learned | held-out | 156 → 161 | 237 → 242 | 245 → 247 | 264 → 267 | 132 → 129 |
+| | tuning | 52 → 50 | 77 → 77 | 79 → 79 | 86 → 88 | 40 → 39 |
+
+- **At 83 notes the index-level ranks reproduce the proxy.** Within 2 and within 8 are its delivered totals. Within 10 is one lower on the held-out set than the proxy's listed-or-delivered, because a rank ignores the recall's byte budget.
+- **At 30,000 notes, the whole-word query at the cap decides the pool.** The held-out set's unranked notes and rows within 10:
+  - without it (rev 3.36's single word leg, with rev 3.37's other rules): 128 unranked and 282 within 10. The two notes lost are hq-0006's and hq-0165's (§6.5.2);
+  - with word caps of 512 and 1,024 instead of it: 128 and 127 unranked;
+  - with a whole-word query over every column: 126 unranked and 284 within 10;
+  - with the same query over the header only, the design: 124 unranked and 284 within 10.
+- **Every rank loss at 30,000 notes is a tie.** Each lost note sits in a group within one point of each other, sharing the same matched words and differing only in BM25 detail:
+  - hq-0001 ("What is my name?") shares its one word with thousands of bench notes, and moves from 9th to 42nd among them;
+  - tq-0028 ("Which time zone…") ties on `time*`, which begins the bench's `timezone`, and moves from 14th to 43rd;
+  - hq-0131 and hq-0289 are the Lantern tie above, and hq-0152 and hq-0228 the Moss tie.
+
+  The largest gains are the reverse: the Stockholm note rises from 103rd to 2nd (hq-0119) and from 106th to 5th (hq-0253).
+- **The learned store costs tuning two rows within 2.** The 319 learned notes state the same facts as the gold notes. Four gold notes fall one to eight places, mostly below learned notes that score within half a point of them (tq-0047, tq-0068, tq-0077, tq-0103), and two rise (tq-0117, tq-0150).
+
+**The learning lookup**, without a model. The search is `learning_view`'s: historical, explicit, 20 candidates, the first 5 active hits per query, the session's best 20 notes.
+- For each corpus session, the store holds the gold notes that the sessions before it state: what a perfect learner would hold, with supersession recomputed for that subset.
+- Each user row of the session is searched.
+
+Of the 32 change, correction and restatement turns:
+- the 7 corrections correct a note stated in the same turn, so no note is held yet;
+- for the 10 changes, the changed note is among the session's 20 on both layouts, and among the turn's own 5 for 8 of them on both;
+- for the 15 restatements, the note is among the session's 20 for 13 → 14 of them, and among the turn's own 5 for 13 → 14 (cs-050 gains).
+
+Nothing is lost.
+
+**L8's coverage search** (`memory_eval.rs:2184`): the title and aliases, historical, the first 5 hits that are not summaries. It was run on `store-L` and `store-L-episodes`, the two L8 stores whose project partition still exists.
+- The coverage judge matched some notes that the current code still returns among its 5. The revision returns every one of them: 70 of 70 and 68 of 68.
+- The 5-hit sets are identical for 66 and 67 of the 83 gold notes.
+- L8 ran from a pinned worktree, so its figures are pre-LQ17. The current code reproduces the pinned run's hit lists for 74 and 78 of 83.
+
+**The index benches.** These are §6.4's benches plus a 30K run and the *dense* mix. They were run in release under `/usr/bin/time -l`, one at a time on a quiet machine, the prototype against the same commit.
+- The dense mix keeps the average mix's sizes. It gives each note a gold-like header: 3–6 aliases of 1–3 words (4.8 on average), 1–3 tags and a 3–5-word title, 115 B in all against the average mix's 17 B. (The gold notes carry 4.8 aliases and 82 B.)
+- Its English is inflected, with 3-letter stems (`run`, `use`, `set` …), and half its query words are bare stems.
+- It exercises the header table and the prefix doclist merge, which the average mix barely touches.
 
 | Corpus | Layout | Cache MiB (× body bytes) | Build s | Search + verify p50 / p95 / max ms | Peak RSS MB |
 |---|---|---:|---:|---|---:|
-| 10K, average | current | 109.2 (8.9×) | 4.3 | 5.3 / 10.5 / 15.7 | 247 |
-| 10K, average | revised | 40.2 (3.3×) | 1.0 | 4.4 / 7.2 / 8.6 | 143 |
-| 100K, average | current | 1,065.5 (8.5×) | 53.1 | 71.1 / 144.5 / 209.1 | 691 |
-| 100K, average | revised | 366.6 (2.9×) | 14.4 | 23.2 / 40.3 / 59.4 | 687 |
-| 100K, learned | current | 531.7 (9.4×) | 29.3 | 17.9 / 55.4 / 82.3 | 571 |
-| 100K, learned | revised | 219.7 (3.9×) | 9.1 | 8.1 / 22.2 / 31.4 | 532 |
+| 10K, average | current | 109.2 (8.9×) | 4.2 | 5.2 / 10.7 / 16.8 | 247 |
+| 10K, average | revised | 40.2 (3.3×) | 0.9 | 5.1 / 8.6 / 11.2 | 143 |
+| 30K, average | current | 320.5 (8.6×) | 14.3 | 10.0 / 29.4 / 38.8 | 465 |
+| 30K, average | revised | 112.7 (3.0×) | 3.5 | 6.4 / 16.6 / 20.3 | 313 |
+| 30K, dense | current | 372.1 (9.8×) | 17.5 | 9.2 / 24.5 / 42.5 | 479 |
+| 30K, dense | revised | 156.1 (4.1×) | 5.7 | 8.1 / 20.4 / 31.1 | 376 |
+| 100K, average | current | 1,065.5 (8.5×) | 55.4 | 72.2 / 148.9 / 221.6 | 692 |
+| 100K, average | revised | 366.6 (2.9×) | 14.9 | 24.9 / 47.2 / 66.5 | 686 |
+| 100K, learned | current | 531.7 (9.4×) | 29.9 | 18.0 / 56.1 / 84.5 | 572 |
+| 100K, learned | revised | 219.7 (3.9×) | 9.2 | 8.5 / 25.8 / 35.8 | 532 |
+| 100K, dense | current | 1,225.3 (9.7×) | 68.0 | 32.7 / 136.2 / 170.5 | 733 |
+| 100K, dense | revised | 503.9 (4.0×) | 25.5 | 16.6 / 61.5 / 92.6 | 730 |
 
 - **Where the bytes went** (100K average, `dbstat`):
   - the trigram index went from 533.9 MiB to 27.5 MiB for bodies plus 8.7 MiB for headers;
   - `chunk` went from 353.7 MiB to 152.7 MiB, which is now the text once (125 MiB of bodies) and its keys;
   - `fts_word` (88.8 MiB) and `note` (35.6 MiB) are unchanged.
+
   The survey's replica estimate was 352 MiB.
-- **§6.4's target is met with room.** The p95 is 40 ms at 100K against a 100 ms target. The file (367 MiB) is still larger than the 256 MiB mmap window (`memory_index/mod.rs:1593`). Mapping the whole file (option O5) remains a separate choice and is not needed to meet the target. At 100K the peak RSS is the bench's own in-memory records.
+- **Gold-like headers cost more than the review's estimate.** The review estimated 40–50 MiB more at 100K; the dense mix measures 137 MiB more than the average mix:
+  - the header trigram table grows from 8.7 to 77.5 MiB;
+  - `note` grows from 35.6 to 59.6 MiB;
+  - the rest follows the longer headers and bodies.
+
+  The dense mix is still 41 % of the current layout's 1,225 MiB on the same corpus.
+- **§6.4's target is met with room.** The p95 at 100K is 47 ms (average), 26 ms (learned) and 62 ms (dense), against a 100 ms target. At the design point (30K, LQ15) it is 17 ms, where the current layout takes 29 ms.
+  - The whole-word query at the cap costs at most 3.4 ms of that: without it, the p95 was 8.5, 16.3 and 43.8 ms at 10K, 30K and 100K.
+  - The file (367 MiB at 100K average) is still larger than the 256 MiB mmap window (`memory_index/mod.rs:1593`). Mapping the whole file (option O5) remains a separate choice and is not needed to meet the target.
+  - At 100K the peak RSS is the bench's own in-memory records.
 - **The 200 bench queries at 10K** still return 8 hits each. 171–172 of the 200 hit the candidate cap before and after, so each top 8 is picked from hundreds of matching chunks.
-  - 112 of the 200 top-8 sets are identical, with a mean overlap of 7.1 of 8. For single CJK words 24 of 25 sets are identical, and for single CJK characters 25 of 25.
-  - Hits only the current layout returned: `term` 133, `trigram` 34, `term`+`trigram` 8.
-  - Hits only the revision returns: `term` 134, `prefix` 34, `term`+`prefix` 7.
-  - So the synthetic corpus measures reshuffles among equally matching notes; recall is what the proxy measures.
+  - 128 of the 200 top-8 sets are identical, with a mean overlap of 7.25 of 8.
+  - Hits only the current layout returned: `term` 133, `term`+`trigram` 8, `phrase` 4, `trigram` 4. Hits only the revision returns: `term` 134, `term`+`prefix` 7, `phrase` 4, `trigram` 4.
+  - Each layout was also run with no cap and no limit, so every lost hit could be scored by the revision's own ranking.
+  - The cap already decides the top 8 on both layouts for about a fifth of the queries: capped and uncapped top 8s differ for 42 queries on the current layout and 44 on the revision.
+  - Of the 149 hits only the current layout returned, the revision's uncapped ranking puts 136 at or below its own 8th hit. 129 of those are less than 5.0 below it, one substring hit's weight, and the median gap is 0.13.
+  - The other 13 would enter the revision's top 8 with no cap. The cap drops them, as it drops 7 of the revision's new hits on the current layout.
+  - Every lost hit is a candidate of some leg of the revision; none is unmatched.
+  - The synthetic corpus thus shows reshuffles among near-equal notes and the cap's known effect (§7c Q10), not a class of match the revision cannot find; recall is what the proxies measure.
 
 #### 6.5.6 The fixtures
 
-The invariant fixtures (`crates/openalpaca_storage/tests/fixtures/memory/`) are this index's contract tests. The index runner (`memory_index/fixture_tests.rs`) runs nine of them: 21, 22, 23, 24 and 26, then 12, 11, 10 and 09. On the prototype all nine pass with these changes:
-- **21.** Step 1's `match_includes` changes from `trigram` to `prefix`, and the row text says why: the question finds the note through `prefer*`, matching the body's `prefers` and the title's `preference`. The other steps and the counts are unchanged. On the current layout the revised step fails (`prefix` is missing from `[term, trigram]`).
-- **26 (new), the body-only variant:** `26-query-prefix-in-body.json`, row `q5`, slice 2. It holds a note titled "Terminal" whose body says "User prefers kitty over iTerm", and the espresso decoy.
-  - Step 1, "what do I prefer?", finds the note through its body alone, with `match_includes: prefix` and its excerpt.
-  - Step 2 recalls it.
-  - Step 3, `prefers`, matches as `term`.
-  - Step 4, `presso`, finds **nothing**: an infix inside a body word, the boundary §6.5.4 measures.
-  - Step 5, `espresso`, finds the decoy.
-  - On the current layout step 1 fails (`[trigram]`), and so does step 4, because the trigram table finds `presso` in `espresso`.
-- **23.** Its steps are unchanged. Steps 5–6 (`简洁的回答`, `用户喜欢`) pass because Chinese bodies keep trigram.
-  - It gains note 004, a Latin note with a Chinese phrase ("For every version, 发布说明写成要点 and link the tag."), and step 13, `说明写成`, which must find it as `trigram`. The rule is "a chunk that carries an unsegmented character", mixed chunks included.
-  - Its test now counts 12 searches.
+The invariant fixtures (`crates/openalpaca_storage/tests/fixtures/memory/`) are this index's contract tests. The index runner (`memory_index/fixture_tests.rs`) runs nine of them: 21, 22, 23, 24 and 26, then 12, 11, 10 and 09. On the prototype all nine pass with the changes below.
+
+Each new or changed step was also run alone on the current layout and on rev 3.36's prototype (E2). The steps that pin a rule nothing else fails on were run against a build with that rule broken (`memeval/l8/layout/proto/stepcheck.py`):
+
+| Step | What it pins | Current layout | Rev 3.36 (E2) | Revised |
+|---|---|---|---|---|
+| 21/1 | `prefer*` reports `prefix` | fails | passes | passes |
+| 26/1, 26/4 | a body-only prefix hit; `presso` inside `espresso` finds nothing | fail | pass | pass |
+| 26/6 | `now` does not match a Chinese note's `## Knowledge` heading | fails | fails | passes |
+| 26/7 | `commit` glued to Chinese (`遍commit`) is a whole word: `term` | fails (`trigram`) | fails (`trigram`) | passes |
+| 26/8 | `partner's` stays exact: `partner store` is not found | passes | passes | passes; fails when every literal's last token is a prefix |
+| 26/9 | `memory_file` finds `memory_files` as `phrase` | passes | passes | passes; fails when no literal is a prefix |
+| 23/6 | `用户喜欢` reports `trigram`, as `简洁的回答` in the same run does | passes | fails (`prefix`) | passes |
+| 22/19 | `x_ab*` finds nothing in a note holding `x_abc` | fails (the infix) | passes | passes; fails when every literal's last token is a prefix, which is what an injected `*` does here |
+| 22/20 | `and` alone finds the note that says `and`, not the one that says `Android` | fails (the infix) | fails (`and*`) | passes |
+
+- **21.** Step 1's `match_includes` changes from `trigram` to `prefix`. The fixture's texts are rewritten, because they were already wrong before this revision.
+  - They say the note is found only through the trigram table, and that plain `unicode61` returns nothing (`unicode61_only_would_return: []`). But `editor` is a whole token of the title "Editor preference", so an OR-routed word table alone finds the note. The G23 reproduction they cite was made under the whole-message AND that the design removed.
+  - The texts now say the note is found by `editor` in its title and by `prefer*` (the title's `preference`, the body's `prefers`), and that step 1 carries `term` and `prefix`.
+  - They also say that 26 is the body-only test. `unicode61_only_would_return` becomes the note itself.
+- **26 (new), the body boundary:** `26-query-prefix-in-body.json`, row `q5`, slice 2. Its `required_outcome` and `notes_for_implementer` are written out; the prototype's are placeholders.
+  - The notes:
+    - "Terminal" ("User prefers kitty over iTerm");
+    - the espresso decoy;
+    - a Chinese note under a `## Knowledge` heading;
+    - a Chinese note with `commit` glued to it;
+    - "Birthday" ("My partner's birthday is in May");
+    - "Shopping" ("The partner store opens at nine");
+    - "Storage crate" ("Read memory_files before you edit a note").
+  - Step 1, "what do I prefer?", finds "Terminal" through its body alone, with `match_includes: prefix` and its excerpt. Step 2 recalls it. Step 3, `prefers`, is `term`.
+  - Step 4, `presso`, finds **nothing**: an infix inside a body word, the boundary §6.5.4 measures. Step 5, `espresso`, finds the decoy.
+  - Steps 6–9 are the table's rows above.
+- **22.** Two notes are added — "Linker flag" ("Pass x_abc to the linker") and "Phone" ("My phone runs Android 15") — with steps 19 and 20.
+  - Step 9 (`tabs*`) can no longer tell a caller's `*` taken as syntax (the F4 defect) from the index's own prefix, since `tabs` is a prefix either way.
+  - Step 19 can: a two-character last token is never a prefix, so only an injected `*` would find `x abc`.
+  - The notes text loses "must not become a prefix query on the unicode61 table", and says both of these instead.
+- **23.** Step 6 gains `match_includes: trigram`.
+  - It also gains note 004, a Latin note with a Chinese phrase ("For every version, 发布说明写成要点 and link the tag."), and step 13, `说明写成`, which must find it as `trigram`. The rule is "a chunk that carries an unsegmented character", mixed chunks included.
+  - Its test counts 12 searches.
+- **12.** Its `design` field quotes §5 step 4 as 03 rev 7.8 states it, not the old "every ≥3-character term against both tables". Its steps are unchanged and pass: its identifiers match as phrases on the word table.
 - **The runner reads excerpts from the note.** At the index level, `excerpt_contains` appears in steps 11/4, 12/5, 12/8, 21/1 and 26/1.
   - The runner reads the hit's chunk from the note body at `chunk_ordinal`, as `recall.rs:576` does, instead of `SearchHit.excerpt` (`fixture_tests.rs:579`).
   - 23's step 12 is a `read`. The index runner skips it, and the service answers it from the file, as today.
-- **22, 24, 12, 11, 10 and 09 are unchanged, and pass.**
-  - 22's escaping steps match whole words or its title.
-  - 24 rests on supersession, tombstones and a rebuild, not on tokens.
-  - 12's identifiers match as phrases on the word table.
-- The fixture README gains row 26.
+- **24, 11, 10 and 09 are unchanged, and pass.** 24 rests on supersession, tombstones and a rebuild, not on tokens.
+- **The runner's counts:** 22 searches 20 times, 23 12 times, and 26 8 times plus one recall. The fixture README gains row 26.
 
 #### 6.5.7 What the build changes
 
 Phase 2 of the LQ17 slice builds §6.5.1–§6.5.6. Where behaviour changes, tests come first: red on the current layout, green on the new one.
 - **`memory_index`:**
-  - `SCHEMA_VERSION` goes from 3 to 4. The cache is deleted and rebuilt off the request path (scale slice S6), and the file keeps its name, `memory-index-v1.sqlite`.
-  - The tables, the upsert and the deletes (§6.5.1).
+  - `SCHEMA_VERSION` goes from 3 to 4. Its doc comment names what else must bump it: the tokenizers, the script-boundary split, and the ranges of `query::is_unsegmented`, since each decides what the tables hold. The file keeps its name, `memory-index-v1.sqlite`.
+  - The tables, the upsert, and the `chunk` delete trigger (§6.5.1).
   - `EXPECTED_TABLES`, and the merge and `optimize` passes, now over three FTS tables.
-  - Routing, in `query.rs`.
+  - Routing, in `query.rs`: `split_scripts`, `tokens_split` and `is_unsegmented` are one function each, shared by the upsert, the query builder, the ranker and the file scan.
+  - The whole-word query at the cap (§6.5.2).
   - Ranking, with `MatchReason::Prefix` and `W_PREFIX`.
   - `SearchHit.excerpt` is removed.
   - The file scan (§6.5.3).
-- **Tests that pin the current layout change with it.** The prototype ran the storage and core library suites. Each had exactly 8 failures, all of them this layout, with 688 and 2,098 tests passing; the daemon's and the CLI's suites were not run.
+- **The upgrade, and a downgrade.**
+  - The first start of the build finds a schema-3 cache, deletes it and its WAL (`open_existing`, `memory_index/mod.rs:545`, `:598`), and rebuilds off the request path (scale slice S6). The old file is not left beside the new one.
+  - Until the rebuild finishes, search and recall answer from the file scan, which finds what the index will (§6.5.3), and `memory_timeline` is refused `index_rebuilding` (03 §7a).
+  - A build from before this one meets a schema-4 cache the same way, since the version does not match, and rebuilds its own.
+  - Nothing is converted, and the notes and snapshots are not touched.
+- **Tests that pin the current layout change with it.** On the prototype the storage and core library suites each fail exactly 8 tests, all of them this layout, with 688 and 2,098 passing. The daemon's and the CLI's suites were not run.
   - In `memory_index/tests.rs`:
     - the trigram-only `prefer` test becomes the prefix test and gains the infix case;
     - the empty-body test reads `chunk`'s columns;
     - the schema-2 test checks the version;
     - the identifier test reads its excerpt from the note;
-    - the MATCH-string test expects `"w"*`;
-    - the incremental-equals-rebuilt test expects one `fts_word` and one `fts_tri_head` row per chunk, and one `fts_tri` row per unsegmented chunk;
+    - the MATCH-string test expects `"w"*`, an exact phrase for a stop word or a term carrying an unsegmented character, and the split;
+    - the incremental-equals-rebuilt test compares the three tables' contents where it compared row counts: `fts5vocab(<table>, 'instance')` rows, keyed by the note id and the chunk ordinal of their rowid. Row counts would pass with text written into the wrong column. (`fts5vocab` reads a contentless table's terms, columns and offsets; verified.)
     - the maintenance test needs an unsegmented chunk in its corpus for three merged tables;
     - the scan-agrees test expects `prefix`.
+  - A new test deletes a `note` row through its `ON DELETE CASCADE`, and finds no FTS row left for its chunks.
   - In core's `memory/service/scale_tests.rs`:
-    - three tests read `chunk`'s dropped columns directly to compare an incremental index with a rebuilt one;
+    - three tests read `chunk`'s dropped columns directly to compare an incremental index with a rebuilt one. They compare `fts5vocab` contents as above (`scale_tests.rs:410`);
     - the idle-tick merge test counts `fts_tri` segments, and its corpus has no unsegmented chunk;
-    - the damaged-cache test scribbles over "the second half of the file, where the full-text index lies". In the smaller file that half also holds pages the open reads (it fails at "open does not look"), so it must damage pages `dbstat` names as an FTS table's.
+    - the damaged-cache test scribbles over "the second half of the file, where the full-text index lies". In the smaller file that half also holds pages the open reads (it fails at "open does not look"), so it must damage pages `dbstat` names as an FTS table's. A second case damages a `chunk` page, now about 40 % of the file and read by the ranker on every search.
+  - `tools/builtins/memory_tools/tests.rs:491` asserts that the hit's `match` holds `term` or `trigram`, which it passes through `term` whatever the layout does. It asserts the exact list instead: `["term", "prefix"]` (`editor` in the title, `prefer*`).
   - The three golden recall tests in `prompt_ctx/sources/memory.rs`: the fixture-21 note's header reads `match=term,prefix`, where it read `match=term,trigram` (`memory_recall_{index,excerpts}.golden.txt`).
 - **What people and models are told:**
   - `memory_search`'s description (`tools/builtins/memory_tools.rs:244`): "partial words" becomes the beginning of a word, plus substrings in titles, aliases, tags and Chinese, Japanese or Korean text.
@@ -1004,10 +1182,13 @@ Phase 2 of the LQ17 slice builds §6.5.1–§6.5.6. Where behaviour changes, tes
   - `docs/Skill_Template_Reference.md`'s tool row.
   - The module docs of `memory_index` and `query.rs`.
   - CLAUDE.md's storage paragraph and its lexical-search gotcha: a recall test must share a word, a word's beginning, an alias, or a substring of a title, alias, tag or unsegmented text.
+  - [08](08-evaluation-report.md) and `10-learning-evaluation.md` say that their figures, L8's included (run from a pinned worktree), are pre-LQ17.
 - **Measured again on the build:**
-  - the proxy in both modes over both question sets (no net loss, every lost row explained);
-  - the index fixtures, and the 200 bench queries' hit sets at 10K;
-  - the three index benches (size by `dbstat`, build time, p50/p95/max, RSS);
+  - the retrieval proxy in both modes over both question sets;
+  - the scale proxy at 30,000 notes, with and without the L8 stores;
+  - the learning lookup without a model, and L8's coverage search on its stores;
+  - the index fixtures, and the 200 bench queries' hit sets at 10K, capped and uncapped;
+  - the index benches: 10K, 30K and 100K average, 100K learned, and 30K and 100K dense (size by `dbstat`, build time, p50/p95/max, RSS);
   - the service bench's recall line at 10K and 100K.
 
 #### 6.5.8 Considered and not taken
@@ -1015,8 +1196,14 @@ Phase 2 of the LQ17 slice builds §6.5.1–§6.5.6. Where behaviour changes, tes
 - **`detail=none` or `detail=column`** on the trigram table: every phrase of four or more characters fails ("phrase queries are not supported", §6.4).
 - **A document-frequency cutoff on ORed terms** (the scale review's unmeasured alternative): it would cut latency but keep the 1 GiB file. A term's inclusion would also depend on corpus statistics and change as the store grows.
 - **A stemmer** (03 §5 step 4, MD-1): it is English-only, and it changes what an identifier or a CJK run means.
-- **`prefix=` indexes** on the word table: they add 11 % to the size in the replica, to buy latency the target no longer needs.
-- **Mapping the whole file** (O5): the scale review measured it at −20 to −25 % of search time. It is a separate change and is not needed for 100 ms at 367 MiB.
+- **`prefix=` indexes** on the word table: they add 11 % to the size in the replica, to buy latency the target does not need.
+- **Mapping the whole file** (O5): the scale review measured it at −20 to −25 % of search time. It is a separate change and is not needed for the 100 ms target.
+- **Searching unsegmented bodies for Latin terms, ranked by the text alone.** This was rev 3.36's design, and the repair the review proposed for it. The retrieval leg returns every Chinese chunk that holds the substring — `now` in the heading `## Knowledge` — up to its own cap, for the ranker to throw away, on every search with such a term. The split at script boundaries finds the one case that leg was for, a Latin word glued to Chinese, as a word, on the word table.
+- **A larger candidate cap on the word table**, instead of the whole-word query: at 30,000 notes, caps of 512 and 1,024 left both and one of the two lost notes out (§6.5.5).
+- **The whole-word query over every column:** the same notes recovered as over the header, at 12 ms of p95 at 30K and 32 ms at 100K (§6.5.2).
+- **A prefix hit's relevance in the trigram slot (E4).** The word table is queried twice for relevance: whole words, with BM25 × 2.0, and the prefix terms as prefixes, with their BM25 × 1.0 beside the trigram tables'. A prefix hit then earns what a substring hit earned before.
+  - It recovers tq-0032, but gives back the held-out gains: 254 / 292 in index mode, 288 in excerpts mode, 82 / 95 and 93 on the tuning set.
+  - Against the revision, it recovers tq-0032's listed row but loses a held-out listed row, three held-out delivered rows and an excerpts tuning row.
 
 ---
 
@@ -1568,7 +1755,7 @@ Each question has a recommendation, and the design is written for it.
 | **LQ14** | The extractor was told to reuse known keys, and the reader's coarse or value-bearing keys (`editor.preference`, `routine.friday.weekly-review`, `user.machine`) led it to replace or drop unrelated facts. | **Keys only the chat model coined are not offered** to the extractor (known keys, key targets, the note's line); the notes stay searchable, recallable and listed; a key learning or the user also holds is offered. No `memory_store` key validation. §2.3 step 4 amended in place. | `diagnosis/learning-gap.md` (owner decision 4), its two sceptics | `0fe524d8`; repair round 1 `2d333522` (rev 3.34) |
 | **LQ15** | Which store size does the memory service's cost target? | **The design point is about 30K notes**; 100K is a later target. | `bench/scale/analysis.md` and its sceptic review | — (a target, no code) |
 | **LQ16** | Drop ruling R3's stat scan before every read (option O4), or keep it? | **Keep R3, and make the scan cheaper**: a bulk directory stat where the platform has one (`getattrlistbulk` on macOS; 156 → 87 ms per 100,000-file scan in the sceptic's `scanbench.c`, and 221–233 ms → 99–108 ms for the built listing, release, in this slice's `product/work/p4-timing.log`), `readdir` + `lstat` elsewhere, the same entries and fields bit for bit. | `bench/scale/analysis.md` (its sceptic section), `bench/scale/sceptic/scanbench.c`; the built listing's figure: `product/work/p4-timing.log` (rev 3.35) | `0177a41f`; repair round 1 `5f36b1dd` (rev 3.34) |
-| **LQ17** | The index's FTS layout at 100K. | **An index-layout revision, in a separate slice**, which follows this one. | `bench/scale/analysis.md`, `bench/scale/sceptic/` (the `ftsq` measurements) | design §6.5 (rev 3.36), measured on a prototype; the build is the LQ17 slice's phase 2 |
+| **LQ17** | The index's FTS layout at 100K. | **An index-layout revision, in a separate slice**, which follows this one. | `bench/scale/analysis.md`, `bench/scale/sceptic/` (the `ftsq` measurements) | design §6.5 (rev 3.36; revised by rev 3.37 after its review), measured on a prototype; the build is the LQ17 slice's phase 2 |
 
 **Noted, not asked.**
 - L4 makes T22's unscoped `GET /v1/chat/confirmations` carry note titles and excerpts in a memory-confirm preview (§4.4). T22 stays pending as it is.
@@ -1701,12 +1888,50 @@ A new key `[orchestrator.memory] recall_mode = "index" | "excerpts"`, **default 
 
 The log is not in date order and is not reordered. The 3.x entries are the implementers' and continue rev 3, the approval; the lead's **rev 4** and **rev 5** (MD-13…MD-16, `dac8221e`, `2fbe8e06`) were written between rev 3.4 and rev 3.5 and so predate every entry from rev 3.5 on despite their numbers; and rev 1 sits above rev 2.
 
+- **rev 3.37 (2026-09-27), LQ17's index layout revision, answering its review (design text only; phase 1 of the LQ17 slice).** A sceptic reviewed rev 3.36 and asked for fixes: 2 major findings, 6 minor, 3 nits. Each is answered below. Most change the design, measured again on the prototype — its final form is the variant the notes call E6. None is rejected outright; where the fix taken differs from the one the review proposed, the entry says why. §6.5 is rewritten in place; §10's LQ17 row and the status line are amended; rev 3.36's entry carries an inline correction; 03 is rev 7.8, and 04 is rev 4.6.
+  - **1 (major), a Latin substring still ranked inside mixed chunks.** Rev 3.36 said a body trigram hit counts in ranking only for a term carrying an unsegmented character, but its ranker credited a Latin substring (`W_TRIGRAM` and the `trigram` reason) in any chunk carrying one CJK character; only the body table's BM25 was withheld. The template headings then matched Chinese and mixed notes and no English one — 287 question–note pairs over 25 questions — and hq-0090 and hq-0120 showed it, as the review's reruns found. *Fixed, by another route than the review proposed.* The review proposed matching a Latin term in an unsegmented body only on tokens cut at script boundaries, in the ranker and the file scan, and keeping a retrieval leg on the body table for glued Latin such as `和commit`. The revision cuts at script boundaries in the word table itself (`split_scripts`, on the index side and the query side), so a glued word is a word: `term`, with the word table's BM25. The body table is then searched only for terms carrying an unsegmented character, and the retrieval leg is gone. That leg would have filled its own cap with every Chinese chunk under a `## Knowledge` heading, for the ranker to throw away. Both of the review's pins are fixture steps (26/6, `now`; 26/7, `commit`), red on the current layout and on rev 3.36's prototype. The proxy is unchanged by this, row for row, but for the known tie hq-0045.
+  - **2 (major), the accuracy gate never reached the candidate cap.** *Measured, and it found a loss, now fixed.* The proxy's 620 questions were run at the index level over the gold notes among 30,000 bench notes, and with the 319 notes two L8 runs learned (§6.5.5).
+    - With rev 3.36's single word leg, two relied-on notes left the candidate pool. Each was found only by the tag `work`, crowded out by `work*` → `worker`, `workspace`.
+    - A larger cap did not bring them back (512: neither; 1,024: one of them).
+    - The whole-word query at the cap does: the prefix terms, as whole words, in titles, aliases and tags. With it no relied-on note leaves the pool; 124 against the current layout's 126, and 129 against 132 with the learned notes.
+    - A whole-word query over every column did the same, but cost 32 ms at the p95 at 100K (76 ms against 44), so the query is confined to the header.
+    - The 200 bench queries' lost hits were checked against an uncapped run of each layout (§6.5.5). 136 of the 149 score at or below the revision's own 8th hit, 129 of them within one substring hit's weight. The other 13 are the cap's doing, which drops 7 of the revision's new hits on the current layout the same way.
+  - **3 (minor), two retrieval consumers unmeasured.** *Measured; nothing is lost.*
+    - The learning lookup, with no model: each corpus session searched as `learning_view` searches it, over the gold notes of the sessions before it. The 10 changed notes are offered on both layouts. The restatements go from 13 to 14 of 15, and from 13 to 14 within the turn's own five hits.
+    - L8's coverage search, on the two L8 stores whose project partition exists: every judged match the current code returns among its five hits, the revision returns too (70 of 70, 68 of 68).
+    - L8's figures are pre-LQ17, as §6.5.7 has the reports say.
+  - **4 (minor), contentless tables and no trigger.** *Adopted:* one `AFTER DELETE ON chunk` trigger removes a chunk's FTS rows, and the incremental-equals-rebuilt tests compare `fts5vocab` contents keyed by note id and ordinal (§6.5.1, §6.5.7). Both are verified on SQLite 3.51: the trigger and a cascade, `fts5vocab` on a contentless table. One part of the finding is corrected: no path deletes a `note` row relying on the cascade today — every delete removes the chunk rows first (`mod.rs:1544-1585`) — so the hazard was latent, not a defect.
+  - **5 (minor), fixtures that no longer kept their invariants.** *Fixed* (§6.5.6):
+    - 22 gains step 19 (`x_ab*`), which tells an injected `*` from the index's own prefix, and its notes text is rewritten.
+    - 21's texts are corrected: its `editor` was always a whole token of the title.
+    - 12's `design` field quotes the revised step 4.
+    - The two unguarded routing rules are pinned by 26/8 (`partner's` stays exact) and 26/9 (`memory_file` finds `memory_files`), each shown to fail with its rule broken, and by 26/7 (Latin glued to Chinese).
+  - **6 (minor), four inaccurate statements.** *All corrected.*
+    - (a) A prefix hit's coverage equals a substring hit's, but its relevance is the word table's BM25 at twice the weight — tq-0032's mechanism (§6.5.3).
+    - (b) Index tuning's listed-or-delivered falls 95 → 94, deterministically. Rev 3.36 counted that as no net loss; it is a net loss of one row on one of eight totals, which the rule treats as a stop. §6.5.5 states it for the lead, with the one measured way to recover it (E4) and what that costs on the held-out set.
+    - (c) A term carrying an unsegmented character is now never a prefix, so `用户喜欢` reports `trigram` like `简洁的回答` in the same run (23/6).
+    - (d) The citation is `search.rs:837` / `:928`.
+  - **7 (minor), a bench that understated headers and morphology.** *Measured:* a dense mix — 4.8 aliases and 115 B of header per note, inflected English with 3-letter stems, half the query words bare stems — and a 30K point (§6.5.5). The review estimated 40–50 MiB more at 100K. The dense mix costs 137 MiB more than the average mix: 504 MiB, 4.0× the body bytes, against the current layout's 1,225 MiB on the same corpus. The conclusion holds.
+  - **8 (minor), stale or unstated records.** *All fixed:*
+    - 04's risk row;
+    - `is_unsegmented` and the split named as part of the index's contents and of the `SCHEMA_VERSION` doc comment;
+    - the upgrade and downgrade path (§6.5.7);
+    - the loss described as ordinary text in German and Swedish compounds and in Arabic and Hebrew attached forms, not only as English compounds and camelCase (§6.5.4).
+  - **9 (nits).** *All three taken:*
+    - `memory_tools/tests.rs:491` asserts the exact reasons;
+    - a stop word is never a prefix (22/20: `and` does not find `Android`);
+    - the damaged-cache test also damages a `chunk` page.
+  - **Evidence** (session scratchpad, `memeval/l8/layout/`):
+    - `proto/`: the patches from E2 to E6 (`patch_e3.py` … `patch_e6.py`), the saved variants, `stepcheck.py`, and the bench logs (`bench/r2-*`, `r3-*`);
+    - `scale/`: the harness (`proto/harness/`), its job files, outputs and analyzers — scale proxy, learning lookup, coverage;
+    - `work/`: `infix_loss_e3.py`, `capcheck.py`, `rowdiff.py`;
+    - the review's own scripts and reruns in the scratchpad's `sceptic/`.
 - **rev 3.36 (2026-09-27), LQ17's index layout revision: §6.5 (design text only; phase 1 of the LQ17 slice).** The owner's LQ17 ("write the layout revision") is written as §6.5 and measured on a prototype built in a scratch copy of `f6f40feb`, outside the repository; phase 2 builds it, after a review of this text. Nothing is built by this revision.
   - **The layout** (§6.5.1): index schema 4; one normalized copy of each chunk's text in `chunk`; the header once per note on `note`; three contentless FTS tables — `fts_word` over everything, a new `fts_tri_head` over titles, aliases and tags, and `fts_tri` over the bodies of chunks in scripts `unicode61` cannot split (CJK, Thai, Lao, Myanmar, Khmer); `SearchHit.excerpt` removed.
-  - **Routing and ranking** (§6.5.2–§6.5.3): a `unicode61` prefix query for every term whose last token has three or more characters; a body trigram hit ranked only for a term carrying an unsegmented character; `MatchReason` gains `prefix`; `W_PREFIX` = `W_TRIGRAM`; the file scan agrees with the index.
+  - **Routing and ranking** (§6.5.2–§6.5.3; *revised by rev 3.37*): a `unicode61` prefix query for every term whose last token has three or more characters; a body trigram hit ranked only for a term carrying an unsegmented character; `MatchReason` gains `prefix`; `W_PREFIX` = `W_TRIGRAM`; the file scan agrees with the index.
   - **The measured case** (§6.5.4–§6.5.5):
     - the retrieval-proxy baseline on the current layout in both recall modes, over the held-out and tuning questions, with its repeatability;
-    - the prototype against it: no net loss, and every lost row explained;
+    - the prototype against it: no net loss, and every lost row explained *(corrected in rev 3.37: index tuning's listed-or-delivered falls from 95 to 94, tq-0032 — a net loss of one row on that total, now stated for the lead to rule on)*;
     - the five variants measured and not taken;
     - the 641 infix matches the layout drops, 452 of them the note template's own headings;
     - the three index benches before and after, and the 200 bench queries' hit sets at 10K.
