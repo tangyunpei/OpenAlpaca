@@ -1528,37 +1528,47 @@ fn a_write_while_a_rebuild_reads_its_partition_is_indexed_as_it_stands() {
     assert!(rebuild.join().unwrap().unwrap());
     let new = writer.join().unwrap().unwrap();
     tick.join().unwrap().unwrap();
-    service.reconcile_owner(ALICE).unwrap();
 
-    let recalled = service
-        .recall(&tool, "which editor marmalade", RecallBudget::default())
-        .unwrap();
-    let ids: Vec<NoteId> = recalled
-        .notes
-        .iter()
-        .map(|n| n.id)
-        .chain(recalled.listed.iter().map(|l| l.id))
-        .collect();
-    assert!(
-        ids.contains(&new.id) && !ids.contains(&old.id),
-        "recall serves the replacement, not what it replaced: {ids:?}"
-    );
+    // As soon as the three have joined — no later tick heals the index
+    // first (repair round 1 of the L8 product slice) — and again after one.
     let key = files::home_partition_key(&user.owner_key);
-    let row = |id: NoteId| {
-        service
-            .index()
-            .row_facts(&key)
-            .unwrap()
-            .into_iter()
-            .find(|r| r.id == id.to_string())
-            .unwrap()
+    let check = |when: &str| {
+        let recalled = service
+            .recall(&tool, "which editor marmalade", RecallBudget::default())
+            .unwrap();
+        let ids: Vec<NoteId> = recalled
+            .notes
+            .iter()
+            .map(|n| n.id)
+            .chain(recalled.listed.iter().map(|l| l.id))
+            .collect();
+        assert!(
+            ids.contains(&new.id) && !ids.contains(&old.id),
+            "{when}: recall serves the replacement, not what it replaced: {ids:?}"
+        );
+        let row = |id: NoteId| {
+            service
+                .index()
+                .row_facts(&key)
+                .unwrap()
+                .into_iter()
+                .find(|r| r.id == id.to_string())
+                .unwrap()
+        };
+        assert_eq!(row(new.id).origin, "user", "{when}");
+        assert!(
+            !row(new.id).same_key_loser && !row(new.id).conflict,
+            "{when}"
+        );
+        assert_eq!(
+            row(old.id).effective_status,
+            Some(index::EffectiveStatus::Superseded),
+            "{when}"
+        );
     };
-    assert_eq!(row(new.id).origin, "user");
-    assert!(!row(new.id).same_key_loser && !row(new.id).conflict);
-    assert_eq!(
-        row(old.id).effective_status,
-        Some(index::EffectiveStatus::Superseded)
-    );
+    check("before any further tick");
+    service.reconcile_owner(ALICE).unwrap();
+    check("after a tick");
 }
 
 /// P6, the forget contract's half: a forget while a rebuild has opened the
@@ -1633,25 +1643,95 @@ fn a_forget_while_a_rebuild_reads_its_partition_leaves_its_sources_forgotten() {
     assert!(rebuild.join().unwrap().unwrap());
     forget.join().unwrap().unwrap();
     tick.join().unwrap().unwrap();
+
+    // As soon as the three have joined, and again after a tick.
+    let key = files::home_partition_key(&user.owner_key);
+    let check = |when: &str| {
+        let recalled = service
+            .recall(&tool, "oolong marmalade tea", RecallBudget::default())
+            .unwrap();
+        let ids: Vec<NoteId> = recalled
+            .notes
+            .iter()
+            .map(|n| n.id)
+            .chain(recalled.listed.iter().map(|l| l.id))
+            .collect();
+        assert!(
+            !ids.contains(&sibling.id),
+            "{when}: a note citing a forgotten note's source is recalled: {ids:?}"
+        );
+        let facts = service.index().row_facts(&key).unwrap();
+        let sib = facts
+            .iter()
+            .find(|r| r.id == sibling.id.to_string())
+            .unwrap();
+        assert!(sib.source_forgotten, "{when}");
+    };
+    check("before any further tick");
+    service.reconcile_owner(ALICE).unwrap();
+    check("after a tick");
+}
+
+/// P6's tick bookkeeping (repair round 1 of the L8 product slice): a tick
+/// whose index pass a running rebuild skipped does not remember its scan,
+/// and a completed rebuild forgets every remembered scan — so the next tick
+/// itself, with no read between, brings the index in line with a hand edit
+/// made after the rebuild read the partition. Every read's stat scan would
+/// also find that edit; this pins the tick's own catch-up (its doc: a scan
+/// is remembered once its work has succeeded). Either half alone suffices
+/// here; the test fails only with both taken out.
+#[test]
+fn a_tick_whose_pass_a_rebuild_skipped_is_done_by_the_next_tick() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let h = Harness::new();
+    let (service, _, _) = ready_cedar_service(&h, 2);
+    let user = h.user(ALICE, None);
+    let note = service
+        .store(
+            &user,
+            StoreInput {
+                title: "Herb garden".into(),
+                body: "# Herb garden\n\nThe user grows basil.\n".into(),
+                kind: Some(NoteKind::Fact),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     service.reconcile_owner(ALICE).unwrap();
 
-    let recalled = service
-        .recall(&tool, "oolong marmalade tea", RecallBudget::default())
-        .unwrap();
-    let ids: Vec<NoteId> = recalled
-        .notes
-        .iter()
-        .map(|n| n.id)
-        .chain(recalled.listed.iter().map(|l| l.id))
-        .collect();
-    assert!(
-        !ids.contains(&sibling.id),
-        "a note citing a forgotten note's source is recalled: {ids:?}"
-    );
+    // A rebuild that has read every partition and not yet finished.
+    service.gates.all_read.store(false, SeqCst);
+    let hold = service.gates.after_read.write().unwrap();
+    service.rebuild_state().pending = true;
+    let rebuild = {
+        let service = service.clone();
+        std::thread::spawn(move || service.run_pending_rebuild())
+    };
+    eventually("the rebuild read every partition", || {
+        service.gates.all_read.load(SeqCst)
+    });
+    let file = file_of(&h, &user.owner_key, note.id);
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replace("grows basil", "grows basil and thyme")).unwrap();
+    let during = service.reconcile_owner(ALICE).unwrap();
+    let [edit] = &during.changes[..] else {
+        panic!("the tick finds the hand edit: {:?}", during.changes);
+    };
+    let edited = edit.revision.clone().expect("a revision");
+    drop(hold);
+    assert!(rebuild.join().unwrap().unwrap());
+
+    service.reconcile_owner(ALICE).unwrap();
     let key = files::home_partition_key(&user.owner_key);
-    let facts = service.index().row_facts(&key).unwrap();
-    let sib = facts.iter().find(|r| r.id == sibling.id.to_string()).unwrap();
-    assert!(sib.source_forgotten);
+    let row = service
+        .index()
+        .row_facts(&key)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == note.id.to_string())
+        .unwrap();
+    assert_eq!(row.revision, edited, "the tick indexed the edited file");
+    assert_eq!(row.origin, "external");
 }
 
 /// The wait above is checked before the index is read, so a rebuild can

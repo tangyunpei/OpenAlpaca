@@ -275,6 +275,11 @@ pub(crate) struct TestGates {
     /// slice's P6).
     pub after_open: std::sync::RwLock<()>,
     pub opened: std::sync::atomic::AtomicBool,
+    /// Where a rebuild waits once it has read every partition and released
+    /// their writer slots, before it marks the index ready — `all_read` set
+    /// first (repair round 1 of the L8 product slice).
+    pub after_read: std::sync::RwLock<()>,
+    pub all_read: std::sync::atomic::AtomicBool,
     /// Where recall or search waits once it has found the index serving,
     /// before its stat scans — counted first in `serving_seen` (the L8
     /// product slice's P7).
@@ -1284,6 +1289,16 @@ impl MemoryService {
             self.index
                 .stamp_scan(p.partition_key(), loaded.scan.len())?;
         }
+        #[cfg(test)]
+        self.gates
+            .all_read
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        #[cfg(test)]
+        let _after_read = self
+            .gates
+            .after_read
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         self.index.finish_rebuild()?;
         // Re-read from the rows on each partition's next pass, and re-derive
         // each on the next tick: a tick that ran meanwhile skipped its pass.
