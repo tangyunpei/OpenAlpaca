@@ -125,7 +125,7 @@ impl MemoryService {
                 sort_newest_first(&mut out);
                 Ok(Some(out))
             },
-            || Ok(suggestions_from_files(&partitions, limit)?),
+            || suggestions_from_files(&partitions, limit),
         )
     }
 }
