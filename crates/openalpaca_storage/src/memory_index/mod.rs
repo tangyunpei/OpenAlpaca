@@ -25,6 +25,7 @@
 
 pub mod chunker;
 pub mod query;
+mod scan;
 mod search;
 mod timeline;
 
@@ -61,6 +62,9 @@ pub const MAX_QUERY_CHARS: usize = 512;
 pub const DEFAULT_LIMIT: usize = 8;
 /// The largest page a search returns (design 09 §13.1: `limit` 1–50).
 pub const MAX_LIMIT: usize = 50;
+/// How many notes one transaction of a whole rebuild indexes: the index is
+/// released between batches, and the WAL checkpoints between them.
+pub const REBUILD_BATCH: usize = 256;
 /// How many best-ranked chunks each FTS table contributes to the candidate
 /// set. The filters run inside the query, so these are *eligible* chunks; the
 /// cap bounds the merge, and hitting it sets `partial`.
@@ -99,6 +103,24 @@ impl fmt::Display for IndexError {
 }
 
 impl std::error::Error for IndexError {}
+
+impl IndexError {
+    /// Whether the cache file itself is damaged — SQLite's `SQLITE_CORRUPT`
+    /// (FTS5's `SQLITE_CORRUPT_VTAB` included) or `SQLITE_NOTADB`. Open no
+    /// longer runs `PRAGMA quick_check` (scale slice S6: 2.4 s at every boot
+    /// at 100K notes), so damage below the catalog surfaces on use, and a
+    /// caller that meets this rebuilds the cache.
+    pub fn is_corruption(&self) -> bool {
+        matches!(
+            self,
+            Self::Sqlite(rusqlite::Error::SqliteFailure(e, _))
+                if matches!(
+                    e.code,
+                    rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+                )
+        )
+    }
+}
 
 impl From<rusqlite::Error> for IndexError {
     fn from(e: rusqlite::Error) -> Self {
@@ -460,11 +482,14 @@ impl MemoryIndex {
         Ok(crate::store::cache_dir()?.join(INDEX_FILE_NAME))
     }
 
-    /// Opens the cache at `path`, creating it when absent. A file that fails
-    /// `quick_check`, carries another [`SCHEMA_VERSION`] or lacks a table is
-    /// deleted and recreated — it is a cache — and the fresh index reports
-    /// [`IndexState::Rebuilding`] until [`MemoryIndex::rebuild`] runs. An
-    /// intact file keeps the state it recorded.
+    /// Opens the cache at `path`, creating it when absent. A file that is
+    /// not a database, carries another [`SCHEMA_VERSION`] or lacks a table
+    /// is deleted and recreated — it is a cache — and the fresh index
+    /// reports [`IndexState::Rebuilding`] until [`MemoryIndex::rebuild`]
+    /// runs. An intact file keeps the state it recorded. No integrity check
+    /// runs here (scale slice S6: `quick_check` read the whole file at every
+    /// boot); damage below the catalog is met on use and reported by
+    /// [`IndexError::is_corruption`].
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -508,12 +533,6 @@ impl MemoryIndex {
     fn open_existing(path: &Path) -> std::result::Result<Self, String> {
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
         apply_pragmas(&conn).map_err(|e| e.to_string())?;
-        let check: String = conn
-            .query_row("PRAGMA quick_check", [], |r| r.get(0))
-            .map_err(|e| e.to_string())?;
-        if check != "ok" {
-            return Err(format!("quick_check: {check}"));
-        }
         for table in EXPECTED_TABLES {
             let present: bool = conn
                 .query_row(
@@ -570,6 +589,13 @@ impl MemoryIndex {
             tracing::warn!("memory index mutex was poisoned; recovering");
             poisoned.into_inner()
         })
+    }
+
+    /// The state alone — one row of `meta`, where [`Self::index_state`]
+    /// also counts every note and chunk.
+    pub fn state(&self) -> Result<IndexState> {
+        let conn = self.lock();
+        Ok(read_state(&conn)?)
     }
 
     /// The state and the row counts.
@@ -631,25 +657,52 @@ impl MemoryIndex {
         Ok(report)
     }
 
-    /// Drops everything and indexes `records`, then marks the index `ready`.
-    /// The `rebuilding` mark is committed first on its own, so a crash inside
-    /// the rebuild leaves an index that says so and keeps what it had.
+    /// Drops everything and indexes `records`, then marks the index `ready`:
+    /// [`Self::begin_rebuild`], the records in batches, then
+    /// [`Self::finish_rebuild`]. A crash inside leaves an index that says
+    /// `rebuilding`.
     pub fn rebuild(&self, records: &[IndexRecord]) -> Result<RebuildReport> {
-        {
-            let conn = self.lock();
-            write_state(&conn, IndexState::Rebuilding)?;
+        self.begin_rebuild()?;
+        let mut report = RebuildReport::default();
+        for batch in records.chunks(REBUILD_BATCH) {
+            let done = self.upsert_many(batch)?;
+            report.notes += done.notes;
+            report.chunks += done.chunks;
         }
+        self.finish_rebuild()?;
+        Ok(report)
+    }
+
+    /// Starts a whole rebuild: the cache is recreated empty — a new file at
+    /// the same path, or a new in-memory database — and says `rebuilding`,
+    /// so a crash before [`Self::finish_rebuild`] leaves an index that says
+    /// so. Recreating rather than deleting rows leaves no free pages behind
+    /// and never reads a damaged page (scale slice S6). The caller then
+    /// indexes the notes in batches — each its own transaction, so the
+    /// index is never held for the whole rebuild — and finishes.
+    pub fn begin_rebuild(&self) -> Result<()> {
+        let mut conn = self.lock();
+        let fresh = match &self.path {
+            Some(path) => {
+                // Close this file before it is deleted, so nothing of it is
+                // checkpointed into the new one.
+                drop(std::mem::replace(&mut *conn, Connection::open_in_memory()?));
+                delete_cache_files(path)?;
+                Connection::open(path)?
+            }
+            None => Connection::open_in_memory()?,
+        };
+        apply_pragmas(&fresh)?;
+        create_schema(&fresh)?;
+        *conn = fresh;
+        Ok(())
+    }
+
+    /// Ends a whole rebuild: one merged FTS segment per table, the state
+    /// `ready`, and the WAL folded back into the file.
+    pub fn finish_rebuild(&self) -> Result<()> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
-        tx.execute_batch(
-            "DELETE FROM chunk; DELETE FROM note_alias; DELETE FROM note_source;
-             DELETE FROM note; DELETE FROM partition;",
-        )?;
-        let mut report = RebuildReport::default();
-        for record in records {
-            report.chunks += upsert_in(&tx, record)?;
-            report.notes += 1;
-        }
         // A bulk load leaves each FTS index as several segments; one merged
         // segment per index makes every later term lookup one doclist read.
         tx.execute_batch(
@@ -660,7 +713,7 @@ impl MemoryIndex {
         tx.commit()?;
         // Fold the WAL back into the file: a rebuild's WAL is the whole index.
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-        Ok(report)
+        Ok(())
     }
 
     /// Replaces one partition's rows with `records`, every one of which must

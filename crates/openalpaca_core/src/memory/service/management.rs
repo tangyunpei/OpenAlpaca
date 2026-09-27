@@ -116,7 +116,17 @@ impl MemoryService {
     /// skipped, and so — with one WARN — is one whose open or scan fails
     /// for any other reason: one broken partition never stops the tick for
     /// the partitions after it.
+    ///
+    /// A whole rebuild the index is owed — left by the daemon's start, a
+    /// failed attempt, or damage met on use — runs first, here, off the
+    /// request path (scale slice S6).
     pub fn reconcile_owner(&self, owner_id: &str) -> Result<SyncReport, MemoryError> {
+        if let Err(e) = self.run_pending_rebuild() {
+            tracing::warn!(
+                "memory: the search index could not be rebuilt; recall and search read the \
+                 note files meanwhile, and the next tick tries again: {e}"
+            );
+        }
         let owner_key = files::owner_key(owner_id);
         let mut scopes = vec![StoreScope::Home];
         scopes.extend(
@@ -154,16 +164,19 @@ impl MemoryService {
                     scanned += count;
                     changes.extend(found);
                 }
-                Err(e) => tracing::warn!(
-                    partition = partition.partition_key(),
-                    "memory: partition skipped by the reconciliation scan: {e}"
-                ),
+                Err(e) => {
+                    self.note_index_failure(&e);
+                    tracing::warn!(
+                        partition = partition.partition_key(),
+                        "memory: partition skipped by the reconciliation scan: {e}"
+                    );
+                }
             }
         }
         Ok(SyncReport {
             scanned,
             changes,
-            index_state: self.index.index_state()?.state,
+            index_state: self.current_index_state()?,
         })
     }
 

@@ -248,14 +248,46 @@ fn sweep_orphaned_uploads(db: &Database, grace_hours: i64) -> usize {
     cleaned
 }
 
+/// The memory index's boot rebuild, off the request path (scale slice S6):
+/// a cache that was missing, damaged or of another schema version is
+/// rebuilt on a blocking worker started with the daemon's background tasks
+/// — the socket is already bound — while recall and search read the note
+/// files (design §5). A valid cache has nothing owed and this returns at
+/// once. One that fails stays owed, and the reconciliation timer tries
+/// again.
+pub fn spawn_memory_index_rebuild(
+    service: Arc<openalpaca_core::memory::service::MemoryService>,
+) {
+    if !service.rebuild_pending() {
+        return;
+    }
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        match tokio::task::spawn_blocking(move || service.run_pending_rebuild()).await {
+            Ok(Ok(true)) => tracing::info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "memory index rebuilt"
+            ),
+            Ok(Ok(false)) => {}
+            Ok(Err(e)) => tracing::warn!(
+                "memory index rebuild failed; recall and search read the note files, and the \
+                 reconciliation timer tries again: {e}"
+            ),
+            Err(e) => tracing::warn!("memory index rebuild task failed: {e}"),
+        }
+    });
+}
+
 /// The memory reconciliation timer (memory redesign, design §5 *Freshness
 /// without a watcher*): every [`MEMORY_RECONCILE_INTERVAL`], a bounded stat
 /// scan of every partition the owner's control snapshots know — a file
 /// edited, added or removed behind the service's back is re-recorded
 /// `external`, the index follows, and each finding is one `memory_changed`
-/// with no surface (§7b P13). The first scan runs one interval after boot:
-/// `open_default` has just rebuilt or checked the cache, and a partition is
-/// also stat-scanned before every read, so nothing waits on this.
+/// with no surface (§7b P13). It first runs any whole rebuild the index is
+/// still owed (scale slice S6). The first scan runs one interval after
+/// boot: the cache was opened (and, if owed, is being rebuilt by
+/// [`spawn_memory_index_rebuild`]), and a partition is also stat-scanned
+/// before every read, so nothing waits on this.
 pub fn spawn_memory_reconciliation(
     service: Arc<openalpaca_core::memory::service::MemoryService>,
     owner_id: String,

@@ -711,6 +711,7 @@ async fn async_main(
     );
     background::spawn_asset_cleanup(db.clone(), daemon_config.clone(), cancel_token.clone());
     background::spawn_telemetry_cleanup(db.clone(), cancel_token.clone());
+    background::spawn_memory_index_rebuild(svcs.memory_service.clone());
     background::spawn_memory_reconciliation(
         svcs.memory_service.clone(),
         local_user_id.clone(),

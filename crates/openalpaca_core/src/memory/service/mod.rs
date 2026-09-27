@@ -83,7 +83,7 @@ use openalpaca_storage::memory_index::{
 use openalpaca_storage::store::StoreScope;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::UNIX_EPOCH;
 
 use write_slot::WriteSlots;
@@ -122,6 +122,14 @@ pub const LIST_MAX_LIMIT: usize = 100;
 /// The shortest id prefix [`MemoryService::find_by_id_prefix`] takes: 8 hex
 /// characters, the first group of a UUID (design 09 §12.1).
 pub const ID_PREFIX_MIN_HEX: usize = 8;
+/// Design §5: while the index is rebuilt, recall and search read the notes
+/// from their files — at most this many, the most recently updated first
+/// (a scan that leaves notes out says `partial`). Scale slice S6: the
+/// realistic store after a year or two is 10K–30K notes, and the bound
+/// keeps the scan's matching work to that of a 10K-note partition; the
+/// partitions are read whole (through the parse cache) for their
+/// derivation either way.
+pub const FILE_SCAN_MAX_NOTES: usize = 10_000;
 
 #[cfg(test)]
 thread_local! {
@@ -167,6 +175,34 @@ struct Fingerprint {
     pinned: bool,
     relative_path: String,
     stat: (i64, u64, u64),
+}
+
+/// The whole-index rebuild (design §5; scale slice S6).
+#[derive(Debug, Default)]
+struct RebuildState {
+    /// The index lacks notes: a fresh, recreated or schema-bumped cache, a
+    /// rebuild that failed, or damage met on use. Until a rebuild
+    /// completes, recall and search read the files.
+    pending: bool,
+    /// A rebuild is running: the index is being refilled from nothing.
+    running: bool,
+}
+
+/// What a search reads while the index is rebuilt: the notes, from their
+/// files, as the index would have held them.
+struct FileScan {
+    records: Vec<IndexRecord>,
+    pinned: Vec<IndexRecord>,
+    truncated: bool,
+}
+
+/// Tests: points where a test can hold the service still — the rebuild
+/// once it has emptied the index, and a reply-path read before it starts.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(super) struct TestGates {
+    pub rebuild: std::sync::RwLock<()>,
+    pub reads: std::sync::RwLock<()>,
 }
 
 /// The owner's partitions for one request (design §3 rule 1).
@@ -224,6 +260,12 @@ pub struct MemoryService {
     /// scan detects. `None` in a test that has no bus; the daemon attaches
     /// its bus with [`MemoryService::with_bus`].
     bus: Option<crate::bus::EventBus>,
+    /// Whether a whole rebuild is owed or running (scale slice S6), and
+    /// the signal a reader waiting for one to end is woken by.
+    rebuild: Mutex<RebuildState>,
+    rebuilt: Condvar,
+    #[cfg(test)]
+    pub(super) gates: Arc<TestGates>,
 }
 
 impl std::fmt::Debug for MemoryService {
@@ -255,6 +297,10 @@ impl MemoryService {
             used_by_request: Mutex::new(VecDeque::new()),
             raised: Mutex::new(HashMap::new()),
             bus: None,
+            rebuild: Mutex::new(RebuildState::default()),
+            rebuilt: Condvar::new(),
+            #[cfg(test)]
+            gates: Arc::new(TestGates::default()),
         }
     }
 
@@ -289,14 +335,34 @@ impl MemoryService {
         }
     }
 
-    /// The daemon's service: the cache at `state/cache/memory-index-v1.sqlite`
-    /// under the home store, rebuilt from the partitions the control
-    /// snapshots name when it is fresh or was recreated (design §5, *Freshness
-    /// without a watcher*); a valid one keeps its rows and is checked
-    /// partition by partition on first use. A cache that cannot be opened at
-    /// all is replaced by an in-memory one with one WARN — the index is
-    /// disposable, the daemon is not.
+    /// The service over the cache at `state/cache/memory-index-v1.sqlite`
+    /// under the home store, **ready**: a fresh or recreated cache is
+    /// rebuilt from the partitions the control snapshots name before this
+    /// returns ([`Self::open_default_deferred`], then
+    /// [`Self::run_pending_rebuild`]). What a caller that needs the index at
+    /// once uses — a test, the evaluation harness; the daemon opens with
+    /// [`Self::open_default_deferred`] and rebuilds in the background.
     pub fn open_default(db: Option<Database>) -> Self {
+        let service = Self::open_default_deferred(db);
+        if let Err(e) = service.run_pending_rebuild() {
+            tracing::warn!("memory index rebuild failed: {e:#}");
+        }
+        service
+    }
+
+    /// The daemon's service (design §5, *Freshness without a watcher*; scale
+    /// slice S6): the cache at `state/cache/memory-index-v1.sqlite` under the
+    /// home store, opened **without waiting for anything** — no integrity
+    /// check, and a fresh, recreated or schema-bumped cache is not rebuilt
+    /// here but left owed ([`Self::rebuild_pending`]) for
+    /// [`Self::run_pending_rebuild`] to do off the request path. Until it
+    /// has, recall and search read the files (design §5: "search meanwhile
+    /// serves a bounded scoped file scan with `index_state: rebuilding`").
+    /// A valid cache keeps its rows and is checked partition by partition on
+    /// first use. A cache that cannot be opened at all is replaced by an
+    /// in-memory one with one WARN — the index is disposable, the daemon is
+    /// not.
+    pub fn open_default_deferred(db: Option<Database>) -> Self {
         let index = match MemoryIndex::default_path().and_then(|p| Ok(MemoryIndex::open(&p)?)) {
             Ok(index) => index,
             Err(e) => {
@@ -305,16 +371,97 @@ impl MemoryService {
             }
         };
         let service = Self::new(db, index);
-        match service.index.index_state() {
-            Ok(report) if report.state == IndexState::Rebuilding => {
-                if let Err(e) = service.rebuild_index() {
-                    tracing::warn!("memory index rebuild failed: {e:#}");
-                }
+        let owed = match service.index.state() {
+            Ok(state) => state == IndexState::Rebuilding,
+            Err(e) => {
+                tracing::warn!("memory index state unreadable, rebuilding it: {e}");
+                true
             }
-            Ok(_) => {}
-            Err(e) => tracing::warn!("memory index state unreadable: {e}"),
+        };
+        if owed {
+            service.rebuild_state().pending = true;
         }
         service
+    }
+
+    fn rebuild_state(&self) -> std::sync::MutexGuard<'_, RebuildState> {
+        self.rebuild.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether a whole rebuild of the index is owed or running (scale slice
+    /// S6): recall and search then read the files, and the suggestions a
+    /// turn is told about are left out.
+    pub fn rebuild_pending(&self) -> bool {
+        let state = self.rebuild_state();
+        state.pending || state.running
+    }
+
+    /// Whether a whole rebuild is running now.
+    pub fn rebuild_running(&self) -> bool {
+        self.rebuild_state().running
+    }
+
+    /// Whether reads can be served from the index: no rebuild owed or
+    /// running.
+    fn index_serves(&self) -> bool {
+        !self.rebuild_pending()
+    }
+
+    /// Blocks while a whole rebuild runs — what a read of the index that
+    /// has no file-scan answer (learning's lookups, the timeline, the
+    /// suggestions list) does, rather than read an index being refilled.
+    fn wait_for_rebuild(&self) {
+        let mut state = self.rebuild_state();
+        while state.running {
+            state = self
+                .rebuilt
+                .wait(state)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    /// What an error from the index means for it: damage to the cache file
+    /// (open no longer checks it, scale slice S6) owes a rebuild, which the
+    /// next reconciliation tick runs; until then recall and search read the
+    /// files. One WARN, with no note text.
+    fn note_index_failure(&self, e: &MemoryError) {
+        if !e.is_index_corruption() {
+            return;
+        }
+        let mut state = self.rebuild_state();
+        if !state.pending {
+            state.pending = true;
+            tracing::warn!(
+                "memory: the search index cache is damaged ({e}); recall and search read the \
+                 note files until the next reconciliation rebuilds it"
+            );
+        }
+    }
+
+    /// Runs the whole rebuild the index is owed, if any and none is running
+    /// — off the request path: the daemon calls this on a blocking worker
+    /// when it starts, and every reconciliation tick calls it. Answers
+    /// whether it rebuilt. A rebuild that fails stays owed.
+    pub fn run_pending_rebuild(&self) -> Result<bool, MemoryError> {
+        {
+            let mut state = self.rebuild_state();
+            if !state.pending || state.running {
+                return Ok(false);
+            }
+            state.running = true;
+        }
+        self.finish_rebuild_run(self.rebuild_index_inner())
+            .map(|()| true)
+    }
+
+    /// Ends a rebuild run: owed again if it failed, and every reader
+    /// waiting for it woken.
+    fn finish_rebuild_run(&self, result: Result<(), MemoryError>) -> Result<(), MemoryError> {
+        let mut state = self.rebuild_state();
+        state.running = false;
+        state.pending = result.is_err();
+        self.rebuilt.notify_all();
+        result
     }
 
     pub fn index(&self) -> &MemoryIndex {
@@ -664,13 +811,22 @@ impl MemoryService {
     /// fingerprints and the next pass reads the rows again. The whole
     /// rebuild stays where it is needed: a missing, recreated or
     /// schema-bumped cache ([`Self::rebuild_index`]).
+    ///
+    /// While a whole rebuild runs the pass is skipped (scale slice S6): the
+    /// rebuild reads every partition itself, and a write it read too early
+    /// is found by the next read's stat scan or the next write's pass,
+    /// whose fingerprints come from the rebuilt rows.
     fn reindex_view(&self, p: &Partition, loaded: &LoadedPartition) -> Result<(), MemoryError> {
+        if self.rebuild_running() {
+            return Ok(());
+        }
         let result = self.reindex_view_once(p, loaded);
-        if result.is_err() {
+        if let Err(e) = &result {
             self.fingerprints
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(p.partition_key());
+            self.note_index_failure(e);
         }
         result
     }
@@ -787,11 +943,37 @@ impl MemoryService {
     }
 
     /// Rebuilds the whole cache from every partition a control snapshot
-    /// names (a fresh or recreated index). Best effort per partition.
+    /// names (a fresh or recreated index), now; one already running is
+    /// waited for first. Best effort per partition.
     pub fn rebuild_index(&self) -> Result<(), MemoryError> {
+        {
+            let mut state = self.rebuild_state();
+            while state.running {
+                state = self
+                    .rebuilt
+                    .wait(state)
+                    .unwrap_or_else(|e| e.into_inner());
+            }
+            state.running = true;
+        }
+        self.finish_rebuild_run(self.rebuild_index_inner())
+    }
+
+    /// The rebuild itself (scale slice S6): the cache recreated empty, then
+    /// each partition read and indexed in batches — the index is released
+    /// between them, and nothing else writes it meanwhile ([`Self::reindex_view`]
+    /// skips while a rebuild runs; a write it missed is found by the next
+    /// read's stat scan) — then merged and marked ready.
+    fn rebuild_index_inner(&self) -> Result<(), MemoryError> {
         // Everything is read again from the disk, as on a fresh start.
         self.parse_cache.clear();
-        let mut records: Vec<IndexRecord> = Vec::new();
+        self.index.begin_rebuild()?;
+        #[cfg(test)]
+        let _paused = self.gates.rebuild.read().unwrap_or_else(|e| e.into_inner());
+        self.fingerprints
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         let mut opened: Vec<Partition> = Vec::new();
         for (path, parsed) in files::list_snapshots()? {
             let snapshot = match parsed {
@@ -819,19 +1001,78 @@ impl MemoryService {
             }
         }
         for p in &opened {
-            let loaded = p.load()?;
-            records.extend(Self::records_from(p, &loaded));
-        }
-        self.index.rebuild(&records)?;
-        {
-            let mut fingerprints = self.fingerprints.lock().unwrap_or_else(|e| e.into_inner());
-            fingerprints.clear();
-        }
-        for p in &opened {
+            // A partition that cannot be read now is left to the first read
+            // of it, whose stat scan indexes a partition the index lacks.
+            let loaded = match p.load() {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    tracing::warn!(
+                        partition = p.partition_key(),
+                        "memory: partition skipped during rebuild: {e}"
+                    );
+                    continue;
+                }
+            };
+            for batch in Self::records_from(p, &loaded).chunks(index::REBUILD_BATCH) {
+                self.index.upsert_many(batch)?;
+            }
             self.index
-                .reconcile(p.partition_key(), || Self::scan_entries(p))?;
+                .stamp_scan(p.partition_key(), loaded.scan.len())?;
         }
+        self.index.finish_rebuild()?;
+        // Re-read from the rows on each partition's next pass.
+        self.fingerprints
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         Ok(())
+    }
+
+    /// The notes of `partitions` as the index would hold them, read from
+    /// their files (design §5, a rebuilding index): the pinned ones all,
+    /// the others at most [`FILE_SCAN_MAX_NOTES`], most recently updated
+    /// first.
+    fn file_scan(&self, partitions: &[&Partition]) -> Result<FileScan, MemoryError> {
+        let loaded: Vec<(&Partition, LoadedPartition)> = partitions
+            .iter()
+            .map(|p| Ok::<_, MemoryError>((*p, p.load()?)))
+            .collect::<Result<_, _>>()?;
+        let mut candidates: Vec<(&Partition, &NoteView, FileStat)> = Vec::new();
+        let mut pinned = Vec::new();
+        for (p, l) in &loaded {
+            for (view, stat) in Self::indexable(l) {
+                if view.note.pinned {
+                    pinned.push(Self::record_for(p, view, stat));
+                }
+                candidates.push((*p, view, stat));
+            }
+        }
+        candidates.sort_by(|a, b| {
+            b.1.note
+                .updated_at
+                .cmp(&a.1.note.updated_at)
+                .then_with(|| a.1.note.id.cmp(&b.1.note.id))
+        });
+        let truncated = candidates.len() > FILE_SCAN_MAX_NOTES;
+        candidates.truncate(FILE_SCAN_MAX_NOTES);
+        let records = candidates
+            .into_iter()
+            .map(|(p, view, stat)| Self::record_for(p, view, stat))
+            .collect();
+        Ok(FileScan {
+            records,
+            pinned,
+            truncated,
+        })
+    }
+
+    /// The index's state for an answer: `rebuilding` while a rebuild is
+    /// owed or running (without asking the index), else what it records.
+    fn current_index_state(&self) -> Result<IndexState, MemoryError> {
+        if !self.index_serves() {
+            return Ok(IndexState::Rebuilding);
+        }
+        Ok(self.index.state()?)
     }
 
     // ------------------------------------------------------------------------
@@ -1487,7 +1728,7 @@ impl MemoryService {
         Ok(SyncReport {
             scanned,
             changes,
-            index_state: self.index.index_state()?.state,
+            index_state: self.current_index_state()?,
         })
     }
 

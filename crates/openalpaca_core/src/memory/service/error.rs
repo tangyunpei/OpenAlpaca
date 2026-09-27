@@ -170,8 +170,20 @@ impl From<IndexError> for MemoryError {
     fn from(e: IndexError) -> Self {
         match e {
             IndexError::InvalidInput(m) => Self::InvalidInput(m),
-            other => Self::Internal(anyhow::anyhow!("{other}")),
+            // Kept as the error it is (the text is the same), so the service
+            // can tell a damaged cache from any other failure.
+            other => Self::Internal(anyhow::Error::new(other)),
         }
+    }
+}
+
+impl MemoryError {
+    /// Whether this is the index cache reporting damage
+    /// ([`IndexError::is_corruption`]) — what makes the service rebuild it
+    /// (scale slice S6).
+    pub(crate) fn is_index_corruption(&self) -> bool {
+        matches!(self, Self::Internal(e)
+            if e.downcast_ref::<IndexError>().is_some_and(IndexError::is_corruption))
     }
 }
 

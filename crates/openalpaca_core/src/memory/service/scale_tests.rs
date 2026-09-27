@@ -7,6 +7,7 @@ use super::tests::{ALICE, Harness};
 use super::*;
 use openalpaca_storage::memory_files::{NoteKind, NoteSource, SourceType};
 use openalpaca_storage::memory_index::MemoryIndex;
+use std::sync::Arc;
 
 fn learned_note(
     h: &Harness,
@@ -462,4 +463,151 @@ fn a_forgotten_notes_file_put_back_between_reads_is_never_served() {
         ),
         Err(MemoryError::NotFound(_))
     ));
+}
+
+// ============================================================================
+// S6 — the index never blocks boot (M2, O11)
+// ============================================================================
+
+/// Polls `f` for up to ten seconds.
+fn eventually(what: &str, f: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !f() {
+        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn cedar_notes(h: &Harness, n: usize) {
+    let user = h.user(ALICE, None);
+    for i in 0..n {
+        h.store(
+            &user,
+            &format!("Cedar {i}"),
+            &format!("# Cedar {i}\n\nThe cedar grove number {i} by the river.\n"),
+            NoteKind::Fact,
+        );
+    }
+}
+
+fn search_cedar(service: &MemoryService, ctx: &MemoryAccessContext) -> SearchOutput {
+    service
+        .search(
+            ctx,
+            SearchInput {
+                query: "cedar grove".into(),
+                limit: Some(SEARCH_MAX_LIMIT),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+
+/// The daemon's open over a missing cache returns at once, owing the
+/// rebuild; until it is done — and while it runs, held still here once it
+/// has emptied the index — search and recall answer from the note files and
+/// say `rebuilding`, and a turn's suggestions are left out rather than
+/// waited for. The rebuild then leaves a ready index that answers the same.
+#[test]
+fn the_daemon_open_returns_at_once_and_search_reads_the_files_while_it_rebuilds() {
+    let h = Harness::new();
+    cedar_notes(&h, 6);
+    let service = Arc::new(MemoryService::open_default_deferred(Some(h.db.clone())));
+    assert!(service.rebuild_pending(), "a missing cache is owed a rebuild");
+    assert_eq!(
+        service.index().index_state().unwrap().notes,
+        0,
+        "and the open did not do it"
+    );
+    let tool = service
+        .context(
+            ALICE,
+            WorkspaceHint::None,
+            Surface::ModelTool,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let found = search_cedar(&service, &tool);
+    assert_eq!(found.results.len(), 6, "{found:?}");
+    assert_eq!(found.index_state, IndexState::Rebuilding);
+    let recalled = service
+        .recall(&tool, "cedar grove river", RecallBudget::default())
+        .unwrap();
+    assert!(!recalled.notes.is_empty());
+    assert_eq!(recalled.index_state, IndexState::Rebuilding);
+
+    let hold = service.gates.rebuild.write().unwrap();
+    let rebuild = {
+        let service = service.clone();
+        std::thread::spawn(move || service.run_pending_rebuild())
+    };
+    eventually("the rebuild starts", || service.rebuild_running());
+    let during = search_cedar(&service, &tool);
+    assert_eq!(during.results.len(), 6, "answered while the rebuild runs");
+    assert_eq!(during.index_state, IndexState::Rebuilding);
+    assert!(
+        service
+            .pending_suggestions(&tool, 3, &HashSet::new())
+            .unwrap()
+            .is_empty()
+    );
+    drop(hold);
+    assert!(rebuild.join().unwrap().unwrap(), "it rebuilt");
+    assert!(!service.rebuild_pending());
+    let after = search_cedar(&service, &tool);
+    assert_eq!(after.index_state, IndexState::Ready);
+    assert_eq!(after.results.len(), 6);
+    assert_eq!(service.index().index_state().unwrap().notes, 6);
+}
+
+/// Damage to the cache met on use — there is no integrity check at open —
+/// owes a rebuild: recall and search read the files from then on, and the
+/// next reconciliation tick rebuilds the cache from a new file.
+#[test]
+fn a_damaged_cache_met_on_use_is_rebuilt_by_the_next_tick() {
+    let h = Harness::new();
+    cedar_notes(&h, 60);
+    let path = MemoryIndex::default_path().unwrap();
+    drop(MemoryService::open_default(Some(h.db.clone())));
+    // Scribble over the second half of the file, where the full-text index
+    // lies; the catalog and the schema version, at its start, still read.
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let len = std::fs::metadata(&path).unwrap().len();
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(len / 2)).unwrap();
+        file.write_all(&vec![0xAB; (len - len / 2) as usize]).unwrap();
+    }
+    let service = MemoryService::open_default_deferred(Some(h.db.clone()));
+    assert!(!service.rebuild_pending(), "open does not look");
+    let tool = service
+        .context(
+            ALICE,
+            WorkspaceHint::None,
+            Surface::ModelTool,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let err = service
+        .search(
+            &tool,
+            SearchInput {
+                query: "cedar grove".into(),
+                ..Default::default()
+            },
+        )
+        .expect_err("the damaged pages are read");
+    assert!(err.is_index_corruption(), "{err}");
+    assert!(service.rebuild_pending(), "damage owes a rebuild");
+    let found = search_cedar(&service, &tool);
+    assert_eq!(found.index_state, IndexState::Rebuilding);
+    assert_eq!(found.results.len(), 50, "the files answer, to the limit");
+
+    service.reconcile_owner(ALICE).unwrap();
+    assert!(!service.rebuild_pending());
+    let found = search_cedar(&service, &tool);
+    assert_eq!(found.index_state, IndexState::Ready);
+    assert_eq!(found.results.len(), 50);
 }

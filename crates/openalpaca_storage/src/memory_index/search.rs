@@ -228,15 +228,15 @@ pub(crate) const W_VALID_NOW: f64 = 1.0;
 /// The filters of design §5 step 5 as one SQL fragment over the `note`
 /// alias `n`, applied inside every candidate query — so the caps count
 /// eligible rows and the limit is applied last.
-struct Filter {
+pub(super) struct Filter {
     clause: String,
     params: Vec<Value>,
     /// The instant validity is evaluated at, for the ranking bonus.
-    instant: String,
+    pub(super) instant: String,
 }
 
 impl Filter {
-    fn build(q: &SearchQuery, now: DateTime<Utc>) -> Self {
+    pub(super) fn build(q: &SearchQuery, now: DateTime<Utc>) -> Self {
         let mut clause = format!(
             "n.partition_key IN ({})",
             placeholders_unnumbered(q.partition_keys.len())
@@ -301,56 +301,56 @@ fn placeholders_unnumbered(n: usize) -> String {
 
 /// A candidate chunk with the evidence each generator produced.
 #[derive(Default)]
-struct ChunkEvidence {
-    note_rowid: i64,
-    word_rank: Option<f64>,
-    tri_rank: Option<f64>,
+pub(super) struct ChunkEvidence {
+    pub(super) note_rowid: i64,
+    pub(super) word_rank: Option<f64>,
+    pub(super) tri_rank: Option<f64>,
 }
 
 #[derive(Default)]
-struct ExactEvidence {
-    title: bool,
-    alias: bool,
-    fact_key: bool,
+pub(super) struct ExactEvidence {
+    pub(super) title: bool,
+    pub(super) alias: bool,
+    pub(super) fact_key: bool,
 }
 
-struct NoteRow {
-    rowid: i64,
-    id: String,
-    partition_key: String,
-    scope: String,
-    revision: String,
-    relative_path: String,
-    title: String,
-    kind: String,
-    status: String,
-    effective_status: EffectiveStatus,
-    origin: String,
-    fact_key: Option<String>,
-    valid_from: Option<String>,
-    valid_to: Option<String>,
-    updated_at: String,
-    date: String,
-    pinned: bool,
-    conflict: bool,
-    same_key_loser: bool,
-    source_forgotten: bool,
-    superseded_by: Vec<String>,
-    authority: i64,
+pub(super) struct NoteRow {
+    pub(super) rowid: i64,
+    pub(super) id: String,
+    pub(super) partition_key: String,
+    pub(super) scope: String,
+    pub(super) revision: String,
+    pub(super) relative_path: String,
+    pub(super) title: String,
+    pub(super) kind: String,
+    pub(super) status: String,
+    pub(super) effective_status: EffectiveStatus,
+    pub(super) origin: String,
+    pub(super) fact_key: Option<String>,
+    pub(super) valid_from: Option<String>,
+    pub(super) valid_to: Option<String>,
+    pub(super) updated_at: String,
+    pub(super) date: String,
+    pub(super) pinned: bool,
+    pub(super) conflict: bool,
+    pub(super) same_key_loser: bool,
+    pub(super) source_forgotten: bool,
+    pub(super) superseded_by: Vec<String>,
+    pub(super) authority: i64,
 }
 
-struct ChunkRow {
-    id: i64,
-    note_rowid: i64,
-    ordinal: u32,
-    heading: Option<String>,
-    line_from: u32,
-    line_to: u32,
-    excerpt: String,
-    title: String,
-    aliases: String,
-    tags: String,
-    body: String,
+pub(super) struct ChunkRow {
+    pub(super) id: i64,
+    pub(super) note_rowid: i64,
+    pub(super) ordinal: u32,
+    pub(super) heading: Option<String>,
+    pub(super) line_from: u32,
+    pub(super) line_to: u32,
+    pub(super) excerpt: String,
+    pub(super) title: String,
+    pub(super) aliases: String,
+    pub(super) tags: String,
+    pub(super) body: String,
 }
 
 impl MemoryIndex {
@@ -724,14 +724,14 @@ fn load_first_chunks(conn: &Connection, note_rowids: &[i64]) -> Result<Vec<Chunk
 // ============================================================================
 
 /// The normalized text fields of one chunk, tokenized once.
-struct ChunkText<'a> {
+pub(super) struct ChunkText<'a> {
     fields: [&'a str; 4],
     tokens: [HashSet<&'a str>; 4],
     token_lists: [Vec<&'a str>; 4],
 }
 
 impl<'a> ChunkText<'a> {
-    fn new(c: &'a ChunkRow) -> Self {
+    pub(super) fn new(c: &'a ChunkRow) -> Self {
         let fields = [
             c.title.as_str(),
             c.aliases.as_str(),
@@ -752,16 +752,16 @@ impl<'a> ChunkText<'a> {
         }
     }
 
-    fn has_token(&self, term: &str) -> bool {
+    pub(super) fn has_token(&self, term: &str) -> bool {
         self.tokens.iter().any(|set| set.contains(term))
     }
 
-    fn contains(&self, text: &str) -> bool {
+    pub(super) fn contains(&self, text: &str) -> bool {
         self.fields.iter().any(|f| f.contains(text))
     }
 
     /// A literal as a phrase: a substring, or its tokens in sequence.
-    fn has_phrase(&self, literal: &str) -> bool {
+    pub(super) fn has_phrase(&self, literal: &str) -> bool {
         if self.contains(literal) {
             return true;
         }
@@ -789,7 +789,7 @@ struct NoteScore {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn rank(
+pub(super) fn rank(
     q: &SearchQuery,
     parsed: &ParsedQuery,
     words: &[String],

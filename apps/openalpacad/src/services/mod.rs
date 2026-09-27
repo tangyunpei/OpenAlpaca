@@ -210,13 +210,16 @@ pub async fn initialize_services(
     };
 
     // The memory service, before the tool registry that registers its read
-    // surface. `open_default` opens (or recreates and rebuilds) the cache
-    // under the home store; the owner check and source verification read
-    // this database. The bus is where every `memory_changed` goes (design
-    // §7a): one publish per write, from inside the service, whichever
-    // surface asked.
+    // surface. `open_default_deferred` opens (or recreates) the cache under
+    // the home store and returns at once: a cache that needs rebuilding is
+    // rebuilt in the background once the daemon runs
+    // (`background::spawn_memory_index_rebuild`), recall and search reading
+    // the note files meanwhile (scale slice S6). The owner check and source
+    // verification read this database. The bus is where every
+    // `memory_changed` goes (design §7a): one publish per write, from inside
+    // the service, whichever surface asked.
     let memory_service = Arc::new(
-        openalpaca_core::memory::service::MemoryService::open_default(Some(db.clone()))
+        openalpaca_core::memory::service::MemoryService::open_default_deferred(Some(db.clone()))
             .with_bus(bus.clone()),
     );
 

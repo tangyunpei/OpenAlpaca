@@ -239,6 +239,10 @@ impl MemoryService {
     /// [`PENDING_SUGGESTIONS_READ_MAX`] suggestions per call. A partition is
     /// re-parsed only when its stat scan or a re-read finds it changed. Not a
     /// recall: nothing is recorded as used.
+    ///
+    /// While the index is rebuilt it lists nothing (scale slice S6): the
+    /// list comes from the index, and the turn goes without the block
+    /// rather than wait.
     pub fn pending_suggestions(
         &self,
         ctx: &MemoryAccessContext,
@@ -246,6 +250,9 @@ impl MemoryService {
         skip: &HashSet<NoteId>,
     ) -> Result<Vec<PendingSuggestion>, MemoryError> {
         Self::require(ctx.capabilities.read, "memory_read")?;
+        if !self.index_serves() {
+            return Ok(Vec::new());
+        }
         let resolved = self.resolve(ctx)?;
         let partitions: Vec<&Partition> = resolved
             .all()

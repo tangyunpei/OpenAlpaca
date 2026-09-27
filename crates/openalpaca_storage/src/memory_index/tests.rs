@@ -2249,3 +2249,194 @@ fn a_timeline_around_an_instant_and_around_no_note() {
         assert!(t.before.is_empty() && t.after.is_empty(), "{id}");
     }
 }
+
+// ============================================================================
+// Scale slice S6: no integrity check at open; the file scan while rebuilding
+// ============================================================================
+
+/// Open reads the catalog and the schema version, and no more: a cache
+/// damaged below its catalog opens as it recorded itself — `quick_check`
+/// read the whole file at every boot (2.4 s at 100K notes) — and the first
+/// use of a damaged page reports corruption, which is what a caller
+/// rebuilds on.
+#[test]
+fn a_cache_damaged_below_its_catalog_opens_and_says_corrupt_on_use() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(INDEX_FILE_NAME);
+    let (root, page_size) = {
+        let index = MemoryIndex::open(&path).unwrap();
+        let records: Vec<IndexRecord> = (0..40)
+            .map(|i| record(&format!("n{i}"), &format!("Note {i}"), "Some body words.\n"))
+            .collect();
+        index.rebuild(&records).unwrap();
+        let conn = index.lock();
+        let root: i64 = conn
+            .query_row(
+                "SELECT rootpage FROM sqlite_master WHERE name = 'note'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
+        (root, page_size)
+    };
+    // Scribble over the `note` table's root page.
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(((root - 1) * page_size) as u64))
+            .unwrap();
+        file.write_all(&vec![0xAB; page_size as usize]).unwrap();
+    }
+    let index = MemoryIndex::open(&path).unwrap();
+    assert_eq!(
+        index.state().unwrap(),
+        IndexState::Ready,
+        "opened as it recorded itself: no integrity check"
+    );
+    let err = index
+        .reconcile("home-p", || Ok(Vec::new()))
+        .expect_err("the note table's page is damaged");
+    assert!(err.is_corruption(), "{err}");
+    assert!(!IndexError::InvalidInput("x".into()).is_corruption());
+}
+
+/// A whole rebuild starts from a new, empty file — no free pages left
+/// behind, no damaged page read — and indexes in batches.
+#[test]
+fn a_rebuild_starts_from_a_new_file() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(INDEX_FILE_NAME);
+    let index = MemoryIndex::open(&path).unwrap();
+    let big: Vec<IndexRecord> = (0..600)
+        .map(|i| record(&format!("b{i}"), &format!("Big {i}"), &"word ".repeat(400)))
+        .collect();
+    index.rebuild(&big).unwrap();
+    let pages = |index: &MemoryIndex| -> i64 {
+        index
+            .lock()
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .unwrap()
+    };
+    let before = pages(&index);
+    index.rebuild(&[record("s", "Small", "tiny")]).unwrap();
+    assert!(
+        pages(&index) * 4 < before,
+        "the file shrank with its contents: {} pages of {before}",
+        pages(&index)
+    );
+    let state = index.index_state().unwrap();
+    assert_eq!(state.state, IndexState::Ready);
+    assert_eq!(state.notes, 1);
+    assert_eq!(index.state().unwrap(), IndexState::Ready);
+}
+
+/// The file scan a search falls back to while the index is rebuilt answers
+/// with the index's own filters: the same notes, for word, substring,
+/// literal, short CJK and exact-title queries, on both filter sets and with
+/// the historical, kind, validity and date switches. It says `rebuilding`,
+/// and `partial` when the caller left notes out.
+#[test]
+fn the_file_scan_finds_what_the_index_finds() {
+    let at = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    let now = at("2026-09-26T12:00:00Z");
+    let index = MemoryIndex::open_in_memory().unwrap().with_clock(move || now);
+    let mut records = vec![
+        record("vim", "Editor preference", "The user prefers vim for editing.\n"),
+        record("tabs", "Indentation", "Tabs, never spaces; `rustfmt::skip` is fine.\n"),
+        record("tea", "Afternoon drink", "简洁的回答 and green tea.\n"),
+        record("old", "Old editor", "The user used emacs.\n"),
+        record("loser", "Editor key loser", "Nano for editing.\n"),
+        record("forgot", "Forgotten source", "Editing notes from a forgotten row.\n"),
+        record("summary", "Conversation summary", "We talked about editing.\n"),
+        record("ended", "Ended plan", "Editing sprint that is over.\n"),
+        record("soon", "Upcoming plan", "Editing sprint next month.\n"),
+        record("other", "Other partition", "Editing elsewhere.\n"),
+    ];
+    records[3].effective_status = EffectiveStatus::Superseded;
+    records[4].same_key_loser = true;
+    records[4].conflict = true;
+    records[5].source_forgotten = true;
+    records[6].kind = "episode".into();
+    records[6].origin = "extracted_other".into();
+    records[7].valid_to = Some("2026-09-01T00:00:00Z".into());
+    records[8].valid_from = Some("2026-10-01T00:00:00Z".into());
+    records[9].partition_key = "home-q".into();
+    records[1].kind = "preference".into();
+    records[2].observed_at = Some("2026-01-05T00:00:00Z".into());
+    index.rebuild(&records).unwrap();
+
+    let keys = vec!["home-p".to_string()];
+    let mut queries: Vec<SearchQuery> = Vec::new();
+    for text in [
+        "editing",
+        "prefer",
+        "rustfmt::skip",
+        "简洁",
+        "Editor preference",
+        "sprint",
+        "green tea",
+        "nothing matches this",
+    ] {
+        for mode in [SearchMode::Explicit, SearchMode::Automatic] {
+            let mut q = SearchQuery::new(text, keys.clone());
+            q.limit = MAX_LIMIT;
+            q.mode = mode;
+            queries.push(q.clone());
+            q.historical = true;
+            queries.push(q.clone());
+            q.historical = false;
+            q.as_of = Some(at("2026-08-01T00:00:00Z"));
+            queries.push(q.clone());
+            q.as_of = None;
+            q.kind = Some("preference".into());
+            queries.push(q.clone());
+            q.kind = None;
+            q.date_from = Some(at("2026-09-01T00:00:00Z"));
+            queries.push(q);
+        }
+    }
+    let mut found = 0;
+    for q in &queries {
+        let from_index = index.search(q).unwrap();
+        found += from_index.hits.len();
+        let from_files = index.scan_search(&records, q, false).unwrap();
+        let mut a: Vec<&str> = ids(&from_index);
+        let mut b: Vec<&str> = ids(&from_files);
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "{q:?}");
+        assert_eq!(from_files.index_state, IndexState::Rebuilding);
+        assert!(!from_files.partial);
+        for hit in &from_files.hits {
+            let twin = from_index.hits.iter().find(|h| h.id == hit.id).unwrap();
+            assert_eq!(hit.matches, twin.matches, "{q:?} {}", hit.id);
+            assert_eq!(hit.chunk_ordinal, twin.chunk_ordinal);
+            assert_eq!(hit.upcoming, twin.upcoming);
+            assert_eq!(hit.same_key_loser, twin.same_key_loser);
+        }
+    }
+    assert!(found > 60, "the queries exercise the filters ({found} hits)");
+    // The prefix of a word is found as a substring, below whole tokens.
+    let q = SearchQuery::new("prefer", keys.clone());
+    let hits = index.scan_search(&records, &q, true).unwrap();
+    assert_eq!(ids(&hits), ["vim"]);
+    assert_eq!(hits.hits[0].matches, [MatchReason::Trigram]);
+    assert!(hits.partial, "a caller's bound is reported");
+
+    // Pinned notes, as the index lists them.
+    records[0].pinned = true;
+    records[2].pinned = true;
+    records[2].updated_at = "2026-09-24T10:00:00Z".into();
+    records[7].pinned = true;
+    records[9].pinned = true;
+    index.rebuild(&records).unwrap();
+    assert_eq!(
+        index.scan_pinned(&records, &keys),
+        index.list_pinned(&keys).unwrap()
+    );
+}

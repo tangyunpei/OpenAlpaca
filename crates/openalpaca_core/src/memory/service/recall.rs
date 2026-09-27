@@ -190,7 +190,20 @@ impl MemoryService {
     /// changed behind the service's back, so a hit among them is answered
     /// `stale` — the index was out of date for it, and the fresh bytes are
     /// what is served.
+    ///
+    /// A read that reaches the index waits while a whole rebuild runs
+    /// (scale slice S6) — recall and search do not come here then; they read
+    /// the files — and damage the index reports here owes a rebuild.
     pub(super) fn touch(&self, p: &Partition) -> Result<HashSet<NoteId>, MemoryError> {
+        self.wait_for_rebuild();
+        let result = self.touch_once(p);
+        if let Err(e) = &result {
+            self.note_index_failure(e);
+        }
+        result
+    }
+
+    fn touch_once(&self, p: &Partition) -> Result<HashSet<NoteId>, MemoryError> {
         let key = p.partition_key();
         let never_indexed = self.index.last_scan(key)?.is_none();
         if never_indexed {
@@ -224,6 +237,10 @@ impl MemoryService {
     /// a model with [`MemoryService::record_delivery`], because a context
     /// manager may still drop a selected note for budget, and `memory_used`
     /// names what the model really read.
+    ///
+    /// While the index is rebuilt (design §5; scale slice S6) the pinned
+    /// notes and the search come from a bounded scan of the files, with the
+    /// index's filters and ranking, and the result says `rebuilding`.
     pub fn recall(
         &self,
         ctx: &MemoryAccessContext,
@@ -240,9 +257,14 @@ impl MemoryService {
             .filter(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)))
             .collect();
         let mut found_stale: HashSet<NoteId> = HashSet::new();
-        for p in &partitions {
-            found_stale.extend(self.touch(p)?);
-        }
+        let files = if self.index_serves() {
+            for p in &partitions {
+                found_stale.extend(self.touch(p)?);
+            }
+            None
+        } else {
+            Some(self.file_scan(&partitions)?)
+        };
         let keys: Vec<String> = partitions
             .iter()
             .map(|p| p.partition_key().to_string())
@@ -265,7 +287,10 @@ impl MemoryService {
         // Step 2: pinned notes within their own sub-budget, oldest
         // `updated_at` first (ties by id), so pinning a new note never
         // evicts an older one from the budget. Each is re-read first.
-        let pinned = self.index.list_pinned(&keys)?;
+        let pinned = match &files {
+            None => self.index.list_pinned(&keys)?,
+            Some(scan) => self.index.scan_pinned(&scan.pinned, &keys),
+        };
         let pinned_ids: HashSet<NoteId> = pinned
             .iter()
             .filter_map(|n| NoteId::parse(&n.id).ok())
@@ -360,14 +385,21 @@ impl MemoryService {
 
         // Steps 3–6: the search, in the index.
         let mut partial = false;
-        let mut index_state = self.index.index_state()?.state;
+        let mut index_state = match &files {
+            None => self.index.state()?,
+            Some(_) => index::IndexState::Rebuilding,
+        };
         if let Some(query) = query_text(message)
             && !keys.is_empty()
         {
             let mut q = SearchQuery::new(query, keys.clone());
             q.limit = RECALL_CANDIDATES;
             q.mode = SearchMode::Automatic;
-            let results = match self.index.search(&q) {
+            let searched = match &files {
+                None => self.index.search(&q),
+                Some(scan) => self.index.scan_search(&scan.records, &q, scan.truncated),
+            };
+            let results = match searched {
                 Ok(r) => r,
                 Err(index::IndexError::InvalidInput(_)) => index::SearchResults {
                     hits: Vec::new(),
@@ -375,7 +407,11 @@ impl MemoryService {
                     partial: false,
                     index_state,
                 },
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    let e = MemoryError::from(e);
+                    self.note_index_failure(&e);
+                    return Err(e);
+                }
             };
             partial = results.partial;
             index_state = results.index_state;
@@ -577,9 +613,15 @@ impl MemoryService {
         let resolved = self.resolve(ctx)?;
         let partitions: Vec<&Partition> = resolved.in_scope(input.scope);
         let mut found_stale: HashSet<NoteId> = HashSet::new();
-        for p in &partitions {
-            found_stale.extend(self.touch(p)?);
-        }
+        // While the index is rebuilt, the files answer (scale slice S6).
+        let files = if self.index_serves() {
+            for p in &partitions {
+                found_stale.extend(self.touch(p)?);
+            }
+            None
+        } else {
+            Some(self.file_scan(&partitions)?)
+        };
         let keys: Vec<String> = partitions
             .iter()
             .map(|p| p.partition_key().to_string())
@@ -604,7 +646,15 @@ impl MemoryService {
         // the second pass reads a fresh index (design §5 step 7).
         let mut output = None;
         for pass in 0..2 {
-            let results = self.index.search(&q)?;
+            let searched = match &files {
+                None => self.index.search(&q),
+                Some(scan) => self.index.scan_search(&scan.records, &q, scan.truncated),
+            };
+            let results = searched.map_err(|e| {
+                let e = MemoryError::from(e);
+                self.note_index_failure(&e);
+                e
+            })?;
             let mut dirty: HashSet<String> = HashSet::new();
             let mut items = Vec::with_capacity(results.hits.len());
             for hit in &results.hits {
@@ -671,7 +721,9 @@ impl MemoryService {
                 partial: results.partial,
                 index_state: results.index_state,
             });
-            if !had_dirty || pass == 1 {
+            // A file scan read the files themselves: a second pass would
+            // read the same ones.
+            if !had_dirty || pass == 1 || files.is_some() {
                 break;
             }
         }
