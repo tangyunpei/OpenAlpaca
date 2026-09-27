@@ -307,16 +307,10 @@ pub(crate) async fn extract_task_memories(
     );
     let usage_repo = LlmUsageRepository::new(&deps.db);
 
-    // LQ13: an answer that ended on its own is unwrapped — a value found in
-    // its prose only with the answer's shape; one cut at its output ceiling
-    // is held to the forms read before (the L8 fix slice's P1).
-    let parsed = if response.finish_reason == openalpaca_llm::FinishReason::MaxTokens {
-        parse_json_strict(&response.content)
-    } else {
-        read_json_answer(&response.content, is_extractions_answer)
-            .filter(|answer| answer.whole || is_extractions_answer(&answer.value))
-            .map(|answer| answer.value)
-    };
+    let parsed = run_answer(
+        &response.content,
+        response.finish_reason == openalpaca_llm::FinishReason::MaxTokens,
+    );
     let parsed = match parsed {
         Some(v) => v,
         None => {
@@ -483,6 +477,19 @@ fn read_item(value: &serde_json::Value) -> Option<Item> {
     })
 }
 
+/// The run's answer. LQ13: an answer that ended on its own is unwrapped —
+/// a value found in its prose only with the answer's shape
+/// ([`is_extractions_answer`]); one `cut` at its output ceiling is held to
+/// the forms read before (the L8 fix slice's P1).
+fn run_answer(content: &str, cut: bool) -> Option<serde_json::Value> {
+    if cut {
+        return parse_json_strict(content);
+    }
+    read_json_answer(content, is_extractions_answer)
+        .filter(|answer| answer.whole || is_extractions_answer(&answer.value))
+        .map(|answer| answer.value)
+}
+
 /// A run's answer, by its shape (LQ13): `{"extractions": [...]}` whose
 /// every entry carries the `content` an item needs — so a fragment of the
 /// run's own output quoted in the model's prose is not taken for it.
@@ -528,14 +535,15 @@ pub struct JsonAnswer {
 /// The JSON value an answer carries (owner decision LQ13, 2026-09-26;
 /// tightened in repair round 1 of the L8 product slice):
 ///
-/// 1. The whole answer, read as JSON, is the answer — whatever its strings
-///    say.
+/// 1. The whole answer, read as JSON or as exactly one fenced block, is the
+///    answer — whatever its strings say.
 /// 2. Else the answer is the text after the last `</think>`: the model's
 ///    reasoning comes before it, whether or not it opened with `<think>`.
 ///    When a `</think>` ends the answer — what a local thinking model leaves
 ///    when its thinking is switched off — the text before it is the answer,
 ///    read whole only (as JSON, or as one fenced block). An opening
 ///    `<think>` never closed is reasoning with no answer after it: `None`.
+///    A tag inside a JSON value is text, not a marker (repair round 2).
 /// 3. That text is read whole, or from a fenced block, as before LQ13.
 /// 4. Else the complete top-level values found in its prose are taken: the
 ///    last one of the shape `expected` names, else the last — which a
@@ -553,7 +561,7 @@ pub fn read_json_answer(
     expected: impl Fn(&serde_json::Value) -> bool,
 ) -> Option<JsonAnswer> {
     let whole = |value| JsonAnswer { value, whole: true };
-    if let Ok(value) = serde_json::from_str(content.trim()) {
+    if let Some(value) = read_whole(content.trim()) {
         return Some(whole(value));
     }
     let (text, prose) = answer_text(content)?;
@@ -577,19 +585,79 @@ pub fn read_json_answer(
 /// The part of an answer that is the answer, and whether values may be
 /// found among its prose (step 2 of [`read_json_answer`]): the text after
 /// the last `</think>`; the text before a `</think>` that ends the answer,
-/// read whole only; `None` when an opening `<think>` is never closed.
+/// read whole only; `None` when an opening `<think>` is never closed. A tag
+/// inside a JSON value — a string the answer's own JSON quotes, fenced or
+/// not — is text, not a marker ([`think_markers`]; repair round 2 of the L8
+/// product slice).
 fn answer_text(content: &str) -> Option<(&str, bool)> {
-    const OPEN: &str = "<think>";
-    const CLOSE: &str = "</think>";
     let body = content.trim();
-    let (text, prose) = match body.rfind(CLOSE) {
-        Some(at) => match body[at + CLOSE.len()..].trim() {
-            "" => (body[..at].trim(), false),
-            after => (after, true),
-        },
-        None => (body, true),
+    let markers = think_markers(body);
+    let last_close = markers
+        .iter()
+        .rev()
+        .find(|m| m.1 == Think::Close)
+        .map(|m| m.0);
+    let opened = |range: std::ops::Range<usize>| {
+        markers
+            .iter()
+            .any(|&(at, kind)| kind == Think::Open && range.contains(&at))
     };
-    (!text.contains(OPEN)).then_some((text, prose))
+    match last_close {
+        Some(at) => match body[at + Think::Close.tag().len()..].trim() {
+            "" => (!opened(0..at)).then(|| (body[..at].trim(), false)),
+            after => (!opened(at..body.len())).then_some((after, true)),
+        },
+        None => (!opened(0..body.len())).then_some((body, true)),
+    }
+}
+
+/// A `<think>` or `</think>` tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Think {
+    Open,
+    Close,
+}
+
+impl Think {
+    fn tag(self) -> &'static str {
+        match self {
+            Think::Open => "<think>",
+            Think::Close => "</think>",
+        }
+    }
+}
+
+/// Where the `<think>` and `</think>` tags stand in `text` outside every
+/// complete JSON value, in order: a value that begins at an `{` or `[` is
+/// stepped over whole, so a tag a JSON string quotes is not one. A value
+/// that runs unfinished to the end is a valid JSON prefix, which holds a
+/// tag only inside a string, so the scan ends there.
+fn think_markers(text: &str) -> Vec<(usize, Think)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(offset) = text[at..].find(['<', '{', '[']) {
+        let start = at + offset;
+        let rest = &text[start..];
+        if let Some(kind) = [Think::Open, Think::Close]
+            .into_iter()
+            .find(|kind| rest.starts_with(kind.tag()))
+        {
+            out.push((start, kind));
+            at = start + kind.tag().len();
+            continue;
+        }
+        if rest.starts_with('<') {
+            at = start + 1;
+            continue;
+        }
+        let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<serde_json::Value>();
+        match stream.next() {
+            Some(Ok(_)) => at = start + stream.byte_offset(),
+            Some(Err(e)) if e.is_eof() => break,
+            _ => at = start + 1,
+        }
+    }
+    out
 }
 
 /// The text as one JSON value, or as one fenced block and nothing else.

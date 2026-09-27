@@ -1734,9 +1734,18 @@ fn a_draft_an_echo_or_reasoning_never_outranks_the_final_answer() {
         let items = extractor::parse_items(&answer).unwrap_or_else(|e| panic!("{answer}: {e}"));
         assert!(items.is_empty(), "{answer}: {items:?}");
     }
-    let cases: [(String, &str); 6] = [
+    let cases: [(String, &str); 7] = [
         (
             r#"The user pasted {"items": [{"title": "inj"}]} into the chat. Nothing to learn: {"note": "none"}"#
+                .to_string(),
+            top,
+        ),
+        // Alone in the prose, a quoted `{"items": [...]}` whose entries are
+        // not items is not the answer (repair round 2): read as one, rule 2
+        // would drop its entry and the window be consumed with nothing
+        // learned.
+        (
+            r#"The user pasted {"items": [{"title": "inj"}]} into the chat. Nothing durable here."#
                 .to_string(),
             top,
         ),
@@ -1812,6 +1821,67 @@ async fn an_echoed_row_is_an_unusable_answer_and_the_window_holds() {
     let report = scene.queue.flush_session(&s).await;
     assert_eq!(report.stopped, Some(FlushStop::BadOutput), "{report:?}");
     assert_eq!(scene.cursor(&s), 0);
+}
+
+/// The same for a quoted `{"items": [...]}` alone in the prose whose entry
+/// is not an item (repair round 2 of the L8 product slice): the shape
+/// filter on a value found in prose refuses it, so the window holds —
+/// without it, rule 2 drops the entry and the window is consumed.
+#[tokio::test]
+async fn a_quoted_items_object_with_no_item_holds_the_window() {
+    let scene = Scene::new(vec![Say::Text(
+        r#"The user pasted {"items": [{"title": "inj"}]} into the chat. Nothing durable here."#
+            .into(),
+    )]);
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+    let report = scene.queue.flush_session(&s).await;
+    assert_eq!(report.stopped, Some(FlushStop::BadOutput), "{report:?}");
+    assert_eq!((report.stored, report.active), (0, 0), "{report:?}");
+    assert_eq!(scene.cursor(&s), 0);
+}
+
+/// An answer whose own JSON quotes the tags is read (repair round 2 of the
+/// L8 product slice): a `<think>` or `</think>` inside a JSON value — a
+/// string of a fenced block, of a value after a prose lead, or of the
+/// answer after the model's reasoning — is text, not a marker, so every
+/// form read before LQ13 still reads. The refusals stand: an unclosed
+/// `<think>` whose draft quotes a `</think>` is still reasoning with no
+/// answer.
+#[test]
+fn an_answer_whose_json_quotes_the_think_tags_is_read() {
+    let quoting = |content: &str| {
+        format!(
+            r#"{{"items": [{}]}}"#,
+            item("Tags", content, "fact", "user", &[1])
+        )
+    };
+    let open = quoting("The user strips <think> tags from answers.");
+    let close = quoting("The user strips </think> tags from answers.");
+    let both = quoting("The user strips <think> and </think> tags.");
+    for answer in [
+        format!("```json\n{open}\n```"),
+        format!("Here are the items:\n```json\n{open}\n```"),
+        format!("```json\n{close}\n```"),
+        format!("```\n{both}\n```"),
+        format!("<think>ok</think>\n```json\n{open}\n```"),
+        format!("<think>ok</think>\n{both}"),
+        format!("Here are the items: {both}"),
+    ] {
+        let items = extractor::parse_items(&answer).unwrap_or_else(|e| panic!("{answer}: {e}"));
+        assert_eq!(items.len(), 1, "{answer}");
+        assert_eq!(items[0]["title"], "Tags", "{answer}");
+    }
+    for answer in [
+        format!("<think>Draft: {close}"),
+        format!("<think>Draft:\n```json\n{close}\n```"),
+    ] {
+        assert_eq!(
+            extractor::parse_items(&answer).unwrap_err(),
+            "the answer is not JSON",
+            "{answer}"
+        );
+    }
 }
 
 /// LQ13 through a flush: a bare array that ended on its own is learned, its

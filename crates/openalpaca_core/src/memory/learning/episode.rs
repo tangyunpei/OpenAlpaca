@@ -434,6 +434,27 @@ mod tests {
         }
     }
 
+    /// A summary whose own text quotes the tags is read (repair round 2 of
+    /// the L8 product slice): a `<think>` or `</think>` inside the JSON is
+    /// text, not a marker — fenced, after a prose lead, or after the
+    /// model's reasoning — as the reader before LQ13 read it. A
+    /// conversation about stripping those tags is the one most likely to
+    /// quote them.
+    #[test]
+    fn a_summary_that_quotes_the_think_tags_is_read() {
+        let summary = r#"{"topic": "Hiding <think> blocks", "discussed": "How to strip </think> from a local model's answer."}"#;
+        for answer in [
+            format!("```json\n{summary}\n```"),
+            format!("Here is the summary:\n```json\n{summary}\n```"),
+            format!("<think>ok</think>\n```json\n{summary}\n```"),
+            format!("Here is the summary: {summary}"),
+        ] {
+            let s = parse_summary(&answer).unwrap_or_else(|e| panic!("{answer}: {e}"));
+            assert_eq!(s.topic, "Hiding <think> blocks", "{answer}");
+        }
+        assert!(parse_summary(&format!("<think>Draft: {summary}")).is_err());
+    }
+
     #[test]
     fn the_knowledge_is_at_most_1_kib_and_never_splits_a_character() {
         let s = Summary {

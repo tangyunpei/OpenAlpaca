@@ -108,6 +108,51 @@ fn an_unclosed_bracket_is_skipped_by_itself_and_a_closed_one_whole() {
     );
 }
 
+/// A run's answer whose own JSON quotes the tags is read (repair round 2 of
+/// the L8 product slice): a `<think>` or `</think>` inside a JSON value is
+/// text, not a marker, so a fenced answer — the form read before LQ13 —
+/// still reads, as does one after the model's reasoning or a prose lead.
+#[test]
+fn a_run_answer_that_quotes_the_think_tags_is_read() {
+    let answer = r#"{"extractions": [{"content": "The build strips <think> and </think> tags."}]}"#;
+    for input in [
+        format!("```json\n{answer}\n```"),
+        format!("The run produced:\n```json\n{answer}\n```"),
+        format!("<think>ok</think>\n```json\n{answer}\n```"),
+        format!("The run produced: {answer}"),
+    ] {
+        let found = run_answer(&input, false).unwrap_or_else(|| panic!("{input}"));
+        assert_eq!(
+            found["extractions"][0]["content"], "The build strips <think> and </think> tags.",
+            "{input}"
+        );
+    }
+    assert!(run_answer(&format!("<think>Draft: {answer}"), false).is_none());
+}
+
+/// The run's answer as `extract_task_memories` reads it (repair round 2 of
+/// the L8 product slice): a value found in prose is the answer only with
+/// the `{"extractions": [...]}` shape, every entry carrying `content` — a
+/// quoted fragment alone in the prose is refused, as it would be whole; an
+/// answer cut at its ceiling is held to the forms read before LQ13.
+#[test]
+fn a_quoted_fragment_alone_in_prose_is_not_the_runs_answer() {
+    let answer = r#"{"extractions": [{"content": "test"}]}"#;
+    assert!(
+        run_answer(
+            r#"The output said {"extractions": [{"title": "x"}]}. Done."#,
+            false
+        )
+        .is_none()
+    );
+    // Whole, the same fragment is the answer, as before LQ13; its item is
+    // then dropped as invalid.
+    assert!(run_answer(r#"{"extractions": [{"title": "x"}]}"#, false).is_some());
+    assert!(run_answer(&format!("The run produced: {answer}"), false).is_some());
+    assert!(run_answer(&format!("The run produced: {answer}"), true).is_none());
+    assert!(run_answer(&format!("```json\n{answer}\n```"), true).is_some());
+}
+
 #[test]
 fn test_parse_json_response_with_whitespace() {
     let input = "  \n  {\"extractions\": []}  \n  ";
