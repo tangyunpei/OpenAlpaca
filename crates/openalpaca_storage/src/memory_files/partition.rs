@@ -3031,7 +3031,7 @@ body
     #[test]
     fn put_patches_the_view_exactly_as_the_whole_list_version() {
         let dir = PathBuf::from("/nowhere/notes");
-        let mut seed: u64 = 0x0DDB_A11_5EED;
+        let mut seed: u64 = 0x00DD_BA11_5EED;
         let mut next = |n: u64| {
             seed ^= seed << 13;
             seed ^= seed >> 7;

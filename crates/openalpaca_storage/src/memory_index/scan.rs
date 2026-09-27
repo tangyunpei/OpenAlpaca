@@ -156,7 +156,7 @@ impl MemoryIndex {
             for (rowid, note) in &notes {
                 let e = ExactEvidence {
                     title: query::normalize_exact(&note.title) == parsed.normalized,
-                    alias: aliases[rowid].iter().any(|a| *a == parsed.normalized),
+                    alias: aliases[rowid].contains(&parsed.normalized),
                     fact_key: note.fact_key.as_deref() == Some(parsed.normalized.as_str()),
                 };
                 if e.title || e.alias || e.fact_key {
