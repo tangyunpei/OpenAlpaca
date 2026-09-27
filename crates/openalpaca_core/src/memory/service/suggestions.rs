@@ -49,73 +49,78 @@ impl MemoryService {
                 "limit must be between 1 and {SUGGESTIONS_MAX_LIMIT}"
             )));
         }
-        let resolved = self.resolve(ctx)?;
-        let partitions: Vec<&Partition> = resolved
-            .all()
-            .into_iter()
-            .filter(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)))
-            .collect();
-        for p in &partitions {
-            self.touch(p)?;
-        }
-        let keys: Vec<String> = partitions
-            .iter()
-            .map(|p| p.partition_key().to_string())
-            .collect();
-        let by_key = |key: &str| {
-            partitions
+        // One generation of the index throughout (scale slice S6): a rebuild
+        // that starts under the read makes it read again.
+        self.read_index(|| {
+            let resolved = self.resolve(ctx)?;
+            let partitions: Vec<&Partition> = resolved
+                .all()
+                .into_iter()
+                .filter(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)))
+                .collect();
+            for p in &partitions {
+                self.touch(p)?;
+            }
+            let keys: Vec<String> = partitions
                 .iter()
-                .copied()
-                .find(|p| p.partition_key() == key)
-        };
+                .map(|p| p.partition_key().to_string())
+                .collect();
+            let by_key = |key: &str| {
+                partitions
+                    .iter()
+                    .copied()
+                    .find(|p| p.partition_key() == key)
+            };
 
-        // Newest first; one group per (partition, target) in that order. A
-        // candidate naming several notes cannot be confirmed (S5) and is not
-        // a suggestion here.
-        let mut groups: Vec<((String, String), Vec<CatalogNote>)> = Vec::new();
-        for row in self.index.suggestion_rows(&keys)? {
-            let [target] = row.supersedes.as_slice() else {
-                continue;
-            };
-            let group = (row.partition_key.clone(), target.clone());
-            match groups.iter_mut().find(|(g, _)| *g == group) {
-                Some((_, rows)) => rows.push(row),
-                None => groups.push((group, vec![row])),
-            }
-        }
-
-        let mut dirty: HashSet<String> = HashSet::new();
-        let mut out: Vec<Suggestion> = Vec::new();
-        for ((partition_key, target_id), rows) in groups {
-            if out.len() >= limit {
-                break;
-            }
-            let Some(p) = by_key(&partition_key) else {
-                continue;
-            };
-            let Some(target) = verified_target(self, p, &target_id, &mut dirty)? else {
-                continue;
-            };
-            let total = rows.len();
-            for (skipped, row) in rows.into_iter().enumerate() {
-                if let Some(mut suggestion) = verified_suggestion(p, &row, &target, &mut dirty) {
-                    suggestion.older_count = total - skipped - 1;
-                    out.push(suggestion);
-                    break;
+            // Newest first; one group per (partition, target) in that order. A
+            // candidate naming several notes cannot be confirmed (S5) and is not
+            // a suggestion here.
+            let mut groups: Vec<((String, String), Vec<CatalogNote>)> = Vec::new();
+            for row in self.index.suggestion_rows(&keys)? {
+                let [target] = row.supersedes.as_slice() else {
+                    continue;
+                };
+                let group = (row.partition_key.clone(), target.clone());
+                match groups.iter_mut().find(|(g, _)| *g == group) {
+                    Some((_, rows)) => rows.push(row),
+                    None => groups.push((group, vec![row])),
                 }
             }
-        }
-        for key in dirty {
-            if let Some(p) = by_key(&key) {
-                self.reindex(p)?;
+
+            let mut dirty: HashSet<String> = HashSet::new();
+            let mut out: Vec<Suggestion> = Vec::new();
+            for ((partition_key, target_id), rows) in groups {
+                if out.len() >= limit {
+                    break;
+                }
+                let Some(p) = by_key(&partition_key) else {
+                    continue;
+                };
+                let Some(target) = verified_target(self, p, &target_id, &mut dirty)? else {
+                    continue;
+                };
+                let total = rows.len();
+                for (skipped, row) in rows.into_iter().enumerate() {
+                    if let Some(mut suggestion) = verified_suggestion(p, &row, &target, &mut dirty)
+                    {
+                        suggestion.older_count = total - skipped - 1;
+                        out.push(suggestion);
+                        break;
+                    }
+                }
             }
-        }
-        out.sort_by(|a, b| {
-            b.created_at
-                .cmp(&a.created_at)
-                .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
-        });
-        Ok(out)
+            for key in dirty {
+                if let Some(p) = by_key(&key) {
+                    self.reindex(p)?;
+                }
+            }
+            out.sort_by(|a, b| {
+                b.created_at
+                    .cmp(&a.created_at)
+                    .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+            });
+            Ok(out)
+        })
     }
 }
 

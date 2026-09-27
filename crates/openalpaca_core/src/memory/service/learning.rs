@@ -108,63 +108,67 @@ impl MemoryService {
         if message_ids.is_empty() {
             return Ok(None);
         }
-        let resolved = self.resolve(ctx)?;
-        let partitions: Vec<&Partition> = resolved
-            .all()
-            .into_iter()
-            .filter(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)))
-            .collect();
-        for p in &partitions {
-            self.touch(p)?;
-        }
-        let keys: Vec<String> = partitions
-            .iter()
-            .map(|p| p.partition_key().to_string())
-            .collect();
-        let source_keys: Vec<String> = message_ids
-            .iter()
-            .map(|id| format!("message:{id}"))
-            .collect();
-        let wanted: HashSet<i64> = message_ids.iter().copied().collect();
-        let mut dirty: HashSet<String> = HashSet::new();
-        let mut newest: Option<i64> = None;
-        for row in self.index.notes_citing(&keys, &source_keys)? {
-            if !is_summary_row(&row.kind, &row.origin, &row.status) {
-                continue;
+        // One generation of the index throughout (scale slice S6): a rebuild
+        // that starts under the read makes it read again.
+        self.read_index(|| {
+            let resolved = self.resolve(ctx)?;
+            let partitions: Vec<&Partition> = resolved
+                .all()
+                .into_iter()
+                .filter(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)))
+                .collect();
+            for p in &partitions {
+                self.touch(p)?;
             }
-            let (Some(p), Ok(id)) = (
-                partitions
-                    .iter()
-                    .find(|p| p.partition_key() == row.partition_key),
-                NoteId::parse(&row.id),
-            ) else {
-                continue;
-            };
-            match verify(p, &row.relative_path, id, &row.revision) {
-                Verified::Fresh { note, stale, .. } => {
-                    if stale {
+            let keys: Vec<String> = partitions
+                .iter()
+                .map(|p| p.partition_key().to_string())
+                .collect();
+            let source_keys: Vec<String> = message_ids
+                .iter()
+                .map(|id| format!("message:{id}"))
+                .collect();
+            let wanted: HashSet<i64> = message_ids.iter().copied().collect();
+            let mut dirty: HashSet<String> = HashSet::new();
+            let mut newest: Option<i64> = None;
+            for row in self.index.notes_citing(&keys, &source_keys)? {
+                if !is_summary_row(&row.kind, &row.origin, &row.status) {
+                    continue;
+                }
+                let (Some(p), Ok(id)) = (
+                    partitions
+                        .iter()
+                        .find(|p| p.partition_key() == row.partition_key),
+                    NoteId::parse(&row.id),
+                ) else {
+                    continue;
+                };
+                match verify(p, &row.relative_path, id, &row.revision) {
+                    Verified::Fresh { note, stale, .. } => {
+                        if stale {
+                            dirty.insert(row.partition_key.clone());
+                        }
+                        let cited = note
+                            .sources
+                            .iter()
+                            .filter(|s| s.kind == SourceType::Message)
+                            .filter_map(|s| s.id.parse::<i64>().ok())
+                            .filter(|n| wanted.contains(n))
+                            .max();
+                        newest = newest.max(cited);
+                    }
+                    Verified::Gone => {
                         dirty.insert(row.partition_key.clone());
                     }
-                    let cited = note
-                        .sources
-                        .iter()
-                        .filter(|s| s.kind == SourceType::Message)
-                        .filter_map(|s| s.id.parse::<i64>().ok())
-                        .filter(|n| wanted.contains(n))
-                        .max();
-                    newest = newest.max(cited);
-                }
-                Verified::Gone => {
-                    dirty.insert(row.partition_key.clone());
                 }
             }
-        }
-        for key in dirty {
-            if let Some(p) = partitions.iter().find(|p| p.partition_key() == key) {
-                self.reindex(p)?;
+            for key in dirty {
+                if let Some(p) = partitions.iter().find(|p| p.partition_key() == key) {
+                    self.reindex(p)?;
+                }
             }
-        }
-        Ok(newest)
+            Ok(newest)
+        })
     }
 
     /// Learning's known-notes lookup for one chunk (design 09 §2.3). Only
@@ -197,141 +201,145 @@ impl MemoryService {
         chunk_message_ids: &[i64],
     ) -> Result<LearningView, MemoryError> {
         Self::require_extraction(ctx)?;
-        let resolved = self.resolve(ctx)?;
-        let partitions: Vec<&Partition> = resolved
-            .all()
-            .into_iter()
-            .filter(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)))
-            .collect();
-        for p in &partitions {
-            self.touch(p)?;
-        }
-        let keys: Vec<String> = partitions
-            .iter()
-            .map(|p| p.partition_key().to_string())
-            .collect();
-        let by_key = |key: &str| {
-            partitions
-                .iter()
-                .copied()
-                .find(|p| p.partition_key() == key)
-        };
-        let mut dirty: HashSet<String> = HashSet::new();
-
-        // Step 2: this window's learned notes, active and candidate.
-        let source_keys: Vec<String> = chunk_message_ids
-            .iter()
-            .map(|id| format!("message:{id}"))
-            .collect();
-        let mut from_this_window: Vec<KnownNote> = Vec::new();
-        for row in self.index.notes_citing(&keys, &source_keys)? {
-            if !matches!(row.origin.as_str(), "extracted_user" | "extracted_other")
-                || !matches!(
-                    row.effective_status,
-                    index::EffectiveStatus::Active | index::EffectiveStatus::Candidate
-                )
-                || is_summary_row(&row.kind, &row.origin, &row.status)
-            {
-                continue;
-            }
-            let Some(p) = by_key(&row.partition_key) else {
-                continue;
-            };
-            let named = Named {
-                id: &row.id,
-                relative_path: &row.relative_path,
-                revision: &row.revision,
-                origin: &row.origin,
-                effective_status: row.effective_status,
-            };
-            if let Some(note) = known_note(p, &named, true, &mut dirty) {
-                from_this_window.push(note);
-            }
-        }
-
-        // Step 3: the search, over each query; the union by best score.
-        let mut best: HashMap<String, (f64, SearchHit)> = HashMap::new();
-        for query in queries {
-            let query = query.trim();
-            if query.is_empty() || keys.is_empty() {
-                continue;
-            }
-            let mut q = SearchQuery::new(query.to_string(), keys.clone());
-            q.limit = LOOKUP_CANDIDATES;
-            // Superseded and archived notes come back too and are dropped
-            // below: `historical` is what lifts the validity filter, so a
-            // note whose window has ended still counts.
-            q.historical = true;
-            q.mode = SearchMode::Explicit;
-            let results = match self.index.search(&q) {
-                Ok(r) => r,
-                Err(index::IndexError::InvalidInput(_)) => continue,
-                Err(e) => return Err(e.into()),
-            };
-            for hit in results
-                .hits
+        // One generation of the index throughout (scale slice S6): a rebuild
+        // that starts under the read makes it read again.
+        self.read_index(|| {
+            let resolved = self.resolve(ctx)?;
+            let partitions: Vec<&Partition> = resolved
+                .all()
                 .into_iter()
-                .filter(|h| h.effective_status == index::EffectiveStatus::Active)
-                .filter(|h| !is_summary_row(&h.kind, &h.origin, &h.status))
-                .take(LEARNING_HITS_PER_QUERY)
-            {
-                match best.get(&hit.id) {
-                    Some((score, _)) if *score >= hit.score => {}
-                    _ => {
-                        best.insert(hit.id.clone(), (hit.score, hit));
+                .filter(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)))
+                .collect();
+            for p in &partitions {
+                self.touch(p)?;
+            }
+            let keys: Vec<String> = partitions
+                .iter()
+                .map(|p| p.partition_key().to_string())
+                .collect();
+            let by_key = |key: &str| {
+                partitions
+                    .iter()
+                    .copied()
+                    .find(|p| p.partition_key() == key)
+            };
+            let mut dirty: HashSet<String> = HashSet::new();
+
+            // Step 2: this window's learned notes, active and candidate.
+            let source_keys: Vec<String> = chunk_message_ids
+                .iter()
+                .map(|id| format!("message:{id}"))
+                .collect();
+            let mut from_this_window: Vec<KnownNote> = Vec::new();
+            for row in self.index.notes_citing(&keys, &source_keys)? {
+                if !matches!(row.origin.as_str(), "extracted_user" | "extracted_other")
+                    || !matches!(
+                        row.effective_status,
+                        index::EffectiveStatus::Active | index::EffectiveStatus::Candidate
+                    )
+                    || is_summary_row(&row.kind, &row.origin, &row.status)
+                {
+                    continue;
+                }
+                let Some(p) = by_key(&row.partition_key) else {
+                    continue;
+                };
+                let named = Named {
+                    id: &row.id,
+                    relative_path: &row.relative_path,
+                    revision: &row.revision,
+                    origin: &row.origin,
+                    effective_status: row.effective_status,
+                };
+                if let Some(note) = known_note(p, &named, true, &mut dirty) {
+                    from_this_window.push(note);
+                }
+            }
+
+            // Step 3: the search, over each query; the union by best score.
+            let mut best: HashMap<String, (f64, SearchHit)> = HashMap::new();
+            for query in queries {
+                let query = query.trim();
+                if query.is_empty() || keys.is_empty() {
+                    continue;
+                }
+                let mut q = SearchQuery::new(query.to_string(), keys.clone());
+                q.limit = LOOKUP_CANDIDATES;
+                // Superseded and archived notes come back too and are dropped
+                // below: `historical` is what lifts the validity filter, so a
+                // note whose window has ended still counts.
+                q.historical = true;
+                q.mode = SearchMode::Explicit;
+                let results = match self.index.search(&q) {
+                    Ok(r) => r,
+                    Err(index::IndexError::InvalidInput(_)) => continue,
+                    Err(e) => return Err(e.into()),
+                };
+                for hit in results
+                    .hits
+                    .into_iter()
+                    .filter(|h| h.effective_status == index::EffectiveStatus::Active)
+                    .filter(|h| !is_summary_row(&h.kind, &h.origin, &h.status))
+                    .take(LEARNING_HITS_PER_QUERY)
+                {
+                    match best.get(&hit.id) {
+                        Some((score, _)) if *score >= hit.score => {}
+                        _ => {
+                            best.insert(hit.id.clone(), (hit.score, hit));
+                        }
                     }
                 }
             }
-        }
-        let mut ranked: Vec<(f64, SearchHit)> = best.into_values().collect();
-        ranked.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.1.id.cmp(&b.1.id))
-        });
+            let mut ranked: Vec<(f64, SearchHit)> = best.into_values().collect();
+            ranked.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.1.id.cmp(&b.1.id))
+            });
 
-        let mut notes: Vec<KnownNote> = from_this_window
-            .iter()
-            .filter(|n| n.effective_status == EffectiveStatus::Active)
-            .cloned()
-            .collect();
-        for (_, hit) in &ranked {
-            if notes.len() >= LEARNING_MAX_NOTES {
-                break;
+            let mut notes: Vec<KnownNote> = from_this_window
+                .iter()
+                .filter(|n| n.effective_status == EffectiveStatus::Active)
+                .cloned()
+                .collect();
+            for (_, hit) in &ranked {
+                if notes.len() >= LEARNING_MAX_NOTES {
+                    break;
+                }
+                if notes.iter().any(|n| n.id.to_string() == hit.id) {
+                    continue;
+                }
+                let Some(p) = by_key(&hit.partition_key) else {
+                    continue;
+                };
+                let named = Named {
+                    id: &hit.id,
+                    relative_path: &hit.relative_path,
+                    revision: &hit.revision,
+                    origin: &hit.origin,
+                    effective_status: hit.effective_status,
+                };
+                if let Some(note) = known_note(p, &named, false, &mut dirty)
+                    && note.effective_status == EffectiveStatus::Active
+                {
+                    notes.push(note);
+                }
             }
-            if notes.iter().any(|n| n.id.to_string() == hit.id) {
-                continue;
-            }
-            let Some(p) = by_key(&hit.partition_key) else {
-                continue;
-            };
-            let named = Named {
-                id: &hit.id,
-                relative_path: &hit.relative_path,
-                revision: &hit.revision,
-                origin: &hit.origin,
-                effective_status: hit.effective_status,
-            };
-            if let Some(note) = known_note(p, &named, false, &mut dirty)
-                && note.effective_status == EffectiveStatus::Active
-            {
-                notes.push(note);
-            }
-        }
-        notes.truncate(LEARNING_MAX_NOTES);
+            notes.truncate(LEARNING_MAX_NOTES);
 
-        // Step 4: the keys.
-        let known_keys = self.index.fact_keys(&keys, LEARNING_MAX_KEYS)?;
+            // Step 4: the keys.
+            let known_keys = self.index.fact_keys(&keys, LEARNING_MAX_KEYS)?;
 
-        for key in dirty {
-            if let Some(p) = by_key(&key) {
-                self.reindex(p)?;
+            for key in dirty {
+                if let Some(p) = by_key(&key) {
+                    self.reindex(p)?;
+                }
             }
-        }
-        Ok(LearningView {
-            notes,
-            from_this_window,
-            keys: known_keys,
+            Ok(LearningView {
+                notes,
+                from_this_window,
+                keys: known_keys,
+            })
         })
     }
 
@@ -348,50 +356,54 @@ impl MemoryService {
         fact_keys: &[String],
     ) -> Result<HashMap<String, KnownNote>, MemoryError> {
         Self::require_extraction(ctx)?;
-        let mut out = HashMap::new();
         if fact_keys.is_empty() {
-            return Ok(out);
+            return Ok(HashMap::new());
         }
-        let resolved = self.resolve(ctx)?;
-        let mut partitions: Vec<&Partition> = Vec::new();
-        if let Some(p) = &resolved.project {
-            partitions.push(p);
-        }
-        partitions.push(&resolved.home);
-        partitions.retain(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)));
-        for p in &partitions {
-            self.touch(p)?;
-        }
-        let mut dirty: HashSet<String> = HashSet::new();
-        for key in fact_keys {
-            if out.contains_key(key) {
-                continue;
+        // One generation of the index throughout (scale slice S6): a rebuild
+        // that starts under the read makes it read again.
+        self.read_index(|| {
+            let resolved = self.resolve(ctx)?;
+            let mut partitions: Vec<&Partition> = Vec::new();
+            if let Some(p) = &resolved.project {
+                partitions.push(p);
             }
+            partitions.push(&resolved.home);
+            partitions.retain(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)));
             for p in &partitions {
-                let Some(row) = self.index.fact_key_winner(p.partition_key(), key)? else {
+                self.touch(p)?;
+            }
+            let mut out = HashMap::new();
+            let mut dirty: HashSet<String> = HashSet::new();
+            for key in fact_keys {
+                if out.contains_key(key) {
                     continue;
-                };
-                let named = Named {
-                    id: &row.id,
-                    relative_path: &row.relative_path,
-                    revision: &row.revision,
-                    origin: &row.origin,
-                    effective_status: row.effective_status,
-                };
-                if let Some(note) = known_note(p, &named, false, &mut dirty)
-                    && note.effective_status == EffectiveStatus::Active
-                {
-                    out.insert(key.clone(), note);
-                    break;
+                }
+                for p in &partitions {
+                    let Some(row) = self.index.fact_key_winner(p.partition_key(), key)? else {
+                        continue;
+                    };
+                    let named = Named {
+                        id: &row.id,
+                        relative_path: &row.relative_path,
+                        revision: &row.revision,
+                        origin: &row.origin,
+                        effective_status: row.effective_status,
+                    };
+                    if let Some(note) = known_note(p, &named, false, &mut dirty)
+                        && note.effective_status == EffectiveStatus::Active
+                    {
+                        out.insert(key.clone(), note);
+                        break;
+                    }
                 }
             }
-        }
-        for key in dirty {
-            if let Some(p) = partitions.iter().find(|p| p.partition_key() == key) {
-                self.reindex(p)?;
+            for key in dirty {
+                if let Some(p) = partitions.iter().find(|p| p.partition_key() == key) {
+                    self.reindex(p)?;
+                }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 }
 

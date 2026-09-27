@@ -193,12 +193,22 @@ impl MemoryService {
     ///
     /// A read that reaches the index waits while a whole rebuild runs
     /// (scale slice S6) — recall and search do not come here then; they read
-    /// the files — and damage the index reports here owes a rebuild.
+    /// the files — and damage the index reports here owes a rebuild. The
+    /// wait is checked before the caller's reads, so a caller with no
+    /// file-scan answer touches and reads inside [`Self::read_index`], which
+    /// reads again when a rebuild started in between.
     pub(super) fn touch(&self, p: &Partition) -> Result<HashSet<NoteId>, MemoryError> {
         self.wait_for_rebuild();
         let result = self.touch_once(p);
         if let Err(e) = &result {
             self.note_index_failure(e);
+        }
+        #[cfg(test)]
+        {
+            self.gates
+                .touches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(self.gates.touched.read().unwrap_or_else(|e| e.into_inner()));
         }
         result
     }

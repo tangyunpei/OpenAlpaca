@@ -242,7 +242,8 @@ impl MemoryService {
     ///
     /// While the index is rebuilt it lists nothing (scale slice S6): the
     /// list comes from the index, and the turn goes without the block
-    /// rather than wait.
+    /// rather than wait — also when a rebuild starts under the read, which
+    /// may then have read an index being refilled.
     pub fn pending_suggestions(
         &self,
         ctx: &MemoryAccessContext,
@@ -252,9 +253,23 @@ impl MemoryService {
         #[cfg(test)]
         let _stall = self.gates.reads.read().unwrap_or_else(|e| e.into_inner());
         Self::require(ctx.capabilities.read, "memory_read")?;
-        if !self.index_serves() {
+        let Some(generation) = self.serving_generation() else {
+            return Ok(Vec::new());
+        };
+        let listed = self.pending_suggestions_read(ctx, limit, skip);
+        if !self.same_generation(generation) {
             return Ok(Vec::new());
         }
+        listed
+    }
+
+    /// [`Self::pending_suggestions`]' read of the index and the files.
+    fn pending_suggestions_read(
+        &self,
+        ctx: &MemoryAccessContext,
+        limit: usize,
+        skip: &HashSet<NoteId>,
+    ) -> Result<Vec<PendingSuggestion>, MemoryError> {
         let resolved = self.resolve(ctx)?;
         let partitions: Vec<&Partition> = resolved
             .all()

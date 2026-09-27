@@ -340,52 +340,57 @@ impl MemoryService {
             super::Capabilities::ALL,
             super::Attribution::default(),
         )?;
-        let resolved = self.resolve(&ctx)?;
-        let rows: std::collections::HashSet<String> =
-            message_ids.iter().map(|id| id.to_string()).collect();
-        let source_keys: Vec<String> = message_ids
-            .iter()
-            .map(|id| format!("message:{id}"))
-            .collect();
-        let mut targets: Vec<(NoteId, String)> = Vec::new();
-        for p in resolved.all() {
-            if matches!(p.health(), files::PartitionHealth::Quarantined(_)) {
-                continue;
-            }
-            self.touch(p)?;
-            let key = p.partition_key().to_string();
-            for row in self
-                .index
-                .notes_citing(std::slice::from_ref(&key), &source_keys)?
-            {
-                let (Some(kind), Some(origin), Some(status)) = (
-                    files::NoteKind::parse(&row.kind),
-                    Origin::parse(&row.origin),
-                    NoteStatus::parse(&row.status),
-                ) else {
-                    continue;
-                };
-                if !files::is_conversation_summary(kind, origin, status) {
+        // One generation of the index throughout (scale slice S6): a rebuild
+        // that starts under the read makes it read again.
+        let targets = self.read_index(|| {
+            let resolved = self.resolve(&ctx)?;
+            let rows: std::collections::HashSet<String> =
+                message_ids.iter().map(|id| id.to_string()).collect();
+            let source_keys: Vec<String> = message_ids
+                .iter()
+                .map(|id| format!("message:{id}"))
+                .collect();
+            let mut targets: Vec<(NoteId, String)> = Vec::new();
+            for p in resolved.all() {
+                if matches!(p.health(), files::PartitionHealth::Quarantined(_)) {
                     continue;
                 }
-                let Ok(id) = NoteId::parse(&row.id) else {
-                    continue;
-                };
-                let super::recall::Verified::Fresh { note, revision, .. } =
-                    super::recall::verify(p, &row.relative_path, id, &row.revision)
-                else {
-                    continue;
-                };
-                let all_here = !note.sources.is_empty()
-                    && note
-                        .sources
-                        .iter()
-                        .all(|s| s.kind == SourceType::Message && rows.contains(&s.id));
-                if all_here && files::is_conversation_summary(note.kind, origin, note.status) {
-                    targets.push((id, revision));
+                self.touch(p)?;
+                let key = p.partition_key().to_string();
+                for row in self
+                    .index
+                    .notes_citing(std::slice::from_ref(&key), &source_keys)?
+                {
+                    let (Some(kind), Some(origin), Some(status)) = (
+                        files::NoteKind::parse(&row.kind),
+                        Origin::parse(&row.origin),
+                        NoteStatus::parse(&row.status),
+                    ) else {
+                        continue;
+                    };
+                    if !files::is_conversation_summary(kind, origin, status) {
+                        continue;
+                    }
+                    let Ok(id) = NoteId::parse(&row.id) else {
+                        continue;
+                    };
+                    let super::recall::Verified::Fresh { note, revision, .. } =
+                        super::recall::verify(p, &row.relative_path, id, &row.revision)
+                    else {
+                        continue;
+                    };
+                    let all_here = !note.sources.is_empty()
+                        && note
+                            .sources
+                            .iter()
+                            .all(|s| s.kind == SourceType::Message && rows.contains(&s.id));
+                    if all_here && files::is_conversation_summary(note.kind, origin, note.status) {
+                        targets.push((id, revision));
+                    }
                 }
             }
-        }
+            Ok(targets)
+        })?;
         let mut forgotten = 0;
         for batch in targets.chunks(20) {
             let out = self.forget(

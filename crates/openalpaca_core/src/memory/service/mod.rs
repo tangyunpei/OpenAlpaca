@@ -201,6 +201,10 @@ struct RebuildState {
     /// A rebuild is running: the index is being refilled from nothing. Set
     /// and cleared only by a [`RebuildRun`].
     running: bool,
+    /// How many rebuilds have started — the index's generation. A read
+    /// that saw it change did not read one index throughout
+    /// ([`MemoryService::read_index`]).
+    started: u64,
 }
 
 /// A whole rebuild in progress (scale slice S6): `running` from
@@ -260,6 +264,10 @@ pub(crate) struct TestGates {
     pub reads: std::sync::RwLock<()>,
     /// The next rebuild panics once it has emptied the index.
     pub panic_rebuild: std::sync::atomic::AtomicBool,
+    /// Where a `touch` that has done its work waits, before the caller
+    /// reads the index — counted first in `touches`.
+    pub touched: std::sync::RwLock<()>,
+    pub touches: std::sync::atomic::AtomicUsize,
 }
 
 /// The owner's partitions for one request (design §3 rule 1).
@@ -468,8 +476,9 @@ impl MemoryService {
 
     /// Blocks while a whole rebuild runs — what a read of the index that
     /// has no file-scan answer (learning's lookups, the timeline, the
-    /// suggestions list) does, rather than read an index being refilled.
-    fn wait_for_rebuild(&self) {
+    /// suggestions list) does, rather than read an index being refilled —
+    /// and answers the generation it then sees.
+    fn wait_for_rebuild(&self) -> u64 {
         let mut state = self.rebuild_state();
         while state.running {
             state = self
@@ -477,6 +486,42 @@ impl MemoryService {
                 .wait(state)
                 .unwrap_or_else(|e| e.into_inner());
         }
+        state.started
+    }
+
+    /// Whether no whole rebuild has started since `generation`.
+    fn same_generation(&self, generation: u64) -> bool {
+        self.rebuild_state().started == generation
+    }
+
+    /// Runs `read` — a `touch` of the partitions and every index read after
+    /// it — against one generation of the index (scale slice S6): it waits
+    /// while a whole rebuild runs, and when one started while `read` ran —
+    /// so what it read may be an index being emptied and refilled — it
+    /// waits for that rebuild to end and reads again. A rebuild starts only
+    /// at boot, after damage met on use or for a bloated cache, so a read
+    /// is repeated rarely. What a read with no file-scan answer goes
+    /// through: learning's lookups, the timeline, the suggestions list, a
+    /// deleted conversation's summaries.
+    pub(super) fn read_index<T>(
+        &self,
+        mut read: impl FnMut() -> Result<T, MemoryError>,
+    ) -> Result<T, MemoryError> {
+        loop {
+            let generation = self.wait_for_rebuild();
+            let result = read();
+            if self.same_generation(generation) {
+                return result;
+            }
+        }
+    }
+
+    /// The generation the index serves reads at, or `None` while a whole
+    /// rebuild is owed or running — for a reply-path read that goes without
+    /// the index rather than wait ([`Self::pending_suggestions`]).
+    fn serving_generation(&self) -> Option<u64> {
+        let state = self.rebuild_state();
+        (!state.pending && !state.running).then_some(state.started)
     }
 
     /// What an error from the index means for it: damage to the cache file
@@ -519,6 +564,7 @@ impl MemoryService {
         mut state: std::sync::MutexGuard<'_, RebuildState>,
     ) -> RebuildRun<'_> {
         state.running = true;
+        state.started += 1;
         RebuildRun {
             service: self,
             completed: false,

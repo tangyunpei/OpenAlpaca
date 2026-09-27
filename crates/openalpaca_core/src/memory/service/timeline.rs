@@ -60,112 +60,118 @@ impl MemoryService {
         Self::require(ctx.capabilities.read, "memory_read")?;
         let before = side(input.before, "before")?;
         let after = side(input.after, "after")?;
-        let resolved = self.resolve(ctx)?;
-        let partitions: Vec<&Partition> = resolved.all();
-        for p in &partitions {
-            self.touch(p)?;
-        }
-        let keys: Vec<String> = partitions
-            .iter()
-            .map(|p| p.partition_key().to_string())
-            .collect();
-        let by_key = |key: &str| {
-            partitions
+        // One generation of the index throughout (scale slice S6): a rebuild
+        // that starts under the read makes it read again.
+        let (output, revisions) = self.read_index(|| {
+            let resolved = self.resolve(ctx)?;
+            let partitions: Vec<&Partition> = resolved.all();
+            for p in &partitions {
+                self.touch(p)?;
+            }
+            let keys: Vec<String> = partitions
                 .iter()
-                .copied()
-                .find(|p| p.partition_key() == key)
-        };
-
-        // One re-run when a re-read found the index out of date, so the
-        // second pass reads a fresh index (as a search does, design §5
-        // step 7).
-        let mut output = None;
-        for pass in 0..2 {
-            let (point, anchor_note, anchor_date) = match &input.anchor {
-                TimelineAnchor::Note(id) => {
-                    let key = self.timeline_note(&keys, *id)?;
-                    (
-                        TimelinePoint::Note {
-                            partition_key: key,
-                            id: id.to_string(),
-                        },
-                        Some(*id),
-                        None,
-                    )
-                }
-                TimelineAnchor::Query(query) => {
-                    let hits = self.search_unrecorded(
-                        ctx,
-                        SearchInput {
-                            query: query.clone(),
-                            historical: true,
-                            ..Default::default()
-                        },
-                    )?;
-                    let Some(first) = hits.results.first() else {
-                        return Ok(TimelineOutput {
-                            anchor_note: None,
-                            anchor_date: None,
-                            rows: Vec::new(),
-                            index_state: hits.index_state,
-                        });
-                    };
-                    let key = self.timeline_note(&keys, first.id)?;
-                    (
-                        TimelinePoint::Note {
-                            partition_key: key,
-                            id: first.id.to_string(),
-                        },
-                        Some(first.id),
-                        None,
-                    )
-                }
-                TimelineAnchor::Date(at) => (TimelinePoint::Instant(*at), None, Some(*at)),
+                .map(|p| p.partition_key().to_string())
+                .collect();
+            let by_key = |key: &str| {
+                partitions
+                    .iter()
+                    .copied()
+                    .find(|p| p.partition_key() == key)
             };
-            let found = self.index.timeline(&TimelineQuery {
-                partition_keys: keys.clone(),
-                point,
-                before,
-                after,
-            })?;
-            let mut dirty: HashSet<String> = HashSet::new();
-            let listed = found
-                .before
-                .iter()
-                .map(|r| (r, BEFORE))
-                .chain(found.anchor.iter().map(|r| (r, ANCHOR)))
-                .chain(found.after.iter().map(|r| (r, AFTER)));
-            let mut rows = Vec::new();
-            let mut revisions = Vec::new();
-            for (row, reason) in listed {
-                let Some(p) = by_key(&row.partition_key) else {
-                    continue;
+
+            // One re-run when a re-read found the index out of date, so the
+            // second pass reads a fresh index (as a search does, design §5
+            // step 7).
+            let mut output = None;
+            for pass in 0..2 {
+                let (point, anchor_note, anchor_date) = match &input.anchor {
+                    TimelineAnchor::Note(id) => {
+                        let key = self.timeline_note(&keys, *id)?;
+                        (
+                            TimelinePoint::Note {
+                                partition_key: key,
+                                id: id.to_string(),
+                            },
+                            Some(*id),
+                            None,
+                        )
+                    }
+                    TimelineAnchor::Query(query) => {
+                        let hits = self.search_unrecorded(
+                            ctx,
+                            SearchInput {
+                                query: query.clone(),
+                                historical: true,
+                                ..Default::default()
+                            },
+                        )?;
+                        let Some(first) = hits.results.first() else {
+                            let nothing = TimelineOutput {
+                                anchor_note: None,
+                                anchor_date: None,
+                                rows: Vec::new(),
+                                index_state: hits.index_state,
+                            };
+                            return Ok((nothing, Vec::new()));
+                        };
+                        let key = self.timeline_note(&keys, first.id)?;
+                        (
+                            TimelinePoint::Note {
+                                partition_key: key,
+                                id: first.id.to_string(),
+                            },
+                            Some(first.id),
+                            None,
+                        )
+                    }
+                    TimelineAnchor::Date(at) => (TimelinePoint::Instant(*at), None, Some(*at)),
                 };
-                if let Some((served, revision)) = Self::timeline_row(p, row, reason, &mut dirty) {
-                    rows.push(served);
-                    revisions.push(revision);
+                let found = self.index.timeline(&TimelineQuery {
+                    partition_keys: keys.clone(),
+                    point,
+                    before,
+                    after,
+                })?;
+                let mut dirty: HashSet<String> = HashSet::new();
+                let listed = found
+                    .before
+                    .iter()
+                    .map(|r| (r, BEFORE))
+                    .chain(found.anchor.iter().map(|r| (r, ANCHOR)))
+                    .chain(found.after.iter().map(|r| (r, AFTER)));
+                let mut rows = Vec::new();
+                let mut revisions = Vec::new();
+                for (row, reason) in listed {
+                    let Some(p) = by_key(&row.partition_key) else {
+                        continue;
+                    };
+                    if let Some((served, revision)) = Self::timeline_row(p, row, reason, &mut dirty)
+                    {
+                        rows.push(served);
+                        revisions.push(revision);
+                    }
+                }
+                let had_dirty = !dirty.is_empty();
+                for key in dirty {
+                    if let Some(p) = by_key(&key) {
+                        self.reindex(p)?;
+                    }
+                }
+                output = Some((
+                    TimelineOutput {
+                        anchor_note,
+                        anchor_date,
+                        rows,
+                        index_state: found.index_state,
+                    },
+                    revisions,
+                ));
+                if !had_dirty || pass == 1 {
+                    break;
                 }
             }
-            let had_dirty = !dirty.is_empty();
-            for key in dirty {
-                if let Some(p) = by_key(&key) {
-                    self.reindex(p)?;
-                }
-            }
-            output = Some((
-                TimelineOutput {
-                    anchor_note,
-                    anchor_date,
-                    rows,
-                    index_state: found.index_state,
-                },
-                revisions,
-            ));
-            if !had_dirty || pass == 1 {
-                break;
-            }
-        }
-        let (output, revisions) = output.expect("one pass always runs");
+            Ok(output.expect("one pass always runs"))
+        })?;
         // A listed row is fetched through a memory tool, as a search hit is
         // (design §7a `memory_used` reason `tool`), at the revision re-read.
         if ctx.surface == super::Surface::ModelTool {

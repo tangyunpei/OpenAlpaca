@@ -672,6 +672,133 @@ fn a_rebuild_that_panics_stays_owed_and_holds_no_reader() {
     assert_eq!(found.results.len(), 4);
 }
 
+/// A deferred service over a cache already rebuilt with `n` cedar notes,
+/// and Alice's `ModelTool` and `Extraction` contexts on it.
+fn ready_cedar_service(
+    h: &Harness,
+    n: usize,
+) -> (Arc<MemoryService>, MemoryAccessContext, MemoryAccessContext) {
+    cedar_notes(h, n);
+    let service = Arc::new(MemoryService::open_default_deferred(Some(h.db.clone())));
+    assert!(service.run_pending_rebuild().unwrap());
+    let ctx = |surface, caps| {
+        service
+            .context(ALICE, WorkspaceHint::None, surface, caps, Attribution::default())
+            .unwrap()
+    };
+    let tool = ctx(Surface::ModelTool, Capabilities::ALL);
+    let extraction = ctx(Surface::Extraction, Capabilities::EXTRACTION);
+    (service, tool, extraction)
+}
+
+/// Every note on the timeline around now.
+fn timeline_rows(service: &MemoryService, tool: &MemoryAccessContext) -> usize {
+    service
+        .timeline(
+            tool,
+            TimelineInput {
+                anchor: TimelineAnchor::Date(Utc::now()),
+                before: Some(20),
+                after: Some(20),
+            },
+        )
+        .unwrap()
+        .rows
+        .len()
+}
+
+/// Owes a whole rebuild and starts it on its own thread, held still once
+/// it has emptied the index; the rebuild ends when the returned guard is
+/// dropped.
+fn start_held_rebuild(
+    service: &Arc<MemoryService>,
+) -> (
+    std::sync::RwLockWriteGuard<'_, ()>,
+    std::thread::JoinHandle<Result<bool, MemoryError>>,
+) {
+    let hold = service.gates.rebuild.write().unwrap();
+    service.rebuild_state().pending = true;
+    let rebuild = {
+        let service = service.clone();
+        std::thread::spawn(move || service.run_pending_rebuild())
+    };
+    eventually("the rebuild starts", || service.rebuild_running());
+    (hold, rebuild)
+}
+
+/// A read of the index that has no file-scan answer — learning's
+/// known-notes lookup here — waits while a whole rebuild runs, and answers
+/// from the rebuilt index with every note, never from the emptied one.
+#[test]
+fn a_learning_lookup_during_a_rebuild_waits_for_it() {
+    let h = Harness::new();
+    let (service, _, extraction) = ready_cedar_service(&h, 4);
+    let (hold, rebuild) = start_held_rebuild(&service);
+    let (sent, read) = std::sync::mpsc::channel();
+    {
+        let service = service.clone();
+        std::thread::spawn(move || {
+            let view = service.learning_view(&extraction, &["cedar grove".to_string()], &[]);
+            let _ = sent.send((view.map(|v| v.notes.len()), service.rebuild_pending()));
+        });
+    }
+    assert!(
+        read.recv_timeout(std::time::Duration::from_millis(300))
+            .is_err(),
+        "no answer while the rebuild runs"
+    );
+    drop(hold);
+    assert!(rebuild.join().unwrap().unwrap());
+    let (notes, pending) = read
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    assert!(!pending, "it answered after the rebuild");
+    assert_eq!(notes.unwrap(), 4, "with every note");
+}
+
+/// The wait above is checked before the index is read, so a rebuild can
+/// start between the check and the read: here once the timeline's `touch`
+/// has done its work. The read then meets an emptied index; it waits for
+/// the rebuild and reads again rather than answer from it.
+#[test]
+fn a_rebuild_that_starts_under_a_read_makes_it_read_again() {
+    let h = Harness::new();
+    let (service, tool, _) = ready_cedar_service(&h, 4);
+    assert_eq!(timeline_rows(&service, &tool), 4);
+    let touched = service.gates.touched.write().unwrap();
+    let before = service
+        .gates
+        .touches
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let (sent, read) = std::sync::mpsc::channel();
+    {
+        let (service, tool) = (service.clone(), tool.clone());
+        std::thread::spawn(move || {
+            let _ = sent.send(timeline_rows(&service, &tool));
+        });
+    }
+    eventually("the timeline has touched its partition", || {
+        service
+            .gates
+            .touches
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > before
+    });
+    let (hold, rebuild) = start_held_rebuild(&service);
+    drop(touched);
+    assert!(
+        read.recv_timeout(std::time::Duration::from_millis(300))
+            .is_err(),
+        "no answer from the emptied index"
+    );
+    drop(hold);
+    assert!(rebuild.join().unwrap().unwrap());
+    let rows = read
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(rows, 4, "read again from the rebuilt index");
+}
+
 // ============================================================================
 // S5 — the index is maintained (M1)
 // ============================================================================
