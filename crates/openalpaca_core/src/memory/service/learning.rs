@@ -131,7 +131,7 @@ impl MemoryService {
             let wanted: HashSet<i64> = message_ids.iter().copied().collect();
             let mut dirty: HashSet<String> = HashSet::new();
             let mut newest: Option<i64> = None;
-            for row in self.index.notes_citing(&keys, &source_keys)? {
+            for row in self.indexed(self.index.notes_citing(&keys, &source_keys))? {
                 if !is_summary_row(&row.kind, &row.origin, &row.status) {
                     continue;
                 }
@@ -231,7 +231,7 @@ impl MemoryService {
                 .map(|id| format!("message:{id}"))
                 .collect();
             let mut from_this_window: Vec<KnownNote> = Vec::new();
-            for row in self.index.notes_citing(&keys, &source_keys)? {
+            for row in self.indexed(self.index.notes_citing(&keys, &source_keys))? {
                 if !matches!(row.origin.as_str(), "extracted_user" | "extracted_other")
                     || !matches!(
                         row.effective_status,
@@ -271,9 +271,8 @@ impl MemoryService {
                 q.historical = true;
                 q.mode = SearchMode::Explicit;
                 let results = match self.index.search(&q) {
-                    Ok(r) => r,
                     Err(index::IndexError::InvalidInput(_)) => continue,
-                    Err(e) => return Err(e.into()),
+                    searched => self.indexed(searched)?,
                 };
                 for hit in results
                     .hits
@@ -328,7 +327,7 @@ impl MemoryService {
             notes.truncate(LEARNING_MAX_NOTES);
 
             // Step 4: the keys.
-            let known_keys = self.index.fact_keys(&keys, LEARNING_MAX_KEYS)?;
+            let known_keys = self.indexed(self.index.fact_keys(&keys, LEARNING_MAX_KEYS))?;
 
             for key in dirty {
                 if let Some(p) = by_key(&key) {
@@ -379,7 +378,9 @@ impl MemoryService {
                     continue;
                 }
                 for p in &partitions {
-                    let Some(row) = self.index.fact_key_winner(p.partition_key(), key)? else {
+                    let Some(row) =
+                        self.indexed(self.index.fact_key_winner(p.partition_key(), key))?
+                    else {
                         continue;
                     };
                     let named = Named {

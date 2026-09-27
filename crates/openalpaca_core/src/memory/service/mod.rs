@@ -542,6 +542,20 @@ impl MemoryService {
         }
     }
 
+    /// An index answer as the service takes it (scale slice S6): damage the
+    /// error reports owes a rebuild ([`Self::note_index_failure`]) before it
+    /// goes up, whichever read met it — open runs no integrity check, so a
+    /// B-tree only one read reaches is found by that read or not at all.
+    /// Every read of the index on a request's path goes through here, or
+    /// through `touch` and the index passes, which note their own.
+    pub(super) fn indexed<T>(&self, answer: index::Result<T>) -> Result<T, MemoryError> {
+        answer.map_err(|e| {
+            let e = MemoryError::from(e);
+            self.note_index_failure(&e);
+            e
+        })
+    }
+
     /// Runs the whole rebuild the index is owed, if any and none is running
     /// — off the request path: the daemon calls this on a blocking worker
     /// when it starts, and every reconciliation tick calls it. Answers
@@ -803,7 +817,7 @@ impl MemoryService {
         let mut fingerprints = self.fingerprints.lock().unwrap_or_else(|e| e.into_inner());
         let mut last_scans = self.last_scans.lock().unwrap_or_else(|e| e.into_inner());
         for m in &mv.moves {
-            self.index.remove_partition(&m.old_key)?;
+            self.indexed(self.index.remove_partition(&m.old_key))?;
             fingerprints.remove(&m.old_key);
             last_scans.remove(&m.old_key);
             self.parse_cache.evict_partition(&m.old_key);
@@ -1251,7 +1265,7 @@ impl MemoryService {
         if !self.index_serves() {
             return Ok(IndexState::Rebuilding);
         }
-        Ok(self.index.state()?)
+        self.indexed(self.index.state())
     }
 
     // ------------------------------------------------------------------------

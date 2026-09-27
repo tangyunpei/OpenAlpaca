@@ -300,7 +300,7 @@ impl MemoryService {
         // `updated_at` first (ties by id), so pinning a new note never
         // evicts an older one from the budget. Each is re-read first.
         let pinned = match &files {
-            None => self.index.list_pinned(&keys)?,
+            None => self.indexed(self.index.list_pinned(&keys))?,
             Some(scan) => self.index.scan_pinned(&scan.pinned, &keys),
         };
         let pinned_ids: HashSet<NoteId> = pinned
@@ -398,7 +398,7 @@ impl MemoryService {
         // Steps 3–6: the search, in the index.
         let mut partial = false;
         let mut index_state = match &files {
-            None => self.index.state()?,
+            None => self.indexed(self.index.state())?,
             Some(_) => index::IndexState::Rebuilding,
         };
         if let Some(query) = query_text(message)
@@ -412,18 +412,13 @@ impl MemoryService {
                 Some(scan) => self.index.scan_search(&scan.records, &q, scan.truncated),
             };
             let results = match searched {
-                Ok(r) => r,
                 Err(index::IndexError::InvalidInput(_)) => index::SearchResults {
                     hits: Vec::new(),
                     count: 0,
                     partial: false,
                     index_state,
                 },
-                Err(e) => {
-                    let e = MemoryError::from(e);
-                    self.note_index_failure(&e);
-                    return Err(e);
-                }
+                searched => self.indexed(searched)?,
             };
             partial = results.partial;
             index_state = results.index_state;
@@ -662,11 +657,7 @@ impl MemoryService {
                 None => self.index.search(&q),
                 Some(scan) => self.index.scan_search(&scan.records, &q, scan.truncated),
             };
-            let results = searched.map_err(|e| {
-                let e = MemoryError::from(e);
-                self.note_index_failure(&e);
-                e
-            })?;
+            let results = self.indexed(searched)?;
             let mut dirty: HashSet<String> = HashSet::new();
             let mut items = Vec::with_capacity(results.hits.len());
             for hit in &results.hits {

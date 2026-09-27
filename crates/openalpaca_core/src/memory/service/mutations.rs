@@ -357,10 +357,10 @@ impl MemoryService {
                 }
                 self.touch(p)?;
                 let key = p.partition_key().to_string();
-                for row in self
-                    .index
-                    .notes_citing(std::slice::from_ref(&key), &source_keys)?
-                {
+                for row in self.indexed(
+                    self.index
+                        .notes_citing(std::slice::from_ref(&key), &source_keys),
+                )? {
                     let (Some(kind), Some(origin), Some(status)) = (
                         files::NoteKind::parse(&row.kind),
                         Origin::parse(&row.origin),

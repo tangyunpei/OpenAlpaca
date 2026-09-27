@@ -76,7 +76,7 @@ impl MemoryService {
             // candidate naming several notes cannot be confirmed (S5) and is not
             // a suggestion here.
             let mut groups: Vec<((String, String), Vec<CatalogNote>)> = Vec::new();
-            for row in self.index.suggestion_rows(&keys)? {
+            for row in self.indexed(self.index.suggestion_rows(&keys))? {
                 let [target] = row.supersedes.as_slice() else {
                     continue;
                 };
@@ -132,7 +132,7 @@ pub(super) fn verified_target(
     id: &str,
     dirty: &mut HashSet<String>,
 ) -> Result<Option<SuggestionTarget>, MemoryError> {
-    let Some(row) = service.index.catalog_note(p.partition_key(), id)? else {
+    let Some(row) = service.indexed(service.index.catalog_note(p.partition_key(), id))? else {
         return Ok(None);
     };
     if row.effective_status != IndexStatus::Active {

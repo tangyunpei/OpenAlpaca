@@ -126,12 +126,12 @@ impl MemoryService {
                     }
                     TimelineAnchor::Date(at) => (TimelinePoint::Instant(*at), None, Some(*at)),
                 };
-                let found = self.index.timeline(&TimelineQuery {
+                let found = self.indexed(self.index.timeline(&TimelineQuery {
                     partition_keys: keys.clone(),
                     point,
                     before,
                     after,
-                })?;
+                }))?;
                 let mut dirty: HashSet<String> = HashSet::new();
                 let listed = found
                     .before
@@ -195,7 +195,7 @@ impl MemoryService {
     /// none.
     fn timeline_note(&self, keys: &[String], id: NoteId) -> Result<String, MemoryError> {
         for key in keys {
-            if let Some(note) = self.index.catalog_note(key, &id.to_string())? {
+            if let Some(note) = self.indexed(self.index.catalog_note(key, &id.to_string()))? {
                 if note.effective_status == index::EffectiveStatus::Candidate {
                     return Err(MemoryError::invalid(format!(
                         "note {id} is a candidate, and a timeline lists no candidates: confirm it \

@@ -799,6 +799,121 @@ fn a_rebuild_that_starts_under_a_read_makes_it_read_again() {
     assert_eq!(rows, 4, "read again from the rebuilt index");
 }
 
+/// Overwrites the root page of the B-tree `name` in the closed cache file
+/// at `path` — damage below the catalog that only the reads using that
+/// B-tree meet.
+fn damage_btree(path: &Path, name: &str) {
+    let (root, page_size): (i64, i64) = {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        let root = conn
+            .query_row(
+                "SELECT rootpage FROM sqlite_master WHERE name = ?1",
+                [name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let page_size = conn
+            .query_row("PRAGMA page_size", [], |r| r.get(0))
+            .unwrap();
+        (root, page_size)
+    };
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start(((root - 1) * page_size) as u64))
+        .unwrap();
+    file.write_all(&vec![0xAB; page_size as usize]).unwrap();
+}
+
+/// A deferred service over a ready cache of 20 cedar notes — the first
+/// pinned, the second citing a message row — whose B-tree `btree` is
+/// damaged: what a restart meets, since open runs no integrity check.
+/// Answers the service and the message row.
+fn service_with_damaged(h: &Harness, btree: &str) -> (MemoryService, i64) {
+    cedar_notes(h, 20);
+    let user = h.user(ALICE, None);
+    let first = h
+        .service
+        .list(&user, ListInput::default())
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|i| i.id)
+        .min()
+        .unwrap();
+    let file = file_of(h, &user.owner_key, first);
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replace("pinned: false", "pinned: true")).unwrap();
+    let row = h.message_row("The cedar grove by the river is where I walk.");
+    let extraction = h
+        .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap();
+    learned_note(
+        h,
+        &extraction,
+        "Walks",
+        "# Walks\n\n## Knowledge\nThe user walks in the cedar grove.\n",
+        row,
+    );
+    let path = MemoryIndex::default_path().unwrap();
+    drop(MemoryService::open_default(Some(h.db.clone())));
+    damage_btree(&path, btree);
+    let service = MemoryService::open_default_deferred(Some(h.db.clone()));
+    assert!(!service.rebuild_pending(), "open does not look");
+    (service, row)
+}
+
+fn context(service: &MemoryService, surface: Surface, caps: Capabilities) -> MemoryAccessContext {
+    service
+        .context(ALICE, WorkspaceHint::None, surface, caps, Attribution::default())
+        .unwrap()
+}
+
+/// Damage in a B-tree only one read reaches — here the chunk-by-note index,
+/// read by recall's pinned notes (step 2) and by no stat scan, search or
+/// tick — owes a rebuild when that read meets it, as damage met anywhere
+/// else does: recall reads the files from then on, and the next tick
+/// rebuilds the cache. Before, nothing marked it, so every turn's recall
+/// failed at its pinned notes, and not even a restart repaired the file.
+#[test]
+fn damage_met_by_recalls_pinned_notes_owes_a_rebuild() {
+    let h = Harness::new();
+    let (service, _) = service_with_damaged(&h, "chunk_note");
+    let tool = context(&service, Surface::ModelTool, Capabilities::ALL);
+    let recall = || service.recall(&tool, "cedar grove river", RecallBudget::default());
+    let err = recall().expect_err("the pinned note's chunks are counted");
+    assert!(err.is_index_corruption(), "{err}");
+    assert!(service.rebuild_pending(), "the damage owes a rebuild");
+    let recalled = recall().unwrap();
+    assert_eq!(recalled.index_state, IndexState::Rebuilding);
+    assert!(!recalled.notes.is_empty(), "the files answer");
+
+    service.reconcile_owner(ALICE).unwrap();
+    assert!(!service.rebuild_pending(), "the tick rebuilt it");
+    let recalled = recall().unwrap();
+    assert_eq!(recalled.index_state, IndexState::Ready);
+    assert!(!recalled.notes.is_empty());
+}
+
+/// The same for a read with no file-scan answer: learning's lookup meets
+/// damage in the citations' index, owes the rebuild, and after the next
+/// tick finds the note citing its row again — where it used to fail on
+/// every flush, learning backing off and retrying for good.
+#[test]
+fn damage_met_by_learnings_lookup_owes_a_rebuild() {
+    let h = Harness::new();
+    let (service, row) = service_with_damaged(&h, "note_source_key");
+    let extraction = context(&service, Surface::Extraction, Capabilities::EXTRACTION);
+    let lookup = || service.learning_view(&extraction, &["cedar grove".to_string()], &[row]);
+    let err = lookup().expect_err("the citations' index is read");
+    assert!(err.is_index_corruption(), "{err}");
+    assert!(service.rebuild_pending(), "the damage owes a rebuild");
+
+    service.reconcile_owner(ALICE).unwrap();
+    assert!(!service.rebuild_pending(), "the tick rebuilt it");
+    let view = lookup().unwrap();
+    assert_eq!(view.from_this_window.len(), 1, "{view:?}");
+}
+
 // ============================================================================
 // S5 — the index is maintained (M1)
 // ============================================================================

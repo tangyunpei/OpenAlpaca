@@ -287,7 +287,7 @@ impl MemoryService {
         let mut dirty: HashSet<String> = HashSet::new();
         let mut seen_targets: HashSet<(String, String)> = HashSet::new();
         let mut read = 0usize;
-        for row in self.index.suggestion_rows(&keys)? {
+        for row in self.indexed(self.index.suggestion_rows(&keys))? {
             if out.len() >= limit || read >= PENDING_SUGGESTIONS_READ_MAX {
                 break;
             }
