@@ -113,9 +113,26 @@ fn says_nothing(text: &str) -> bool {
 
 /// The answer must be one JSON object whose `topic` and `discussed` are
 /// non-empty strings; `decided` and `open` are optional strings. Anything
-/// else is `Err` — a reachable model's unusable answer (ruling LR20).
+/// else is `Err` — a reachable model's unusable answer (ruling LR20). Owner
+/// decision LQ13 (2026-09-26): the object is read out of a `<think>` block or
+/// prose around it, as [`crate::memory::task_extraction::parse_json_answer`]
+/// reads it.
 pub(crate) fn parse_summary(content: &str) -> Result<Summary, String> {
-    let Some(value) = crate::memory::task_extraction::parse_json_response(content) else {
+    summary_of(crate::memory::task_extraction::parse_json_answer(
+        content,
+        |v| v.get("topic").is_some() || v.get("discussed").is_some(),
+    ))
+}
+
+/// [`parse_summary`] for an answer the model stopped at its output ceiling:
+/// the forms read before LQ13 only, so a cut answer is reported as cut and
+/// never rescued in part (the L8 fix slice's P1).
+pub(crate) fn parse_cut_summary(content: &str) -> Result<Summary, String> {
+    summary_of(crate::memory::task_extraction::parse_json_strict(content))
+}
+
+fn summary_of(value: Option<serde_json::Value>) -> Result<Summary, String> {
+    let Some(value) = value else {
         return Err("the answer is not JSON".to_string());
     };
     if !value.is_object() {
@@ -390,6 +407,28 @@ mod tests {
             r#"{"topic": "", "discussed": "x"}"#,
             r#"{"topic": "x", "discussed": "none"}"#,
             r#"{"topic": "x", "discussed": 3}"#,
+        ] {
+            assert!(parse_summary(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// LQ13 (the L8 product slice's P3): a summary behind a `<think>` block,
+    /// before a trailing `</think>` or inside prose is read; a truncated one
+    /// and one of the wrong shape still fail.
+    #[test]
+    fn a_summary_wrapped_in_thinking_or_prose_is_read() {
+        let summary = r#"{"topic": "Lisbon trip", "discussed": "Flights and hotels."}"#;
+        for answer in [
+            format!("<think>\nA trip. Draft: {{\"topic\": \"\"}}\n</think>\n{summary}"),
+            format!("{summary}\n</think>"),
+            format!("Here is the summary:\n{summary}\nThat is all."),
+        ] {
+            let s = parse_summary(&answer).unwrap_or_else(|e| panic!("{answer}: {e}"));
+            assert_eq!(s.topic, "Lisbon trip", "{answer}");
+        }
+        for bad in [
+            r#"Here: {"topic": "Lisbon trip", "discussed": "Flights"#,
+            r#"Here: ["Lisbon trip"] and {"note": 1}"#,
         ] {
             assert!(parse_summary(bad).is_err(), "{bad}");
         }

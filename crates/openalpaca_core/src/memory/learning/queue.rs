@@ -1479,7 +1479,13 @@ impl LearningQueue {
             report.input_tokens += u64::from(response.usage.input_tokens);
             report.output_tokens += u64::from(response.usage.output_tokens);
 
-            let parsed = extractor::parse_items(&response.content);
+            // LQ13: an answer that ended on its own is unwrapped; a cut one
+            // is held to the forms read before (the L8 fix slice's P1).
+            let parsed = if response.finish_reason == openalpaca_llm::FinishReason::MaxTokens {
+                extractor::parse_cut_items(&response.content)
+            } else {
+                extractor::parse_items(&response.content)
+            };
             self.record_usage(AGENT_LABEL, &response, latency_ms, parsed.is_err())
                 .await;
             let items = match parsed {
@@ -2027,7 +2033,11 @@ impl LearningQueue {
             report.calls += 1;
             report.input_tokens += u64::from(response.usage.input_tokens);
             report.output_tokens += u64::from(response.usage.output_tokens);
-            let parsed = episode::parse_summary(&response.content);
+            let parsed = if response.finish_reason == openalpaca_llm::FinishReason::MaxTokens {
+                episode::parse_cut_summary(&response.content)
+            } else {
+                episode::parse_summary(&response.content)
+            };
             self.record_usage(EPISODE_LABEL, &response, latency_ms, parsed.is_err())
                 .await;
             let summary = match parsed {

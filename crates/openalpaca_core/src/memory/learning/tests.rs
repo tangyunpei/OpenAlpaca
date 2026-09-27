@@ -1612,6 +1612,132 @@ async fn an_answer_that_is_not_an_items_object_holds_the_window() {
     assert_eq!(scene.cursor(&s), 0);
 }
 
+// ── LQ13: the answer unwrapped (the L8 product slice's P3) ──────────────
+
+/// The L8 capture's eleven answers, each of the fixture file's entries.
+fn captured_answers() -> Vec<(String, String, Vec<String>)> {
+    let fixtures: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("tests/unusable_answers.json")).unwrap();
+    fixtures
+        .iter()
+        .map(|f| {
+            (
+                f["capture"].as_str().unwrap().to_string(),
+                f["answer"].as_str().unwrap().to_string(),
+                f["titles"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t.as_str().unwrap().to_string())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// LQ13: the eleven answers the L8 capture found unusable
+/// (`tests/unusable_answers.json`: nine bare arrays of items, one bare array
+/// followed by `</think>`, and one `{"items": [...]}` after the model's own
+/// deliberation — each the captured head and tail, joined where the capture
+/// kept nothing) are read as the items they carry.
+#[test]
+fn the_captured_unusable_answers_parse_to_their_items() {
+    let answers = captured_answers();
+    assert_eq!(answers.len(), 11);
+    for (capture, answer, titles) in answers {
+        let items = extractor::parse_items(&answer).unwrap_or_else(|e| panic!("{capture}: {e}"));
+        let read: Vec<&str> = items
+            .iter()
+            .map(|i| i["title"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(read, titles, "{capture}");
+    }
+}
+
+/// LQ13's limits: nothing that would not have been an answer is made one.
+/// A truncated answer — the capture's own head, a bare array cut inside its
+/// first item — a value dug out of malformed JSON, two objects of the wrong
+/// shape, prose alone, and a bare array that holds no item object all fail
+/// as before.
+#[test]
+fn a_truncated_malformed_misshapen_or_prose_answer_still_fails() {
+    let answers = captured_answers();
+    let head: String = answers[0].1.chars().take(400).collect();
+    let prose: String = answers[10].1.chars().take(400).collect();
+    let not_json = "the answer is not JSON";
+    let top = "the answer's top level is not {\"items\": [...]}";
+    let cases: [(&str, &str); 8] = [
+        (&head, not_json),
+        (&prose, not_json),
+        (
+            r#"Here it is: {"items": [{"title": "Editor", "content": "vim"#,
+            not_json,
+        ),
+        (
+            r#"{"items": [{"title": "Editor" "content": "vim", "aliases": ["vi"]}]}"#,
+            not_json,
+        ),
+        (r#"First {"note": "vim"}, then {"extractions": []}."#, top),
+        ("[]", top),
+        (r#"["vim", "helix"]"#, top),
+        ("I would rather describe it in prose.", not_json),
+    ];
+    for (answer, why) in cases {
+        assert_eq!(extractor::parse_items(answer).unwrap_err(), why, "{answer}");
+    }
+}
+
+/// LQ13's forms: a leading `<think>…</think>` block and a trailing
+/// `</think>` are stripped, prose around the answer is left, a bare array of
+/// items is the items list, and of several complete values the last with
+/// the answer's shape is the answer.
+#[test]
+fn a_think_block_prose_or_a_bare_array_around_the_items_is_unwrapped() {
+    let one = format!(r#"{{"items": [{}]}}"#, vim_item(&[1]));
+    for answer in [
+        format!("<think>\nThe user said vim. Draft: {{\"items\": []}}\n</think>\n\n{one}"),
+        format!("{one}\n</think>"),
+        format!("Here is what I found [n1]:\n{one}\nThat is all."),
+        format!("[{}]", vim_item(&[1])),
+        format!("[{}]\n</think>", vim_item(&[1])),
+        format!("Draft {{\"items\": []}}, then the answer:\n{one}\nand {{\"n\": 1}}."),
+    ] {
+        let items = extractor::parse_items(&answer).unwrap_or_else(|e| panic!("{answer}: {e}"));
+        assert_eq!(items.len(), 1, "{answer}");
+        assert_eq!(items[0]["title"], "Editor preference", "{answer}");
+    }
+}
+
+/// LQ13 through a flush: a bare array that ended on its own is learned, its
+/// item through every rule as in a well-formed answer; the same array cut
+/// at `max_tokens` is reported cut and not rescued (the L8 fix slice's P1 —
+/// a cut answer is held to the forms read before LQ13).
+#[tokio::test]
+async fn a_bare_array_is_learned_and_a_cut_one_is_still_reported_cut() {
+    let bare = format!("[{}]", vim_item(&[1]));
+    let scene = Scene::new(vec![Say::Text(bare.clone()), Say::Cut(bare)]);
+    let (learned, cut) = (scene.session(), scene.session());
+    scene.turn(&learned, PREF, "Noted.");
+    scene.turn(&cut, PREF, "Noted.");
+
+    let report = scene.queue.flush_session(&learned).await;
+    assert_eq!((report.stopped, report.stored), (None, 1), "{report:?}");
+    assert_eq!(report.active, 1, "{report:?}");
+
+    let report = scene.queue.flush_session(&cut).await;
+    assert_eq!(report.stopped, Some(FlushStop::BadOutput), "{report:?}");
+    let ceiling = scene.model.first_request().max_tokens.expect("a ceiling");
+    assert_eq!(
+        LearningCursorRepository::new(&scene.db)
+            .get(&cut)
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some(format!("cut at max_tokens ({ceiling})").as_str())
+    );
+    assert_eq!(scene.cursor(&cut), 0, "the window holds");
+}
+
 /// The minimum, per chunk: less of the user's own text than
 /// `extract_min_content_len` is not sent, and the cursor moves past it.
 #[tokio::test]

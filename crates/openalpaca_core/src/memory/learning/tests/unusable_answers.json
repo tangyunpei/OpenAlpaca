@@ -1,0 +1,89 @@
+[
+ {
+  "capture": "cs-002 replay, answer 1 of 11: the answer's top level is not {\"items\": [...]} (1052 chars, finish stop)",
+  "answer": "[\n  {\n    \"title\": \"User's laptop model and operating system\",\n    \"content\": \"The user's laptop is a ThinkPad X1 Carbon Gen 9 running Fedora.\",\n    \"kind\": \"fact\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      1\n    ],\n    \"aliases\": [\n      \"ThinkPad X1 Carbon Gen 9\",\n      \"Fedora\",\n      \"laptop\",\n      \"computer\",\n      \"device\"\n    ],\n    \"fact_key\": \"user.device\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  },\n  {\n    \"title\": \"Package manager preference\",\n    \"content\": \"The user prefers dnf commands for system administration.\",\n    \"kind\": \"preference\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      1\n    ],\n    \"aliases\": [\n      \"dnf\",\n      \"apt\",\n      \"package manager\",\n      \"Fedora commands\",\n      \"Linux commands\"\n    ],\n    \"fact_key\": \"user.package_manager_preference\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  }\n]",
+  "titles": [
+   "User's laptop model and operating system",
+   "Package manager preference"
+  ]
+ },
+ {
+  "capture": "cs-002 replay, answer 2 of 11: the answer's top level is not {\"items\": [...]} (1044 chars, finish stop)",
+  "answer": "[\n  {\n    \"title\": \"User's laptop model and operating system\",\n    \"content\": \"The user's laptop is a ThinkPad X1 Carbon Gen 9 running Fedora.\",\n    \"kind\": \"fact\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      1\n    ],\n    \"aliases\": [\n      \"ThinkPad X1 Carbon Gen 9\",\n      \"Fedora\",\n      \"laptop\",\n      \"computer\",\n      \"device\"\n    ],\n    \"fact_key\": \"user.device\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  },\n  {\n    \"title\": \"Package manager preference\",\n    \"content\": \"The user prefers dnf commands for system administration.\",\n    \"kind\": \"preference\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      1\n    ],\n    \"aliases\": [\n      \"dnf\",\n      \"apt\",\n      \"package manager\",\n      \"Fedora commands\",\n      \"Linux commands\"\n    ],\n    \"fact_key\": \"user.package_manager_preference\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  }\n]",
+  "titles": [
+   "User's laptop model and operating system",
+   "Package manager preference"
+  ]
+ },
+ {
+  "capture": "cs-002 replay, answer 3 of 11: the answer's top level is not {\"items\": [...]} (1044 chars, finish stop)",
+  "answer": "[\n  {\n    \"title\": \"User's laptop model and operating system\",\n    \"content\": \"The user's laptop is a ThinkPad X1 Carbon Gen 9 running Fedora.\",\n    \"kind\": \"fact\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      1\n    ],\n    \"aliases\": [\n      \"ThinkPad X1 Carbon Gen 9\",\n      \"Fedora\",\n      \"laptop\",\n      \"computer\",\n      \"device\"\n    ],\n    \"fact_key\": \"user.device\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  },\n  {\n    \"title\": \"Package manager preference\",\n    \"content\": \"The user prefers dnf commands for system administration.\",\n    \"kind\": \"preference\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      1\n    ],\n    \"aliases\": [\n      \"dnf\",\n      \"apt\",\n      \"package manager\",\n      \"Fedora commands\",\n      \"Linux commands\"\n    ],\n    \"fact_key\": \"user.package_manager_preference\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  }\n]",
+  "titles": [
+   "User's laptop model and operating system",
+   "Package manager preference"
+  ]
+ },
+ {
+  "capture": "cs-005 replay, answer 4 of 11: the answer's top level is not {\"items\": [...]} (2584 chars, finish stop)",
+  "answer": "[\n  {\n    \"title\": \"User's preferred name in chat\",\n    \"content\": \"The user prefers to be called \\\"Wei\\\" in chat, rather than her full name Lin Wei.\",\n    \"kind\": \"preference\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      3\n    ],\n    \"aliases\": [\n      \"Wei\",\n      \"Lin Wei\",\n      \"林薇\"\n    ],\n    \"fact_key\": \"user.preferred_name\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  },\n  {\n    \"title\": \"User's team and manager\",\n    \"content\": \"The user is on the Ledger Platform team and her manager is Priya Raman.\",\n    \"kind\": \"fact\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      11\n    ],\n    \"aliases\": [\n      \"Ledger Platform\",\n      \"Priya Raman\",\n      \"manager\",\n      \"team\"\n    ],\n    \"fact_key\": \"user.team\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  }\n]",
+  "titles": [
+   "User's preferred name in chat",
+   "User's team and manager"
+  ]
+ },
+ {
+  "capture": "cs-005 replay, answer 5 of 11: the answer's top level is not {\"items\": [...]} (2617 chars, finish stop)",
+  "answer": "[\n  {\n    \"title\": \"User's preferred name in chat\",\n    \"content\": \"The user prefers to be called \\\"Wei\\\" in chat, rather than her full name Lin Wei.\",\n    \"kind\": \"preference\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      3\n    ],\n    \"aliases\": [\n      \"Wei\",\n      \"Lin Wei\",\n      \"林薇\"\n    ],\n    \"fact_key\": \"user.preferred_name\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  },\n  {\n    \"title\": \"User's team and manager\",\n    \"content\": \"The user works on the Ledger Platform team at Quillpay. Her manager is Priya Raman.\",\n    \"kind\": \"fact\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      11\n    ],\n    \"aliases\": [\n      \"Ledger Platform\",\n      \"Priya Raman\",\n      \"manager\",\n      \"team\"\n    ],\n    \"fact_key\": \"user.team\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  }\n]",
+  "titles": [
+   "User's preferred name in chat",
+   "User's team and manager"
+  ]
+ },
+ {
+  "capture": "cs-005 replay, answer 6 of 11: the answer's top level is not {\"items\": [...]} (2632 chars, finish stop)",
+  "answer": "[\n  {\n    \"title\": \"User's preferred name in chat\",\n    \"content\": \"The user prefers to be called \\\"Wei\\\" in chat, rather than her full name Lin Wei.\",\n    \"kind\": \"preference\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      3\n    ],\n    \"aliases\": [\n      \"Wei\",\n      \"Lin Wei\",\n      \"林薇\"\n    ],\n    \"fact_key\": \"user.preferred_name\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  },\n  {\n    \"title\": \"User's team and manager\",\n    \"content\": \"The user works on the Ledger Platform team. Her manager is Priya Raman.\",\n    \"kind\": \"fact\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      11\n    ],\n    \"aliases\": [\n      \"Ledger Platform\",\n      \"Priya Raman\",\n      \"manager\",\n      \"team\"\n    ],\n    \"fact_key\": \"user.team\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  }\n]",
+  "titles": [
+   "User's preferred name in chat",
+   "User's team and manager"
+  ]
+ },
+ {
+  "capture": "cs-010 replay, answer 7 of 11: the answer is not JSON (2431 chars, finish stop)",
+  "answer": "[\n  {\n    \"title\": \"Vim editor preference: plain vimrc, no plugin manager\",\n    \"content\": \"The user is a vim person who uses a plain .vimrc with no plugin manager at all. Editor tips should be vim-flavoured, avoiding plugin managers or other editors.\",\n    \"kind\": \"preference\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      1\n    ],\n    \"aliases\": [\n      \"vim\",\n      \"vimrc\"\n    ],\n    \"fact_key\": \"user.editor\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  },\n  {\n    \"title\": \"Terminal theme and coding font\",\n    \"content\": \"The user uses the gruvbox dark theme and JetBrains Mono as the coding font.\",\n    \"kind\": \"preference\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      7\n    ],\n    \"aliases\": [\n      \"gruvbox\",\n      \"gruvbox dark\",\n      \"jetbrains mono\",\n      \"coding font\",\n      \"terminal theme\",\n      \"editor theme\"\n    ],\n    \"fact_key\": \"user.theme_font\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  }\n]\n</think>",
+  "titles": [
+   "Vim editor preference: plain vimrc, no plugin manager",
+   "Terminal theme and coding font"
+  ]
+ },
+ {
+  "capture": "cs-025 replay, answer 8 of 11: the answer's top level is not {\"items\": [...]} (1415 chars, finish stop)",
+  "answer": "[\n  {\n    \"title\": \"用户作息：23:30 入睡，06:30 起床\",\n    \"content\": \"用户通常晚上 23:30 入睡，早上 06:30 起床，每晚睡眠约 7 小时。\",\n    \"kind\": \"fact\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      1\n    ],\n    \"aliases\": [\n      \"sleep schedule\",\n      \"bedtime\",\n      \"wake up time\",\n      \"作息\",\n      \"睡眠时间\"\n    ],\n    \"fact_key\": \"user.daily_schedule\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  },\n  {\n    \"title\": \"编辑器：纯 Vim，不用插件管理器\",\n    \"content\": \"用户只用 Vim 和一份简单的 .vimrc，不使用任何插件管理器（如 VimPlug、Pathogen 等）。\",\n    \"kind\": \"preference\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      5\n    ],\n    \"aliases\": [\n      \"vim\",\n      \"vimrc\",\n      \"no plugin manager\",\n      \"编辑器\",\n      \"text editor\",\n      \"no plugins\"\n    ],\n    \"fact_key\": \"user.notes_tool\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  }\n]",
+  "titles": [
+   "用户作息：23:30 入睡，06:30 起床",
+   "编辑器：纯 Vim，不用插件管理器"
+  ]
+ },
+ {
+  "capture": "cs-025 replay, answer 9 of 11: the answer's top level is not {\"items\": [...]} (1445 chars, finish stop)",
+  "answer": "[\n  {\n    \"title\": \"用户作息：23:30 入睡，06:30 起床\",\n    \"content\": \"用户通常晚上 23:30 入睡，早上 06:30 起床，每晚睡眠约 7 小时。\",\n    \"kind\": \"fact\",\n    \"stated_by\": \"user\",\n    \"confidence\": 0.95,\n    \"rows\": [\n      1\n    ],\n    \"aliases\": [\n      \"sleep schedule\",\n      \"bedtime\",\n      \"wake up time\",\n      \"作息\",\n      \"睡眠时间\"\n    ],\n    \"fact_key\": \"user.daily_schedule\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  },\n  {\n    \"title\": \"编辑器：纯 Vim\",\n    \"content\": \"用户用 Vim 写笔记，不装插件管理器，偏好纯 Vim/Ex/sed 风格。\",\n    \"kind\": \"preference\",\n    \"stated_by\": \"user\",\n    \"confidence\": 0.95,\n    \"rows\": [\n      5\n    ],\n    \"aliases\": [\n      \"vim\",\n      \"vimrc\",\n      \"no plugin manager\",\n      \"编辑器\",\n      \"text editor\",\n      \"vim configuration\"\n    ],\n    \"fact_key\": \"user.notes_tool\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  }\n]",
+  "titles": [
+   "用户作息：23:30 入睡，06:30 起床",
+   "编辑器：纯 Vim"
+  ]
+ },
+ {
+  "capture": "cs-025 replay, answer 10 of 11: the answer's top level is not {\"items\": [...]} (1459 chars, finish stop)",
+  "answer": "[\n  {\n    \"title\": \"用户每日作息：23:30 入睡，06:30 起床\",\n    \"content\": \"用户通常晚上 23:30 入睡，早上 06:30 起床，每晚睡眠约 7 小时。\",\n    \"kind\": \"fact\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      1\n    ],\n    \"aliases\": [\n      \"sleep schedule\",\n      \"bedtime\",\n      \"wake up time\",\n      \"daily schedule\",\n      \"作息\",\n      \"睡眠时间\"\n    ],\n    \"fact_key\": \"user.daily_schedule\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  },\n  {\n    \"title\": \"编辑器：纯 Vim，不用插件管理器\",\n    \"content\": \"用户只用 Vim，不使用任何插件管理器（如 VimPlug、Pathogen 等）。\",\n    \"kind\": \"preference\",\n    \"stated_by\": \"user\",\n    \"confidence\": 1.0,\n    \"rows\": [\n      5\n    ],\n    \"aliases\": [\n      \"vim\",\n      \"vimrc\",\n      \"editor\",\n      \"plugin manager\",\n      \"no plugins\",\n      \"编辑器\",\n      \"插件\"\n    ],\n    \"fact_key\": \"user.notes_tool\",\n    \"replaces\": null,\n    \"replace_reason\": null,\n    \"valid_from\": null,\n    \"valid_to\": null\n  }\n]",
+  "titles": [
+   "用户每日作息：23:30 入睡，06:30 起床",
+   "编辑器：纯 Vim，不用插件管理器"
+  ]
+ },
+ {
+  "capture": "cs-026 replay, answer 11 of 11: the answer is not JSON (5153 chars, finish stop)",
+  "answer": "I need to analyze the conversation to extract durable knowledge. Let me look at what's being discussed:\n\n1. The user is working on the Lantern project, specifically about a `partner.region` column migration.\n2. The user decided to use \"offline mode\" for Sqlx in CI (R5: \"Offline mode it is. Thanks.\")\n3. This is a decision about how CI handles Sqlx compilation.\n\nLet me check what's already in known_notes: [n1] is the Lantern overview and says nothing about how CI builds Sqlx, so this is new.\n\n{\"items\":[{\"title\":\"Lantern CI builds Sqlx in offline mode\",\"content\":\"Lantern 的 CI 用 Sqlx 离线模式（SQLX_OFFLINE=true）编译，不在 CI 中连接数据库。每次迁移后需用 sqlx database prepare 重新生成 .sqlx/ 并提交，并添加 sqlx database prepare --check 守卫以检测缓存过期。\",\"kind\":\"decision\",\"stated_by\":\"user\",\"confidence\":0.9,\"rows\":[5,6],\"aliases\":[\"sqlx offline mode\",\"SQLX_OFFLINE\",\".sqlx cache\",\"CI sqlx build\",\"sqlx database prepare\",\"sqlx offline CI\"],\"fact_key\":\"lantern.sqlx_ci_mode\",\"replaces\":null,\"replace_reason\":null,\"valid_from\":\"2026-09-25\",\"valid_to\":null}]}",
+  "titles": [
+   "Lantern CI builds Sqlx in offline mode"
+  ]
+ }
+]

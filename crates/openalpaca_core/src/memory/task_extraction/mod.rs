@@ -307,7 +307,17 @@ pub(crate) async fn extract_task_memories(
     );
     let usage_repo = LlmUsageRepository::new(&deps.db);
 
-    let parsed = match parse_json_response(&response.content) {
+    // LQ13: an answer that ended on its own is unwrapped; one cut at its
+    // output ceiling is held to the forms read before (the L8 fix slice's P1).
+    let parsed = if response.finish_reason == openalpaca_llm::FinishReason::MaxTokens {
+        parse_json_strict(&response.content)
+    } else {
+        parse_json_answer(&response.content, |v| {
+            v.get("extractions")
+                .is_some_and(serde_json::Value::is_array)
+        })
+    };
+    let parsed = match parsed {
         Some(v) => v,
         None => {
             if let Err(e) = usage_repo.record_and_log(
@@ -473,9 +483,117 @@ fn read_item(value: &serde_json::Value) -> Option<Item> {
     })
 }
 
-/// Try to parse JSON from an LLM response, handling both raw and fenced
-/// formats. Shared with the chat-turn extractor.
+/// The JSON value an answer carries (owner decision LQ13, 2026-09-26),
+/// whatever the caller's shape: [`parse_json_answer`] with no shape
+/// preferred. Shared with the chat-turn extractor and the conversation
+/// summaries, which pass their own shape.
 pub fn parse_json_response(content: &str) -> Option<serde_json::Value> {
+    parse_json_answer(content, |_| true)
+}
+
+/// The JSON value an answer carries (owner decision LQ13, 2026-09-26): a
+/// leading `<think>…</think>` block and a trailing `</think>` are stripped;
+/// then the answer is read whole, or from a fenced block, as before LQ13;
+/// else the complete top-level values found in the prose around it are
+/// taken — the last one of the shape `expected` names, else the last. A
+/// value the answer opens and never closes — a truncated one — makes the
+/// whole answer unreadable, whatever came before it, and nothing is dug out
+/// of a bracketed stretch that is not JSON. `None` when there is no value.
+pub fn parse_json_answer(
+    content: &str,
+    expected: impl Fn(&serde_json::Value) -> bool,
+) -> Option<serde_json::Value> {
+    let body = strip_think(content);
+    if let Some(v) = parse_json_strict(body) {
+        return Some(v);
+    }
+    let mut values = top_level_values(body)?;
+    let pick = values
+        .iter()
+        .rposition(expected)
+        .unwrap_or(values.len() - 1);
+    Some(values.swap_remove(pick))
+}
+
+/// A leading `<think>…</think>` block and a trailing `</think>` — what a
+/// local thinking model leaves when its thinking is switched off — are not
+/// the answer.
+fn strip_think(content: &str) -> &str {
+    const OPEN: &str = "<think>";
+    const CLOSE: &str = "</think>";
+    let mut body = content.trim();
+    if let Some(rest) = body.strip_prefix(OPEN)
+        && let Some(end) = rest.find(CLOSE)
+    {
+        body = rest[end + CLOSE.len()..].trim();
+    }
+    if let Some(rest) = body.strip_suffix(CLOSE) {
+        body = rest.trim();
+    }
+    body
+}
+
+/// The complete JSON values that begin at an `{` or `[` outside any value,
+/// in order. `None` when there is none, or when one begins and runs to the
+/// end unfinished — a truncated answer is never read in part. A bracket that
+/// does not begin a value — prose such as `[n1]`, or malformed JSON — is
+/// skipped to its matching bracket, so no value inside it is taken.
+fn top_level_values(text: &str) -> Option<Vec<serde_json::Value>> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(offset) = text[at..].find(['{', '[']) {
+        let start = at + offset;
+        let rest = &text[start..];
+        let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<serde_json::Value>();
+        match stream.next() {
+            Some(Ok(value)) => {
+                out.push(value);
+                at = start + stream.byte_offset();
+            }
+            Some(Err(e)) if e.is_eof() => return None,
+            _ => at = start + matching_bracket_end(rest).unwrap_or(1),
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// How many bytes of `text` — which starts with `{` or `[` — run to the
+/// bracket that closes it, strings read as JSON strings; `None` when none
+/// does.
+fn matching_bracket_end(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The forms read before LQ13: the whole answer as JSON, or a fenced block.
+/// What an answer cut at its output ceiling is held to (the L8 fix slice's
+/// P1: a cut answer is reported as cut, never rescued in part).
+pub fn parse_json_strict(content: &str) -> Option<serde_json::Value> {
     let trimmed = content.trim();
     if let Ok(v) = serde_json::from_str(trimmed) {
         return Some(v);

@@ -29,6 +29,24 @@ fn test_parse_json_response_invalid() {
     assert!(parse_json_response(input).is_none());
 }
 
+/// LQ13 (the L8 product slice's P3): the one JSON value an answer carries is
+/// read out of a `<think>` block or prose around it; of several, the last.
+/// A truncated value is never read, and prose alone is still no answer.
+#[test]
+fn test_parse_json_response_unwraps_thinking_and_prose() {
+    let answer = r#"{"extractions": [{"content": "test"}]}"#;
+    for input in [
+        format!("<think>\nDraft: {{\"extractions\": []}}\n</think>\n{answer}"),
+        format!("{answer}\n</think>"),
+        format!("Here is what the run produced:\n{answer}\nDone."),
+    ] {
+        let v = parse_json_response(&input).unwrap_or_else(|| panic!("{input}"));
+        assert_eq!(v["extractions"].as_array().unwrap().len(), 1, "{input}");
+    }
+    assert!(parse_json_response(r#"Here: {"extractions": [{"content": "te"#).is_none());
+    assert!(parse_json_response("Nothing worth keeping came out of this run.").is_none());
+}
+
 #[test]
 fn test_parse_json_response_with_whitespace() {
     let input = "  \n  {\"extractions\": []}  \n  ";
