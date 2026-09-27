@@ -270,6 +270,11 @@ pub(crate) struct TestGates {
     /// reads the index — counted first in `touches`.
     pub touched: std::sync::RwLock<()>,
     pub touches: std::sync::atomic::AtomicUsize,
+    /// Where a rebuild waits once it has opened a partition, before it
+    /// reads that partition's notes — `opened` set first (the L8 product
+    /// slice's P6).
+    pub after_open: std::sync::RwLock<()>,
+    pub opened: std::sync::atomic::AtomicBool,
 }
 
 /// The owner's partitions for one request (design §3 rule 1).
@@ -1007,8 +1012,18 @@ impl MemoryService {
     /// is found by the next read's stat scan or the next write's pass,
     /// whose fingerprints come from the rebuilt rows.
     fn reindex_view(&self, p: &Partition, loaded: &LoadedPartition) -> Result<(), MemoryError> {
+        self.reindex_view_unless_rebuilding(p, loaded).map(|_| ())
+    }
+
+    /// [`Self::reindex_view`], answering whether the pass ran — `false` when
+    /// a whole rebuild running skipped it.
+    fn reindex_view_unless_rebuilding(
+        &self,
+        p: &Partition,
+        loaded: &LoadedPartition,
+    ) -> Result<bool, MemoryError> {
         if self.rebuild_running() {
-            return Ok(());
+            return Ok(false);
         }
         let result = self.reindex_view_once(p, loaded);
         if let Err(e) = &result {
@@ -1018,7 +1033,7 @@ impl MemoryService {
                 .remove(p.partition_key());
             self.note_index_failure(e);
         }
-        result
+        result.map(|()| true)
     }
 
     /// The fingerprints of a partition's rows as the index holds them
@@ -1153,8 +1168,17 @@ impl MemoryService {
     /// The rebuild itself (scale slice S6): the cache recreated empty, then
     /// each partition read and indexed in batches — the index is released
     /// between them, and nothing else writes it meanwhile ([`Self::reindex_view`]
-    /// skips while a rebuild runs; a write it missed is found by the next
-    /// read's stat scan) — then merged and marked ready.
+    /// skips while a rebuild runs) — then merged and marked ready.
+    ///
+    /// Each partition is opened, read and indexed **under its writer slot**
+    /// (the L8 product slice's P6): a service write to it lands either
+    /// before the rebuild opens it — and is read — or after its rows are in
+    /// — and its file is found by the next read's stat scan, whose pass
+    /// re-derives the partition. Opened earlier, a partition would be
+    /// derived under the control snapshot of that open, and a write landing
+    /// in between indexed with stale derived facts no stat scan sees. When
+    /// the rebuild completes, the ticks' last scans are forgotten, so the
+    /// next tick re-derives every partition, as the first after a restart.
     fn rebuild_index_inner(&self) -> Result<(), MemoryError> {
         // Everything is read again from the disk, as on a fresh start.
         self.parse_cache.clear();
@@ -1173,7 +1197,7 @@ impl MemoryService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        let mut opened: Vec<Partition> = Vec::new();
+        let mut partitions: Vec<(StoreScope, String, String)> = Vec::new();
         for (path, parsed) in files::list_snapshots()? {
             let snapshot = match parsed {
                 Ok(s) => s,
@@ -1191,15 +1215,32 @@ impl MemoryService {
                     StoreScope::Project(project.to_path_buf())
                 }
             };
-            match self.open_cached(&scope, &snapshot.owner_id) {
-                Ok(p) => opened.push(p),
-                Err(e) => tracing::warn!(
-                    partition = %snapshot.partition_key,
-                    "memory: partition skipped during rebuild: {e}"
-                ),
-            }
+            partitions.push((scope, snapshot.owner_id, snapshot.partition_key));
         }
-        for p in &opened {
+        for (scope, owner_id, partition_key) in &partitions {
+            let _write = self
+                .slots
+                .begin_write(&Self::slot_key(scope, &files::owner_key(owner_id)));
+            let p = match self.open_cached(scope, owner_id) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        partition = %partition_key,
+                        "memory: partition skipped during rebuild: {e}"
+                    );
+                    continue;
+                }
+            };
+            #[cfg(test)]
+            self.gates
+                .opened
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            #[cfg(test)]
+            let _after_open = self
+                .gates
+                .after_open
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             // A partition that cannot be read now is left to the first read
             // of it, whose stat scan indexes a partition the index lacks.
             let loaded = match p.load() {
@@ -1212,15 +1253,20 @@ impl MemoryService {
                     continue;
                 }
             };
-            for batch in Self::records_from(p, &loaded).chunks(index::REBUILD_BATCH) {
+            for batch in Self::records_from(&p, &loaded).chunks(index::REBUILD_BATCH) {
                 self.index.upsert_many(batch)?;
             }
             self.index
                 .stamp_scan(p.partition_key(), loaded.scan.len())?;
         }
         self.index.finish_rebuild()?;
-        // Re-read from the rows on each partition's next pass.
+        // Re-read from the rows on each partition's next pass, and re-derive
+        // each on the next tick: a tick that ran meanwhile skipped its pass.
         self.fingerprints
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.last_scans
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();

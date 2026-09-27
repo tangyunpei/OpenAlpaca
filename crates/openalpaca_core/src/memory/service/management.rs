@@ -229,11 +229,15 @@ impl MemoryService {
             self.publish(&change);
             changes.push(change);
         }
-        self.reindex_view(partition, &view)?;
-        self.last_scans
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key.to_string(), scan);
+        // A pass a running rebuild skipped did not bring the rows in line
+        // with this scan: the next tick looks again (the L8 product slice's
+        // P6), as it does after the rebuild, which forgets every last scan.
+        if self.reindex_view_unless_rebuilding(partition, &view)? {
+            self.last_scans
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key.to_string(), scan);
+        }
         Ok((scanned, changes))
     }
 }

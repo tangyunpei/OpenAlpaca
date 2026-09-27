@@ -1280,6 +1280,206 @@ fn a_learning_lookup_during_a_rebuild_waits_for_it() {
     assert_eq!(notes.unwrap(), 4, "with every note");
 }
 
+/// The L8 product slice's P6 (the scale slice's round-3 safety review,
+/// F1): a service write to a partition while a whole rebuild has opened it
+/// but not yet read it is indexed with the derived facts of the partition
+/// as it stands after the write — not those of the control snapshot the
+/// rebuild read when it opened the partition. Here the user replaces a note
+/// (same `fact_key`) and a reconciliation tick runs meanwhile, each on its
+/// own thread since the rebuild may hold the partition; afterwards the
+/// replacement's row is the user's, the old note's is superseded, and
+/// recall serves the replacement and not the note it replaced.
+#[test]
+fn a_write_while_a_rebuild_reads_its_partition_is_indexed_as_it_stands() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let h = Harness::new();
+    let (service, tool, _) = ready_cedar_service(&h, 2);
+    let user = h.user(ALICE, None);
+    let old = service
+        .store(
+            &user,
+            StoreInput {
+                title: "Editor choice".into(),
+                body: "# Editor\n\nThe user edits with marmalade vim.\n".into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("user.editor".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    // A rebuild is owed — boot, damage or a bloated cache — and it has
+    // opened the partition.
+    service.gates.opened.store(false, SeqCst);
+    let hold = service.gates.after_open.write().unwrap();
+    service.rebuild_state().pending = true;
+    let rebuild = {
+        let service = service.clone();
+        std::thread::spawn(move || service.run_pending_rebuild())
+    };
+    eventually("the rebuild opened the partition", || {
+        service.gates.opened.load(SeqCst)
+    });
+    let writer = {
+        let (service, user, old) = (service.clone(), user.clone(), old.clone());
+        std::thread::spawn(move || {
+            service.store(
+                &user,
+                StoreInput {
+                    title: "Editor choice now".into(),
+                    body: "# Editor\n\nThe user edits with marmalade helix now.\n".into(),
+                    kind: Some(NoteKind::Preference),
+                    fact_key: Some("user.editor".into()),
+                    supersedes: Some((old.id, old.revision.clone())),
+                    ..Default::default()
+                },
+            )
+        })
+    };
+    // The write lands now unless the partition is held; then a tick, which
+    // lands now on the same terms. Either way the rebuild then goes on.
+    fn settle<T>(t: &std::thread::JoinHandle<T>) {
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while !t.is_finished() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    settle(&writer);
+    let tick = {
+        let service = service.clone();
+        std::thread::spawn(move || service.reconcile_owner(ALICE).map(|_| ()))
+    };
+    settle(&tick);
+    drop(hold);
+    assert!(rebuild.join().unwrap().unwrap());
+    let new = writer.join().unwrap().unwrap();
+    tick.join().unwrap().unwrap();
+    service.reconcile_owner(ALICE).unwrap();
+
+    let recalled = service
+        .recall(&tool, "which editor marmalade", RecallBudget::default())
+        .unwrap();
+    let ids: Vec<NoteId> = recalled
+        .notes
+        .iter()
+        .map(|n| n.id)
+        .chain(recalled.listed.iter().map(|l| l.id))
+        .collect();
+    assert!(
+        ids.contains(&new.id) && !ids.contains(&old.id),
+        "recall serves the replacement, not what it replaced: {ids:?}"
+    );
+    let key = files::home_partition_key(&user.owner_key);
+    let row = |id: NoteId| {
+        service
+            .index()
+            .row_facts(&key)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == id.to_string())
+            .unwrap()
+    };
+    assert_eq!(row(new.id).origin, "user");
+    assert!(!row(new.id).same_key_loser && !row(new.id).conflict);
+    assert_eq!(
+        row(old.id).effective_status,
+        Some(index::EffectiveStatus::Superseded)
+    );
+}
+
+/// P6, the forget contract's half: a forget while a rebuild has opened the
+/// partition leaves the note that cites the same message out of automatic
+/// recall (design 03 §6, *Forget contract*) — its row says
+/// `source_forgotten` — as it would with no rebuild running.
+#[test]
+fn a_forget_while_a_rebuild_reads_its_partition_leaves_its_sources_forgotten() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let h = Harness::new();
+    let (service, tool, extraction) = ready_cedar_service(&h, 2);
+    let user = h.user(ALICE, None);
+    let row = h.message_row("I drink oolong-marmalade tea every morning.");
+    let learned = |title: &str, body: &str| {
+        service
+            .store(
+                &extraction,
+                StoreInput {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: Some(NoteKind::Preference),
+                    sources: vec![NoteSource {
+                        kind: SourceType::Message,
+                        id: row.to_string(),
+                        observed_at: None,
+                    }],
+                    provenance: Some(ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    };
+    let forgotten = learned("Morning tea", "# Tea\n\nThe user drinks oolong-marmalade tea.\n");
+    let sibling = learned("Tea habit", "# Habit\n\nEvery morning: oolong-marmalade tea.\n");
+
+    service.gates.opened.store(false, SeqCst);
+    let hold = service.gates.after_open.write().unwrap();
+    service.rebuild_state().pending = true;
+    let rebuild = {
+        let service = service.clone();
+        std::thread::spawn(move || service.run_pending_rebuild())
+    };
+    eventually("the rebuild opened the partition", || {
+        service.gates.opened.load(SeqCst)
+    });
+    let forget = {
+        let (service, user) = (service.clone(), user.clone());
+        let target = (forgotten.id, forgotten.revision.clone());
+        std::thread::spawn(move || {
+            service.forget(
+                &user,
+                ForgetInput {
+                    targets: vec![target],
+                    reason: None,
+                },
+            )
+        })
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while !forget.is_finished() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let tick = {
+        let service = service.clone();
+        std::thread::spawn(move || service.reconcile_owner(ALICE).map(|_| ()))
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while !tick.is_finished() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    drop(hold);
+    assert!(rebuild.join().unwrap().unwrap());
+    forget.join().unwrap().unwrap();
+    tick.join().unwrap().unwrap();
+    service.reconcile_owner(ALICE).unwrap();
+
+    let recalled = service
+        .recall(&tool, "oolong marmalade tea", RecallBudget::default())
+        .unwrap();
+    let ids: Vec<NoteId> = recalled
+        .notes
+        .iter()
+        .map(|n| n.id)
+        .chain(recalled.listed.iter().map(|l| l.id))
+        .collect();
+    assert!(
+        !ids.contains(&sibling.id),
+        "a note citing a forgotten note's source is recalled: {ids:?}"
+    );
+    let key = files::home_partition_key(&user.owner_key);
+    let facts = service.index().row_facts(&key).unwrap();
+    let sib = facts.iter().find(|r| r.id == sibling.id.to_string()).unwrap();
+    assert!(sib.source_forgotten);
+}
+
 /// The wait above is checked before the index is read, so a rebuild can
 /// start between the check and the read: here once the timeline's `touch`
 /// has done its work. The read then meets an emptied index; it waits for
