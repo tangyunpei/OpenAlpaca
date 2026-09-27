@@ -273,7 +273,11 @@ pub fn spawn_memory_index_rebuild(
                 "memory index rebuild failed; recall and search read the note files, and the \
                  reconciliation timer tries again: {e}"
             ),
-            Err(e) => tracing::warn!("memory index rebuild task failed: {e}"),
+            // A panic: the rebuild stays owed all the same (its run guard).
+            Err(e) => tracing::warn!(
+                "memory index rebuild task failed; recall and search read the note files, and \
+                 the reconciliation timer tries again: {e}"
+            ),
         }
     });
 }

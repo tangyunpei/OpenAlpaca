@@ -1073,13 +1073,14 @@ impl MemoryService {
     /// logged, [`Self::reindex_view`] has dropped the partition's
     /// fingerprints, and the rows the index lacks are found by the next
     /// search's stat scan or the next reconciliation tick (§5, 30 s), which
-    /// re-index the partition whole.
+    /// re-index what changed (the next pass reads its fingerprints from the
+    /// rows, scale slice S1).
     fn reindex_after_write(&self, p: &Partition, loaded: &LoadedPartition) {
         if let Err(e) = self.reindex_view(p, loaded) {
             tracing::warn!(
                 partition = p.partition_key(),
                 "memory: the write landed, but the search index did not follow; \
-                 the next search or reconciliation re-indexes the partition: {e}"
+                 the next search or reconciliation catches the index up: {e}"
             );
         }
     }

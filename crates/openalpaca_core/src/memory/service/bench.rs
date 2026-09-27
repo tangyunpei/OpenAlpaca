@@ -23,8 +23,8 @@
 //! `update`, `forget`, `list`, `recently_learned`, `learning_view` for one
 //! chunk and `pending_suggestions` (the one learning read on the reply
 //! path), and the first and a quiet reconciliation tick. Once per run: the
-//! seed, `open_default` with a missing index cache (the boot rebuild) and a
-//! valid one, the daemon's `open_default_deferred` with a missing one (it
+//! seed, `open_default` (tests, the evaluation harness: an inline rebuild)
+//! with a missing index cache and a valid one, the daemon's `open_default_deferred` with a missing one (it
 //! returns before the rebuild, scale slice S6), the sizes of the snapshot,
 //! `MEMORY.md` and the index cache, and the machine. Design 09 §6.4's proposed targets, not gates: recall p95
 //! and learned-`store` p95 at or under 100 ms at 100K notes.
@@ -394,8 +394,9 @@ fn run_service_bench_with(name: &str, n: usize, mix: Mix, tombstones: usize) {
         seeded.elapsed.as_secs_f64()
     );
 
-    // The boot path (design 09 §6.4): `open_default` over a missing index
-    // cache rebuilds it from every partition; over a valid one it opens.
+    // `open_default` (tests, the evaluation harness; design 09 §6.4's boot
+    // path until scale slice S6): over a missing index cache it rebuilds
+    // it inline from every partition; over a valid one it opens.
     let index_path = MemoryIndex::default_path().unwrap();
     let started = Instant::now();
     drop(MemoryService::open_default(Some(db.clone())));

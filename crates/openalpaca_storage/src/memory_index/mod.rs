@@ -51,6 +51,17 @@ pub const INDEX_FILE_NAME: &str = "memory-index-v1.sqlite";
 /// Version 3 (design 09 §13.1, MD-14) added the note's dates — `created_at`,
 /// `observed_at` and `date`, the one a search filters and orders by and a
 /// timeline walks.
+///
+/// **It versions what a row holds, not only the tables.** Since scale slice
+/// S1 the service re-indexes a note only when its bytes, its file's stat or
+/// its derived facts change — also across a restart, reading what it
+/// indexed back from the rows — so rows written by an older build are kept
+/// until their note changes. Any change to what a row holds for the same
+/// note bytes — the chunker, [`query::normalize`], `authority_rank`, the
+/// service's `record_for`, how `date` or `norm_title` is derived, the FTS
+/// tokenizers — must bump this too, or the old rows are served for good;
+/// the bump is what re-derives every row, by a rebuild off the request
+/// path.
 pub const SCHEMA_VERSION: i64 = 3;
 /// Design §4: a note is at most 32 KiB. A larger body is refused by
 /// [`MemoryIndex::upsert`] so the cache stays bounded by what `memory_files`
@@ -817,6 +828,9 @@ impl MemoryIndex {
     /// name that partition. Leaves the index state alone. Ends as a rebuild
     /// ends (scale slice S5): its FTS indexes merged and the WAL folded
     /// back and truncated — a whole partition's writes left both behind.
+    /// No service path calls it since scale slice S1 (a partition is
+    /// re-indexed note by note, and wholly only by a rebuild); the index's
+    /// own tests do.
     pub fn replace_partition(
         &self,
         partition_key: &str,
