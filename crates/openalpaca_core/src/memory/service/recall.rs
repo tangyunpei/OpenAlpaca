@@ -115,7 +115,9 @@ pub(super) fn verify(
     id: NoteId,
     expected_revision: &str,
 ) -> Verified {
-    if p.snapshot().is_some_and(|s| s.tombstone(&id).is_some()) {
+    // Read in place: a copy of the whole snapshot per hit was the
+    // verification's largest cost at scale (scale slice S2).
+    if p.is_tombstoned(&id) {
         return Verified::Gone;
     }
     let path = p.root().join(relative_path);

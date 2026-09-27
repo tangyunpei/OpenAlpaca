@@ -81,14 +81,14 @@ impl MemoryService {
             return Ok(HashSet::new());
         }
         let resolved = self.resolve(ctx)?;
-        let snapshots: Vec<_> = resolved
-            .all()
-            .into_iter()
-            .filter_map(|p| p.snapshot())
-            .collect();
+        let partitions = resolved.all();
         Ok(keys
             .iter()
-            .filter(|k| snapshots.iter().any(|s| s.is_source_suppressed(k)))
+            .filter(|k| {
+                partitions.iter().any(|p| {
+                    p.with_snapshot(|s| s.is_some_and(|s| s.is_source_suppressed(k)))
+                })
+            })
             .cloned()
             .collect())
     }

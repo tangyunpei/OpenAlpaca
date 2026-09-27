@@ -52,6 +52,9 @@ thread_local! {
     /// How many note files this thread has read from disk (design 09 §6.3).
     /// Read by tests only.
     static FILE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// How many whole copies of a control snapshot [`Partition::snapshot`]
+    /// has handed out on this thread. Read by tests only.
+    static SNAPSHOT_COPIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Tests: which snapshot save of this thread fails, counting the next
     /// as 1; 0 fails none ([`fail_snapshot_save`]).
     #[cfg(test)]
@@ -103,6 +106,14 @@ pub fn scans_on_this_thread() -> u64 {
 #[doc(hidden)]
 pub fn note_file_reads_on_this_thread() -> u64 {
     FILE_READS.with(|n| n.get())
+}
+
+/// The whole control snapshots [`Partition::snapshot`] has copied on this
+/// thread so far — a test-only counter like [`whole_parses_on_this_thread`]:
+/// a per-hit check reads the snapshot by reference and copies none.
+#[doc(hidden)]
+pub fn snapshot_copies_on_this_thread() -> u64 {
+    SNAPSHOT_COPIES.with(|n| n.get())
 }
 
 /// Reads one note file, counted.
@@ -881,8 +892,22 @@ impl Partition {
         }
     }
 
+    /// Reads the control snapshot in place, under the partition's lock —
+    /// what a per-note check needs, without the whole copy
+    /// [`Partition::snapshot`] makes (every note record and tombstone).
+    /// `f` must not call back into this partition.
+    pub fn with_snapshot<T>(&self, f: impl FnOnce(Option<&ControlSnapshot>) -> T) -> T {
+        f(self.lock().snapshot.as_deref())
+    }
+
+    /// Whether `id` was forgotten: the snapshot holds its tombstone.
+    pub fn is_tombstoned(&self, id: &NoteId) -> bool {
+        self.with_snapshot(|s| s.is_some_and(|s| s.tombstone(id).is_some()))
+    }
+
     /// A copy of the control snapshot, when the partition has one.
     pub fn snapshot(&self) -> Option<ControlSnapshot> {
+        SNAPSHOT_COPIES.with(|n| n.set(n.get() + 1));
         self.lock().snapshot.as_deref().cloned()
     }
 
