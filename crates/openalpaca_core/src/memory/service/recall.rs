@@ -247,6 +247,8 @@ impl MemoryService {
         message: &str,
         budget: RecallBudget,
     ) -> Result<RecallResult, MemoryError> {
+        #[cfg(test)]
+        let _stall = self.gates.reads.read().unwrap_or_else(|e| e.into_inner());
         Self::require(ctx.capabilities.read, "memory_read")?;
         let resolved = self.resolve(ctx)?;
         // A quarantined partition contributes nothing to the automatic path

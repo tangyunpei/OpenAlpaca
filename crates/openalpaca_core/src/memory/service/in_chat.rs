@@ -249,6 +249,8 @@ impl MemoryService {
         limit: usize,
         skip: &HashSet<NoteId>,
     ) -> Result<Vec<PendingSuggestion>, MemoryError> {
+        #[cfg(test)]
+        let _stall = self.gates.reads.read().unwrap_or_else(|e| e.into_inner());
         Self::require(ctx.capabilities.read, "memory_read")?;
         if !self.index_serves() {
             return Ok(Vec::new());

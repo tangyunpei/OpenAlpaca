@@ -221,10 +221,11 @@ struct FileScan {
 }
 
 /// Tests: points where a test can hold the service still — the rebuild
-/// once it has emptied the index, and a reply-path read before it starts.
+/// once it has emptied the index, and a reply-path read (recall, the
+/// pending suggestions) before it starts.
 #[cfg(test)]
 #[derive(Debug, Default)]
-pub(super) struct TestGates {
+pub(crate) struct TestGates {
     pub rebuild: std::sync::RwLock<()>,
     pub reads: std::sync::RwLock<()>,
 }
@@ -290,7 +291,7 @@ pub struct MemoryService {
     rebuilt: Condvar,
     maintenance: Mutex<MaintenanceMarks>,
     #[cfg(test)]
-    pub(super) gates: Arc<TestGates>,
+    pub(crate) gates: Arc<TestGates>,
 }
 
 impl std::fmt::Debug for MemoryService {
@@ -662,6 +663,20 @@ impl MemoryService {
             }
         };
         Ok(Resolved { home, project })
+    }
+
+    /// The partition keys a context reaches — its home partition and, when
+    /// it resolved one, its project's — derived without opening either.
+    /// What a log line about the context's memory names (scale slice S7).
+    pub fn partition_keys(&self, ctx: &MemoryAccessContext) -> Vec<String> {
+        let mut keys = vec![files::home_partition_key(&ctx.owner_key)];
+        if let Some(root) = &ctx.project_root
+            && let Ok(key) =
+                files::partition_key_for(&StoreScope::Project(root.clone()), &ctx.owner_key)
+        {
+            keys.push(key);
+        }
+        keys
     }
 
     fn slot_key(scope: &StoreScope, owner_key: &str) -> String {

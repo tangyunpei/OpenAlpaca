@@ -29,6 +29,46 @@ use std::sync::{Arc, RwLock};
 /// The `MemorySource` name, and the `source` of every section it emits.
 pub const SOURCE_NAME: &str = "memory";
 
+/// The longest a reply waits on memory (scale slice S7, M4): the per-turn
+/// recall, and on its own the pending suggestions a turn is told about.
+/// Past it the turn continues without that part, as it does when memory
+/// fails, and the read finishes on its blocking worker — so what it was
+/// doing (a stat scan's re-index, say) is done for the next turn.
+///
+/// Chosen from the L8 benches (M5 Max, release): the healthy recall p95 is
+/// 59 ms at 10K notes (81 ms with a tombstone, before S3), 497 ms at 100K
+/// learned-size notes and 661 ms at 100K average-size ones;
+/// `pending_suggestions` is about 300 ms at 100K. The waits that had no
+/// bound were whole-partition re-indexes inside a turn (3.3 s at 10K, 43 s
+/// at 100K, before S1), a boot rebuild (2.9 s / 33 s, before S6) and an
+/// uncached read of a 100K partition after an external edit (~3 s). 1.5 s
+/// is more than twice the slowest healthy p95 and under every one of
+/// those.
+pub const REPLY_MEMORY_DEADLINE: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+/// Runs `work` on the blocking pool for at most `bound`: its answer, or
+/// `None` — with one WARN naming the context's partitions and the time
+/// waited, never a note's text — when the deadline passed first.
+async fn within_reply_deadline<T: Send + 'static>(
+    what: &'static str,
+    bound: std::time::Duration,
+    partitions: impl FnOnce() -> Vec<String>,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<Result<T, tokio::task::JoinError>> {
+    let started = std::time::Instant::now();
+    match tokio::time::timeout(bound, tokio::task::spawn_blocking(work)).await {
+        Ok(joined) => Some(joined),
+        Err(_) => {
+            tracing::warn!(
+                partitions = ?partitions(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "memory {what} ran past the reply's deadline; the turn continues without it"
+            );
+            None
+        }
+    }
+}
+
 pub struct MemorySource {
     /// The daemon's service, installed after construction
     /// (`Orchestrator::set_memory_service`); `None` until then, and nothing
@@ -63,6 +103,18 @@ impl ContextSource for MemorySource {
     }
 
     async fn resolve(&self, request: &ContextRequest) -> Vec<ContextSection> {
+        self.resolve_within(request, REPLY_MEMORY_DEADLINE).await
+    }
+}
+
+impl MemorySource {
+    /// [`ContextSource::resolve`] with the recall bounded by `deadline`
+    /// ([`REPLY_MEMORY_DEADLINE`] on the reply path).
+    pub(crate) async fn resolve_within(
+        &self,
+        request: &ContextRequest,
+        deadline: std::time::Duration,
+    ) -> Vec<ContextSection> {
         if request.query.trim().is_empty() {
             return vec![];
         }
@@ -111,15 +163,22 @@ impl ContextSource for MemorySource {
             _ => self.daemon_config.load().orchestrator.memory.recall_mode,
         };
         let budget = RecallBudget::for_mode(mode);
-        let recalled =
-            tokio::task::spawn_blocking(move || service.recall(&ctx, &query, budget)).await;
+        let partitions = {
+            let (service, ctx) = (service.clone(), ctx.clone());
+            move || service.partition_keys(&ctx)
+        };
+        let recalled = within_reply_deadline("recall", deadline, partitions, move || {
+            service.recall(&ctx, &query, budget)
+        })
+        .await;
         let result = match recalled {
-            Ok(Ok(result)) => result,
-            Ok(Err(e)) => {
+            None => return vec![],
+            Some(Ok(Ok(result))) => result,
+            Some(Ok(Err(e))) => {
                 tracing::warn!(error = %e, "memory recall failed; the turn runs without it");
                 return vec![];
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 tracing::warn!(error = %e, "memory recall did not complete; the turn runs without it");
                 return vec![];
             }
@@ -290,6 +349,16 @@ pub async fn memory_suggestions_block(
     service: Arc<MemoryService>,
     ctx: &crate::tools::registry::ToolContext,
 ) -> Option<String> {
+    memory_suggestions_block_within(service, ctx, REPLY_MEMORY_DEADLINE).await
+}
+
+/// [`memory_suggestions_block`] with the read bounded by `deadline`: past
+/// it, the turn goes without the block (scale slice S7).
+pub(crate) async fn memory_suggestions_block_within(
+    service: Arc<MemoryService>,
+    ctx: &crate::tools::registry::ToolContext,
+    deadline: std::time::Duration,
+) -> Option<String> {
     let access = match service.context_for_tool(ctx, Capabilities::READ_ONLY) {
         Ok(access) => access,
         Err(MemoryError::NoOwner(_)) => return None,
@@ -303,17 +372,22 @@ pub async fn memory_suggestions_block(
         .as_deref()
         .map(|lane| service.raised_on(lane))
         .unwrap_or_default();
-    let listed = tokio::task::spawn_blocking(move || {
+    let partitions = {
+        let (service, access) = (service.clone(), access.clone());
+        move || service.partition_keys(&access)
+    };
+    let listed = within_reply_deadline("suggestions", deadline, partitions, move || {
         service.pending_suggestions(&access, SUGGESTIONS_LISTED, &raised)
     })
     .await;
     match listed {
-        Ok(Ok(items)) => render_memory_suggestions(&items),
-        Ok(Err(e)) => {
+        None => None,
+        Some(Ok(Ok(items))) => render_memory_suggestions(&items),
+        Some(Ok(Err(e))) => {
             tracing::warn!(error = %e, "memory suggestions could not be read; the turn runs without them");
             None
         }
-        Err(e) => {
+        Some(Err(e)) => {
             tracing::warn!(error = %e, "memory suggestions did not complete; the turn runs without them");
             None
         }
@@ -990,5 +1064,118 @@ mod tests {
         assert!(turn.content.contains("[memory id=2]"));
         assert_eq!(turn.used.len(), 1);
         assert_eq!(turn.used[0].reason, UsedReason::Recall);
+    }
+
+    // ------------------------------------------------------------------------
+    // Scale slice S7: a reply never waits on memory without a bound
+    // ------------------------------------------------------------------------
+
+    /// Holds the service's reply-path reads still — recall and the pending
+    /// suggestions wait at their start — until the returned sender is
+    /// dropped or sent to. The lock is held on its own thread, never across
+    /// an `.await` of the test.
+    fn stall_reads(service: &MemoryService) -> std::sync::mpsc::Sender<()> {
+        let gates = service.gates.clone();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (held, holding) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _hold = gates.reads.write().unwrap();
+            held.send(()).unwrap();
+            let _ = released.recv();
+        });
+        holding.recv().unwrap();
+        release
+    }
+
+    /// The bound is a constant, chosen from the L8 benches: over twice the
+    /// slowest healthy recall p95 measured (661 ms at 100K notes), and
+    /// under every unbounded case they found (2.9 s and up).
+    #[test]
+    fn the_reply_memory_deadline_is_one_and_a_half_seconds() {
+        assert_eq!(
+            REPLY_MEMORY_DEADLINE,
+            std::time::Duration::from_millis(1_500)
+        );
+    }
+
+    /// A recall that has not answered by the deadline is left behind: the
+    /// turn gets no memory sections — as it does on a recall error — with
+    /// one WARN naming the partition and the time waited, and no note text.
+    /// The same recall, not held, delivers.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_recall_past_the_deadline_leaves_the_turn_without_memory() {
+        let scene = scene();
+        store(
+            &scene,
+            "Editor preference",
+            "# Editor preference\n\nThe user prefers vim for secret-marmalade work.\n",
+        );
+        let release = stall_reads(&scene.service);
+        let started = std::time::Instant::now();
+        let sections = scene
+            .source
+            .resolve_within(
+                &request("what editor do I prefer?", Some(ALICE)),
+                std::time::Duration::from_millis(100),
+            )
+            .await;
+        assert!(sections.is_empty(), "the turn continues without memory");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        drop(release);
+        let home_key = openalpaca_storage::memory_files::home_partition_key(
+            &openalpaca_storage::memory_files::owner_key(ALICE),
+        );
+        logs_assert(|lines: &[&str]| {
+            let warns: Vec<&&str> = lines
+                .iter()
+                .filter(|l| l.contains("WARN") && l.contains("reply's deadline"))
+                .collect();
+            match warns.as_slice() {
+                [line] if line.contains(&home_key)
+                    && line.contains("elapsed_ms")
+                    && !line.contains("marmalade")
+                    && !line.contains("Editor") =>
+                {
+                    Ok(())
+                }
+                other => Err(format!("one WARN with the partition and no text: {other:?}")),
+            }
+        });
+        let sections = scene
+            .source
+            .resolve_within(
+                &request("what editor do I prefer?", Some(ALICE)),
+                std::time::Duration::from_secs(30),
+            )
+            .await;
+        assert_eq!(sections.len(), 1, "unheld, the recall delivers");
+    }
+
+    /// The pending suggestions a turn is told about are bound the same way:
+    /// past the deadline the turn goes without the block.
+    #[tokio::test]
+    async fn pending_suggestions_past_the_deadline_leave_the_turn_without_the_block() {
+        let scene = scene();
+        let ctx = crate::tools::registry::ToolContext {
+            principal: Some(crate::security::policy::Principal::User {
+                global_id: ALICE.to_string(),
+            }),
+            owner_id: Some(ALICE.to_string()),
+            lane_key: Some(format!("{ALICE}:gui")),
+            source: Some("gui".into()),
+            ..Default::default()
+        };
+        let release = stall_reads(&scene.service);
+        let started = std::time::Instant::now();
+        let block = memory_suggestions_block_within(
+            scene.service.clone(),
+            &ctx,
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+        assert!(block.is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        drop(release);
     }
 }

@@ -599,6 +599,25 @@ pub fn snapshot_path_for(partition_key: &str) -> Result<PathBuf, MemoryFilesErro
         .join(format!("{partition_key}.json")))
 }
 
+/// The partition key of `owner_key`'s partition in `scope` — what
+/// [`Partition::open`] derives — without opening or creating anything. For
+/// a log line that must name a partition it has not opened.
+pub fn partition_key_for(scope: &StoreScope, owner_key: &str) -> Result<String, MemoryFilesError> {
+    match scope {
+        StoreScope::Home => Ok(home_partition_key(owner_key)),
+        StoreScope::Project(_) => {
+            let root = store_root(scope)?
+                .join(ContentKind::Memory.dir_name())
+                .join(OWNERS_DIR)
+                .join(owner_key);
+            Ok(project_partition_key(
+                owner_key,
+                &canonical_string_lenient(&root)?,
+            ))
+        }
+    }
+}
+
 fn now_seconds() -> DateTime<Utc> {
     to_second(Utc::now())
 }
