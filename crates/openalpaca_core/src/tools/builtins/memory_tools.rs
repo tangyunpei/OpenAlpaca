@@ -703,10 +703,10 @@ fn says_suggestion(json: &mut serde_json::Value, id: NoteId, replaces: NoteId) {
         "Saved as a suggestion, not applied: note {replaces} is the user's own — they saved it, \
          edited it by hand or imported it — so a change to it waits for them. Until the user \
          confirms suggestion {id}, their note stays in use and yours is not recalled. The user \
-         confirms it in the Memory view (Suggestions: Replace, or Keep mine) or with \
-         `openalpaca memory confirm {id}`. On an attended app turn you may raise it with \
-         memory_confirm on a later turn, when it is listed in <memory_suggestions>. Tell the user \
-         it is waiting; do not store it again."
+         answers it in the Memory view (Suggestions: Replace, or Keep mine to decline) or \
+         confirms it with `openalpaca memory confirm {id}`. On an attended app turn you may \
+         raise it with memory_confirm on a later turn, when it is listed in \
+         <memory_suggestions>. Tell the user it is waiting; do not store it again."
     ));
 }
 
@@ -942,8 +942,9 @@ struct ConfirmArgs {
     target_revision: String,
 }
 
-/// `memory_confirm`: the assistant raises one suggestion from the user's own
-/// words, and the person answers on the card (design 09 §4). The model's
+/// `memory_confirm`: the assistant raises one suggestion that cites a
+/// message the user typed — learning's, or since LQ11 its own (§4.2 rule
+/// 5) — and the person answers on the card (design 09 §4). The model's
 /// call alone changes nothing: the confirm runs only with the approval fact
 /// the sandbox makes when a person clicked Approve for **this** call (§4.2
 /// rule 1), and a Deny dismisses the suggestion for good (§4.3, LQ2).
@@ -996,8 +997,10 @@ impl BuiltInTool for MemoryConfirmTool {
         Ok(wire::update_output_json(&out).to_string())
     }
 
-    /// The card's text (design 09 §4.4), read from the notes at the named
-    /// revisions — never the model's words. A note that is not confirmable
+    /// The card's text (design 09 §4.4), composed from the notes read at
+    /// the named revisions — never from the call's arguments (the
+    /// suggestion's own text may be the chat model's, LQ11, and the card
+    /// says so). A note that is not confirmable
     /// in chat (§4.2 rule 5), or whose notes moved, is refused here, before
     /// any card. A preview that renders marks the suggestion raised on this
     /// lane (§4.5).
@@ -1063,8 +1066,9 @@ pub fn memory_confirm_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "memory_confirm".to_string(),
         description: "Ask the user whether one pending suggestion should replace the note it \
-            names: the user answers Approve or Deny on a card that shows both texts, written \
-            by OpenAlpaca, not by you. Call it only for a suggestion listed in \
+            names: the user answers Approve or Deny on a card that shows both texts, composed \
+            by OpenAlpaca from the notes, never from your arguments. Call it only for a \
+            suggestion listed in \
             <memory_suggestions> on this turn, with that line's id, revision and \
             replaces_revision, when the conversation reaches its topic or comes to a natural \
             pause — at most once per turn. Once its card has been shown, whatever the answer, \
@@ -1101,8 +1105,8 @@ pub fn memory_update_tool_definition() -> ToolDefinition {
             `edit` applies a `patch` to the named fields and keeps the rest byte for byte; \
             `archive` retires the note from recall. An edit of a note the user saved, edited \
             by hand or imported does not change it: the edited note is saved as a suggestion \
-            the user confirms, and the result says so. A note the user saved cannot be \
-            archived from here. `confirm` (making a candidate \
+            the user confirms, and the result says so; one that rests on a message the user \
+            asked to forget is refused. A note the user saved cannot be archived from here. `confirm` (making a candidate \
             active) is the user's own act and is refused here — tell the user to confirm it \
             in the app's Memory view or with `openalpaca memory confirm <id>`. Asks the user \
             for confirmation before it runs."

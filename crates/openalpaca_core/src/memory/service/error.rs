@@ -28,8 +28,10 @@ pub enum MemoryError {
         id: NoteId,
         current_revision: String,
     },
-    /// `authority_conflict`: a `ModelTool` edit, archive or supersede of a
-    /// `user` note (design §4, G2).
+    /// `authority_conflict`: a `ModelTool` archive of a `user` note, an edit
+    /// of one that changes nothing a suggestion carries (design §4, G2), or
+    /// an edit of a saved note a forget took out of recall (the L8
+    /// close-out, design §6).
     AuthorityConflict { id: NoteId, message: String },
     /// `confirm_refused`: `confirm` from a context that is not a
     /// user-directed surface (design §4).
@@ -39,10 +41,10 @@ pub enum MemoryError {
     /// `not_a_suggestion` (design 09 §4.2 rule 5): `memory_confirm` names a
     /// note that is not a suggestion confirmable in chat — not a candidate
     /// naming a note it replaces, inferred from the conversation
-    /// (`extracted_other`), or citing no row the user typed. Learning's
+    /// (`extracted_other`), or citing no row the user typed. (Learning's
     /// suggestion and, since LQ11, the chat model's own are confirmable in
-    /// chat when they cite one. Confirmable, if at all, only in the Memory
-    /// view or the CLI.
+    /// chat when they cite one.) A note refused so is confirmable, if at
+    /// all, only in the Memory view or the CLI.
     NotASuggestion { id: NoteId, message: String },
     /// `approval_required` (design 09 §4.2 rule 6): `memory_confirm` ran
     /// without a person's Approve on its card for this call. Nothing is

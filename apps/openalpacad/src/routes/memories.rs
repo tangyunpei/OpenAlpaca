@@ -28,7 +28,9 @@
 //! of `anchor` (a note id), `q` (its first hit) or `date`, in index rows.
 //!
 //! **Suggestions** (Learning v2, design 09 §3.5): `GET
-//! /v1/memories/suggestions` lists the pending ones; `confirm` of a
+//! /v1/memories/suggestions` lists the pending ones, each with what else it
+//! changes of its note besides the title and the text (`changes`, the L8
+//! close-out's A4); `confirm` of a
 //! suggestion takes the replaced note's revision as `target_revision` in
 //! the body — like a create's `supersedes.expected_revision`, it is the
 //! *other* note's — and answers `superseded` and `dismissed`; `undo`
@@ -378,7 +380,11 @@ pub async fn create_memory_handler(
     }
 }
 
-/// `POST /v1/memories/forget`.
+/// `POST /v1/memories/forget`: the targets in the order given, each its own
+/// forget; a forgotten note's pending suggestions are withdrawn once every
+/// target has had its turn, so a suggestion named with the note it would
+/// replace is forgotten as asked, in either order (the L8 close-out's A3).
+/// `openalpaca memory forget` sends all its ids here in one request.
 pub async fn forget_memories_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1089,9 +1095,11 @@ const INDEX_REBUILDING_MESSAGE: &str = "the memory search index is being rebuilt
 /// carries the current revision in its message and as `ETag`, so a client
 /// can re-read or retry without a second request; what the client kept of
 /// its edit and what it should do next are the client's words, not the
-/// daemon's. The one refusal whose message names a next step is
-/// `503 MEMORY_INDEX_REBUILDING` ([`INDEX_REBUILDING_MESSAGE`]), which no
-/// client state decides.
+/// daemon's. Refusals that no client state decides name their own next
+/// step: `503 MEMORY_INDEX_REBUILDING` ([`INDEX_REBUILDING_MESSAGE`]: try
+/// the timeline again, search and read meanwhile), `MEMORY_QUARANTINED`
+/// (`openalpaca memory doctor --repair`), `MEMORY_BUSY` (a write pending on the
+/// project: try again) and `MEMORY_NOT_UNDOABLE` (forget it instead).
 fn refusal(e: MemoryError) -> Response {
     match e {
         MemoryError::InvalidInput(m) => invalid(m).into_response(),

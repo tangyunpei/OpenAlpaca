@@ -355,6 +355,9 @@ async fn a_tool_call_never_mints_user_and_never_retires_a_user_note() {
             "suggestion",
             "not applied",
             "Memory view",
+            // Keep mine declines; the user answers, not only confirms (the
+            // L8 close-out's A5).
+            "Keep mine to decline",
             &format!("openalpaca memory confirm {}", out["id"].as_str().unwrap()),
             "memory_confirm",
         ] {
