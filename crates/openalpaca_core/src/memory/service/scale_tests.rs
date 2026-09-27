@@ -912,7 +912,10 @@ fn search_cedar(service: &MemoryService, ctx: &MemoryAccessContext) -> SearchOut
 /// rebuild; until it is done — and while it runs, held still here once it
 /// has emptied the index — search and recall answer from the note files and
 /// say `rebuilding`, and a turn's suggestions are left out rather than
-/// waited for. The rebuild then leaves a ready index that answers the same.
+/// waited for. Nothing is indexed inline meanwhile: the answers before the
+/// rebuild leave the index empty, and the ones during it come on their own
+/// thread, so a read that waited for the rebuild fails the test rather than
+/// hang it. The rebuild then leaves a ready index that answers the same.
 #[test]
 fn the_daemon_open_returns_at_once_and_search_reads_the_files_while_it_rebuilds() {
     let h = Harness::new();
@@ -941,6 +944,12 @@ fn the_daemon_open_returns_at_once_and_search_reads_the_files_while_it_rebuilds(
         .unwrap();
     assert!(!recalled.notes.is_empty());
     assert_eq!(recalled.index_state, IndexState::Rebuilding);
+    assert_eq!(
+        service.index().index_state().unwrap().notes,
+        0,
+        "the files answered: nothing was indexed inline"
+    );
+    assert!(service.rebuild_pending(), "the rebuild is still owed");
 
     let hold = service.gates.rebuild.write().unwrap();
     let rebuild = {
@@ -948,15 +957,23 @@ fn the_daemon_open_returns_at_once_and_search_reads_the_files_while_it_rebuilds(
         std::thread::spawn(move || service.run_pending_rebuild())
     };
     eventually("the rebuild starts", || service.rebuild_running());
-    let during = search_cedar(&service, &tool);
+    let (sent, answered) = std::sync::mpsc::channel();
+    {
+        let (service, tool) = (service.clone(), tool.clone());
+        std::thread::spawn(move || {
+            let during = search_cedar(&service, &tool);
+            let suggestions = service
+                .pending_suggestions(&tool, 3, &HashSet::new())
+                .map(|s| s.len());
+            let _ = sent.send((during, suggestions));
+        });
+    }
+    let (during, suggestions) = answered
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("search and the suggestions answer while the rebuild runs, not after it");
     assert_eq!(during.results.len(), 6, "answered while the rebuild runs");
     assert_eq!(during.index_state, IndexState::Rebuilding);
-    assert!(
-        service
-            .pending_suggestions(&tool, 3, &HashSet::new())
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(suggestions.unwrap(), 0, "a turn's suggestions are left out");
     drop(hold);
     assert!(rebuild.join().unwrap().unwrap(), "it rebuilt");
     assert!(!service.rebuild_pending());
