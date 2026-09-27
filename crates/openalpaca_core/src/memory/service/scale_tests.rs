@@ -483,8 +483,16 @@ const FTS_TABLES: [&str; 3] = ["fts_word", "fts_tri_head", "fts_tri"];
 
 /// The notes on disk now, with their current revisions: every status, the
 /// candidates and the superseded included.
+/// Every note of the partition, in an order that does not depend on the
+/// clock or on the random ids the notes were minted with: by title, then by
+/// id. The service lists newest first, and notes written in the same second
+/// tie on the timestamp and fall back to their ids, so a seeded run that
+/// picks "the n-th note" from the service's own order picks a different note
+/// on every run — and what it reaches (a forget of a note that shares a
+/// source, say) with it. Every title a run writes carries its step, so this
+/// order is the run's own.
 fn every_note(service: &MemoryService, user: &MemoryAccessContext) -> Vec<ListItem> {
-    service
+    let mut items = service
         .list(
             user,
             ListInput {
@@ -495,7 +503,9 @@ fn every_note(service: &MemoryService, user: &MemoryAccessContext) -> Vec<ListIt
             },
         )
         .unwrap()
-        .items
+        .items;
+    items.sort_by(|a, b| a.title.cmp(&b.title).then(a.id.cmp(&b.id)));
+    items
 }
 
 /// The rows the incremental passes leave (scale slice S1) are the rows a
