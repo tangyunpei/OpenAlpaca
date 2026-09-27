@@ -613,6 +613,65 @@ fn a_damaged_cache_met_on_use_is_rebuilt_by_the_next_tick() {
     assert_eq!(found.results.len(), 50);
 }
 
+/// A rebuild that panics part-way — a note the chunker chokes on, say —
+/// leaves no rebuild running for the life of the process: it stays owed,
+/// so recall and search read the files, a read that waits for a running
+/// rebuild returns at once, and the next attempt rebuilds.
+#[test]
+fn a_rebuild_that_panics_stays_owed_and_holds_no_reader() {
+    let h = Harness::new();
+    cedar_notes(&h, 4);
+    let service = Arc::new(MemoryService::open_default_deferred(Some(h.db.clone())));
+    assert!(service.rebuild_pending());
+    service
+        .gates
+        .panic_rebuild
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        service.run_pending_rebuild()
+    }));
+    assert!(unwound.is_err(), "the injected panic unwound");
+    assert!(!service.rebuild_running(), "no rebuild is left running");
+    assert!(service.rebuild_pending(), "and the rebuild is still owed");
+    let tool = service
+        .context(
+            ALICE,
+            WorkspaceHint::None,
+            Surface::ModelTool,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    assert_eq!(search_cedar(&service, &tool).index_state, IndexState::Rebuilding);
+    // A read with no file-scan answer waits only while a rebuild runs.
+    let (sent, read) = std::sync::mpsc::channel();
+    {
+        let (service, tool) = (service.clone(), tool.clone());
+        std::thread::spawn(move || {
+            let rows = service
+                .timeline(
+                    &tool,
+                    TimelineInput {
+                        anchor: TimelineAnchor::Date(Utc::now()),
+                        before: Some(20),
+                        after: Some(20),
+                    },
+                )
+                .map(|t| t.rows.len());
+            let _ = sent.send(rows);
+        });
+    }
+    let rows = read
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the timeline returns rather than wait for a dead rebuild");
+    assert_eq!(rows.unwrap(), 4);
+    assert!(service.run_pending_rebuild().unwrap(), "the next attempt rebuilds");
+    assert!(!service.rebuild_pending());
+    let found = search_cedar(&service, &tool);
+    assert_eq!(found.index_state, IndexState::Ready);
+    assert_eq!(found.results.len(), 4);
+}
+
 // ============================================================================
 // S5 — the index is maintained (M1)
 // ============================================================================

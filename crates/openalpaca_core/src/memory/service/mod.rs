@@ -198,8 +198,38 @@ struct RebuildState {
     /// rebuild that failed, or damage met on use. Until a rebuild
     /// completes, recall and search read the files.
     pending: bool,
-    /// A rebuild is running: the index is being refilled from nothing.
+    /// A rebuild is running: the index is being refilled from nothing. Set
+    /// and cleared only by a [`RebuildRun`].
     running: bool,
+}
+
+/// A whole rebuild in progress (scale slice S6): `running` from
+/// [`MemoryService::start_rebuild_run`] until this drops — after a success,
+/// a failure or a panic alike — and every reader waiting for it is woken
+/// then. A rebuild that did not complete, a panic's included, stays owed,
+/// so recall and search read the files and the next tick tries again; a
+/// panic can no longer leave `running` set for the life of the process,
+/// holding every read that waits for it.
+struct RebuildRun<'a> {
+    service: &'a MemoryService,
+    completed: bool,
+}
+
+impl RebuildRun<'_> {
+    /// Ends the run with the rebuild's result.
+    fn finish(mut self, result: Result<(), MemoryError>) -> Result<(), MemoryError> {
+        self.completed = result.is_ok();
+        result
+    }
+}
+
+impl Drop for RebuildRun<'_> {
+    fn drop(&mut self) {
+        let mut state = self.service.rebuild_state();
+        state.running = false;
+        state.pending = !self.completed;
+        self.service.rebuilt.notify_all();
+    }
 }
 
 /// When the index was last seen written and last maintained (scale slice
@@ -228,6 +258,8 @@ struct FileScan {
 pub(crate) struct TestGates {
     pub rebuild: std::sync::RwLock<()>,
     pub reads: std::sync::RwLock<()>,
+    /// The next rebuild panics once it has emptied the index.
+    pub panic_rebuild: std::sync::atomic::AtomicBool,
 }
 
 /// The owner's partitions for one request (design §3 rule 1).
@@ -470,15 +502,27 @@ impl MemoryService {
     /// when it starts, and every reconciliation tick calls it. Answers
     /// whether it rebuilt. A rebuild that fails stays owed.
     pub fn run_pending_rebuild(&self) -> Result<bool, MemoryError> {
-        {
-            let mut state = self.rebuild_state();
+        let run = {
+            let state = self.rebuild_state();
             if !state.pending || state.running {
                 return Ok(false);
             }
-            state.running = true;
+            self.start_rebuild_run(state)
+        };
+        run.finish(self.rebuild_index_inner()).map(|()| true)
+    }
+
+    /// Marks a whole rebuild running, under the state lock the caller
+    /// checked it with; the returned run clears the mark when it drops.
+    fn start_rebuild_run(
+        &self,
+        mut state: std::sync::MutexGuard<'_, RebuildState>,
+    ) -> RebuildRun<'_> {
+        state.running = true;
+        RebuildRun {
+            service: self,
+            completed: false,
         }
-        self.finish_rebuild_run(self.rebuild_index_inner())
-            .map(|()| true)
     }
 
     /// The index's upkeep when it is idle (scale slice S5, M1), called by
@@ -529,16 +573,6 @@ impl MemoryService {
                 );
             }
         }
-    }
-
-    /// Ends a rebuild run: owed again if it failed, and every reader
-    /// waiting for it woken.
-    fn finish_rebuild_run(&self, result: Result<(), MemoryError>) -> Result<(), MemoryError> {
-        let mut state = self.rebuild_state();
-        state.running = false;
-        state.pending = result.is_err();
-        self.rebuilt.notify_all();
-        result
     }
 
     pub fn index(&self) -> &MemoryIndex {
@@ -1037,7 +1071,7 @@ impl MemoryService {
     /// names (a fresh or recreated index), now; one already running is
     /// waited for first. Best effort per partition.
     pub fn rebuild_index(&self) -> Result<(), MemoryError> {
-        {
+        let run = {
             let mut state = self.rebuild_state();
             while state.running {
                 state = self
@@ -1045,9 +1079,9 @@ impl MemoryService {
                     .wait(state)
                     .unwrap_or_else(|e| e.into_inner());
             }
-            state.running = true;
-        }
-        self.finish_rebuild_run(self.rebuild_index_inner())
+            self.start_rebuild_run(state)
+        };
+        run.finish(self.rebuild_index_inner())
     }
 
     /// The rebuild itself (scale slice S6): the cache recreated empty, then
@@ -1061,6 +1095,14 @@ impl MemoryService {
         self.index.begin_rebuild()?;
         #[cfg(test)]
         let _paused = self.gates.rebuild.read().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        if self
+            .gates
+            .panic_rebuild
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("injected rebuild panic");
+        }
         self.fingerprints
             .lock()
             .unwrap_or_else(|e| e.into_inner())
