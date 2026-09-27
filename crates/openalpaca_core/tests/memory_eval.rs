@@ -10032,6 +10032,101 @@ async fn a_summary_that_stops_bad_output_is_flushed_again() {
     );
 }
 
+/// Repair round 2 of the L8 fix slice for a conversation summary (the
+/// fidelity review's M2; the round-3 tests review's F1): `episode_one`
+/// bounds a summary's retries per position of the session's **episode**
+/// cursor, the one the queue counts a summary's unusable answers against.
+/// A session whose summary window spans two chunks, the first never usable:
+/// three attempts on the first — the third skips it and fails the second
+/// once — and a fourth summarises the second. A bound of three in all, or
+/// one read at a cursor a summary never moves (the learning cursor), would
+/// leave the second chunk held after one answer, never summarised.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_summary_over_two_windows_is_retried_until_each_is_read_or_skipped() {
+    let omega_answers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = omega_answers.clone();
+    let (router, _stub) = stub_router(&[TEST_MODEL], move |request| {
+        let prompt = prompt_of(request);
+        if prompt.contains("You are the memory extractor") {
+            return r#"{"items": []}"#.to_string();
+        }
+        if !prompt.contains("You are the conversation recorder") {
+            return "Noted.".to_string();
+        }
+        if conversation_of(&prompt).contains("marker-alpha")
+            || seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            return UNUSABLE_ANSWER.to_string();
+        }
+        serde_json::json!({
+            "topic": "The omega marker",
+            "discussed": "The user named the omega marker.",
+            "decided": "",
+            "open": "",
+        })
+        .to_string()
+    });
+    let run = OfflineRun::new(router);
+    // Three turns of about 7 KB fill one chunk's 24 KiB of transcript; the
+    // fourth, as long, starts a second chunk, and the three short turns
+    // after it leave past the first chunk the four user turns a summary
+    // waits for (`EPISODE_MIN_USER_TURNS`).
+    let filler = "lorem ipsum ".repeat(580);
+    let turns: Vec<(String, TurnMode)> = (0..7)
+        .map(|i| match i {
+            0 => (format!("marker-alpha {filler}"), TurnMode::Explicit),
+            3 => (format!("marker-omega {filler}"), TurnMode::Explicit),
+            1 | 2 => (format!("Noise turn {i}. {filler}"), TurnMode::Noise),
+            i => (format!("Short turn {i}."), TurnMode::Noise),
+        })
+        .collect();
+    let turns: Vec<(&str, TurnMode)> = turns.iter().map(|(t, m)| (t.as_str(), *m)).collect();
+    let session = fixture_session("cs-t62", &turns);
+    let fed = run
+        .learner()
+        .with_summaries(true)
+        .feed(&[&session], true)
+        .await;
+    let [summary] = &fed.episodes[..] else {
+        panic!("one summary flush: {:?}", fed.episodes);
+    };
+    let json = serde_json::to_value(summary).unwrap();
+    assert_eq!(
+        json["attempt_stops"],
+        serde_json::json!(["BadOutput", "BadOutput", "BadOutput", null]),
+        "three on the first chunk (the third skips it and fails the second), one more summarises the second: {summary:?}"
+    );
+    assert_eq!(
+        (
+            summary.attempts,
+            summary.calls,
+            summary.skipped_unusable,
+            summary.episodes,
+            summary.stopped.as_deref()
+        ),
+        (4, 5, 1, 1, None),
+        "{summary:?}"
+    );
+    assert_eq!(
+        omega_answers.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the second chunk was answered twice"
+    );
+    let session_id = &fed.transcript[0].session_id;
+    let through = openalpaca_storage::LearningCursorRepository::new(&run.db)
+        .episode_through(session_id)
+        .unwrap();
+    assert!(
+        Some(through) >= fed.transcript[0].user_rows.last().copied(),
+        "the episode cursor passed the last turn: {through}"
+    );
+    let warnings = learning_warnings(&fed.turns, &fed.flushes, &fed.episodes);
+    assert!(
+        !warnings.iter().any(|w| w.contains("left unread")),
+        "{warnings:?}"
+    );
+}
+
 /// H2 with rev 3.11/3.12's semantics kept: a forced re-run that never read
 /// its session to the end is a violation, however it ended — and after
 /// `MAX_ATTEMPTS` unusable answers the product skips the window and ends
