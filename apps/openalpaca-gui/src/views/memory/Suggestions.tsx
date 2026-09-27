@@ -43,7 +43,12 @@ import {
   hiddenNotice,
 } from "@/lib/hidden-chars";
 
-import { suggestionWhence, targetOriginLabel, targetTextLabel } from "./copy";
+import {
+  savedByAlpaca,
+  suggestionWhence,
+  targetOriginLabel,
+  targetTextLabel,
+} from "./copy";
 import { suggestionHidden } from "./suggestion-hidden";
 
 export interface SuggestionsProps {
@@ -144,7 +149,11 @@ function SuggestionRow({
         <p className="mt-[3px] mb-0 text-red-ink">{notice}</p>
       )}
       <span className="mt-[3px] block font-mono text-2xs-plus text-muted-fg">
-        {suggestionWhence(item.origin, when)}
+        {suggestionWhence(
+          item.origin,
+          when,
+          savedByAlpaca(item.origin, item.observed_at),
+        )}
         {item.older_count > 0 &&
           ` · ${item.older_count} older suggestion${item.older_count === 1 ? "" : "s"} for this note`}
       </span>

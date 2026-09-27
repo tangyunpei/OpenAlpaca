@@ -688,6 +688,15 @@ fn a_suggestion_line_names_both_notes_whose_words_and_why() {
         suggestion_line(&inferred),
         "b1c2d3e4  replace “My commute” (edited by hand) → “Commute”  inferred from the conversation, 2026-09-25"
     );
+    // Owner decision LQ11: one the assistant's memory tools saved in chat —
+    // no `observed_at`, which learning stamps on every note it writes.
+    let mut in_chat = item.clone();
+    in_chat["observed_at"] = serde_json::Value::Null;
+    in_chat["older_count"] = serde_json::json!(0);
+    assert_eq!(
+        suggestion_line(&in_chat),
+        "b1c2d3e4  replace “My commute” (saved by you) → “Commute”  suggested by the assistant, 2026-09-25 — The user said they cycle now."
+    );
 }
 
 /// A suggestion's own text can change after learning wrote it — the owner
@@ -1140,6 +1149,7 @@ fn the_suggestions_listing_counts_each_suggestions_hidden_characters() {
         "reason": "Said so.",
         "origin": "extracted_user",
         "created_at": "2026-09-25T10:00:00Z",
+        "observed_at": "2026-09-25T09:00:00Z",
         "older_count": 0,
         "target": {
             "id": TARGET, "title": "My\u{202e} commute", "origin": "user",
@@ -1153,6 +1163,7 @@ fn the_suggestions_listing_counts_each_suggestions_hidden_characters() {
         "reason": null,
         "origin": "extracted_user",
         "created_at": "2026-09-25T10:00:00Z",
+        "observed_at": "2026-09-25T09:00:00Z",
         "older_count": 0,
         "target": { "id": TARGET, "title": "Lunch", "origin": "user", "excerpt": "Noodles." },
     });

@@ -117,6 +117,11 @@ function note(fields: Partial<FakeNote> & { id: string; title: string }) {
     updated_at: "2026-09-24T10:00:00Z",
     sources: [],
     history: [],
+    // What learning stamps on every note it writes from the owner's words
+    // (design 09 §2.5); a test of the chat model's own suggestion passes
+    // `observed_at: null`, as its memory tools leave it (owner decision LQ11).
+    observed_at:
+      fields.origin === "extracted_user" ? "2026-09-23T18:02:11Z" : null,
     ...fields,
   };
   notes.push(created);
@@ -147,6 +152,7 @@ function readOutput(n: FakeNote, kept?: { title: string; body: string }) {
     body: kept?.body ?? n.body,
     frontmatter: {
       updated_at: n.updated_at,
+      observed_at: n.observed_at ?? null,
       aliases: n.aliases ?? [],
       tags: n.tags ?? [],
       fact_key: n.fact_key ?? null,
@@ -1267,6 +1273,43 @@ describe("the Memory view", () => {
       action: "confirm",
       target_revision: saved.revision,
     });
+  });
+
+  /**
+   * Owner decision LQ11: a change the chat model saved against a note the
+   * owner saved is a suggestion like learning's, and says who suggested it —
+   * Alpaca, in chat — on the card and on the candidate's detail. Its own
+   * memory tools leave `observed_at` empty; learning stamps it on every note.
+   */
+  it("says Alpaca suggested a change it saved in chat", async () => {
+    note({ id: "n-1", title: "My commute", body: "The user takes the bus.\n" });
+    note({
+      id: "n-2",
+      title: "Commute",
+      body: "# Commute\n\nThe user cycles to the office now.\n",
+      knowledge: "The user cycles to the office now.",
+      status: "candidate",
+      origin: "extracted_user",
+      observed_at: null,
+      created_at: "2026-09-25T08:00:00Z",
+      sources: [{ type: "message", id: "77", observed_at: null }],
+      supersedes: ["n-1"],
+    });
+    renderView();
+    const section = await screen.findByRole("region", { name: "Suggestions" });
+    expect(section).toHaveTextContent("Suggested by Alpaca on 2026-09-25");
+    expect(section).not.toHaveTextContent("From what you said");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Candidates" }));
+    const list = await screen.findByRole("list", { name: "Notes" });
+    await user.click(
+      await within(list).findByRole("button", { name: "Commute" }),
+    );
+    expect(
+      await screen.findByText(
+        "Suggested by Alpaca — would replace “My commute”. It is not used in answers until you confirm it.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("keeps the owner's note from the detail once the note it would replace was retired another way", async () => {

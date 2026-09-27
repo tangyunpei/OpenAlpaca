@@ -46,15 +46,35 @@ export const CANDIDATE_NOTE =
 const NOT_USED_YET = "It is not used in answers until you confirm it.";
 
 /**
+ * Whether a note "learned from what you said" was written by Alpaca's own
+ * memory tools in chat rather than by learning (owner decision LQ11): origin
+ * `extracted_user` with no `observed_at`, which learning stamps on every
+ * note it writes and a tool call cannot set (the daemon's own test, LQ14).
+ */
+export function savedByAlpaca(
+  origin: NoteOrigin,
+  observedAt: unknown,
+): boolean {
+  return origin === "extracted_user" && (observedAt ?? null) === null;
+}
+
+/**
  * A candidate's note follows its origin (design 09 §3.5): a suggestion from
- * the owner's own words says so and names the note it would replace; an
+ * the owner's own words says so and names the note it would replace; one
+ * Alpaca saved in chat says it suggested it (owner decision LQ11); an
  * inferred one says it is not the owner's words. `replaces` is the replaced
  * note's title, `null` when the candidate names none (or it is unknown yet).
  */
 export function candidateNote(
   origin: NoteOrigin,
   replaces: string | null,
+  byAlpaca = false,
 ): string {
+  if (origin === "extracted_user" && byAlpaca) {
+    return replaces === null
+      ? `Suggested by Alpaca. ${NOT_USED_YET}`
+      : `Suggested by Alpaca — would replace “${replaces}”. ${NOT_USED_YET}`;
+  }
   if (origin === "extracted_user") {
     return replaces === null
       ? `From what you said. ${NOT_USED_YET}`
@@ -94,14 +114,22 @@ export function targetTextLabel(origin: NoteOrigin): string {
 
 /**
  * Where a suggestion came from, and when: “From what you said on
- * 2026-09-24”. A suggestion whose own text changed after learning wrote it
- * says who wrote the words now, and when it was suggested.
+ * 2026-09-24”, or “Suggested by Alpaca on 2026-09-24” for one Alpaca's
+ * memory tools saved in chat (owner decision LQ11). A suggestion whose own
+ * text changed after learning wrote it says who wrote the words now, and
+ * when it was suggested.
  */
-export function suggestionWhence(origin: NoteOrigin, when: string): string {
+export function suggestionWhence(
+  origin: NoteOrigin,
+  when: string,
+  byAlpaca = false,
+): string {
   const day = when.slice(0, 10);
   switch (origin) {
     case "extracted_user":
-      return `From what you said on ${day}`;
+      return byAlpaca
+        ? `Suggested by Alpaca on ${day}`
+        : `From what you said on ${day}`;
     case "extracted_other":
       return `Inferred from the conversation on ${day}`;
     case "user":

@@ -45,6 +45,7 @@ import {
   candidateNote,
   freshnessNote,
   originLabel,
+  savedByAlpaca,
   scopeLabel,
   sourceLabel,
 } from "./copy";
@@ -111,7 +112,11 @@ export function NoteTab({ note, replaces = null }: NoteTabProps) {
     <div className="max-w-[660px]">
       {deciding && (
         <p className="mt-0 mb-[14px] rounded-2xl border border-amber-line bg-amber-surface px-[12px] py-[9px] text-base leading-[1.5] wrap-anywhere text-amber-ink">
-          {candidateNote(note.origin, was?.text ?? null)}
+          {candidateNote(
+            note.origin,
+            was?.text ?? null,
+            savedByAlpaca(note.origin, note.frontmatter["observed_at"]),
+          )}
         </p>
       )}
       {note.effective_status === "superseded" && (

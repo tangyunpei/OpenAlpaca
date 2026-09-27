@@ -893,7 +893,9 @@ fn target_origin_label(origin: &str) -> &str {
 }
 
 /// One `openalpaca memory suggestions` line (design 09 §3.5):
-/// `<id8>  replace “X” (saved by you) → “B”  from your words, 2026-09-24 — <reason>`.
+/// `<id8>  replace “X” (saved by you) → “B”  from your words, 2026-09-24 — <reason>`
+/// — `suggested by the assistant, <date>` for one the assistant saved in
+/// chat (owner decision LQ11).
 ///
 /// The line is what a person reads before `memory confirm <id>` makes the
 /// suggestion theirs, and the titles and the reason came from the model or
@@ -912,8 +914,13 @@ pub(crate) fn suggestion_line(item: &Value) -> String {
         .take(10)
         .collect();
     // A suggestion whose own text changed after learning wrote it says who
-    // wrote the words now, and when it was suggested.
+    // wrote the words now, and when it was suggested. One the assistant's
+    // memory tools saved in chat (owner decision LQ11) has no `observed_at`,
+    // which learning stamps on every note it writes, and says so.
     let whence = match item["origin"].as_str() {
+        Some("extracted_user") if item["observed_at"].is_null() => {
+            format!("suggested by the assistant, {date}")
+        }
         Some("extracted_user") => format!("from your words, {date}"),
         Some("extracted_other") => format!("inferred from the conversation, {date}"),
         Some("user") => format!("edited by you, suggested {date}"),
