@@ -144,3 +144,166 @@ fn a_write_stamps_its_partition_scan_with_the_files_it_saw() {
         Some(("2026-09-26T09:30:00Z".to_string(), 3))
     );
 }
+
+// ============================================================================
+// S1 — no whole-partition re-index where an incremental one is exact (O1)
+// ============================================================================
+
+/// How many index rows this thread has built (each a copy of a body) while
+/// `f` ran.
+fn records_built(f: impl FnOnce()) -> u64 {
+    let before = super::RECORDS_BUILT.with(|n| n.get());
+    f();
+    super::RECORDS_BUILT.with(|n| n.get()) - before
+}
+
+/// A service over a cache file in the harness's temp root — what a daemon
+/// restart reopens.
+fn file_service(h: &Harness, path: &Path) -> MemoryService {
+    MemoryService::new(Some(h.db.clone()), MemoryIndex::open(path).unwrap())
+}
+
+/// After a restart the service knows nothing of what it indexed, but the
+/// cache does: the first write re-indexes the note it wrote and the notes
+/// whose derived facts moved — here the note it replaces — never the whole
+/// partition, and the rows it leaves are the rows a whole re-index would
+/// have left.
+#[test]
+fn the_first_write_after_a_restart_reindexes_only_what_changed() {
+    let h = Harness::new();
+    let path = h.root.path().join("cache").join("memory-index.sqlite");
+    let user = h.user(ALICE, None);
+    let first = file_service(&h, &path);
+    first.rebuild_index().unwrap();
+    let mut old = None;
+    for i in 0..8 {
+        let out = first
+            .store(
+                &user,
+                StoreInput {
+                    title: format!("Restart note {i}"),
+                    body: format!("# R{i}\n\nThe restart note number {i}.\n"),
+                    kind: Some(NoteKind::Fact),
+                    fact_key: (i == 0).then(|| "restart.probe".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        if i == 0 {
+            old = Some(out);
+        }
+    }
+    let old = old.unwrap();
+    drop(first);
+
+    let second = file_service(&h, &path);
+    let built = records_built(|| {
+        second
+            .store(
+                &user,
+                StoreInput {
+                    title: "Restart replacement".into(),
+                    body: "# R\n\nThe replacement.\n".into(),
+                    kind: Some(NoteKind::Fact),
+                    fact_key: Some("restart.probe".into()),
+                    supersedes: Some((old.id, old.revision.clone())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    });
+    assert_eq!(built, 2, "the new note and the one it supersedes, not all nine");
+    let key = files::home_partition_key(&user.owner_key);
+    let row = second.index().get(&key, &old.id.to_string()).unwrap().unwrap();
+    assert_eq!(row.effective_status, index::EffectiveStatus::Superseded);
+    assert_eq!(second.index().index_state().unwrap().notes, 9);
+}
+
+/// The first reconciliation tick after a restart re-derives the partition
+/// and finds its rows already right: it rebuilds none of them.
+#[test]
+fn the_first_tick_after_a_restart_rebuilds_no_unchanged_row() {
+    let h = Harness::new();
+    let path = h.root.path().join("cache").join("memory-index.sqlite");
+    let user = h.user(ALICE, None);
+    let first = file_service(&h, &path);
+    first.rebuild_index().unwrap();
+    for i in 0..6 {
+        first
+            .store(
+                &user,
+                StoreInput {
+                    title: format!("Tick note {i}"),
+                    body: format!("# T{i}\n\nTick body {i}.\n"),
+                    kind: Some(NoteKind::Fact),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    drop(first);
+    let second = file_service(&h, &path);
+    let built = records_built(|| {
+        second.reconcile_owner(ALICE).unwrap();
+    });
+    assert_eq!(built, 0, "nothing changed on disk or in the derivation");
+}
+
+/// An edit made behind the service's back is found by the stat scan before
+/// the next read, and only that note is re-indexed — its new words are
+/// searchable, and the answer says the note moved (`stale`).
+#[test]
+fn an_external_edit_reindexes_only_the_edited_note() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let mut edited = None;
+    for i in 0..10 {
+        let out = h.store(
+            &user,
+            &format!("Edit note {i}"),
+            &format!("# E{i}\n\nOriginal words {i}.\n"),
+            NoteKind::Fact,
+        );
+        if i == 3 {
+            edited = Some(out);
+        }
+    }
+    let edited = edited.unwrap();
+    // Prime the scan, then edit one file by hand.
+    let tool = h.tool(ALICE, None);
+    h.service
+        .recall(&tool, "original words", RecallBudget::default())
+        .unwrap();
+    let dir = h.home().join("memory/owners").join(&user.owner_key).join("notes");
+    let file = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(&edited.id.to_string()))
+        })
+        .unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replace("Original words 3.", "Marzipan harbour.")).unwrap();
+
+    let mut found = None;
+    let built = records_built(|| {
+        found = Some(
+            h.service
+                .search(
+                    &tool,
+                    SearchInput {
+                        query: "marzipan harbour".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+        );
+    });
+    assert_eq!(built, 1, "the edited note only");
+    let found = found.unwrap();
+    assert_eq!(found.results.len(), 1, "{found:?}");
+    assert_eq!(found.results[0].id, edited.id);
+    assert_eq!(found.results[0].freshness, Freshness::Stale);
+}

@@ -161,7 +161,7 @@ impl MemoryService {
         }
         for key in dirty {
             if let Some(p) = partitions.iter().find(|p| p.partition_key() == key) {
-                self.reindex(p, true)?;
+                self.reindex(p)?;
             }
         }
         Ok(newest)
@@ -325,7 +325,7 @@ impl MemoryService {
 
         for key in dirty {
             if let Some(p) = by_key(&key) {
-                self.reindex(p, true)?;
+                self.reindex(p)?;
             }
         }
         Ok(LearningView {
@@ -388,7 +388,7 @@ impl MemoryService {
         }
         for key in dirty {
             if let Some(p) = partitions.iter().find(|p| p.partition_key() == key) {
-                self.reindex(p, true)?;
+                self.reindex(p)?;
             }
         }
         Ok(out)

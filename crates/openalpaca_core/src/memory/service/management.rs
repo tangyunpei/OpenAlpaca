@@ -204,7 +204,7 @@ impl MemoryService {
             self.publish(&change);
             changes.push(change);
         }
-        self.reindex_view(partition, &view, false)?;
+        self.reindex_view(partition, &view)?;
         self.last_scans
             .lock()
             .unwrap_or_else(|e| e.into_inner())

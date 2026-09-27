@@ -149,7 +149,7 @@ impl MemoryService {
             let had_dirty = !dirty.is_empty();
             for key in dirty {
                 if let Some(p) = by_key(&key) {
-                    self.reindex(p, true)?;
+                    self.reindex(p)?;
                 }
             }
             output = Some((

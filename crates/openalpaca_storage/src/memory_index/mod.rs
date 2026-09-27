@@ -945,6 +945,64 @@ impl MemoryIndex {
     }
 }
 
+/// The facts a note's row was built from, as the row holds them (scale
+/// slice S1): what a caller compares with the note on disk to decide
+/// whether the row must be written again — so a service that has just
+/// started re-indexes only what changed, never a whole partition. Every
+/// field is a `note` column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowFacts {
+    pub id: String,
+    pub revision: String,
+    pub relative_path: String,
+    pub effective_status: Option<EffectiveStatus>,
+    pub origin: String,
+    pub conflict: bool,
+    pub same_key_loser: bool,
+    pub source_forgotten: bool,
+    pub superseded_by: Vec<String>,
+    pub pinned: bool,
+    pub file: FileStat,
+}
+
+impl MemoryIndex {
+    /// Every row of one partition, as [`RowFacts`].
+    pub fn row_facts(&self, partition_key: &str) -> Result<Vec<RowFacts>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, revision, relative_path, effective_status, origin, conflict,
+                    same_key_loser, source_forgotten, superseded_by, pinned,
+                    mtime_ns, size, inode
+             FROM note WHERE partition_key = ?1",
+        )?;
+        let rows = stmt.query_map(params![partition_key], |r| {
+            let status: String = r.get(3)?;
+            let superseded: String = r.get(8)?;
+            let size: i64 = r.get(11)?;
+            let inode: i64 = r.get(12)?;
+            Ok(RowFacts {
+                id: r.get(0)?,
+                revision: r.get(1)?,
+                relative_path: r.get(2)?,
+                effective_status: EffectiveStatus::parse(&status),
+                origin: r.get(4)?,
+                conflict: r.get::<_, i64>(5)? != 0,
+                same_key_loser: r.get::<_, i64>(6)? != 0,
+                source_forgotten: r.get::<_, i64>(7)? != 0,
+                superseded_by: serde_json::from_str(&superseded).unwrap_or_default(),
+                pinned: r.get::<_, i64>(9)? != 0,
+                file: FileStat {
+                    mtime_ns: r.get(10)?,
+                    size: size as u64,
+                    inode: inode as u64,
+                },
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(IndexError::from)
+    }
+}
+
 /// A catalog row with what learning's lookup reads (design 09 §2.3): the
 /// note's identity and filter fields, its own `supersedes` list and its
 /// title — no body and no chunk.

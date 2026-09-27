@@ -107,7 +107,7 @@ impl MemoryService {
         }
         for key in dirty {
             if let Some(p) = by_key(&key) {
-                self.reindex(p, true)?;
+                self.reindex(p)?;
             }
         }
         out.sort_by(|a, b| {

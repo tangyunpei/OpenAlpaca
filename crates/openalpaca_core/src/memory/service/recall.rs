@@ -184,16 +184,17 @@ fn query_text(message: &str) -> Option<String> {
 
 impl MemoryService {
     /// Before a read: makes the index trustworthy for `p`. A partition never
-    /// indexed is indexed whole; one the index knows gets a stat scan, and
-    /// is re-indexed only when the scan finds a difference. Returns the ids
-    /// the scan found changed behind the service's back, so a hit among them
-    /// is answered `stale` — the index was out of date for it, and the fresh
-    /// bytes are what is served.
+    /// indexed is indexed; one the index knows gets a stat scan, and is
+    /// re-indexed only when the scan finds a difference — and then only the
+    /// notes that differ (scale slice S1). Returns the ids the scan found
+    /// changed behind the service's back, so a hit among them is answered
+    /// `stale` — the index was out of date for it, and the fresh bytes are
+    /// what is served.
     pub(super) fn touch(&self, p: &Partition) -> Result<HashSet<NoteId>, MemoryError> {
         let key = p.partition_key();
         let never_indexed = self.index.last_scan(key)?.is_none();
         if never_indexed {
-            self.reindex(p, true)?;
+            self.reindex(p)?;
             return Ok(HashSet::new());
         }
         let report = self.index.reconcile(key, || Self::scan_entries(p))?;
@@ -205,7 +206,7 @@ impl MemoryService {
                     .iter()
                     .filter_map(|(id, _)| NoteId::parse(id).ok()),
             );
-            self.reindex(p, true)?;
+            self.reindex(p)?;
         }
         Ok(stale)
     }
@@ -439,7 +440,7 @@ impl MemoryService {
         // the re-read found goes back into the index for the next turn.
         for key in dirty {
             if let Some(p) = by_key(&key) {
-                self.reindex(p, true)?;
+                self.reindex(p)?;
             }
         }
 
@@ -662,7 +663,7 @@ impl MemoryService {
             let had_dirty = !dirty.is_empty();
             for key in dirty {
                 if let Some(p) = by_key(&key) {
-                    self.reindex(p, true)?;
+                    self.reindex(p)?;
                 }
             }
             output = Some(SearchOutput {

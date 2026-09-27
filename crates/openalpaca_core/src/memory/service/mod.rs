@@ -640,28 +640,32 @@ impl MemoryService {
         }
     }
 
-    /// Re-indexes a partition from the disk: everything on a first visit or
-    /// when the index has no rows for it, otherwise only the notes whose
-    /// facts changed since this process last indexed them.
-    fn reindex(&self, p: &Partition, full: bool) -> Result<(), MemoryError> {
+    /// Re-indexes a partition from the disk: only the notes whose facts
+    /// differ from what the index holds for them.
+    fn reindex(&self, p: &Partition) -> Result<(), MemoryError> {
         let loaded = p.load()?;
-        self.reindex_view(p, &loaded, full)
+        self.reindex_view(p, &loaded)
     }
 
     /// [`Self::reindex`] from a view already read — the one a mutation
-    /// returns (design 09 §6.3 quick win 3). An incremental pass builds a
-    /// row, and copies a body, only for a note whose fingerprint changed
-    /// (quick win 4). A pass that fails part-way may have recorded
+    /// returns (design 09 §6.3 quick win 3). The pass builds a row, and
+    /// copies a body, only for a note whose fingerprint changed (quick win
+    /// 4), and removes the rows of notes that are gone.
+    ///
+    /// **Exact without a whole re-index** (scale slice S1, O1): the
+    /// fingerprints a partition is compared against are, on its first pass
+    /// in this process, read from the index's own rows — every fingerprint
+    /// field is a `note` column ([`index::RowFacts`]) — so a restart, the
+    /// first tick, a stat difference before a read and a dirty hit each
+    /// re-index what changed, never the whole partition (46 s at 100K notes,
+    /// holding the index). A partition the index has no rows for is simply
+    /// indexed note by note. A pass that fails part-way may have recorded
     /// fingerprints of rows it never wrote, so it forgets the partition's
-    /// fingerprints: the next pass rebuilds the partition whole instead of
-    /// trusting them.
-    fn reindex_view(
-        &self,
-        p: &Partition,
-        loaded: &LoadedPartition,
-        full: bool,
-    ) -> Result<(), MemoryError> {
-        let result = self.reindex_view_once(p, loaded, full);
+    /// fingerprints and the next pass reads the rows again. The whole
+    /// rebuild stays where it is needed: a missing, recreated or
+    /// schema-bumped cache ([`Self::rebuild_index`]).
+    fn reindex_view(&self, p: &Partition, loaded: &LoadedPartition) -> Result<(), MemoryError> {
+        let result = self.reindex_view_once(p, loaded);
         if result.is_err() {
             self.fingerprints
                 .lock()
@@ -669,6 +673,55 @@ impl MemoryService {
                 .remove(p.partition_key());
         }
         result
+    }
+
+    /// The fingerprints of a partition's rows as the index holds them
+    /// (scale slice S1), and the ids of rows no fingerprint can stand for
+    /// — an id that does not parse — which the caller removes. A row whose
+    /// status or origin does not parse gets a fingerprint no note matches,
+    /// so it is written again.
+    fn fingerprints_from_rows(
+        &self,
+        key: &str,
+    ) -> Result<(HashMap<NoteId, Fingerprint>, Vec<String>), MemoryError> {
+        let mut known = HashMap::new();
+        let mut strays = Vec::new();
+        for row in self.index.row_facts(key)? {
+            let Ok(id) = NoteId::parse(&row.id) else {
+                strays.push(row.id);
+                continue;
+            };
+            let effective_status = row.effective_status.map(|s| match s {
+                index::EffectiveStatus::Active => EffectiveStatus::Active,
+                index::EffectiveStatus::Superseded => EffectiveStatus::Superseded,
+                index::EffectiveStatus::Archived => EffectiveStatus::Archived,
+                index::EffectiveStatus::Candidate => EffectiveStatus::Candidate,
+            });
+            let origin = Origin::parse(&row.origin);
+            let superseded_by: Option<Vec<NoteId>> = row
+                .superseded_by
+                .iter()
+                .map(|s| NoteId::parse(s).ok())
+                .collect();
+            let readable = effective_status.is_some() && origin.is_some() && superseded_by.is_some();
+            known.insert(
+                id,
+                Fingerprint {
+                    // An empty revision matches no file: the row is rewritten.
+                    revision: if readable { row.revision } else { String::new() },
+                    effective_status: effective_status.unwrap_or(EffectiveStatus::Active),
+                    origin: origin.unwrap_or(Origin::External),
+                    conflict: row.conflict,
+                    same_key_loser: row.same_key_loser,
+                    source_forgotten: row.source_forgotten,
+                    superseded_by: superseded_by.unwrap_or_default(),
+                    pinned: row.pinned,
+                    relative_path: row.relative_path,
+                    stat: (row.file.mtime_ns, row.file.size, row.file.inode),
+                },
+            );
+        }
+        Ok((known, strays))
     }
 
     /// Step 4 of a mutation (design §6): the index follows a write that is
@@ -681,7 +734,7 @@ impl MemoryService {
     /// search's stat scan or the next reconciliation tick (§5, 30 s), which
     /// re-index the partition whole.
     fn reindex_after_write(&self, p: &Partition, loaded: &LoadedPartition) {
-        if let Err(e) = self.reindex_view(p, loaded, false) {
+        if let Err(e) = self.reindex_view(p, loaded) {
             tracing::warn!(
                 partition = p.partition_key(),
                 "memory: the write landed, but the search index did not follow; \
@@ -690,49 +743,39 @@ impl MemoryService {
         }
     }
 
-    fn reindex_view_once(
-        &self,
-        p: &Partition,
-        loaded: &LoadedPartition,
-        full: bool,
-    ) -> Result<(), MemoryError> {
+    fn reindex_view_once(&self, p: &Partition, loaded: &LoadedPartition) -> Result<(), MemoryError> {
         let key = p.partition_key().to_string();
         let notes = Self::indexable(loaded);
         let mut fingerprints = self.fingerprints.lock().unwrap_or_else(|e| e.into_inner());
-        let known = fingerprints.entry(key.clone()).or_default();
-        if full || known.is_empty() {
-            let records: Vec<IndexRecord> = notes
-                .iter()
-                .map(|(v, stat)| Self::record_for(p, v, *stat))
-                .collect();
-            self.index.replace_partition(&key, &records)?;
-            known.clear();
-            for (view, stat) in &notes {
-                known.insert(view.note.id, Self::fingerprint(view, *stat));
+        if !fingerprints.contains_key(&key) {
+            let (seeded, strays) = self.fingerprints_from_rows(&key)?;
+            for id in strays {
+                self.index.remove(&key, &id)?;
             }
-        } else {
-            let mut seen: HashSet<NoteId> = HashSet::new();
-            let mut changed: Vec<IndexRecord> = Vec::new();
-            for (view, stat) in &notes {
-                seen.insert(view.note.id);
-                let fp = Self::fingerprint(view, *stat);
-                if known.get(&view.note.id) != Some(&fp) {
-                    changed.push(Self::record_for(p, view, *stat));
-                    known.insert(view.note.id, fp);
-                }
+            fingerprints.insert(key.clone(), seeded);
+        }
+        let known = fingerprints.get_mut(&key).expect("seeded above");
+        let mut seen: HashSet<NoteId> = HashSet::new();
+        let mut changed: Vec<IndexRecord> = Vec::new();
+        for (view, stat) in &notes {
+            seen.insert(view.note.id);
+            let fp = Self::fingerprint(view, *stat);
+            if known.get(&view.note.id) != Some(&fp) {
+                changed.push(Self::record_for(p, view, *stat));
+                known.insert(view.note.id, fp);
             }
-            let gone: Vec<NoteId> = known
-                .keys()
-                .filter(|id| !seen.contains(id))
-                .copied()
-                .collect();
-            for id in gone {
-                known.remove(&id);
-                self.index.remove(&key, &id.to_string())?;
-            }
-            if !changed.is_empty() {
-                self.index.upsert_many(&changed)?;
-            }
+        }
+        let gone: Vec<NoteId> = known
+            .keys()
+            .filter(|id| !seen.contains(id))
+            .copied()
+            .collect();
+        for id in gone {
+            known.remove(&id);
+            self.index.remove(&key, &id.to_string())?;
+        }
+        if !changed.is_empty() {
+            self.index.upsert_many(&changed)?;
         }
         drop(fingerprints);
         // Stamp the scan so `last_scan` says the rows were checked — the
@@ -1439,7 +1482,7 @@ impl MemoryService {
                 self.publish(&change);
                 changes.push(change);
             }
-            self.reindex_view(&fresh, &view, false)?;
+            self.reindex_view(&fresh, &view)?;
         }
         Ok(SyncReport {
             scanned,
