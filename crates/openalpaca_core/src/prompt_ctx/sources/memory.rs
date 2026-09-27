@@ -1255,4 +1255,52 @@ mod tests {
         drop(release);
         logs_assert(|lines: &[&str]| one_deadline_warn(lines, &["Helix", "vim", "Editor"]));
     }
+
+    /// The reply path's own entry points — `ContextSource::resolve`, which a
+    /// turn calls, and `memory_suggestions_block` — are bound by
+    /// [`REPLY_MEMORY_DEADLINE`] itself, not by some other bound: held, each
+    /// returns empty once that deadline has passed, and well before the
+    /// test's outer bound.
+    #[tokio::test]
+    async fn the_reply_path_waits_on_memory_for_the_reply_memory_deadline() {
+        let scene = scene();
+        store(
+            &scene,
+            "Editor preference",
+            "# Editor preference\n\nThe user prefers vim.\n",
+        );
+        let ctx = crate::tools::registry::ToolContext {
+            principal: Some(crate::security::policy::Principal::User {
+                global_id: ALICE.to_string(),
+            }),
+            owner_id: Some(ALICE.to_string()),
+            lane_key: Some(format!("{ALICE}:gui")),
+            source: Some("gui".into()),
+            ..Default::default()
+        };
+        let waited_for_the_deadline = |waited: std::time::Duration| {
+            assert!(
+                waited >= REPLY_MEMORY_DEADLINE
+                    && waited < REPLY_MEMORY_DEADLINE + std::time::Duration::from_secs(2),
+                "waited {waited:?}, where the deadline is {REPLY_MEMORY_DEADLINE:?}"
+            );
+        };
+        let release = stall_reads(&scene.service);
+
+        let started = std::time::Instant::now();
+        let sections = bounded(
+            scene
+                .source
+                .resolve(&request("what editor do I prefer?", Some(ALICE))),
+        )
+        .await;
+        assert!(sections.is_empty(), "the turn continues without memory");
+        waited_for_the_deadline(started.elapsed());
+
+        let started = std::time::Instant::now();
+        let block = bounded(memory_suggestions_block(scene.service.clone(), &ctx)).await;
+        assert!(block.is_none(), "the turn goes without the block");
+        waited_for_the_deadline(started.elapsed());
+        drop(release);
+    }
 }
