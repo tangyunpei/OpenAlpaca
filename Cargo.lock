@@ -3580,6 +3580,7 @@ dependencies = [
  "openalpaca_storage",
  "regex",
  "reqwest 0.13.4",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

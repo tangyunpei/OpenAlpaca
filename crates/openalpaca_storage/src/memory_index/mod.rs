@@ -481,7 +481,10 @@ const META_SCHEMA: &str = "schema_version";
 const META_STATE: &str = "state";
 /// The file's size right after the last rebuild (scale slice S5).
 const META_REBUILT_BYTES: &str = "rebuilt_bytes";
-/// Pages one FTS `merge` step may write before it yields.
+/// Pages one FTS `merge` step may write before it yields. Sent negated:
+/// a positive `merge` only merges a level holding `usermerge` (4) segments,
+/// which FTS5's own automerge never lets build up, so it found no work; a
+/// negative one merges every segment into one, as few as two at a time.
 const MERGE_PAGES: i64 = 256;
 /// The WAL is truncated to this after a checkpoint, whatever one large
 /// transaction grew it to (scale slice S5).
@@ -778,7 +781,7 @@ impl MemoryIndex {
                     let before = conn.total_changes();
                     conn.execute(
                         &format!(
-                            "INSERT INTO {table}({table}, rank) VALUES ('merge', {MERGE_PAGES})"
+                            "INSERT INTO {table}({table}, rank) VALUES ('merge', -{MERGE_PAGES})"
                         ),
                         [],
                     )?;

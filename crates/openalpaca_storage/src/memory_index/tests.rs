@@ -2485,6 +2485,21 @@ fn a_full_replace_leaves_the_wal_truncated() {
     assert_eq!(index.index_state().unwrap().notes, 300);
 }
 
+/// How many segments each full-text index holds, `(fts_word, fts_tri)`:
+/// one after a rebuild's `optimize`, more after later writes.
+fn fts_segments(index: &MemoryIndex) -> (i64, i64) {
+    let conn = index.lock();
+    let count = |table: &str| -> i64 {
+        conn.query_row(
+            &format!("SELECT count(DISTINCT segid) FROM {table}_idx"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    (count("fts_word"), count("fts_tri"))
+}
+
 /// Maintenance merges the FTS segments writes left, folds the WAL back and
 /// truncates it, and says how the file's size compares with its size after
 /// the last rebuild.
@@ -2508,7 +2523,18 @@ fn maintenance_merges_truncates_and_reports_the_growth() {
     index.upsert_many(&bulky("b", 60, "home-p")).unwrap();
     assert!(index.writes() > writes, "writes are counted");
     assert!(wal_bytes(&path) > 0);
+    let (word, tri) = fts_segments(&index);
+    assert!(
+        word > 1 && tri > 1,
+        "the writes left segments to merge: {word}, {tri}"
+    );
     let after = index.maintain(std::time::Duration::from_secs(5)).unwrap();
+    assert!(after.merge_steps > 0, "the merge did work: {after:?}");
+    assert_eq!(
+        fts_segments(&index),
+        (1, 1),
+        "each full-text index is one segment again"
+    );
     assert_eq!(wal_bytes(&path), 0, "the WAL is truncated");
     assert!(after.bytes > rebuilt.rebuilt_bytes, "{after:?}");
     assert_eq!(after.rebuilt_bytes, rebuilt.rebuilt_bytes);

@@ -617,6 +617,21 @@ fn a_damaged_cache_met_on_use_is_rebuilt_by_the_next_tick() {
 // S5 — the index is maintained (M1)
 // ============================================================================
 
+/// How many segments each full-text index of the cache file at `path`
+/// holds, `(fts_word, fts_tri)`, read on a connection of the test's own.
+fn fts_segments(path: &Path) -> (i64, i64) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let count = |table: &str| -> i64 {
+        conn.query_row(
+            &format!("SELECT count(DISTINCT segid) FROM {table}_idx"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    (count("fts_word"), count("fts_tri"))
+}
+
 fn wal_len(path: &Path) -> u64 {
     let mut wal = path.as_os_str().to_owned();
     wal.push("-wal");
@@ -654,7 +669,8 @@ fn store_many(service: &MemoryService, prefix: &str, n: usize) {
 }
 
 /// Once a tick passes with no index write since the one before — idle —
-/// the tick merges the FTS segments the writes left and truncates the WAL.
+/// the tick merges the FTS segments the writes left, into one per index,
+/// and truncates the WAL.
 /// A cache that has not outgrown its rebuilt size is not rebuilt.
 #[test]
 fn an_idle_tick_merges_the_index_and_truncates_its_wal() {
@@ -670,10 +686,21 @@ fn an_idle_tick_merges_the_index_and_truncates_its_wal() {
         .rebuilt_bytes;
     store_many(&service, "Pecan", 4);
     assert!(wal_len(&path) > 0, "the writes are in the WAL");
+    let (word, tri) = fts_segments(&path);
+    assert!(
+        word > 1 && tri > 1,
+        "the writes left segments to merge: {word}, {tri}"
+    );
     service.reconcile_owner(ALICE).unwrap();
     assert!(wal_len(&path) > 0, "a tick right after writes leaves it");
+    assert_eq!(fts_segments(&path), (word, tri), "and merges nothing");
     service.reconcile_owner(ALICE).unwrap();
     assert_eq!(wal_len(&path), 0, "the idle tick truncated it");
+    assert_eq!(
+        fts_segments(&path),
+        (1, 1),
+        "and merged each full-text index into one segment"
+    );
     let pass = service
         .index()
         .maintain(std::time::Duration::ZERO)
