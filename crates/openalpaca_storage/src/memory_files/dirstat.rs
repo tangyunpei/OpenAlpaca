@@ -150,7 +150,12 @@ pub(super) fn list_bulk(dir: &Path) -> io::Result<Option<Vec<(ScanEntry, StatKey
             )
         };
         if count < 0 {
-            return Err(io::Error::last_os_error());
+            let e = io::Error::last_os_error();
+            // Interrupted by a signal, the call returned no entry: ask again.
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(e);
         }
         if count == 0 {
             return Ok(Some(out));
@@ -164,7 +169,7 @@ pub(super) fn list_bulk(dir: &Path) -> io::Result<Option<Vec<(ScanEntry, StatKey
             if !is_note_name(&record.name) {
                 continue;
             }
-            let path = dir.join(&record.name);
+            let path = entry_path(dir, &record.name_bytes);
             match record.stat() {
                 // Not a regular file: a link, a directory.
                 Some(None) => {}
@@ -192,6 +197,16 @@ pub(super) fn list_bulk(dir: &Path) -> io::Result<Option<Vec<(ScanEntry, StatKey
             }
         }
     }
+}
+
+/// `dir` joined with an entry's name as the directory holds it — its bytes,
+/// not their lossy UTF-8 reading, which names the file only on a volume
+/// that allows no other (APFS, HFS+): the reference listing's
+/// `DirEntry::path`.
+#[cfg(target_os = "macos")]
+fn entry_path(dir: &Path, name: &[u8]) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    dir.join(std::ffi::OsStr::from_bytes(name))
 }
 
 /// One batch holds this many bytes of records: a few thousand notes.
@@ -232,6 +247,10 @@ struct Record {
     length: usize,
     returned_common: u32,
     returned_file: u32,
+    /// The name's bytes, as the directory holds them.
+    name_bytes: Vec<u8>,
+    /// The same, read as UTF-8 lossily — what [`ScanEntry::file_name`]
+    /// holds, as the reference listing's `to_string_lossy` gives it.
     name: String,
     kind: u32,
     mtime: (i64, i64),
@@ -285,6 +304,7 @@ impl Record {
             length,
             returned_common,
             returned_file,
+            name_bytes: name_bytes.to_vec(),
             name: String::from_utf8_lossy(name_bytes).into_owned(),
             kind,
             mtime,
@@ -394,5 +414,15 @@ mod tests {
 
         assert!(list_bulk(&d.join("absent")).unwrap().is_none());
         assert!(list_by_lstat(&d.join("absent")).unwrap().is_none());
+    }
+
+    /// An entry's path keeps its name's bytes — a name that is not UTF-8,
+    /// which a network or FUSE volume may hold, names the file itself, not
+    /// its lossy reading. (APFS refuses such a name, so no file is made.)
+    #[test]
+    fn an_entry_path_keeps_the_names_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = entry_path(Path::new("/notes"), b"a\xffb.md");
+        assert_eq!(path.as_os_str().as_bytes(), b"/notes/a\xffb.md");
     }
 }
