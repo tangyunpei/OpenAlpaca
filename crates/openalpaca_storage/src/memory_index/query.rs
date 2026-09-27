@@ -80,7 +80,7 @@ pub(crate) const STOP_WORDS: &[&str] = &[
 ];
 
 /// An identifier or path kept whole, with the parts the search falls back
-/// to when the whole matches nothing.
+/// to when the whole is found in no eligible note (design 09 §6.5.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Literal {
     pub text: String,

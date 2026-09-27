@@ -407,8 +407,9 @@ impl MemoryIndex {
         let mut chunks: HashMap<i64, ChunkEvidence> = HashMap::new();
         let mut exact: HashMap<i64, ExactEvidence> = HashMap::new();
 
-        // A literal's parts are routed only when the literal itself matches
-        // no eligible note.
+        // A literal's parts are routed only when the literal itself is found
+        // in no eligible note (`literal_has_hit`, design 09 §6.5.2): its
+        // prefix phrase can match a longer form and still leave it unfound.
         let mut words: Vec<String> = parsed.words.clone();
         for literal in &parsed.literals {
             if !literal_has_hit(&conn, literal, &filter)? {

@@ -465,11 +465,12 @@ mod query_tests {
             Some("\"tabs\"* OR \"spaces\"* OR \"drop\"* OR \"table\"* OR \"notes\"*")
         );
         // A quote inside a literal is doubled, never a delimiter; a
-        // one-character last token is never a prefix.
+        // one-letter last token is no prefix (a number would be one).
         let p = parsed("a\"b\"c");
         assert_eq!(p.word_match(&p.words).as_deref(), Some("\"a\"\"b\"\"c\""));
         // A literal rides beside the words; the search adds its parts to the
-        // word list when the literal matches nothing.
+        // word list when the literal is found in no eligible note (design 09
+        // §6.5.2).
         let p = parsed("title:tabs");
         assert_eq!(p.word_match(&p.words).as_deref(), Some("\"title:tabs\"*"));
         assert_eq!(
@@ -560,6 +561,10 @@ mod query_tests {
     fn a_term_is_a_prefix_only_by_its_last_token() {
         for term in [
             "prefer",
+            // A last token of exactly three characters: the threshold
+            // (§6.5.2, *Why from 3 characters*).
+            "tea",
+            "x_abc",
             "memory_file",
             "title:tabs",
             "rustfmt::skip",
@@ -1410,12 +1415,16 @@ fn a_cjk_term_is_a_substring_wherever_it_stands_in_a_run() {
     }
 }
 
-/// Design 09 §6.5.2: a literal's last token is a prefix only when it has
-/// three or more characters — `memory_file` finds `memory_files`, while
-/// `partner's` stays the phrase `partner s` and `x_ab*` (a caller's `*`)
-/// never finds `x_abc`.
+/// Design 09 §6.5.2: a term's last token is a prefix from three
+/// characters — exactly three included — and, since repair round 2 of
+/// LQ17, when it is a number after another token, whatever its length
+/// (`a_literal_ending_in_a_number_finds_the_text_it_begins`): `memory_file`
+/// finds `memory_files`, `x_abc` finds `x_abcd` and `tea` finds `teams`,
+/// while `partner's` stays the phrase `partner s` and `x_ab*` (a caller's
+/// `*`) never finds `x_abc`. At a threshold of four, `x_abc` and `tea`
+/// would find nothing (the L8 close-out's B1).
 #[test]
-fn a_literal_ends_in_a_prefix_only_from_three_characters() {
+fn a_last_token_is_a_prefix_from_three_characters_or_as_a_number() {
     let index = ready_index();
     index
         .upsert_many(&[
@@ -1423,6 +1432,8 @@ fn a_literal_ends_in_a_prefix_only_from_three_characters() {
             record("birthday", "Birthday", "My partner's birthday is in May.\n"),
             record("store", "Shopping", "The partner store opens at nine.\n"),
             record("flag", "Linker flag", "Pass x_abc to the linker.\n"),
+            record("longer", "Other flag", "Pass x_abcd when it links twice.\n"),
+            record("team", "Work", "The user's teams meet on Mondays.\n"),
         ])
         .unwrap();
     let r = index.search(&q("memory_file")).unwrap();
@@ -1430,7 +1441,13 @@ fn a_literal_ends_in_a_prefix_only_from_three_characters() {
     assert_eq!(hit(&r, "files").matches, vec![MatchReason::Phrase]);
     assert_eq!(ids(&index.search(&q("partner's")).unwrap()), vec!["birthday"]);
     assert_eq!(ids(&index.search(&q("x_ab*")).unwrap()), Vec::<&str>::new());
-    assert_eq!(ids(&index.search(&q("x_abc")).unwrap()), vec!["flag"]);
+    let r = index.search(&q("x_abc")).unwrap();
+    assert_eq!(ids(&r)[0], "flag");
+    assert!(ids(&r).contains(&"longer"), "{:?}", ids(&r));
+    assert_eq!(hit(&r, "longer").matches, vec![MatchReason::Phrase]);
+    let r = index.search(&q("tea")).unwrap();
+    assert_eq!(ids(&r), vec!["team"]);
+    assert_eq!(hit(&r, "team").matches, vec![MatchReason::Prefix]);
 }
 
 /// Design 09 §6.5.2 (repair round 2 of LQ17): a literal counts as found —
@@ -1657,9 +1674,11 @@ fn a_whole_word_in_a_body_is_not_crowded_out_by_a_prefix_that_fills_the_cap() {
 /// the cap adds a word's chunks only when there are at most as many as the
 /// cap. A word held whole by more bodies than that adds none of them, so the
 /// candidates are the prefix query's own 256 — which can hold none of those
-/// notes, when the longer words sit in titles. This pins the cliff the
-/// design names; adding the first 256 by rowid instead would rank arbitrary
-/// notes above every ranked prefix hit.
+/// notes whenever more than 256 chunks holding a longer form outrank them
+/// on BM25, by a header column as here or by a shorter row alone (the L8
+/// close-out's B2 corrects §6.5.4, which named titles only). This pins the
+/// cliff the design names; adding the first 256 by rowid instead would rank
+/// arbitrary notes above every ranked prefix hit.
 #[test]
 fn a_body_word_held_by_more_than_the_cap_adds_none_at_the_cap() {
     let index = ready_index();
@@ -3609,4 +3628,106 @@ fn maintenance_merges_truncates_and_reports_the_growth() {
     // A search still finds what the writes left.
     let found = index.search(&q("round 5")).unwrap();
     assert!(!found.hits.is_empty());
+}
+
+
+/// The L8 close-out's B1: a word held whole by **exactly** the cap's number
+/// of bodies is added at the cap (§6.5.2: "only when there are at most
+/// 256") — every top hit then holds `work` whole. At `< CANDIDATE_CAP` it
+/// would add none, and the top hits would be the `worker` titles.
+#[test]
+fn a_body_word_held_by_exactly_the_cap_is_added_at_the_cap() {
+    let index = ready_index();
+    let mut records: Vec<IndexRecord> = (0..CANDIDATE_CAP + 44)
+        .map(|i| {
+            record(
+                &format!("w{i:03}"),
+                &format!("Worker rota {i}"),
+                "The worker rota lives in the shared workspace; workers swap shifts.\n",
+            )
+        })
+        .collect();
+    for i in 0..CANDIDATE_CAP {
+        records.push(record(
+            &format!("c{i:03}"),
+            &format!("Day {i}"),
+            "Today I rode along the river to work.\n",
+        ));
+    }
+    index.rebuild(&records).unwrap();
+    let mut sq = q("where do I work?");
+    sq.limit = MAX_LIMIT;
+    let r = index.search(&sq).unwrap();
+    assert!(r.partial, "the word table's query filled its cap");
+    assert_eq!(r.count, MAX_LIMIT);
+    for h in &r.hits {
+        assert!(h.id.starts_with('c'), "{}: every top hit holds `work` whole", h.id);
+        assert_eq!(h.matches, vec![MatchReason::Term], "{}", h.id);
+    }
+}
+
+/// A body long enough that the chunker cuts at the next heading, ending in
+/// `last`.
+fn long_section(last: &str) -> String {
+    let mut s = String::new();
+    for i in 0..40 {
+        s.push_str(&format!(
+            "Line {i} of filler text that says nothing in particular here. "
+        ));
+    }
+    s.push_str(last);
+    s.push('\n');
+    s
+}
+
+/// The L8 close-out's B1 (design 09 §6.5.3: "a word matched as the beginning
+/// of such a token, and nowhere as a whole token, reports `prefix`"): a note
+/// holding `prefer` whole in one chunk and only as the beginning of
+/// `prefers` in another reports `term` alone — in the index and in the file
+/// scan. The chunk-level evidence says `prefix` in the second chunk; the
+/// note-level rule drops it.
+#[test]
+fn a_word_whole_in_one_chunk_drops_prefix_from_another() {
+    let index = ready_index();
+    let body = format!(
+        "# Editor\n\n## One\n{}\n## Two\n{}",
+        long_section("The user prefers vim."),
+        long_section("The user said prefer, exactly that word.")
+    );
+    assert!(chunker::chunk_body(&body).len() >= 2, "two chunks");
+    let records = vec![record("two", "Editor", &body)];
+    index.rebuild(&records).unwrap();
+    let r = index.search(&q("prefer")).unwrap();
+    assert_eq!(hit(&r, "two").matches, vec![MatchReason::Term]);
+    let scan = index.scan_search(&records, &q("prefer"), false).unwrap();
+    assert_eq!(hit(&scan, "two").matches, vec![MatchReason::Term]);
+}
+
+/// The L8 close-out's B1 (design 09 §6.5.2, repair round 2 of LQ17): the
+/// word table's probes of a literal are split at script boundaries, as the
+/// word table indexes text — so `看一遍commit-log` counts as found in a note
+/// holding it spaced (`看一遍 commit-log`), and its part `log` is not
+/// searched to drag in a decoy. Unsplit, the index and the file scan
+/// disagree.
+#[test]
+fn a_glued_literal_found_spaced_hides_its_parts() {
+    let literal = query::parse_query("看一遍commit-log").unwrap().literals[0].clone();
+    // Split, and exact: a term carrying an unsegmented character is never a
+    // prefix.
+    assert_eq!(
+        literal.word_probes(),
+        ("\"看一遍 commit-log\"".to_string(), None)
+    );
+    let index = ready_index();
+    let records = vec![
+        record("spaced", "发版", "每次 看一遍 commit-log 再发版。\n"),
+        record("decoy", "Deploy", "The deploy log is kept for a week.\n"),
+    ];
+    index.rebuild(&records).unwrap();
+    let r = index.search(&q("看一遍commit-log")).unwrap();
+    assert_eq!(ids(&r), vec!["spaced"]);
+    let scan = index
+        .scan_search(&records, &q("看一遍commit-log"), false)
+        .unwrap();
+    assert_eq!(ids(&scan), vec!["spaced"]);
 }
