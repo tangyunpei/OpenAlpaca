@@ -401,8 +401,9 @@ suggestion for good, as **Keep mine** does, and nothing else you said is
 forgotten. There is **no `Always allow`** on this card: each answer is for that
 one suggestion. A card nobody answers leaves the suggestion waiting in the
 Memory view, and it is not raised again in the app's or the CLI's chat until the
-daemon restarts. Only a suggestion learning took from your own words, or one
-the assistant saved on a turn you typed, is ever raised in chat — one
+daemon restarts. Only a suggestion that cites a message you typed — one
+learning took from your own words, or one the assistant saved in chat — is
+ever raised in chat — one
 OpenAlpaca inferred from its own replies or a tool's output waits in the
 Memory view — and only in the app's and the CLI's chat, never on Telegram,
 Discord or iMessage.
@@ -747,7 +748,8 @@ Two columns, in the Library's shape. The left one, top to bottom:
   note after the suggestion was made, the Replace is refused rather than
   retiring your edit unseen. A suggestion whose note was already replaced or
   archived some other way leaves this card; its Replace in the note's detail is
-  refused too, and the detail's Keep mine clears it. **Keep mine** dismisses the suggestion and leaves
+  refused too, and the detail's Keep mine clears it. Forgetting the note
+  dismisses its suggestions with it. **Keep mine** dismisses the suggestion and leaves
   your note as it was (*"Kept your note"*). Neither forgets anything else you
   said in the same message. A suggestion is never used in answers while it
   waits; one that was only inferred from the conversation says so.

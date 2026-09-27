@@ -824,7 +824,9 @@ note that shares your note's key, or edits your note: a candidate naming your
 note, which stays in force and in recall until you *Replace* or *Keep mine*,
 and the tool's result tells the model so (its `superseded` is empty; `replaces`
 names your note). With no `scope` it is stored in your note's partition. It
-cites the message you typed on that turn, so the assistant may raise it with
+cites the message you typed on that turn — and an edit's suggestion, a copy of
+your note's text, then what your note cites, so forgetting a message your note
+learned from takes the copy out too — so the assistant may raise it with
 `memory_confirm` on a later attended turn; the Memory view, `openalpaca memory
 suggestions`, the in-chat card and the `<memory_suggestions>` line say the
 assistant suggested it. Saving exactly what your note already says returns
@@ -836,7 +838,9 @@ before: archiving a note edited by hand or imported, and an edit of one that
 changes only `review_after` — after which it counts as learned and a
 replacement of it stands. Its replacement of a note learned from you replaces
 it at once, as learning's does. No surface
-archives a suggestion — it is replaced or kept. `memory_update` and `memory_forget` raise the ordinary
+archives a suggestion — it is replaced or kept — and forgetting a note
+withdraws every suggestion that would replace it, which could never be
+confirmed any more. `memory_update` and `memory_forget` raise the ordinary
 confirmation card, and an unattended turn (a scheduled skill, a piped
 `openalpaca chat`) is refused them outright. `memory_update` with `action:
 confirm` is refused **before** any card, since nothing the model does confirms
@@ -854,9 +858,9 @@ raised on that lane since the daemon started, and any other suggestion for the
 note it would replace — the lane is `{owner}:gui`, which every app and CLI chat
 conversation of that owner shares. The call raises the ordinary card with a
 preview the **daemon** wrote from the notes — which note, your
-text, the new text, why, the date of the newest message you typed that it
-cites ("from what you said on …", or "suggested by the assistant on …" for
-one the assistant wrote), with every hidden character of what it quotes left out and, when any
+text, the new text, why, and when — the date of the newest message you typed
+that it cites ("from what you said on …"), or for one the assistant wrote the
+day it saved it ("suggested by the assistant on …"), with every hidden character of what it quotes left out and, when any
 was, a last line saying how many (`This preview leaves out 2 hidden
 characters; the Memory view shows them as <U+…>.`) — and `per_call: true`. Only a person's **Approve** on that card, for
 that call, confirms it: the confirm is then a user-directed write (origin
@@ -929,7 +933,7 @@ addressed. Bodies and queries are closed objects — an unknown key is a `400`.
 | `GET /v1/memories/search` | Literal search: `q` (1–512 chars), `kind`, `scope`, `limit` (1–50, default 10), `historical`, `as_of`, and the model tool's `date_from`, `date_to` (inclusive, on the note's date — observed, else first saved; RFC 3339 or `YYYY-MM-DD`) and `order_by` (`relevance`, `newest`, `oldest`). `detail` defaults to `snippets` here: cited results with `freshness`, `conflict`, `same_key_loser`, `sources_status`, `valid_from` and `valid_to`; `detail=index` answers the tool's index rows. Either way with `count`, `partial` and `index_state`. Candidates are never returned. |
 | `GET /v1/memories/timeline` | `memory_timeline`: around exactly one of `anchor` (a note id), `q` (its first hit) or `date` (RFC 3339 or `YYYY-MM-DD`), the nearest `before` and `after` notes (0–20, default 5), in date order. Answers `{anchor, results, count, index_state}` — `anchor` is `{id}`, `{date}` or null when `q` matched nothing — with index rows whose `reason` is `before`, `anchor` or `after`, superseded, archived and ended notes marked by `status`, candidates never listed. An unknown anchor is `404`; no anchor, two, or a side over 20 is `400`; while the search index is being rebuilt it answers `503 MEMORY_INDEX_REBUILDING` at once. |
 | `GET /v1/memories/recently-learned` | The extractor's `extracted_user` notes that recall would use, newest first, each with `supersedes` (what it replaced) — `since` (RFC 3339, or a window like `7d`, `24h`, `30m`; default 7 days) and `limit`. A note that is not in force, loses its `fact_key` to another note, or cites a message a forget suppressed is not listed. An edit through this surface re-records a note as `user` and it leaves the list. |
-| `GET /v1/memories/suggestions` | The pending suggestions, newest first — `limit` (1–100, default 20). Each item: `id`, `revision`, `title`, `knowledge` (the suggested text, cut at 4 KiB), `knowledge_left_out` (how many characters that cut left out, 0 when whole), `reason`, `created_at`, `observed_at` (the cited message's time), `origin`, `scope`, `sources`, `older_count`, and `target: {id, revision, title, excerpt, excerpt_left_out, origin, scope}` — the note it would replace, as read now, its text cut at 600 bytes. Where several name one note only the newest is listed, and `older_count` counts the rest. A suggestion whose note is gone or no longer in force is not listed (undo still dismisses it). Records nothing. |
+| `GET /v1/memories/suggestions` | The pending suggestions, newest first — `limit` (1–100, default 20). Each item: `id`, `revision`, `title`, `knowledge` (the suggested text, cut at 4 KiB), `knowledge_left_out` (how many characters that cut left out, 0 when whole), `reason`, `created_at`, `observed_at` (the newest cited message's time, as learning records it; `null` for a suggestion the assistant saved in chat, which is how the app and the CLI tell it apart), `origin`, `scope`, `sources`, `older_count`, and `target: {id, revision, title, excerpt, excerpt_left_out, origin, scope}` — the note it would replace, as read now, its text cut at 600 bytes. Where several name one note only the newest is listed, and `older_count` counts the rest. A suggestion whose note is gone or no longer in force is not listed (undo still dismisses it). Records nothing. |
 | `GET /v1/memories/recently-used` | The in-memory ring of notes delivered to a model since the daemon started (`limit`, default 50, max 200): `{id, revision, reason, delivered_at, lane_key, task_id}`, `reason` as in `memory_used` — a note the recall only listed is recorded `index`, not as delivered. Cleared at restart. |
 | `GET /v1/memories/doctor` | The read-only report: every partition with its health, counts, malformed files, duplicate ids and conflicts, other owners' partitions as orphans, and stale/abandoned/orphaned move snapshots. Changes nothing. |
 | `POST /v1/memories` | Save a note: `title`, `body`, `kind`, and optionally `scope`, `aliases`, `tags`, `fact_key`, `sources` (`[{type: message\|task, id}]`, verified against the database), `valid_from`, `valid_to`, and `supersedes: {id, expected_revision}` to replace a note. `201` with the `memory_store` result and `ETag`; an exact duplicate is `200` with the existing id and `dedup: existing`; a moved `supersedes` target is `409`. |
