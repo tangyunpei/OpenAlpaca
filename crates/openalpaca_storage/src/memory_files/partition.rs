@@ -1691,6 +1691,20 @@ impl Partition {
             if input.replace_policy == ReplacePolicy::SuggestUnlessLearned
                 && view.derived.origin.is_saved()
             {
+                // A suggestion to replace a note in force with itself is that
+                // note — an exact duplicate, as with no `supersedes` below
+                // (repair round 1 of the L8 product slice).
+                if view.derived.effective_status == EffectiveStatus::Active && same_note(view) {
+                    let created = Created {
+                        id: view.note.id,
+                        revision: view.revision.clone(),
+                        origin: view.derived.origin,
+                        dedup: Dedup::Existing,
+                        superseded: Vec::new(),
+                        suggestion: false,
+                    };
+                    return Ok((created, loaded));
+                }
                 status = NoteStatus::Candidate;
             }
             // S1: a surface the user did not direct may not *replace* a note

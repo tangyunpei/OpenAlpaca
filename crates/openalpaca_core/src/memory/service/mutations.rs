@@ -616,8 +616,10 @@ impl MemoryService {
 /// suggestion carries — title, body, aliases, tags, `fact_key` or the
 /// validity window. `None` when it changes none of them — nothing, or only
 /// `review_after`, which a suggestion cannot carry: that is no replacement,
-/// and is answered as any edit is (G2 refuses it for a note the user saved;
-/// one that changes nothing writes nothing).
+/// and is answered as any edit is — G2 refuses it for a `user` note, while
+/// for a note edited by hand or imported it applies directly and re-records
+/// the note as `extracted_user`, as before LQ11 (design 03 §4, rev 7.5); one
+/// that changes nothing writes nothing.
 fn edited_content(before: &NoteView, patch: &NotePatch) -> Option<files::Note> {
     let mut edited = before.note.clone();
     patch.apply(&mut edited);

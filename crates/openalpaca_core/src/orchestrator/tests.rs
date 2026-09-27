@@ -7264,6 +7264,8 @@ async fn memory_suggestions_reach_only_an_attended_gui_turn() {
                     id: row.to_string(),
                     observed_at: None,
                 }],
+                // As learning stamps every note it writes (LQ14's datum).
+                observed_at: Some(chrono::Utc::now()),
                 supersedes: Some((scene.vim.id, scene.vim.revision.clone())),
                 replace_policy: ReplacePolicy::SuggestUnlessLearned,
                 provenance: Some(ExtractionProvenance::UserWords),

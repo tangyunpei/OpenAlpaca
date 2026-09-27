@@ -433,3 +433,218 @@ fn a_hand_edited_note_gets_a_suggestion_and_a_learned_one_is_replaced() {
         .unwrap();
     assert_eq!(learned_now.effective_status, EffectiveStatus::Superseded);
 }
+
+/// A note learning wrote from what the user said, under `key`, in the
+/// partition `ctx` names by `scope`.
+fn learned(
+    h: &Harness,
+    workspace: Option<&Path>,
+    scope: Option<NoteScope>,
+    key: &str,
+    title: &str,
+    knowledge: &str,
+) -> StoreOutput {
+    let row = h.message_row(knowledge);
+    h.service
+        .store(
+            &h.ctx(
+                ALICE,
+                workspace,
+                Surface::Extraction,
+                Capabilities::EXTRACTION,
+            )
+            .unwrap(),
+            StoreInput {
+                title: title.into(),
+                body: format!("# {title}\n\n{knowledge}\n"),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some(key.into()),
+                scope,
+                sources: vec![NoteSource {
+                    kind: SourceType::Message,
+                    id: row.to_string(),
+                    observed_at: None,
+                }],
+                observed_at: Some(chrono::Utc::now()),
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+
+/// Repair round 1 of the L8 product slice: an exact duplicate of a note the
+/// user saved — the same kind, title, text, key, aliases and tags — is that
+/// note, as `memory_store`'s description says, whether the chat model names
+/// it in `supersedes` or only shares its key. It is no "replace X with X"
+/// suggestion.
+#[test]
+fn an_exact_duplicate_of_a_saved_note_returns_it() {
+    let h = Harness::new();
+    let laptop = saved(&h, "user.laptop", "Laptop", "A ThinkPad X1 Carbon.");
+    let (_, tool) = chat_turn(&h, "My laptop is a ThinkPad X1 Carbon.", None);
+    let same = |supersedes: Option<(NoteId, String)>| StoreInput {
+        title: "Laptop".into(),
+        body: "# Laptop\n\nA ThinkPad X1 Carbon.\n".into(),
+        kind: Some(NoteKind::Preference),
+        fact_key: Some("user.laptop".into()),
+        supersedes,
+        ..Default::default()
+    };
+    for supersedes in [None, Some((laptop.id, laptop.revision.clone()))] {
+        let out = h.service.store(&tool, same(supersedes.clone())).unwrap();
+        assert_eq!(out.dedup, Dedup::Existing, "{supersedes:?}");
+        assert!(!out.suggestion, "{supersedes:?}");
+        assert_eq!(out.id, laptop.id, "{supersedes:?}");
+        assert!(out.superseded.is_empty(), "{supersedes:?}");
+    }
+    assert!(
+        h.service
+            .suggestions(&h.user(ALICE, None), None)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(read_note(&h, laptop.id).revision, laptop.revision);
+}
+
+/// Repair round 1 of the L8 product slice: the note a store meets under its
+/// key is the R9 winner of the partition it would land in — per partition,
+/// as R9 is — so a learned note holding the key in the project does not
+/// hide the note the user saved under it at home. The chat model's
+/// preference (a global kind) under that key is a suggestion replacing the
+/// saved note, not a second active note the saved one silently outranks.
+#[test]
+fn a_learned_note_in_the_project_does_not_hide_a_saved_note_at_home() {
+    let h = Harness::new();
+    let ws = h.workspace("lantern", Some(".git"));
+    learned(
+        &h,
+        Some(&ws),
+        Some(NoteScope::Project),
+        "user.editor",
+        "Editor here",
+        "In this project the user edits with vim.",
+    );
+    let editor = saved(&h, "user.editor", "Editor", "The user edits with vim.");
+    let (_, tool) = chat_turn(&h, "I use Helix everywhere now.", Some(&ws));
+    let out = h
+        .service
+        .store(
+            &tool,
+            StoreInput {
+                title: "Editor".into(),
+                body: "# Editor\n\nThe user edits with Helix.\n".into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("user.editor".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(out.suggestion, "{out:?}");
+    assert_eq!(out.superseded, vec![editor.id]);
+    assert_eq!(out.scope, NoteScope::Global);
+    assert_eq!(active_under(&h, "user.editor"), vec![editor.id]);
+}
+
+/// Repair round 1 of the L8 product slice: a replacement that names a
+/// learned note — or the chat model's own earlier suggestion — under the
+/// key of a note the user saved is a replacement of the saved note, so a
+/// suggestion naming it: replacing the named note alone would leave the new
+/// one under the saved note's key, silently outranked by it (or, for a note
+/// edited by hand or imported, outranking it).
+#[test]
+fn a_replacement_under_a_saved_notes_key_is_a_suggestion_for_the_saved_note() {
+    let h = Harness::new();
+    let editor = saved(&h, "user.editor", "Editor", "The user edits with vim.");
+    let loser = learned(
+        &h,
+        None,
+        None,
+        "user.editor",
+        "Editor again",
+        "The user edits with vim, still.",
+    );
+    let (_, tool) = chat_turn(&h, "I use Helix now.", None);
+    let store = |title: &str, knowledge: &str, target: &StoreOutput| {
+        h.service
+            .store(
+                &tool,
+                StoreInput {
+                    title: title.into(),
+                    body: format!("# {title}\n\n{knowledge}\n"),
+                    kind: Some(NoteKind::Preference),
+                    fact_key: Some("user.editor".into()),
+                    supersedes: Some((target.id, target.revision.clone())),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    };
+    let first = store("Editor", "The user edits with Helix.", &loser);
+    assert!(first.suggestion, "{first:?}");
+    assert_eq!(first.superseded, vec![editor.id]);
+    // The model names its own suggestion next: the same.
+    let second = store("Editor", "The user edits with Helix 25.", &first);
+    assert!(second.suggestion, "{second:?}");
+    assert_eq!(second.superseded, vec![editor.id]);
+    assert_eq!(
+        active_under(&h, "user.editor")
+            .into_iter()
+            .collect::<HashSet<_>>(),
+        HashSet::from([editor.id, loser.id])
+    );
+    assert_eq!(read_note(&h, editor.id).revision, editor.revision);
+}
+
+/// Repair round 1 of the L8 product slice (design 09 §4.2 rule 5): the
+/// in-chat card and the `<memory_suggestions>` line say the chat model's
+/// suggestion is the assistant's — its text is the model's, not the user's
+/// words as learning wrote them — as the Memory view and the CLI do. The
+/// date is still the turn's typed row's. Learning's suggestion keeps "from
+/// what you said".
+#[test]
+fn the_card_says_the_assistant_suggested_the_chat_models_suggestion() {
+    let h = Harness::new();
+    let laptop = saved(&h, "user.laptop", "Laptop", "A ThinkPad X1 Carbon.");
+    let (_, tool) = chat_turn(&h, "I switched to a MacBook Air M3.", None);
+    let out = h
+        .service
+        .store(
+            &tool,
+            StoreInput {
+                title: "Laptop".into(),
+                body: "# Laptop\n\nA MacBook Air M3.\n".into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("user.laptop".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(out.suggestion);
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let pending = h
+        .service
+        .pending_suggestions(&tool, 3, &HashSet::new())
+        .unwrap();
+    let [line] = &pending[..] else {
+        panic!("one pending suggestion: {pending:?}");
+    };
+    let rendered = line.render();
+    assert!(
+        rendered.ends_with(&format!("(suggested by the assistant on {today})\n")),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("what you said"), "{rendered}");
+    let preview = h
+        .service
+        .suggestion_preview(&tool, out.id, &out.revision, &laptop.revision)
+        .unwrap();
+    assert!(
+        preview
+            .text
+            .contains(&format!("Suggested by the assistant on {today}.")),
+        "{}",
+        preview.text
+    );
+    assert!(!preview.text.contains("what you said"), "{}", preview.text);
+}

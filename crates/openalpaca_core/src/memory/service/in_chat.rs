@@ -69,13 +69,37 @@ pub struct PendingSuggestion {
     pub target_origin: Origin,
     /// `YYYY-MM-DD` of the newest row the user typed that it cites.
     pub said_on: String,
+    /// The chat model wrote it, not learning ([`by_the_assistant`]).
+    pub by_assistant: bool,
+}
+
+/// Whether a suggestion of origin `extracted_user` was written by the chat
+/// model's memory tools rather than by learning — it has no `observed_at`,
+/// which the extractor alone sets (owner decision LQ14's datum). Its text is
+/// the chat model's own, so a card or a line says the assistant suggested
+/// it, not that the user said it (repair round 1 of the L8 product slice;
+/// design 09 §4.2 rule 5).
+pub(super) fn by_the_assistant(note: &Note) -> bool {
+    note.observed_at.is_none()
+}
+
+/// When, and from what, a suggestion came: "from what you said on <date>"
+/// for learning's, "suggested by the assistant on <date>" for the chat
+/// model's.
+fn whence(by_assistant: bool, said_on: &str) -> String {
+    if by_assistant {
+        format!("suggested by the assistant on {said_on}")
+    } else {
+        format!("from what you said on {said_on}")
+    }
 }
 
 impl PendingSuggestion {
     /// The line `<memory_suggestions>` carries (design 09 §4.5): the ids and
     /// revisions `memory_confirm` takes, then both titles and the date,
-    /// titles cut to [`SUGGESTION_LINE_TITLE_BYTES`]. Data, not an
-    /// instruction — when to call is in the tool's description.
+    /// titles cut to [`SUGGESTION_LINE_TITLE_BYTES`], and where it came
+    /// from ([`whence`]). Data, not an instruction — when to call is in the
+    /// tool's description.
     pub fn render(&self) -> String {
         let who = match self.target_origin {
             Origin::User => "saved by you",
@@ -84,14 +108,14 @@ impl PendingSuggestion {
             _ => "learned earlier",
         };
         format!(
-            "[memory-suggestion id={} revision={} replaces={} replaces_revision={}] “{}” ({who}) → “{}” (from what you said on {})\n",
+            "[memory-suggestion id={} revision={} replaces={} replaces_revision={}] “{}” ({who}) → “{}” ({})\n",
             self.id,
             self.revision,
             self.target,
             self.target_revision,
             one_line(&self.target_title, SUGGESTION_LINE_TITLE_BYTES),
             one_line(&self.title, SUGGESTION_LINE_TITLE_BYTES),
-            self.said_on,
+            whence(self.by_assistant, &self.said_on),
         )
     }
 }
@@ -105,6 +129,8 @@ pub(super) struct InChatSuggestion {
     pub target: NoteId,
     /// `YYYY-MM-DD` of the newest row the user typed that it cites.
     pub said_on: String,
+    /// The chat model wrote it, not learning ([`by_the_assistant`]).
+    pub by_assistant: bool,
 }
 
 impl MemoryService {
@@ -175,6 +201,7 @@ impl MemoryService {
         Ok(InChatSuggestion {
             target: *target,
             said_on,
+            by_assistant: by_the_assistant(&view.note),
         })
     }
 
@@ -221,7 +248,12 @@ impl MemoryService {
             )));
         }
         Ok(SuggestionPreview {
-            text: render_preview(target, &view.note, &suggestion.said_on),
+            text: render_preview(
+                target,
+                &view.note,
+                &suggestion.said_on,
+                suggestion.by_assistant,
+            ),
             target: suggestion.target,
         })
     }
@@ -352,6 +384,7 @@ impl MemoryService {
             let Some(said_on) = self.newest_user_row_date(&note)? else {
                 continue;
             };
+            let by_assistant = by_the_assistant(&note);
             out.push(PendingSuggestion {
                 id,
                 revision,
@@ -361,6 +394,7 @@ impl MemoryService {
                 target_title: target.title,
                 target_origin: target.origin,
                 said_on,
+                by_assistant,
             });
         }
         for key in dirty {
@@ -547,7 +581,9 @@ fn one_line_of(text: &str, served_cut: bool, max: usize) -> String {
 /// The preview of design 09 §4.4, from the notes as read: who wrote the
 /// text being replaced decides how it is named — the owner's own (saved,
 /// edited by hand, imported) is "yours", anything learning wrote is "the
-/// current note".
+/// current note"; and who wrote the suggestion decides where it is said to
+/// come from — "from what you said on <date>" for learning's, "suggested by
+/// the assistant on <date>" for the chat model's ([`by_the_assistant`]).
 ///
 /// It quotes the fields the Memory view's Suggestions card serves — both
 /// titles, the reason, the replaced note's text as its excerpt
@@ -564,7 +600,12 @@ fn one_line_of(text: &str, served_cut: bool, max: usize) -> String {
 /// ([`PREVIEW_TEXT_BYTES_UNDER_COUNT`]), so the 1 KiB bound — a backstop
 /// here, as on a preview that left nothing out — cuts nothing above it
 /// either: not the date, not the last line.
-fn render_preview(target: &NoteView, suggestion: &Note, said_on: &str) -> String {
+fn render_preview(
+    target: &NoteView,
+    suggestion: &Note,
+    said_on: &str,
+    by_assistant: bool,
+) -> String {
     let (named, label, kept) = match target.derived.origin {
         Origin::User => ("your saved note", "Yours", "Your note is kept"),
         Origin::External => ("your note (edited by hand)", "Yours", "Your note is kept"),
@@ -588,7 +629,7 @@ fn render_preview(target: &NoteView, suggestion: &Note, said_on: &str) -> String
         None => PREVIEW_TEXT_BYTES,
         Some(_) => PREVIEW_TEXT_BYTES_UNDER_COUNT,
     };
-    let when = format!("from what you said on {said_on}");
+    let when = whence(by_assistant, said_on);
     let why = match reason {
         Some(reason) => format!("Why: {reason} ({when})"),
         None => format!("{}{}.", when[..1].to_uppercase(), &when[1..]),

@@ -1866,8 +1866,10 @@ impl MemoryService {
     /// a **suggestion** — a candidate naming it, written as learning writes
     /// one (`ReplacePolicy::SuggestUnlessLearned`, design 09 §3.2 S1–S4) —
     /// that changes nothing until the user confirms it. So is, in the
-    /// lead's reading, a store with no `supersedes` whose `fact_key` names
-    /// such a note (the same-key case 09 §2.5 case 3 handles for learning).
+    /// lead's reading, a store whose `fact_key` names such a note — the R9
+    /// winner of that key where the store would land (the same-key case 09
+    /// §2.5 case 3 handles for learning; [`Self::route_tool_replacement`]).
+    /// An exact duplicate of such a note is that note (`dedup: existing`).
     /// The suggestion cites the turn's own row when the turn has one the
     /// user typed, so a later attended app turn may raise it for
     /// confirmation (design 09 §4.2 rule 5). A replacement of a learned note
@@ -1992,23 +1994,35 @@ impl MemoryService {
     /// it names goes through the suggestion policy, so the file layer — the
     /// one load under the partition's lock — makes a replacement of a note
     /// the user saved, edited by hand or imported a suggestion, and lets one
-    /// of a learned note stand. In the lead's reading a store with no
-    /// `supersedes` whose `fact_key`'s R9 winner is such a note names it —
-    /// the winner in the partitions the store may go to, the project's
-    /// first, as learning looks (ruling LR11). A replacement of such a note
-    /// cites the turn's own row the user typed, when there is one.
+    /// of a learned note stand. In the lead's reading a store under the key
+    /// of such a note is a replacement of it, since R9 would otherwise set
+    /// the two against each other in one partition (repair round 1 of the L8
+    /// product slice):
+    ///
+    /// - with no `supersedes`, the note it names is the first saved R9
+    ///   winner of its `fact_key` in the partitions the store may go to —
+    ///   the one `scope` names, else the project's and then the home one
+    ///   (ruling LR11) — and the store goes to that note's partition (LR10);
+    ///   with none, it lands where it would have, among no saved winner;
+    /// - with a `supersedes` naming a note that is not saved, a saved R9
+    ///   winner of the store's `fact_key` in that note's partition is named
+    ///   instead: replacing the named note alone would leave the new one
+    ///   under the saved note's key, silently outranked by it, or — over a
+    ///   note edited by hand or imported — outranking it.
+    ///
+    /// A replacement of a saved note cites the turn's own row the user
+    /// typed, when there is one.
     fn route_tool_replacement(
         &self,
         ctx: &MemoryAccessContext,
         resolved: &Resolved,
         input: &mut StoreInput,
     ) -> Result<(), MemoryError> {
-        let saved = match &input.supersedes {
-            Some((target, _)) => Self::find_note(resolved, target)?
-                .is_some_and(|(_, view)| view.derived.origin.is_saved()),
-            None => match &input.fact_key {
-                Some(key) => match Self::key_winner(resolved, input.scope, key)? {
-                    Some(winner) if winner.derived.origin.is_saved() => {
+        let saved = match (&input.supersedes, input.fact_key.as_deref()) {
+            (Some((target, _)), key) => match Self::find_note(resolved, target)? {
+                Some((_, view)) if view.derived.origin.is_saved() => true,
+                Some((p, _)) => match key.map(|key| Self::saved_key_winner(p, key)).transpose()? {
+                    Some(Some(winner)) if winner.note.id != *target => {
                         input.supersedes = Some((winner.note.id, winner.revision));
                         true
                     }
@@ -2016,6 +2030,27 @@ impl MemoryService {
                 },
                 None => false,
             },
+            (None, Some(key)) => {
+                let partitions: Vec<&Partition> = match input.scope {
+                    Some(scope) => resolved.in_scope(Some(scope)),
+                    None => resolved.project.iter().chain([&resolved.home]).collect(),
+                };
+                let mut found = None;
+                for p in partitions {
+                    if let Some(winner) = Self::saved_key_winner(p, key)? {
+                        found = Some(winner);
+                        break;
+                    }
+                }
+                match found {
+                    Some(winner) => {
+                        input.supersedes = Some((winner.note.id, winner.revision));
+                        true
+                    }
+                    None => false,
+                }
+            }
+            (None, None) => false,
         };
         if input.supersedes.is_some() {
             input.replace_policy = ReplacePolicy::SuggestUnlessLearned;
@@ -2033,33 +2068,23 @@ impl MemoryService {
         Ok(())
     }
 
-    /// The R9 winner of `key` a store may meet: the effectively active note
-    /// with that key that is no same-key loser and no conversation summary,
-    /// in the partition `scope` names, or — with none named — in the
-    /// project's partition first and then the home one (ruling LR11). The
-    /// first partition holding a winner answers.
-    fn key_winner(
-        resolved: &Resolved,
-        scope: Option<NoteScope>,
-        key: &str,
-    ) -> Result<Option<NoteView>, MemoryError> {
-        let partitions: Vec<&Partition> = match scope {
-            Some(scope) => resolved.in_scope(Some(scope)),
-            None => resolved.project.iter().chain([&resolved.home]).collect(),
-        };
-        for p in partitions {
-            let loaded = p.load()?;
-            let winner = loaded.views.iter().find(|v| {
+    /// The R9 winner of `key` in `p` — the effectively active note with that
+    /// key that is no same-key loser and no conversation summary; at most
+    /// one per key and partition — when it is a note the user saved, edited
+    /// by hand or imported.
+    fn saved_key_winner(p: &Partition, key: &str) -> Result<Option<NoteView>, MemoryError> {
+        let loaded = p.load()?;
+        Ok(loaded
+            .views
+            .iter()
+            .find(|v| {
                 v.note.fact_key.as_deref() == Some(key)
                     && v.derived.effective_status == EffectiveStatus::Active
                     && v.derived.same_key_loser_to.is_none()
                     && !files::is_conversation_summary(v.note.kind, v.derived.origin, v.note.status)
-            });
-            if let Some(winner) = winner {
-                return Ok(Some(winner.clone()));
-            }
-        }
-        Ok(None)
+            })
+            .filter(|v| v.derived.origin.is_saved())
+            .cloned())
     }
 
     /// The row the user typed for this context's turn, as a source (design

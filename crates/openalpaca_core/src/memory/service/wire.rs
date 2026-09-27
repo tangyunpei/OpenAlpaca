@@ -213,14 +213,19 @@ pub fn list_output_json(out: &ListOutput) -> Value {
     })
 }
 
-/// `memory_store`'s result (design §7a), plus `dedup` (§7b P8).
+/// `memory_store`'s result (design §7a), plus `dedup` (§7b P8). A
+/// suggestion supersedes nothing until the user confirms it, so its
+/// `superseded` is empty — the note it would replace is named by the
+/// tool's `replaces` (owner decision LQ11) — as `memory_update`'s is for
+/// the suggestion an edit becomes.
 pub fn store_output_json(out: &StoreOutput) -> Value {
+    let superseded: &[NoteId] = if out.suggestion { &[] } else { &out.superseded };
     json!({
         "id": out.id.to_string(),
         "revision": out.revision,
         "scope": out.scope.as_str(),
         "origin": out.origin.as_str(),
-        "superseded": ids_json(&out.superseded),
+        "superseded": ids_json(superseded),
         "dedup": match out.dedup {
             Dedup::Created => "created",
             Dedup::Existing => "existing",

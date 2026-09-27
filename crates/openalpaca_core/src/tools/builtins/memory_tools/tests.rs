@@ -347,6 +347,9 @@ async fn a_tool_call_never_mints_user_and_never_retires_a_user_note() {
     let says_suggestion = |out: &serde_json::Value| {
         assert_eq!(out["suggestion"], true, "{out}");
         assert_eq!(out["replaces"], approval.to_string(), "{out}");
+        // Nothing is superseded until the user confirms: `replaces` names
+        // the note, and both tools say so alike (repair round 1).
+        assert_eq!(out["superseded"], serde_json::json!([]), "{out}");
         let note = out["note"].as_str().unwrap_or_default();
         for words in [
             "suggestion",
@@ -913,6 +916,8 @@ fn suggestion_saying(
                 ),
                 kind: Some(NoteKind::Preference),
                 sources: rows.iter().map(|r| message(*r)).collect(),
+                // As learning stamps every note it writes (§2.5; LQ14's datum).
+                observed_at: Some(ts("2026-09-24T10:00:00Z")),
                 supersedes: Some((target.0, target.1.to_string())),
                 replace_policy: ReplacePolicy::SuggestUnlessLearned,
                 provenance: Some(provenance),
