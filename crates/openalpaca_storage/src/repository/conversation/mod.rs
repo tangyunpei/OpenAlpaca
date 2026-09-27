@@ -382,6 +382,46 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
+    /// The user row a turn wrote (`request_id`, migration 044), reading only
+    /// [`LearningRow`]'s columns; `None` when that turn wrote none. With the
+    /// turn's lane, the read walks that lane's rows newest first
+    /// (`idx_conv_msg_lane_id`), where a turn's own row is near the top. The
+    /// chat model's suggestion cites it (owner decision LQ11, design 09
+    /// §4.2 rule 5).
+    pub fn user_row_of_request(
+        &self,
+        lane_key: Option<&str>,
+        request_id: &str,
+    ) -> Result<Option<LearningRow>> {
+        self.db.with_connection(|conn| {
+            let row = match lane_key {
+                Some(lane) => conn
+                    .query_row(
+                        &format!(
+                            "SELECT {LEARNING_COLUMNS} FROM conversation_messages
+                             WHERE lane_key = ?1 AND request_id = ?2 AND role = 'user'
+                             ORDER BY id DESC LIMIT 1",
+                        ),
+                        rusqlite::params![lane, request_id],
+                        Self::row_to_learning_row,
+                    )
+                    .optional()?,
+                None => conn
+                    .query_row(
+                        &format!(
+                            "SELECT {LEARNING_COLUMNS} FROM conversation_messages
+                             WHERE request_id = ?1 AND role = 'user'
+                             ORDER BY id DESC LIMIT 1",
+                        ),
+                        rusqlite::params![request_id],
+                        Self::row_to_learning_row,
+                    )
+                    .optional()?,
+            };
+            Ok(row)
+        })
+    }
+
     /// Every message id one session holds, in id order. Deleting or clearing
     /// a conversation reads them first: its conversation summaries are the
     /// notes whose sources all lie among them (design 09 §13.3).

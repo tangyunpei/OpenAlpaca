@@ -43,6 +43,8 @@ mod episode_tests;
 mod scale_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tool_suggestion_tests;
 
 pub use context::{
     ATTENDED_CHAT_SOURCES, Attribution, Capabilities, ChatCommandTurn, MemoryAccessContext,
@@ -1784,11 +1786,24 @@ impl MemoryService {
 
     /// `memory_store` (design §7a): a new note in the partition the scope
     /// rule picks, or the exact duplicate's id; with `supersedes`, the
-    /// successor of a note in the same partition (design §6).
+    /// successor of a note in the same partition (design §6) — with no
+    /// `scope`, in that note's partition (ruling LR10).
+    ///
+    /// Owner decision LQ11 (2026-09-26): on the chat model's surface a
+    /// replacement of a note the user saved, edited by hand or imported is
+    /// a **suggestion** — a candidate naming it, written as learning writes
+    /// one (`ReplacePolicy::SuggestUnlessLearned`, design 09 §3.2 S1–S4) —
+    /// that changes nothing until the user confirms it. So is, in the
+    /// lead's reading, a store with no `supersedes` whose `fact_key` names
+    /// such a note (the same-key case 09 §2.5 case 3 handles for learning).
+    /// The suggestion cites the turn's own row when the turn has one the
+    /// user typed, so a later attended app turn may raise it for
+    /// confirmation (design 09 §4.2 rule 5). A replacement of a learned note
+    /// stands as before.
     pub fn store(
         &self,
         ctx: &MemoryAccessContext,
-        input: StoreInput,
+        mut input: StoreInput,
     ) -> Result<StoreOutput, MemoryError> {
         Self::require(ctx.capabilities.write, "memory_write")?;
         self.validate_store(ctx, &input)?;
@@ -1796,7 +1811,18 @@ impl MemoryService {
             return Err(MemoryError::invalid("kind is required"));
         };
         let resolved = self.resolve(ctx)?;
-        let target_scope = match (input.scope, resolved.project.is_some()) {
+        if ctx.surface == Surface::ModelTool {
+            self.route_tool_replacement(ctx, &resolved, &mut input)?;
+        }
+        // Ruling LR10: a replacement that names no scope goes to the
+        // partition of the note it replaces.
+        let replaced_scope = match (&input.supersedes, input.scope) {
+            (Some((target, _)), None) => {
+                Self::find_note(&resolved, target)?.map(|(p, _)| scope_of(p))
+            }
+            _ => None,
+        };
+        let target_scope = match (input.scope.or(replaced_scope), resolved.project.is_some()) {
             (Some(NoteScope::Project), false) => {
                 return Err(MemoryError::invalid(
                     "scope `project` needs a project, and this request resolved no project root \
@@ -1815,9 +1841,10 @@ impl MemoryService {
                     .expect("a project scope resolved a project partition"),
             ),
         };
-        // A `supersedes` target in the *other* partition: the link would be
-        // ignored (design §6, same partition), so the store is refused
-        // rather than silently creating an unlinked note.
+        // A `supersedes` target in the *other* partition than the scope
+        // named: the link would be ignored (design §6, same partition), so
+        // the store is refused rather than silently creating an unlinked
+        // note.
         if let Some((target, _)) = &input.supersedes {
             let other = match target_scope {
                 NoteScope::Global => resolved.project.as_ref(),
@@ -1884,6 +1911,104 @@ impl MemoryService {
             dedup: created.dedup,
             suggestion: created.suggestion,
             change,
+        })
+    }
+
+    /// Owner decision LQ11 on the chat model's surface: every replacement
+    /// it names goes through the suggestion policy, so the file layer — the
+    /// one load under the partition's lock — makes a replacement of a note
+    /// the user saved, edited by hand or imported a suggestion, and lets one
+    /// of a learned note stand. In the lead's reading a store with no
+    /// `supersedes` whose `fact_key`'s R9 winner is such a note names it —
+    /// the winner in the partitions the store may go to, the project's
+    /// first, as learning looks (ruling LR11). A replacement of such a note
+    /// cites the turn's own row the user typed, when there is one.
+    fn route_tool_replacement(
+        &self,
+        ctx: &MemoryAccessContext,
+        resolved: &Resolved,
+        input: &mut StoreInput,
+    ) -> Result<(), MemoryError> {
+        let saved = match &input.supersedes {
+            Some((target, _)) => Self::find_note(resolved, target)?
+                .is_some_and(|(_, view)| view.derived.origin.is_saved()),
+            None => match &input.fact_key {
+                Some(key) => match Self::key_winner(resolved, input.scope, key)? {
+                    Some(winner) if winner.derived.origin.is_saved() => {
+                        input.supersedes = Some((winner.note.id, winner.revision));
+                        true
+                    }
+                    _ => false,
+                },
+                None => false,
+            },
+        };
+        if input.supersedes.is_some() {
+            input.replace_policy = ReplacePolicy::SuggestUnlessLearned;
+        }
+        if saved
+            && let Some(row) = self.turn_row(ctx)
+            && input.sources.len() < MAX_SOURCES
+            && !input
+                .sources
+                .iter()
+                .any(|s| s.kind == row.kind && s.id == row.id)
+        {
+            input.sources.push(row);
+        }
+        Ok(())
+    }
+
+    /// The R9 winner of `key` a store may meet: the effectively active note
+    /// with that key that is no same-key loser and no conversation summary,
+    /// in the partition `scope` names, or — with none named — in the
+    /// project's partition first and then the home one (ruling LR11). The
+    /// first partition holding a winner answers.
+    fn key_winner(
+        resolved: &Resolved,
+        scope: Option<NoteScope>,
+        key: &str,
+    ) -> Result<Option<NoteView>, MemoryError> {
+        let partitions: Vec<&Partition> = match scope {
+            Some(scope) => resolved.in_scope(Some(scope)),
+            None => resolved.project.iter().chain([&resolved.home]).collect(),
+        };
+        for p in partitions {
+            let loaded = p.load()?;
+            let winner = loaded.views.iter().find(|v| {
+                v.note.fact_key.as_deref() == Some(key)
+                    && v.derived.effective_status == EffectiveStatus::Active
+                    && v.derived.same_key_loser_to.is_none()
+                    && !files::is_conversation_summary(v.note.kind, v.derived.origin, v.note.status)
+            });
+            if let Some(winner) = winner {
+                return Ok(Some(winner.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The row the user typed for this context's turn, as a source (design
+    /// 09 §1.2, §4.2 rule 5): the user row its request wrote, when that row
+    /// is user-authored — not the assistant's own follow-up, not a `/slash`
+    /// turn, not a long row that may be quoted text. `None` without a
+    /// request, a database or such a row.
+    fn turn_row(&self, ctx: &MemoryAccessContext) -> Option<NoteSource> {
+        let request_id = ctx.attribution.request_id?;
+        let db = self.db.as_ref()?;
+        let row = openalpaca_storage::ConversationRepository::new(db)
+            .user_row_of_request(ctx.attribution.lane_key.as_deref(), &request_id.to_string())
+            .inspect_err(|e| tracing::warn!("memory: the turn's own row could not be read: {e:#}"))
+            .ok()??;
+        crate::memory::learning::is_user_authored_row(&row).then(|| NoteSource {
+            kind: SourceType::Message,
+            id: row.id.to_string(),
+            observed_at: chrono::NaiveDateTime::parse_from_str(
+                &row.created_at,
+                "%Y-%m-%d %H:%M:%S",
+            )
+            .ok()
+            .map(|t| t.and_utc()),
         })
     }
 

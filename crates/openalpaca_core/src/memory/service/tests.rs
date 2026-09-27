@@ -2454,11 +2454,12 @@ fn edit(body: &str) -> UpdateAction {
 }
 
 /// Fixture 10 steps 3–7 and 18 steps 6–9: similarity replaces nothing; a
-/// tool call may neither edit, archive nor supersede a `user` note, and the
-/// refusal names the note, the Memory view and the CLI verb; the same edit
-/// through a user-directed surface succeeds and keeps the note `user`.
+/// tool call may not archive a `user` note, and the refusal names the note,
+/// the Memory view and the CLI verb; its edit or supersede of one is — owner
+/// decision LQ11 — a suggestion that leaves the note as it is; the same
+/// edit through a user-directed surface succeeds and keeps the note `user`.
 #[test]
-fn a_tool_call_may_not_edit_archive_or_supersede_a_user_note() {
+fn a_tool_call_may_not_archive_a_user_note_and_suggests_its_edit_or_supersede() {
     let h = Harness::new();
     let tool = h.tool(ALICE, None);
     let user = h.user(ALICE, None);
@@ -2491,7 +2492,7 @@ fn a_tool_call_may_not_edit_archive_or_supersede_a_user_note() {
         "nothing was replaced by similarity"
     );
 
-    let err = h
+    let suggested = h
         .service
         .store(
             &tool,
@@ -2504,30 +2505,26 @@ fn a_tool_call_may_not_edit_archive_or_supersede_a_user_note() {
                 ..Default::default()
             },
         )
-        .unwrap_err();
-    assert_eq!(err.class(), "authority_conflict");
-    let text = err.to_string();
-    assert!(
-        text.contains(&u.id.to_string())
-            && text.contains("Memory view")
-            && text.contains("openalpaca memory"),
-        "{text}"
-    );
+        .unwrap();
+    assert!(suggested.suggestion);
+    assert_eq!(suggested.origin, Origin::ExtractedUser);
     assert_eq!(read(&h, &user, u.id).revision, u.revision);
 
-    let err = h
+    let suggested = h
         .service
         .update(
             &tool,
             UpdateInput {
                 id: u.id,
                 expected_revision: u.revision.clone(),
-                action: edit("# Editor preference\n\nThe user prefers helix.\n"),
+                action: edit("# Editor preference\n\nThe user prefers kakoune.\n"),
                 reason: None,
             },
         )
-        .unwrap_err();
-    assert_eq!(err.class(), "authority_conflict");
+        .unwrap();
+    assert_ne!(suggested.id, u.id);
+    assert_eq!(suggested.status, NoteStatus::Candidate);
+    assert_eq!(read(&h, &user, u.id).revision, u.revision);
     let err = h
         .service
         .update(
@@ -2541,6 +2538,13 @@ fn a_tool_call_may_not_edit_archive_or_supersede_a_user_note() {
         )
         .unwrap_err();
     assert_eq!(err.class(), "authority_conflict");
+    let text = err.to_string();
+    assert!(
+        text.contains(&u.id.to_string())
+            && text.contains("Memory view")
+            && text.contains("openalpaca memory"),
+        "{text}"
+    );
     let current = read(&h, &user, u.id);
     assert_eq!(current.revision, u.revision);
     assert_eq!(current.status, NoteStatus::Active);

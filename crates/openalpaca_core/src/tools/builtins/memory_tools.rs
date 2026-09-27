@@ -680,8 +680,32 @@ impl BuiltInTool for MemoryStoreTool {
             .context_for_tool(ctx, Capabilities::READ_WRITE)
             .map_err(refuse)?;
         let out = blocking(move || service.store(&access, input).map_err(refuse)).await?;
-        Ok(wire::store_output_json(&out).to_string())
+        let mut json = wire::store_output_json(&out);
+        if out.suggestion
+            && let [replaces] = out.superseded.as_slice()
+        {
+            says_suggestion(&mut json, out.id, *replaces);
+        }
+        Ok(json.to_string())
     }
+}
+
+/// Owner decision LQ11: what a tool result says when the chat model's
+/// replacement of a note the user saved, edited by hand or imported was
+/// written as a suggestion — in words the model acts on: nothing changed
+/// yet, how the user confirms it, and that it is not to be stored again.
+fn says_suggestion(json: &mut serde_json::Value, id: NoteId, replaces: NoteId) {
+    json["suggestion"] = serde_json::Value::Bool(true);
+    json["replaces"] = serde_json::Value::String(replaces.to_string());
+    json["note"] = serde_json::Value::String(format!(
+        "Saved as a suggestion, not applied: note {replaces} is the user's own — they saved it, \
+         edited it by hand or imported it — so a change to it waits for them. Until the user \
+         confirms suggestion {id}, their note stays in use and yours is not recalled. The user \
+         confirms it in the Memory view (Suggestions: Replace, or Keep mine) or with \
+         `openalpaca memory confirm {id}`. On an attended app turn you may raise it with \
+         memory_confirm on a later turn, when it is listed in <memory_suggestions>. Tell the user \
+         it is waiting; do not store it again."
+    ));
 }
 
 pub fn memory_store_tool_definition() -> ToolDefinition {
@@ -694,8 +718,10 @@ pub fn memory_store_tool_definition() -> ToolDefinition {
             every project; other kinds go to the current project when there is one. The \
             note is recorded as learned from the user, not as the user's own edit, and the \
             user can review it. To replace an earlier note pass `supersedes` with its id and \
-            revision (you cannot replace a note the user saved themselves). An exact \
-            duplicate returns the existing note."
+            revision. Replacing a note the user saved, edited by hand or imported — or saving \
+            under such a note's `fact_key` — does not change it: yours is saved as a suggestion \
+            the user confirms, and the result says so. An exact duplicate returns the existing \
+            note."
             .to_string(),
         parameters: closed_schema(
             serde_json::json!({
@@ -836,7 +862,11 @@ impl BuiltInTool for MemoryUpdateTool {
             .context_for_tool(ctx, Capabilities::READ_WRITE)
             .map_err(refuse)?;
         let out = blocking(move || service.update(&access, input).map_err(refuse)).await?;
-        Ok(wire::update_output_json(&out).to_string())
+        let mut json = wire::update_output_json(&out);
+        if let Some(replaces) = out.suggested_for {
+            says_suggestion(&mut json, out.id, replaces);
+        }
+        Ok(json.to_string())
     }
 
     /// Design 09 §4.1: `confirm` is refused from a tool call, so it is
@@ -1064,8 +1094,10 @@ pub fn memory_update_tool_definition() -> ToolDefinition {
             (memory_read gives both, as do memory_list and memory_search with \
             `detail: \"snippets\"`); a changed revision is a conflict and nothing is written. \
             `edit` applies a `patch` to the named fields and keeps the rest byte for byte; \
-            `archive` retires the note from recall. A note the user saved \
-            themselves cannot be edited or archived from here. `confirm` (making a candidate \
+            `archive` retires the note from recall. An edit of a note the user saved, edited \
+            by hand or imported does not change it: the edited note is saved as a suggestion \
+            the user confirms, and the result says so. A note the user saved cannot be \
+            archived from here. `confirm` (making a candidate \
             active) is the user's own act and is refused here — tell the user to confirm it \
             in the app's Memory view or with `openalpaca memory confirm <id>`. Asks the user \
             for confirmation before it runs."

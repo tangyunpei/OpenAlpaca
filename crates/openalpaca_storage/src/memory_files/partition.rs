@@ -1714,11 +1714,13 @@ impl Partition {
                     current_revision: view.revision.clone(),
                 });
             }
-            // S2 (design 09 §3.2, ruling LR9): learning replaces a learned
-            // note outright, and suggests replacing any other — one the user
-            // saved, edited by hand or imported. The one load above decides.
+            // S2 (design 09 §3.2, ruling LR9): learning — and, since owner
+            // decision LQ11, the chat model's tool call — replaces a learned
+            // note outright, and suggests replacing one the user saved,
+            // edited by hand or imported. Any other target (a conversation
+            // summary) is replaced as asked. The one load above decides.
             if input.replace_policy == ReplacePolicy::SuggestUnlessLearned
-                && view.derived.origin != Origin::ExtractedUser
+                && view.derived.origin.is_saved()
             {
                 status = NoteStatus::Candidate;
             }

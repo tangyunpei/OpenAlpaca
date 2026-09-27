@@ -4027,6 +4027,81 @@ fn suggest_unless_learned_replaces_only_a_learned_target() {
     }
 }
 
+/// Owner decision LQ11 (the L8 product slice's P1): the chat model's
+/// `memory_store` writes a replacement under `SuggestUnlessLearned` too, so
+/// its replacement of a note the user saved, edited by hand or imported is
+/// a suggestion — S1 lets a candidate name a `user` note — and G2 holds: it
+/// retires nothing and mints no `user`. What the policy suggests for is
+/// exactly those three origins; any other target — a learned note, or a
+/// conversation summary (`extracted_other`) — is replaced as asked.
+#[test]
+fn suggest_unless_learned_suggests_for_a_saved_target_only_and_serves_a_tool_call() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let tool_change = |target: &NoteView| {
+        p.create(
+            NewNote {
+                supersedes: Some((target.note.id, target.revision.clone())),
+                replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                ..new_note(
+                    &target.note.title,
+                    "# Changed\n\nnew value\n",
+                    target.note.kind,
+                )
+            },
+            Actor::ModelTool,
+        )
+        .unwrap()
+    };
+    let saved = saved_note(&p, "Commute", "# Commute\n\nbus\n");
+    let edited = hand_edited(&p, "Style", "# Style\n\nsentence case\n");
+    let imported = p
+        .create(
+            new_note("Timezone", "# Timezone\n\nCET\n", NoteKind::Fact),
+            Actor::Extraction {
+                origin: Origin::Imported,
+            },
+        )
+        .unwrap();
+    let imported = p.read(&imported.id).unwrap();
+    for target in [&saved, &edited, &imported] {
+        let created = tool_change(target);
+        assert!(created.suggestion, "{:?}", target.derived.origin);
+        assert_eq!(created.origin, Origin::ExtractedUser);
+        assert_eq!(effective(&p, &target.note.id), EffectiveStatus::Active);
+    }
+
+    let summary = p
+        .create(
+            NewNote {
+                status: Some(NoteStatus::Active),
+                ..new_note(
+                    "Conversation on 2026-09-20: Lisbon",
+                    "# Conversation\n\nFlights.\n",
+                    NoteKind::Episode,
+                )
+            },
+            Actor::Extraction {
+                origin: Origin::ExtractedOther,
+            },
+        )
+        .unwrap();
+    let summary = p.read(&summary.id).unwrap();
+    let learned = p
+        .create(
+            new_note("Tea", "# Tea\n\ngreen\n", NoteKind::Preference),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    let learned = p.read(&learned.id).unwrap();
+    for target in [&summary, &learned] {
+        let created = tool_change(target);
+        assert!(!created.suggestion, "{:?}", target.derived.origin);
+        assert_eq!(p.read(&created.id).unwrap().note.status, NoteStatus::Active);
+        assert_eq!(effective(&p, &target.note.id), EffectiveStatus::Superseded);
+    }
+}
+
 /// S4: a restated change does not mint a second identical suggestion — the
 /// same fields and the same `supersedes` answer `dedup` with the pending
 /// candidate's id; a different wording is a second suggestion.

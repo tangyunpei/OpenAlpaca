@@ -1168,11 +1168,13 @@ pub enum ReplacePolicy {
     /// (design §4): every save, tool call and user-directed edit.
     #[default]
     Direct,
-    /// Learning's (design 09 §2.5): a replacement of a learned
-    /// (`extracted_user`) target stands; any other target gets a
-    /// *suggestion* — the note is written as a candidate, which retires
-    /// nothing until the user confirms it. Carried from Learning v2 L2 on;
-    /// the file layer honours it from L3 (S2).
+    /// Learning's (design 09 §2.5), and the chat model's `memory_store`
+    /// since owner decision LQ11: a target the user saved, edited by hand
+    /// or imported ([`super::Origin::is_saved`]) gets a *suggestion* — the
+    /// note is written as a candidate, which retires nothing until the user
+    /// confirms it; a replacement of any other target (a learned note)
+    /// stands. Carried from Learning v2 L2 on; the file layer honours it
+    /// from L3 (S2).
     SuggestUnlessLearned,
 }
 

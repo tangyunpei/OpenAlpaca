@@ -86,6 +86,14 @@ impl Origin {
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|o| o.as_str() == s)
     }
+
+    /// A note the user saved, edited by hand or imported — theirs, whatever
+    /// its rank (ruling LR9): learning replaces one only through a
+    /// suggestion the user confirms, and since owner decision LQ11 so does
+    /// the chat model's tool call.
+    pub fn is_saved(self) -> bool {
+        matches!(self, Origin::User | Origin::External | Origin::Imported)
+    }
 }
 
 impl fmt::Display for Origin {

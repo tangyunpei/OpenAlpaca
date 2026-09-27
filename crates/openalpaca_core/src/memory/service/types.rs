@@ -196,6 +196,11 @@ pub struct UpdateOutput {
     /// A confirmed suggestion: the other pending suggestions for the same
     /// note, each withdrawn after the confirm was written (S6).
     pub dismissed: Vec<NoteId>,
+    /// Owner decision LQ11: the chat model's edit of a note the user saved,
+    /// edited by hand or imported was written as a suggestion naming that
+    /// note — this one — and `id` is the suggestion's, not the note's.
+    /// `None` for every other update.
+    pub suggested_for: Option<NoteId>,
 }
 
 /// What a withdrawal did (design 09 §3.3, ruling LR12): the one note is

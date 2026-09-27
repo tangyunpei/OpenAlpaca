@@ -13,13 +13,15 @@
 
 use super::{
     ForgetInput, ForgetItem, ForgetItemStatus, ForgetOutput, MemoryAccessContext, MemoryChange,
-    MemoryError, MemoryService, Retained, UpdateAction, UpdateInput, UpdateOutput, WithdrawOutput,
+    MemoryError, MemoryService, Retained, Surface, UpdateAction, UpdateInput, UpdateOutput,
+    WithdrawOutput,
 };
 use openalpaca_storage::memory_files::{
-    self as files, EffectiveStatus, ForgetMode, ForgetStatus, LoadedPartition, MAX_NOTE_BYTES,
-    MAX_TITLE_CHARS, NoteId, NotePatch, NoteStatus, NoteView, Origin, Partition, SourceType,
-    is_valid_fact_key,
+    self as files, Dedup, EffectiveStatus, ForgetMode, ForgetStatus, LoadedPartition,
+    MAX_NOTE_BYTES, MAX_TITLE_CHARS, NewNote, NoteId, NotePatch, NoteStatus, NoteView, Origin,
+    Partition, ReplacePolicy, SourceType, is_valid_fact_key,
 };
+use openalpaca_storage::store::StoreScope;
 
 impl MemoryService {
     /// `memory_update` (design §7a): edit, archive or confirm under the
@@ -102,6 +104,17 @@ impl MemoryService {
                 )
             }
         };
+        // Owner decision LQ11, in the lead's reading: the chat model's edit
+        // of a note the user saved, edited by hand or imported that changes
+        // what a suggestion carries is a suggestion carrying the edit.
+        if ctx.surface == Surface::ModelTool
+            && let files::UpdateAction::Edit(patch) = &action
+            && before.derived.origin.is_saved()
+            && before.derived.effective_status == EffectiveStatus::Active
+            && let Some(edited) = edited_content(&before, patch)
+        {
+            return self.suggest_edit(ctx, &store_scope, &before, &input.expected_revision, edited);
+        }
         let _write = self
             .slots
             .begin_write(&Self::slot_key(&store_scope, &ctx.owner_key));
@@ -144,6 +157,70 @@ impl MemoryService {
             change,
             superseded: suggestion_targets,
             dismissed,
+            suggested_for: None,
+        })
+    }
+
+    /// Owner decision LQ11 on `memory_update`: the chat model's edit of a
+    /// note the user saved, edited by hand or imported, written as a
+    /// suggestion — a candidate with the edited content that names the note
+    /// at `expected_revision` (a moved note is `revision_conflict`, as for
+    /// any edit) and changes nothing until the user confirms it — through
+    /// the path a store's replacement takes (`SuggestUnlessLearned`). It
+    /// cites the turn's own row the user typed, when there is one.
+    fn suggest_edit(
+        &self,
+        ctx: &MemoryAccessContext,
+        store_scope: &StoreScope,
+        before: &NoteView,
+        expected_revision: &str,
+        edited: files::Note,
+    ) -> Result<UpdateOutput, MemoryError> {
+        let target = before.note.id;
+        let new = NewNote {
+            title: edited.title,
+            body: edited.body,
+            kind: Some(edited.kind),
+            status: Some(NoteStatus::Active),
+            aliases: edited.aliases,
+            tags: edited.tags,
+            fact_key: edited.fact_key,
+            sources: self.turn_row(ctx).into_iter().collect(),
+            observed_at: None,
+            valid_from: edited.valid_from,
+            valid_to: edited.valid_to,
+            supersedes: Some((target, expected_revision.to_string())),
+            replace_policy: ReplacePolicy::SuggestUnlessLearned,
+        };
+        let _write = self
+            .slots
+            .begin_write(&Self::slot_key(store_scope, &ctx.owner_key));
+        let partition = self.open_partition(store_scope, &ctx.owner_id)?;
+        let (created, view) = partition.create_viewed(new, ctx.actor(None))?;
+        self.reindex_after_write(&partition, &view);
+        let change = (created.dedup == Dedup::Created).then(|| MemoryChange {
+            partition_key: partition.partition_key().to_string(),
+            note_id: created.id,
+            change: "created",
+            revision: Some(created.revision.clone()),
+            origin: created.origin,
+            surface: Some(ctx.surface),
+        });
+        if let Some(change) = &change {
+            self.publish(change);
+        }
+        let status = view
+            .get(&created.id)
+            .map(|v| v.note.status)
+            .unwrap_or(NoteStatus::Candidate);
+        Ok(UpdateOutput {
+            id: created.id,
+            revision: created.revision,
+            status,
+            change,
+            superseded: Vec::new(),
+            dismissed: Vec::new(),
+            suggested_for: created.suggestion.then_some(target),
         })
     }
 
@@ -505,6 +582,26 @@ impl MemoryService {
             change,
         })
     }
+}
+
+/// The note `patch` would make of `before`, when it changes what a
+/// suggestion carries — title, body, aliases, tags, `fact_key` or the
+/// validity window. `None` when it changes none of them — nothing, or only
+/// `review_after`, which a suggestion cannot carry: that is no replacement,
+/// and is answered as any edit is (G2 refuses it for a note the user saved;
+/// one that changes nothing writes nothing).
+fn edited_content(before: &NoteView, patch: &NotePatch) -> Option<files::Note> {
+    let mut edited = before.note.clone();
+    patch.apply(&mut edited);
+    let b = &before.note;
+    let changed = edited.title != b.title
+        || edited.body != b.body
+        || edited.aliases != b.aliases
+        || edited.tags != b.tags
+        || edited.fact_key != b.fact_key
+        || edited.valid_from != b.valid_from
+        || edited.valid_to != b.valid_to;
+    changed.then_some(edited)
 }
 
 fn retained_note(forgotten: usize, cited_messages: bool, cited_tasks: bool) -> String {
