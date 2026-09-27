@@ -307,15 +307,15 @@ pub(crate) async fn extract_task_memories(
     );
     let usage_repo = LlmUsageRepository::new(&deps.db);
 
-    // LQ13: an answer that ended on its own is unwrapped; one cut at its
-    // output ceiling is held to the forms read before (the L8 fix slice's P1).
+    // LQ13: an answer that ended on its own is unwrapped — a value found in
+    // its prose only with the answer's shape; one cut at its output ceiling
+    // is held to the forms read before (the L8 fix slice's P1).
     let parsed = if response.finish_reason == openalpaca_llm::FinishReason::MaxTokens {
         parse_json_strict(&response.content)
     } else {
-        parse_json_answer(&response.content, |v| {
-            v.get("extractions")
-                .is_some_and(serde_json::Value::is_array)
-        })
+        read_json_answer(&response.content, is_extractions_answer)
+            .filter(|answer| answer.whole || is_extractions_answer(&answer.value))
+            .map(|answer| answer.value)
     };
     let parsed = match parsed {
         Some(v) => v,
@@ -483,6 +483,20 @@ fn read_item(value: &serde_json::Value) -> Option<Item> {
     })
 }
 
+/// A run's answer, by its shape (LQ13): `{"extractions": [...]}` whose
+/// every entry carries the `content` an item needs — so a fragment of the
+/// run's own output quoted in the model's prose is not taken for it.
+fn is_extractions_answer(value: &serde_json::Value) -> bool {
+    value
+        .get("extractions")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .all(|i| i.get("content").is_some_and(serde_json::Value::is_string))
+        })
+}
+
 /// The JSON value an answer carries (owner decision LQ13, 2026-09-26),
 /// whatever the caller's shape: [`parse_json_answer`] with no shape
 /// preferred. Shared with the chat-turn extractor and the conversation
@@ -491,53 +505,109 @@ pub fn parse_json_response(content: &str) -> Option<serde_json::Value> {
     parse_json_answer(content, |_| true)
 }
 
-/// The JSON value an answer carries (owner decision LQ13, 2026-09-26): a
-/// leading `<think>…</think>` block and a trailing `</think>` are stripped;
-/// then the answer is read whole, or from a fenced block, as before LQ13;
-/// else the complete top-level values found in the prose around it are
-/// taken — the last one of the shape `expected` names, else the last. A
-/// value the answer opens and never closes — a truncated one — makes the
-/// whole answer unreadable, whatever came before it, and nothing is dug out
-/// of a bracketed stretch that is not JSON. `None` when there is no value.
+/// The JSON value an answer carries (owner decision LQ13, 2026-09-26), as
+/// [`read_json_answer`] finds it, however it was found.
 pub fn parse_json_answer(
     content: &str,
     expected: impl Fn(&serde_json::Value) -> bool,
 ) -> Option<serde_json::Value> {
-    let body = strip_think(content);
-    if let Some(v) = parse_json_strict(body) {
-        return Some(v);
+    read_json_answer(content, expected).map(|answer| answer.value)
+}
+
+/// An answer's JSON value, and how it was found.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonAnswer {
+    pub value: serde_json::Value,
+    /// Read as the whole answer, or as a fenced block — the forms read
+    /// before LQ13 — rather than found among prose. A caller holds a value
+    /// found among prose to the shape it expects: a quoted fragment or a
+    /// draft is not an answer.
+    pub whole: bool,
+}
+
+/// The JSON value an answer carries (owner decision LQ13, 2026-09-26;
+/// tightened in repair round 1 of the L8 product slice):
+///
+/// 1. The whole answer, read as JSON, is the answer — whatever its strings
+///    say.
+/// 2. Else the answer is the text after the last `</think>`: the model's
+///    reasoning comes before it, whether or not it opened with `<think>`.
+///    When a `</think>` ends the answer — what a local thinking model leaves
+///    when its thinking is switched off — the text before it is the answer,
+///    read whole only (as JSON, or as one fenced block). An opening
+///    `<think>` never closed is reasoning with no answer after it: `None`.
+/// 3. That text is read whole, or from a fenced block, as before LQ13.
+/// 4. Else the complete top-level values found in its prose are taken: the
+///    last one of the shape `expected` names, else the last — which a
+///    caller then refuses for its shape ([`JsonAnswer::whole`] is false). A
+///    value the prose opens and never finishes — a truncated one — makes
+///    the whole answer unreadable. A bracket that closes but is not JSON is
+///    skipped whole, so nothing inside it is taken; one that never closes
+///    is skipped by itself, so a stray `[` in the prose does not hide the
+///    answer after it — and a value nested in a malformed wrapper that never
+///    closes is then found as the prose's next value.
+///
+/// `None` when there is no value.
+pub fn read_json_answer(
+    content: &str,
+    expected: impl Fn(&serde_json::Value) -> bool,
+) -> Option<JsonAnswer> {
+    let whole = |value| JsonAnswer { value, whole: true };
+    if let Ok(value) = serde_json::from_str(content.trim()) {
+        return Some(whole(value));
     }
-    let mut values = top_level_values(body)?;
+    let (text, prose) = answer_text(content)?;
+    if !prose {
+        return read_whole(text).map(whole);
+    }
+    if let Some(value) = parse_json_strict(text) {
+        return Some(whole(value));
+    }
+    let mut values = top_level_values(text)?;
     let pick = values
         .iter()
         .rposition(expected)
         .unwrap_or(values.len() - 1);
-    Some(values.swap_remove(pick))
+    Some(JsonAnswer {
+        value: values.swap_remove(pick),
+        whole: false,
+    })
 }
 
-/// A leading `<think>…</think>` block and a trailing `</think>` — what a
-/// local thinking model leaves when its thinking is switched off — are not
-/// the answer.
-fn strip_think(content: &str) -> &str {
+/// The part of an answer that is the answer, and whether values may be
+/// found among its prose (step 2 of [`read_json_answer`]): the text after
+/// the last `</think>`; the text before a `</think>` that ends the answer,
+/// read whole only; `None` when an opening `<think>` is never closed.
+fn answer_text(content: &str) -> Option<(&str, bool)> {
     const OPEN: &str = "<think>";
     const CLOSE: &str = "</think>";
-    let mut body = content.trim();
-    if let Some(rest) = body.strip_prefix(OPEN)
-        && let Some(end) = rest.find(CLOSE)
-    {
-        body = rest[end + CLOSE.len()..].trim();
+    let body = content.trim();
+    let (text, prose) = match body.rfind(CLOSE) {
+        Some(at) => match body[at + CLOSE.len()..].trim() {
+            "" => (body[..at].trim(), false),
+            after => (after, true),
+        },
+        None => (body, true),
+    };
+    (!text.contains(OPEN)).then_some((text, prose))
+}
+
+/// The text as one JSON value, or as one fenced block and nothing else.
+fn read_whole(text: &str) -> Option<serde_json::Value> {
+    if let Ok(value) = serde_json::from_str(text) {
+        return Some(value);
     }
-    if let Some(rest) = body.strip_suffix(CLOSE) {
-        body = rest.trim();
-    }
-    body
+    let fenced = text.strip_prefix("```")?.strip_suffix("```")?;
+    let fenced = fenced.strip_prefix("json").unwrap_or(fenced);
+    serde_json::from_str(fenced.trim()).ok()
 }
 
 /// The complete JSON values that begin at an `{` or `[` outside any value,
 /// in order. `None` when there is none, or when one begins and runs to the
 /// end unfinished — a truncated answer is never read in part. A bracket that
 /// does not begin a value — prose such as `[n1]`, or malformed JSON — is
-/// skipped to its matching bracket, so no value inside it is taken.
+/// skipped to its matching bracket, so no value inside it is taken; one
+/// with no matching bracket is skipped by itself.
 fn top_level_values(text: &str) -> Option<Vec<serde_json::Value>> {
     let mut out = Vec::new();
     let mut at = 0;

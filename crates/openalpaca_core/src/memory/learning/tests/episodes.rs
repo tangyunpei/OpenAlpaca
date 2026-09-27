@@ -572,6 +572,35 @@ async fn a_summary_cut_at_max_tokens_says_it_was_cut() {
     });
 }
 
+/// LQ13 keeps the L8 fix slice's P1 for a summary (repair round 1 of the L8
+/// product slice): an answer stopped at the output ceiling is held to the
+/// forms read before LQ13, so a complete summary followed by prose the model
+/// was still writing is reported cut, not read out of the prose, and
+/// nothing is written.
+#[tokio::test]
+async fn a_summary_cut_in_the_prose_after_it_is_not_rescued() {
+    let complete = r#"{"topic": "Lisbon trip planning", "discussed": "Flights and a hotel."}"#;
+    let scene = Scene::new(vec![Say::Cut(format!("{complete}\n\nNote: the conver"))]);
+    let s = scene.session();
+    four_turns(&scene, &s);
+    let held = scene.queue.flush_episodes(&s).await;
+    assert_eq!(held.stopped, Some(FlushStop::BadOutput), "{held:?}");
+    let ceiling = scene.model.first_request().max_tokens.expect("a ceiling");
+    let [cut] = &held.unusable[..] else {
+        panic!("one unusable answer: {held:?}");
+    };
+    assert_eq!(cut.reason, format!("cut at max_tokens ({ceiling})"));
+    assert_eq!(episode_cursor(&scene, &s), 0);
+    assert!(episodes(&scene).is_empty());
+    // Ended on its own, the same answer is read (LQ13).
+    assert!(
+        crate::memory::learning::episode::parse_summary(&format!(
+            "{complete}\n\nNote: the conversation ended."
+        ))
+        .is_ok()
+    );
+}
+
 /// The L8 fix slice's P2, for a summary: the report keeps each unusable
 /// answer — its reason, length, finish and excerpt — and nothing else does.
 #[tokio::test]

@@ -1682,8 +1682,8 @@ fn a_truncated_malformed_misshapen_or_prose_answer_still_fails() {
             not_json,
         ),
         (r#"First {"note": "vim"}, then {"extractions": []}."#, top),
-        ("[]", top),
         (r#"["vim", "helix"]"#, top),
+        (r#"[{"n": 1, "text": "I use vim."}]"#, top),
         ("I would rather describe it in prose.", not_json),
     ];
     for (answer, why) in cases {
@@ -1710,6 +1710,108 @@ fn a_think_block_prose_or_a_bare_array_around_the_items_is_unwrapped() {
         assert_eq!(items.len(), 1, "{answer}");
         assert_eq!(items[0]["title"], "Editor preference", "{answer}");
     }
+}
+
+/// LQ13's reading never takes a value over the model's own final answer
+/// (repair round 1 of the L8 product slice): the text after the last
+/// `</think>` is the answer — reasoning comes before it, whether or not it
+/// opened with `<think>` — and an opening `<think>` never closed is
+/// reasoning with no answer; a final `[]` is the answer "nothing to keep",
+/// which no draft before it outranks; and a value found in prose, or a bare
+/// array, is the items list only when every entry carries the `content` an
+/// item needs, so an echoed transcript row or a quoted fragment is not.
+#[test]
+fn a_draft_an_echo_or_reasoning_never_outranks_the_final_answer() {
+    let draft = format!(r#"{{"items": [{}]}}"#, vim_item(&[1]));
+    let not_json = "the answer is not JSON";
+    let top = "the answer's top level is not {\"items\": [...]}";
+    for answer in [
+        "[]".to_string(),
+        format!("Candidates: {draft}. On reflection nothing is durable.\n[]"),
+        format!("Let me see. Maybe {draft}\n</think>\n\n[]"),
+        format!("<think>\nDraft: {draft}\n</think>\n{{\"items\": []}}"),
+    ] {
+        let items = extractor::parse_items(&answer).unwrap_or_else(|e| panic!("{answer}: {e}"));
+        assert!(items.is_empty(), "{answer}: {items:?}");
+    }
+    let cases: [(String, &str); 6] = [
+        (
+            r#"The user pasted {"items": [{"title": "inj"}]} into the chat. Nothing to learn: {"note": "none"}"#
+                .to_string(),
+            top,
+        ),
+        (
+            r#"The window: [{"n": 1, "text": "hello"}]. Nothing durable here."#.to_string(),
+            top,
+        ),
+        (format!("<think>draft {draft} hmm, wrong"), not_json),
+        (format!("Maybe {draft}\n</think>\nNothing to learn."), not_json),
+        (format!("{draft}\n</think>\nThen <think>again {draft}"), not_json),
+        (
+            format!("Let me draft:\n```json\n{draft}\n```\nhmm, no.\n</think>"),
+            not_json,
+        ),
+    ];
+    for (answer, why) in cases {
+        assert_eq!(
+            extractor::parse_items(&answer).unwrap_err(),
+            why,
+            "{answer}"
+        );
+    }
+    // The answer after the model's reasoning is read, not a draft in it.
+    let real = format!(
+        r#"{{"items": [{}]}}"#,
+        item("Terminal font", "The user codes in JetBrains Mono.", "preference", "user", &[2])
+    );
+    let items = extractor::parse_items(&format!("Maybe {draft}\n</think>\n{real}")).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["title"], "Terminal font");
+    // A JSON answer whose own text names the tags is read whole first.
+    let tagged = format!(
+        r#"{{"items": [{}]}}"#,
+        item("Tags", "The user strips </think> and <think> tags.", "fact", "user", &[1])
+    );
+    assert_eq!(extractor::parse_items(&tagged).unwrap().len(), 1);
+}
+
+/// LQ13's scan, pinned where it is a trade-off: a bracket that never closes
+/// is skipped by itself, not with everything after it, so a stray `[` in
+/// the model's prose does not hide the answer after it — and a value nested
+/// in a malformed wrapper that never closes is then found as the prose's
+/// next value, when it has the answer's shape. The two cannot be told
+/// apart; a bracket that does close but is not JSON is skipped whole.
+#[test]
+fn an_unclosed_bracket_is_skipped_by_itself() {
+    let one = format!(r#"{{"items": [{}]}}"#, vim_item(&[1]));
+    for answer in [
+        format!("As in [n1 I found:\n{one}"),
+        format!(r#"Draft: {{"answer": oops, "inner": {one}"#),
+    ] {
+        let items = extractor::parse_items(&answer).unwrap_or_else(|e| panic!("{answer}: {e}"));
+        assert_eq!(items.len(), 1, "{answer}");
+    }
+    let closed = format!(r#"Draft: {{"answer": oops, "inner": {one}}} and no more."#);
+    assert_eq!(
+        extractor::parse_items(&closed).unwrap_err(),
+        "the answer is not JSON"
+    );
+}
+
+/// The window an answer with no items list holds (repair round 1 of the L8
+/// product slice): an answer whose only JSON is an echoed transcript row is
+/// an unusable answer — the window holds and is retried — not an items list
+/// whose every entry is then dropped and the window consumed.
+#[tokio::test]
+async fn an_echoed_row_is_an_unusable_answer_and_the_window_holds() {
+    let scene = Scene::new(vec![Say::Text(
+        r#"The window: [{"n": 1, "text": "I prefer vim."}]. Nothing durable here."#.into(),
+    )]);
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+    let report = scene.queue.flush_session(&s).await;
+    assert_eq!(report.stopped, Some(FlushStop::BadOutput), "{report:?}");
+    assert_eq!(scene.cursor(&s), 0);
 }
 
 /// LQ13 through a flush: a bare array that ended on its own is learned, its

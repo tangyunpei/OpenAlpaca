@@ -47,6 +47,67 @@ fn test_parse_json_response_unwraps_thinking_and_prose() {
     assert!(parse_json_response("Nothing worth keeping came out of this run.").is_none());
 }
 
+/// LQ13's reading (repair round 1 of the L8 product slice): the text after
+/// the last `</think>` is the answer; one `</think>` that ends the answer
+/// leaves the text before it, read whole; an opening `<think>` never closed
+/// is no answer; and a value found in prose is taken only with the shape
+/// the caller expects — here `{"extractions": [...]}` whose every entry
+/// carries `content` — so a quoted fragment or a draft the reasoning holds
+/// is not the answer.
+#[test]
+fn a_value_in_prose_or_reasoning_is_taken_only_with_the_expected_shape() {
+    let answer = r#"{"extractions": [{"content": "test"}]}"#;
+    let read = |input: &str| read_json_answer(input, is_extractions_answer);
+    for input in [
+        format!("Maybe {{\"extractions\": [{{\"content\": \"draft\"}}]}}\n</think>\n{answer}"),
+        format!(
+            "Quoted: {{\"extractions\": [{{\"title\": \"no content\"}}]}}. Then {answer}. And {{\"n\": 1}}."
+        ),
+    ] {
+        let found = read(&input).unwrap_or_else(|| panic!("{input}"));
+        assert_eq!(found.value["extractions"][0]["content"], "test", "{input}");
+    }
+    for input in [
+        format!("<think>draft {answer} hmm"),
+        format!("Draft {answer}\n</think>\nNothing to keep."),
+        format!("Draft {answer} hmm, no.\n</think>"),
+    ] {
+        assert!(read(&input).is_none(), "{input}");
+    }
+    // A quoted fragment of the wrong shape, alone in prose, is found — its
+    // caller refuses it, as it would refuse it whole.
+    let quoted = read(r#"The output said {"extractions": [{"title": "x"}]}."#).unwrap();
+    assert!(!quoted.whole && !is_extractions_answer(&quoted.value));
+    // Whole, it is read as before LQ13.
+    let whole = read(r#"{"extractions": [{"title": "x"}]}"#).unwrap();
+    assert!(whole.whole);
+}
+
+/// LQ13's scan, pinned where it is a trade-off: a bracket that never closes
+/// is skipped by itself — a stray `[` in prose does not hide the answer
+/// after it, and a value nested in a malformed wrapper that never closes is
+/// then found as prose's next value. A bracket that closes but is not JSON
+/// is skipped whole, so nothing inside it is taken.
+#[test]
+fn an_unclosed_bracket_is_skipped_by_itself_and_a_closed_one_whole() {
+    let answer = r#"{"extractions": [{"content": "test"}]}"#;
+    for input in [
+        format!("See [n1 and then {answer}"),
+        format!(r#"Draft: {{"answer": oops, "inner": {answer}"#),
+    ] {
+        let found =
+            read_json_answer(&input, is_extractions_answer).unwrap_or_else(|| panic!("{input}"));
+        assert_eq!(found.value["extractions"][0]["content"], "test", "{input}");
+    }
+    assert!(
+        read_json_answer(
+            &format!(r#"Draft: {{"answer": oops, "inner": {answer}}} and no more."#),
+            is_extractions_answer
+        )
+        .is_none()
+    );
+}
+
 #[test]
 fn test_parse_json_response_with_whitespace() {
     let input = "  \n  {\"extractions\": []}  \n  ";
@@ -82,6 +143,10 @@ mod through_the_service {
 
     impl Scene {
         fn new(reply: &str) -> Self {
+            Self::with(RecordingProvider::new(reply))
+        }
+
+        fn with(provider: Arc<RecordingProvider>) -> Self {
             let root = tempfile::tempdir().unwrap();
             let home = root.path().join("home");
             std::fs::create_dir_all(&home).unwrap();
@@ -107,7 +172,7 @@ mod through_the_service {
                 _root: root,
                 db,
                 service: Arc::new(service),
-                provider: RecordingProvider::new(reply),
+                provider,
                 cancel: CancellationToken::new(),
             }
         }
@@ -212,6 +277,35 @@ mod through_the_service {
         assert_eq!(note.sources.len(), 1, "{:?}", note.sources);
         assert_eq!(note.sources[0].kind, SourceType::Task);
         assert_eq!(note.sources[0].id, TASK);
+    }
+
+    /// LQ13 keeps the L8 fix slice's P1 for a run (repair round 1 of the L8
+    /// product slice): an answer stopped at its output ceiling is held to
+    /// the forms read before LQ13, so the `extractions` object in the prose
+    /// of a cut answer is not read — it is a JSON parse failure and nothing
+    /// is stored. The same answer ended on its own is read.
+    #[tokio::test]
+    async fn a_cut_answer_is_not_read_out_of_its_prose() {
+        let answer = format!("The run found one thing:\n{EVIDENCE_ITEM}\nAnd then the");
+        let cut = Scene::with(RecordingProvider::cut(answer.clone()));
+        let outcome = extract_task_memories(&cut.deps(), cut.params(OWNER, true)).await;
+        assert_eq!(
+            outcome,
+            TaskExtractionOutcome::Extracted(TaskExtractionReport::default())
+        );
+        assert!(cut.candidates().is_empty());
+        // One scene at a time: each holds the home store's guard.
+        drop(cut);
+
+        let ended = Scene::new(&answer);
+        let outcome = extract_task_memories(&ended.deps(), ended.params(OWNER, true)).await;
+        assert_eq!(
+            outcome,
+            TaskExtractionOutcome::Extracted(TaskExtractionReport {
+                stored: 1,
+                ..Default::default()
+            })
+        );
     }
 
     /// A failed or cancelled run teaches nothing: no note, no model call.

@@ -166,13 +166,22 @@ pub(crate) fn build_request(
 
 /// Rule 1: the answer carries `{"items": [...]}` — or, owner decision LQ13
 /// (2026-09-26), a bare array of item objects, which is the items list —
-/// read as [`crate::memory::task_extraction::parse_json_answer`] reads it:
-/// out of a `<think>` block or prose around it. `Err` names what the model
-/// sent instead — a failed attempt (§1.4), never a partial read. Every item
-/// then goes through rules 2–14 exactly as in a well-formed answer.
+/// read as [`crate::memory::task_extraction::read_json_answer`] reads it:
+/// after the model's reasoning, or out of prose around it. A value found in
+/// prose, and a bare array anywhere, is the answer only with every entry
+/// carrying the `content` an item needs (repair round 1 of the L8 product
+/// slice): an echoed transcript row or a quoted fragment is not an answer,
+/// and `[]` is the answer "nothing to keep". `Err` names what the model sent
+/// instead — a failed attempt (§1.4), never a partial read. Every item then
+/// goes through rules 2–14 exactly as in a well-formed answer.
 pub(crate) fn parse_items(content: &str) -> Result<Vec<serde_json::Value>, String> {
-    let value = crate::memory::task_extraction::parse_json_answer(content, is_items_answer);
-    items_of(value, true)
+    match crate::memory::task_extraction::read_json_answer(content, is_items_answer) {
+        Some(answer) if answer.whole || is_items_answer(&answer.value) => {
+            items_of(Some(answer.value), true)
+        }
+        Some(_) => Err(NOT_ITEMS.to_string()),
+        None => items_of(None, true),
+    }
 }
 
 /// [`parse_items`] for an answer the model stopped at its output ceiling: the
@@ -203,20 +212,27 @@ fn items_of(
 
 const NOT_ITEMS: &str = "the answer's top level is not {\"items\": [...]}";
 
-/// LQ13: an answer's shape — `{"items": [...]}`, or a bare items list.
+/// LQ13: an answer's shape — `{"items": [...]}` or a bare items list, every
+/// entry an item ([`is_items_list`]).
 fn is_items_answer(value: &serde_json::Value) -> bool {
     match value {
-        serde_json::Value::Object(object) => object.get("items").is_some_and(|v| v.is_array()),
+        serde_json::Value::Object(object) => object
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| is_items_list(items)),
         serde_json::Value::Array(items) => is_items_list(items),
         _ => false,
     }
 }
 
-/// A bare array is an items list when it holds at least one value and every
-/// value is an object: an empty one, or one of strings or numbers, is not an
-/// answer — nor a list found inside one.
+/// A list is an items list when every value is an object carrying a string
+/// `content` — the key rule 2 requires of an item. An empty list is one: the
+/// answer "nothing to keep". A list of strings, or of objects that are not
+/// items — a transcript row the model echoed — is not.
 fn is_items_list(items: &[serde_json::Value]) -> bool {
-    !items.is_empty() && items.iter().all(serde_json::Value::is_object)
+    items
+        .iter()
+        .all(|i| i.get("content").is_some_and(serde_json::Value::is_string))
 }
 
 /// An item that passed rules 2–10.

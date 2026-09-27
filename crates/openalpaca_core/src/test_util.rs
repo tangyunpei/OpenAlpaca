@@ -142,6 +142,16 @@ impl RecordingProvider {
         })
     }
 
+    /// The same, every answer stopped at its output ceiling
+    /// (`FinishReason::MaxTokens`): a model cut off mid-answer.
+    pub(crate) fn cut(reply: impl Into<String>) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            seen: std::sync::Mutex::new(Vec::new()),
+            reply: reply.into(),
+            finish_reason: openalpaca_llm::FinishReason::MaxTokens,
+        })
+    }
+
     /// The first request this provider saw, panicking when it saw none —
     /// "the call never reached a provider" is the failure worth reporting.
     pub(crate) fn first_request(&self) -> openalpaca_llm::ChatRequest {
