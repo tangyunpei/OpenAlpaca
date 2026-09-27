@@ -4,12 +4,13 @@
 //! The model asks and the person's card answers. The service maps exactly
 //! one act to origin `user` — a confirm whose [`HumanApproval`] the sandbox
 //! made on the one branch where a person approved this call — and only for a
-//! **suggestion from the user's own words**: a candidate of origin
+//! **suggestion that cites a message the user typed**: a candidate of origin
 //! `extracted_user` that names the note it replaces and cites at least one
-//! row the user typed (§4.2 rule 5). An inferred suggestion is confirmable
-//! only in the Memory view or the CLI, so a card never presents the
-//! assistant's inference as the user's words. Every other call from the same
-//! context stays `ModelTool` (G2).
+//! row the user typed (§4.2 rule 5) — learning's, or since LQ11 the chat
+//! model's own, whose card says the assistant suggested it. An inferred
+//! suggestion is confirmable only in the Memory view or the CLI, so a card
+//! never presents an inference from the conversation as the user's words.
+//! Every other call from the same context stays `ModelTool` (G2).
 //!
 //! The card's text is the daemon's, read here (§4.4), never an argument the
 //! model wrote; a Deny withdraws the suggestion (§4.3, LQ2) exactly as the
@@ -186,7 +187,7 @@ impl MemoryService {
         let refuse = |why: String| MemoryError::NotASuggestion {
             id,
             message: format!(
-                "note {id} {why}. Only a suggestion learned from the user's own words is confirmed in chat; the user confirms or keeps any other in the Memory view, or with `openalpaca memory confirm {id}` or `openalpaca memory undo {id}`."
+                "note {id} {why}. Only a suggestion that cites a message the user typed is confirmed in chat; the user confirms or keeps any other in the Memory view, or with `openalpaca memory confirm {id}` or `openalpaca memory undo {id}`."
             ),
         };
         if view.note.status != NoteStatus::Candidate || view.note.supersedes.is_empty() {
@@ -208,7 +209,7 @@ impl MemoryService {
                         .to_string()
                 }
                 other => format!(
-                    "is not from the user's own words as learning wrote it (its origin is `{other}`)"
+                    "is not a suggestion as learning or the assistant wrote it (its origin is `{other}`)"
                 ),
             }));
         }
@@ -226,8 +227,9 @@ impl MemoryService {
     /// and the note it replaces **at the revisions the model named**, both
     /// read here, at most [`PREVIEW_MAX_BYTES`]. A moved suggestion or target
     /// is `revision_conflict`, a gone one `not_found`, a target no longer in
-    /// force `invalid_input`, and anything but a suggestion from the user's
-    /// words `not_a_suggestion` — each before any card is raised.
+    /// force `invalid_input`, and anything but a suggestion confirmable in
+    /// chat (§4.2 rule 5) `not_a_suggestion` — each before any card is
+    /// raised.
     pub fn suggestion_preview(
         &self,
         ctx: &MemoryAccessContext,
@@ -276,10 +278,10 @@ impl MemoryService {
     }
 
     /// The pending suggestions a turn that offers `memory_confirm` is told
-    /// about (design 09 §4.5): suggestions from the user's own words
-    /// (§4.2 rule 5) whose target is still in force, newest first, one per
-    /// target, at most `limit`, leaving out any whose id or target is in
-    /// `skip` — what was already raised on this lane.
+    /// about (design 09 §4.5): suggestions that cite a message the user
+    /// typed (§4.2 rule 5) whose target is still in force, newest first,
+    /// one per target, at most `limit`, leaving out any whose id or target
+    /// is in `skip` — what was already raised on this lane.
     ///
     /// **On the reply path, so it reads the index, not the partitions**
     /// (ruling LR18): the candidates come from the index's `supersedes`
@@ -422,8 +424,8 @@ impl MemoryService {
         Ok(out)
     }
 
-    /// Whether `id` is a suggestion from the user's own words — what
-    /// `memory_update action: confirm`'s refusal names instead of the
+    /// Whether `id` is a suggestion confirmable in chat (§4.2 rule 5) —
+    /// what `memory_update action: confirm`'s refusal names instead of the
     /// Memory view (design 09 §4.1). Reads; records nothing.
     pub fn is_in_chat_suggestion(&self, ctx: &MemoryAccessContext, id: NoteId) -> bool {
         let Ok(resolved) = self.resolve(ctx) else {
@@ -437,7 +439,7 @@ impl MemoryService {
 
     /// `memory_confirm` (design 09 §4.2 rule 5): a person approved this call
     /// on its card, so the confirm of this one suggestion is theirs. Requires
-    /// a `ModelTool` context and a suggestion from the user's own words;
+    /// a `ModelTool` context and a suggestion confirmable in chat (rule 5);
     /// performs the confirm as a user-directed write — origin `user`,
     /// `memory_changed.surface` `"user"` — bound to the target's revision
     /// (S5), then S6's dismissals. Nothing else this context does changes.

@@ -37,10 +37,12 @@ pub enum MemoryError {
     /// `not_undoable` (design §6): the origin is no longer `extracted_user`.
     NotUndoable { id: NoteId, origin: Origin },
     /// `not_a_suggestion` (design 09 §4.2 rule 5): `memory_confirm` names a
-    /// note that is not a suggestion learned from the user's own words — not
-    /// a candidate naming a note it replaces, inferred from the conversation
-    /// (`extracted_other`), or citing no row the user typed. Confirmable, if
-    /// at all, only in the Memory view or the CLI.
+    /// note that is not a suggestion confirmable in chat — not a candidate
+    /// naming a note it replaces, inferred from the conversation
+    /// (`extracted_other`), or citing no row the user typed. Learning's
+    /// suggestion and, since LQ11, the chat model's own are confirmable in
+    /// chat when they cite one. Confirmable, if at all, only in the Memory
+    /// view or the CLI.
     NotASuggestion { id: NoteId, message: String },
     /// `approval_required` (design 09 §4.2 rule 6): `memory_confirm` ran
     /// without a person's Approve on its card for this call. Nothing is

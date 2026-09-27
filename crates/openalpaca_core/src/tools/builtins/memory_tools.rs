@@ -872,9 +872,12 @@ impl BuiltInTool for MemoryUpdateTool {
     /// Design 09 §4.1: `confirm` is refused from a tool call, so it is
     /// refused **before** the card — a person is no longer asked to approve
     /// something the service would then refuse. The refusal names
-    /// `memory_confirm` for a suggestion from the user's own words on a turn
-    /// that offers it (an attended `gui` turn, §4.1), and the Memory view
-    /// otherwise. Every other action raises the ordinary card.
+    /// `memory_confirm` for a suggestion confirmable in chat (§4.2 rule 5:
+    /// one that cites a message the user typed — learning's or, since LQ11,
+    /// the assistant's own) on a turn that offers it (an attended `gui`
+    /// turn, §4.1), and the Memory view otherwise. It says whose act the
+    /// confirm is, never whose words the suggestion holds. Every other
+    /// action raises the ordinary card.
     async fn confirmation_preview(
         &self,
         arguments: &serde_json::Value,
@@ -900,7 +903,7 @@ impl BuiltInTool for MemoryUpdateTool {
             };
         let message = if in_chat {
             format!(
-                "Note {id} is a suggestion from the user's own words, and confirming it is the user's act, not a tool call's: call memory_confirm with its id, its revision and the revision of the note it replaces, and the user answers on the card."
+                "Note {id} is a suggestion waiting for the user, and confirming it is the user's act, not a tool call's: call memory_confirm with its id, its revision and the revision of the note it replaces, and the user answers on the card."
             )
         } else {
             format!(
@@ -992,8 +995,8 @@ impl BuiltInTool for MemoryConfirmTool {
     }
 
     /// The card's text (design 09 §4.4), read from the notes at the named
-    /// revisions — never the model's words. A suggestion that is not from
-    /// the user's own words, or whose notes moved, is refused here, before
+    /// revisions — never the model's words. A note that is not confirmable
+    /// in chat (§4.2 rule 5), or whose notes moved, is refused here, before
     /// any card. A preview that renders marks the suggestion raised on this
     /// lane (§4.5).
     async fn confirmation_preview(

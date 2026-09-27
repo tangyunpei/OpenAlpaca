@@ -1324,6 +1324,14 @@ async fn an_inferred_suggestion_is_not_a_suggestion_in_chat() {
         .unwrap_err();
     assert!(err.starts_with("not_a_suggestion"), "{err}");
     assert!(err.contains("inferred from the conversation"), "{err}");
+    // Rule 5 as it reads since LQ11 (repair round 2 of the L8 product
+    // slice): what is confirmed in chat is a suggestion that cites a
+    // message the user typed — learning's or the assistant's — not only
+    // one "learned from the user's own words".
+    assert!(
+        err.contains("Only a suggestion that cites a message the user typed is confirmed in chat"),
+        "{err}"
+    );
     assert!(
         err.contains("Memory view")
             && err.contains(&format!("openalpaca memory confirm {}", inferred.id)),
@@ -2197,10 +2205,12 @@ fn pending_suggestions_parses_no_partition() {
     assert!(openalpaca_storage::memory_files::whole_parses_on_this_thread() > after);
 }
 
-/// Design 09 §4.1: a `memory_update` confirm of a suggestion from the user's
-/// words names `memory_confirm` on a turn that offers it — an attended `gui`
+/// Design 09 §4.1: a `memory_update` confirm of a suggestion confirmable in
+/// chat names `memory_confirm` on a turn that offers it — an attended `gui`
 /// turn — and the Memory view anywhere else, so the model is never pointed
-/// at a tool it does not have.
+/// at a tool it does not have. The refusal says whose act the confirm is,
+/// not whose words the suggestion holds: since LQ11 it may be the chat
+/// model's own (repair round 2 of the L8 product slice).
 #[tokio::test]
 async fn a_memory_update_confirm_of_a_suggestion_names_memory_confirm_in_chat() {
     let h = Harness::new();
@@ -2213,6 +2223,8 @@ async fn a_memory_update_confirm_of_a_suggestion_names_memory_confirm_in_chat() 
         .unwrap_err();
     assert!(err.starts_with("confirm_refused"), "{err}");
     assert!(err.contains("memory_confirm"), "{err}");
+    assert!(err.contains("a suggestion waiting for the user"), "{err}");
+    assert!(!err.contains("own words"), "{err}");
     let mut telegram = h.tool_ctx(ALICE);
     telegram.source = Some("telegram".into());
     telegram.lane_key = Some(format!("{ALICE}:telegram"));
