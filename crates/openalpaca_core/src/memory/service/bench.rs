@@ -10,7 +10,11 @@
 //! quadratic. The notes are 45 % `user`, 45 % `extracted_user` (some within
 //! *recently learned*'s week), 10 % `external`, one in ten with a
 //! `fact_key`, a fifth of the prose in Chinese, and one in a thousand (at
-//! least five) a suggestion from the user's own words.
+//! least five) a suggestion from the user's own words. A run may also seed
+//! tombstones (scale slice S9, the sceptic's M9: the L8 runs had one after
+//! 300 turns): withdrawals' — no links, no suppressed source — of notes that
+//! are not on disk, so they change no derived fact and cost only what a
+//! tombstone costs.
 //!
 //! **What each run prints**, once per cache mode (`on`: the service's
 //! default 128 MiB; `off`: `NoteParseCache::new(0)`, which caches nothing):
@@ -20,8 +24,9 @@
 //! chunk and `pending_suggestions` (the one learning read on the reply
 //! path), and the first and a quiet reconciliation tick. Once per run: the
 //! seed, `open_default` with a missing index cache (the boot rebuild) and a
-//! valid one, the sizes of the snapshot, `MEMORY.md` and the index cache,
-//! and the machine. Design 09 §6.4's proposed targets, not gates: recall p95
+//! valid one, the daemon's `open_default_deferred` with a missing one (it
+//! returns before the rebuild, scale slice S6), the sizes of the snapshot,
+//! `MEMORY.md` and the index cache, and the machine. Design 09 §6.4's proposed targets, not gates: recall p95
 //! and learned-`store` p95 at or under 100 ms at 100K notes.
 
 use super::*;
@@ -146,8 +151,9 @@ struct Seeded {
 
 /// `n` notes in the owner's home partition, written straight to disk with
 /// the snapshot built in one pass (design 09 §6.4: through repair's path,
-/// never `create`).
-fn seed(db: &Database, n: usize, mix: Mix, rng: &mut Rng) -> Seeded {
+/// never `create`), and `tombstones` withdrawals' tombstones of notes that
+/// are not on disk (scale slice S9).
+fn seed(db: &Database, n: usize, mix: Mix, tombstones: usize, rng: &mut Rng) -> Seeded {
     let started = Instant::now();
     let message_ids: Vec<i64> = (0..50)
         .map(|i| {
@@ -262,6 +268,15 @@ fn seed(db: &Database, n: usize, mix: Mix, rng: &mut Rng) -> Seeded {
             },
         );
     }
+    for t in 0..tombstones {
+        snapshot.tombstones.push(files::Tombstone {
+            id: NoteId::parse(&format!("f0{t:06x}-0000-4000-8000-000000000000")).unwrap(),
+            origin: Origin::ExtractedUser,
+            supersedes: Vec::new(),
+            suppressed_sources: Vec::new(),
+            forgotten_at: second(now),
+        });
+    }
     snapshot.save(p.snapshot_path(), now).unwrap();
     Seeded {
         notes: n,
@@ -346,6 +361,12 @@ const QUERIES: &[&str] = &[
 /// One run: seed `n` notes of `mix`, then measure each operation with the
 /// parse cache on and off.
 fn run_service_bench(name: &str, n: usize, mix: Mix) {
+    run_service_bench_with(name, n, mix, 0);
+}
+
+/// [`run_service_bench`] over a partition that also holds `tombstones`
+/// tombstones.
+fn run_service_bench_with(name: &str, n: usize, mix: Mix, tombstones: usize) {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -355,7 +376,7 @@ fn run_service_bench(name: &str, n: usize, mix: Mix) {
         .create_global_user(OWNER, None)
         .unwrap();
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    let seeded = seed(&db, n, mix, &mut rng);
+    let seeded = seed(&db, n, mix, tombstones, &mut rng);
     let iterations = match n {
         n if n >= 100_000 => 8,
         n if n >= 10_000 => 20,
@@ -365,7 +386,7 @@ fn run_service_bench(name: &str, n: usize, mix: Mix) {
     println!("{name}");
     println!("  machine: {}", machine());
     println!(
-        "  seeded {} notes ({mix:?} mix, {} body bytes, {} B avg, {} suggestions) in {:.2} s",
+        "  seeded {} notes ({mix:?} mix, {} body bytes, {} B avg, {} suggestions, {tombstones} tombstones) in {:.2} s",
         seeded.notes,
         seeded.body_bytes,
         seeded.body_bytes / seeded.notes.max(1),
@@ -387,6 +408,23 @@ fn run_service_bench(name: &str, n: usize, mix: Mix) {
         cold.as_secs_f64() * 1e3,
         warm.as_secs_f64() * 1e3,
         file_mib(&index_path) + file_mib(&PathBuf::from(format!("{}-wal", index_path.display())))
+    );
+    // The daemon's open (scale slice S6): over a missing cache it returns
+    // before the rebuild, which then runs off the request path.
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", index_path.display()));
+    }
+    let started = Instant::now();
+    let deferred = MemoryService::open_default_deferred(Some(db.clone()));
+    let open = started.elapsed();
+    let started = Instant::now();
+    deferred.run_pending_rebuild().unwrap();
+    let rebuild = started.elapsed();
+    drop(deferred);
+    println!(
+        "  open_default_deferred: missing index cache {:.1} ms (returns owing the rebuild), then the background rebuild {:.1} ms",
+        open.as_secs_f64() * 1e3,
+        rebuild.as_secs_f64() * 1e3
     );
 
     let mut counter = 0usize;
@@ -578,6 +616,21 @@ fn bench_service_10k_notes() {
     run_service_bench("bench_service_10k_notes", 10_000, Mix::Average);
 }
 
+/// The realistic baseline the sceptic names (M9): the 10K partition with one
+/// tombstone, as the L8 runs had after 300 turns — before scale slice S3
+/// every read-write open then listed `notes/` again (recall p95 ≈ 81 ms,
+/// against 59 ms without).
+#[test]
+#[ignore = "bench: cargo test --release -p openalpaca_core --lib -- --ignored bench_service --nocapture"]
+fn bench_service_10k_notes_one_tombstone() {
+    run_service_bench_with(
+        "bench_service_10k_notes_one_tombstone",
+        10_000,
+        Mix::Average,
+        1,
+    );
+}
+
 #[test]
 #[ignore = "bench: cargo test --release -p openalpaca_core --lib -- --ignored bench_service_100k --nocapture"]
 fn bench_service_100k_notes() {
@@ -603,7 +656,7 @@ fn the_service_bench_seeds_a_partition_the_service_reads() {
     IdentityRepository::new(&db)
         .create_global_user(OWNER, None)
         .unwrap();
-    let seeded = seed(&db, 60, Mix::Learned, &mut Rng(7));
+    let seeded = seed(&db, 60, Mix::Learned, 1, &mut Rng(7));
     assert_eq!(seeded.notes, 60);
     let loaded = Partition::open(&StoreScope::Home, OWNER)
         .unwrap()
@@ -612,6 +665,18 @@ fn the_service_bench_seeds_a_partition_the_service_reads() {
     assert_eq!(loaded.health, PartitionHealth::Ready);
     assert_eq!(loaded.views.len(), 60);
     assert!(loaded.malformed.is_empty());
+    let snapshot = Partition::open(&StoreScope::Home, OWNER)
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    assert_eq!(snapshot.tombstones.len(), 1, "the seeded tombstone");
+    assert!(
+        loaded
+            .views
+            .iter()
+            .all(|v| !v.derived.source_forgotten && v.derived.superseded_by.is_empty()),
+        "a withdrawal's tombstone changes no derived fact"
+    );
     assert!(loaded.views.iter().all(|v| v.derived.recorded));
     let service = MemoryService::new(Some(db.clone()), MemoryIndex::open_in_memory().unwrap());
     service.rebuild_index().unwrap();
