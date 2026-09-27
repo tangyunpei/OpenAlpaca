@@ -67,7 +67,7 @@ pub struct PendingSuggestion {
     pub target_revision: String,
     pub target_title: String,
     pub target_origin: Origin,
-    /// `YYYY-MM-DD` of the newest row the user typed that it cites.
+    /// `YYYY-MM-DD` it was said or suggested ([`MemoryService::said_on`]).
     pub said_on: String,
     /// The chat model wrote it, not learning ([`by_the_assistant`]).
     pub by_assistant: bool,
@@ -127,7 +127,7 @@ pub const SUGGESTION_LINE_TITLE_BYTES: usize = 60;
 pub(super) struct InChatSuggestion {
     /// The note it would replace (S5: exactly one).
     pub target: NoteId,
-    /// `YYYY-MM-DD` of the newest row the user typed that it cites.
+    /// `YYYY-MM-DD` it was said or suggested ([`MemoryService::said_on`]).
     pub said_on: String,
     /// The chat model wrote it, not learning ([`by_the_assistant`]).
     pub by_assistant: bool,
@@ -155,6 +155,23 @@ impl MemoryService {
             .filter(|row| crate::memory::learning::is_user_authored_row(row))
             .max_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)))
             .map(|row| row.created_at.chars().take(10).collect()))
+    }
+
+    /// The date a suggestion's card and line give (design 09 §4.4, §4.5),
+    /// `None` when it cites no row the user typed (§4.2 rule 5): for
+    /// learning's, the newest such row it cites — when the user said it;
+    /// for the chat model's ([`by_the_assistant`]), the day it was saved —
+    /// when the assistant suggested it, since an edit suggestion also
+    /// cites the older rows of the note it copies (repair round 2 of the
+    /// L8 product slice), as the Memory view and the CLI date it.
+    pub(super) fn said_on(&self, note: &Note) -> Result<Option<String>, MemoryError> {
+        Ok(self.newest_user_row_date(note)?.map(|said| {
+            if by_the_assistant(note) {
+                note.created_at.format("%Y-%m-%d").to_string()
+            } else {
+                said
+            }
+        }))
     }
 
     /// Rule 5 of design 09 §4.2 over one read note: a candidate naming the
@@ -195,7 +212,7 @@ impl MemoryService {
                 ),
             }));
         }
-        let Some(said_on) = self.newest_user_row_date(&view.note)? else {
+        let Some(said_on) = self.said_on(&view.note)? else {
             return Err(refuse("cites no message the user typed".to_string()));
         };
         Ok(InChatSuggestion {
@@ -381,7 +398,7 @@ impl MemoryService {
             if note.status != NoteStatus::Candidate || note.supersedes != [target.id] {
                 continue;
             }
-            let Some(said_on) = self.newest_user_row_date(&note)? else {
+            let Some(said_on) = self.said_on(&note)? else {
                 continue;
             };
             let by_assistant = by_the_assistant(&note);

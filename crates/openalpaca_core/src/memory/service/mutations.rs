@@ -18,8 +18,8 @@ use super::{
 };
 use openalpaca_storage::memory_files::{
     self as files, Dedup, EffectiveStatus, ForgetMode, ForgetStatus, LoadedPartition,
-    MAX_NOTE_BYTES, MAX_TITLE_CHARS, NewNote, NoteId, NotePatch, NoteStatus, NoteView, Origin,
-    Partition, ReplacePolicy, SourceType, is_valid_fact_key,
+    MAX_NOTE_BYTES, MAX_SOURCES, MAX_TITLE_CHARS, NewNote, NoteId, NotePatch, NoteSource,
+    NoteStatus, NoteView, Origin, Partition, ReplacePolicy, SourceType, is_valid_fact_key,
 };
 use openalpaca_storage::store::StoreScope;
 
@@ -167,7 +167,11 @@ impl MemoryService {
     /// at `expected_revision` (a moved note is `revision_conflict`, as for
     /// any edit) and changes nothing until the user confirms it — through
     /// the path a store's replacement takes (`SuggestUnlessLearned`). It
-    /// cites the turn's own row the user typed, when there is one.
+    /// cites the turn's own row the user typed, when there is one, and then
+    /// what the note it copies cites (repair round 2 of the L8 product
+    /// slice), at most [`MAX_SOURCES`]: its text is that note's, so a later
+    /// forget of a row the note learned from takes the copy out as it would
+    /// the note.
     fn suggest_edit(
         &self,
         ctx: &MemoryAccessContext,
@@ -185,7 +189,7 @@ impl MemoryService {
             aliases: edited.aliases,
             tags: edited.tags,
             fact_key: edited.fact_key,
-            sources: self.turn_row(ctx).into_iter().collect(),
+            sources: edit_sources(self.turn_row(ctx), &before.note.sources),
             observed_at: None,
             valid_from: edited.valid_from,
             valid_to: edited.valid_to,
@@ -232,7 +236,9 @@ impl MemoryService {
     /// moved or went since is left alone; the confirm stands whatever
     /// happens to these, so nothing here fails it. `view` is the partition
     /// right after the confirm, and is brought up to date with each
-    /// dismissal.
+    /// dismissal. A forget calls it too, with the forgotten note as both
+    /// (repair round 2 of the L8 product slice): a suggestion to replace a
+    /// forgotten note can never be confirmed.
     fn dismiss_others(
         &self,
         ctx: &MemoryAccessContext,
@@ -272,7 +278,7 @@ impl MemoryService {
                 Err(e) => {
                     tracing::warn!(
                         note = %id,
-                        "memory: a suggestion made moot by a confirm could not be dismissed: {e}"
+                        "memory: a suggestion made moot by a confirm or a forget could not be dismissed: {e}"
                     );
                     // A failure part-way may have left a tombstone: read
                     // what is there now, for the index.
@@ -286,7 +292,10 @@ impl MemoryService {
     }
 
     /// `memory_forget` (design §6, *Forget contract*): ids with expected
-    /// revisions, each its own single-note mutation, tombstone first.
+    /// revisions, each its own single-note mutation, tombstone first. A
+    /// forgotten note's pending suggestions — which could never be confirmed
+    /// now, and one of which may be the chat model's copy of its text — are
+    /// withdrawn after it (repair round 2 of the L8 product slice).
     pub fn forget(
         &self,
         ctx: &MemoryAccessContext,
@@ -335,10 +344,13 @@ impl MemoryService {
                 .slots
                 .begin_write(&Self::slot_key(&store_scope, &ctx.owner_key));
             let partition = self.open_partition(&store_scope, &ctx.owner_id)?;
-            let (outcomes, after) = partition.forget_viewed(&[(*id, expected.clone())], mode)?;
+            let (outcomes, mut after) =
+                partition.forget_viewed(&[(*id, expected.clone())], mode)?;
+            let mut forgot = false;
             for outcome in outcomes {
                 let status = match outcome.status {
                     ForgetStatus::Forgotten => {
+                        forgot = true;
                         cited_messages |= view
                             .note
                             .sources
@@ -366,6 +378,9 @@ impl MemoryService {
                     id: outcome.id,
                     status,
                 });
+            }
+            if forgot && mode == ForgetMode::Forget {
+                self.dismiss_others(ctx, &partition, &mut after, *id, &[*id]);
             }
             self.reindex_after_write(&partition, &after);
         }
@@ -653,4 +668,23 @@ fn retained_note(forgotten: usize, cited_messages: bool, cited_tasks: bool) -> S
         " Session logs and any external backup are separate data and are not touched by a forget.",
     );
     note
+}
+
+/// The sources of the chat model's edit suggestion ([`MemoryService`]'s
+/// `suggest_edit`): the turn's own typed row first — the row §4.2 rule 5
+/// reads — then the edited note's, each once, at most [`MAX_SOURCES`].
+fn edit_sources(turn: Option<NoteSource>, note: &[NoteSource]) -> Vec<NoteSource> {
+    let mut out: Vec<NoteSource> = turn.into_iter().collect();
+    for source in note {
+        if out.len() >= MAX_SOURCES {
+            break;
+        }
+        if !out
+            .iter()
+            .any(|s| s.kind == source.kind && s.id == source.id)
+        {
+            out.push(source.clone());
+        }
+    }
+    out
 }

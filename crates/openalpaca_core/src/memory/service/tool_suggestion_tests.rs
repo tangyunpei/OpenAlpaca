@@ -600,8 +600,8 @@ fn a_replacement_under_a_saved_notes_key_is_a_suggestion_for_the_saved_note() {
 /// in-chat card and the `<memory_suggestions>` line say the chat model's
 /// suggestion is the assistant's — its text is the model's, not the user's
 /// words as learning wrote them — as the Memory view and the CLI do. The
-/// date is still the turn's typed row's. Learning's suggestion keeps "from
-/// what you said".
+/// date is the day it was made (repair round 2). Learning's suggestion
+/// keeps "from what you said".
 #[test]
 fn the_card_says_the_assistant_suggested_the_chat_models_suggestion() {
     let h = Harness::new();
@@ -647,4 +647,290 @@ fn the_card_says_the_assistant_suggested_the_chat_models_suggestion() {
         preview.text
     );
     assert!(!preview.text.contains("what you said"), "{}", preview.text);
+}
+
+/// A cited message, as a note's source.
+fn message(row: i64) -> NoteSource {
+    NoteSource {
+        kind: SourceType::Message,
+        id: row.to_string(),
+        observed_at: None,
+    }
+}
+
+/// Repair round 2 of the L8 product slice: the chat model's edit of a
+/// saved note is a copy of that note's text, so it cites what the note
+/// cites — the turn's own typed row first, then the note's sources — and a
+/// later forget of a sibling citing the same row takes the confirmed copy
+/// out as it would have taken the note (design §6, the sibling cost C2
+/// accepts). Before, the copy cited the turn's row alone and kept the
+/// forgotten row's text in automatic recall.
+#[test]
+fn a_chat_models_edit_suggestion_cites_the_saved_notes_sources() {
+    let h = Harness::new();
+    let said = h.message_row("I live at 1 Elm Street, the blue house.");
+    let user = h.user(ALICE, None);
+    let home = h
+        .service
+        .store(
+            &user,
+            StoreInput {
+                title: "Home address".into(),
+                body: "# Home address\n\nThe user lives at 1 Elm Street.\n".into(),
+                kind: Some(NoteKind::Fact),
+                fact_key: Some("user.address".into()),
+                sources: vec![message(said)],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let sibling = h
+        .service
+        .store(
+            &h.ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+                .unwrap(),
+            StoreInput {
+                title: "House colour".into(),
+                body: "# House colour\n\nThe user's house is blue.\n".into(),
+                kind: Some(NoteKind::Fact),
+                sources: vec![message(said)],
+                observed_at: Some(chrono::Utc::now()),
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let (turn, tool) = chat_turn(&h, "Note that it is the blue house.", None);
+    let out = h
+        .service
+        .update(
+            &tool,
+            UpdateInput {
+                id: home.id,
+                expected_revision: home.revision.clone(),
+                action: UpdateAction::Edit(Patch {
+                    body: Some(
+                        "# Home address\n\nThe user lives at 1 Elm Street, the blue house.\n"
+                            .into(),
+                    ),
+                    ..Default::default()
+                }),
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(out.suggested_for, Some(home.id));
+    let cited: Vec<String> = read_note(&h, out.id)
+        .sources
+        .iter()
+        .map(NoteSource::suppression_key)
+        .collect();
+    assert_eq!(
+        cited,
+        vec![format!("message:{turn}"), format!("message:{said}")],
+        "the turn's typed row first, then what the saved note cites"
+    );
+
+    let confirmed = h
+        .service
+        .update(
+            &user,
+            UpdateInput {
+                id: out.id,
+                expected_revision: out.revision.clone(),
+                action: UpdateAction::Confirm {
+                    target_revision: Some(home.revision.clone()),
+                },
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(confirmed.status, NoteStatus::Active);
+    assert!(!read_note(&h, out.id).source_forgotten);
+    h.service
+        .forget(
+            &user,
+            ForgetInput {
+                targets: vec![(sibling.id, sibling.revision)],
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert!(
+        read_note(&h, out.id).source_forgotten,
+        "the forgotten row's text goes out with the copy that carries it"
+    );
+}
+
+/// Repair round 2 of the L8 product slice: forgetting a note withdraws the
+/// pending suggestions that would replace it — they can never be confirmed
+/// now — so the chat model's edit copy of a forgotten note's text is not
+/// left behind as a candidate the model can list and read back. The
+/// store path's suggestion for the same note goes too. A withdrawal
+/// suppresses nothing: the turn's row stays unforgotten.
+#[test]
+fn forgetting_a_note_withdraws_the_suggestions_that_would_replace_it() {
+    let h = Harness::new();
+    let editor = saved(&h, "user.editor", "Editor", "The user edits with vim.");
+    let (typed, tool) = chat_turn(&h, "I use the vim keymap in every editor.", None);
+    let keymap = h
+        .service
+        .store(
+            &h.ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+                .unwrap(),
+            StoreInput {
+                title: "Keymap".into(),
+                body: "# Keymap\n\nThe user uses the vim keymap everywhere.\n".into(),
+                kind: Some(NoteKind::Preference),
+                sources: vec![message(typed)],
+                observed_at: Some(chrono::Utc::now()),
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let copy = h
+        .service
+        .update(
+            &tool,
+            UpdateInput {
+                id: editor.id,
+                expected_revision: editor.revision.clone(),
+                action: UpdateAction::Edit(Patch {
+                    body: Some(
+                        "# Editor\n\nThe user edits with vim, and its keymap everywhere.\n".into(),
+                    ),
+                    ..Default::default()
+                }),
+                reason: None,
+            },
+        )
+        .unwrap();
+    let (_, later) = chat_turn(&h, "I moved to Helix.", None);
+    let stored = h
+        .service
+        .store(
+            &later,
+            StoreInput {
+                title: "Editor".into(),
+                body: "# Editor\n\nThe user edits with Helix.\n".into(),
+                kind: Some(NoteKind::Preference),
+                supersedes: Some((editor.id, editor.revision.clone())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(copy.suggested_for, Some(editor.id));
+    assert!(stored.suggestion);
+    let user = h.user(ALICE, None);
+    let candidates = |ctx: &MemoryAccessContext| -> Vec<NoteId> {
+        h.service
+            .list(
+                ctx,
+                ListInput {
+                    status: Some(NoteStatus::Candidate),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|i| i.id)
+            .collect()
+    };
+    assert_eq!(candidates(&tool).len(), 2);
+
+    let out = h
+        .service
+        .forget(
+            &user,
+            ForgetInput {
+                targets: vec![(editor.id, editor.revision.clone())],
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(out.results[0].status, ForgetItemStatus::Forgotten);
+    assert!(candidates(&tool).is_empty(), "{:?}", candidates(&tool));
+    assert!(candidates(&user).is_empty());
+    for id in [copy.id, stored.id] {
+        let err = h
+            .service
+            .read(
+                &tool,
+                ReadInput {
+                    id,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.class(), "not_found", "{id}");
+    }
+    assert!(
+        !read_note(&h, keymap.id).source_forgotten,
+        "a withdrawn suggestion suppresses nothing it cited"
+    );
+}
+
+/// Repair round 2 of the L8 product slice: the assistant's suggestion is
+/// dated the day it was made, on the card and the line, as the Memory view
+/// and the CLI date it — not by the newest typed row it cites, which for an
+/// edit made on a turn with no typed row of its own is the older row the
+/// copied note learned from.
+#[test]
+fn the_assistants_edit_suggestion_is_dated_the_day_it_was_made() {
+    let h = Harness::new();
+    let (said, _) = chat_turn(&h, "My editor is vim.", None);
+    h.db.with_connection(|c| {
+        c.execute(
+            "UPDATE conversation_messages SET created_at = '2026-01-02 03:04:05' WHERE id = ?1",
+            [said],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let editor = h
+        .service
+        .store(
+            &h.user(ALICE, None),
+            StoreInput {
+                title: "Editor".into(),
+                body: "# Editor\n\nThe user edits with vim.\n".into(),
+                kind: Some(NoteKind::Preference),
+                sources: vec![message(said)],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // A model tool with no request of its own: no turn row to cite.
+    let tool = h.tool(ALICE, None);
+    let out = h
+        .service
+        .update(
+            &tool,
+            UpdateInput {
+                id: editor.id,
+                expected_revision: editor.revision.clone(),
+                action: UpdateAction::Edit(Patch {
+                    body: Some("# Editor\n\nThe user edits with vim in a terminal.\n".into()),
+                    ..Default::default()
+                }),
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(out.suggested_for, Some(editor.id));
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let preview = h
+        .service
+        .suggestion_preview(&tool, out.id, &out.revision, &editor.revision)
+        .unwrap();
+    assert!(
+        preview
+            .text
+            .contains(&format!("Suggested by the assistant on {today}.")),
+        "{}",
+        preview.text
+    );
+    assert!(!preview.text.contains("2026-01-02"), "{}", preview.text);
 }
