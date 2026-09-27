@@ -31,7 +31,9 @@ mod timeline;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -343,6 +345,22 @@ pub struct MemoryIndex {
     conn: Mutex<Connection>,
     path: Option<PathBuf>,
     clock: Clock,
+    /// Row writes since open — what tells an idle index from a busy one
+    /// (scale slice S5).
+    writes: AtomicU64,
+}
+
+/// What one maintenance pass found and did (scale slice S5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Maintenance {
+    /// FTS merge steps that did work.
+    pub merge_steps: usize,
+    /// The file's size now (pages × page size), the WAL folded in.
+    pub bytes: u64,
+    /// Its size right after the last whole rebuild — the yardstick a
+    /// caller compares `bytes` with. A cache written before this was
+    /// recorded takes its size now.
+    pub rebuilt_bytes: u64,
 }
 
 impl fmt::Debug for MemoryIndex {
@@ -461,6 +479,13 @@ const RANK_WEIGHTS: &str = "bm25(4.0, 3.0, 1.5, 1.0)";
 
 const META_SCHEMA: &str = "schema_version";
 const META_STATE: &str = "state";
+/// The file's size right after the last rebuild (scale slice S5).
+const META_REBUILT_BYTES: &str = "rebuilt_bytes";
+/// Pages one FTS `merge` step may write before it yields.
+const MERGE_PAGES: i64 = 256;
+/// The WAL is truncated to this after a checkpoint, whatever one large
+/// transaction grew it to (scale slice S5).
+const JOURNAL_SIZE_LIMIT: i64 = 32 * 1024 * 1024;
 
 /// The tables an intact cache has. A file missing any is recreated.
 const EXPECTED_TABLES: &[&str] = &[
@@ -514,6 +539,7 @@ impl MemoryIndex {
             conn: Mutex::new(conn),
             path: Some(path.to_path_buf()),
             clock: Arc::new(Utc::now),
+            writes: AtomicU64::new(0),
         })
     }
 
@@ -527,6 +553,7 @@ impl MemoryIndex {
             conn: Mutex::new(conn),
             path: None,
             clock: Arc::new(Utc::now),
+            writes: AtomicU64::new(0),
         })
     }
 
@@ -565,6 +592,7 @@ impl MemoryIndex {
             conn: Mutex::new(conn),
             path: Some(path.to_path_buf()),
             clock: Arc::new(Utc::now),
+            writes: AtomicU64::new(0),
         })
     }
 
@@ -637,6 +665,7 @@ impl MemoryIndex {
     /// Synchronous, so a service write is searchable when this returns
     /// (design §5, *Freshness without a watcher*).
     pub fn upsert(&self, record: &IndexRecord) -> Result<usize> {
+        self.wrote();
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let chunks = upsert_in(&tx, record)?;
@@ -646,6 +675,7 @@ impl MemoryIndex {
 
     /// [`MemoryIndex::upsert`] for many notes in one transaction. All or none.
     pub fn upsert_many(&self, records: &[IndexRecord]) -> Result<RebuildReport> {
+        self.wrote();
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let mut report = RebuildReport::default();
@@ -710,14 +740,80 @@ impl MemoryIndex {
              INSERT INTO fts_tri(fts_tri) VALUES ('optimize');",
         )?;
         write_state(&tx, IndexState::Ready)?;
+        // The size the cache is judged against until the next rebuild
+        // (scale slice S5): the database's pages, the WAL's included.
+        let bytes = file_bytes(&tx)?;
+        write_rebuilt_bytes(&tx, bytes)?;
         tx.commit()?;
         // Fold the WAL back into the file: a rebuild's WAL is the whole index.
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
 
+    fn wrote(&self) {
+        self.writes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Row writes since open (scale slice S5): a caller that sees the same
+    /// number twice, a while apart, knows the index sat idle between.
+    pub fn writes(&self) -> u64 {
+        self.writes.load(Ordering::Relaxed)
+    }
+
+    /// Maintenance for an index at rest (scale slice S5, M1): FTS `merge`
+    /// steps — each bounded, the index released between them — until
+    /// neither table has merge work left or `budget` is spent, then the WAL
+    /// folded back into the file and truncated. Reports the file's size and
+    /// its size after the last rebuild, so the caller can tell a cache that
+    /// has only grown with its notes from one that has bloated. Changes no
+    /// row.
+    pub fn maintain(&self, budget: Duration) -> Result<Maintenance> {
+        let started = Instant::now();
+        let mut merge_steps = 0;
+        loop {
+            let mut worked = false;
+            {
+                let conn = self.lock();
+                for table in ["fts_word", "fts_tri"] {
+                    let before = conn.total_changes();
+                    conn.execute(
+                        &format!(
+                            "INSERT INTO {table}({table}, rank) VALUES ('merge', {MERGE_PAGES})"
+                        ),
+                        [],
+                    )?;
+                    // FTS5: a delta under two means the step did no work.
+                    if conn.total_changes() - before >= 2 {
+                        worked = true;
+                        merge_steps += 1;
+                    }
+                }
+            }
+            if !worked || started.elapsed() >= budget {
+                break;
+            }
+        }
+        let conn = self.lock();
+        let bytes = file_bytes(&conn)?;
+        let rebuilt_bytes = match read_rebuilt_bytes(&conn)? {
+            Some(b) => b,
+            None => {
+                write_rebuilt_bytes(&conn, bytes)?;
+                bytes
+            }
+        };
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(Maintenance {
+            merge_steps,
+            bytes,
+            rebuilt_bytes,
+        })
+    }
+
     /// Replaces one partition's rows with `records`, every one of which must
-    /// name that partition. Leaves the index state alone.
+    /// name that partition. Leaves the index state alone. Ends as a rebuild
+    /// ends (scale slice S5): its FTS indexes merged and the WAL folded
+    /// back and truncated — a whole partition's writes left both behind.
     pub fn replace_partition(
         &self,
         partition_key: &str,
@@ -729,6 +825,7 @@ impl MemoryIndex {
                 stray.id, stray.partition_key
             )));
         }
+        self.wrote();
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         delete_partition_rows(&tx, partition_key)?;
@@ -738,11 +835,17 @@ impl MemoryIndex {
             report.notes += 1;
         }
         tx.commit()?;
+        conn.execute_batch(
+            "INSERT INTO fts_word(fts_word) VALUES ('optimize');
+             INSERT INTO fts_tri(fts_tri) VALUES ('optimize');
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )?;
         Ok(report)
     }
 
     /// Removes one note by id. `Ok(false)` when there was no such row.
     pub fn remove(&self, partition_key: &str, id: &str) -> Result<bool> {
+        self.wrote();
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let rowid: Option<i64> = tx
@@ -768,6 +871,7 @@ impl MemoryIndex {
     /// to its new path finds no row here and is a no-op, so the new row
     /// survives.
     pub fn remove_path(&self, partition_key: &str, relative_path: &str) -> Result<bool> {
+        self.wrote();
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let rowid: Option<i64> = tx
@@ -791,6 +895,7 @@ impl MemoryIndex {
     /// Removes every row of one partition (a purge, a workspace move's
     /// invalidation). Returns how many notes went.
     pub fn remove_partition(&self, partition_key: &str) -> Result<u64> {
+        self.wrote();
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let removed = delete_partition_rows(&tx, partition_key)?;
@@ -1396,8 +1501,35 @@ fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
          PRAGMA busy_timeout = 5000;
          PRAGMA temp_store = MEMORY;
          PRAGMA cache_size = -{CACHE_SIZE_KIB};
-         PRAGMA mmap_size = {MMAP_BYTES};"
+         PRAGMA mmap_size = {MMAP_BYTES};
+         PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT};"
     ))
+}
+
+/// The database's size: its pages, free ones included, times the page size.
+fn file_bytes(conn: &Connection) -> rusqlite::Result<u64> {
+    let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    Ok((pages * page_size) as u64)
+}
+
+fn read_rebuilt_bytes(conn: &Connection) -> rusqlite::Result<Option<u64>> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![META_REBUILT_BYTES],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(value.and_then(|v| v.parse().ok()))
+}
+
+fn write_rebuilt_bytes(conn: &Connection, bytes: u64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+        params![META_REBUILT_BYTES, bytes.to_string()],
+    )?;
+    Ok(())
 }
 
 fn create_schema(conn: &Connection) -> rusqlite::Result<()> {

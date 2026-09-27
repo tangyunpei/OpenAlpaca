@@ -7,6 +7,7 @@ use super::tests::{ALICE, Harness};
 use super::*;
 use openalpaca_storage::memory_files::{NoteKind, NoteSource, SourceType};
 use openalpaca_storage::memory_index::MemoryIndex;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 fn learned_note(
@@ -610,4 +611,94 @@ fn a_damaged_cache_met_on_use_is_rebuilt_by_the_next_tick() {
     let found = search_cedar(&service, &tool);
     assert_eq!(found.index_state, IndexState::Ready);
     assert_eq!(found.results.len(), 50);
+}
+
+// ============================================================================
+// S5 — the index is maintained (M1)
+// ============================================================================
+
+fn wal_len(path: &Path) -> u64 {
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    std::fs::metadata(PathBuf::from(wal))
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+fn store_many(service: &MemoryService, prefix: &str, n: usize) {
+    let user = service
+        .context(
+            ALICE,
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    for i in 0..n {
+        service
+            .store(
+                &user,
+                StoreInput {
+                    title: format!("{prefix} {i}"),
+                    body: format!(
+                        "# {prefix} {i}\n\n{} {i}\n",
+                        "the walnut orchard keeps its ledger ".repeat(40)
+                    ),
+                    kind: Some(NoteKind::Fact),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+}
+
+/// Once a tick passes with no index write since the one before — idle —
+/// the tick merges the FTS segments the writes left and truncates the WAL.
+/// A cache that has not outgrown its rebuilt size is not rebuilt.
+#[test]
+fn an_idle_tick_merges_the_index_and_truncates_its_wal() {
+    let h = Harness::new();
+    let service = MemoryService::open_default(Some(h.db.clone()));
+    let path = MemoryIndex::default_path().unwrap();
+    store_many(&service, "Walnut", 30);
+    service.rebuild_index().unwrap();
+    let rebuilt = service
+        .index()
+        .maintain(std::time::Duration::ZERO)
+        .unwrap()
+        .rebuilt_bytes;
+    store_many(&service, "Pecan", 4);
+    assert!(wal_len(&path) > 0, "the writes are in the WAL");
+    service.reconcile_owner(ALICE).unwrap();
+    assert!(wal_len(&path) > 0, "a tick right after writes leaves it");
+    service.reconcile_owner(ALICE).unwrap();
+    assert_eq!(wal_len(&path), 0, "the idle tick truncated it");
+    let pass = service
+        .index()
+        .maintain(std::time::Duration::ZERO)
+        .unwrap();
+    assert_eq!(pass.rebuilt_bytes, rebuilt, "and did not rebuild");
+}
+
+/// A cache grown past twice its size after its last rebuild — here by a
+/// partition that outgrew it tenfold — is rebuilt by the tick, off the
+/// request path, and records its new size.
+#[test]
+fn a_cache_grown_past_twice_its_rebuilt_size_is_rebuilt_by_a_tick() {
+    let h = Harness::new();
+    let service = MemoryService::open_default(Some(h.db.clone()));
+    store_many(&service, "Seed", 3);
+    service.rebuild_index().unwrap();
+    let small = service.index().maintain(std::time::Duration::ZERO).unwrap();
+    store_many(&service, "Growth", 60);
+    service.reconcile_owner(ALICE).unwrap();
+    service.reconcile_owner(ALICE).unwrap();
+    let after = service.index().maintain(std::time::Duration::ZERO).unwrap();
+    assert!(
+        after.rebuilt_bytes > small.rebuilt_bytes * 2,
+        "rebuilt at its new size: {small:?} then {after:?}"
+    );
+    assert!(!service.rebuild_pending());
+    assert_eq!(service.index().index_state().unwrap().notes, 63);
 }

@@ -2440,3 +2440,80 @@ fn the_file_scan_finds_what_the_index_finds() {
         index.list_pinned(&keys).unwrap()
     );
 }
+
+// ============================================================================
+// Scale slice S5: the index is maintained
+// ============================================================================
+
+fn wal_bytes(path: &std::path::Path) -> u64 {
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    std::fs::metadata(std::path::PathBuf::from(wal))
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+fn bulky(prefix: &str, n: usize, partition: &str) -> Vec<IndexRecord> {
+    (0..n)
+        .map(|i| {
+            let mut r = record(
+                &format!("{prefix}{i}"),
+                &format!("Bulky {prefix} {i}"),
+                &format!("{} {i}\n", "lorem ipsum dolor sit amet ".repeat(60)),
+            );
+            r.partition_key = partition.to_string();
+            r.relative_path = format!("notes/{prefix}{i}--bulky.md");
+            r
+        })
+        .collect()
+}
+
+/// A full replace of a partition — the one bulk write left outside a
+/// rebuild — ends like a rebuild: its FTS indexes merged and its WAL folded
+/// back and truncated, where it used to leave a WAL as large as everything
+/// it wrote (896 MiB after a first tick at 100K notes).
+#[test]
+fn a_full_replace_leaves_the_wal_truncated() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(INDEX_FILE_NAME);
+    let index = MemoryIndex::open(&path).unwrap();
+    index.rebuild(&[]).unwrap();
+    index
+        .replace_partition("home-p", &bulky("r", 300, "home-p"))
+        .unwrap();
+    assert_eq!(wal_bytes(&path), 0, "the WAL is truncated");
+    assert_eq!(index.index_state().unwrap().notes, 300);
+}
+
+/// Maintenance merges the FTS segments writes left, folds the WAL back and
+/// truncates it, and says how the file's size compares with its size after
+/// the last rebuild.
+#[test]
+fn maintenance_merges_truncates_and_reports_the_growth() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(INDEX_FILE_NAME);
+    let index = MemoryIndex::open(&path).unwrap();
+    index.rebuild(&bulky("a", 20, "home-p")).unwrap();
+    let rebuilt = index.maintain(std::time::Duration::from_secs(5)).unwrap();
+    assert!(rebuilt.rebuilt_bytes > 0);
+    assert_eq!(rebuilt.bytes, rebuilt.rebuilt_bytes, "nothing written since");
+    let writes = index.writes();
+    for round in 0..6 {
+        for r in bulky("a", 20, "home-p").iter_mut() {
+            r.body = format!("{} round {round}\n", r.body);
+            r.revision = format!("{:0>64}", round + 1);
+            index.upsert(r).unwrap();
+        }
+    }
+    index.upsert_many(&bulky("b", 60, "home-p")).unwrap();
+    assert!(index.writes() > writes, "writes are counted");
+    assert!(wal_bytes(&path) > 0);
+    let after = index.maintain(std::time::Duration::from_secs(5)).unwrap();
+    assert_eq!(wal_bytes(&path), 0, "the WAL is truncated");
+    assert!(after.bytes > rebuilt.rebuilt_bytes, "{after:?}");
+    assert_eq!(after.rebuilt_bytes, rebuilt.rebuilt_bytes);
+    assert_eq!(index.index_state().unwrap().notes, 80);
+    // A search still finds what the writes left.
+    let found = index.search(&q("round 5")).unwrap();
+    assert!(!found.hits.is_empty());
+}

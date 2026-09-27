@@ -119,7 +119,8 @@ impl MemoryService {
     ///
     /// A whole rebuild the index is owed — left by the daemon's start, a
     /// failed attempt, or damage met on use — runs first, here, off the
-    /// request path (scale slice S6).
+    /// request path (scale slice S6); the index's idle upkeep runs last
+    /// (scale slice S5).
     pub fn reconcile_owner(&self, owner_id: &str) -> Result<SyncReport, MemoryError> {
         if let Err(e) = self.run_pending_rebuild() {
             tracing::warn!(
@@ -173,6 +174,8 @@ impl MemoryService {
                 }
             }
         }
+        // Upkeep once the index has sat idle for a tick (scale slice S5).
+        self.maintain_index_when_idle();
         Ok(SyncReport {
             scanned,
             changes,

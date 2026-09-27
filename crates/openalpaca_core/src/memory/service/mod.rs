@@ -122,6 +122,20 @@ pub const LIST_MAX_LIMIT: usize = 100;
 /// The shortest id prefix [`MemoryService::find_by_id_prefix`] takes: 8 hex
 /// characters, the first group of a UUID (design 09 §12.1).
 pub const ID_PREFIX_MIN_HEX: usize = 8;
+/// Scale slice S5: a cache file grown past this many times its size right
+/// after its last rebuild is rebuilt (from a new file) by the reconciliation
+/// tick. Measured on 2,000 notes of ~1 KB (release build): editing a quarter
+/// of the notes six times over grows the file to 1.39× — segment merges
+/// reuse pages but never shrink the file — a whole-partition rewrite to
+/// 1.80×, and doubling the notes to 1.78× of the first rebuild (a clean
+/// rebuild of the doubled notes is 1.78× too). So at 2× a cache is rebuilt
+/// about once per doubling of its content or per three rewrites of every
+/// note — geometric, so the rebuilds' cost stays proportional to the
+/// writes — and never holds more than its own size again in dead pages.
+pub const INDEX_BLOAT_FACTOR: u64 = 2;
+/// How long one idle maintenance pass may spend merging FTS segments; each
+/// merge step holds the index only briefly (scale slice S5).
+pub const INDEX_MAINTENANCE_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
 /// Design §5: while the index is rebuilt, recall and search read the notes
 /// from their files — at most this many, the most recently updated first
 /// (a scan that leaves notes out says `partial`). Scale slice S6: the
@@ -186,6 +200,16 @@ struct RebuildState {
     pending: bool,
     /// A rebuild is running: the index is being refilled from nothing.
     running: bool,
+}
+
+/// When the index was last seen written and last maintained (scale slice
+/// S5), in its own count of row writes.
+#[derive(Debug, Default)]
+struct MaintenanceMarks {
+    /// The count the previous tick saw.
+    seen: u64,
+    /// The count the last maintenance pass ran at.
+    done: u64,
 }
 
 /// What a search reads while the index is rebuilt: the notes, from their
@@ -264,6 +288,7 @@ pub struct MemoryService {
     /// the signal a reader waiting for one to end is woken by.
     rebuild: Mutex<RebuildState>,
     rebuilt: Condvar,
+    maintenance: Mutex<MaintenanceMarks>,
     #[cfg(test)]
     pub(super) gates: Arc<TestGates>,
 }
@@ -299,6 +324,7 @@ impl MemoryService {
             bus: None,
             rebuild: Mutex::new(RebuildState::default()),
             rebuilt: Condvar::new(),
+            maintenance: Mutex::new(MaintenanceMarks::default()),
             #[cfg(test)]
             gates: Arc::new(TestGates::default()),
         }
@@ -452,6 +478,56 @@ impl MemoryService {
         }
         self.finish_rebuild_run(self.rebuild_index_inner())
             .map(|()| true)
+    }
+
+    /// The index's upkeep when it is idle (scale slice S5, M1), called by
+    /// every reconciliation tick: once a tick finds no index write since the
+    /// tick before — and some since the last pass — the FTS segments the
+    /// writes left are merged, within [`INDEX_MAINTENANCE_BUDGET`], and the
+    /// WAL folded back and truncated; and a cache file grown past
+    /// [`INDEX_BLOAT_FACTOR`] times its size after its last rebuild is
+    /// rebuilt from a new file, here, off the request path (recall and
+    /// search read the files meanwhile). Nothing while a rebuild is owed.
+    fn maintain_index_when_idle(&self) {
+        if !self.index_serves() {
+            return;
+        }
+        let writes = self.index.writes();
+        {
+            let mut marks = self
+                .maintenance
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let idle = writes == marks.seen;
+            marks.seen = writes;
+            if !idle || writes == marks.done {
+                return;
+            }
+            marks.done = writes;
+        }
+        let pass = match self.index.maintain(INDEX_MAINTENANCE_BUDGET) {
+            Ok(pass) => pass,
+            Err(e) => {
+                let e = MemoryError::from(e);
+                self.note_index_failure(&e);
+                tracing::warn!("memory: index maintenance failed: {e}");
+                return;
+            }
+        };
+        if pass.bytes > pass.rebuilt_bytes.saturating_mul(INDEX_BLOAT_FACTOR) {
+            tracing::info!(
+                bytes = pass.bytes,
+                rebuilt_bytes = pass.rebuilt_bytes,
+                "memory: the search index cache outgrew twice its rebuilt size; rebuilding it"
+            );
+            self.rebuild_state().pending = true;
+            if let Err(e) = self.run_pending_rebuild() {
+                tracing::warn!(
+                    "memory: the search index could not be rebuilt; recall and search read \
+                     the note files meanwhile, and the next tick tries again: {e}"
+                );
+            }
+        }
     }
 
     /// Ends a rebuild run: owed again if it failed, and every reader
