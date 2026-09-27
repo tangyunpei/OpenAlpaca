@@ -4592,10 +4592,11 @@ struct LearningCost {
     flush_latency_p50_ms: u64,
     flush_latency_p95_ms: u64,
     flushes_by_trigger: BTreeMap<String, usize>,
-    // ── Unusable answers, over every attempt (repair round 1 of the L8 fix
-    //    slice): a retried flush's `stopped` is its last attempt's, and a
-    //    window skipped after `MAX_ATTEMPTS` unusable answers ends with
-    //    none ────────────────────────────────────────────────────────────
+    // ── Unusable answers, over every attempt of the learning phase (repair
+    //    round 1 of the L8 fix slice; the forced re-run's attempts and
+    //    answers are in its own record, `forced_rerun.flush`): a retried
+    //    flush's `stopped` is its last attempt's, and a window skipped after
+    //    `MAX_ATTEMPTS` unusable answers ends with none ──────────────────
     /// `flush_session` calls: a flush retried at once counts each attempt
     /// (`extraction_calls` counts the model calls).
     flush_attempts: usize,

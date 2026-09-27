@@ -276,19 +276,22 @@ nothing retired, and the user's confirm retiring the old note. The L8 fix
 slice's tests run there too: the summaries' daily cap lifted and a capped or
 erroring feed warned about; a `switch` and a summary that stop `BadOutput`
 flushed again at once (a `turns` window waits for the session's next
-flush, and which labels are retried is pinned), a switch over two chunks
-retried until each is read or skipped, and a forced re-run whose window the
-queue skipped after its unusable answers unchecked; a flush record keeping
-each unusable answer's excerpt; unusable answers, skipped windows and a
-window a session's last flush left unread counted and warned about; flush
-latency read over attempts; every learning measure split by the path
-that wrote the note (a stub reader that calls `memory_store` beside a stub
+flush, and which labels are retried is pinned), a switch and a summary over
+two chunks each retried until each chunk is read or skipped, and a forced
+re-run whose window the queue skipped after its unusable answers unchecked;
+a flush record keeping each unusable answer's excerpt; unusable answers,
+skipped windows and a window a session's last flush left unread counted and
+warned about; flush latency read over attempts; every learning measure
+split by the path that wrote the note (a stub reader that calls `memory_store` beside a stub
 extractor); the coverage judge's own cap and its `none`/`unparsed` totals;
 a pair whose one matched note supersedes the old one, credited only when the
-judge, asked again without it, names the old note; a restatement the reader
+judge, asked again without it, names the old note, and those checks totalled
+with a failed one told apart from a `NONE`; a restatement the reader
 wrote or no flush read (a turn in a skipped window unread whatever a later
-flush read); a replay's conditions and its labelled totals; and a replay
-that writes summaries and asks a question file. The stub
+flush read); a replay's conditions and its labelled totals; a replay
+that writes summaries and asks a question file; and the bus events a lagged
+subscription lost — a fed turn's, a flush's, a question turn's, on a bus of
+one slot — counted, totalled and warned about. The stub
 router's rate limits are lifted, so the tests time the harness, not the
 default 40 000-TPM bucket. Plain `cargo test -p openalpaca_core` does
 not compile this file at all; it compiles and runs `memory_eval_corpus`, the
@@ -457,20 +460,21 @@ re-applied in a replay: that would need a live feed that records them.
 
 | Field | What it is |
 |---|---|
-| `learning.warnings` | What to read first: fed turns that ended in an error, learning or summary flushes a daily cap stopped, each session whose learning or summary window was skipped after `MAX_ATTEMPTS` unusable answers (its turns never learned or summarised), and each session whose last learning or summary flush ended with any other stop, with the stop (a window left unread when the run ended) |
-| `learning.turns` | Every fed turn: its corpus place and mode, its user row, the reader's calls, tools and own memory writes (`model_tool_memory_changes`, and the notes, `model_tool_notes`) |
-| `learning.flushes` | Every flush: its label (`turns`, `switch`, `replay`, `forced_rerun`), `turns_fed` (a fed flush's place), `cursor_before` and `cursor_after` (the session's learning cursor, a message id, around it: the rows it moved past), its `attempts`, `attempt_stops` and `attempt_latencies_ms`, latency (over every attempt), the queue's counts per §2.4 outcome summed over the attempts, the notes it wrote, and `unusable_answers` |
+| `learning.warnings` | What to read first: fed turns that ended in an error, learning or summary flushes a daily cap stopped, each session whose learning or summary window was skipped after `MAX_ATTEMPTS` unusable answers (its turns never learned or summarised), each session whose last learning or summary flush ended with any other stop, with the stop (a window left unread when the run ended), and the bus events a lagged subscription lost (`learning.cost.events_lagged`), each subscription named — and, after the forced re-run, its own lost events, which could hide a resurrection from its check |
+| `learning.turns` | Every fed turn: its corpus place and mode, its user row, the reader's calls, tools and own memory writes (`model_tool_memory_changes`, and the notes, `model_tool_notes`), all read off the bus, and `events_lagged`, the events its subscription lost to lag (those counts may be short by them) |
+| `learning.flushes` | Every flush of the learning phase: its label (`turns`, `switch` or `replay`; the forced re-run's record is `learning.forced_rerun.flush`), `turns_fed` (a fed flush's place), `cursor_before` and `cursor_after` (the session's learning cursor, a message id, around it: the rows it moved past), its `attempts`, `attempt_stops` and `attempt_latencies_ms`, latency (over every attempt), the queue's counts per §2.4 outcome summed over the attempts, the notes it wrote (from its `memory_changed` events; `events_lagged`, the events its subscription lost), and `unusable_answers` |
 | `learning.episode_flushes` | L, and a replay asked questions: every conversation-summary flush (label `switch`, or `replay`): its attempts, calls, the summaries written, the windows it skipped after `MAX_ATTEMPTS` unusable answers (`skipped_unusable`), tokens, latency, the notes it wrote and its unusable answers |
 | `learning.learned` | The store after the phase, history and candidates included: status, origin, key, aliases, validity, sources, links, knowledge and `surface` — `extraction` when a learning flush's `memory_changed` created it, `model_tool` for any other learned note (the reader's `memory_store`) — conversation summaries left out |
 | `learning.episodes` | L, and a replay asked questions: the conversation summaries the phase wrote, in the same shape |
 | `learning.coverage` | Per relied-on gold note: a historical search on its title and aliases (at most 5 notes) and the coverage judge's `MATCH <n>` or `NONE`; `share` is the fact coverage; `none`, `unparsed` (a reply with no verdict line — an unread row, not a miss; `unparsed_cut_at_max_tokens` of them ran to the cap), `not_found` and `judge_errors` (a failed judge call or a failed search — the row's `judge_error` begins `search:` for the second) counted apart; `by_surface`, `matched` by the writer of the note the judge chose — in a live run the judge's single pick, not a path's own coverage (above). The judge's cap is its own, `conditions.learning.coverage_judge_max_tokens` (2048: at the QA judge's 400 every L8 unparsed verdict was a deliberation cut before its line). Against a report from before it (no `coverage_judge_max_tokens`), coverage can gain up to that report's `unparsed` count from the cap alone — L8's L 2, its replays 5–8 (up to +9.6 pp) — unless the old store is judged again: at temperature 0 a verdict that ended under 400 tokens is unchanged |
 | `learning.noise`, `learning.noise_by_surface` | Active learned notes no coverage call chose, and the candidates raised — pooled, and by path (in a live run, a path's note the judge passed over for the other path's counts as its noise) |
-| `learning.changed_facts` | The 8 pairs and the 7 corrections, each with its outcome (`new_active_old_superseded`, `new_active_old_same_key_loser`, `both_active_unlinked`, `new_missing`, `old_never_learned`, …) and whether the two notes share a key. When the judge matched one note for both golds and that note is active, no same-key loser, and supersedes a superseded note the old gold's search returned, the link is checked, not credited (since the fix slice's repair round 2: a link says what the store replaced, not what the note states): the coverage judge is asked about the old gold once more, with the same prompt and cap, shown its hits without the new note — at most one call a pair — and the pair is scored from that pick as any pair is. The superseded note: `new_active_old_superseded`; an active note that still states the old value: `both_active_unlinked`; `NONE`: `old_never_learned`. Such a pair records `link_check` (the superseded note, the candidates, the verdict, the pick, the reply and its tokens) and `old_note_from: link_check` (`judge` otherwise), and its key reuse (`fact_keys.pairs_key_reused` of `pairs_with_two_notes`) is read over the note the check named. The printed line says how many pairs were credited after how many checks |
+| `learning.changed_facts` | The 8 pairs and the 7 corrections, each with its outcome (`new_active_old_superseded`, `new_active_old_same_key_loser`, `both_active_unlinked`, `new_missing`, `old_never_learned`, …) and whether the two notes share a key. When the judge matched one note for both golds and that note is active, no same-key loser, and supersedes a superseded note the old gold's search returned, the link is checked, not credited (since the fix slice's repair round 2: a link says what the store replaced, not what the note states): the coverage judge is asked about the old gold once more, with the same prompt and cap, shown its hits without the new note — at most one call a pair — and the pair is scored from that pick as any pair is: a superseded note (the linked one or another) gives `new_active_old_superseded` and a same-key loser `new_active_old_same_key_loser`, both correct; any other active note, `both_active_unlinked`; `NONE`, a reply with no verdict line, a failed call or no judge, `old_never_learned`. A checked pair is one whose `link_check` is set (the superseded note, the candidates, the verdict, the pick, the reply and its tokens); its `old_note_from` is `link_check` only when the check named a note — otherwise it stays `judge`, the old note being the new one — and its key reuse (`fact_keys.pairs_key_reused` of `pairs_with_two_notes`) is read over the note the check named. `learning.link_checks` totals the checks: `checks`, `calls` (all but `not_judged`), `credited`, the verdicts — `matched`, `none`, and apart from `none` the checks that `failed` with no verdict (`unparsed`, `unparsed_cut_at_max_tokens` of them, and `judge_errors`), which credit nothing without being the judge's reading — `not_judged`, and the judge tokens, which `coverage.judge_tokens_*` (the coverage rows' alone) leave out. The printed line carries them |
 | `learning.restatements`, `learning.restatements_by_surface` | Per `restate` turn: `nothing_written`, `automatic_replacement`, `suggestion`, `duplicate_note`, `first_learned` from the notes citing its row; where none does, `model_tool_write` (the reader wrote a note during the turn — `reader_notes`; its notes mostly carry no sources) or `extraction_failed` (no flush of the session moved its cursor across the turn's row without skipping a window: a flush reads from the cursor, so a turn an earlier flush skipped past stays unread whatever a later flush read, and a flush that skipped a window counts none of its range read), and `nothing_written` only for a turn extraction read and wrote nothing for. `by_surface` gives each path's own outcome; the tally is pooled and by path |
 | `learning.aliases`, `learning.fact_keys`, `…_by_surface` | The share of active learned notes with an alias in the other script (CJK against Latin), with any alias, and with a key — pooled, and by path |
 | `learning.suggestion_check` | L-S: per seeded note, its suggestions and its status before and after the confirm |
+| `learning.forced_rerun` | L and a replay: the note forgotten, its sources and session, the re-run's own flush record (`flush`, label `forced_rerun`, with its attempts, unusable answers and `events_lagged`), the notes it wrote citing a forgotten row (`resurrected`) or with the forgotten note's title or key from other rows (`rewritten_from_other_rows`), and `skipped` — why no check ran. Its counts are in no `learning.cost` total |
 | `learning.invariants` | User notes retired without a confirm, forgotten notes resurrected — both must be 0 — and `forced_rerun_checked`: the re-run forgot a note and its flush made an extraction call and read its session to the end (no `stopped`, no window skipped). For L and a replay a re-run that checked nothing (skipped, no call, a flush that stopped — an unusable answer, no model — or one whose window the queue skipped after `MAX_ATTEMPTS` unusable answers) is a violation, never a 0 that reads as a pass; `forced_rerun_unchecked` says why. A violation fails the run after the report is written |
-| `learning.cost` | Extraction calls and tokens, flush latency p50/p95 (over attempts, each one flush as a daemon runs it — as L8 measured it; a trigger's retries summed would read up to three times as long for each chunk), flushes by trigger, the conversation summaries' calls, count and tokens, memory changes by surface, the reader's feed cost and its turn errors (`feed_turn_errors`, `feed_turn_errors_at`); and, over every attempt, for learning and for summaries apart (`episode_…`): `flush_attempts`, `unusable_answers` and `unusable_answers_by_reason` (`cut at max_tokens`, `empty completion`, or the parser's reason) and `windows_skipped_unusable`; and `windows_left_unread` (`episode_…` too): the sessions whose last learning (or summary) flush ended with a stop, a cap's among them — a window each left unread when the run ended. Count failures and unread windows from these, never from `flushes[].stopped` alone: a retried flush's `stopped` is its last attempt's, a window skipped after `MAX_ATTEMPTS` unusable answers ends with none, and a `turns` flush's stop is read again by its session's next flush |
+| `learning.cost` | Extraction calls and tokens, flush latency p50/p95 (over attempts, each one flush as a daemon runs it — as L8 measured it; a trigger's retries summed would read up to three times as long for each chunk), flushes by trigger, the conversation summaries' calls, count and tokens, memory changes by surface, the reader's feed cost and its turn errors (`feed_turn_errors`, `feed_turn_errors_at`); the bus events the phase's subscriptions lost to lag — the fed turns', the flushes' and the summaries' — and each subscription that lost any (`events_lagged`, `events_lagged_at`: non-zero means a note a flush created may count as the reader's in the surface split, and a reader write may be missing from a restatement's `model_tool_write`; `learning.warnings` says so); and, over every attempt of the learning phase (the forced re-run's are in its own record), for learning and for summaries apart (`episode_…`): `flush_attempts`, `unusable_answers` and `unusable_answers_by_reason` (`cut at max_tokens`, `empty completion`, or the parser's reason) and `windows_skipped_unusable`; and `windows_left_unread` (`episode_…` too): the sessions whose last learning (or summary) flush ended with a stop, a cap's among them — a window each left unread when the run ended. Count failures and unread windows from these, never from `flushes[].stopped` alone: a retried flush's `stopped` is its last attempt's, a window skipped after `MAX_ATTEMPTS` unusable answers ends with none, and a `turns` flush's stop is read again by its session's next flush |
 
 The L8 fix slice reclassifies as well as adds (design 09 rev 3.26): H6
 moves a pair whose one note supersedes the old one to
@@ -587,11 +591,13 @@ On the local test model the cost is time (design 09 §7.5): L ≈ 4 h (300 fed
 turns, about 40 flushes, 470 questions, 83 coverage calls), a replay ≈ 0.5 h,
 L0 ≈ 3.3 h, L-S ≈ 0.5 h. Since the L8 fix slice a `switch`, `replay`,
 summary or forced re-run flush that stops `BadOutput` is retried up to
-twice more (L8's fed flushes stopped `BadOutput` 11 times in L — 8
-`switch`, 3 `turns` — and 16 in L-episodes; a `turns` one waits for its
-session's next flush), an
-extraction answer may run to 2,892 output tokens instead of 2,800, and a
-coverage verdict to 2,048. `OPENALPACA_MEMORY_EVAL_SESSIONS=2` with
+twice more for each of its chunks (L8's fed flushes stopped `BadOutput` 11
+times in L — 8 `switch`, 3 `turns` — and 16 in L-episodes; a `turns` one
+waits for its session's next flush), an
+extraction answer may run to 2,892 output tokens instead of 2,800, a
+coverage verdict to 2,048, and H6's link check makes at most one more
+coverage-judge call a pair — 8 a run, each up to 2,048 output tokens, on
+top of the 83 (`learning.link_checks`). `OPENALPACA_MEMORY_EVAL_SESSIONS=2` with
 `OPENALPACA_MEMORY_EVAL_LIMIT=5` is a smoke run of the whole L pipeline.
 
 ## Reading a report
@@ -630,7 +636,12 @@ or E report with the archived A and B reports:
   measure between the two modes), and the cost per question turn —
   `reader_tokens_in_mean_per_turn`, `reader_tokens_in_median_per_turn` (every
   round's input tokens), `reader_rounds_mean_per_turn` (model calls, ≈ rounds) and
-  `tool_calls_mean_per_turn`; `null` with no rows.
+  `tool_calls_mean_per_turn`; `null` with no rows; new with the L8 fix
+  slice's nits round: `events_lagged` and `events_lagged_at` — the bus
+  events the question turns' subscriptions lost to lag, and the rows that
+  lost any (`<id> (<n>)`): those rows' tools, model calls, tokens and cost,
+  and so `memory_search_calls` and `memory_write_calls`, may be short;
+  printed as `!! WARNING` under the totals when non-zero.
 - `rows`: one per question — the question, gold and actual answer, the judge's
   verdict and raw reply, latency, `ack_ms`, the routing `mode`, reader LLM
   calls/tokens/cost, the tools called, `memory_search_calls`,
@@ -660,7 +671,10 @@ or E report with the archived A and B reports:
   `reader_llm_calls` counts the main loop's
   `LlmCallCompleted` events, which it publishes **once per turn** with the
   whole turn's tokens — it is 1 on every answered row, the archived reports'
-  included, whatever the rounds; read `reader_rounds` for those.
+  included, whatever the rounds; read `reader_rounds` for those. New with the
+  L8 fix slice's nits round: `events_lagged`, the bus events the turn's
+  subscription lost to lag — its `mode`, `tools` and reader calls, tokens and
+  cost are read off the bus and may be short by them (`totals.events_lagged`).
 - New with the learning evaluation: `conditions.judge_model`,
   `judge_is_reader`, `judge_same_family`, `judge_is_extractor`, and
   `conditions.learning` (the corpus and its hash, what was fed, the flush
