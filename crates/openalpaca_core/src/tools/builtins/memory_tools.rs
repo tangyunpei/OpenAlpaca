@@ -244,8 +244,9 @@ pub fn memory_search_tool_definition() -> ToolDefinition {
             and read only those with memory_read, several at once. Matching is lexical: whole \
             words and identifiers, the beginning of a word (a note saying `prefers` matches \
             `prefer`), and part of a word in a title, an alias or a tag, or in Chinese, \
-            Japanese or Korean text. There is no meaning-based search, so use the words a \
-            note would actually contain and, if nothing matches, try one more wording. \
+            Japanese, Korean, Thai, Hindi, Tamil and similar scripts. \
+            There is no meaning-based search, so use the words a note would actually \
+            contain and, if nothing matches, try one more wording. \
             `detail: \"snippets\"` returns cited excerpts instead. Active notes only unless \
             `historical` is true; `date_from`/`date_to` keep notes dated in a range (a note's \
             date is when it was observed, else when it was saved), and `order_by` sorts by \

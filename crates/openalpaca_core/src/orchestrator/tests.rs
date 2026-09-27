@@ -7046,9 +7046,10 @@ fn memory_messages(request: &ChatRequest) -> Vec<String> {
 
 /// **Plan 3.3, fixture 21 step 2.** "what editor do I prefer?" recalls
 /// "User prefers vim for editing" into the main loop's own request — through
-/// the service's union-of-terms search (`prefer` reaches `prefers` only
-/// through the trigram table), never the SQL repository — and says nothing
-/// about coffee. One block per turn, quoted as reference data.
+/// the service's union-of-terms search (`prefer` reaches `prefers` as the
+/// word table's prefix query, design 09 §6.5.2), never the SQL repository —
+/// and says nothing about coffee. One block per turn, quoted as reference
+/// data.
 #[tokio::test]
 async fn the_main_loop_recalls_the_natural_question_fixture_through_the_service() {
     let dir = tempfile::tempdir().unwrap();

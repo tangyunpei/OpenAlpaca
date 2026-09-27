@@ -649,7 +649,7 @@ fn fixture_22_literal_and_case_never_reaches_fts_syntax() {
 #[test]
 fn fixture_23_cjk_queries_of_one_two_and_more_characters() {
     let s = run("23-query-cjk-lengths.json");
-    assert_eq!(s.searched, 12, "{s:?}");
+    assert_eq!(s.searched, 13, "{s:?}");
     assert_eq!(s.skipped.len(), 1, "{s:?}"); // step 12 is a read
     assert!(s.stopped_at.is_none(), "{s:?}");
 }

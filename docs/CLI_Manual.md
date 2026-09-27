@@ -686,7 +686,7 @@ Notes:
 - `search` is literal: a term is matched as a whole word or as the beginning of
   one, so `prefer` finds `prefers` (the result says `prefix`); inside a word it is
   matched only in a title, an alias or a tag, or in Chinese, Japanese, Korean,
-  Thai, Lao, Myanmar or Khmer text, so `presso` does not find a body's `espresso`;
+  Thai, Hindi, Tamil and similar scripts, so `presso` does not find a body's `espresso`;
   a one- or two-character query (a short Chinese term) is a substring scan. Results are cited — the heading and line
   range the excerpt came from, why it matched, and its freshness — and a result
   flagged `conflict` or `same-key loser` is one `doctor` also names. Candidates are

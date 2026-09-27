@@ -519,10 +519,16 @@ mod query_tests {
             tokens(&split_scripts(text)).collect::<Vec<_>>(),
             tokens_split(text).collect::<Vec<_>>()
         );
-        for c in ['中', 'あ', '한', 'ก', 'ກ', 'က', 'ក'] {
+        // Written without spaces: CJK, Thai, Lao, Myanmar, Khmer, Tibetan,
+        // Yi, Javanese, Balinese, Tai Tham, New Tai Lue. Words built with
+        // vowel signs unicode61 breaks at: Devanagari, Bengali, Tamil,
+        // Thaana (repair round 1 of LQ17).
+        for c in [
+            '中', 'あ', '한', 'ก', 'ກ', 'က', 'ក', 'ཀ', 'ꆈ', 'ꦏ', 'ᬓ', 'ᨠ', 'ᦀ', 'क', 'অ', 'த', 'ދ',
+        ] {
             assert!(is_unsegmented(c), "{c}");
         }
-        for c in ['a', 'é', 'я', 'α', 'ע', 'ب', 'क', '1'] {
+        for c in ['a', 'é', 'я', 'α', 'ע', 'ب', '1', 'ß'] {
             assert!(!is_unsegmented(c), "{c}");
         }
     }
@@ -540,9 +546,10 @@ mod query_tests {
         }
     }
 
-    /// The whole-word query at the cap names only the terms that went out
-    /// as prefixes, in the header columns; the body trigram table only
-    /// terms carrying an unsegmented character.
+    /// The whole-word queries at the cap name only the terms that went out
+    /// as prefixes — all of them over the header columns, and each alone
+    /// over the body; the body trigram table only terms carrying an
+    /// unsegmented character.
     #[test]
     fn the_cap_query_and_the_body_trigram_query_take_their_own_terms() {
         let p = parsed("work at 公司 partner's memory_file 用户喜欢");
@@ -552,8 +559,14 @@ mod query_tests {
             Some("\"work\"* OR \"用户喜欢\" OR \"partner's\" OR \"memory_file\"*")
         );
         assert_eq!(
-            p.word_match_head_exact(&p.words).as_deref(),
-            Some("{title aliases tags} : (\"work\" OR \"memory_file\")")
+            p.word_match_exact_at_cap(&p.words),
+            Some(WholeWordQueries {
+                header: "{title aliases tags} : (\"work\" OR \"memory_file\")".to_string(),
+                bodies: vec![
+                    "{body} : \"work\"".to_string(),
+                    "{body} : \"memory_file\"".to_string(),
+                ],
+            })
         );
         assert_eq!(
             p.head_trigram_match(&p.words).as_deref(),
@@ -564,7 +577,7 @@ mod query_tests {
             Some("\"用户喜欢\"")
         );
         let p = parsed("用户喜欢");
-        assert_eq!(p.word_match_head_exact(&p.words), None);
+        assert_eq!(p.word_match_exact_at_cap(&p.words), None);
         let p = parsed("presso");
         assert_eq!(p.body_trigram_match(&p.words), None);
     }
@@ -1385,7 +1398,9 @@ fn a_literal_ends_in_a_prefix_only_from_three_characters() {
 /// sent as prefixes are searched again as whole words in titles, aliases
 /// and tags — so a note whose one match is the tag `work` is still a
 /// candidate. The trigram header table cannot save it: `work` is a
-/// substring of every `Worker` title.
+/// substring of every `Worker` title, and those fill its cap too. A note
+/// only that query kept takes no word relevance (design 09 §6.5.3): its
+/// coverage and its authority score it.
 #[test]
 fn a_whole_word_in_a_header_is_not_crowded_out_by_a_prefix_that_fills_the_cap() {
     let index = ready_index();
@@ -1408,6 +1423,217 @@ fn a_whole_word_in_a_header_is_not_crowded_out_by_a_prefix_that_fills_the_cap() 
     assert!(r.partial, "the word table's query filled its cap");
     assert_eq!(ids(&r)[0], "job", "{:?}", ids(&r));
     assert_eq!(hit(&r, "job").matches, vec![MatchReason::Term]);
+    assert_eq!(
+        hit(&r, "job").score,
+        search::W_TERM + search::W_AUTHORITY * authority_rank("user") as f64,
+        "coverage and authority alone: no relevance borrowed from the query at the cap"
+    );
+}
+
+/// Design 09 §6.5.2 (repair round 1 of LQ17): the same at the cap for a
+/// body. Each term sent as a prefix is searched again alone as a whole word
+/// in bodies, unranked, and its chunks join the candidates when they fit
+/// within the cap — so a note whose one match is `work` in its body is not
+/// lost among the `worker` and `workspace` bodies the prefix found. A note
+/// only that query kept takes no word relevance: its coverage and its
+/// authority score it (§6.5.3), and a whole word still ranks above every
+/// beginning.
+#[test]
+fn a_whole_word_in_a_body_is_not_crowded_out_by_a_prefix_that_fills_the_cap() {
+    let index = ready_index();
+    let mut records: Vec<IndexRecord> = (0..CANDIDATE_CAP + 40)
+        .map(|i| {
+            record(
+                &format!("w{i:03}"),
+                &format!("Worker rota {i}"),
+                "The worker rota lives in the shared workspace; workers swap shifts.\n",
+            )
+        })
+        .collect();
+    records.push(record(
+        "commute",
+        "Commute",
+        "The user rides to work on a bicycle.\n",
+    ));
+    index.rebuild(&records).unwrap();
+    let mut sq = q("where do I work?");
+    sq.limit = MAX_LIMIT;
+    let r = index.search(&sq).unwrap();
+    assert!(r.partial, "the word table's query filled its cap");
+    assert_eq!(ids(&r)[0], "commute", "{:?}", ids(&r));
+    let commute = hit(&r, "commute");
+    assert_eq!(commute.matches, vec![MatchReason::Term]);
+    assert_eq!(
+        commute.score,
+        search::W_TERM + search::W_AUTHORITY * authority_rank("user") as f64,
+        "coverage and authority alone: no relevance borrowed from the query at the cap"
+    );
+}
+
+/// Design 09 §6.5.3: trigram relevance is the larger of the header table's
+/// and the unsegmented-body table's normalized BM25, not their sum — a term
+/// found inside a run of both a note's title and its body earns one
+/// trigram relevance weight.
+#[test]
+fn trigram_relevance_is_the_larger_of_the_two_tables_not_their_sum() {
+    let index = ready_index();
+    index
+        .upsert(&record(
+            "both",
+            "项目发布说明",
+            "每次发布说明都写成要点。\n",
+        ))
+        .unwrap();
+    let r = index.search(&q("发布说明")).unwrap();
+    assert_eq!(ids(&r), vec!["both"]);
+    let both = hit(&r, "both");
+    assert_eq!(both.matches, vec![MatchReason::Trigram]);
+    assert_eq!(
+        both.score,
+        search::W_TRIGRAM
+            + search::W_BM25_TRIGRAM
+            + search::W_AUTHORITY * authority_rank("user") as f64,
+        "one trigram relevance, the larger of the two tables' (each 1.0 here)"
+    );
+}
+
+/// A query word glued across scripts (`python版本`) goes to the word table
+/// as the phrase of its split tokens, so it finds text written spaced
+/// (`Python 版本`) as well as glued; the ranker and the file scan read the
+/// same split tokens in sequence and call it a whole-word match, `term`, so
+/// an answer given during a rebuild finds what the index finds (design 09
+/// §6.5.3).
+#[test]
+fn a_query_word_glued_across_scripts_is_a_term_in_spaced_and_glued_text() {
+    let index = ready_index();
+    let records = vec![
+        record("spaced", "Runtime", "Python 版本: 3.12\n"),
+        record("glued", "Toolchain", "我们的python版本 是 3.11。\n"),
+        record("other", "Garden", "Tomatoes ripen in August.\n"),
+    ];
+    index.rebuild(&records).unwrap();
+    for query in ["python版本", "Python版本"] {
+        let r = index.search(&q(query)).unwrap();
+        let mut got = ids(&r);
+        got.sort();
+        assert_eq!(got, vec!["glued", "spaced"], "{query}");
+        for id in ["glued", "spaced"] {
+            assert_eq!(hit(&r, id).matches, vec![MatchReason::Term], "{query} {id}");
+        }
+        let scan = index.scan_search(&records, &q(query), false).unwrap();
+        let mut from_files = ids(&scan);
+        from_files.sort();
+        assert_eq!(from_files, got, "{query}: the file scan finds what the index finds");
+        for h in &scan.hits {
+            assert_eq!(h.matches, hit(&r, &h.id).matches, "{query} {}", h.id);
+        }
+    }
+}
+
+/// Design 09 §6.5.1 (repair round 1 of LQ17): `unicode61` breaks a word of
+/// Devanagari, Tamil or Bengali at every vowel sign, and reads a Yi or
+/// Javanese run as one token, so that text keeps substring search on the
+/// trigram table. A stem finds its inflected form — as a phrase, since the
+/// virama makes the query a literal — and a word inside a run is a
+/// substring, `trigram`; the file scan agrees.
+#[test]
+fn text_unicode61_breaks_at_vowel_signs_or_reads_as_one_run_keeps_substring_search() {
+    let index = ready_index();
+    let records = vec![
+        record("hindi", "Weekend", "हर शनिवार दोस्तों के साथ क्रिकेट।\n"),
+        record("tamil", "Home", "அவர் சென்னையில் வசிக்கிறார்.\n"),
+        record("bengali", "Friends", "বন্ধুদের সাথে আড্ডা।\n"),
+        record("yi", "Yi note", "ꆈꌠꁱꂷꀋꉬ\n"),
+        record("javanese", "Javanese note", "ꦲꦏꦸꦱꦼꦩꦤ\n"),
+    ];
+    index.rebuild(&records).unwrap();
+    for (query, id, reason) in [
+        ("दोस्त", "hindi", MatchReason::Phrase),
+        ("சென்னை", "tamil", MatchReason::Phrase),
+        ("বন্ধু", "bengali", MatchReason::Phrase),
+        ("ꌠꁱꂷ", "yi", MatchReason::Trigram),
+        ("ꦏꦸꦱꦼ", "javanese", MatchReason::Trigram),
+    ] {
+        let r = index.search(&q(query)).unwrap();
+        assert_eq!(ids(&r), vec![id], "{query}");
+        assert_eq!(hit(&r, id).matches, vec![reason], "{query}");
+        let scan = index.scan_search(&records, &q(query), false).unwrap();
+        assert_eq!(ids(&scan), vec![id], "{query}: the file scan agrees");
+        assert_eq!(scan.hits[0].matches, vec![reason], "{query}");
+    }
+}
+
+/// Design 09 §6.5.1 (repair round 1 of LQ17): `unicode61` counts letters,
+/// numbers and private-use characters as token characters, by its own
+/// Unicode tables, and breaks a word at everything else; `query::tokens`
+/// keeps every alphanumeric character. Where the two disagree inside a
+/// word, the word table holds fragments that neither the ranker nor the
+/// file scan reads, so that text must reach the trigram table: every such
+/// character — as the bundled SQLite reads it — is unsegmented, but for the
+/// ones listed here, which no living script writes inside every word: the
+/// vowel points of Hebrew, Arabic, Syriac and Samaritan (their ordinary
+/// text is unpointed), and a few combining letters and symbols.
+#[test]
+fn every_character_unicode61_breaks_a_word_at_is_unsegmented_or_listed() {
+    const LISTED: &[(u32, u32)] = &[
+        (0x0590, 0x05FF),   // Hebrew points
+        (0x0600, 0x06FF),   // Arabic harakat
+        (0x0700, 0x074F),   // Syriac vowels
+        (0x0800, 0x083F),   // Samaritan vowels
+        (0x08A0, 0x08FF),   // Arabic extended-A marks
+        (0x1800, 0x18AF),   // Mongolian ali gali
+        (0x1DC0, 0x1DFF),   // combining Latin letters
+        (0x2DE0, 0x2DFF),   // combining Cyrillic letters
+        (0xA640, 0xA69F),   // combining Cyrillic letters
+        (0xFB1D, 0xFB4F),   // Hebrew presentation forms
+        (0x1F100, 0x1F1FF), // enclosed Latin letters
+    ];
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE t USING fts5(x, tokenize='unicode61 remove_diacritics 2');
+         CREATE VIRTUAL TABLE v USING fts5vocab(t, 'instance');",
+    )
+    .unwrap();
+    let mut probe: std::collections::BTreeSet<char> = std::collections::BTreeSet::new();
+    for c in (0u32..=0x10FFFF).filter_map(char::from_u32) {
+        if c.is_ascii() || !c.is_alphanumeric() {
+            continue;
+        }
+        for d in query::normalize(&c.to_string()).chars() {
+            if d.is_alphanumeric() && !d.is_ascii() && !query::is_unsegmented(d) {
+                probe.insert(d);
+            }
+        }
+    }
+    let tx = conn.unchecked_transaction().unwrap();
+    {
+        let mut insert = tx.prepare("INSERT INTO t(rowid, x) VALUES (?1, ?2)").unwrap();
+        for c in &probe {
+            insert
+                .execute(rusqlite::params![*c as i64, format!("q{c}q")])
+                .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+    // `q<c>q` is one token when `c` is a token character, two otherwise.
+    let mut stmt = conn
+        .prepare("SELECT doc FROM v GROUP BY doc HAVING COUNT(*) > 1")
+        .unwrap();
+    let breaking: Vec<u32> = stmt
+        .query_map([], |r| r.get::<_, i64>(0))
+        .unwrap()
+        .map(|r| r.unwrap() as u32)
+        .collect();
+    assert!(breaking.len() > 100, "the probe saw the marks: {}", breaking.len());
+    let unlisted: Vec<String> = breaking
+        .iter()
+        .filter(|&&u| !LISTED.iter().any(|&(a, b)| (a..=b).contains(&u)))
+        .map(|u| format!("U+{u:04X}"))
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "unicode61 breaks a word at these, and is_unsegmented does not cover them: {unlisted:?}"
+    );
 }
 
 /// Every way a chunk row goes takes its full-text rows with it — a cascade
@@ -2636,7 +2862,7 @@ fn an_index_at_schema_3_is_rebuilt_with_the_revised_tables() {
     let index = MemoryIndex::open(&path).unwrap();
     let report = index.index_state().unwrap();
     assert_eq!(report.state, IndexState::Rebuilding);
-    assert_eq!(report.schema_version, 4);
+    assert_eq!(report.schema_version, SCHEMA_VERSION);
     assert_eq!(report.notes, 0, "nothing of the v3 cache is served");
     let conn = index.lock();
     let column = |table: &str, column: &str| -> bool {
@@ -2665,6 +2891,41 @@ fn an_index_at_schema_3_is_rebuilt_with_the_revised_tables() {
             "{table} is contentless: {sql}"
         );
     }
+}
+
+/// Repair round 1 of LQ17 widens `query::is_unsegmented` (design 09
+/// §6.5.1), which decides what `fts_tri` and the script split hold: a cache
+/// written at schema 4 — a Devanagari body kept out of `fts_tri` — is
+/// recreated, never served.
+#[test]
+fn an_index_at_schema_4_is_rebuilt_for_the_widened_scripts() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(INDEX_FILE_NAME);
+    {
+        let index = MemoryIndex::open(&path).unwrap();
+        index
+            .rebuild(&[record("n1", "Weekend", "हर शनिवार दोस्तों के साथ।\n")])
+            .unwrap();
+        let conn = index.lock();
+        conn.execute(
+            "UPDATE meta SET value = '4' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    }
+    let index = MemoryIndex::open(&path).unwrap();
+    let report = index.index_state().unwrap();
+    assert_eq!(report.state, IndexState::Rebuilding);
+    assert_eq!(report.schema_version, SCHEMA_VERSION);
+    assert_eq!(report.notes, 0, "nothing of the v4 cache is served");
+    index
+        .rebuild(&[record("n1", "Weekend", "हर शनिवार दोस्तों के साथ।\n")])
+        .unwrap();
+    let conn = index.lock();
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM fts_tri", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1, "a Devanagari body is in the trigram table");
 }
 
 /// Five dated notes a day apart, one per status the timeline shows or hides.
@@ -2881,10 +3142,10 @@ fn a_rebuild_starts_from_a_new_file() {
 /// The file scan a search falls back to while the index is rebuilt answers
 /// with the index's own filters and evidence: the same notes and reasons,
 /// for word, word-beginning, header-substring, glued-word, CJK, literal,
-/// short CJK and exact-title queries — and nothing for a term inside a body
-/// word — on both filter sets and with the historical, kind, validity and
-/// date switches (design 09 §6.5.3). It says `rebuilding`, and `partial`
-/// when the caller left notes out.
+/// short CJK, exact-title, glued-query and Devanagari queries — and nothing
+/// for a term inside a body word — on both filter sets and with the
+/// historical, kind, validity and date switches (design 09 §6.5.3). It says
+/// `rebuilding`, and `partial` when the caller left notes out.
 #[test]
 fn the_file_scan_finds_what_the_index_finds() {
     let at = |s: &str| {
@@ -2907,6 +3168,8 @@ fn the_file_scan_finds_what_the_index_finds() {
         record("other", "Other partition", "Editing elsewhere.\n"),
         record("glued", "发版 checklist", "发版前先看一遍commit 记录。\n## Knowledge\n周五不发版。\n"),
         record("espresso", "Espresso machine", "Descale the espresso machine monthly; `memory_files` too.\n"),
+        record("spaced", "Runtime", "Python 版本: 3.12\n"),
+        record("hindi", "Weekend", "हर शनिवार दोस्तों के साथ क्रिकेट।\n"),
     ];
     records[3].effective_status = EffectiveStatus::Superseded;
     records[4].same_key_loser = true;
@@ -2939,6 +3202,9 @@ fn the_file_scan_finds_what_the_index_finds() {
         "发版前",
         "memory_file",
         "machine descale",
+        "python版本",
+        "दोस्त",
+        "शनिवार",
     ] {
         for mode in [SearchMode::Explicit, SearchMode::Automatic] {
             let mut q = SearchQuery::new(text, keys.clone());

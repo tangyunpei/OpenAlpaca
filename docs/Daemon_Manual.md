@@ -654,7 +654,7 @@ applies to the next one. A workflow's lead gets the same
 recall, in the same mode, once at its start. Search is literal: a term is
 matched as a whole word or as the beginning of one (`prefer` finds
 `prefers`), and inside a word only in a note's title, aliases and tags, or in
-Chinese, Japanese, Korean, Thai, Lao, Myanmar or Khmer text — `presso` does
+Chinese, Japanese, Korean, Thai, Hindi, Tamil and similar scripts — `presso` does
 not find a body's `espresso`; a one- or two-character query (a short Chinese
 word) goes through a bounded scan, and nothing asks a model. A reply waits at most 1.5 s for its recall
 (and, apart, for the suggestions it is told about): past that the turn goes

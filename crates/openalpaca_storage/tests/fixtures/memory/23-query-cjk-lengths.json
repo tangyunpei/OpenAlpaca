@@ -2,11 +2,11 @@
   "row": {
     "id": "q3",
     "scenario": "slice-2 query fixture: CJK queries of 1, 2 and 3+ characters against 用户喜欢简洁的回答",
-    "required_outcome": "One- and two-character queries go through the bounded scoped substring pass and find the note (partial reported when the scan cap is hit; not on a corpus this small); three-or-more-character queries reach the trigram table; an alias hit is reported as `alias`; complete Chinese retrieval is never claimed from unicode61 alone. Supports matrix row 12."
+    "required_outcome": "One- and two-character queries go through the bounded scoped substring pass and find the note (partial reported when the scan cap is hit; not on a corpus this small); three-or-more-character queries reach the trigram table, in Devanagari too; an alias hit is reported as `alias`; complete Chinese retrieval is never claimed from unicode61 alone. Supports matrix row 12."
   },
-  "design": ["§5 step 4 (03 rev 7.8, 09 §6.5): a term of three or more characters carrying a character of a script unicode61 cannot split (CJK among them) is matched exactly on the unicode61 table and as a substring on the trigram tables, which hold titles, aliases and tags and the body of every chunk carrying such a character — a mixed Latin and Chinese chunk included; one- and two-character queries use a bounded scoped substring pass; return `partial: true` when a scan cap is hit", "§5 step 3: Unicode-normalized terms", "§4: CJK aliases round-trip byte-identically"],
+  "design": ["§5 step 4 (03 rev 7.8, 09 §6.5): a term of three or more characters carrying a character of a script unicode61 cannot split into words (CJK among them, and Devanagari, whose words it breaks at every vowel sign) is matched exactly on the unicode61 table and as a substring on the trigram tables, which hold titles, aliases and tags and the body of every chunk carrying such a character — a mixed Latin and Chinese chunk included; one- and two-character queries use a bounded scoped substring pass; return `partial: true` when a scan cap is hit", "§5 step 3: Unicode-normalized terms", "§4: CJK aliases round-trip byte-identically"],
   "loads_in": ["slice-2"],
-  "notes_for_implementer": "Four notes: the target (body 用户喜欢简洁的回答, alias 简洁), a CJK decoy about apples, an English decoy, and a Latin note with a Chinese phrase in its body (note 004, added by LQ17). Lengths are in characters, not bytes: 答 is one character and three UTF-8 bytes, so a byte-counting router would send it to the trigram table and a 2-character query to `unicode61`, where it matches nothing — the lengths here catch that. The design gives the substring pass no MatchReason, so steps 1–3 check the id and `partial: false` only; step 4's alias hit is `alias`; steps 5 and 6 (3+ characters inside the body's one CJK run) include `trigram` wherever the term stands in the run — `用户喜欢` begins it and `简洁的回答` ends it, and a CJK term is never a prefix query (09 §6.5.2) — and step 7 is the exact title. Step 13 searches `说明写成` inside note 004's `发布说明写成要点`: a chunk that carries an unsegmented character keeps its body in the trigram table even when most of it is Latin. Step 8 is the full-width punctuation and NFKC case: ｑｕｉｃｋ must normalize to `quick` and find the English decoy. Step 9 mixes scripts in one query and returns both matching notes by the union rule.",
+  "notes_for_implementer": "Four notes: the target (body 用户喜欢简洁的回答, alias 简洁), a CJK decoy about apples, an English decoy, and a Latin note with a Chinese phrase in its body (note 004, added by LQ17). Lengths are in characters, not bytes: 答 is one character and three UTF-8 bytes, so a byte-counting router would send it to the trigram table and a 2-character query to `unicode61`, where it matches nothing — the lengths here catch that. The design gives the substring pass no MatchReason, so steps 1–3 check the id and `partial: false` only; step 4's alias hit is `alias`; steps 5 and 6 (3+ characters inside the body's one CJK run) include `trigram` wherever the term stands in the run — `用户喜欢` begins it and `简洁的回答` ends it, and a CJK term is never a prefix query (09 §6.5.2) — and step 7 is the exact title. Step 13 searches `说明写成` inside note 004's `发布说明写成要点`: a chunk that carries an unsegmented character keeps its body in the trigram table even when most of it is Latin. Step 14 searches `दोस्त` (friend) in note 005's `दोस्तों` (friends'), added by LQ17's repair round 1: unicode61 breaks a Devanagari word at every vowel sign, so the script counts as unsegmented (09 §6.5.1) and its body is in the trigram table; the virama inside `दोस्त` is no letter, so the query is a literal and the stem is found inside the inflected form as `phrase`. Step 8 is the full-width punctuation and NFKC case: ｑｕｉｃｋ must normalize to `quick` and find the English decoy. Step 9 mixes scripts in one query and returns both matching notes by the union rule.",
   "owners": [
     { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
   ],
@@ -58,6 +58,16 @@
           "updated_at": "2026-09-23T10:03:00Z",
           "body": "# Release notes\n\nFor every version, 发布说明写成要点 and link the tag.\n",
           "origin": "user"
+        },
+        {
+          "id": "00000023-0000-4000-8000-000000000005",
+          "title": "Weekend",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:04:00Z",
+          "updated_at": "2026-09-23T10:04:00Z",
+          "body": "# Weekend\n\nहर शनिवार दोस्तों के साथ क्रिकेट।\n",
+          "origin": "user"
         }
       ]
     }
@@ -78,6 +88,7 @@
     { "step": 10, "op": "search", "context": "alice_tool", "input": { "query": "苹果" }, "expect": { "ids": ["00000023-0000-4000-8000-000000000002"], "ids_absent": ["00000023-0000-4000-8000-000000000001"] } },
     { "step": 11, "op": "search", "context": "alice_tool", "input": { "query": "香蕉" }, "expect": { "ids_unordered": [], "count": 0 } },
     { "step": 12, "op": "read", "context": "alice_tool", "input": { "id": "00000023-0000-4000-8000-000000000001" }, "expect": { "results": { "00000023-0000-4000-8000-000000000001": { "excerpt_contains": "用户喜欢简洁的回答" } }, "frontmatter_aliases": ["简洁"] } },
-    { "step": 13, "op": "search", "context": "alice_tool", "input": { "query": "说明写成" }, "expect": { "ids": ["00000023-0000-4000-8000-000000000004"], "results": { "00000023-0000-4000-8000-000000000004": { "match_includes": ["trigram"] } } } }
+    { "step": 13, "op": "search", "context": "alice_tool", "input": { "query": "说明写成" }, "expect": { "ids": ["00000023-0000-4000-8000-000000000004"], "results": { "00000023-0000-4000-8000-000000000004": { "match_includes": ["trigram"] } } } },
+    { "step": 14, "op": "search", "context": "alice_tool", "input": { "query": "दोस्त" }, "expect": { "ids": ["00000023-0000-4000-8000-000000000005"], "results": { "00000023-0000-4000-8000-000000000005": { "match_includes": ["phrase"], "excerpt_contains": "दोस्तों के साथ" } } } }
   ]
 }

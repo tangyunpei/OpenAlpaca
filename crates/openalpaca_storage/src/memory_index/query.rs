@@ -1,5 +1,5 @@
 //! Query normalization and the literal query builder (design §5 steps 3–4;
-//! the routing is design 09 §6.5.2, LQ17, index schema 4).
+//! the routing is design 09 §6.5.2, LQ17, index schemas 4 and 5).
 //!
 //! A query is normalized — NFKC, lowercase, Latin diacritics stripped — and
 //! split into terms. Each term is one of:
@@ -24,8 +24,9 @@
 //!   token is a stop word ([`is_prefix_term`]). So `prefer` finds `prefers`
 //!   and `preference`, `memory_file` finds `memory_files`, and `partner's`,
 //!   `用户喜欢` and `and` match exactly. When that query fills its candidate
-//!   cap, the terms it sent as prefixes are searched again as whole words in
-//!   titles, aliases and tags ([`ParsedQuery::word_match_head_exact`]).
+//!   cap, the terms it sent as prefixes are searched again as whole words,
+//!   together in titles, aliases and tags and each alone in bodies
+//!   ([`ParsedQuery::word_match_exact_at_cap`]).
 //! - **`fts_tri_head`** (`trigram` over titles, aliases and tags) takes every
 //!   one of three or more characters, as a substring.
 //! - **`fts_tri`** (`trigram` over the bodies of chunks carrying an
@@ -34,13 +35,14 @@
 //!
 //! So nothing finds a term **inside** a word of a body written in a
 //! space-separated script (`presso` in `espresso`); a title, an alias or a
-//! tag still does, and a Chinese, Japanese, Korean, Thai, Lao, Myanmar or
-//! Khmer body keeps substring search.
+//! tag still does, and a body in an unsegmented script — CJK, Thai,
+//! Devanagari, Tamil and the rest [`is_unsegmented`] names — keeps
+//! substring search.
 //!
 //! The MATCH strings are built from these terms only: every term is a
 //! double-quoted FTS5 string with embedded quotes doubled, joined by `OR` —
 //! the only syntax added is the index's own `*` after a closing quote and
-//! the whole-word query's column filter — so `AND`, `NOT`, `NEAR`,
+//! the whole-word queries' column filters — so `AND`, `NOT`, `NEAR`,
 //! `column:`, a caller's `*`, parentheses and an unbalanced quote are text,
 //! never syntax: the F4 class of defect.
 //!
@@ -81,6 +83,18 @@ pub(crate) struct Literal {
     /// Its alphanumeric runs of three or more characters, stop words
     /// excluded, in order.
     pub parts: Vec<String>,
+}
+
+/// The MATCH strings of the whole-word queries at the word table's cap
+/// ([`ParsedQuery::word_match_exact_at_cap`], design 09 §6.5.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WholeWordQueries {
+    /// Every prefix term as a whole word in titles, aliases and tags: one
+    /// ranked query with its own cap.
+    pub header: String,
+    /// Each prefix term alone as a whole word in bodies: one unranked query
+    /// per term, which adds its chunks only when they fit within a cap.
+    pub bodies: Vec<String>,
 }
 
 /// A parsed query.
@@ -130,17 +144,24 @@ impl ParsedQuery {
         }))
     }
 
-    /// The whole-word query the search runs when [`Self::word_match`] fills
-    /// its candidate cap (design 09 §6.5.2): the terms that went out as
-    /// prefixes, as whole words, in titles, aliases and tags only. `None`
-    /// when no term was a prefix — the first query was already this one.
-    pub(crate) fn word_match_head_exact(&self, words: &[String]) -> Option<String> {
-        or_join(
-            self.routed(words)
-                .filter(|t| is_prefix_term(t))
-                .map(|t| quote(&split_scripts(t))),
-        )
-        .map(|m| format!("{{title aliases tags}} : ({m})"))
+    /// The whole-word queries the search runs when [`Self::word_match`]
+    /// fills its candidate cap (design 09 §6.5.2), over the terms that went
+    /// out as prefixes: all of them as whole words in titles, aliases and
+    /// tags, and each one alone as a whole word in bodies. `None` when no
+    /// term was a prefix — the first query was already this one.
+    pub(crate) fn word_match_exact_at_cap(&self, words: &[String]) -> Option<WholeWordQueries> {
+        let phrases: Vec<String> = self
+            .routed(words)
+            .filter(|t| is_prefix_term(t))
+            .map(|t| quote(&split_scripts(t)))
+            .collect();
+        if phrases.is_empty() {
+            return None;
+        }
+        Some(WholeWordQueries {
+            header: format!("{{title aliases tags}} : ({})", phrases.join(" OR ")),
+            bodies: phrases.iter().map(|p| format!("{{body}} : {p}")).collect(),
+        })
     }
 
     /// The header trigram table's MATCH string: every term of three or more
@@ -211,12 +232,25 @@ pub(crate) fn tokens(text: &str) -> impl Iterator<Item = &str> {
         .filter(|t| !t.is_empty())
 }
 
-/// A character of a script `unicode61` cannot split into words: CJK (as
-/// [`is_cjk`]), Thai, Lao, Myanmar and Khmer. `unicode61` reads a run of them
-/// as one token, so a word inside the run is found only as a substring: a
-/// chunk carrying one keeps its body in the trigram table, and a term
-/// carrying one is matched exactly on the word table, never as a prefix
-/// (design 09 §6.5.1).
+/// A character of a script `unicode61` cannot split into words (design 09
+/// §6.5.1). Two kinds:
+///
+/// - **written without spaces between words** — CJK (as [`is_cjk`]), Thai,
+///   Lao, Myanmar, Khmer, Tibetan, Yi, Javanese, Balinese, Buginese and the
+///   Tai scripts: `unicode61` reads a run of them as one token, so a word
+///   inside the run is found only as a substring;
+/// - **words built with vowel signs `unicode61` breaks at** — Devanagari and
+///   the other Brahmic scripts, Thaana, the Philippine scripts, Limbu,
+///   Lepcha, Cham, Meetei Mayek, Miao: its tables count a combining mark as
+///   no token character, so `दोस्तों` is indexed as the consonants `द स त`,
+///   fragments no query or ranker reads as the word (repair round 1 of
+///   LQ17).
+///
+/// A chunk carrying one keeps its body in the trigram table, and a term
+/// carrying one is matched exactly on the word table, never as a prefix.
+/// The vowel points of Hebrew, Arabic, Syriac and Samaritan are left out:
+/// their ordinary text is unpointed, and a test lists every mark
+/// `unicode61` breaks a word at that this does not cover.
 ///
 /// **The one predicate.** The upsert, the query builder, the ranker and the
 /// file scan all call it, and it decides what `fts_tri` and the script split
@@ -226,13 +260,40 @@ pub(crate) fn is_unsegmented(c: char) -> bool {
     is_cjk(c)
         || matches!(
             c as u32,
-            0x0E00..=0x0E7F     // Thai
-            | 0x0E80..=0x0EFF   // Lao
-            | 0x1000..=0x109F   // Myanmar
-            | 0x1780..=0x17FF   // Khmer
-            | 0x19E0..=0x19FF   // Khmer symbols
-            | 0xA9E0..=0xA9FF   // Myanmar extended-B
-            | 0xAA60..=0xAA7F   // Myanmar extended-A
+            // Written without spaces between words.
+            0x0E00..=0x0E7F       // Thai
+            | 0x0E80..=0x0EFF     // Lao
+            | 0x0F00..=0x0FFF     // Tibetan
+            | 0x1000..=0x109F     // Myanmar
+            | 0x1780..=0x17FF     // Khmer
+            | 0x1950..=0x197F     // Tai Le
+            | 0x1980..=0x19DF     // New Tai Lue
+            | 0x19E0..=0x19FF     // Khmer symbols
+            | 0x1A00..=0x1A1F     // Buginese
+            | 0x1A20..=0x1AAF     // Tai Tham
+            | 0x1B00..=0x1B7F     // Balinese
+            | 0xA000..=0xA4CF     // Yi syllables and radicals
+            | 0xA980..=0xA9DF     // Javanese
+            | 0xA9E0..=0xA9FF     // Myanmar extended-B
+            | 0xAA60..=0xAA7F     // Myanmar extended-A
+            | 0xAA80..=0xAADF     // Tai Viet
+            // Words built with vowel signs `unicode61` breaks at.
+            | 0x0780..=0x07BF     // Thaana
+            | 0x0900..=0x0DFF     // Devanagari, Bengali … Malayalam, Sinhala
+            | 0x1700..=0x177F     // Tagalog, Hanunoo, Buhid, Tagbanwa
+            | 0x1900..=0x194F     // Limbu
+            | 0x1B80..=0x1BFF     // Sundanese, Batak
+            | 0x1C00..=0x1C4F     // Lepcha
+            | 0x1CD0..=0x1CFF     // Vedic extensions
+            | 0xA800..=0xA82F     // Syloti Nagri
+            | 0xA880..=0xA8FF     // Saurashtra, Devanagari extended
+            | 0xA900..=0xA95F     // Kayah Li, Rejang
+            | 0xAA00..=0xAA5F     // Cham
+            | 0xAAE0..=0xAAFF     // Meetei Mayek extensions
+            | 0xABC0..=0xABFF     // Meetei Mayek
+            | 0x10A00..=0x10A5F   // Kharoshthi
+            | 0x11000..=0x11FFF   // the Brahmic scripts of plane 1
+            | 0x16F00..=0x16F9F   // Miao
         )
 }
 

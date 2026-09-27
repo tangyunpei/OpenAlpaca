@@ -44,10 +44,10 @@ added (design 09 §6.5.6, LQ17).
 | `20-compaction-handoff-cancelled-task.json` | Compaction, lead/worker handoff, a cancelled task | slice 3 |
 | `21-query-natural-question-prefer-vim.json` | slice-2 query fixture: "what editor do I prefer?" → "User prefers vim for editing" | slice 2 |
 | `22-query-literal-and.json` | slice-2 query fixture: F4's literal-`AND` case | slice 2 |
-| `23-query-cjk-lengths.json` | slice-2 query fixture: CJK queries of 1, 2 and 3+ characters | slice 2 |
+| `23-query-cjk-lengths.json` | slice-2 query fixture: CJK queries of 1, 2 and 3+ characters; a Devanagari stem found inside its inflected form (LQ17's repair round 1) | slice 2 |
 | `24-forgotten-replacement-not-revived.json` | slice-2 query fixture: a forgotten or archived replacement does not revive its predecessor | slice 2 |
 | `25-suggestion-lifecycle.json` | Learning v2 L3 (design 09 §3): a suggestion retires nothing until a confirm bound to its target's revision; an automatic replacement's withdrawal brings the old note back; a suggestion is never archived or edited by a tool call | slice 2 (the file-level loader) |
-| `26-query-prefix-in-body.json` | LQ17 query fixture (design 09 §6.5.6): "what do I prefer?" finds "User prefers kitty" through its body alone (`prefix`); a term inside a body word (`presso`, `now` in a Chinese note's heading) finds nothing; a Latin word glued to Chinese is a `term`; a literal's last token is a prefix only from three characters | slice 2 |
+| `26-query-prefix-in-body.json` | LQ17 query fixture (design 09 §6.5.6): "what do I prefer?" finds "User prefers kitty" through its body alone (`prefix`); a term inside a body word (`presso`, `now` in a Chinese note's heading) finds nothing; a Latin word glued to Chinese is a `term`; a literal's last token is a prefix only from three characters | slice 2; step 2's recall also at slice 3 (`prompt_ctx/sources/memory.rs`) |
 
 Rows 05 and 06 are about the database opener, not the memory library; their files
 state the expectation so the matrix is complete, and the loader that runs them is
@@ -251,9 +251,12 @@ mutation, or an `update` whose pre-image a later step needs) for later `@id:` /
 underneath: `search` is the index query with the context's partitions
 pre-resolved and the §5 step-5 filters; `recall` is the same query with the
 automatic-path filter set (same-key losers and `source_forgotten` notes out) and
-the §4 byte budget, with no prompt assembly; `store`/`update`/`forget`/`list`/
-`read` are `memory_files` mutations and reads on the named partition with the
-context's `surface` mapped to the origin it records. Ops slice 2 cannot run
+the §4 byte budget, with no prompt assembly. The index serves no excerpt (design
+09 §6.5.1), so an `excerpt_contains` a slice-2 search checks is read from the note
+body at the hit's `chunk_ordinal`, as the service reads it from the verified file.
+`store`/`update`/`forget`/`list`/`read` are `memory_files` mutations and reads on
+the named partition with the context's `surface` mapped to the origin it
+records. Ops slice 2 cannot run
 (`extraction`, `tool_call`, the CLI and daemon ops) are skipped by name, and the
 file's `loads_in` says which slice owns the whole file.
 

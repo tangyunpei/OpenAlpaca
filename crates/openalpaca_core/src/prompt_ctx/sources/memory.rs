@@ -547,6 +547,65 @@ mod tests {
         assert!(scene.service.recently_used(10).is_empty());
     }
 
+    /// Fixture 26 (`26-query-prefix-in-body.json`) step 2: over its seven
+    /// notes, "what do I prefer?" recalls "Terminal" through its body alone
+    /// — `prefer` begins `prefers`, and the title shares nothing with the
+    /// question — keyed by id and revision with reason `recall`, its header
+    /// saying `match=prefix` (design 09 §6.5.3), and nothing else: no other
+    /// note holds a word that begins with `prefer`.
+    #[tokio::test]
+    async fn the_body_only_prefix_fixture_recalls_through_the_service() {
+        let scene = scene();
+        let terminal = store(
+            &scene,
+            "Terminal",
+            "# Terminal\n\nUser prefers kitty over iTerm.\n",
+        );
+        for (title, body) in [
+            ("Coffee", "# Coffee\n\nUser drinks espresso after lunch.\n"),
+            ("通勤", "# 通勤\n\n## Knowledge\n每天坐地铁 5 号线上班。\n"),
+            ("发版", "# 发版\n\n发版前先看一遍commit 记录。\n"),
+            (
+                "Birthday",
+                "# Birthday\n\nMy partner's birthday is in May.\n",
+            ),
+            (
+                "Shopping",
+                "# Shopping\n\nThe partner store opens at nine.\n",
+            ),
+            (
+                "Storage crate",
+                "# Storage crate\n\nRead memory_files before you edit a note.\n",
+            ),
+        ] {
+            store(&scene, title, body);
+        }
+
+        let sections = scene
+            .source
+            .resolve(&request("what do I prefer?", Some(ALICE)))
+            .await;
+        assert_eq!(sections.len(), 1, "{sections:?}");
+        assert_eq!(
+            sections[0].key,
+            ContextKey::Memory(MemoryUsed {
+                id: terminal.id,
+                revision: terminal.revision.clone(),
+                reason: crate::memory::service::UsedReason::Recall,
+            })
+        );
+        assert!(
+            sections[0]
+                .content
+                .contains("User prefers kitty over iTerm")
+        );
+        assert!(
+            sections[0].content.contains(" match=prefix "),
+            "{}",
+            sections[0].content
+        );
+    }
+
     /// No owner (a `System` principal, an unlinked external identity), an
     /// owner that is not a `global_user` row, an empty query, or a service
     /// not installed yet: nothing is recalled, nothing fails.

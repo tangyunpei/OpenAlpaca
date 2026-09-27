@@ -6,7 +6,7 @@
 //! fields, the normalized title, aliases and tags), its chunks with line spans
 //! and their normalized text — the one copy of the text in the cache — and
 //! three contentless FTS5 indexes over the chunks (index schema 4, design 09
-//! §6.5, LQ17):
+//! §6.5, LQ17; schema 5 widens the unsegmented scripts):
 //!
 //! - `fts_word`, `unicode61` over title, aliases, tags and body, the text
 //!   split at script boundaries ([`query::split_scripts`]): whole tokens, and
@@ -14,8 +14,9 @@
 //! - `fts_tri_head`, `trigram` over title, aliases and tags: substrings of the
 //!   header;
 //! - `fts_tri`, `trigram` over the body of a chunk that carries a character of
-//!   a script `unicode61` cannot split ([`query::is_unsegmented`]: CJK, Thai,
-//!   Lao, Myanmar, Khmer): substrings of that text.
+//!   a script `unicode61` cannot split into words ([`query::is_unsegmented`]:
+//!   CJK, Thai and the other scripts written without spaces; Devanagari, Tamil
+//!   and the other scripts built with vowel signs): substrings of that text.
 //!
 //! [`query`] says which term goes where. A word-beginning or substring hit is
 //! weighted below a whole-token hit; one- and two-character queries go
@@ -65,7 +66,11 @@ pub const INDEX_FILE_NAME: &str = "memory-index-v1.sqlite";
 /// timeline walks. Version 4 (design 09 §6.5, LQ17) is the layout revision:
 /// `note.norm_aliases` and `norm_tags`, `chunk` holding only its normalized
 /// text, the header trigram table `fts_tri_head`, `fts_tri` only over
-/// unsegmented-script chunks, and all three FTS tables contentless.
+/// unsegmented-script chunks, and all three FTS tables contentless. Version
+/// 5 (LQ17's repair round 1) widens [`query::is_unsegmented`] to the
+/// scripts whose words `unicode61` breaks at their vowel signs (Devanagari
+/// and the rest) and to Tibetan, Yi and the other scripts written without
+/// spaces, so their bodies are in `fts_tri` again.
 ///
 /// **It versions what a row holds, not only the tables.** Since scale slice
 /// S1 the service re-indexes a note only when its bytes, its file's stat or
@@ -79,7 +84,7 @@ pub const INDEX_FILE_NAME: &str = "memory-index-v1.sqlite";
 /// `fts_tri` hold — must bump this too, or the old rows are served for
 /// good; the bump is what re-derives every row, by a rebuild off the
 /// request path.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 /// Design §4: a note is at most 32 KiB. A larger body is refused by
 /// [`MemoryIndex::upsert`] so the cache stays bounded by what `memory_files`
 /// would have written.

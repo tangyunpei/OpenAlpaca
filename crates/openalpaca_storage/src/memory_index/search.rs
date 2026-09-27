@@ -316,8 +316,8 @@ fn placeholders_unnumbered(n: usize) -> String {
 }
 
 /// A candidate chunk with the evidence each generator produced. A chunk
-/// only the whole-word query at the cap or the substring pass found carries
-/// no rank: its coverage decides (design 09 §6.5.3).
+/// only the whole-word queries at the cap or the substring pass found
+/// carries no rank: its coverage decides (design 09 §6.5.3).
 #[derive(Default)]
 pub(super) struct ChunkEvidence {
     pub(super) note_rowid: i64,
@@ -431,13 +431,28 @@ impl MemoryIndex {
             }
             // A word beginning shared by many longer words can fill the cap
             // with them and crowd out a note whose one match is the whole
-            // word in its header — `work*` and the tag `work` (design 09
-            // §6.5.2). Below the cap the first query already holds it. The
-            // chunks this finds carry no rank: their coverage decides.
-            if capped && let Some(m) = parsed.word_match_head_exact(&words) {
-                let rows = fts_candidates(&conn, "fts_word", &m, &filter)?;
-                for (chunk_id, note_rowid, _) in rows {
+            // word — the tag `work` among `worker` and `workspace`, or
+            // `rides to work` in a body (design 09 §6.5.2). So the terms
+            // sent as prefixes are searched again as whole words: in the
+            // header, ranked, with a cap of its own; and in the body, each
+            // term alone and unranked, its chunks added only when they fit
+            // within the cap — a word that common has no note a cap could
+            // single out, and ranking it would cost BM25 over every one.
+            // Below the cap the first query already holds every such chunk.
+            // The chunks these find carry no rank: their coverage decides.
+            if capped && let Some(at_cap) = parsed.word_match_exact_at_cap(&words) {
+                for (chunk_id, note_rowid, _) in
+                    fts_candidates(&conn, "fts_word", &at_cap.header, &filter)?
+                {
                     chunks.entry(chunk_id).or_default().note_rowid = note_rowid;
+                }
+                for m in &at_cap.bodies {
+                    let rows = fts_rows_unranked(&conn, "fts_word", m, &filter, CANDIDATE_CAP + 1)?;
+                    if rows.len() <= CANDIDATE_CAP {
+                        for (chunk_id, note_rowid) in rows {
+                            chunks.entry(chunk_id).or_default().note_rowid = note_rowid;
+                        }
+                    }
                 }
             }
         }
@@ -544,6 +559,37 @@ fn fts_candidates(
             r.get::<_, i64>(1)?,
             r.get::<_, f64>(2)?,
         ))
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(IndexError::from)
+}
+
+/// Up to `limit` eligible chunks of one FTS table, in chunk id order and
+/// unranked: no BM25 is computed, so a term held by thousands of chunks
+/// costs no more than `limit` rows.
+fn fts_rows_unranked(
+    conn: &Connection,
+    table: &str,
+    match_expr: &str,
+    filter: &Filter,
+    limit: usize,
+) -> Result<Vec<(i64, i64)>> {
+    let sql = format!(
+        "SELECT c.id, c.note_rowid
+         FROM {table}
+         CROSS JOIN chunk c ON c.id = {table}.rowid
+         CROSS JOIN note n ON n.rowid = c.note_rowid
+         WHERE {table} MATCH ? AND {filter}
+         LIMIT ?",
+        filter = filter.clause
+    );
+    let mut params: Vec<Value> = Vec::with_capacity(filter.params.len() + 2);
+    params.push(Value::Text(match_expr.to_string()));
+    params.extend(filter.params.iter().cloned());
+    params.push(Value::Integer(limit as i64));
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(params_from_iter(params.iter()), |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(IndexError::from)
@@ -809,9 +855,20 @@ impl<'a> ChunkText<'a> {
         }
     }
 
-    /// `term` is a whole token of some field.
+    /// `term` is a whole token of some field — or, for a word glued across
+    /// scripts (`python版本`), its split tokens stand in sequence in some
+    /// field, which is how the word table matches it: as the phrase
+    /// `python 版本`, in spaced text as in glued (design 09 §6.5.3).
     pub(super) fn has_token(&self, term: &str) -> bool {
-        self.tokens.iter().any(|set| set.contains(term))
+        if self.tokens.iter().any(|set| set.contains(term)) {
+            return true;
+        }
+        let split: Vec<&str> = query::tokens_split(term).collect();
+        split.len() > 1
+            && self
+                .token_lists
+                .iter()
+                .any(|list| list.windows(split.len()).any(|w| w == split.as_slice()))
     }
 
     /// A token of some field begins with `term`, which the word table

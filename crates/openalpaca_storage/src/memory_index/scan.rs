@@ -11,7 +11,8 @@
 //! it waits on nothing the rebuild holds. A term is matched in the note's
 //! normalized title, aliases, tags and body chunks with the index's own
 //! evidence (design 09 §6.5.3), through the same `ChunkText`: as a whole
-//! token of the text split at script boundaries (`term`), else as a token's
+//! token of the text split at script boundaries, or a word glued across
+//! scripts as its split tokens in sequence (`term`), else as a token's
 //! beginning (`prefix`: `prefer` in `prefers`), else as a substring where
 //! the trigram tables find one (`trigram`: in a title, an alias or a tag,
 //! or a term carrying an unsegmented character in unsegmented text); a
@@ -19,7 +20,7 @@
 //! — and the whole query is compared with the title, the aliases and the
 //! `fact_key`. So an answer given during a rebuild finds what the index
 //! finds. The scan reads every note, so it has no cap and needs no
-//! whole-word query. What it cannot have is BM25 (no index statistics), so
+//! whole-word queries. What it cannot have is BM25 (no index statistics), so
 //! it orders hits by the same term and authority weights with no relevance
 //! tie-break but recency; and every answer says `rebuilding`, and `partial`
 //! when the caller left notes out.
