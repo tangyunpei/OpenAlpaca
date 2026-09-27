@@ -517,8 +517,11 @@ impl MemoryService {
     }
 
     /// The generation the index serves reads at, or `None` while a whole
-    /// rebuild is owed or running — for a reply-path read that goes without
-    /// the index rather than wait ([`Self::pending_suggestions`]).
+    /// rebuild is owed or running — for a reply-path read that then goes
+    /// without the index ([`Self::pending_suggestions`]). It is read once, at
+    /// the read's start: a rebuild that starts after it makes the read's
+    /// `touch` wait, which the reply's 1.5 s bound (scale slice S7) cuts
+    /// short for the turn.
     fn serving_generation(&self) -> Option<u64> {
         let state = self.rebuild_state();
         (!state.pending && !state.running).then_some(state.started)
