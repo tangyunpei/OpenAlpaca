@@ -687,7 +687,9 @@ said in your own words becomes an active note learned from you (origin
 `extracted_user`, listed as *recently learned* with a one-step undo). A learned
 note carries `aliases` — other words you might search it by, the other language
 included — a `fact_key` naming the fact it answers for (reusing a key your notes
-already use when one fits), and `observed_at`, when you said it. A fact about you (a key
+already use when one fits; a key only the assistant's own `memory_store` coined
+is not offered to it — the note itself still is), and `observed_at`, when you
+said it. A fact about you (a key
 starting `user.`) that replaces no note is saved in the **global** partition,
 whichever project you said it in; a replacement is saved in the partition of
 the note it replaces. When it
@@ -714,7 +716,11 @@ while no model can answer (one `WARN` when that starts, one `INFO` when it
 ends, with retries backing off from 1 minute to 1 hour), while a memory
 partition is quarantined, and while a daily cap binds; an answer the model
 cannot give in the expected shape three times running is skipped, with one
-`WARN` naming the conversation and the messages. Deleting or clearing a
+`WARN` naming the conversation and the messages. An answer that carries its
+JSON behind a `<think>…</think>` block, before a stray `</think>`, inside prose
+or as a bare list of items is read for the items it carries, each checked as in
+a well-formed answer; an answer cut at its output ceiling is not — it counts as
+cut. Deleting or clearing a
 conversation drops its turns not yet learned, and so does deleting the project
 directory a turn named — even while the model is answering: learning, and an
 episode note, skip those turns rather than re-create the directory and its
@@ -801,11 +807,21 @@ recall — superseded, archived or with an ended validity window — marked by
 `status`; a candidate (a suggestion included) is never listed, and a timeline
 is not drawn around one. The main conversation's system prompt says the same
 in one line. Search hits, timeline rows and read notes are all reported as
-`memory_used` with reason `tool`. A tool call records origin `extracted_user` at most,
-never `user`; it cannot confirm a candidate, it cannot edit, archive or
-replace a note you wrote, and it cannot edit a suggestion (the text you are
-asked about stays the extractor's). No surface archives a suggestion — it is
-replaced or kept. `memory_update` and `memory_forget` raise the ordinary
+`memory_used` with reason `tool`. While the search index is being rebuilt,
+`memory_timeline` answers `index_rebuilding` at once — the model can tell you,
+and search and read answer meanwhile — rather than wait for the rebuild. A tool call records origin `extracted_user` at most,
+never `user`; it cannot confirm a candidate, it cannot archive a note you
+wrote, and it cannot edit a suggestion (the text you are asked about stays the
+extractor's). **The assistant's replacement of a note you saved, edited by hand
+or imported is a suggestion** — whether it names the note in `supersedes`,
+saves under that note's `fact_key`, or edits it: a candidate naming your note,
+which stays in force and in recall until you *Replace* or *Keep mine*, and the
+tool's result tells the model so. With no `scope` it is stored in your note's
+partition. It cites the message you typed on that turn, so the assistant may
+raise it with `memory_confirm` on a later attended turn; the Memory view and
+`openalpaca memory suggestions` say the assistant suggested it. Its replacement
+of a note learned from you replaces it at once, as learning's does. No surface
+archives a suggestion — it is replaced or kept. `memory_update` and `memory_forget` raise the ordinary
 confirmation card, and an unattended turn (a scheduled skill, a piped
 `openalpaca chat`) is refused them outright. `memory_update` with `action:
 confirm` is refused **before** any card, since nothing the model does confirms
@@ -894,7 +910,7 @@ addressed. Bodies and queries are closed objects — an unknown key is a `400`.
 |---|---|
 | `GET /v1/memories` | List notes: `kind`, `status` (default `active`), `scope`, `include_history`, `include_candidates`, `limit` (1–100, default 50) and `cursor`. Answers `{items, next_cursor}`, each item with `supersedes` (the ids it names as replaced); a cursor is valid for the filter set that issued it, and one from another filter set is `400 MEMORY_INVALID_INPUT`. |
 | `GET /v1/memories/search` | Literal search: `q` (1–512 chars), `kind`, `scope`, `limit` (1–50, default 10), `historical`, `as_of`, and the model tool's `date_from`, `date_to` (inclusive, on the note's date — observed, else first saved; RFC 3339 or `YYYY-MM-DD`) and `order_by` (`relevance`, `newest`, `oldest`). `detail` defaults to `snippets` here: cited results with `freshness`, `conflict`, `same_key_loser`, `sources_status`, `valid_from` and `valid_to`; `detail=index` answers the tool's index rows. Either way with `count`, `partial` and `index_state`. Candidates are never returned. |
-| `GET /v1/memories/timeline` | `memory_timeline`: around exactly one of `anchor` (a note id), `q` (its first hit) or `date` (RFC 3339 or `YYYY-MM-DD`), the nearest `before` and `after` notes (0–20, default 5), in date order. Answers `{anchor, results, count, index_state}` — `anchor` is `{id}`, `{date}` or null when `q` matched nothing — with index rows whose `reason` is `before`, `anchor` or `after`, superseded, archived and ended notes marked by `status`, candidates never listed. An unknown anchor is `404`; no anchor, two, or a side over 20 is `400`. |
+| `GET /v1/memories/timeline` | `memory_timeline`: around exactly one of `anchor` (a note id), `q` (its first hit) or `date` (RFC 3339 or `YYYY-MM-DD`), the nearest `before` and `after` notes (0–20, default 5), in date order. Answers `{anchor, results, count, index_state}` — `anchor` is `{id}`, `{date}` or null when `q` matched nothing — with index rows whose `reason` is `before`, `anchor` or `after`, superseded, archived and ended notes marked by `status`, candidates never listed. An unknown anchor is `404`; no anchor, two, or a side over 20 is `400`; while the search index is being rebuilt it answers `503 MEMORY_INDEX_REBUILDING` at once. |
 | `GET /v1/memories/recently-learned` | The extractor's `extracted_user` notes that recall would use, newest first, each with `supersedes` (what it replaced) — `since` (RFC 3339, or a window like `7d`, `24h`, `30m`; default 7 days) and `limit`. A note that is not in force, loses its `fact_key` to another note, or cites a message a forget suppressed is not listed. An edit through this surface re-records a note as `user` and it leaves the list. |
 | `GET /v1/memories/suggestions` | The pending suggestions, newest first — `limit` (1–100, default 20). Each item: `id`, `revision`, `title`, `knowledge` (the suggested text, cut at 4 KiB), `knowledge_left_out` (how many characters that cut left out, 0 when whole), `reason`, `created_at`, `observed_at` (the cited message's time), `origin`, `scope`, `sources`, `older_count`, and `target: {id, revision, title, excerpt, excerpt_left_out, origin, scope}` — the note it would replace, as read now, its text cut at 600 bytes. Where several name one note only the newest is listed, and `older_count` counts the rest. A suggestion whose note is gone or no longer in force is not listed (undo still dismisses it). Records nothing. |
 | `GET /v1/memories/recently-used` | The in-memory ring of notes delivered to a model since the daemon started (`limit`, default 50, max 200): `{id, revision, reason, delivered_at, lane_key, task_id}`, `reason` as in `memory_used` — a note the recall only listed is recorded `index`, not as delivered. Cleared at restart. |
@@ -922,11 +938,13 @@ MEMORY_QUARANTINED` (the partition's control snapshot is missing or invalid —
 `openalpaca memory doctor --repair`, with the daemon stopped, is the only way
 out), `400 MEMORY_INVALID_INPUT` (a limit, a grammar, a shape, an unknown key, a
 cursor from another filter set). Two more the envelope can carry: `409
-MEMORY_BUSY` (a memory write on that partition is in flight — retry) and `500
-MEMORY_INTERNAL` (the store or the database refused; the cause is in the daemon
-log). `409 MEMORY_AUTHORITY_CONFLICT` and `409 MEMORY_CONFIRM_REFUSED` are the
-model's tool-surface refusals — a tool call editing, archiving or replacing a
-`user` note, a confirm from a tool call — and this user-directed surface never
+MEMORY_BUSY` (a memory write on that partition is in flight — retry), `503
+MEMORY_INDEX_REBUILDING` (the timeline, while the search index is being
+rebuilt — retry in a minute) and `500 MEMORY_INTERNAL` (the store or the
+database refused; the cause is in the daemon log). `409
+MEMORY_AUTHORITY_CONFLICT` and `409 MEMORY_CONFIRM_REFUSED` are the model's
+tool-surface refusals — a tool call archiving a `user` note or editing a
+suggestion, a confirm from a tool call — and this user-directed surface never
 produces them.
 
 **A note is at most 32 KiB, so a read is never cut.** The limit covers the whole
@@ -1336,7 +1354,7 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 
 - heartbeat event emitter
 - memory reconciliation (fixed 30 s interval): a stat scan of every memory partition the owner's control snapshots know; a note file edited, added or removed behind the daemon's back is re-recorded as `external`, the search index follows, and each finding is one `memory_changed` frame. It first runs any rebuild of the search index still owed, and once the index has had no write for a whole interval it merges the index and truncates its write-ahead log — rebuilding it from a new file when it has grown past twice its size after its last rebuild.
-- memory index rebuild (once, at start, only when the search index is missing, unreadable or of another version): rebuilds it from the note files on a blocking worker while the daemon already serves; recall and search answer from the note files until it is done, and a rebuild that fails is retried by the next reconciliation
+- memory index rebuild (once, at start, only when the search index is missing, unreadable or of another version): rebuilds it from the note files on a blocking worker while the daemon already serves, each partition under its writer slot, so a write meanwhile is never indexed with stale derived facts; recall and search — also when a rebuild starts under them — the suggestions list and a deleted conversation's episode notes answer from the note files until it is done, the timeline answers `MEMORY_INDEX_REBUILDING`, and only background learning waits for it; and a rebuild that fails is retried by the next reconciliation
 - learning sweeper (fixed 15 s interval): a conversation with turns not yet learned becomes due once it has been idle `[orchestrator.learning] idle_secs` or is no longer its lane's active conversation, and a due one is learned once no chat turn has been in flight for 20 s; a conversation with new turns becomes due for its episode note once it has been quiet 30 minutes or is no longer its lane's active conversation, and the note is written after its facts, when it has at least 4 of your turns (see [Memory](#memory))
 - learning boot catch-up (once, 30 s after start): every conversation with turns not yet learned is due, and so is the episode note of every conversation with at least 4 of your turns past its episode cursor
 - file-processing worker and asset cleanup (upload governance)

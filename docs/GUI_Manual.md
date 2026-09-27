@@ -732,7 +732,10 @@ Two columns, in the Library's shape. The left one, top to bottom:
   with how much is not shown, `... (1400 more characters not shown)`, and the
   note's detail has the rest), why it thinks so, and *"From
   what you said on <date>"* (*"Edited by you · suggested on <date>"* once you
-  edited the suggestion itself). **Replace** makes the new note yours and keeps the old
+  edited the suggestion itself). The assistant can make a suggestion too: when
+  it saves in chat a change to a note you saved — rather than overwrite your
+  note, which it may not — the card reads *"Suggested by Alpaca on <date>"*,
+  and the candidate's detail *"Suggested by Alpaca — would replace “X”"*. **Replace** makes the new note yours and keeps the old
   one as history (*"Replaced — “X” is kept as history"*); if you edited the old
   note after the suggestion was made, the Replace is refused rather than
   retiring your edit unseen. A suggestion whose note was already replaced or

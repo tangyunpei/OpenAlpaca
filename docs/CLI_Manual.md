@@ -703,7 +703,9 @@ Notes:
   validity window has ended — with that status in the STATUS column (in yellow);
   the anchor is in bold. Candidates are never listed, and a timeline is not drawn
   around one. It is the model's `memory_timeline` over `GET
-  /v1/memories/timeline`.
+  /v1/memories/timeline`. While the daemon is rebuilding its search index the
+  timeline is refused at once (`503 MEMORY_INDEX_REBUILDING`) — `search`
+  answers meanwhile; try the timeline again in a minute.
 - `show` prints the note with its provenance; `--raw` prints the note *file* as the
   daemon holds it, frontmatter and all; `--revision <rev>` reads one of the last
   five revisions the daemon wrote (a hand edit is not one of them) — `--raw` of a
@@ -772,7 +774,9 @@ Notes:
   `<id8>  replace “X” (saved by you) → “B”  from your words, 2026-09-24 — <reason>`,
   with `(+N older)` when several restatements named the same note, and `inferred
   from the conversation` for one read out of an answer or a tool's output rather
-  than your own words. A suggestion whose own text changed after it was written
+  than your own words. The assistant's own change to a note you saved — which
+  it may not apply itself — is a suggestion too, and reads `suggested by the
+  assistant, <date>`. A suggestion whose own text changed after it was written
   says who wrote it now: `edited by you, suggested <date>` (or `edited outside
   OpenAlpaca`, `imported`). A change to a note that was itself *learned* needs no
   question: it replaces the old note at once, and `undo` brings the old one back.
@@ -846,8 +850,9 @@ Refusals come from the daemon in its own words: `404 MEMORY_NOT_FOUND`,
 revision is in the message), `409 MEMORY_QUARANTINED` (its partition's snapshot is
 missing or invalid — `doctor --repair`), `409 MEMORY_NOT_UNDOABLE`,
 `400 MEMORY_INVALID_INPUT`, `409 MEMORY_BUSY` (a write on the partition is in
-flight — retry), `500 MEMORY_INTERNAL` (the daemon's store or database refused;
-the daemon log has the cause).
+flight — retry), `503 MEMORY_INDEX_REBUILDING` (`timeline` only, while the search
+index is being rebuilt — retry in a minute), `500 MEMORY_INTERNAL` (the daemon's
+store or database refused; the daemon log has the cause).
 
 ### `persona`
 
