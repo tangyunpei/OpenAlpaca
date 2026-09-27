@@ -934,3 +934,148 @@ fn the_assistants_edit_suggestion_is_dated_the_day_it_was_made() {
     );
     assert!(!preview.text.contains("2026-01-02"), "{}", preview.text);
 }
+
+/// An RFC 3339 instant, for a validity bound.
+fn instant(text: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+/// Close-out A1: the chat model's edit of a note the user saved that
+/// changes any one field a suggestion carries — title, text, aliases, tags,
+/// key, or either validity bound — is a suggestion carrying that change,
+/// and the result says so. The exact-duplicate test used to leave validity
+/// out, so a validity-only edit was answered with the saved note itself:
+/// nothing written, nothing waiting for the user, and a result that read as
+/// a successful update.
+#[test]
+fn a_chat_models_edit_of_any_one_field_of_a_saved_note_is_a_suggestion() {
+    let cases: Vec<(&str, Patch)> = vec![
+        (
+            "title",
+            Patch {
+                title: Some("Editor of choice".into()),
+                ..Default::default()
+            },
+        ),
+        (
+            "body",
+            Patch {
+                body: Some("# Editor\n\nThe user edits with Helix.\n".into()),
+                ..Default::default()
+            },
+        ),
+        (
+            "aliases",
+            Patch {
+                aliases: Some(vec!["vi".into()]),
+                ..Default::default()
+            },
+        ),
+        (
+            "tags",
+            Patch {
+                tags: Some(vec!["tools".into()]),
+                ..Default::default()
+            },
+        ),
+        (
+            "fact_key",
+            Patch {
+                fact_key: Some(Some("user.editor.main".into())),
+                ..Default::default()
+            },
+        ),
+        (
+            "valid_from",
+            Patch {
+                valid_from: Some(Some(instant("2026-01-01T00:00:00Z"))),
+                ..Default::default()
+            },
+        ),
+        (
+            "valid_to",
+            Patch {
+                valid_to: Some(Some(instant("2026-12-31T00:00:00Z"))),
+                ..Default::default()
+            },
+        ),
+    ];
+    for (field, patch) in cases {
+        let h = Harness::new();
+        let editor = saved(&h, "user.editor", "Editor", "The user edits with vim.");
+        let (_, tool) = chat_turn(&h, "Change my editor note.", None);
+        let out = h
+            .service
+            .update(
+                &tool,
+                UpdateInput {
+                    id: editor.id,
+                    expected_revision: editor.revision.clone(),
+                    action: UpdateAction::Edit(patch),
+                    reason: None,
+                },
+            )
+            .unwrap_or_else(|e| panic!("{field}: {e}"));
+        assert_eq!(out.suggested_for, Some(editor.id), "{field}: {out:?}");
+        assert_ne!(out.id, editor.id, "{field}");
+        assert_eq!(out.status, NoteStatus::Candidate, "{field}");
+        let suggestion = read_note(&h, out.id);
+        let original = read_note(&h, editor.id);
+        assert_eq!(original.revision, editor.revision, "{field}: untouched");
+        if field == "body" {
+            assert_ne!(suggestion.body, original.body, "{field}");
+        } else {
+            assert_ne!(
+                suggestion.frontmatter[field], original.frontmatter[field],
+                "{field}: the suggestion carries the change"
+            );
+        }
+        let listed = h.service.suggestions(&h.user(ALICE, None), None).unwrap();
+        assert_eq!(
+            listed.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![out.id],
+            "{field}"
+        );
+    }
+}
+
+/// Close-out A1, on the store path and S4: a `supersedes` of a saved note
+/// with its exact text but another validity window is a suggestion, not the
+/// saved note; restating that suggestion is the same suggestion, and
+/// restating it with yet another window is a second one.
+#[test]
+fn a_replacement_differing_only_in_validity_is_a_suggestion() {
+    let h = Harness::new();
+    let editor = saved(&h, "user.editor", "Editor", "The user edits with vim.");
+    let (_, tool) = chat_turn(&h, "Only until the end of the year.", None);
+    let store = |valid_to: &str| {
+        h.service
+            .store(
+                &tool,
+                StoreInput {
+                    title: "Editor".into(),
+                    body: "# Editor\n\nThe user edits with vim.\n".into(),
+                    kind: Some(NoteKind::Preference),
+                    fact_key: Some("user.editor".into()),
+                    valid_to: Some(instant(valid_to)),
+                    supersedes: Some((editor.id, editor.revision.clone())),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    };
+    let first = store("2026-12-31T00:00:00Z");
+    assert!(first.suggestion, "{first:?}");
+    assert_eq!(first.dedup, Dedup::Created);
+    assert_ne!(first.id, editor.id);
+    let again = store("2026-12-31T00:00:00Z");
+    assert_eq!((again.id, again.dedup), (first.id, Dedup::Existing));
+    assert!(again.suggestion);
+    let other = store("2027-06-30T00:00:00Z");
+    assert!(other.suggestion);
+    assert_eq!(other.dedup, Dedup::Created);
+    assert_ne!(other.id, first.id);
+    assert_eq!(read_note(&h, editor.id).revision, editor.revision);
+}

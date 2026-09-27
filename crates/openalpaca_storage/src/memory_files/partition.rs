@@ -1663,6 +1663,8 @@ impl Partition {
         if let Some((target, _)) = &input.supersedes {
             self.recheck(&state, &mut parsed, &mut loaded, &[*target])?;
         }
+        // Design §7c Q8's exact duplicate: kind, title, body, key, aliases
+        // and tags.
         let same_note = |v: &NoteView| {
             v.note.kind == kind
                 && v.note.title == input.title
@@ -1670,6 +1672,16 @@ impl Partition {
                 && v.note.fact_key == input.fact_key
                 && v.note.aliases == input.aliases
                 && v.note.tags == input.tags
+        };
+        // A replacement is the same as a note only when it changes nothing a
+        // suggestion carries — its validity window included, which Q8 leaves
+        // out: a replacement that bounds a note in time changes it (the L8
+        // close-out's A1; before, a validity-only change of a saved note was
+        // answered with the note itself and written nowhere).
+        let same_replacement = |v: &NoteView| {
+            same_note(v)
+                && v.note.valid_from == input.valid_from
+                && v.note.valid_to == input.valid_to
         };
 
         let mut supersedes = Vec::new();
@@ -1693,8 +1705,11 @@ impl Partition {
             {
                 // A suggestion to replace a note in force with itself is that
                 // note — an exact duplicate, as with no `supersedes` below
-                // (repair round 1 of the L8 product slice).
-                if view.derived.effective_status == EffectiveStatus::Active && same_note(view) {
+                // (repair round 1 of the L8 product slice), when its validity
+                // window is the note's too.
+                if view.derived.effective_status == EffectiveStatus::Active
+                    && same_replacement(view)
+                {
                     let created = Created {
                         id: view.note.id,
                         revision: view.revision.clone(),
@@ -1723,7 +1738,7 @@ impl Partition {
                 && let Some(existing) = loaded.views.iter().find(|v| {
                     v.derived.effective_status == EffectiveStatus::Candidate
                         && v.note.supersedes == [*target]
-                        && same_note(v)
+                        && same_replacement(v)
                 })
             {
                 let created = Created {
