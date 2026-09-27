@@ -1434,19 +1434,30 @@ impl MemoryIndex {
         report.changed.sort();
         report.removed.sort();
 
+        self.stamp_in(&conn, partition_key, entries.len())?;
+        Ok(report)
+    }
+
+    /// Records that `partition_key` was scanned now with `files` note files
+    /// — what [`MemoryIndex::reconcile`] records — without comparing any
+    /// row: the stamp a caller makes when it has just brought the rows in
+    /// line with a scan of its own (a write's re-index, design §5 step 4;
+    /// scale slice S4, O10).
+    pub fn stamp_scan(&self, partition_key: &str, files: usize) -> Result<()> {
+        let conn = self.lock();
+        self.stamp_in(&conn, partition_key, files)
+    }
+
+    fn stamp_in(&self, conn: &Connection, partition_key: &str, files: usize) -> Result<()> {
         conn.execute(
             "INSERT INTO partition (partition_key, last_scan_at, last_scan_files)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(partition_key) DO UPDATE SET
                  last_scan_at = excluded.last_scan_at,
                  last_scan_files = excluded.last_scan_files",
-            params![
-                partition_key,
-                canon_timestamp(&self.now()),
-                entries.len() as i64
-            ],
+            params![partition_key, canon_timestamp(&self.now()), files as i64],
         )?;
-        Ok(report)
+        Ok(())
     }
 
     /// When a partition was last scanned, if ever.

@@ -395,31 +395,93 @@ impl Parsed {
     /// under a retitle the name it moved from). The bytes are classified
     /// exactly as a read of the file would classify them; the note, when
     /// they are one, is returned.
+    ///
+    /// Scale slice S4 (O8): the one or two replaced files are found by
+    /// binary search — `scan` and `notes` are sorted by file name,
+    /// `malformed` by path, every file under the one `notes/` — the written
+    /// file is inserted at its place, and only the ids the write touched
+    /// are counted again for duplicates. The result is the one the old
+    /// whole-list pass (three filters hashing every path, two sorts, the
+    /// duplicate map rebuilt) gave: `parsed_tests` pins the two against
+    /// each other.
     fn put(
         &mut self,
         replaced: &HashSet<PathBuf>,
         entry: ScanEntry,
         bytes: &[u8],
     ) -> Option<Arc<ParsedNote>> {
-        self.scan.retain(|e| !replaced.contains(&e.path));
-        self.notes.retain(|(e, _)| !replaced.contains(&e.path));
-        self.malformed.retain(|m| !replaced.contains(&m.path));
+        debug_assert!(self.scan.is_sorted_by(|a, b| a.file_name <= b.file_name));
+        debug_assert!(
+            self.notes
+                .is_sorted_by(|a, b| a.0.file_name <= b.0.file_name)
+        );
+        debug_assert!(self.malformed.is_sorted_by(|a, b| a.path <= b.path));
+        let mut touched: Vec<NoteId> = Vec::new();
+        for path in replaced {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if let Ok(i) = self
+                .scan
+                .binary_search_by(|e| e.file_name.as_str().cmp(&name))
+                && self.scan[i].path == *path
+            {
+                self.scan.remove(i);
+            }
+            if let Ok(i) = self
+                .notes
+                .binary_search_by(|(e, _)| e.file_name.as_str().cmp(&name))
+                && self.notes[i].0.path == *path
+            {
+                touched.push(self.notes.remove(i).1.note.id);
+            }
+            if let Ok(i) = self.malformed.binary_search_by(|m| m.path.cmp(path)) {
+                self.malformed.remove(i);
+            }
+        }
         let written = match classify(&entry, Ok(bytes.to_vec())) {
             Ok(parsed) => {
-                self.notes.push((entry.clone(), Arc::clone(&parsed)));
-                self.notes.sort_by(|a, b| a.0.file_name.cmp(&b.0.file_name));
+                let at = self
+                    .notes
+                    .partition_point(|(e, _)| e.file_name <= entry.file_name);
+                self.notes.insert(at, (entry.clone(), Arc::clone(&parsed)));
+                touched.push(parsed.note.id);
                 Some(parsed)
             }
             Err(file) => {
-                self.malformed.push(file);
-                self.malformed.sort_by(|a, b| a.path.cmp(&b.path));
+                let at = self.malformed.partition_point(|m| m.path <= file.path);
+                self.malformed.insert(at, file);
                 None
             }
         };
-        self.scan.push(entry);
-        self.scan.sort_by(|a, b| a.file_name.cmp(&b.file_name));
-        self.find_duplicates();
+        let at = self
+            .scan
+            .partition_point(|e| e.file_name <= entry.file_name);
+        self.scan.insert(at, entry);
+        touched.sort();
+        touched.dedup();
+        for id in touched {
+            self.recount_duplicate(id);
+        }
         written
+    }
+
+    /// Re-derives whether `id` is claimed by two or more parsed files — the
+    /// one entry of `duplicates` [`Parsed::find_duplicates`] would give it,
+    /// in the same place.
+    fn recount_duplicate(&mut self, id: NoteId) {
+        self.duplicates.retain(|(d, _)| *d != id);
+        let paths: Vec<PathBuf> = self
+            .notes
+            .iter()
+            .filter(|(_, p)| p.note.id == id)
+            .map(|(e, _)| e.path.clone())
+            .collect();
+        if paths.len() > 1 {
+            let at = self.duplicates.partition_point(|(d, _)| *d < id);
+            self.duplicates.insert(at, (id, paths));
+        }
     }
 }
 
@@ -2714,4 +2776,203 @@ pub fn adopt(
         adopted.push(new_partition_key);
     }
     Ok(adopted)
+}
+
+#[cfg(test)]
+mod parsed_tests {
+    //! `Parsed::put` (scale slice S4, O8): what a write patches into the
+    //! view it read must be exactly what the whole-list version produced —
+    //! the same scan, notes, malformed files and duplicate ids, in the same
+    //! orders — over creates, rewrites, retitles, malformed bytes and files
+    //! that claim an id another file holds.
+
+    use super::*;
+
+    const TEMPLATE: &str = "---
+schema: 1
+id: 00000000-0000-4000-8000-000000000000
+title: T
+kind: fact
+status: active
+fact_key: null
+aliases: []
+tags: []
+created_at: 2026-09-23T10:00:00Z
+updated_at: 2026-09-23T10:00:00Z
+observed_at: null
+valid_from: null
+valid_to: null
+review_after: null
+pinned: false
+sources: []
+supersedes: []
+---
+# T
+
+body
+";
+
+    /// The whole-list `put` this slice replaced, kept as the reference.
+    fn put_reference(
+        p: &mut Parsed,
+        replaced: &HashSet<PathBuf>,
+        entry: ScanEntry,
+        bytes: &[u8],
+    ) -> Option<Arc<ParsedNote>> {
+        p.scan.retain(|e| !replaced.contains(&e.path));
+        p.notes.retain(|(e, _)| !replaced.contains(&e.path));
+        p.malformed.retain(|m| !replaced.contains(&m.path));
+        let written = match classify(&entry, Ok(bytes.to_vec())) {
+            Ok(parsed) => {
+                p.notes.push((entry.clone(), Arc::clone(&parsed)));
+                p.notes.sort_by(|a, b| a.0.file_name.cmp(&b.0.file_name));
+                Some(parsed)
+            }
+            Err(file) => {
+                p.malformed.push(file);
+                p.malformed.sort_by(|a, b| a.path.cmp(&b.path));
+                None
+            }
+        };
+        p.scan.push(entry);
+        p.scan.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+        p.find_duplicates();
+        written
+    }
+
+    fn id(n: u64) -> NoteId {
+        NoteId::parse(&format!("00000000-0000-4000-8000-{n:012x}")).unwrap()
+    }
+
+    fn bytes_for(id: NoteId, title: &str) -> Vec<u8> {
+        TEMPLATE
+            .replace("00000000-0000-4000-8000-000000000000", &id.to_string())
+            .replace("title: T", &format!("title: {title}"))
+            .into_bytes()
+    }
+
+    fn entry(dir: &Path, file_name: &str, size: u64) -> ScanEntry {
+        ScanEntry {
+            path: dir.join(file_name),
+            file_name: file_name.to_string(),
+            id: Note::id_from_file_name(file_name),
+            size,
+            mtime: None,
+            inode: size,
+        }
+    }
+
+    /// What two views must agree on, in order.
+    fn shape(p: &Parsed) -> impl PartialEq + std::fmt::Debug {
+        (
+            p.scan.clone(),
+            p.notes
+                .iter()
+                .map(|(e, n)| (e.path.clone(), n.note.id, n.revision.clone()))
+                .collect::<Vec<_>>(),
+            p.malformed.clone(),
+            p.duplicates.clone(),
+        )
+    }
+
+    #[test]
+    fn put_patches_the_view_exactly_as_the_whole_list_version() {
+        let dir = PathBuf::from("/nowhere/notes");
+        let mut seed: u64 = 0x0DDB_A11_5EED;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        // A starting view: sixty files, some malformed, two sharing an id
+        // under names that are not the canon's.
+        let mut fast = Parsed::default();
+        for i in 0..60u64 {
+            let (name, bytes) = match i % 10 {
+                3 => (format!("notes-{i:03}.md"), b"not a note".to_vec()),
+                7 => (
+                    format!("hand-{i:03}.md"),
+                    bytes_for(id(1_000 + i % 2), "hand"),
+                ),
+                _ => (
+                    Note::file_name_for(id(i), &format!("title {i}")),
+                    bytes_for(id(i), &format!("title {i}")),
+                ),
+            };
+            fast.put(&HashSet::new(), entry(&dir, &name, i), &bytes);
+        }
+        let mut reference = fast.clone();
+        assert_eq!(shape(&fast), shape(&reference));
+        assert!(!fast.duplicates.is_empty() && !fast.malformed.is_empty());
+
+        for step in 0..400u64 {
+            let existing: Vec<ScanEntry> = fast.scan.clone();
+            let pick = |k: u64| existing[(k as usize) % existing.len()].clone();
+            let (replaced, new_entry, bytes): (HashSet<PathBuf>, ScanEntry, Vec<u8>) =
+                match next(6) {
+                    // A new note.
+                    0 => {
+                        let n = 10_000 + step;
+                        let name = Note::file_name_for(id(n), "new");
+                        (HashSet::new(), entry(&dir, &name, step), bytes_for(id(n), "new"))
+                    }
+                    // A rewrite in place of any file, as a note.
+                    1 => {
+                        let old = pick(next(1_000));
+                        let n = old.id.unwrap_or_else(|| id(20_000 + step));
+                        let bytes = bytes_for(n, &format!("rewritten {step}"));
+                        (
+                            HashSet::from([old.path.clone()]),
+                            entry(&dir, &old.file_name, step),
+                            bytes,
+                        )
+                    }
+                    // A retitle: written onto the old name, renamed to a new one.
+                    2 => {
+                        let old = pick(next(1_000));
+                        let n = old.id.unwrap_or_else(|| id(30_000 + step));
+                        let name = Note::file_name_for(n, &format!("retitled {step}"));
+                        let target = dir.join(&name);
+                        (
+                            HashSet::from([old.path.clone(), target]),
+                            entry(&dir, &name, step),
+                            bytes_for(n, &format!("retitled {step}")),
+                        )
+                    }
+                    // Malformed bytes over a file.
+                    3 => {
+                        let old = pick(next(1_000));
+                        (
+                            HashSet::from([old.path.clone()]),
+                            entry(&dir, &old.file_name, step),
+                            b"---\nbroken".to_vec(),
+                        )
+                    }
+                    // A hand-named file claiming an id another file holds.
+                    4 => {
+                        let n = pick(next(1_000)).id.unwrap_or_else(|| id(7));
+                        let name = format!("hand-{step:04}.md");
+                        (HashSet::new(), entry(&dir, &name, step), bytes_for(n, "dup"))
+                    }
+                    // A file whose name says one id and whose frontmatter another.
+                    _ => {
+                        let name = Note::file_name_for(id(40_000 + step), "mismatch");
+                        (
+                            HashSet::new(),
+                            entry(&dir, &name, step),
+                            bytes_for(id(50_000 + step), "mismatch"),
+                        )
+                    }
+                };
+            let a = fast.put(&replaced, new_entry.clone(), &bytes);
+            let b = put_reference(&mut reference, &replaced, new_entry, &bytes);
+            assert_eq!(
+                a.map(|n| (n.note.id, n.revision.clone())),
+                b.map(|n| (n.note.id, n.revision.clone())),
+                "step {step}"
+            );
+            assert_eq!(shape(&fast), shape(&reference), "step {step}");
+        }
+    }
 }

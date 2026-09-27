@@ -6,6 +6,7 @@
 use super::tests::{ALICE, Harness};
 use super::*;
 use openalpaca_storage::memory_files::{NoteKind, NoteSource, SourceType};
+use openalpaca_storage::memory_index::MemoryIndex;
 
 fn learned_note(
     h: &Harness,
@@ -67,7 +68,12 @@ fn verification_copies_no_control_snapshot() {
         );
     }
     // A tombstone, so the check has something to look through.
-    let gone = h.store(&user, "Gone note", "# Gone\n\ngreen garden\n", NoteKind::Fact);
+    let gone = h.store(
+        &user,
+        "Gone note",
+        "# Gone\n\ngreen garden\n",
+        NoteKind::Fact,
+    );
     h.service
         .forget(
             &user,
@@ -104,5 +110,37 @@ fn verification_copies_no_control_snapshot() {
         files::snapshot_copies_on_this_thread() - before,
         0,
         "learning's lookup copies no snapshot"
+    );
+}
+
+// ============================================================================
+// S4 — a write's index stamp (O10)
+// ============================================================================
+
+/// After a write the index says its partition was scanned — now, with the
+/// files the write's own view listed — as the stat scan before a read would
+/// record it. The stamp comes from the view; no row is read back for it.
+#[test]
+fn a_write_stamps_its_partition_scan_with_the_files_it_saw() {
+    use chrono::TimeZone;
+    let at = Utc.with_ymd_and_hms(2026, 9, 26, 9, 30, 0).unwrap();
+    let h = Harness::with_index(
+        MemoryIndex::open_in_memory()
+            .unwrap()
+            .with_clock(move || at),
+    );
+    let user = h.user(ALICE, None);
+    for i in 0..3 {
+        h.store(
+            &user,
+            &format!("Stamp {i}"),
+            &format!("# S{i}\n\nx {i}\n"),
+            NoteKind::Fact,
+        );
+    }
+    let key = files::home_partition_key(&user.owner_key);
+    assert_eq!(
+        h.service.index().last_scan(&key).unwrap(),
+        Some(("2026-09-26T09:30:00Z".to_string(), 3))
     );
 }

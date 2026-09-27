@@ -736,16 +736,10 @@ impl MemoryService {
         }
         drop(fingerprints);
         // Stamp the scan so `last_scan` says the rows were checked — the
-        // view's own scan, which after a write carries the written file.
-        let entries: Vec<index::ScanEntry> = loaded
-            .scan
-            .iter()
-            .map(|e| index::ScanEntry {
-                relative_path: format!("{}/{}", files::NOTES_DIR, e.file_name),
-                stat: file_stat(e),
-            })
-            .collect();
-        self.index.reconcile(&key, || Ok(entries))?;
+        // view's own scan, which after a write carries the written file. The
+        // rows were just brought in line with it, so nothing is compared
+        // (scale slice S4, O10: a reconcile here read every row back).
+        self.index.stamp_scan(&key, loaded.scan.len())?;
         Ok(())
     }
 

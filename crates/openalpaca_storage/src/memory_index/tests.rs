@@ -1717,6 +1717,40 @@ fn reconcile_reports_an_external_edit_a_deletion_and_a_new_file() {
     assert_eq!(index.last_scan("home-q").unwrap(), None);
 }
 
+/// `stamp_scan` records exactly the `(last_scan_at, last_scan_files)` a
+/// reconcile of the same scan records, and changes no row (scale slice S4:
+/// a write's re-index stamps its own scan without reading every row back).
+#[test]
+fn stamp_scan_records_what_a_reconcile_records() {
+    use chrono::TimeZone;
+    let at = Utc.with_ymd_and_hms(2026, 9, 26, 8, 0, 0).unwrap();
+    let index = ready_index().with_clock(move || at);
+    index
+        .upsert_many(&[record("coffee", "Coffee", "Oat flat white.\n")])
+        .unwrap();
+    index
+        .reconcile("home-p", || {
+            Ok(vec![
+                entry("notes/a.md", 1, 1, 1),
+                entry("notes/b.md", 1, 1, 2),
+            ])
+        })
+        .unwrap();
+    let reconciled = index.last_scan("home-p").unwrap();
+    index.stamp_scan("home-q", 2).unwrap();
+    assert_eq!(index.last_scan("home-q").unwrap(), reconciled);
+    assert_eq!(reconciled, Some(("2026-09-26T08:00:00Z".to_string(), 2)));
+    index.stamp_scan("home-p", 5).unwrap();
+    assert_eq!(
+        index.last_scan("home-p").unwrap(),
+        Some(("2026-09-26T08:00:00Z".to_string(), 5))
+    );
+    assert!(
+        index.get("home-p", "coffee").unwrap().is_some(),
+        "no row changed"
+    );
+}
+
 #[test]
 fn reconcile_propagates_the_scanner_error_and_records_no_scan() {
     let index = ready_index();
