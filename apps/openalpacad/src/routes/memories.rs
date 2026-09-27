@@ -1083,6 +1083,12 @@ fn with_etag(mut response: Response, revision: &str) -> Response {
 /// carries the current revision in its message and as `ETag`, so a client
 /// can re-read or retry without a second request; what the client kept and
 /// what it should do next are the client's words, not the daemon's.
+/// `503 MEMORY_INDEX_REBUILDING`'s message: the timeline waits for the
+/// rebuild, and searching and reading notes do not.
+const INDEX_REBUILDING_MESSAGE: &str = "the memory search index is being rebuilt, so the \
+     timeline cannot be read now; try again in a minute. Searching and reading notes work \
+     meanwhile.";
+
 fn refusal(e: MemoryError) -> Response {
     match e {
         MemoryError::InvalidInput(m) => invalid(m).into_response(),
@@ -1131,10 +1137,13 @@ fn refusal(e: MemoryError) -> Response {
         }
         // The L8 product slice's P8: the timeline answers at once while the
         // index is rebuilt, rather than hold the request for the rebuild.
+        // The service's words name the model's tools; a person reading the
+        // route's answer is told what they can use meanwhile (repair round 1
+        // of the L8 product slice).
         MemoryError::IndexRebuilding => api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "MEMORY_INDEX_REBUILDING",
-            e.to_string(),
+            INDEX_REBUILDING_MESSAGE.to_string(),
         ),
         MemoryError::NoOwner(_)
         | MemoryError::CapabilityDenied { .. }

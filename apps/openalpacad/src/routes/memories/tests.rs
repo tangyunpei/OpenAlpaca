@@ -1547,3 +1547,16 @@ async fn the_timeline_route_is_memory_timeline() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
     assert_eq!(code(&json), "MEMORY_NOT_FOUND");
 }
+
+/// The timeline's rebuild refusal speaks to a person (repair round 1 of the
+/// L8 product slice): the service's own words name the model's tools, and
+/// the CLI prints the route's message as it is.
+#[tokio::test]
+async fn the_rebuild_refusal_names_no_model_tool() {
+    let (status, json) = split(refusal(MemoryError::IndexRebuilding)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(code(&json), "MEMORY_INDEX_REBUILDING");
+    let message = json["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("try again in a minute"), "{json}");
+    assert!(!message.contains("memory_"), "{json}");
+}
