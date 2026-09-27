@@ -4710,6 +4710,52 @@ fn a_forgotten_notes_file_that_comes_back_is_never_listed_indexed_or_navigated()
     assert!(p.read(&kept.id).is_ok());
 }
 
+/// A forgotten note's file that comes back and cannot be deleted stays out
+/// of every read, and the WARN each scan logs names the partition, the id
+/// and the error — never the file's path, whose slug is the forgotten
+/// title.
+#[cfg(unix)]
+#[test]
+#[tracing_test::traced_test]
+fn a_forgotten_file_that_cannot_be_deleted_is_logged_without_its_title() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let gone = p
+        .create(
+            new_note("Marzipan lighthouse", "# M\n\nWords.\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let file = p.read(&gone.id).unwrap().path;
+    let bytes = read_file(&file);
+    p.forget(&[(gone.id, gone.revision.clone())]).unwrap();
+    std::fs::write(&file, &bytes).unwrap();
+    let notes = p.notes_dir().to_path_buf();
+    std::fs::set_permissions(&notes, std::fs::Permissions::from_mode(0o500)).unwrap();
+    // A user who may delete in a read-only directory anyway (root) has no
+    // failure to log.
+    let deletes_anyway = std::fs::write(notes.join(".probe"), b"").is_ok();
+    let scanned = p.scan();
+    std::fs::set_permissions(&notes, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if deletes_anyway {
+        return;
+    }
+    assert!(scanned.unwrap().iter().all(|e| e.id != Some(gone.id)));
+    assert!(file.exists(), "it could not be deleted");
+    let id = gone.id.to_string();
+    logs_assert(|lines: &[&str]| {
+        let warns: Vec<&&str> = lines
+            .iter()
+            .filter(|l| l.contains("WARN") && l.contains("could not be deleted"))
+            .collect();
+        match warns.as_slice() {
+            [line] if line.contains(&id) && !line.to_lowercase().contains("marzipan") => Ok(()),
+            other => Err(format!("one WARN with the id and no title: {other:?}")),
+        }
+    });
+}
+
 /// Recovery's sweep of forgotten files (design §6's recovery column) runs
 /// once per partition per process through a service's cache (scale slice
 /// S3) — every scan deletes a forgotten file it meets, so an open need not

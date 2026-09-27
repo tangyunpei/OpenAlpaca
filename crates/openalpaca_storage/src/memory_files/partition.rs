@@ -1134,8 +1134,11 @@ impl Partition {
     /// a sync client while the service runs — is never listed, read,
     /// indexed or written into `MEMORY.md`. The caller leaves it out; this
     /// deletes it and its `.history`, as recovery at open does, when the
-    /// partition was opened for writing. A deletion that fails is logged
-    /// (the id only) and the file stays out of every read.
+    /// partition was opened for writing. A deletion that fails leaves the
+    /// file out of every read and is logged with the note's id and the
+    /// operating system's error only — never the path, whose slug is the
+    /// forgotten title; every scan that meets the file tries again, and
+    /// logs again.
     fn drop_forgotten(&self, path: &Path, id: NoteId) {
         if !self.writable {
             return;
@@ -1150,8 +1153,9 @@ impl Partition {
             Err(e) => tracing::warn!(
                 partition = %self.partition_key,
                 note = %id,
+                error = %e.root_cause(),
                 "memory: a forgotten note's file reappeared and could not be deleted; \
-                 it stays out of every read: {e:#}"
+                 it stays out of every read"
             ),
         }
     }
