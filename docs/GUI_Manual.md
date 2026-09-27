@@ -383,14 +383,17 @@ draw as an empty cell, since what is hidden is decided by Unicode's classes —
 control, format, default-ignorable, unassigned and private-use characters, and
 every blank but the plain space — not by what a font draws.
 
-**A suggestion raised in chat.** When learning is waiting on a change to a
-note you saved (see *Suggestions* under the Memory view), the assistant may
-ask you about it in the conversation — at most one per turn, when the topic
+**A suggestion raised in chat.** When a change to a note you saved is waiting
+for you — one learning found in what you said, or one the assistant saved in
+chat (see *Suggestions* under the Memory view) — the assistant may ask you
+about it in the conversation — at most one per turn, when the topic
 comes up or the conversation pauses. It uses the same card, headed
 `Confirmation required · memory_confirm`, and the card's text is
 OpenAlpaca's, not the model's: under a `From OpenAlpaca` label it reads
 *"Replace your saved note “X” with “B”?"*, then your text, the new text, why,
-the date you said it, and that your note is kept as history. The literal
+where it came from — "from what you said on <date>", or "suggested by the
+assistant on <date>" for a change the assistant saved itself — and that your
+note is kept as history. The literal
 arguments (three ids) stay below it. **Approve** makes the new note yours —
 exactly as **Replace** in the Memory view does; the model saying yes, or any
 setting that approves tools automatically, never does. **Deny** dismisses the
@@ -398,8 +401,9 @@ suggestion for good, as **Keep mine** does, and nothing else you said is
 forgotten. There is **no `Always allow`** on this card: each answer is for that
 one suggestion. A card nobody answers leaves the suggestion waiting in the
 Memory view, and it is not raised again in the app's or the CLI's chat until the
-daemon restarts. Only a suggestion from your own words is ever raised in chat —
-one OpenAlpaca inferred from its own replies or a tool's output waits in the
+daemon restarts. Only a suggestion learning took from your own words, or one
+the assistant saved on a turn you typed, is ever raised in chat — one
+OpenAlpaca inferred from its own replies or a tool's output waits in the
 Memory view — and only in the app's and the CLI's chat, never on Telegram,
 Discord or iMessage.
 
@@ -735,7 +739,10 @@ Two columns, in the Library's shape. The left one, top to bottom:
   edited the suggestion itself). The assistant can make a suggestion too: when
   it saves in chat a change to a note you saved — rather than overwrite your
   note, which it may not — the card reads *"Suggested by Alpaca on <date>"*,
-  and the candidate's detail *"Suggested by Alpaca — would replace “X”"*. **Replace** makes the new note yours and keeps the old
+  and the candidate's detail *"Suggested by Alpaca — would replace “X”"*;
+  its origin, in the detail's header and under *Where this came from*, still
+  reads *Learned from what you said*, as every note the assistant saves in chat
+  does. **Replace** makes the new note yours and keeps the old
   one as history (*"Replaced — “X” is kept as history"*); if you edited the old
   note after the suggestion was made, the Replace is refused rather than
   retiring your edit unseen. A suggestion whose note was already replaced or

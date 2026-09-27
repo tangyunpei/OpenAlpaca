@@ -357,7 +357,7 @@ rather than guessing:
 | `invalid_input` | §7a `memory_store` / `MEMORY_INVALID_INPUT`; §3 rule 6 (unknown fields refused) |
 | `not_found` | §7a / `MEMORY_NOT_FOUND` |
 | `revision_conflict` | §7a / `MEMORY_REVISION_CONFLICT` |
-| `authority_conflict` | §4, §7a: a `ModelTool` supersede/edit/archive of a `user` note |
+| `authority_conflict` | §4, §7a: a `ModelTool` supersede/edit/archive of a `user` note at the file layer (`ReplacePolicy::Direct`, the fixtures' `alice_tool`); on the service's tool path a supersede, or an edit of its content, is a suggestion instead (owner decision LQ11, 03 rev 7.4) |
 | `confirm_refused` | §4, §7a: `confirm` from a `ModelTool` context |
 | `not_undoable` | §6 / `MEMORY_NOT_UNDOABLE` |
 | `quarantined` | §2 / `MEMORY_QUARANTINED` |

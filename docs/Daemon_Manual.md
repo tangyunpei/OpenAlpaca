@@ -687,9 +687,10 @@ said in your own words becomes an active note learned from you (origin
 `extracted_user`, listed as *recently learned* with a one-step undo). A learned
 note carries `aliases` — other words you might search it by, the other language
 included — a `fact_key` naming the fact it answers for (reusing a key your notes
-already use when one fits; a key only the assistant's own `memory_store` coined
-is not offered to it — the note itself still is), and `observed_at`, when you
-said it. A fact about you (a key
+already use when one fits; a key only the assistant's own `memory_store` ever
+used is not offered to it — the note itself still is — while a key learning or
+you used, even on a note since replaced, is, and in every partition learning
+reads together), and `observed_at`, when you said it. A fact about you (a key
 starting `user.`) that replaces no note is saved in the **global** partition,
 whichever project you said it in; a replacement is saved in the partition of
 the note it replaces. When it
@@ -717,10 +718,13 @@ ends, with retries backing off from 1 minute to 1 hour), while a memory
 partition is quarantined, and while a daily cap binds; an answer the model
 cannot give in the expected shape three times running is skipped, with one
 `WARN` naming the conversation and the messages. An answer that carries its
-JSON behind a `<think>…</think>` block, before a stray `</think>`, inside prose
-or as a bare list of items is read for the items it carries, each checked as in
-a well-formed answer; an answer cut at its output ceiling is not — it counts as
-cut. Deleting or clearing a
+JSON after the model's reasoning (behind a `</think>`), before a stray
+`</think>` that ends it, inside prose or as a bare list of items is read for
+the items it carries, each checked as in a well-formed answer — a draft in the
+reasoning, or a list or object in the prose that is not the items (no entry
+with a `content`), is not taken, and `[]` means nothing to keep; an answer
+whose `<think>` never closes, or cut at its output ceiling, is not read — the
+latter counts as cut. Deleting or clearing a
 conversation drops its turns not yet learned, and so does deleting the project
 directory a turn named — even while the model is answering: learning, and an
 episode note, skip those turns rather than re-create the directory and its
@@ -811,16 +815,27 @@ in one line. Search hits, timeline rows and read notes are all reported as
 `memory_timeline` answers `index_rebuilding` at once — the model can tell you,
 and search and read answer meanwhile — rather than wait for the rebuild. A tool call records origin `extracted_user` at most,
 never `user`; it cannot confirm a candidate, it cannot archive a note you
-wrote, and it cannot edit a suggestion (the text you are asked about stays the
-extractor's). **The assistant's replacement of a note you saved, edited by hand
-or imported is a suggestion** — whether it names the note in `supersedes`,
-saves under that note's `fact_key`, or edits it: a candidate naming your note,
-which stays in force and in recall until you *Replace* or *Keep mine*, and the
-tool's result tells the model so. With no `scope` it is stored in your note's
-partition. It cites the message you typed on that turn, so the assistant may
-raise it with `memory_confirm` on a later attended turn; the Memory view and
-`openalpaca memory suggestions` say the assistant suggested it. Its replacement
-of a note learned from you replaces it at once, as learning's does. No surface
+wrote, and it cannot edit a suggestion once written (the text you are asked
+about is the one its writer — learning or the assistant — wrote). **The
+assistant's replacement of a note you saved, edited by hand or imported is a
+suggestion** — whether it names the note in `supersedes`, saves under that
+note's `fact_key` (in the partition the note would land in), names another
+note that shares your note's key, or edits your note: a candidate naming your
+note, which stays in force and in recall until you *Replace* or *Keep mine*,
+and the tool's result tells the model so (its `superseded` is empty; `replaces`
+names your note). With no `scope` it is stored in your note's partition. It
+cites the message you typed on that turn, so the assistant may raise it with
+`memory_confirm` on a later attended turn; the Memory view, `openalpaca memory
+suggestions`, the in-chat card and the `<memory_suggestions>` line say the
+assistant suggested it. Saving exactly what your note already says returns
+your note, not a suggestion. An edit goes through `memory_update`'s ordinary
+card first: approving it gives you a suggestion to *Replace* or *Keep mine*,
+not the edit. Before this, a replacement of a note you saved was refused and
+one of a note edited by hand or imported was applied at once. Still direct, as
+before: archiving a note edited by hand or imported, and an edit of one that
+changes only `review_after` — after which it counts as learned and a
+replacement of it stands. Its replacement of a note learned from you replaces
+it at once, as learning's does. No surface
 archives a suggestion — it is replaced or kept. `memory_update` and `memory_forget` raise the ordinary
 confirmation card, and an unattended turn (a scheduled skill, a piped
 `openalpaca chat`) is refused them outright. `memory_update` with `action:
@@ -831,15 +846,17 @@ a candidate.
 the app's or the CLI's chat — never a connector's, never an unattended one —
 the main conversation also has `memory_confirm {id, expected_revision,
 target_revision}`, and that turn's memory message ends with a
-`<memory_suggestions>` block: up to three pending suggestions from your own
-words, newest first, one line each with both ids and both revisions, read from
+`<memory_suggestions>` block: up to three pending suggestions — learning's,
+from your own words, and the assistant's own, each line saying which — newest
+first, one line each with both ids and both revisions, read from
 the index (no note file is parsed for it), leaving out a suggestion already
 raised on that lane since the daemon started, and any other suggestion for the
 note it would replace — the lane is `{owner}:gui`, which every app and CLI chat
 conversation of that owner shares. The call raises the ordinary card with a
 preview the **daemon** wrote from the notes — which note, your
 text, the new text, why, the date of the newest message you typed that it
-cites, with every hidden character of what it quotes left out and, when any
+cites ("from what you said on …", or "suggested by the assistant on …" for
+one the assistant wrote), with every hidden character of what it quotes left out and, when any
 was, a last line saying how many (`This preview leaves out 2 hidden
 characters; the Memory view shows them as <U+…>.`) — and `per_call: true`. Only a person's **Approve** on that card, for
 that call, confirms it: the confirm is then a user-directed write (origin
