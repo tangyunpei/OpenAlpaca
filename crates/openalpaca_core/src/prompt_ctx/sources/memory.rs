@@ -417,6 +417,7 @@ mod tests {
     struct Scene {
         _env: HomeStoreGuard,
         _root: tempfile::TempDir,
+        db: Database,
         service: Arc<MemoryService>,
         source: MemorySource,
         /// The live config the source reads `recall_mode` from on each turn.
@@ -440,7 +441,7 @@ mod tests {
         IdentityRepository::new(&db)
             .create_global_user(ALICE, None)
             .unwrap();
-        let service = MemoryService::new(Some(db), MemoryIndex::open_in_memory().unwrap());
+        let service = MemoryService::new(Some(db.clone()), MemoryIndex::open_in_memory().unwrap());
         service.rebuild_index().unwrap();
         let service = Arc::new(service);
         let slot = Arc::new(RwLock::new(Some(service.clone())));
@@ -448,6 +449,7 @@ mod tests {
         Scene {
             _env: env,
             _root: root,
+            db,
             service,
             source: MemorySource::new(slot, config.clone()),
             config,
@@ -1087,6 +1089,36 @@ mod tests {
         release
     }
 
+    /// A stalled call that the deadline must end: failing here, not
+    /// hanging, when it does not.
+    async fn bounded<T>(call: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(5), call)
+            .await
+            .expect("the reply's deadline ended the call")
+    }
+
+    /// The one WARN a call past the deadline logs: the home partition's key
+    /// and the time waited, and none of `words`.
+    fn one_deadline_warn(lines: &[&str], words: &[&str]) -> Result<(), String> {
+        let home_key = openalpaca_storage::memory_files::home_partition_key(
+            &openalpaca_storage::memory_files::owner_key(ALICE),
+        );
+        let warns: Vec<&&str> = lines
+            .iter()
+            .filter(|l| l.contains("WARN") && l.contains("reply's deadline"))
+            .collect();
+        match warns.as_slice() {
+            [line]
+                if line.contains(&home_key)
+                    && line.contains("elapsed_ms")
+                    && words.iter().all(|w| !line.contains(w)) =>
+            {
+                Ok(())
+            }
+            other => Err(format!("one WARN with the partition and no text: {other:?}")),
+        }
+    }
+
     /// The bound is a constant, chosen from the L8 benches: over twice the
     /// slowest healthy recall p95 measured (661 ms at 100K notes), and
     /// under every unbounded case they found (2.9 s and up).
@@ -1112,36 +1144,14 @@ mod tests {
             "# Editor preference\n\nThe user prefers vim for secret-marmalade work.\n",
         );
         let release = stall_reads(&scene.service);
-        let started = std::time::Instant::now();
-        let sections = scene
-            .source
-            .resolve_within(
-                &request("what editor do I prefer?", Some(ALICE)),
-                std::time::Duration::from_millis(100),
-            )
-            .await;
+        let sections = bounded(scene.source.resolve_within(
+            &request("what editor do I prefer?", Some(ALICE)),
+            std::time::Duration::from_millis(100),
+        ))
+        .await;
         assert!(sections.is_empty(), "the turn continues without memory");
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
         drop(release);
-        let home_key = openalpaca_storage::memory_files::home_partition_key(
-            &openalpaca_storage::memory_files::owner_key(ALICE),
-        );
-        logs_assert(|lines: &[&str]| {
-            let warns: Vec<&&str> = lines
-                .iter()
-                .filter(|l| l.contains("WARN") && l.contains("reply's deadline"))
-                .collect();
-            match warns.as_slice() {
-                [line] if line.contains(&home_key)
-                    && line.contains("elapsed_ms")
-                    && !line.contains("marmalade")
-                    && !line.contains("Editor") =>
-                {
-                    Ok(())
-                }
-                other => Err(format!("one WARN with the partition and no text: {other:?}")),
-            }
-        });
+        logs_assert(|lines: &[&str]| one_deadline_warn(lines, &["marmalade", "Editor"]));
         let sections = scene
             .source
             .resolve_within(
@@ -1153,10 +1163,66 @@ mod tests {
     }
 
     /// The pending suggestions a turn is told about are bound the same way:
-    /// past the deadline the turn goes without the block.
+    /// with one suggestion pending, the unheld read renders the block, and
+    /// held past the deadline the turn goes without it, with one WARN
+    /// naming the partition and the time waited and no note text.
     #[tokio::test]
+    #[tracing_test::traced_test]
     async fn pending_suggestions_past_the_deadline_leave_the_turn_without_the_block() {
         let scene = scene();
+        // A saved note, the user's words that changed it, and learning's
+        // suggestion to replace it (design 09 §3.1).
+        let target = store(
+            &scene,
+            "Editor preference",
+            "# Editor preference\n\n## Knowledge\nI use vim for everything.\n",
+        );
+        let row = scene
+            .db
+            .with_connection(|c| {
+                c.execute(
+                    "INSERT INTO conversation_messages
+                         (lane_key, role, content, source, request_id, created_at)
+                     VALUES ('u_example_alice:gui', 'user', ?1, 'gui', ?2,
+                             '2026-06-14 09:30:00')",
+                    [
+                        "I switched from vim to Helix in June.",
+                        uuid::Uuid::new_v4().to_string().as_str(),
+                    ],
+                )?;
+                Ok(c.last_insert_rowid())
+            })
+            .unwrap();
+        let extraction = scene
+            .service
+            .context(
+                ALICE,
+                WorkspaceHint::None,
+                Surface::Extraction,
+                Capabilities::EXTRACTION,
+                Attribution::default(),
+            )
+            .unwrap();
+        let suggestion = scene
+            .service
+            .store(
+                &extraction,
+                StoreInput {
+                    title: "Editor preference".into(),
+                    body: "# Editor preference\n\n## Knowledge\nThe user edits with Helix.\n".into(),
+                    kind: Some(NoteKind::Preference),
+                    sources: vec![openalpaca_storage::memory_files::NoteSource {
+                        kind: openalpaca_storage::memory_files::SourceType::Message,
+                        id: row.to_string(),
+                        observed_at: None,
+                    }],
+                    supersedes: Some((target.id, target.revision.clone())),
+                    replace_policy: openalpaca_storage::memory_files::ReplacePolicy::SuggestUnlessLearned,
+                    provenance: Some(crate::memory::service::ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let ctx = crate::tools::registry::ToolContext {
             principal: Some(crate::security::policy::Principal::User {
                 global_id: ALICE.to_string(),
@@ -1166,16 +1232,27 @@ mod tests {
             source: Some("gui".into()),
             ..Default::default()
         };
+        let unheld = bounded(memory_suggestions_block_within(
+            scene.service.clone(),
+            &ctx,
+            std::time::Duration::from_secs(30),
+        ))
+        .await;
+        assert!(
+            unheld
+                .as_deref()
+                .is_some_and(|b| b.contains(&suggestion.id.to_string())),
+            "unheld, the block lists the suggestion: {unheld:?}"
+        );
         let release = stall_reads(&scene.service);
-        let started = std::time::Instant::now();
-        let block = memory_suggestions_block_within(
+        let held = bounded(memory_suggestions_block_within(
             scene.service.clone(),
             &ctx,
             std::time::Duration::from_millis(100),
-        )
+        ))
         .await;
-        assert!(block.is_none());
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(held.is_none(), "past the deadline, no block");
         drop(release);
+        logs_assert(|lines: &[&str]| one_deadline_warn(lines, &["Helix", "vim", "Editor"]));
     }
 }
