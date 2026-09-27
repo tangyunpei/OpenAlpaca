@@ -566,6 +566,10 @@ pub struct Partition {
     /// The service's parse cache (design 09 §6.3), when it opened this
     /// partition; `None` reads every file every time.
     cache: Option<Arc<NoteParseCache>>,
+    /// Opened for writing: a scan may delete a forgotten note's file it
+    /// meets (scale slice S3). A read-only open (`doctor`) leaves it out of
+    /// every listing and deletes nothing.
+    writable: bool,
     #[cfg(test)]
     crash: Mutex<Option<CrashPoint>>,
 }
@@ -736,6 +740,7 @@ impl Partition {
             }),
             clock: Arc::new(now_seconds),
             cache,
+            writable: mode == OpenMode::ReadWrite,
             #[cfg(test)]
             crash: Mutex::new(None),
         };
@@ -1070,14 +1075,72 @@ impl Partition {
     // ------------------------------------------------------------------------
 
     /// Lists `notes/*.md`: regular files only — no hidden or temp names, no
-    /// links, no directories — with the facts a stat scan compares.
+    /// links, no directories — with the facts a stat scan compares. A file
+    /// named for a forgotten note is left out and, when the partition was
+    /// opened for writing, deleted (scale slice S3).
     pub fn scan(&self) -> Result<Vec<ScanEntry>> {
-        Ok(self.scan_keyed()?.into_iter().map(|(e, _)| e).collect())
+        let forgotten = self.forgotten_ids();
+        Ok(self
+            .scan_keyed(&forgotten)?
+            .into_iter()
+            .map(|(e, _)| e)
+            .collect())
+    }
+
+    /// Every file of `notes/`, a forgotten note's included — what recovery
+    /// looks through.
+    fn scan_raw(&self) -> Result<Vec<ScanEntry>> {
+        Ok(self
+            .scan_keyed(&HashSet::new())?
+            .into_iter()
+            .map(|(e, _)| e)
+            .collect())
+    }
+
+    /// The ids the snapshot holds tombstones for.
+    fn forgotten_ids(&self) -> HashSet<NoteId> {
+        Self::forgotten_in(&self.lock())
+    }
+
+    fn forgotten_in(state: &State) -> HashSet<NoteId> {
+        state
+            .snapshot
+            .as_ref()
+            .map(|s| s.tombstones.iter().map(|t| t.id).collect())
+            .unwrap_or_default()
+    }
+
+    /// Design §6's hard guarantee, checked wherever a scan runs (scale slice
+    /// S3): a file carrying a forgotten id — put back by a backup restore or
+    /// a sync client while the service runs — is never listed, read,
+    /// indexed or written into `MEMORY.md`. The caller leaves it out; this
+    /// deletes it and its `.history`, as recovery at open does, when the
+    /// partition was opened for writing. A deletion that fails is logged
+    /// (the id only) and the file stays out of every read.
+    fn drop_forgotten(&self, path: &Path, id: NoteId) {
+        if !self.writable {
+            return;
+        }
+        let history = self.history_dir.join(id.to_string());
+        match remove_file_if_exists(path).and_then(|_| remove_dir_all_if_exists(&history)) {
+            Ok(_) => tracing::info!(
+                partition = %self.partition_key,
+                note = %id,
+                "memory: a forgotten note's file reappeared; deleted it"
+            ),
+            Err(e) => tracing::warn!(
+                partition = %self.partition_key,
+                note = %id,
+                "memory: a forgotten note's file reappeared and could not be deleted; \
+                 it stays out of every read: {e:#}"
+            ),
+        }
     }
 
     /// [`Partition::scan`], each entry with the stat identity the parse
-    /// cache compares — from the same `lstat`.
-    fn scan_keyed(&self) -> Result<Vec<(ScanEntry, StatKey)>> {
+    /// cache compares — from the same `lstat` — leaving out (and deleting)
+    /// a file whose name carries one of `forgotten`.
+    fn scan_keyed(&self, forgotten: &HashSet<NoteId>) -> Result<Vec<(ScanEntry, StatKey)>> {
         SCANS.with(|n| n.set(n.get() + 1));
         let entries = match fs::read_dir(&self.notes_dir) {
             Ok(e) => e,
@@ -1102,7 +1165,14 @@ impl Partition {
             if !meta.file_type().is_file() {
                 continue;
             }
-            out.push((scan_entry(path, file_name, &meta), StatKey::of(&meta)));
+            let entry = scan_entry(path, file_name, &meta);
+            if let Some(id) = entry.id
+                && forgotten.contains(&id)
+            {
+                self.drop_forgotten(&entry.path, id);
+                continue;
+            }
+            out.push((entry, StatKey::of(&meta)));
         }
         out.sort_by(|a, b| a.0.file_name.cmp(&b.0.file_name));
         Ok(out)
@@ -1133,10 +1203,14 @@ impl Partition {
     /// read — or, while that stat is within the racy window, is read and
     /// re-hashed but not parsed again — and what this read found replaces
     /// the partition's entries when it differs from them.
-    fn parse_all(&self) -> Result<Parsed> {
+    ///
+    /// A file of one of `forgotten` — by its name or by the id its
+    /// frontmatter carries — is left out and deleted ([`Self::drop_forgotten`],
+    /// scale slice S3).
+    fn parse_all(&self, forgotten: &HashSet<NoteId>) -> Result<Parsed> {
         WHOLE_PARSES.with(|n| n.set(n.get() + 1));
         let taken = SystemTime::now();
-        let keyed = self.scan_keyed()?;
+        let keyed = self.scan_keyed(forgotten)?;
         let cache = self.cache.as_deref();
         let cached = cache.and_then(|c| c.files(&self.partition_key, &self.notes_dir));
         let mut scan = Vec::with_capacity(keyed.len());
@@ -1191,6 +1265,12 @@ impl Partition {
                 }
             };
             match found {
+                Ok(note) if forgotten.contains(&note.note.id) => {
+                    // A forgotten id under a name that does not carry it.
+                    self.drop_forgotten(&entry.path, note.note.id);
+                    changed = true;
+                    continue;
+                }
                 Ok(note) => {
                     parsed.push((entry.clone(), note));
                     keys.push(key.map(|key| (key, trusted)));
@@ -1252,7 +1332,7 @@ impl Partition {
     /// Reads the partition once, keeping what was read so a mutation can
     /// patch it with its own change.
     fn load_parsed(&self, state: &State) -> Result<(Parsed, LoadedPartition), MemoryFilesError> {
-        let parsed = self.parse_all()?;
+        let parsed = self.parse_all(&Self::forgotten_in(state))?;
         let loaded = self.derive_view(&parsed, state);
         Ok((parsed, loaded))
     }
@@ -1936,6 +2016,13 @@ impl Partition {
         self.recheck(&state, &mut parsed, &mut loaded, &ids)?;
         let mut done = ForgetProgress::default();
         let result = self.forget_each(&mut state, &parsed, &loaded, targets, mode, &mut done);
+        if result.is_err()
+            && let Some(cache) = &self.cache
+        {
+            // A tombstone may be durable with its files still on disk: the
+            // next open sweeps again (scale slice S3).
+            cache.rearm_tombstone_sweep(&self.partition_key, &self.notes_dir);
+        }
         self.remember_snapshot(&state, done.saved);
         if let Some(cache) = &self.cache
             && !done.removed.is_empty()
@@ -2067,6 +2154,21 @@ impl Partition {
 
     /// Finishes or abandons an interrupted write from the single `pending`
     /// field, then deletes any tombstoned file still on disk. Idempotent.
+    ///
+    /// **The forget row's sweep runs once per partition per process**
+    /// through a service's cache (scale slice S3), and again after a forget
+    /// that failed part-way; without a cache, at every open. That is as safe
+    /// as sweeping at every open because every other way to a note file
+    /// goes through a scan that leaves a forgotten id's file out and deletes
+    /// it with its `.history` ([`Self::drop_forgotten`]): the stat scan
+    /// before a read and at every reconciliation tick, and the whole read
+    /// behind every listing, write, index pass and `MEMORY.md`. The one
+    /// thing no scan meets is a `.history/<id>/` put back without its note;
+    /// nothing reads it (history is read only for a note that exists), and
+    /// the reconciliation tick deletes it
+    /// ([`Partition::sweep_forgotten_history`]). What stays at every open is
+    /// what reads no directory: the pending recovery, and dropping a
+    /// snapshot record a forgotten id should not have.
     fn recover(&self) -> Result<(), MemoryFilesError> {
         let mut state = self.lock();
         let Some(current) = state.snapshot.as_ref() else {
@@ -2082,7 +2184,7 @@ impl Partition {
         if let Some(pending) = &pending {
             changed = true;
             let files: Vec<(PathBuf, String)> = self
-                .scan()?
+                .scan_raw()?
                 .into_iter()
                 .filter(|e| e.id == Some(pending.id))
                 .filter_map(|e| {
@@ -2139,22 +2241,25 @@ impl Partition {
         }
 
         // Forget row: a tombstoned id whose file still exists is deleted.
-        // One listing of `notes/` serves every tombstone.
-        if !tombstoned.is_empty() {
+        // One listing of `notes/` serves every tombstone — once per process
+        // through a cache (see above).
+        let sweep = !tombstoned.is_empty() && !self.tombstones_swept();
+        if sweep {
             let ids: HashSet<NoteId> = tombstoned.iter().copied().collect();
-            for entry in self.scan()? {
+            for entry in self.scan_raw()? {
                 if entry.id.is_some_and(|id| ids.contains(&id)) {
                     remove_file_if_exists(&entry.path)?;
+                    changed = true;
+                }
+            }
+            for id in &tombstoned {
+                if remove_dir_all_if_exists(&self.history_dir.join(id.to_string()))? {
                     changed = true;
                 }
             }
         }
         let mut still_recorded = Vec::new();
         for id in tombstoned {
-            let dir = self.history_dir.join(id.to_string());
-            if remove_dir_all_if_exists(&dir)? {
-                changed = true;
-            }
             let recorded = records.iter().any(|(r, _)| *r == id)
                 || state
                     .snapshot
@@ -2180,7 +2285,36 @@ impl Partition {
             self.remember_snapshot(&state, saved);
             self.refresh_navigation(&state);
         }
+        if sweep && let Some(cache) = &self.cache {
+            cache.mark_tombstones_swept(&self.partition_key, &self.notes_dir);
+        }
         Ok(())
+    }
+
+    /// Whether this process has already swept the partition's forgotten
+    /// files: only through a cache — an uncached open always sweeps.
+    fn tombstones_swept(&self) -> bool {
+        self.cache
+            .as_ref()
+            .is_some_and(|c| c.tombstones_swept(&self.partition_key, &self.notes_dir))
+    }
+
+    /// Deletes the `.history/<id>/` of every forgotten id — one `lstat` per
+    /// tombstone, no directory listing — and answers how many it found.
+    /// What the reconciliation tick runs (scale slice S3): a `.history` put
+    /// back without its note is met by no scan, and the sweep at open runs
+    /// once per process. A partition opened read-only deletes nothing.
+    pub fn sweep_forgotten_history(&self) -> Result<usize, MemoryFilesError> {
+        if !self.writable {
+            return Ok(0);
+        }
+        let mut removed = 0;
+        for id in self.forgotten_ids() {
+            if remove_dir_all_if_exists(&self.history_dir.join(id.to_string()))? {
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
     // ------------------------------------------------------------------------
@@ -2357,7 +2491,7 @@ impl Partition {
             malformed,
             duplicates,
             ..
-        } = self.parse_all()?;
+        } = self.parse_all(&Self::forgotten_in(&state))?;
         if let Some((id, files)) = duplicates.into_iter().next() {
             return Err(MemoryFilesError::DuplicateId { id, files });
         }

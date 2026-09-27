@@ -1743,11 +1743,22 @@ fn edit_body(body: &str) -> UpdateAction {
 }
 
 fn file_for(p: &Partition, id: &NoteId) -> Option<PathBuf> {
-    p.scan()
-        .unwrap()
-        .into_iter()
-        .find(|e| e.id == Some(*id))
-        .map(|e| e.path)
+    file_on_disk(p, id)
+}
+
+/// The note file on disk whose name carries `id` — read from the directory
+/// itself, since a scan leaves a forgotten id's file out (scale slice S3)
+/// and these tests look at what a crash left behind.
+fn file_on_disk(p: &Partition, id: &NoteId) -> Option<PathBuf> {
+    std::fs::read_dir(p.notes_dir())
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|n| Note::id_from_file_name(&n.to_string_lossy()))
+                == Some(*id)
+        })
 }
 
 #[test]
@@ -4590,6 +4601,157 @@ fn opening_a_partition_scans_its_notes_once() {
     sb.open_home(ALICE);
     assert_eq!(scans_on_this_thread() - before, 2);
     assert!(!leftover.exists(), "recovery deleted it");
+}
+
+/// Design §6's hard guarantee against a forgotten note's file coming back
+/// mid-process — a backup restore, a sync client — while a partition is
+/// open (scale slice S3): every scan meets it, deletes it with its
+/// `.history` and leaves it out, so it is never listed, read, re-recorded
+/// by a reconciliation or written into `MEMORY.md`, whether its file keeps
+/// the canon's name or carries the id under another name. Recovery at open
+/// used to be the only thing that deleted such a file.
+#[test]
+fn a_forgotten_notes_file_that_comes_back_is_never_listed_indexed_or_navigated() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let gone = p
+        .create(
+            new_note(
+                "Forgotten harbour title",
+                "# Forgotten\n\nThe secret harbour words.\n",
+                NoteKind::Fact,
+            ),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let kept = p
+        .create(
+            new_note("Kept", "# Kept\n\nStays.\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let file = p.read(&gone.id).unwrap().path;
+    let bytes = read_file(&file);
+    let history = p.history_dir().join(gone.id.to_string());
+    let history_copy = history.join(format!("{}.md", gone.revision));
+    p.forget(&[(gone.id, gone.revision.clone())]).unwrap();
+    assert!(!file.exists() && !history.exists());
+
+    // It comes back — under its own name, with its `.history` copy, and a
+    // second time under a hand-picked name.
+    let put_back = || {
+        std::fs::write(&file, &bytes).unwrap();
+        std::fs::create_dir_all(&history).unwrap();
+        std::fs::write(&history_copy, &bytes).unwrap();
+    };
+    let renamed = p.notes_dir().join("restored-by-hand.md");
+
+    put_back();
+    let loaded = p.load().unwrap();
+    assert!(loaded.get(&gone.id).is_none(), "not listed");
+    assert!(loaded.scan.iter().all(|e| e.id != Some(gone.id)));
+    assert!(!file.exists() && !history.exists(), "deleted by the read");
+
+    put_back();
+    std::fs::write(&renamed, &bytes).unwrap();
+    assert!(note_files_on_disk(&p).len() >= 3);
+    assert!(
+        p.scan().unwrap().iter().all(|e| e.path != file),
+        "the stat scan leaves it out"
+    );
+    assert!(!file.exists(), "and deletes it");
+    let (changes, view) = p.reconcile_viewed().unwrap();
+    assert!(
+        changes.iter().all(|c| c.id != gone.id),
+        "never re-recorded `external`: {changes:?}"
+    );
+    assert!(view.get(&gone.id).is_none());
+    assert!(!renamed.exists(), "its id under another name goes too");
+    assert!(!p.snapshot().unwrap().notes.contains_key(&gone.id));
+
+    put_back();
+    let (_, view) = p
+        .create_viewed(
+            new_note("Another", "# Another\n\nA write.\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert!(view.get(&gone.id).is_none(), "not in the write's view");
+    let navigation = std::fs::read_to_string(p.root().join(NAVIGATION_FILE)).unwrap();
+    assert!(!navigation.contains("Forgotten harbour title"), "{navigation}");
+    assert!(!navigation.contains(&gone.id.to_string()));
+    assert!(navigation.contains("Kept"));
+    assert!(!file.exists() && !history.exists());
+    assert!(matches!(p.read(&gone.id), Err(MemoryFilesError::NotFound(_))));
+    assert!(p.read(&kept.id).is_ok());
+}
+
+/// Recovery's sweep of forgotten files (design §6's recovery column) runs
+/// once per partition per process through a service's cache (scale slice
+/// S3) — every scan deletes a forgotten file it meets, so an open need not
+/// list `notes/` for them again — and at every open without a cache.
+#[test]
+fn a_cached_open_sweeps_forgotten_files_once() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let targets = twenty_of_twenty_five(&p);
+    p.forget(&targets[..3]).unwrap();
+    drop(p);
+    let cache = Arc::new(NoteParseCache::default());
+    let before = scans_on_this_thread();
+    let first = sb.open_home_cached(ALICE, &cache);
+    assert_eq!(scans_on_this_thread() - before, 1, "the first open sweeps");
+    let before = scans_on_this_thread();
+    let again = sb.open_home_cached(ALICE, &cache);
+    assert_eq!(scans_on_this_thread() - before, 0, "a later one does not");
+    assert_eq!(again.load().unwrap().views.len(), 22);
+    drop(first);
+    let before = scans_on_this_thread();
+    sb.open_home(ALICE);
+    assert_eq!(scans_on_this_thread() - before, 1, "an uncached open sweeps");
+}
+
+/// A forget that fails after its tombstone (the files not yet deleted)
+/// re-arms the sweep: the next open through the same cache deletes the
+/// note's `.history` as recovery always has — the note file itself is
+/// already left out and deleted by every scan.
+#[test]
+fn a_failed_forget_rearms_the_sweep() {
+    let sb = Sandbox::new();
+    let cache = Arc::new(NoteParseCache::default());
+    let p = sb.open_home_cached(ALICE, &cache);
+    let targets = twenty_of_twenty_five(&p);
+    let (id, revision) = targets[0].clone();
+    // A tombstone, and an open through the cache that swept for it.
+    p.forget(&targets[1..2]).unwrap();
+    let before = scans_on_this_thread();
+    drop(sb.open_home_cached(ALICE, &cache));
+    assert_eq!(scans_on_this_thread() - before, 1, "swept once");
+    let before = scans_on_this_thread();
+    drop(sb.open_home_cached(ALICE, &cache));
+    assert_eq!(scans_on_this_thread() - before, 0, "and not again");
+    p.set_crash_point(Some(CrashPoint::ForgetAfter1));
+    let err = p.forget(&[(id, revision)]).unwrap_err();
+    assert!(matches!(err, MemoryFilesError::Crashed(_)));
+    let history = p.history_dir().join(id.to_string());
+    assert!(history.is_dir(), "the crash left the history");
+    drop(p);
+    let reopened = sb.open_home_cached(ALICE, &cache);
+    assert!(!history.exists(), "the re-armed sweep deleted it");
+    assert!(file_on_disk(&reopened, &id).is_none());
+    assert!(matches!(
+        reopened.read(&id),
+        Err(MemoryFilesError::NotFound(_))
+    ));
+}
+
+/// Every `notes/` file on disk, whatever a scan would leave out.
+fn note_files_on_disk(p: &Partition) -> Vec<PathBuf> {
+    std::fs::read_dir(p.notes_dir())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect()
 }
 
 /// Everything a view says, for comparing two of them.

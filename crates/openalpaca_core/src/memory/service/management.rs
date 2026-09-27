@@ -179,10 +179,19 @@ impl MemoryService {
         &self,
         partition: &files::Partition,
     ) -> Result<(usize, Vec<MemoryChange>), MemoryError> {
+        // The scan leaves out, and deletes, a forgotten note's file that
+        // came back; a forgotten note's `.history` put back on its own is
+        // met by no scan, so each tick deletes it here (scale slice S3).
         let mut scan = partition.scan()?;
         scan.sort_by(|a, b| a.file_name.cmp(&b.file_name));
         let scanned = scan.len();
         let key = partition.partition_key();
+        if let Err(e) = partition.sweep_forgotten_history() {
+            tracing::warn!(
+                partition = key,
+                "memory: a forgotten note's history could not be deleted: {e}"
+            );
+        }
         let unchanged = {
             let last = self.last_scans.lock().unwrap_or_else(|e| e.into_inner());
             last.get(key) == Some(&scan)

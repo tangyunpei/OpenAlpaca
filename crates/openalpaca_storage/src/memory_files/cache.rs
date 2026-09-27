@@ -34,7 +34,7 @@
 
 use super::note::{Note, NoteId, NoteSource, UnknownField};
 use super::snapshot::ControlSnapshot;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -214,6 +214,11 @@ struct Inner {
     /// The bytes of every partition whose notes are cached.
     total: usize,
     slots: HashMap<String, Slot>,
+    /// The partitions — key and `notes/` directory — whose forgotten files
+    /// recovery at open has swept in this process (scale slice S3): not a
+    /// parse, so kept whatever the capacity, and forgotten by `clear`,
+    /// `evict_partition` and a forget that failed part-way.
+    swept: HashSet<(String, PathBuf)>,
 }
 
 /// The parse cache the service owns (design 09 §6.3) and hands to every
@@ -314,6 +319,7 @@ impl NoteParseCache {
         if let Some(slot) = inner.slots.remove(partition_key) {
             inner.total -= slot.bytes;
         }
+        inner.swept.retain(|(key, _)| key != partition_key);
     }
 
     /// Drops everything (an index rebuild).
@@ -321,6 +327,34 @@ impl NoteParseCache {
         let mut inner = self.lock();
         inner.slots.clear();
         inner.total = 0;
+        inner.swept.clear();
+    }
+
+    // ------------------------------------------------------------------------
+    // Recovery's sweep of forgotten files (scale slice S3)
+    // ------------------------------------------------------------------------
+
+    /// Whether recovery has swept this partition's forgotten files in this
+    /// process — so an open need not list `notes/` for them again.
+    pub(super) fn tombstones_swept(&self, partition_key: &str, notes_dir: &Path) -> bool {
+        self.lock()
+            .swept
+            .contains(&(partition_key.to_string(), notes_dir.to_path_buf()))
+    }
+
+    /// Records a sweep that completed.
+    pub(super) fn mark_tombstones_swept(&self, partition_key: &str, notes_dir: &Path) {
+        self.lock()
+            .swept
+            .insert((partition_key.to_string(), notes_dir.to_path_buf()));
+    }
+
+    /// The next open sweeps again: a forget failed after its tombstone and
+    /// may have left the note's files behind.
+    pub(super) fn rearm_tombstone_sweep(&self, partition_key: &str, notes_dir: &Path) {
+        self.lock()
+            .swept
+            .remove(&(partition_key.to_string(), notes_dir.to_path_buf()));
     }
 
     // ------------------------------------------------------------------------

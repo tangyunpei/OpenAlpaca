@@ -307,3 +307,159 @@ fn an_external_edit_reindexes_only_the_edited_note() {
     assert_eq!(found.results[0].id, edited.id);
     assert_eq!(found.results[0].freshness, Freshness::Stale);
 }
+
+// ============================================================================
+// S3 — a forgotten note stays forgotten when its file comes back (O3)
+// ============================================================================
+
+fn file_of(h: &Harness, owner_key: &str, id: NoteId) -> PathBuf {
+    let dir = h.home().join("memory/owners").join(owner_key).join("notes");
+    std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(&id.to_string()))
+        })
+        .unwrap()
+}
+
+/// Once a tombstone exists, recovery's sweep of forgotten files ran at
+/// every open — a listing of `notes/` before every read (+236 ms at 100K
+/// notes). Through the service's cache it runs once: a read after the
+/// first lists `notes/` once, for the read itself.
+#[test]
+fn a_read_with_a_tombstone_lists_notes_once() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let mut first = None;
+    for i in 0..5 {
+        let out = h.store(
+            &user,
+            &format!("Sweep {i}"),
+            &format!("# S{i}\n\nx\n"),
+            NoteKind::Fact,
+        );
+        first.get_or_insert(out);
+    }
+    let first = first.unwrap();
+    h.service
+        .forget(
+            &user,
+            ForgetInput {
+                targets: vec![(first.id, first.revision)],
+                reason: None,
+            },
+        )
+        .unwrap();
+    h.service.list(&user, ListInput::default()).unwrap();
+    let before = files::scans_on_this_thread();
+    let listed = h.service.list(&user, ListInput::default()).unwrap();
+    assert_eq!(listed.items.len(), 4);
+    assert_eq!(
+        files::scans_on_this_thread() - before,
+        1,
+        "the read's own listing, and no sweep"
+    );
+}
+
+/// With the sweep once per process, a forgotten note's file put back
+/// between two reads — a backup restore, a sync client — is still never
+/// listed, found, re-recorded by the reconciliation tick, indexed or
+/// written into `MEMORY.md` (design §6's hard guarantee): the scans every
+/// read and tick make leave it out and delete it.
+#[test]
+fn a_forgotten_notes_file_put_back_between_reads_is_never_served() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let mut events = h.bus.subscribe();
+    let gone = h.store(
+        &user,
+        "Forgotten lighthouse",
+        "# F\n\nThe lighthouse keeper words.\n",
+        NoteKind::Fact,
+    );
+    h.store(
+        &user,
+        "Kept lighthouse",
+        "# K\n\nThe lighthouse stays lit.\n",
+        NoteKind::Fact,
+    );
+    let file = file_of(&h, &user.owner_key, gone.id);
+    let bytes = std::fs::read(&file).unwrap();
+    h.service
+        .forget(
+            &user,
+            ForgetInput {
+                targets: vec![(gone.id, gone.revision.clone())],
+                reason: None,
+            },
+        )
+        .unwrap();
+    // The service has opened (and swept) the partition since the forget.
+    h.service.list(&user, ListInput::default()).unwrap();
+    h.service.reconcile_owner(ALICE).unwrap();
+    while events.try_recv().is_ok() {}
+
+    let tool = h.tool(ALICE, None);
+    std::fs::write(&file, &bytes).unwrap();
+    let found = h
+        .service
+        .search(
+            &tool,
+            SearchInput {
+                query: "lighthouse keeper".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(found.results.iter().all(|r| r.id != gone.id), "{found:?}");
+    assert!(!file.exists(), "the read's scan deleted it");
+
+    std::fs::write(&file, &bytes).unwrap();
+    let listed = h.service.list(&user, ListInput::default()).unwrap();
+    assert!(listed.items.iter().all(|i| i.id != gone.id));
+
+    std::fs::write(&file, &bytes).unwrap();
+    let tick = h.service.reconcile_owner(ALICE).unwrap();
+    assert!(tick.changes.iter().all(|c| c.note_id != gone.id), "{tick:?}");
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !format!("{event:?}").contains(&gone.id.to_string()),
+            "no memory_changed names it: {event:?}"
+        );
+    }
+
+    std::fs::write(&file, &bytes).unwrap();
+    h.store(&user, "Another", "# A\n\nA write.\n", NoteKind::Fact);
+    let key = files::home_partition_key(&user.owner_key);
+    assert!(
+        h.service
+            .index()
+            .get(&key, &gone.id.to_string())
+            .unwrap()
+            .is_none(),
+        "never indexed"
+    );
+    let navigation = std::fs::read_to_string(
+        h.home()
+            .join("memory/owners")
+            .join(&user.owner_key)
+            .join(files::NAVIGATION_FILE),
+    )
+    .unwrap();
+    assert!(!navigation.contains("Forgotten lighthouse"), "{navigation}");
+    assert!(navigation.contains("Kept lighthouse"));
+    assert!(!file.exists());
+    assert!(matches!(
+        h.service.read(
+            &tool,
+            ReadInput {
+                id: gone.id,
+                ..Default::default()
+            }
+        ),
+        Err(MemoryError::NotFound(_))
+    ));
+}
