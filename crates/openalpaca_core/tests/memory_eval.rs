@@ -3995,6 +3995,63 @@ struct LinkCheck {
     judge_tokens_out: u32,
 }
 
+/// H6's checks, totalled (the L8 fix slice's nits round): each is one more
+/// coverage-judge call, outside the coverage rows' own totals
+/// (`coverage.judge_tokens_*` are those rows' alone).
+#[derive(Debug, Default, Serialize)]
+struct LinkCheckTotals {
+    /// Pairs a check was due for.
+    checks: usize,
+    /// The coverage-judge calls they made: every check but a `not_judged`
+    /// one, a failed call included.
+    calls: usize,
+    /// Pairs scored correct from the note a check named.
+    credited: usize,
+    /// The judge named a note (`matched`), or answered `NONE` (`none`): its
+    /// reading. A check that `failed` has none — `unparsed`, a reply with no
+    /// verdict line (`unparsed_cut_at_max_tokens` of them ran to the cap),
+    /// or `judge_errors`, a call that failed — and credits nothing, as a
+    /// `NONE` does, without being one. `not_judged`: no judge was set.
+    matched: usize,
+    none: usize,
+    failed: usize,
+    unparsed: usize,
+    unparsed_cut_at_max_tokens: usize,
+    judge_errors: usize,
+    not_judged: usize,
+    judge_tokens_in: u64,
+    judge_tokens_out: u64,
+}
+
+fn link_check_totals(changed: &[ChangedFact]) -> LinkCheckTotals {
+    let checks: Vec<&LinkCheck> = changed
+        .iter()
+        .filter_map(|c| c.link_check.as_ref())
+        .collect();
+    let count = |verdict: &str| checks.iter().filter(|c| c.verdict == verdict).count();
+    let (unparsed, judge_errors) = (count("unparsed"), count("judge_error"));
+    LinkCheckTotals {
+        checks: checks.len(),
+        calls: checks.len() - count("not_judged"),
+        credited: changed
+            .iter()
+            .filter(|c| c.correct && c.old_note_from == Some("link_check"))
+            .count(),
+        matched: count("match"),
+        none: count("none"),
+        failed: unparsed + judge_errors,
+        unparsed,
+        unparsed_cut_at_max_tokens: checks
+            .iter()
+            .filter(|c| c.verdict == "unparsed" && c.judge_tokens_out >= COVERAGE_JUDGE_MAX_TOKENS)
+            .count(),
+        judge_errors,
+        not_judged: count("not_judged"),
+        judge_tokens_in: checks.iter().map(|c| u64::from(c.judge_tokens_in)).sum(),
+        judge_tokens_out: checks.iter().map(|c| u64::from(c.judge_tokens_out)).sum(),
+    }
+}
+
 /// A pair's outcome from what the coverage judge matched for its two gold
 /// notes. The same learned note matching both means the old value was never
 /// learned as its own note — unless H6's check ([`LinkCheck`]) asked the
@@ -4944,6 +5001,8 @@ struct LearningResults {
     /// Of `changed_facts.len()`: a pair whose old note was retired or lost
     /// its key to the new one, a correction whose gold value is active.
     changed_facts_correct: Option<usize>,
+    /// H6's link checks, totalled (the L8 fix slice's nits round).
+    link_checks: Option<LinkCheckTotals>,
     restatements: Vec<Restatement>,
     restatements_by_outcome: BTreeMap<String, usize>,
     aliases: Option<AliasReport>,
@@ -5134,6 +5193,7 @@ async fn measure_learning(
         measure_changed_facts(&pairs, &corrections, &coverage, &results.learned, &checks);
     results.changed_facts_correct =
         Some(results.changed_facts.iter().filter(|c| c.correct).count());
+    results.link_checks = Some(link_check_totals(&results.changed_facts));
     results.restatements = measure_restatements(
         sessions,
         transcript,
@@ -6778,23 +6838,28 @@ fn print_learning(l: &LearningResults) {
         );
     }
     if let Some(correct) = l.changed_facts_correct {
-        let checks = l
-            .changed_facts
-            .iter()
-            .filter(|c| c.link_check.is_some())
-            .count();
-        let credited = l
-            .changed_facts
-            .iter()
-            .filter(|c| c.correct && c.old_note_from == Some("link_check"))
-            .count();
         println!(
             "changed facts: {correct}/{} correct{}",
             l.changed_facts.len(),
-            if checks > 0 {
-                format!(" ({credited} of them after {checks} link check(s))")
-            } else {
-                String::new()
+            match &l.link_checks {
+                Some(k) if k.checks > 0 => format!(
+                    " ({} of them after {} link check(s): {} named a note, {} NONE, {} failed — {} unparsed, {} judge error(s){}; {} in / {} out judge tokens)",
+                    k.credited,
+                    k.checks,
+                    k.matched,
+                    k.none,
+                    k.failed,
+                    k.unparsed,
+                    k.judge_errors,
+                    if k.not_judged > 0 {
+                        format!("; {} not judged", k.not_judged)
+                    } else {
+                        String::new()
+                    },
+                    k.judge_tokens_in,
+                    k.judge_tokens_out,
+                ),
+                _ => String::new(),
             }
         );
     }
@@ -7936,6 +8001,81 @@ async fn a_supersedes_link_is_credited_only_when_the_judge_names_the_old_note() 
         "{json}"
     );
     assert!(serde_json::to_value(&facts[2]).unwrap()["link_check"].is_null());
+}
+
+/// The nits round of the L8 fix slice (the fidelity review's round-3 n3):
+/// H6's checks are coverage-judge calls outside the coverage rows' totals,
+/// so they are totalled apart — the checks, the calls, the pairs credited,
+/// the tokens — and a check that failed (no verdict line, or a failed call)
+/// is told apart from one the judge answered `NONE`: both credit nothing,
+/// but only the second is the judge's reading.
+#[test]
+fn link_checks_are_totalled_and_a_failed_check_is_told_apart_from_none() {
+    let fact = |verdict: Option<&'static str>, correct: bool, tokens: (u32, u32)| {
+        let named = (verdict == Some("match")).then(|| "s".to_string());
+        ChangedFact {
+            kind: "pair",
+            fact_key: None,
+            old_gold: Some("o".to_string()),
+            new_gold: "n".to_string(),
+            old_note: Some(named.clone().unwrap_or_else(|| "n".to_string())),
+            old_note_from: Some(if named.is_some() {
+                "link_check"
+            } else {
+                "judge"
+            }),
+            new_note: Some("n".to_string()),
+            outcome: match (correct, &named) {
+                (true, _) => "new_active_old_superseded",
+                (false, Some(_)) => "both_active_unlinked",
+                (false, None) => "old_never_learned",
+            },
+            key_reused: None,
+            correct,
+            link_check: verdict.map(|verdict| LinkCheck {
+                superseded: "s".to_string(),
+                candidates: vec!["s".to_string()],
+                verdict,
+                named,
+                judge_raw: String::new(),
+                judge_error: (verdict == "judge_error").then(|| "timeout".to_string()),
+                judge_tokens_in: tokens.0,
+                judge_tokens_out: tokens.1,
+            }),
+        }
+    };
+    let facts = [
+        fact(Some("match"), true, (100, 20)),
+        fact(Some("match"), false, (100, 15)),
+        fact(Some("none"), false, (100, 10)),
+        fact(Some("unparsed"), false, (100, COVERAGE_JUDGE_MAX_TOKENS)),
+        fact(Some("unparsed"), false, (100, 300)),
+        fact(Some("judge_error"), false, (0, 0)),
+        fact(Some("not_judged"), false, (0, 0)),
+        fact(None, true, (0, 0)),
+    ];
+    let totals = serde_json::to_value(link_check_totals(&facts)).unwrap();
+    assert_eq!(
+        totals,
+        serde_json::json!({
+            "checks": 7,
+            "calls": 6,
+            "credited": 1,
+            "matched": 2,
+            "none": 1,
+            "failed": 3,
+            "unparsed": 2,
+            "unparsed_cut_at_max_tokens": 1,
+            "judge_errors": 1,
+            "not_judged": 1,
+            "judge_tokens_in": 500,
+            "judge_tokens_out": 20 + 15 + 10 + u64::from(COVERAGE_JUDGE_MAX_TOKENS) + 300,
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(link_check_totals(&facts[7..])).unwrap()["checks"],
+        0
+    );
 }
 
 fn learned(
