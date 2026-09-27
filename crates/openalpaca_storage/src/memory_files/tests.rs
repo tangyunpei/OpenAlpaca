@@ -3791,6 +3791,26 @@ fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing(
     // rewrite it, the doctor must not.
     let gitignore = project.memory_dir().join(".gitignore");
     std::fs::write(&gitignore, "!*\n").unwrap();
+    // A forgotten note whose file and `.history` came back (scale slice S3):
+    // a scan opened for writing deletes them; the doctor's read-only one
+    // leaves the note out and deletes nothing.
+    let gone = home
+        .create(
+            new_note("Gone", "# Gone\n\nForgotten words.\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let gone_file = home.read(&gone.id).unwrap().path;
+    let gone_bytes = read_file(&gone_file);
+    let gone_history = home.history_dir().join(gone.id.to_string());
+    home.forget(&[(gone.id, gone.revision.clone())]).unwrap();
+    std::fs::write(&gone_file, &gone_bytes).unwrap();
+    std::fs::create_dir_all(&gone_history).unwrap();
+    std::fs::write(
+        gone_history.join(format!("{}.md", gone.revision)),
+        &gone_bytes,
+    )
+    .unwrap();
     drop((home, project, carol_home));
 
     let report = doctor(ALICE, Some(&sb.project_root())).unwrap();
@@ -3842,6 +3862,10 @@ fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing(
         std::fs::read_to_string(&gitignore).unwrap(),
         "!*\n",
         "the doctor changes nothing"
+    );
+    assert!(
+        gone_file.exists() && gone_history.exists(),
+        "nor deletes a forgotten note's file or history"
     );
 }
 

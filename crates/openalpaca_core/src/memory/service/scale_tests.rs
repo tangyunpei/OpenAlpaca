@@ -310,6 +310,291 @@ fn an_external_edit_reindexes_only_the_edited_note() {
     assert_eq!(found.results[0].freshness, Freshness::Stale);
 }
 
+/// Everything the index holds about the notes of the cache file at `path`
+/// — every `note` column but the rowid, every chunk, alias and source keyed
+/// by its note — one line per row, sorted; and FTS5's own check that each
+/// full-text index matches the chunks it indexes.
+fn index_contents(path: &Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    for table in ["fts_word", "fts_tri"] {
+        conn.execute(
+            &format!("INSERT INTO {table}({table}, rank) VALUES ('integrity-check', 1)"),
+            [],
+        )
+        .unwrap_or_else(|e| panic!("{table} matches its chunks: {e}"));
+    }
+    let mut out = Vec::new();
+    for sql in [
+        "SELECT partition_key, id, scope, revision, relative_path, title, norm_title, aliases,
+                tags, kind, status, effective_status, origin, authority, fact_key, valid_from,
+                valid_to, updated_at, created_at, observed_at, date, pinned, source_forgotten,
+                conflict, same_key_loser, superseded_by, supersedes, body_line_offset,
+                mtime_ns, size, inode
+         FROM note",
+        "SELECT n.partition_key, n.id, c.partition_key, c.ordinal, c.heading, c.line_from,
+                c.line_to, c.excerpt, c.title, c.aliases, c.tags, c.body
+         FROM chunk c JOIN note n ON n.rowid = c.note_rowid",
+        "SELECT n.partition_key, n.id, a.norm_alias
+         FROM note_alias a JOIN note n ON n.rowid = a.note_rowid",
+        "SELECT n.partition_key, n.id, s.source_key
+         FROM note_source s JOIN note n ON n.rowid = s.note_rowid",
+    ] {
+        let mut stmt = conn.prepare(sql).unwrap();
+        let columns = stmt.column_count();
+        let rows = stmt
+            .query_map([], |r| {
+                (0..columns)
+                    .map(|i| r.get::<_, rusqlite::types::Value>(i))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap();
+        let mut lines: Vec<String> = rows.map(|r| format!("{:?}", r.unwrap())).collect();
+        lines.sort();
+        out.push(format!("-- {} rows", lines.len()));
+        out.extend(lines);
+    }
+    out
+}
+
+/// The notes on disk now, with their current revisions: every status, the
+/// candidates and the superseded included.
+fn every_note(service: &MemoryService, user: &MemoryAccessContext) -> Vec<ListItem> {
+    service
+        .list(
+            user,
+            ListInput {
+                limit: Some(LIST_MAX_LIMIT),
+                include_history: true,
+                include_candidates: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .items
+}
+
+/// The rows the incremental passes leave (scale slice S1) are the rows a
+/// whole rebuild writes from the same files. A seeded random run mixes the
+/// service's writes — saves, replacements, learned notes citing shared
+/// message rows, suggestions and their confirmation, forgets (one of a
+/// learned note flips its siblings' `source_forgotten` with no file of
+/// theirs changing), archives — with hand edits and hand deletions, and
+/// restarts in between, each of which reads the fingerprints back from the
+/// rows. At each checkpoint a reconciliation tick and a search run, and
+/// everything the index holds equals what a separate cache rebuilt from
+/// the same files holds — its notes, chunks, aliases and citations — and
+/// both full-text indexes pass FTS5's integrity check. No rebuild ran in
+/// the incremental service meanwhile.
+#[test]
+fn incremental_passes_after_restarts_leave_the_rows_a_rebuild_writes() {
+    let h = Harness::new();
+    let path = h.root.path().join("cache").join("incremental.sqlite");
+    let rebuilt = h.root.path().join("cache").join("rebuilt.sqlite");
+    let user = h.user(ALICE, None);
+    let extraction = h
+        .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap();
+    let tool = h.tool(ALICE, None);
+    let rows: Vec<i64> = (0..3)
+        .map(|i| h.message_row(&format!("I said thing {i} about the orchard.")))
+        .collect();
+    file_service(&h, &path).rebuild_index().unwrap();
+    let mut service = file_service(&h, &path);
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let mut pick = |n: usize| -> usize {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % n as u64) as usize
+    };
+    let words = ["orchard", "harbour", "lantern", "meadow", "quarry", "cellar"];
+    let keys = ["user.orchard", "user.harbour", "user.lantern"];
+    let (mut checkpoints, mut restarts) = (0, 0);
+    // What the run reached, over every checkpoint: the derived facts an
+    // incremental pass has to follow.
+    let mut reached: HashMap<&str, i64> = HashMap::new();
+    let facts = [
+        ("superseded", "effective_status = 'superseded'"),
+        ("archived", "effective_status = 'archived'"),
+        ("candidate", "effective_status = 'candidate'"),
+        ("source_forgotten", "source_forgotten = 1"),
+        ("same_key_loser", "same_key_loser = 1"),
+        ("external", "origin = 'external'"),
+    ];
+    for step in 0..160 {
+        let notes = every_note(&service, &user);
+        let any = |p: usize| (!notes.is_empty()).then(|| notes[p % notes.len().max(1)].clone());
+        let word = words[pick(words.len())];
+        let op = pick(12);
+        match op {
+            0..=2 => {
+                let _ = service.store(
+                    &user,
+                    StoreInput {
+                        title: format!("Note {step} {word}"),
+                        body: format!("# {word}\n\nStep {step} says the {word} is near.\n"),
+                        kind: Some(NoteKind::Fact),
+                        fact_key: (pick(3) == 0).then(|| keys[pick(keys.len())].to_string()),
+                        aliases: if pick(2) == 0 { vec![format!("{word}-{step}")] } else { vec![] },
+                        ..Default::default()
+                    },
+                );
+            }
+            3 => {
+                let _ = service.store(
+                    &extraction,
+                    StoreInput {
+                        title: format!("Learned {step} {word}"),
+                        body: format!("# L\n\n## Knowledge\nThe user likes the {word}, {step}.\n"),
+                        kind: Some(NoteKind::Preference),
+                        sources: vec![NoteSource {
+                            kind: SourceType::Message,
+                            id: rows[pick(rows.len())].to_string(),
+                            observed_at: None,
+                        }],
+                        provenance: Some(ExtractionProvenance::UserWords),
+                        ..Default::default()
+                    },
+                );
+            }
+            4 | 5 => {
+                // A replacement: the user's own, or learning's suggestion.
+                if let Some(target) = any(pick(97)) {
+                    let learned = op == 5;
+                    let _ = service.store(
+                        if learned { &extraction } else { &user },
+                        StoreInput {
+                            title: format!("Replacement {step}"),
+                            body: format!("# R\n\n## Knowledge\nNow the {word}, {step}.\n"),
+                            kind: Some(NoteKind::Preference),
+                            sources: if learned {
+                                vec![NoteSource {
+                                    kind: SourceType::Message,
+                                    id: rows[pick(rows.len())].to_string(),
+                                    observed_at: None,
+                                }]
+                            } else {
+                                vec![]
+                            },
+                            supersedes: Some((target.id, target.revision.clone())),
+                            replace_policy: if learned {
+                                ReplacePolicy::SuggestUnlessLearned
+                            } else {
+                                ReplacePolicy::Direct
+                            },
+                            provenance: learned.then_some(ExtractionProvenance::UserWords),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+            6 => {
+                if let Some(note) = any(pick(97)) {
+                    let _ = service.forget(
+                        &user,
+                        ForgetInput {
+                            targets: vec![(note.id, note.revision.clone())],
+                            reason: None,
+                        },
+                    );
+                }
+            }
+            7 | 8 => {
+                // An archive, or the confirmation of a suggestion.
+                let candidate = notes
+                    .iter()
+                    .filter(|n| n.status == NoteStatus::Candidate)
+                    .nth(pick(4));
+                let (note, action) = match (op, candidate) {
+                    (8, Some(c)) => {
+                        let target = c.supersedes.first().and_then(|t| {
+                            notes.iter().find(|n| n.id == *t).map(|n| n.revision.clone())
+                        });
+                        (
+                            Some(c.clone()),
+                            UpdateAction::Confirm {
+                                target_revision: target,
+                            },
+                        )
+                    }
+                    _ => (any(pick(97)), UpdateAction::Archive),
+                };
+                if let Some(note) = note {
+                    let _ = service.update(
+                        &user,
+                        UpdateInput {
+                            id: note.id,
+                            expected_revision: note.revision.clone(),
+                            action,
+                            reason: None,
+                        },
+                    );
+                }
+            }
+            9 | 10 => {
+                // By hand: an edit, or a deletion.
+                if let Some(note) = any(pick(97)) {
+                    let file = file_of(&h, &user.owner_key, note.id);
+                    if op == 9 {
+                        let text = std::fs::read_to_string(&file).unwrap();
+                        std::fs::write(&file, format!("{text}\nEdited by hand at {step}: {word}.\n"))
+                            .unwrap();
+                    } else {
+                        std::fs::remove_file(&file).unwrap();
+                    }
+                }
+            }
+            _ => {
+                drop(service);
+                service = file_service(&h, &path);
+                restarts += 1;
+            }
+        }
+        if step % 40 == 39 {
+            service.reconcile_owner(ALICE).unwrap();
+            service
+                .search(
+                    &tool,
+                    SearchInput {
+                        query: word.into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                service.rebuild_state().started,
+                0,
+                "no rebuild ran in the incremental service"
+            );
+            let reference = file_service(&h, &rebuilt);
+            reference.rebuild_index().unwrap();
+            drop(reference);
+            let incremental = index_contents(&path);
+            assert!(incremental.len() > 20, "the run wrote notes: {incremental:?}");
+            assert_eq!(
+                incremental,
+                index_contents(&rebuilt),
+                "step {step}: the incremental index is the rebuilt one"
+            );
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            for (fact, condition) in facts {
+                let n: i64 = conn
+                    .query_row(&format!("SELECT count(*) FROM note WHERE {condition}"), [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                *reached.entry(fact).or_default() += n;
+            }
+            checkpoints += 1;
+        }
+    }
+    assert_eq!(checkpoints, 4);
+    assert!(restarts >= 5, "{restarts} restarts");
+    for (fact, _) in facts {
+        assert!(reached.get(fact).copied().unwrap_or(0) > 0, "the run reached {fact}: {reached:?}");
+    }
+}
+
 // ============================================================================
 // S3 — a forgotten note stays forgotten when its file comes back (O3)
 // ============================================================================
@@ -464,6 +749,50 @@ fn a_forgotten_notes_file_put_back_between_reads_is_never_served() {
         ),
         Err(MemoryError::NotFound(_))
     ));
+}
+
+/// A forgotten note's `.history` put back on its own — no note file, so
+/// no scan meets it — is deleted by the next reconciliation tick: leg (2)
+/// of why sweeping once per process is exactly as safe (design 03 rev
+/// 7.2). A partition opened read-only deletes nothing.
+#[test]
+fn a_tick_deletes_a_forgotten_notes_history_put_back_alone() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let gone = h.store(&user, "Gone", "# Gone\n\nx\n", NoteKind::Fact);
+    h.store(&user, "Kept", "# Kept\n\ny\n", NoteKind::Fact);
+    h.service
+        .forget(
+            &user,
+            ForgetInput {
+                targets: vec![(gone.id, gone.revision.clone())],
+                reason: None,
+            },
+        )
+        .unwrap();
+    // The service has swept the partition since the forget.
+    h.service.list(&user, ListInput::default()).unwrap();
+    h.service.reconcile_owner(ALICE).unwrap();
+    let history = h
+        .home()
+        .join("memory/owners")
+        .join(&user.owner_key)
+        .join(".history")
+        .join(gone.id.to_string());
+    assert!(!history.exists());
+    std::fs::create_dir_all(&history).unwrap();
+    std::fs::write(
+        history.join(format!("{}.md", gone.revision)),
+        "# Gone\n\nx\n",
+    )
+    .unwrap();
+
+    let read_only = Partition::open_readonly(&StoreScope::Home, &user.owner_key).unwrap();
+    assert_eq!(read_only.sweep_forgotten_history().unwrap(), 0);
+    assert!(history.exists(), "a read-only partition deletes nothing");
+
+    h.service.reconcile_owner(ALICE).unwrap();
+    assert!(!history.exists(), "the tick deleted it");
 }
 
 // ============================================================================
