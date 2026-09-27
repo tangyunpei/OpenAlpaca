@@ -1501,6 +1501,14 @@ struct Totals {
     reader_rounds_mean_per_turn: Option<f64>,
     /// The main loop's tool calls per question turn (`rows[].tools`).
     tool_calls_mean_per_turn: Option<f64>,
+    // ── Added by the L8 fix slice's nits round ────────────────────────────
+    /// Bus events the question turns' subscriptions missed (a lagged
+    /// receiver), and each row that lost any, `<id> (<n>)`: those rows'
+    /// tools, model calls, tokens and routing mode may be undercounted — and
+    /// with them `memory_search_calls`, `memory_write_calls` and the reader's
+    /// cost above. Printed as a warning when non-zero.
+    events_lagged: u64,
+    events_lagged_at: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1600,6 +1608,11 @@ struct Row {
     /// retried is missing — the loop counts it against its rounds, but the
     /// router books a response, not an attempt.
     reader_rounds: u64,
+    // ── Added by the L8 fix slice's nits round ────────────────────────────
+    /// Bus events this turn's subscription missed (a lagged receiver): its
+    /// `mode`, `tools` and reader calls, tokens and cost are read from those
+    /// events and may be undercounted (`totals.events_lagged`).
+    events_lagged: u64,
 }
 
 /// A note a memory read tool returned, named as `memory_used` names it.
@@ -1859,6 +1872,12 @@ fn totals(rows: &[Row], judge_cost_usd: f64, wall_ms: u64) -> Totals {
         reader_tokens_in_median_per_turn: median(rows.iter().map(|r| r.reader_tokens_in as f64)),
         reader_rounds_mean_per_turn: mean(rows.iter().map(|r| r.reader_rounds as f64)),
         tool_calls_mean_per_turn: mean(rows.iter().map(|r| r.tools.len() as f64)),
+        events_lagged: rows.iter().map(|r| r.events_lagged).sum(),
+        events_lagged_at: rows
+            .iter()
+            .filter(|r| r.events_lagged > 0)
+            .map(|r| format!("{} ({})", r.id, r.events_lagged))
+            .collect(),
     }
 }
 
@@ -3103,6 +3122,10 @@ struct TurnRecord {
     model_tool_memory_changes: usize,
     /// The notes those writes changed, each once (the L8 fix slice's H7).
     model_tool_notes: Vec<String>,
+    /// Bus events this turn's subscription missed (a lagged receiver): the
+    /// reader's calls, tools and own writes above may be undercounted (the
+    /// L8 fix slice's nits round; totalled in `learning.cost`).
+    events_lagged: u64,
 }
 
 /// Which database session holds which corpus session, and each corpus
@@ -3286,6 +3309,7 @@ impl Learner {
                     tools: Vec::new(),
                     model_tool_memory_changes: 0,
                     model_tool_notes: Vec::new(),
+                    events_lagged: 0,
                 };
                 let mut models = BTreeSet::new();
                 loop {
@@ -3318,7 +3342,7 @@ impl Learner {
                             }
                         }
                         Ok(_) => {}
-                        Err(TryRecvError::Lagged(_)) => continue,
+                        Err(TryRecvError::Lagged(n)) => record.events_lagged += n,
                         Err(_) => break,
                     }
                 }
@@ -4552,6 +4576,16 @@ struct LearningCost {
     /// counts the question phase's only — and which: `<session>#<turn>`.
     feed_turn_errors: usize,
     feed_turn_errors_at: Vec<String>,
+    /// Bus events the learning phase's subscriptions missed (a lagged
+    /// receiver; the L8 fix slice's nits round) — the fed turns', the
+    /// flushes' and the summaries'; the forced re-run's are in its own
+    /// record — and each subscription that lost any
+    /// ([`lagged_subscriptions`]). Non-zero means what is read from those
+    /// events may undercount: a lost `created` counts a flush's note as the
+    /// reader's (H3's surface split), and a lost reader write takes a
+    /// restatement's `model_tool_write` away (H7). `warnings` says so.
+    events_lagged: u64,
+    events_lagged_at: Vec<String>,
 }
 
 /// The class an unusable answer's reason falls in, for the tallies: `cut at
@@ -4585,6 +4619,41 @@ fn feed_turn_errors(turns: &[TurnRecord]) -> Vec<String> {
         .filter(|t| t.is_error)
         .map(|t| format!("{}#{}", t.session, t.turn))
         .collect()
+}
+
+/// The learning phase's subscriptions that lost events to lag (the L8 fix
+/// slice's nits round): the events lost in all, and each subscription that
+/// lost any, with its count — a fed turn as `<session>#<turn> (n)`, a flush
+/// as `<session> <label> flush (n)`, a summary flush as `<session> <label>
+/// summary (n)` — the fed turns first, then the flushes, then the
+/// summaries.
+fn lagged_subscriptions(
+    turns: &[TurnRecord],
+    flushes: &[FlushRecord],
+    episodes: &[EpisodeRecord],
+) -> (u64, Vec<String>) {
+    let lost: Vec<(String, u64)> = turns
+        .iter()
+        .map(|t| (format!("{}#{}", t.session, t.turn), t.events_lagged))
+        .chain(
+            flushes
+                .iter()
+                .map(|f| (format!("{} {} flush", f.session, f.label), f.events_lagged)),
+        )
+        .chain(episodes.iter().map(|e| {
+            (
+                format!("{} {} summary", e.session, e.label),
+                e.events_lagged,
+            )
+        }))
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    (
+        lost.iter().map(|(_, n)| n).sum(),
+        lost.into_iter()
+            .map(|(place, n)| format!("{place} ({n})"))
+            .collect(),
+    )
 }
 
 /// Each session whose last flush ended with a stop, and the stop, in feed
@@ -4634,9 +4703,10 @@ fn summaries_left_unread(episodes: &[EpisodeRecord]) -> Vec<(&str, &str)> {
 /// summaries' apart (H1) — a daemon would learn those windows after 00:00
 /// UTC; a run ends first — the windows skipped after `MAX_ATTEMPTS`
 /// unusable answers, whose turns are never learned or summarised (repair
-/// round 1), and the sessions whose last flush left a window unread for any
+/// round 1), the sessions whose last flush left a window unread for any
 /// other stop ([`left_unread`]; repair round 2 — a cap's session is named
-/// by the cap's line).
+/// by the cap's line), and the bus events a lagged subscription lost
+/// ([`lagged_subscriptions`]; the nits round).
 fn learning_warnings(
     turns: &[TurnRecord],
     flushes: &[FlushRecord],
@@ -4738,6 +4808,13 @@ fn learning_warnings(
             sessions.join(", ")
         ));
     }
+    let (lost, at) = lagged_subscriptions(turns, flushes, episodes);
+    if lost > 0 {
+        warnings.push(format!(
+            "{lost} bus event(s) lost to a lagged subscription, so what is read from them may be undercounted — a note a flush created may count as the reader's (the surface split), and a reader write may be missing from a restatement (`model_tool_write`): {}",
+            at.join(", ")
+        ));
+    }
     warnings
 }
 
@@ -4770,6 +4847,7 @@ fn learning_cost(
     let model_tool: usize = turns.iter().map(|t| t.model_tool_memory_changes).sum();
     *by_surface.entry("model_tool".to_string()).or_insert(0) += model_tool;
     let errors = feed_turn_errors(turns);
+    let (events_lagged, events_lagged_at) = lagged_subscriptions(turns, flushes, episodes);
     LearningCost {
         flushes: flushes.len(),
         flushes_with_calls: flushes.iter().filter(|f| f.calls > 0).count(),
@@ -4804,6 +4882,8 @@ fn learning_cost(
         feed_wall_ms,
         feed_turn_errors: errors.len(),
         feed_turn_errors_at: errors,
+        events_lagged,
+        events_lagged_at,
     }
 }
 
@@ -5509,6 +5589,8 @@ struct TurnObservation {
     cost_usd: f64,
     models: BTreeSet<String>,
     tools: Vec<String>,
+    /// Events the subscription missed (a lagged receiver).
+    events_lagged: u64,
 }
 
 /// Live memory eval. `#[ignore]`d: even `cargo test -- --ignored` exits early
@@ -6016,6 +6098,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
             &learning.learned,
         )
         .await;
+        learning.warnings.extend(forced_rerun_lag_warning(&rerun));
         learning.forced_rerun = Some(rerun);
     }
     if let Some(learning) = report.learning.as_mut() {
@@ -6130,6 +6213,19 @@ fn forced_rerun_unchecked(f: &FlushRecord) -> Option<String> {
     } else {
         None
     }
+}
+
+/// The forced re-run's lost bus events, warned about after it (the L8 fix
+/// slice's nits round): its resurrection check reads the notes its flush's
+/// `created` events name, so a lost event could hide a resurrection. The
+/// count stays in its own record (`forced_rerun.flush.events_lagged`), as
+/// its other counts do.
+fn forced_rerun_lag_warning(rerun: &ForcedRerun) -> Option<String> {
+    let flush = rerun.flush.as_ref().filter(|f| f.events_lagged > 0)?;
+    Some(format!(
+        "the forced re-run's subscription lost {} bus event(s) to lag ({}): a note it wrote may be missing from its resurrection check",
+        flush.events_lagged, flush.session
+    ))
 }
 
 /// L-S (design 09 §7.2): after the suggestion sessions, the seeded notes'
@@ -6440,6 +6536,7 @@ async fn run_replay(settings: &Settings, router: Arc<openalpaca_llm::LlmRouter>)
         &learning.learned,
     )
     .await;
+    learning.warnings.extend(forced_rerun_lag_warning(&rerun));
     learning.forced_rerun = Some(rerun);
     learning.invariants = Some(invariants(&learning, true));
     if asks {
@@ -6612,6 +6709,14 @@ fn print_totals(label: &str, t: &Totals) {
         t.judge_errors,
         t.turn_errors,
     );
+    if t.events_lagged > 0 {
+        println!(
+            "!! WARNING: {} bus event(s) lost to a lagged subscription in {} question turn(s), so their tools, model calls, tokens and cost may be undercounted: {}",
+            t.events_lagged,
+            t.events_lagged_at.len(),
+            t.events_lagged_at.join(", ")
+        );
+    }
     for (cat, b) in &t.by_category {
         println!(
             "  {cat:<24} {}/{} ({:.1}%)",
@@ -6901,7 +7006,7 @@ async fn ask_questions(
                     obs.models.insert(model);
                 }
                 Ok(_) => {}
-                Err(TryRecvError::Lagged(_)) => continue,
+                Err(TryRecvError::Lagged(n)) => obs.events_lagged += n,
                 Err(_) => break,
             }
         }
@@ -6989,6 +7094,7 @@ async fn ask_questions(
             relied_notes_read: delivered.relied_notes_read,
             relied_notes_read_or_excerpted: delivered.relied_notes_read_or_excerpted,
             reader_rounds,
+            events_lagged: obs.events_lagged,
         };
 
         // A turn that errored still gets judged: an empty answer to a
@@ -8053,6 +8159,7 @@ fn fed_turn(session: &str, turn: usize, is_error: bool) -> TurnRecord {
         tools: Vec::new(),
         model_tool_memory_changes: 0,
         model_tool_notes: Vec::new(),
+        events_lagged: 0,
     }
 }
 
@@ -9557,6 +9664,11 @@ struct OfflineRun {
 
 impl OfflineRun {
     fn new(router: Arc<openalpaca_llm::LlmRouter>) -> Self {
+        Self::on_bus(router, openalpaca_core::bus::EventBus::default())
+    }
+
+    /// [`Self::new`] on this bus.
+    fn on_bus(router: Arc<openalpaca_llm::LlmRouter>, bus: openalpaca_core::bus::EventBus) -> Self {
         use openalpaca_core::memory::learning::{LearningDeps, LearningQueue, QueueMode};
         use openalpaca_storage::{Database, IdentityRepository};
         let home = tempfile::tempdir().unwrap();
@@ -9568,7 +9680,6 @@ impl OfflineRun {
         IdentityRepository::new(&db)
             .create_global_user(&owner, None)
             .unwrap();
-        let bus = openalpaca_core::bus::EventBus::default();
         let cfg = eval_daemon_config(System::L, None);
         let turns_per_flush = cfg.orchestrator.learning.turns_per_flush;
         let daemon_config = Arc::new(arc_swap::ArcSwap::from_pointee(cfg));
@@ -10828,6 +10939,160 @@ async fn a_replay_with_questions_writes_summaries_and_asks_them() {
     }
 }
 
+// ── The nits round (the fidelity review's N1, open since round 2) ──────────
+
+/// H3's surface split and H7's restatement attribution are read from the
+/// bus — a flush's `created` events, a fed turn's reader writes — so a
+/// lagged subscription undercounts them. The feed counts every event a
+/// lagged receiver lost, a fed turn's as a flush's, the learning cost
+/// totals and names them, and `learning.warnings` says so. A bus of one
+/// slot lags on every turn, and on a flush that writes two notes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lagged_feed_subscription_is_counted_totalled_and_warned_about() {
+    let (router, _stub) = stub_router(&[TEST_MODEL], |request| {
+        let prompt = prompt_of(request);
+        if !prompt.contains("You are the memory extractor") {
+            return "Noted.".to_string();
+        }
+        // Two notes citing the chunk's first own user row: two events.
+        let row = conversation_of(&prompt).lines().find_map(|line| {
+            let (n, rest) = line.strip_prefix('R')?.split_once(' ')?;
+            rest.starts_with("user ").then(|| n.parse::<u32>().ok())?
+        });
+        let item = |title: &str, content: &str| {
+            serde_json::json!({
+                "title": title, "content": content,
+                "kind": "fact", "stated_by": "user", "confidence": 0.9, "rows": [row],
+            })
+        };
+        serde_json::json!({"items": [
+            item("Bike locker", "The user keeps the bike in a locker."),
+            item("Locker number", "The user's locker is number 42."),
+        ]})
+        .to_string()
+    });
+    let run = OfflineRun::on_bus(router, openalpaca_core::bus::EventBus::new(1));
+    let session = fixture_session(
+        "cs-t71",
+        &[
+            ("I keep my bike in locker 42.", TurnMode::Explicit),
+            ("Thanks.", TurnMode::Noise),
+        ],
+    );
+    let fed = run.learner().feed(&[&session], true).await;
+    let [switch] = &fed.flushes[..] else {
+        panic!("one switch flush: {:?}", fed.flushes);
+    };
+    assert_eq!(switch.stored, 2, "{switch:?}");
+    assert!(
+        switch.events_lagged > 0 && switch.written.len() < 2,
+        "the flush's subscription lagged and lost a write: {switch:?}"
+    );
+    assert!(
+        fed.turns.iter().all(|t| t.events_lagged > 0),
+        "every fed turn's subscription lagged: {:?}",
+        fed.turns
+    );
+    let lost: u64 = fed
+        .turns
+        .iter()
+        .map(|t| t.events_lagged)
+        .chain(fed.flushes.iter().map(|f| f.events_lagged))
+        .sum();
+    let cost = learning_cost(&fed.turns, &fed.flushes, &fed.episodes, fed.wall_ms);
+    assert_eq!(cost.events_lagged, lost, "{cost:?}");
+    assert_eq!(
+        cost.events_lagged_at,
+        [
+            format!("cs-t71#0 ({})", fed.turns[0].events_lagged),
+            format!("cs-t71#1 ({})", fed.turns[1].events_lagged),
+            format!("cs-t71 switch flush ({})", switch.events_lagged),
+        ]
+    );
+    let warnings = learning_warnings(&fed.turns, &fed.flushes, &fed.episodes);
+    assert!(
+        warnings.iter().any(|w| w.contains(&format!(
+            "{lost} bus event(s) lost to a lagged subscription"
+        ))),
+        "{warnings:?}"
+    );
+}
+
+/// The learning phase's lost events are totalled over every subscription
+/// that lagged — the fed turns', the flushes', the summaries' — each named
+/// with its count, and a non-zero total is one loud warning; none lost is
+/// no warning. The forced re-run's, kept in its own record as its other
+/// counts are, is warned about after it: its resurrection check reads the
+/// notes its flush's `created` events name.
+#[test]
+fn lagged_subscriptions_are_totalled_named_and_warned_about() {
+    use openalpaca_core::memory::learning::{EpisodeReport, FlushReport};
+    let flush = |label: &'static str, lagged: u64| {
+        FlushRecord::new(
+            "cs-001",
+            label,
+            0,
+            &FlushReport::default(),
+            Vec::new(),
+            lagged,
+        )
+    };
+    let mut lagged_turn = fed_turn("cs-001", 4, false);
+    lagged_turn.events_lagged = 3;
+    let turns = [fed_turn("cs-001", 3, false), lagged_turn];
+    let flushes = [flush(FLUSH_TURNS, 0), flush(FLUSH_SWITCH, 2)];
+    let episodes = [EpisodeRecord::new(
+        "cs-002",
+        FLUSH_SWITCH,
+        0,
+        &EpisodeReport::default(),
+        Vec::new(),
+        1,
+    )];
+    let cost = serde_json::to_value(learning_cost(&turns, &flushes, &episodes, 0)).unwrap();
+    assert_eq!(cost["events_lagged"], 6, "{cost}");
+    assert_eq!(
+        cost["events_lagged_at"],
+        serde_json::json!([
+            "cs-001#4 (3)",
+            "cs-001 switch flush (2)",
+            "cs-002 switch summary (1)"
+        ])
+    );
+    let warnings = learning_warnings(&turns, &flushes, &episodes);
+    let [one] = &warnings[..] else {
+        panic!("one warning: {warnings:?}");
+    };
+    for part in [
+        "6 bus event(s) lost to a lagged subscription",
+        "surface split",
+        "restatement",
+        "cs-001#4 (3), cs-001 switch flush (2), cs-002 switch summary (1)",
+    ] {
+        assert!(one.contains(part), "{part:?} in {one:?}");
+    }
+
+    let quiet = [fed_turn("cs-001", 3, false)];
+    let cost = serde_json::to_value(learning_cost(&quiet, &flushes[..1], &[], 0)).unwrap();
+    assert_eq!(
+        (&cost["events_lagged"], &cost["events_lagged_at"]),
+        (&serde_json::json!(0), &serde_json::json!([])),
+        "{cost}"
+    );
+    assert!(learning_warnings(&quiet, &flushes[..1], &[]).is_empty());
+
+    let rerun = |lagged: u64| ForcedRerun {
+        flush: Some(flush(FLUSH_FORCED_RERUN, lagged)),
+        ..Default::default()
+    };
+    let warning = forced_rerun_lag_warning(&rerun(2)).expect("a lagged re-run is warned about");
+    for part in ["forced re-run", "2 bus event(s)", "resurrection"] {
+        assert!(warning.contains(part), "{part:?} in {warning:?}");
+    }
+    assert_eq!(forced_rerun_lag_warning(&rerun(0)), None);
+    assert_eq!(forced_rerun_lag_warning(&ForcedRerun::default()), None);
+}
+
 // ─── L8's recall-mode comparison (design 09 §13.4) ──────────────────────────
 
 /// Every variable `Settings::from_env` reads: a test that calls it names
@@ -10971,7 +11236,14 @@ fn listed_ids(prompt: &str) -> Vec<String> {
 /// what the per-turn recall delivered, one after reading the listed notes,
 /// one after a title-only `memory_search`.
 async fn quokkaberry_rows(cfg: openalpaca_core::daemon_config::DaemonConfig) -> Vec<Row> {
-    use openalpaca_core::bus::EventBus;
+    quokkaberry_rows_on(cfg, openalpaca_core::bus::EventBus::default()).await
+}
+
+/// [`quokkaberry_rows`] on this bus.
+async fn quokkaberry_rows_on(
+    cfg: openalpaca_core::daemon_config::DaemonConfig,
+    bus: openalpaca_core::bus::EventBus,
+) -> Vec<Row> {
     use openalpaca_storage::{Database, IdentityRepository};
 
     let home = tempfile::tempdir().unwrap();
@@ -11015,7 +11287,6 @@ async fn quokkaberry_rows(cfg: openalpaca_core::daemon_config::DaemonConfig) -> 
             }]
         },
     );
-    let bus = EventBus::default();
     let service = Arc::new(MemoryService::open_default(Some(db.clone())).with_bus(bus.clone()));
     let seed = seed_notes(&service, &owner, &project, &quokkaberry_notes());
     assert_eq!(seed.seeded, 3, "{seed:?}");
@@ -11206,6 +11477,43 @@ async fn a_listed_note_is_not_delivered_until_a_tool_reads_it() {
     assert_eq!(t.rows_with_every_relied_note_listed_or_delivered, 3);
     assert_eq!(t.rows_with_every_relied_note_read_or_excerpted, 3);
     assert_eq!(t.reader_rounds_mean_per_turn, Some(4.0 / 3.0));
+}
+
+/// The nits round of the L8 fix slice (the fidelity review's N1): a
+/// question turn's tools, model calls, tokens and routing mode are read
+/// from the bus, so its subscription counts the events a lagged receiver
+/// lost, and the totals sum them and name each row. A bus of one slot lags
+/// on every turn; the default bus, on none here.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_turns_lagged_subscription_is_counted_and_totalled() {
+    let cfg = || eval_daemon_config(System::D, Some(RecallMode::Index));
+    let rows = quokkaberry_rows_on(cfg(), openalpaca_core::bus::EventBus::new(1)).await;
+    let lagged: Vec<(&str, u64)> = rows
+        .iter()
+        .map(|r| (r.id.as_str(), r.events_lagged))
+        .collect();
+    assert!(
+        lagged.len() == 3 && lagged.iter().all(|(_, n)| *n > 0),
+        "every question turn's subscription lagged: {lagged:?}"
+    );
+    let t = totals(&rows, 0.0, 0);
+    assert_eq!(t.events_lagged, lagged.iter().map(|(_, n)| n).sum::<u64>());
+    assert_eq!(
+        t.events_lagged_at,
+        lagged
+            .iter()
+            .map(|(id, n)| format!("{id} ({n})"))
+            .collect::<Vec<_>>()
+    );
+
+    let rows = quokkaberry_rows(cfg()).await;
+    let t = totals(&rows, 0.0, 0);
+    assert_eq!(
+        (t.events_lagged, t.events_lagged_at.len()),
+        (0, 0),
+        "{:?}",
+        t.events_lagged_at
+    );
 }
 
 fn used(note: &str, gold: bool, reason: UsedReason) -> UsedNote {
