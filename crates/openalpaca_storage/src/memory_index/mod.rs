@@ -975,24 +975,28 @@ impl MemoryIndex {
     /// learning's `known_keys` (design 09 §2.3 step 4), read from the
     /// catalog rather than a partition parse. A conversation summary holds
     /// no key for learning (design 09 §13.3): one a model's edit put on it
-    /// is not listed. Nor does a note only the chat model wrote (owner
-    /// decision LQ14, [`LEARNING_KEY_HOLDER`]): a key only such notes hold is
-    /// not listed, and one a learned or saved note also holds is.
+    /// is not listed. Nor is a key only notes the chat model wrote ever
+    /// held (owner decision LQ14, [`LEARNING_KEY_HOLDER`]): a key a learned
+    /// or saved note in these partitions holds or held — superseded or
+    /// archived since — is listed, whoever holds it now.
     pub fn fact_keys(&self, partition_keys: &[String], limit: usize) -> Result<Vec<String>> {
         if partition_keys.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
         let conn = self.lock();
+        let partitions = placeholders(partition_keys.len());
         let limit_param = partition_keys.len() + 1;
         let sql = format!(
             "SELECT fact_key, MAX(updated_at) AS newest FROM note
-             WHERE partition_key IN ({}) AND effective_status = 'active'
+             WHERE partition_key IN ({partitions}) AND effective_status = 'active'
                AND fact_key IS NOT NULL
-               AND {LEARNING_KEY_HOLDER}
+               AND NOT (kind = 'episode' AND origin = 'extracted_other')
+               AND fact_key IN (SELECT fact_key FROM note
+                                WHERE partition_key IN ({partitions})
+                                  AND fact_key IS NOT NULL AND {LEARNING_KEY_HOLDER})
              GROUP BY fact_key
              ORDER BY newest DESC, fact_key ASC
-             LIMIT ?{limit_param}",
-            placeholders(partition_keys.len())
+             LIMIT ?{limit_param}"
         );
         let mut stmt = conn.prepare(&sql)?;
         let limit = limit as i64;
@@ -1003,6 +1007,41 @@ impl MemoryIndex {
             .collect();
         let rows = stmt.query_map(params.as_slice(), |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(IndexError::from)
+    }
+
+    /// Which of `fact_keys` are learning's in these partitions (owner
+    /// decision LQ14, [`LEARNING_KEY_HOLDER`]): a note of theirs other than
+    /// a conversation summary and a note only the chat model wrote holds or
+    /// held it, whatever its status now.
+    pub fn learning_keys_among(
+        &self,
+        partition_keys: &[String],
+        fact_keys: &[String],
+    ) -> Result<std::collections::HashSet<String>> {
+        if partition_keys.is_empty() || fact_keys.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        let conn = self.lock();
+        let keys_from = partition_keys.len() + 1;
+        let sql = format!(
+            "SELECT DISTINCT fact_key FROM note
+             WHERE partition_key IN ({}) AND fact_key IN ({})
+               AND {LEARNING_KEY_HOLDER}",
+            placeholders(partition_keys.len()),
+            (keys_from..keys_from + fact_keys.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> = partition_keys
+            .iter()
+            .chain(fact_keys.iter())
+            .map(|k| k as &dyn rusqlite::ToSql)
+            .collect();
+        let rows = stmt.query_map(params.as_slice(), |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<_>>()
             .map_err(IndexError::from)
     }
 
@@ -1098,15 +1137,32 @@ impl MemoryIndex {
     /// same-key loser. Derivation leaves at most one such note per key and
     /// partition. A conversation summary is never learning's target (design
     /// 09 §13.3): a key only a summary holds — a model's edit put it there —
-    /// has no winner here; nor has a key only notes the chat model wrote hold
+    /// has no winner here; nor has a key only notes the chat model wrote
+    /// ever held in `holders` — the partitions learning reads together
     /// (owner decision LQ14, [`LEARNING_KEY_HOLDER`]). A key a learned or a
-    /// saved note also holds has its winner, whoever wrote that.
+    /// saved note in any of them holds or held has its winner here, whoever
+    /// wrote that.
     pub fn fact_key_winner(
         &self,
         partition_key: &str,
         fact_key: &str,
+        holders: &[String],
     ) -> Result<Option<CatalogNote>> {
+        if holders.is_empty() {
+            return Ok(None);
+        }
         let conn = self.lock();
+        let held = (3..3 + holders.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let params: Vec<&dyn rusqlite::ToSql> = [
+            &partition_key as &dyn rusqlite::ToSql,
+            &fact_key as &dyn rusqlite::ToSql,
+        ]
+        .into_iter()
+        .chain(holders.iter().map(|k| k as &dyn rusqlite::ToSql))
+        .collect();
         conn.query_row(
             &format!(
                 "SELECT {CATALOG_COLUMNS} FROM note n
@@ -1114,13 +1170,12 @@ impl MemoryIndex {
                    AND n.effective_status = 'active' AND n.same_key_loser = 0
                    AND NOT (n.kind = 'episode' AND n.origin = 'extracted_other')
                    AND EXISTS (SELECT 1 FROM note
-                               WHERE partition_key = ?1 AND fact_key = ?2
-                                 AND effective_status = 'active'
+                               WHERE partition_key IN ({held}) AND fact_key = ?2
                                  AND {LEARNING_KEY_HOLDER})
                  ORDER BY n.updated_at DESC, n.id ASC
                  LIMIT 1"
             ),
-            params![partition_key, fact_key],
+            params.as_slice(),
             catalog_note_from_row,
         )
         .optional()
@@ -1128,11 +1183,16 @@ impl MemoryIndex {
     }
 }
 
-/// A note whose `fact_key` background learning is offered (owner decision
-/// LQ14, 2026-09-26), as an SQL condition on a `note` row: any effectively
-/// active note but a conversation summary (design 09 §13.3) and a note only
-/// the chat model's `memory_store` wrote. That note is origin
-/// `extracted_user` with no `observed_at`: `observed_at` is set by the
+/// A note whose `fact_key` makes it a key background learning is offered
+/// (owner decision LQ14, 2026-09-26), as an SQL condition on a `note` row,
+/// whatever its status: any note but a conversation summary (design 09
+/// §13.3) and a note only the chat model's `memory_store` wrote. A key is
+/// learning's when any note of the partitions learning reads together
+/// holds or held it so — superseded or archived since, too (repair round 1
+/// of the L8 product slice) — so the chat model's replacement of a learned
+/// note keeps its key learning's, and a key the user saved at home is
+/// learning's in the project too. A note only the chat model wrote is
+/// origin `extracted_user` with no `observed_at`: `observed_at` is set by the
 /// extractor alone — the service refuses it on every other surface, and an
 /// edit's patch cannot carry it — and every note the extractor writes from
 /// the user's words has one, the time of its newest cited row. So a key the

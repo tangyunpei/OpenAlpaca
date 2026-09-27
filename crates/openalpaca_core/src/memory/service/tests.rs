@@ -4304,6 +4304,134 @@ fn a_key_only_the_chat_model_coined_is_withheld_from_learning() {
     );
 }
 
+/// LQ14's holder, decided over every note that carried the key (repair
+/// round 1 of the L8 product slice): a key learning wrote stays learning's
+/// once the chat model's replacement of that learned note stands — it is
+/// still offered, with the replacement as its target, and on the
+/// replacement's line — rather than withheld as if the model had coined it.
+#[test]
+fn a_key_learning_wrote_stays_offered_after_the_chat_model_replaces_its_note() {
+    let h = Harness::new();
+    let tool = h.tool(ALICE, None);
+    let extraction = h
+        .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap();
+    let row = h.message_row("My laptop is a ThinkPad.");
+    let learned = h
+        .service
+        .store(
+            &extraction,
+            StoreInput {
+                title: "Laptop".into(),
+                body: "# Laptop\n\n## Knowledge\nThe user's laptop is a ThinkPad.\n".into(),
+                kind: Some(NoteKind::Fact),
+                fact_key: Some("user.laptop".into()),
+                sources: vec![NoteSource {
+                    kind: SourceType::Message,
+                    id: row.to_string(),
+                    observed_at: None,
+                }],
+                observed_at: Some("2026-09-25T10:00:00Z".parse().unwrap()),
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let replacement = h
+        .service
+        .store(
+            &tool,
+            StoreInput {
+                title: "Laptop".into(),
+                body: "# Laptop\n\nThe user's laptop is a MacBook Air now.\n".into(),
+                kind: Some(NoteKind::Fact),
+                fact_key: Some("user.laptop".into()),
+                supersedes: Some((learned.id, learned.revision.clone())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        !replacement.suggestion,
+        "a learned note is replaced at once"
+    );
+
+    let keys = ["user.laptop".to_string()];
+    let view = h
+        .service
+        .learning_view(&extraction, &["laptop macbook".to_string()], &[])
+        .unwrap();
+    assert_eq!(view.keys, keys.to_vec());
+    let listed = view
+        .notes
+        .iter()
+        .find(|n| n.id == replacement.id)
+        .expect("the replacement is a known note");
+    assert_eq!(listed.fact_key.as_deref(), Some("user.laptop"));
+    let targets = h.service.learning_key_targets(&extraction, &keys).unwrap();
+    assert_eq!(
+        targets.get("user.laptop").map(|n| n.id),
+        Some(replacement.id)
+    );
+}
+
+/// LQ14's holder, decided across the chunk's partitions (repair round 1 of
+/// the L8 product slice): a key the user saved at home is learning's in the
+/// project too, so the project's own winner under it — here the chat
+/// model's note — stays that key's target there, as before LQ14, and the
+/// lookup does not fall through to the user's home note.
+#[test]
+fn a_key_the_user_holds_at_home_keeps_its_project_winner() {
+    let h = Harness::new();
+    let ws = h.workspace("lantern", Some(".git"));
+    let home = h
+        .service
+        .store(
+            &h.user(ALICE, None),
+            StoreInput {
+                title: "Build tool".into(),
+                body: "# Build tool\n\nThe user builds with make.\n".into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("lantern.build".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let project = h
+        .service
+        .store(
+            &h.tool(ALICE, Some(&ws)),
+            StoreInput {
+                title: "Build tool".into(),
+                body: "# Build tool\n\nLantern builds with just.\n".into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("lantern.build".into()),
+                scope: Some(openalpaca_storage::memory_files::NoteScope::Project),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(!project.suggestion, "{project:?}");
+    let extraction = h
+        .ctx(
+            ALICE,
+            Some(&ws),
+            Surface::Extraction,
+            Capabilities::EXTRACTION,
+        )
+        .unwrap();
+    let targets = h
+        .service
+        .learning_key_targets(&extraction, &["lantern.build".to_string()])
+        .unwrap();
+    assert_eq!(
+        targets.get("lantern.build").map(|n| n.id),
+        Some(project.id),
+        "not the user's home note {}",
+        home.id
+    );
+}
+
 /// Background learning's reads are its own: every other surface is
 /// refused, whatever its capabilities.
 #[test]

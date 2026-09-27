@@ -189,10 +189,11 @@ impl MemoryService {
     ///    come first; at most 20 are returned.
     /// 4. **Keys**: the 150 most recently updated distinct `fact_key`s of
     ///    effectively active notes other than a conversation summary, from
-    ///    the index — and, owner decision LQ14, other than a note only the
-    ///    chat model's `memory_store` wrote (`LEARNING_KEY_HOLDER`): a key
-    ///    only such notes hold is not offered, and such a note is listed
-    ///    with no key on its line.
+    ///    the index — and, owner decision LQ14, other than a key only notes
+    ///    the chat model's `memory_store` wrote ever held in these
+    ///    partitions (`LEARNING_KEY_HOLDER`): such a key is not offered, and
+    ///    such a note is listed with no key on its line. A key a learned or
+    ///    saved note holds or held is offered, and shown on every line.
     ///
     /// Every returned note is re-read and re-hashed first; one that changed
     /// behind the service's back is reported with origin `external` (the
@@ -338,8 +339,22 @@ impl MemoryService {
                 }
             }
             notes.truncate(LEARNING_MAX_NOTES);
+            // A chat model's note shows its key only when the key is
+            // learning's all the same (repair round 1 of the L8 product
+            // slice): a learned or saved note holds or held it.
+            let coined_keys: Vec<String> = notes
+                .iter()
+                .filter(|n| coined.contains(&n.id))
+                .filter_map(|n| n.fact_key.clone())
+                .collect();
+            let learnings = self.indexed(self.index.learning_keys_among(&keys, &coined_keys))?;
             for note in &mut notes {
-                if coined.contains(&note.id) {
+                if coined.contains(&note.id)
+                    && !note
+                        .fact_key
+                        .as_ref()
+                        .is_some_and(|k| learnings.contains(k))
+                {
                     note.fact_key = None;
                 }
             }
@@ -365,9 +380,10 @@ impl MemoryService {
     /// key that is not a same-key loser, looked up in the project partition
     /// first and then the home one, and verified against its file. A key
     /// no note carries is absent from the answer, and so is one only a
-    /// conversation summary holds (design 09 §13.3), or only notes the chat
-    /// model wrote (owner decision LQ14). Only the `Extraction` surface may
-    /// ask; it records nothing.
+    /// conversation summary holds (design 09 §13.3), or one only notes the
+    /// chat model wrote ever held in these partitions (owner decision LQ14,
+    /// decided over them together). Only the `Extraction` surface may ask;
+    /// it records nothing.
     pub fn learning_key_targets(
         &self,
         ctx: &MemoryAccessContext,
@@ -390,6 +406,12 @@ impl MemoryService {
             for p in &partitions {
                 self.touch(p)?;
             }
+            // Whether a key is learning's is decided over the partitions read
+            // together (LQ14, repair round 1 of the L8 product slice).
+            let holders: Vec<String> = partitions
+                .iter()
+                .map(|p| p.partition_key().to_string())
+                .collect();
             let mut out = HashMap::new();
             let mut dirty: HashSet<String> = HashSet::new();
             for key in fact_keys {
@@ -398,7 +420,7 @@ impl MemoryService {
                 }
                 for p in &partitions {
                     let Some(row) =
-                        self.indexed(self.index.fact_key_winner(p.partition_key(), key))?
+                        self.indexed(self.index.fact_key_winner(p.partition_key(), key, &holders))?
                     else {
                         continue;
                     };

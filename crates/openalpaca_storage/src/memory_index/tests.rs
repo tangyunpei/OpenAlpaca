@@ -899,20 +899,20 @@ fn fact_key_winner_skips_losers_and_inactive_notes() {
         .upsert_many(&[loser, gone, maybe, keyed("winner")])
         .unwrap();
     let winner = index
-        .fact_key_winner("home-p", "user.editor")
+        .fact_key_winner("home-p", "user.editor", &["home-p".to_string()])
         .unwrap()
         .expect("a winner");
     assert_eq!(winner.id, "winner");
     assert_eq!(winner.origin, "user");
     assert!(
         index
-            .fact_key_winner("home-p", "user.none")
+            .fact_key_winner("home-p", "user.none", &["home-p".to_string()])
             .unwrap()
             .is_none()
     );
     assert!(
         index
-            .fact_key_winner("proj-q", "user.editor")
+            .fact_key_winner("proj-q", "user.editor", &["proj-q".to_string()])
             .unwrap()
             .is_none()
     );
@@ -956,11 +956,130 @@ fn a_key_only_the_chat_model_coined_is_not_offered_to_learning() {
         index.fact_keys(&["home-p".into()], 150).unwrap(),
         vec!["user.commute".to_string(), "user.laptop".to_string()]
     );
-    let winner = |key: &str| index.fact_key_winner("home-p", key).unwrap();
+    let winner = |key: &str| {
+        index
+            .fact_key_winner("home-p", key, &["home-p".to_string()])
+            .unwrap()
+    };
     assert!(winner("editor.preference").is_none());
     assert!(winner("routine.weekly").is_none());
     assert!(winner("user.commute").is_some());
     assert!(winner("user.laptop").is_some());
+}
+
+/// LQ14's holder, over every row and across the partitions learning reads
+/// together (repair round 1 of the L8 product slice): a key a learned note
+/// held before the chat model's note replaced it stays learning's, its
+/// winner the replacement; a key the user saved in one partition is
+/// learning's in the other, where the chat model's note is its winner; and
+/// a key only the chat model ever held, in any status, is not.
+#[test]
+fn a_key_is_learnings_when_a_learned_or_saved_note_ever_held_it_anywhere() {
+    let index = ready_index();
+    // (id, partition, key, origin, has observed_at, status)
+    let notes = [
+        (
+            "learned",
+            "home-p",
+            "user.laptop",
+            "extracted_user",
+            true,
+            "superseded",
+        ),
+        (
+            "replacement",
+            "home-p",
+            "user.laptop",
+            "extracted_user",
+            false,
+            "active",
+        ),
+        ("saved", "home-p", "lantern.build", "user", false, "active"),
+        (
+            "tool-proj",
+            "proj-q",
+            "lantern.build",
+            "extracted_user",
+            false,
+            "active",
+        ),
+        (
+            "tool-old",
+            "home-p",
+            "user.shell",
+            "extracted_user",
+            false,
+            "superseded",
+        ),
+        (
+            "tool-new",
+            "home-p",
+            "user.shell",
+            "extracted_user",
+            false,
+            "active",
+        ),
+    ];
+    let records: Vec<IndexRecord> = notes
+        .iter()
+        .enumerate()
+        .map(|(i, &(id, partition, key, origin, observed, status))| {
+            let mut r = record(id, id, "body");
+            r.partition_key = partition.into();
+            r.fact_key = Some(key.into());
+            r.origin = origin.into();
+            r.observed_at = observed.then(|| "2026-09-20T09:00:00Z".to_string());
+            r.effective_status = if status == "active" {
+                EffectiveStatus::Active
+            } else {
+                EffectiveStatus::Superseded
+            };
+            r.updated_at = format!("2026-09-2{i}T10:00:00Z");
+            r
+        })
+        .collect();
+    index.upsert_many(&records).unwrap();
+    let both = ["proj-q".to_string(), "home-p".to_string()];
+
+    let mut keys = index.fact_keys(&both, 150).unwrap();
+    keys.sort();
+    assert_eq!(keys, vec!["lantern.build", "user.laptop"]);
+    let winner = |partition: &str, key: &str| {
+        index
+            .fact_key_winner(partition, key, &both)
+            .unwrap()
+            .map(|n| n.id)
+    };
+    assert_eq!(
+        winner("home-p", "user.laptop").as_deref(),
+        Some("replacement")
+    );
+    assert_eq!(
+        winner("proj-q", "lantern.build").as_deref(),
+        Some("tool-proj")
+    );
+    assert_eq!(winner("home-p", "user.shell"), None);
+    // Decided in the project alone, the key is the chat model's there.
+    assert_eq!(
+        index
+            .fact_key_winner("proj-q", "lantern.build", &["proj-q".to_string()])
+            .unwrap(),
+        None
+    );
+    let among = index
+        .learning_keys_among(
+            &both,
+            &[
+                "user.laptop".into(),
+                "user.shell".into(),
+                "lantern.build".into(),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        among,
+        std::collections::HashSet::from(["user.laptop".to_string(), "lantern.build".to_string()])
+    );
 }
 
 /// A conversation summary holds no key for learning (design 09 §13.3,
@@ -987,14 +1106,14 @@ fn fact_keys_and_the_key_winner_skip_a_conversation_summary() {
     );
     assert_eq!(
         index
-            .fact_key_winner("home-p", "user.editor")
+            .fact_key_winner("home-p", "user.editor", &["home-p".to_string()])
             .unwrap()
             .map(|n| n.id),
         None
     );
     assert_eq!(
         index
-            .fact_key_winner("home-p", "user.trip")
+            .fact_key_winner("home-p", "user.trip", &["home-p".to_string()])
             .unwrap()
             .map(|n| n.id),
         Some("saved".to_string())
