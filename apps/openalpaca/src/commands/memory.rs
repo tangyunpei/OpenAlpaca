@@ -630,29 +630,8 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 println!("Cancelled. Nothing was forgotten.");
                 return Ok(());
             }
-            for (id, revision) in targets {
-                let response = api
-                    .send::<Value>(
-                        Method::DELETE,
-                        &format!("/v1/memories/{id}"),
-                        Some(&revision),
-                        None,
-                    )
-                    .await?;
-                if response.status().as_u16() != 200 {
-                    eprintln!(
-                        "{} {}: {}",
-                        "✗".red(),
-                        id,
-                        error_from_response(response).await
-                    );
-                    continue;
-                }
-                let out: Value = response.json().await?;
-                println!("{} {} forgotten.", "✓".green(), id);
-                if let Some(note) = out["retained"]["note"].as_str() {
-                    println!("  {}", note.dimmed());
-                }
+            for line in forget_notes(&api, &targets).await? {
+                println!("{line}");
             }
             Ok(())
         }
@@ -1470,6 +1449,55 @@ fn body_from_editor(title: &str) -> Result<String> {
     open_in_editor(file.path())?;
     std::fs::read_to_string(file.path())
         .with_context(|| format!("could not read {} back", file.path().display()))
+}
+
+/// `memory forget`'s requests, and the lines it prints: every id in one
+/// `POST /v1/memories/forget` (20 to a request, the route's most), in the
+/// order given, with the revision each was read at — not one `DELETE` per
+/// id. A forgotten note's pending suggestions are withdrawn once its
+/// request's targets have all been forgotten, so a suggestion named with
+/// the note it would replace is forgotten as asked, in either order (the
+/// L8 close-out's A3); one request per id would forget the note first and
+/// answer the suggestion `not found`. Each target's outcome is one line,
+/// and what a forget keeps is said once per request.
+pub(crate) async fn forget_notes(api: &Api, targets: &[(NoteId, String)]) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
+    for batch in targets.chunks(20) {
+        let body = json!({
+            "targets": batch
+                .iter()
+                .map(|(id, revision)| json!({ "id": id.to_string(), "expected_revision": revision }))
+                .collect::<Vec<_>>(),
+        });
+        let response = api
+            .send(Method::POST, "/v1/memories/forget", None, Some(&body))
+            .await?;
+        if response.status().as_u16() != 200 {
+            return Err(error_from_response(response).await);
+        }
+        let out: Value = response.json().await?;
+        let mut forgot = false;
+        for result in out["results"].as_array().into_iter().flatten() {
+            let id = result["id"].as_str().unwrap_or("?");
+            lines.push(match result["status"].as_str() {
+                Some("forgotten") => {
+                    forgot = true;
+                    format!("{} {id} forgotten.", "✓".green())
+                }
+                Some("revision_conflict") => format!(
+                    "{} {id}: changed since it was read (current revision {}); nothing was forgotten",
+                    "✗".red(),
+                    short(result["current_revision"].as_str().unwrap_or("?"))
+                ),
+                Some("not_found") => format!("{} {id}: not found", "✗".red()),
+                other => format!("{} {id}: {}", "✗".red(), other.unwrap_or("no answer")),
+            });
+        }
+        if forgot && let Some(note) = out["retained"]["note"].as_str() {
+            lines.push(format!("  {}", note.dimmed()));
+        }
+    }
+    Ok(lines)
 }
 
 /// `forget` without `--yes`: a terminal question. Off a terminal there is no

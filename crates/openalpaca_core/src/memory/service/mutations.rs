@@ -104,6 +104,27 @@ impl MemoryService {
                 )
             }
         };
+        // A note the user saved, edited by hand or imported that a forget
+        // took out of automatic recall — it cites a row the user asked to
+        // forget — stays out "until it is edited" (design §6), and that edit
+        // is the user's: the chat model's edit suggestion would copy the
+        // forgotten row's text and cite the row, written after the forget
+        // and so, once confirmed, back in recall; a direct edit of one
+        // edited by hand or imported would lift it at once (the L8
+        // close-out, re-checking round 3's nit under A2).
+        if ctx.surface == Surface::ModelTool
+            && matches!(action, files::UpdateAction::Edit(_))
+            && before.derived.origin.is_saved()
+            && before.derived.source_forgotten
+        {
+            let id = input.id;
+            return Err(MemoryError::AuthorityConflict {
+                id,
+                message: format!(
+                    "Note {id} rests on a message the user asked to forget, so it stays out of automatic recall until the user edits it; a tool call may not: open the Memory view in the app, or run `openalpaca memory edit {id}`."
+                ),
+            });
+        }
         // Owner decision LQ11, in the lead's reading: the chat model's edit
         // of a note the user saved, edited by hand or imported that changes
         // what a suggestion carries is a suggestion carrying the edit.
@@ -132,7 +153,7 @@ impl MemoryService {
         let dismissed = if suggestion_targets.is_empty() {
             Vec::new()
         } else {
-            self.dismiss_others(ctx, &partition, &mut view, input.id, &suggestion_targets)
+            self.dismiss_others(ctx, &partition, &mut view, Some(input.id), &suggestion_targets)
         };
         self.reindex_after_write(&partition, &view);
         let origin = view
@@ -167,11 +188,12 @@ impl MemoryService {
     /// at `expected_revision` (a moved note is `revision_conflict`, as for
     /// any edit) and changes nothing until the user confirms it — through
     /// the path a store's replacement takes (`SuggestUnlessLearned`). It
-    /// cites the turn's own row the user typed, when there is one, and then
-    /// what the note it copies cites (repair round 2 of the L8 product
-    /// slice), at most [`MAX_SOURCES`]: its text is that note's, so a later
-    /// forget of a row the note learned from takes the copy out as it would
-    /// the note.
+    /// cites what the note it copies cites (repair round 2 of the L8
+    /// product slice) and then the turn's own row the user typed, when
+    /// there is one and room for it, at most [`MAX_SOURCES`] ([`edit_sources`]):
+    /// its text is that note's, so a later forget of a row the note learned
+    /// from takes the copy out as it would the note, while a forget of the
+    /// pending copy suppresses none of those rows (the L8 close-out's A2).
     fn suggest_edit(
         &self,
         ctx: &MemoryAccessContext,
@@ -236,22 +258,23 @@ impl MemoryService {
     /// moved or went since is left alone; the confirm stands whatever
     /// happens to these, so nothing here fails it. `view` is the partition
     /// right after the confirm, and is brought up to date with each
-    /// dismissal. A forget calls it too, with the forgotten note as both
-    /// (repair round 2 of the L8 product slice): a suggestion to replace a
-    /// forgotten note can never be confirmed.
+    /// dismissal. A forget calls it too, with no confirmed note and the
+    /// notes it forgot as `targets` (repair round 2 of the L8 product
+    /// slice): a suggestion to replace a forgotten note can never be
+    /// confirmed.
     fn dismiss_others(
         &self,
         ctx: &MemoryAccessContext,
         partition: &Partition,
         view: &mut LoadedPartition,
-        confirmed: NoteId,
+        confirmed: Option<NoteId>,
         targets: &[NoteId],
     ) -> Vec<NoteId> {
         let others: Vec<(NoteId, String, Origin)> = view
             .views
             .iter()
             .filter(|v| {
-                v.note.id != confirmed
+                Some(v.note.id) != confirmed
                     && v.note.status == NoteStatus::Candidate
                     && v.note.supersedes.iter().any(|t| targets.contains(t))
             })
@@ -295,7 +318,9 @@ impl MemoryService {
     /// revisions, each its own single-note mutation, tombstone first. A
     /// forgotten note's pending suggestions — which could never be confirmed
     /// now, and one of which may be the chat model's copy of its text — are
-    /// withdrawn after it (repair round 2 of the L8 product slice).
+    /// withdrawn (repair round 2 of the L8 product slice) once every target
+    /// has had its turn, so a suggestion the same call names is forgotten as
+    /// asked, whatever the order of the targets (the L8 close-out's A3).
     pub fn forget(
         &self,
         ctx: &MemoryAccessContext,
@@ -317,6 +342,10 @@ impl MemoryService {
         let mut changes = Vec::new();
         let mut cited_messages = false;
         let mut cited_tasks = false;
+        // Per store a target was in: the partition as the last of its
+        // targets left it, and the notes forgotten there (not withdrawn),
+        // whose pending suggestions are withdrawn after the loop.
+        let mut moot: Vec<Moot> = Vec::new();
         for (id, expected) in &input.targets {
             let Some((holder, view)) = Self::find_note(&resolved, id)? else {
                 results.push(ForgetItem {
@@ -344,7 +373,7 @@ impl MemoryService {
                 .slots
                 .begin_write(&Self::slot_key(&store_scope, &ctx.owner_key));
             let partition = self.open_partition(&store_scope, &ctx.owner_id)?;
-            let (outcomes, mut after) =
+            let (outcomes, after) =
                 partition.forget_viewed(&[(*id, expected.clone())], mode)?;
             let mut forgot = false;
             for outcome in outcomes {
@@ -379,10 +408,24 @@ impl MemoryService {
                     status,
                 });
             }
-            if forgot && mode == ForgetMode::Forget {
-                self.dismiss_others(ctx, &partition, &mut after, *id, &[*id]);
-            }
             self.reindex_after_write(&partition, &after);
+            let forgotten = (forgot && mode == ForgetMode::Forget).then_some(*id);
+            match moot.iter_mut().find(|m| m.scope == store_scope) {
+                Some(m) => {
+                    m.partition = partition;
+                    m.view = after;
+                    m.forgotten.extend(forgotten);
+                }
+                None => moot.push(Moot {
+                    scope: store_scope,
+                    partition,
+                    view: after,
+                    forgotten: forgotten.into_iter().collect(),
+                }),
+            }
+        }
+        for m in moot {
+            self.withdraw_suggestions_for(ctx, m);
         }
         let forgotten = results
             .iter()
@@ -398,6 +441,34 @@ impl MemoryService {
             retained,
             changes,
         })
+    }
+
+    /// The withdrawals a forget owes (repair round 2 of the L8 product
+    /// slice): every pending suggestion in one partition that names a note
+    /// the forget forgot there, under that partition's writer slot, read
+    /// from the view the partition's last forget returned — each withdrawal
+    /// re-checks its note's revision under the partition's lock, and no
+    /// suggestion can name a note once it is gone. The forgets have landed:
+    /// nothing here fails them.
+    fn withdraw_suggestions_for(&self, ctx: &MemoryAccessContext, moot: Moot) {
+        let Moot {
+            scope,
+            partition,
+            mut view,
+            forgotten,
+        } = moot;
+        if forgotten.is_empty() {
+            return;
+        }
+        let _write = self
+            .slots
+            .begin_write(&Self::slot_key(&scope, &ctx.owner_key));
+        if !self
+            .dismiss_others(ctx, &partition, &mut view, None, &forgotten)
+            .is_empty()
+        {
+            self.reindex_after_write(&partition, &view);
+        }
     }
 
     /// Deleting or clearing a conversation (design 09 §13.3, LQ4) "also
@@ -649,6 +720,14 @@ fn edited_content(before: &NoteView, patch: &NotePatch) -> Option<files::Note> {
     changed.then_some(edited)
 }
 
+/// One partition a forget's targets were in ([`MemoryService::forget`]).
+struct Moot {
+    scope: StoreScope,
+    partition: Partition,
+    view: LoadedPartition,
+    forgotten: Vec<NoteId>,
+}
+
 fn retained_note(forgotten: usize, cited_messages: bool, cited_tasks: bool) -> String {
     if forgotten == 0 {
         return "Nothing was forgotten.".to_string();
@@ -671,11 +750,16 @@ fn retained_note(forgotten: usize, cited_messages: bool, cited_tasks: bool) -> S
 }
 
 /// The sources of the chat model's edit suggestion ([`MemoryService`]'s
-/// `suggest_edit`): the turn's own typed row first — the row §4.2 rule 5
-/// reads — then the edited note's, each once, at most [`MAX_SOURCES`].
+/// `suggest_edit`): every row the edited note cites — its text is that
+/// note's, and a later forget of one of those rows must take the copy out
+/// as it would the note, which is the guarantee (design §6) — then the
+/// turn's own typed row, the one §4.2 rule 5 and learning's rule 13 read,
+/// where [`MAX_SOURCES`] leaves room; each once. A note that already cites
+/// eight rows leaves none: its copy is confirmable in chat only through the
+/// note's own typed rows, if it cites any (the L8 close-out's A5).
 fn edit_sources(turn: Option<NoteSource>, note: &[NoteSource]) -> Vec<NoteSource> {
-    let mut out: Vec<NoteSource> = turn.into_iter().collect();
-    for source in note {
+    let mut out: Vec<NoteSource> = Vec::with_capacity(MAX_SOURCES);
+    for source in note.iter().chain(turn.as_ref()) {
         if out.len() >= MAX_SOURCES {
             break;
         }

@@ -1280,3 +1280,52 @@ async fn an_ambiguous_prefix_lists_titles_with_no_escape_or_format_character() {
     assert!(message.contains(&format!("abcd0001-0000-4000-8000-000000000001  {SHOWN}")), "{message}");
     server.join().expect("the server finishes");
 }
+
+/// The L8 close-out's A3 from the CLI: `memory forget` sends every id in one
+/// `POST /v1/memories/forget`, in the order given, so a suggestion named
+/// with the note it would replace is forgotten as asked — one request per
+/// id would forget the note first, whose forget withdraws the suggestion,
+/// and the second request would answer it `not found`. Each target's
+/// outcome is printed, and what a forget keeps once.
+#[tokio::test]
+async fn forget_sends_every_id_in_one_request_and_prints_each_outcome() {
+    let answer = serde_json::json!({
+        "results": [
+            { "id": TARGET, "status": "forgotten" },
+            { "id": SUGGESTION, "status": "revision_conflict", "current_revision": NEW_REV },
+        ],
+        "retained": { "transcript": true, "session_logs": true, "note": "Session logs are separate." },
+    });
+    let (addr, server) = serve(vec![json_answer("200 OK", OLD_REV, &answer.to_string())]);
+    let api = Api::for_tests(DaemonClient::for_tests(&format!("http://{addr}"), "token"));
+    let targets = vec![
+        (NoteId::parse(TARGET).unwrap(), TARGET_REV.to_string()),
+        (NoteId::parse(SUGGESTION).unwrap(), OLD_REV.to_string()),
+    ];
+    let lines = forget_notes(&api, &targets).await.expect("the forget runs");
+    let requests = server.join().expect("the server finishes");
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(
+        requests[0].starts_with("POST /v1/memories/forget "),
+        "{}",
+        requests[0]
+    );
+    let body = post_body(&requests[0]);
+    assert_eq!(
+        body["targets"],
+        serde_json::json!([
+            { "id": TARGET, "expected_revision": TARGET_REV },
+            { "id": SUGGESTION, "expected_revision": OLD_REV },
+        ])
+    );
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(
+        lines[0].contains(TARGET) && lines[0].contains("forgotten"),
+        "{lines:?}"
+    );
+    assert!(
+        lines[1].contains(SUGGESTION) && lines[1].contains("changed since"),
+        "{lines:?}"
+    );
+    assert!(lines[2].contains("Session logs are separate."), "{lines:?}");
+}

@@ -660,8 +660,9 @@ fn message(row: i64) -> NoteSource {
 
 /// Repair round 2 of the L8 product slice: the chat model's edit of a
 /// saved note is a copy of that note's text, so it cites what the note
-/// cites — the turn's own typed row first, then the note's sources — and a
-/// later forget of a sibling citing the same row takes the confirmed copy
+/// cites — the note's sources, then the turn's own typed row (the L8
+/// close-out's A5 put the note's first) — and a later forget of a sibling
+/// citing the same row takes the confirmed copy
 /// out as it would have taken the note (design §6, the sibling cost C2
 /// accepts). Before, the copy cited the turn's row alone and kept the
 /// forgotten row's text in automatic recall.
@@ -727,8 +728,8 @@ fn a_chat_models_edit_suggestion_cites_the_saved_notes_sources() {
         .collect();
     assert_eq!(
         cited,
-        vec![format!("message:{turn}"), format!("message:{said}")],
-        "the turn's typed row first, then what the saved note cites"
+        vec![format!("message:{said}"), format!("message:{turn}")],
+        "what the saved note cites, then the turn's typed row"
     );
 
     let confirmed = h
@@ -1078,4 +1079,430 @@ fn a_replacement_differing_only_in_validity_is_a_suggestion() {
     assert_eq!(other.dedup, Dedup::Created);
     assert_ne!(other.id, first.id);
     assert_eq!(read_note(&h, editor.id).revision, editor.revision);
+}
+
+/// Whether automatic recall of "Where does the user live?" delivers or
+/// lists `id`.
+fn recalled(h: &Harness, id: NoteId) -> bool {
+    let r = h
+        .service
+        .recall(
+            &h.user(ALICE, None),
+            "Where does the user live? Elm Street address",
+            RecallBudget::default(),
+        )
+        .unwrap();
+    r.notes.iter().any(|n| n.id == id) || r.listed.iter().any(|n| n.id == id)
+}
+
+/// Close-out A2 (design §4: a saved note a suggestion names "stays in force
+/// until the user confirms"): the chat model's edit suggestion copies the
+/// saved note's sources, so a forget of the suggestion — the model's
+/// retraction of it under its card, or the person's own — used to suppress
+/// them and take the saved note out of automatic recall, still active and
+/// never confirmed. A pending suggestion's forget now suppresses only the
+/// rows its target does not cite: here the turn's own row, which a note
+/// learned from the same row follows out (the sibling cost C2 accepts).
+#[test]
+fn forgetting_the_assistants_edit_suggestion_leaves_the_saved_note_in_recall() {
+    for forget_by_the_tool in [true, false] {
+        let h = Harness::new();
+        let said = h.message_row("I live at 1 Elm Street.");
+        let home = h
+            .service
+            .store(
+                &h.user(ALICE, None),
+                StoreInput {
+                    title: "Home address".into(),
+                    body: "# Home address\n\nThe user lives at 1 Elm Street.\n".into(),
+                    kind: Some(NoteKind::Fact),
+                    fact_key: Some("user.address".into()),
+                    sources: vec![message(said)],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(recalled(&h, home.id));
+        let (turn, tool) = chat_turn(&h, "Add that it is the blue house.", None);
+        let sibling = h
+            .service
+            .store(
+                &h.ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+                    .unwrap(),
+                StoreInput {
+                    title: "House colour".into(),
+                    body: "# House colour\n\nThe user's house is blue.\n".into(),
+                    kind: Some(NoteKind::Fact),
+                    sources: vec![message(turn)],
+                    observed_at: Some(chrono::Utc::now()),
+                    provenance: Some(ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let out = h
+            .service
+            .update(
+                &tool,
+                UpdateInput {
+                    id: home.id,
+                    expected_revision: home.revision.clone(),
+                    action: UpdateAction::Edit(Patch {
+                        body: Some(
+                            "# Home address\n\nThe user lives at 1 Elm Street, the blue house.\n"
+                                .into(),
+                        ),
+                        ..Default::default()
+                    }),
+                    reason: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(out.suggested_for, Some(home.id));
+        let forgetter = if forget_by_the_tool {
+            h.tool(ALICE, None)
+        } else {
+            h.user(ALICE, None)
+        };
+        let forget = h
+            .service
+            .forget(
+                &forgetter,
+                ForgetInput {
+                    targets: vec![(out.id, out.revision.clone())],
+                    reason: Some("the user declined the change".into()),
+                },
+            )
+            .unwrap();
+        assert_eq!(forget.results[0].status, ForgetItemStatus::Forgotten);
+        let w = read_note(&h, home.id);
+        assert!(
+            !w.source_forgotten,
+            "by the tool: {forget_by_the_tool}: the saved note stays in force"
+        );
+        assert_eq!(w.status, NoteStatus::Active);
+        assert!(recalled(&h, home.id), "by the tool: {forget_by_the_tool}");
+        assert!(
+            read_note(&h, sibling.id).source_forgotten,
+            "by the tool: {forget_by_the_tool}: the suggestion's own row is forgotten"
+        );
+    }
+}
+
+/// Close-out A2, the round-3 nit it re-checked (design §6: a forget keeps
+/// the notes citing its rows "out of automatic recall until it is edited"):
+/// a note the user saved, which a forget of a sibling citing the same row
+/// took out of recall, is not the chat model's to edit. Its edit suggestion
+/// would copy the forgotten row's text and cite the row — written after the
+/// forget, so, once confirmed, back in recall — and a direct edit of one
+/// edited by hand would lift the suppression at once. Refused, naming the
+/// user's own ways; nothing is written.
+#[test]
+fn a_saved_note_a_forget_took_out_of_recall_is_not_the_models_to_edit() {
+    let h = Harness::new();
+    let said = h.message_row("I live at 1 Elm Street, the blue house.");
+    let user = h.user(ALICE, None);
+    let home = h
+        .service
+        .store(
+            &user,
+            StoreInput {
+                title: "Home address".into(),
+                body: "# Home address\n\nThe user lives at 1 Elm Street.\n".into(),
+                kind: Some(NoteKind::Fact),
+                sources: vec![message(said)],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let style = saved(&h, "user.style", "Style", "Sentence case.");
+    let file = h
+        .home_notes_dir(super::tests::ALICE_KEY)
+        .read_dir()
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().contains(&style.id.to_string()))
+        .unwrap();
+    let text = fs::read_to_string(&file).unwrap();
+    fs::write(
+        &file,
+        text.replace(
+            "sources: []",
+            &format!("sources:\n  - type: message\n    id: '{said}'"),
+        )
+        .replace("Sentence case.", "Sentence case, always."),
+    )
+    .unwrap();
+    h.service.reconcile_owner(ALICE).unwrap();
+    let style = read_note(&h, style.id);
+    assert_eq!(style.origin, Origin::External);
+    assert_eq!(style.sources.len(), 1, "{:?}", style.sources);
+    let sibling = h
+        .service
+        .store(
+            &h.ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+                .unwrap(),
+            StoreInput {
+                title: "House colour".into(),
+                body: "# House colour\n\nThe user's house is blue.\n".into(),
+                kind: Some(NoteKind::Fact),
+                sources: vec![message(said)],
+                observed_at: Some(chrono::Utc::now()),
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    h.service
+        .forget(
+            &user,
+            ForgetInput {
+                targets: vec![(sibling.id, sibling.revision)],
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert!(read_note(&h, home.id).source_forgotten);
+    assert!(read_note(&h, style.id).source_forgotten);
+
+    let (_, tool) = chat_turn(&h, "Also call it my home.", None);
+    let edits = [
+        (
+            home.id,
+            home.revision.clone(),
+            Patch {
+                aliases: Some(vec!["home".into()]),
+                ..Default::default()
+            },
+        ),
+        (
+            style.id,
+            style.revision.clone(),
+            Patch {
+                review_after: Some(Some(instant("2027-01-01T00:00:00Z"))),
+                ..Default::default()
+            },
+        ),
+    ];
+    for (id, revision, patch) in edits {
+        let err = h
+            .service
+            .update(
+                &tool,
+                UpdateInput {
+                    id,
+                    expected_revision: revision.clone(),
+                    action: UpdateAction::Edit(patch),
+                    reason: None,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.class(), "authority_conflict", "{id}: {err}");
+        assert!(err.to_string().contains("asked to forget"), "{err}");
+        assert!(
+            err.to_string()
+                .contains(&format!("openalpaca memory edit {id}")),
+            "{err}"
+        );
+        let after = read_note(&h, id);
+        assert_eq!(after.revision, revision, "nothing written");
+        assert!(after.source_forgotten, "still out of recall");
+    }
+    assert!(
+        h.service
+            .list(
+                &user,
+                ListInput {
+                    status: Some(NoteStatus::Candidate),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .items
+            .is_empty()
+    );
+}
+
+/// Close-out A3: one forget naming a saved note and the assistant's pending
+/// suggestion for it forgets both, in either order. A forgotten note's
+/// suggestions are withdrawn after the forget — but not one the same call
+/// names: it is forgotten as asked, so its own row is suppressed and a note
+/// learned from that row follows it out. Before, `[note, suggestion]`
+/// withdrew the suggestion first and answered it `not_found`.
+#[test]
+fn forgetting_a_note_and_its_suggestion_together_forgets_both_in_either_order() {
+    for note_first in [true, false] {
+        let h = Harness::new();
+        let editor = saved(&h, "user.editor", "Editor", "The user edits with vim.");
+        let (typed, tool) = chat_turn(&h, "I use the vim keymap in every editor.", None);
+        let keymap = h
+            .service
+            .store(
+                &h.ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+                    .unwrap(),
+                StoreInput {
+                    title: "Keymap".into(),
+                    body: "# Keymap\n\nThe user uses the vim keymap everywhere.\n".into(),
+                    kind: Some(NoteKind::Preference),
+                    sources: vec![message(typed)],
+                    observed_at: Some(chrono::Utc::now()),
+                    provenance: Some(ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let copy = h
+            .service
+            .update(
+                &tool,
+                UpdateInput {
+                    id: editor.id,
+                    expected_revision: editor.revision.clone(),
+                    action: UpdateAction::Edit(Patch {
+                        body: Some(
+                            "# Editor\n\nThe user edits with vim, and its keymap everywhere.\n"
+                                .into(),
+                        ),
+                        ..Default::default()
+                    }),
+                    reason: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(copy.suggested_for, Some(editor.id));
+        let note = (editor.id, editor.revision.clone());
+        let suggestion = (copy.id, copy.revision.clone());
+        let targets = if note_first {
+            vec![note, suggestion]
+        } else {
+            vec![suggestion, note]
+        };
+        let out = h
+            .service
+            .forget(
+                &h.user(ALICE, None),
+                ForgetInput {
+                    targets,
+                    reason: None,
+                },
+            )
+            .unwrap();
+        let statuses: Vec<(NoteId, ForgetItemStatus)> = out
+            .results
+            .iter()
+            .map(|r| (r.id, r.status.clone()))
+            .collect();
+        for id in [editor.id, copy.id] {
+            assert!(
+                statuses.contains(&(id, ForgetItemStatus::Forgotten)),
+                "note first: {note_first}: {statuses:?}"
+            );
+        }
+        assert!(
+            read_note(&h, keymap.id).source_forgotten,
+            "note first: {note_first}: the suggestion's own row is forgotten"
+        );
+    }
+}
+
+/// Close-out A5 (round 3's nit on `edit_sources`' cap): the chat model's
+/// edit suggestion cites every row the saved note cites — the rows a later
+/// forget must follow the copy out by — and the turn's own row only where
+/// the eight-source cap leaves room. At the cap the copy used to drop the
+/// note's last row for the turn's, so a forget of a sibling citing that row
+/// left the confirmed copy, and the row's text, in automatic recall.
+#[test]
+fn the_edit_suggestion_keeps_every_row_the_saved_note_cites_at_the_cap() {
+    for cited in [8usize, 3] {
+        let h = Harness::new();
+        let rows: Vec<i64> = (0..cited)
+            .map(|i| h.message_row(&format!("Home detail {i}.")))
+            .collect();
+        let user = h.user(ALICE, None);
+        let home = h
+            .service
+            .store(
+                &user,
+                StoreInput {
+                    title: "Home address".into(),
+                    body: "# Home address\n\nThe user lives at 1 Elm Street.\n".into(),
+                    kind: Some(NoteKind::Fact),
+                    sources: rows.iter().map(|r| message(*r)).collect(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let last = *rows.last().unwrap();
+        let sibling = h
+            .service
+            .store(
+                &h.ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+                    .unwrap(),
+                StoreInput {
+                    title: "House colour".into(),
+                    body: "# House colour\n\nThe user's house is blue.\n".into(),
+                    kind: Some(NoteKind::Fact),
+                    sources: vec![message(last)],
+                    observed_at: Some(chrono::Utc::now()),
+                    provenance: Some(ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let (turn, tool) = chat_turn(&h, "Add that it is the blue house.", None);
+        let out = h
+            .service
+            .update(
+                &tool,
+                UpdateInput {
+                    id: home.id,
+                    expected_revision: home.revision.clone(),
+                    action: UpdateAction::Edit(Patch {
+                        aliases: Some(vec!["blue house".into()]),
+                        ..Default::default()
+                    }),
+                    reason: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(out.suggested_for, Some(home.id));
+        let mut expected: Vec<String> = rows.iter().map(|r| format!("message:{r}")).collect();
+        if cited < 8 {
+            expected.push(format!("message:{turn}"));
+        }
+        let cites: Vec<String> = read_note(&h, out.id)
+            .sources
+            .iter()
+            .map(NoteSource::suppression_key)
+            .collect();
+        assert_eq!(cites, expected, "{cited} rows");
+
+        h.service
+            .update(
+                &user,
+                UpdateInput {
+                    id: out.id,
+                    expected_revision: out.revision.clone(),
+                    action: UpdateAction::Confirm {
+                        target_revision: Some(home.revision.clone()),
+                    },
+                    reason: None,
+                },
+            )
+            .unwrap();
+        h.service
+            .forget(
+                &user,
+                ForgetInput {
+                    targets: vec![(sibling.id, sibling.revision)],
+                    reason: None,
+                },
+            )
+            .unwrap();
+        assert!(
+            read_note(&h, out.id).source_forgotten,
+            "{cited} rows: the confirmed copy follows its last row out"
+        );
+    }
 }

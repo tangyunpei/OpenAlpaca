@@ -204,7 +204,9 @@ pub enum ForgetMode {
     /// keeps the note's `supersedes` — so a forgotten replacement keeps
     /// retiring what it replaced — and suppresses every source it cited.
     /// A candidate's tombstone carries no links (S3): it retired nothing
-    /// while it lived, and must not start now.
+    /// while it lived, and must not start now; and it suppresses none of
+    /// the sources the note it would replace also cites (the L8 close-out's
+    /// A2), which stays in force until the user confirms.
     Forget,
     /// "Keep my note; take back what learning did": undo, a dismissed
     /// suggestion. The tombstone carries **no links and no suppressed
@@ -2108,19 +2110,42 @@ impl Partition {
                 continue;
             }
             let (supersedes, suppressed_sources) = match mode {
-                ForgetMode::Forget => (
-                    // S3: a candidate retired nothing while it lived.
-                    if view.note.status == NoteStatus::Candidate {
-                        Vec::new()
+                ForgetMode::Forget => {
+                    let pending = view.note.status == NoteStatus::Candidate;
+                    // A pending suggestion suppresses none of the sources the
+                    // note it would replace cites (the L8 close-out's A2):
+                    // that note stays in force until the user confirms
+                    // (design §4), and the chat model's edit suggestion
+                    // copies its sources, so suppressing them would take it
+                    // out of recall through the suggestion. A target already
+                    // gone — forgotten earlier in this call too — shields
+                    // nothing.
+                    let shielded: HashSet<String> = if pending {
+                        view.note
+                            .supersedes
+                            .iter()
+                            .filter(|t| !forgotten.contains(t))
+                            .filter_map(|t| loaded.get(t))
+                            .flat_map(|t| t.note.sources.iter().map(|s| s.suppression_key()))
+                            .collect()
                     } else {
-                        view.note.supersedes.clone()
-                    },
-                    view.note
-                        .sources
-                        .iter()
-                        .map(|s| s.suppression_key())
-                        .collect(),
-                ),
+                        HashSet::new()
+                    };
+                    (
+                        // S3: a candidate retired nothing while it lived.
+                        if pending {
+                            Vec::new()
+                        } else {
+                            view.note.supersedes.clone()
+                        },
+                        view.note
+                            .sources
+                            .iter()
+                            .map(|s| s.suppression_key())
+                            .filter(|key| !shielded.contains(key))
+                            .collect(),
+                    )
+                }
                 ForgetMode::Withdraw => (Vec::new(), Vec::new()),
             };
             let tombstone = Tombstone {

@@ -5614,3 +5614,84 @@ fn a_save_the_stat_cannot_see_retires_the_cached_snapshot() {
     );
     assert_eq!(reopened.snapshot().unwrap().notes.len(), 6);
 }
+
+/// The L8 close-out's A2 (design §4: a note a suggestion names "stays in
+/// force until the user confirms"): the forget of a **pending suggestion**
+/// suppresses only the sources the note it would replace does not also
+/// cite. The chat model's edit suggestion copies its target's sources, so
+/// suppressing those would turn the target `source_forgotten` — out of
+/// automatic recall, retired through the suggestion. Its own sources are
+/// suppressed as any forget's are, and a suggestion once confirmed is the
+/// note in force: its forget suppresses all it cites.
+#[test]
+fn a_pending_suggestions_forget_suppresses_none_of_its_targets_sources() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let src = |id: &str| NoteSource {
+        kind: SourceType::Message,
+        id: id.into(),
+        observed_at: None,
+    };
+    let saved = p
+        .create(
+            NewNote {
+                sources: vec![src("10")],
+                ..new_note("Home", "# Home\n\n1 Elm Street\n", NoteKind::Fact)
+            },
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let saved = p.read(&saved.id).unwrap();
+    let suggest = |body: &str| {
+        p.create(
+            NewNote {
+                sources: vec![src("11"), src("10")],
+                supersedes: Some((saved.note.id, saved.revision.clone())),
+                replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                ..new_note("Home", body, NoteKind::Fact)
+            },
+            Actor::ModelTool,
+        )
+        .unwrap()
+    };
+    let copy = suggest("# Home\n\n1 Elm Street, the blue house\n");
+    assert!(copy.suggestion);
+    let taught = p
+        .create(
+            NewNote {
+                sources: vec![src("11")],
+                ..new_note("Colour", "# Colour\n\nThe house is blue.\n", NoteKind::Fact)
+            },
+            Actor::ModelTool,
+        )
+        .unwrap();
+
+    let out = p.forget(&[(copy.id, copy.revision.clone())]).unwrap();
+    assert_eq!(out[0].status, ForgetStatus::Forgotten);
+    let snapshot = p.snapshot().unwrap();
+    assert!(
+        !snapshot.is_source_suppressed("message:10"),
+        "the target's own row is not the suggestion's to suppress"
+    );
+    assert!(snapshot.is_source_suppressed("message:11"));
+    let target = p.read(&saved.note.id).unwrap();
+    assert!(!target.derived.source_forgotten);
+    assert!(target.derived.recallable(), "still in force");
+    assert!(p.read(&taught.id).unwrap().derived.source_forgotten);
+
+    // Confirmed, the suggestion is the note in force and retires the one it
+    // named: its forget suppresses every source it cites.
+    let second = suggest("# Home\n\n1 Elm Street, flat 2\n");
+    let confirmed = p
+        .update(
+            &second.id,
+            &second.revision,
+            UpdateAction::Confirm {
+                target_revision: Some(saved.revision.clone()),
+            },
+            Actor::UserSurface,
+        )
+        .unwrap();
+    p.forget(&[(second.id, confirmed.revision)]).unwrap();
+    assert!(p.snapshot().unwrap().is_source_suppressed("message:10"));
+}
