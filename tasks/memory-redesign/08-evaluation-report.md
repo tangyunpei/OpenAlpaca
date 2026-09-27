@@ -1,6 +1,6 @@
 # Evaluation report — the Markdown memory replacement
 
-**Status: DRAFT (2026-09-24): D measured and the gate passed; post-fix D′/E′ pending.** Plan slice 4 ([04-implementation-plan.md](04-implementation-plan.md) §2, §5). Every number below is a measurement with its conditions, or is marked *pending*. No claim in this report exceeds the measurements. Every figure here is **pre-LQ17**: it was measured on memory index schema 3, before the index layout revision of [09](09-learning-design.md) §6.5 (index schema 4) was built; that revision's own retrieval measurements are in 09 §6.5.5 and its build's record.
+**Status: DRAFT 5 (2026-09-27): D measured and the gate passed; post-fix D′/E′ pending.** Plan slice 4 ([04-implementation-plan.md](04-implementation-plan.md) §2, §5). Every number below is a measurement with its conditions, or is marked *pending*. No claim in this report exceeds the measurements. Every figure here is **pre-LQ17**: it was measured on memory index schema 3, before the index layout revision of [09](09-learning-design.md) §6.5 (index schema 4, repaired as schema 5) was built; that revision's own retrieval measurements are in 09 §6.5.5 and its build's record.
 
 ## 1. What was measured, and how
 
@@ -96,3 +96,4 @@ Run by the session lead at `8815b4cd` (slice 3 complete, the edit guard and the 
 - **draft 2 (2026-09-24):** §3.3's source-conflict diagnosis corrected: file order wrote the March note *before* the June one, not after it, so March most likely won a same-second `updated_at` tie on the lower random id; the fixes paragraph names its commits and the same-second seeding fix.
 - **draft 3 (2026-09-24):** §6 records that the recall header carries no validity window.
 - **draft 4 (2026-09-27):** the status line says every figure is pre-LQ17 (memory index schema 3); the layout revision, 09 §6.5, is built as index schema 4.
+- **draft 5 (2026-09-27):** the status line carries the draft's number and date (it still said 2026-09-24), and names schema 5, the layout's repair round (09 rev 3.39).
