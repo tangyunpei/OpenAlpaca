@@ -15,6 +15,7 @@
 
 use super::authority::{Conflict, Derivation, DerivedNote, EffectiveStatus, NoteInput, derive};
 use super::cache::{FileEntry, NoteParseCache, ParsedNote, StatKey};
+use super::dirstat;
 use super::fsx::{
     ComponentState, canonical_string_lenient, create_private_dir, fsync_dir, read_regular_nofollow,
     real_directory_state, remove_dir_all_if_exists, remove_file_if_exists, write_atomic_private,
@@ -482,25 +483,6 @@ impl Parsed {
             let at = self.duplicates.partition_point(|(d, _)| *d < id);
             self.duplicates.insert(at, (id, paths));
         }
-    }
-}
-
-/// One `notes/*.md` entry from its `symlink_metadata`.
-fn scan_entry(path: PathBuf, file_name: String, meta: &fs::Metadata) -> ScanEntry {
-    #[cfg(unix)]
-    let inode = {
-        use std::os::unix::fs::MetadataExt;
-        meta.ino()
-    };
-    #[cfg(not(unix))]
-    let inode = 0u64;
-    ScanEntry {
-        id: Note::id_from_file_name(&file_name),
-        path,
-        file_name,
-        size: meta.len(),
-        mtime: meta.modified().ok(),
-        inode,
     }
 }
 
@@ -1161,41 +1143,28 @@ impl Partition {
     }
 
     /// [`Partition::scan`], each entry with the stat identity the parse
-    /// cache compares — from the same `lstat` — leaving out (and deleting)
+    /// cache compares — from the same stat call — leaving out (and deleting)
     /// a file whose name carries one of `forgotten`.
+    ///
+    /// The listing is the platform's cheapest that answers the same facts
+    /// (owner decision LQ16, [`dirstat::list_notes`]): one
+    /// `getattrlistbulk` pass on macOS, `readdir` and `lstat` elsewhere.
     fn scan_keyed(&self, forgotten: &HashSet<NoteId>) -> Result<Vec<(ScanEntry, StatKey)>> {
         SCANS.with(|n| n.set(n.get() + 1));
-        let entries = match fs::read_dir(&self.notes_dir) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("Failed to list {}", self.notes_dir.display()));
-            }
+        let Some(listed) = dirstat::list_notes(&self.notes_dir)
+            .with_context(|| format!("Failed to list {}", self.notes_dir.display()))?
+        else {
+            return Ok(Vec::new());
         };
-        let mut out = Vec::new();
-        for entry in entries {
-            let entry =
-                entry.with_context(|| format!("Failed to list {}", self.notes_dir.display()))?;
-            let file_name = entry.file_name().to_string_lossy().into_owned();
-            if file_name.starts_with('.') || !file_name.ends_with(".md") {
-                continue;
-            }
-            let path = entry.path();
-            let Ok(meta) = fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if !meta.file_type().is_file() {
-                continue;
-            }
-            let entry = scan_entry(path, file_name, &meta);
+        let mut out = Vec::with_capacity(listed.len());
+        for (entry, key) in listed {
             if let Some(id) = entry.id
                 && forgotten.contains(&id)
             {
                 self.drop_forgotten(&entry.path, id);
                 continue;
             }
-            out.push((entry, StatKey::of(&meta)));
+            out.push((entry, key));
         }
         out.sort_by(|a, b| a.0.file_name.cmp(&b.0.file_name));
         Ok(out)
@@ -1215,7 +1184,7 @@ impl Partition {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         Ok((
-            scan_entry(path.to_path_buf(), file_name, &meta),
+            dirstat::scan_entry(path.to_path_buf(), file_name, &meta),
             StatKey::of(&meta),
         ))
     }

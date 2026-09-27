@@ -35,6 +35,7 @@
 
 mod authority;
 mod cache;
+mod dirstat;
 mod doctor;
 mod fsx;
 mod note;
