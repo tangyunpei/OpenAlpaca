@@ -240,17 +240,35 @@ pub fn derive(inputs: &[NoteInput<'_>], snapshot: &ControlSnapshot) -> Derivatio
         }
     }
 
+    // Every suppressed source with the latest forget that suppressed it (M7:
+    // keyed once per derive, so the check below is one lookup per cited
+    // source, not a pass over every tombstone). A note is `source_forgotten`
+    // when some tombstone suppressing one of its sources was forgotten at or
+    // after the note's record — and "at or after any of them" is "at or
+    // after the latest of them".
+    let mut latest_forget: HashMap<(&str, &str), DateTime<Utc>> = HashMap::new();
+    for tomb in &snapshot.tombstones {
+        for key in &tomb.suppressed_sources {
+            let Some((kind, id)) = key.split_once(':') else {
+                continue; // not `message:<id>` / `task:<id>`: suppresses no source
+            };
+            let latest = latest_forget.entry((kind, id)).or_insert(tomb.forgotten_at);
+            if tomb.forgotten_at > *latest {
+                *latest = tomb.forgotten_at;
+            }
+        }
+    }
+
     let mut notes = BTreeMap::new();
     for input in inputs {
         let id = input.note.id;
         // `<=`: a write in the forget's own second is not "after" it.
-        let source_forgotten = input.note.sources.iter().any(|s| {
-            let key = s.suppression_key();
-            snapshot
-                .tombstones
-                .iter()
-                .any(|t| t.suppressed_sources.contains(&key) && written_at[&id] <= t.forgotten_at)
-        });
+        let source_forgotten = !latest_forget.is_empty()
+            && input.note.sources.iter().any(|s| {
+                latest_forget
+                    .get(&(s.kind.as_str(), s.id.as_str()))
+                    .is_some_and(|forgotten_at| written_at[&id] <= *forgotten_at)
+            });
         let mut by = superseded_by.get(&id).cloned().unwrap_or_default();
         by.sort();
         by.dedup();

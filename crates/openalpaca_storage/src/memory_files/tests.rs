@@ -2943,6 +2943,114 @@ fn source_forgotten_is_derived_and_an_edit_lifts_it() {
     );
 }
 
+/// `source_forgotten` over a partition with many tombstones (M7: the
+/// tombstone count is a second growth axis) is exactly design §6's rule —
+/// a cited source suppressed by **any** tombstone forgotten at or after the
+/// note's record — restated here as the naive pass over every tombstone of
+/// every source of every note, and compared note by note: recorded notes
+/// (their record's `written_at`) and unrecorded ones (`updated_at`), the
+/// same-second boundary, sources several tombstones suppress at different
+/// times, and tombstones that suppress nothing.
+#[test]
+fn source_forgotten_with_many_tombstones_is_the_rule_note_by_note() {
+    let mut seed: u64 = 0x5EED_1234_ABCD_0042;
+    let mut next = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let at = |minute: u64| ts(2026, 9, 1, 0, 0, 0) + chrono::Duration::minutes(minute as i64);
+    let mut snapshot = ControlSnapshot::new(
+        "home-x",
+        SnapshotScope::Home,
+        "x",
+        "u",
+        "/r",
+        ts(2026, 9, 1, 0, 0, 0),
+    );
+    let mut notes: Vec<Note> = Vec::new();
+    for i in 0..400u32 {
+        let mut n = Note::parse(EXAMPLE.as_bytes()).unwrap();
+        n.id = NoteId::parse(&format!("00000008-0000-4000-8000-{i:012x}")).unwrap();
+        n.fact_key = None;
+        n.supersedes.clear();
+        n.updated_at = at(next(600));
+        n.sources = (0..next(4))
+            .map(|_| NoteSource {
+                kind: if next(5) == 0 {
+                    SourceType::Task
+                } else {
+                    SourceType::Message
+                },
+                id: next(150).to_string(),
+                observed_at: None,
+            })
+            .collect();
+        notes.push(n);
+    }
+    let revisions: Vec<String> = notes.iter().map(Note::revision).collect();
+    for (n, revision) in notes.iter().zip(&revisions) {
+        // Two in three are recorded at their revision, some of them on the
+        // very minute a tombstone below is forgotten at.
+        if next(3) != 0 {
+            snapshot.notes.insert(
+                n.id,
+                NoteRecord {
+                    revision: revision.clone(),
+                    origin: Origin::ExtractedUser,
+                    written_at: at(next(600)),
+                },
+            );
+        }
+    }
+    for t in 0..1_000u32 {
+        snapshot.tombstones.push(Tombstone {
+            id: NoteId::parse(&format!("0000000f-0000-4000-8000-{t:012x}")).unwrap(),
+            origin: Origin::User,
+            supersedes: Vec::new(),
+            suppressed_sources: (0..next(3))
+                .map(|_| {
+                    let kind = if next(5) == 0 { "task" } else { "message" };
+                    format!("{kind}:{}", next(150))
+                })
+                .collect(),
+            forgotten_at: at(next(600)),
+        });
+    }
+    let inputs: Vec<NoteInput<'_>> = notes
+        .iter()
+        .zip(&revisions)
+        .map(|(note, revision)| NoteInput { note, revision })
+        .collect();
+    let derived = derive(&inputs, &snapshot);
+
+    let mut forgotten = 0;
+    for (n, revision) in notes.iter().zip(&revisions) {
+        let written_at = match snapshot.notes.get(&n.id) {
+            Some(record) if record.revision == *revision => record.written_at,
+            _ => n.updated_at,
+        };
+        let expected = n.sources.iter().any(|s| {
+            let key = s.suppression_key();
+            snapshot
+                .tombstones
+                .iter()
+                .any(|t| t.suppressed_sources.contains(&key) && written_at <= t.forgotten_at)
+        });
+        forgotten += usize::from(expected);
+        assert_eq!(
+            derived.notes[&n.id].source_forgotten, expected,
+            "note {}",
+            n.id
+        );
+    }
+    assert!(
+        forgotten > 20 && forgotten < 380,
+        "the corpus exercises both answers ({forgotten} forgotten)"
+    );
+}
+
 #[test]
 fn forgetting_a_replacement_keeps_its_predecessor_superseded_on_disk() {
     let sb = Sandbox::new();
