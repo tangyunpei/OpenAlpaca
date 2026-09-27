@@ -310,6 +310,81 @@ fn an_external_edit_reindexes_only_the_edited_note() {
     assert_eq!(found.results[0].freshness, Freshness::Stale);
 }
 
+/// A row the seeding cannot read as a fingerprint — only a damaged or
+/// foreign cache holds one — is never trusted: a row whose id is no note id
+/// is removed, and a row whose origin, status or `superseded_by` does not
+/// parse is written again from its note, also where the value the seeding
+/// falls back to for it (`active`, no successor) is the note's own. Nothing
+/// else is rebuilt, and the index is then what it was before the damage.
+#[test]
+fn a_row_the_seeding_cannot_read_is_removed_or_written_again() {
+    let h = Harness::new();
+    let path = h.root.path().join("cache").join("memory-index.sqlite");
+    let user = h.user(ALICE, None);
+    let first = file_service(&h, &path);
+    first.rebuild_index().unwrap();
+    let notes: Vec<StoreOutput> = (0..6)
+        .map(|i| {
+            first
+                .store(
+                    &user,
+                    StoreInput {
+                        title: format!("Seed note {i}"),
+                        body: format!("# S{i}\n\nThe seeding note number {i}.\n"),
+                        kind: Some(NoteKind::Fact),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+        })
+        .collect();
+    drop(first);
+    let before = index_contents(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let columns = "partition_key, id, scope, revision, relative_path, title, norm_title, \
+             aliases, tags, kind, status, effective_status, origin, authority, fact_key, \
+             valid_from, valid_to, updated_at, created_at, observed_at, date, pinned, \
+             source_forgotten, conflict, same_key_loser, superseded_by, supersedes, \
+             body_line_offset, mtime_ns, size, inode";
+        let copied = columns
+            .replace(" id,", " 'not-a-uuid',")
+            .replace(" relative_path,", " 'notes/not-a-uuid.md',");
+        let stray = conn
+            .execute(
+                &format!("INSERT INTO note ({columns}) SELECT {copied} FROM note WHERE id = ?1"),
+                [notes[0].id.to_string()],
+            )
+            .unwrap();
+        assert_eq!(stray, 1, "a stray row, a copy of a note's under an id no note has");
+        for (note, damage) in [
+            (&notes[1], "origin = 'bogus'"),
+            (&notes[2], "effective_status = 'bogus'"),
+            (&notes[3], "superseded_by = '[\"not-a-uuid\"]'"),
+        ] {
+            let changed = conn
+                .execute(
+                    &format!("UPDATE note SET {damage} WHERE id = ?1"),
+                    [note.id.to_string()],
+                )
+                .unwrap();
+            assert_eq!(changed, 1, "{damage}");
+        }
+    }
+    assert_ne!(index_contents(&path), before);
+
+    let second = file_service(&h, &path);
+    let built = records_built(|| {
+        second.reconcile_owner(ALICE).unwrap();
+    });
+    assert_eq!(built, 3, "the three unreadable rows are written again, nothing else");
+    assert_eq!(
+        index_contents(&path),
+        before,
+        "the stray row is gone and each rewritten row is its note's"
+    );
+}
+
 /// Everything the index holds about the notes of the cache file at `path`
 /// — every `note` column but the rowid, every chunk, alias and source keyed
 /// by its note — one line per row, sorted; and FTS5's own check that each
