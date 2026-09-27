@@ -388,10 +388,13 @@ for you — one learning found in what you said, or one the assistant saved in
 chat (see *Suggestions* under the Memory view) — the assistant may ask you
 about it in the conversation — at most one per turn, when the topic
 comes up or the conversation pauses. It uses the same card, headed
-`Confirmation required · memory_confirm`, and the card's text is
-OpenAlpaca's, not the model's: under a `From OpenAlpaca` label it reads
-*"Replace your saved note “X” with “B”?"*, then your text, the new text, why,
-where it came from — "from what you said on <date>", or "suggested by the
+`Confirmation required · memory_confirm`, and the card's text is composed
+by OpenAlpaca from the two notes, never from the call's arguments (the new
+text is the assistant's own when it saved the change itself, and the card says
+so): under a `From OpenAlpaca` label it reads
+*"Replace your saved note “X” with “B”?"*, then your text, the new text, what
+else it changes (a `Changes:` line for your note's key, aliases, tags or
+validity), why (none for the assistant's own change), where it came from — "from what you said on <date>", or "suggested by the
 assistant on <date>" for a change the assistant saved itself — and that your
 note is kept as history. The literal
 arguments (three ids) stay below it. **Approve** makes the new note yours —
@@ -741,8 +744,9 @@ Two columns, in the Library's shape. The left one, top to bottom:
   what you said on <date>"* (*"Edited by you · suggested on <date>"* once you
   edited the suggestion itself). The assistant can make a suggestion too: when
   it saves in chat a change to a note you saved — rather than overwrite your
-  note, which it may not — the card reads *"Suggested by Alpaca on <date>"*,
-  and the candidate's detail *"Suggested by Alpaca — would replace “X”"*;
+  note, which it may not — the card reads *"Suggested by Alpaca on <date>"*
+  and gives no *Why* (its text may copy your note's, whose reason is that
+  note's), and the candidate's detail *"Suggested by Alpaca — would replace “X”"*;
   its origin, in the detail's header and under *Where this came from*, still
   reads *Learned from what you said*, as every note the assistant saves in chat
   does. **Replace** makes the new note yours and keeps the old
@@ -750,8 +754,11 @@ Two columns, in the Library's shape. The left one, top to bottom:
   note after the suggestion was made, the Replace is refused rather than
   retiring your edit unseen. A suggestion whose note was already replaced or
   archived some other way leaves this card; its Replace in the note's detail is
-  refused too, and the detail's Keep mine clears it. Forgetting the note
-  dismisses its suggestions with it. **Keep mine** dismisses the suggestion and leaves
+  refused too, and the detail's Keep mine clears it. A suggestion that changes
+  your note's key, aliases, tags or validity says so, one row per field — your
+  note's values, then the new ones — so a change of those alone is not two
+  identical texts. Forgetting the note dismisses its suggestions with it;
+  forgetting a suggestion leaves your note in force. **Keep mine** dismisses the suggestion and leaves
   your note as it was (*"Kept your note"*). Neither forgets anything else you
   said in the same message. A suggestion is never used in answers while it
   waits; one that was only inferred from the conversation says so.
@@ -817,8 +824,8 @@ private use, and in a title, the reason, an alias, a tag or the fact key also a
 line break or a tab — is shown as a highlighted `<U+XXXX>` (as plain `<U+XXXX>`
 in a candidate's rendered text and in the line naming the note it would
 replace), and a line under the texts counts them: `Note: this request contains 2
-hidden characters, shown as <U+…>.` The card counts both titles, both texts and
-the reason; a row its title and the title of the note it replaced; a candidate
+hidden characters, shown as <U+…>.` The card counts both titles, both texts,
+the reason and the values of what it changes; a row its title and the title of the note it replaced; a candidate
 its title, the title of the note it would replace, its text, and the aliases,
 tags and fact key Confirm adopts with it, which its Note tab shows under the
 text. A text holding an escape wraps at its edge — a candidate's code blocks

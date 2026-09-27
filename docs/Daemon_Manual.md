@@ -825,14 +825,24 @@ note's `fact_key` (in the partition the note would land in), names another
 note that shares your note's key, or edits your note: a candidate naming your
 note, which stays in force and in recall until you *Replace* or *Keep mine*,
 and the tool's result tells the model so (its `superseded` is empty; `replaces`
-names your note). With no `scope` it is stored in your note's partition. It
-cites the message you typed on that turn — and an edit's suggestion, a copy of
-your note's text, then what your note cites, so forgetting a message your note
-learned from takes the copy out too — so the assistant may raise it with
-`memory_confirm` on a later attended turn; the Memory view, `openalpaca memory
-suggestions`, the in-chat card and the `<memory_suggestions>` line say the
-assistant suggested it. Saving exactly what your note already says returns
-your note, not a suggestion. An edit goes through `memory_update`'s ordinary
+names your note). A change that only bounds your note in time
+(`valid_from`, `valid_to`) is a suggestion too. With no `scope` it is stored in
+your note's partition. It cites the message you typed on that turn — an edit's
+suggestion, a copy of your note's text, cites what your note cites first and
+that message when there is room (at most eight), so forgetting a message your
+note learned from takes the copy out too, while forgetting the pending
+suggestion itself leaves your note in force: a pending suggestion's forget
+suppresses none of the messages the note it names cites — so the assistant may
+raise it with `memory_confirm` on a later attended turn; the Memory view,
+`openalpaca memory suggestions`, the in-chat card and the `<memory_suggestions>`
+line say the assistant suggested it, give no reason of its text's (the text may
+copy your note's, whose reason is that note's), and say what else it changes —
+your note's key, aliases, tags or validity. Saving exactly what your note
+already says, with the same validity, returns your note, not a suggestion. The
+assistant may not edit a note of yours that a forget took out of recall (it
+cites a message you asked to forget): that is `authority_conflict`, and the edit
+is yours, in the Memory view or with `openalpaca memory edit`. An edit goes
+through `memory_update`'s ordinary
 card first: approving it gives you a suggestion to *Replace* or *Keep mine*,
 not the edit. Before this, a replacement of a note you saved was refused and
 one of a note edited by hand or imported was applied at once. Still direct, as
@@ -842,7 +852,8 @@ replacement of it stands. Its replacement of a note learned from you replaces
 it at once, as learning's does. No surface
 archives a suggestion — it is replaced or kept — and forgetting a note
 withdraws every suggestion that would replace it, which could never be
-confirmed any more. `memory_update` and `memory_forget` raise the ordinary
+confirmed any more, once every note the same forget names has been forgotten —
+so a suggestion named with its note is forgotten as asked, in either order. `memory_update` and `memory_forget` raise the ordinary
 confirmation card, and an unattended turn (a scheduled skill, a piped
 `openalpaca chat`) is refused them outright. `memory_update` with `action:
 confirm` is refused **before** any card, since nothing the model does confirms
@@ -859,8 +870,10 @@ the index (no note file is parsed for it), leaving out a suggestion already
 raised on that lane since the daemon started, and any other suggestion for the
 note it would replace — the lane is `{owner}:gui`, which every app and CLI chat
 conversation of that owner shares. The call raises the ordinary card with a
-preview the **daemon** wrote from the notes — which note, your
-text, the new text, why, and when — the date of the newest message you typed
+preview the **daemon** composed from the notes, never from the call's
+arguments — which note, your text, the new text, what else it changes (a
+`Changes:` line naming the key, aliases, tags or validity it changes), why (none
+for the assistant's own), and when — the date of the newest message you typed
 that it cites ("from what you said on …"), or for one the assistant wrote the
 day it saved it ("suggested by the assistant on …"), with every hidden character of what it quotes left out and, when any
 was, a last line saying how many (`This preview leaves out 2 hidden
@@ -935,11 +948,11 @@ addressed. Bodies and queries are closed objects — an unknown key is a `400`.
 | `GET /v1/memories/search` | Literal search: `q` (1–512 chars), `kind`, `scope`, `limit` (1–50, default 10), `historical`, `as_of`, and the model tool's `date_from`, `date_to` (inclusive, on the note's date — observed, else first saved; RFC 3339 or `YYYY-MM-DD`) and `order_by` (`relevance`, `newest`, `oldest`). `detail` defaults to `snippets` here: cited results with `freshness`, `conflict`, `same_key_loser`, `sources_status`, `valid_from` and `valid_to`; `detail=index` answers the tool's index rows. Either way with `count`, `partial` and `index_state`. Candidates are never returned. |
 | `GET /v1/memories/timeline` | `memory_timeline`: around exactly one of `anchor` (a note id), `q` (its first hit) or `date` (RFC 3339 or `YYYY-MM-DD`), the nearest `before` and `after` notes (0–20, default 5), in date order. Answers `{anchor, results, count, index_state}` — `anchor` is `{id}`, `{date}` or null when `q` matched nothing — with index rows whose `reason` is `before`, `anchor` or `after`, superseded, archived and ended notes marked by `status`, candidates never listed. An unknown anchor is `404`; no anchor, two, or a side over 20 is `400`; while the search index is being rebuilt it answers `503 MEMORY_INDEX_REBUILDING` at once. |
 | `GET /v1/memories/recently-learned` | The extractor's `extracted_user` notes that recall would use, newest first, each with `supersedes` (what it replaced) — `since` (RFC 3339, or a window like `7d`, `24h`, `30m`; default 7 days) and `limit`. A note that is not in force, loses its `fact_key` to another note, or cites a message a forget suppressed is not listed. An edit through this surface re-records a note as `user` and it leaves the list. |
-| `GET /v1/memories/suggestions` | The pending suggestions, newest first — `limit` (1–100, default 20). Each item: `id`, `revision`, `title`, `knowledge` (the suggested text, cut at 4 KiB), `knowledge_left_out` (how many characters that cut left out, 0 when whole), `reason`, `created_at`, `observed_at` (the newest cited message's time, as learning records it; `null` for a suggestion the assistant saved in chat, which is how the app and the CLI tell it apart), `origin`, `scope`, `sources`, `older_count`, and `target: {id, revision, title, excerpt, excerpt_left_out, origin, scope}` — the note it would replace, as read now, its text cut at 600 bytes. Where several name one note only the newest is listed, and `older_count` counts the rest. A suggestion whose note is gone or no longer in force is not listed (undo still dismisses it). Records nothing. |
+| `GET /v1/memories/suggestions` | The pending suggestions, newest first — `limit` (1–100, default 20). Each item: `id`, `revision`, `title`, `knowledge` (the suggested text, cut at 4 KiB), `knowledge_left_out` (how many characters that cut left out, 0 when whole), `reason` (none for a suggestion the assistant saved in chat, whose text may copy the note it names), `changes` (what else it changes of that note: `[{field, from, to}]` for each of `fact_key`, `aliases`, `tags`, `valid_from` and `valid_to` whose values differ, the values as lists, empty for none), `created_at`, `observed_at` (the newest cited message's time, as learning records it; `null` for a suggestion the assistant saved in chat, which is how the app and the CLI tell it apart), `origin`, `scope`, `sources`, `older_count`, and `target: {id, revision, title, excerpt, excerpt_left_out, origin, scope}` — the note it would replace, as read now, its text cut at 600 bytes. Where several name one note only the newest is listed, and `older_count` counts the rest. A suggestion whose note is gone or no longer in force is not listed (undo still dismisses it). Records nothing. |
 | `GET /v1/memories/recently-used` | The in-memory ring of notes delivered to a model since the daemon started (`limit`, default 50, max 200): `{id, revision, reason, delivered_at, lane_key, task_id}`, `reason` as in `memory_used` — a note the recall only listed is recorded `index`, not as delivered. Cleared at restart. |
 | `GET /v1/memories/doctor` | The read-only report: every partition with its health, counts, malformed files, duplicate ids and conflicts, other owners' partitions as orphans, and stale/abandoned/orphaned move snapshots. Changes nothing. |
 | `POST /v1/memories` | Save a note: `title`, `body`, `kind`, and optionally `scope`, `aliases`, `tags`, `fact_key`, `sources` (`[{type: message\|task, id}]`, verified against the database), `valid_from`, `valid_to`, and `supersedes: {id, expected_revision}` to replace a note. `201` with the `memory_store` result and `ETag`; an exact duplicate is `200` with the existing id and `dedup: existing`; a moved `supersedes` target is `409`. |
-| `POST /v1/memories/forget` | Forget several: `{targets: [{id, expected_revision}], reason?}`, per-id status plus what is retained. |
+| `POST /v1/memories/forget` | Forget several: `{targets: [{id, expected_revision}], reason?}` (1–20), per-id status plus what is retained. A forgotten note's pending suggestions are withdrawn once every target has had its turn, so a suggestion named with its note is forgotten as asked, in either order; `openalpaca memory forget` sends its ids here in one request. |
 | `POST /v1/memories/sync` | One reconciliation scan now: `{scanned, changed, index_state, changes}`. |
 | `GET /v1/memories/{id}` | One note with its frontmatter, body (≤ 32 KiB), provenance and `ETag: "<revision>"`. `?section=<heading>` for one section; `?revision=<rev>` for one of the last five daemon-written revisions. |
 | `GET /v1/memories/{id}/history` | Those revisions, newest first: `{revisions: [{revision, written_at}]}`. |
@@ -960,15 +973,15 @@ MEMORY_NOT_FOUND` (an unknown id, or a revision the history does not keep), `409
 MEMORY_QUARANTINED` (the partition's control snapshot is missing or invalid —
 `openalpaca memory doctor --repair`, with the daemon stopped, is the only way
 out), `400 MEMORY_INVALID_INPUT` (a limit, a grammar, a shape, an unknown key, a
-cursor from another filter set). Two more the envelope can carry: `409
+cursor from another filter set). Three more the envelope can carry: `409
 MEMORY_BUSY` (a memory write on that partition is in flight — retry), `503
 MEMORY_INDEX_REBUILDING` (the timeline, while the search index is being
 rebuilt — retry in a minute) and `500 MEMORY_INTERNAL` (the store or the
 database refused; the cause is in the daemon log). `409
 MEMORY_AUTHORITY_CONFLICT` and `409 MEMORY_CONFIRM_REFUSED` are the model's
-tool-surface refusals — a tool call archiving a `user` note or editing a
-suggestion, a confirm from a tool call — and this user-directed surface never
-produces them.
+tool-surface refusals — a tool call archiving a `user` note, editing a
+suggestion or a note a forget took out of recall, a confirm from a tool call —
+and this user-directed surface never produces them.
 
 **A note is at most 32 KiB, so a read is never cut.** The limit covers the whole
 file, frontmatter included, and it is no larger than what a read serves, so
@@ -1248,8 +1261,8 @@ is meant for development and testing, and is off by default.
 `memory_confirm` does (see [Memory](#memory) above): its approval covers that
 one call. The daemon always asks for it, whatever `auto_approve_confirmations`
 or an earlier approval says, never records its approval, and ignores an
-`approval_scope`. A request may also carry `preview`: text the daemon wrote
-from the tool's own read, never the model's, which a client shows above the
+`approval_scope`. A request may also carry `preview`: text the daemon composed
+from the tool's own read, never from the call's arguments, which a client shows above the
 literal `tool_arguments` (`null` for an ordinary prompt). A tool can refuse a
 call **before** its card is raised — `memory_confirm` does for a suggestion
 that moved, and `memory_update` for any `confirm` — and then no prompt is

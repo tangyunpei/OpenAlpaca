@@ -708,7 +708,8 @@ Notes:
   /v1/memories/timeline`. While the daemon is rebuilding its search index the
   timeline is refused at once (`503 MEMORY_INDEX_REBUILDING`) — `search`
   answers meanwhile; try the timeline again in a minute.
-- `show` prints the note with its provenance; `--raw` prints the note *file* as the
+- `show` prints the note with its provenance — its key, aliases, tags and validity
+  bounds among its facts; `--raw` prints the note *file* as the
   daemon holds it, frontmatter and all; `--revision <rev>` reads one of the last
   five revisions the daemon wrote (a hand edit is not one of them) — `--raw` of a
   revision is that revision's file.
@@ -728,7 +729,7 @@ Notes:
   bidi override, a zero-width or control character, a variation selector, any
   space but a plain one, an object replacement character, a code point Unicode
   has not assigned or leaves to private use, and in a title, alias, tag, fact
-  key or reason also a line break or a tab — as `<U+XXXX>`, and a line counts
+  key, reason or changed value also a line break or a tab — as `<U+XXXX>`, and a line counts
   them (`Note: this request contains 2 hidden characters, shown as <U+…>.`):
   under each suggestion that holds any, and under a candidate's text, where it
   counts the title, aliases, tags, fact key and text — as the GUI's candidate
@@ -778,7 +779,12 @@ Notes:
   from the conversation` for one read out of an answer or a tool's output rather
   than your own words. The assistant's own change to a note you saved — which
   it may not apply itself — is a suggestion too, and reads `suggested by the
-  assistant, <date>`. A suggestion whose own text changed after it was written
+  assistant, <date>`, with no reason (its text may copy your note's, whose reason
+  is that note's). A suggestion that changes more than the title and the text
+  says what on a line under its own — `changes: tags none → tools; valid until
+  none → 2026-12-31T00:00:00Z` (the key, aliases, tags and validity bounds, your
+  note's values first) — so a change of those alone is not two identical texts.
+  A suggestion whose own text changed after it was written
   says who wrote it now: `edited by you, suggested <date>` (or `edited outside
   OpenAlpaca`, `imported`). A change to a note that was itself *learned* needs no
   question: it replaces the old note at once, and `undo` brings the old one back.
@@ -802,11 +808,15 @@ Notes:
   stays learned. Once you have edited or confirmed a note it is yours, `undo` is
   refused (`409 MEMORY_NOT_UNDOABLE`), and `forget` is the verb.
 - `forget` prints the title and revision of every note named, asks once (off a
-  terminal it refuses and says to pass `--yes`), then forgets each with the
-  revision it printed. A forgotten note's files, history copies and index rows are
+  terminal it refuses and says to pass `--yes`), then forgets them in one request
+  (`POST /v1/memories/forget`, 20 ids to a request), each with the revision it
+  printed, and prints each one's outcome. A forgotten note's files, history copies and index rows are
   gone and its sources are never re-extracted; the transcript messages it cited
   stay in the conversation, and the command says so. Any suggestion that would
-  replace a forgotten note is dismissed with it. There is no undo. An
+  replace a forgotten note is dismissed with it — but one you name in the same
+  command is forgotten as asked, whatever the order. Forgetting a suggestion
+  leaves the note it would replace in force: it suppresses none of the messages
+  that note cites. There is no undo. An
   **episode note** is the exception on sources: forgetting one forgets that note
   alone, and what its messages taught stays learned.
 - **Episode notes.** After a conversation has been quiet for 30 minutes, when you
