@@ -14,7 +14,8 @@ use super::{
     scope_of, section_of,
 };
 use openalpaca_storage::memory_files::{
-    NoteId, NoteStatus, Origin, Partition, PartitionHealth, knowledge_text,
+    EffectiveStatus, NoteId, NoteStatus, NoteView, Origin, Partition, PartitionHealth,
+    knowledge_text,
 };
 use openalpaca_storage::memory_index::{CatalogNote, EffectiveStatus as IndexStatus};
 use std::collections::HashSet;
@@ -49,79 +50,178 @@ impl MemoryService {
                 "limit must be between 1 and {SUGGESTIONS_MAX_LIMIT}"
             )));
         }
-        // One generation of the index throughout (scale slice S6): a rebuild
-        // that starts under the read makes it read again.
-        self.read_index(|| {
-            let resolved = self.resolve(ctx)?;
-            let partitions: Vec<&Partition> = resolved
-                .all()
-                .into_iter()
-                .filter(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)))
-                .collect();
-            for p in &partitions {
-                self.touch(p)?;
-            }
-            let keys: Vec<String> = partitions
-                .iter()
-                .map(|p| p.partition_key().to_string())
-                .collect();
-            let by_key = |key: &str| {
-                partitions
-                    .iter()
-                    .copied()
-                    .find(|p| p.partition_key() == key)
-            };
-
-            // Newest first; one group per (partition, target) in that order. A
-            // candidate naming several notes cannot be confirmed (S5) and is not
-            // a suggestion here.
-            let mut groups: Vec<((String, String), Vec<CatalogNote>)> = Vec::new();
-            for row in self.indexed(self.index.suggestion_rows(&keys))? {
-                let [target] = row.supersedes.as_slice() else {
-                    continue;
-                };
-                let group = (row.partition_key.clone(), target.clone());
-                match groups.iter_mut().find(|(g, _)| *g == group) {
-                    Some((_, rows)) => rows.push(row),
-                    None => groups.push((group, vec![row])),
-                }
-            }
-
-            let mut dirty: HashSet<String> = HashSet::new();
-            let mut out: Vec<Suggestion> = Vec::new();
-            for ((partition_key, target_id), rows) in groups {
-                if out.len() >= limit {
-                    break;
-                }
-                let Some(p) = by_key(&partition_key) else {
-                    continue;
-                };
-                let Some(target) = verified_target(self, p, &target_id, &mut dirty)? else {
-                    continue;
-                };
-                let total = rows.len();
-                for (skipped, row) in rows.into_iter().enumerate() {
-                    if let Some(mut suggestion) = verified_suggestion(p, &row, &target, &mut dirty)
-                    {
-                        suggestion.older_count = total - skipped - 1;
-                        out.push(suggestion);
-                        break;
+        let resolved = self.resolve(ctx)?;
+        let partitions: Vec<&Partition> = resolved
+            .all()
+            .into_iter()
+            .filter(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)))
+            .collect();
+        // The Memory view, `openalpaca memory suggestions` and `/memories`
+        // on a chat turn wait on this list, so it never waits out a whole
+        // rebuild (the L8 product slice's P8): while the index is rebuilt —
+        // or when a rebuild starts under the read — the partitions' own
+        // files answer, the list complete.
+        self.read_index_or(
+            || {
+                for p in &partitions {
+                    if self.touch_serving(p)?.is_none() {
+                        return Ok(None);
                     }
                 }
-            }
-            for key in dirty {
-                if let Some(p) = by_key(&key) {
-                    self.reindex(p)?;
+                let keys: Vec<String> = partitions
+                    .iter()
+                    .map(|p| p.partition_key().to_string())
+                    .collect();
+                let by_key = |key: &str| {
+                    partitions
+                        .iter()
+                        .copied()
+                        .find(|p| p.partition_key() == key)
+                };
+
+                // Newest first; one group per (partition, target) in that order. A
+                // candidate naming several notes cannot be confirmed (S5) and is not
+                // a suggestion here.
+                let mut groups: Vec<((String, String), Vec<CatalogNote>)> = Vec::new();
+                for row in self.indexed(self.index.suggestion_rows(&keys))? {
+                    let [target] = row.supersedes.as_slice() else {
+                        continue;
+                    };
+                    let group = (row.partition_key.clone(), target.clone());
+                    match groups.iter_mut().find(|(g, _)| *g == group) {
+                        Some((_, rows)) => rows.push(row),
+                        None => groups.push((group, vec![row])),
+                    }
                 }
-            }
-            out.sort_by(|a, b| {
-                b.created_at
-                    .cmp(&a.created_at)
-                    .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
-            });
-            Ok(out)
-        })
+
+                let mut dirty: HashSet<String> = HashSet::new();
+                let mut out: Vec<Suggestion> = Vec::new();
+                for ((partition_key, target_id), rows) in groups {
+                    if out.len() >= limit {
+                        break;
+                    }
+                    let Some(p) = by_key(&partition_key) else {
+                        continue;
+                    };
+                    let Some(target) = verified_target(self, p, &target_id, &mut dirty)? else {
+                        continue;
+                    };
+                    let total = rows.len();
+                    for (skipped, row) in rows.into_iter().enumerate() {
+                        if let Some(mut suggestion) =
+                            verified_suggestion(p, &row, &target, &mut dirty)
+                        {
+                            suggestion.older_count = total - skipped - 1;
+                            out.push(suggestion);
+                            break;
+                        }
+                    }
+                }
+                for key in dirty {
+                    if let Some(p) = by_key(&key) {
+                        self.reindex(p)?;
+                    }
+                }
+                sort_newest_first(&mut out);
+                Ok(Some(out))
+            },
+            || Ok(suggestions_from_files(&partitions, limit)?),
+        )
     }
+}
+
+/// Newest first, ties by id: the order the list is served in.
+fn sort_newest_first(out: &mut [Suggestion]) {
+    out.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+    });
+}
+
+/// The pending suggestions read from the partitions' files — what the list
+/// answers while the index is rebuilt (the L8 product slice's P8): each
+/// partition read whole, through the parse cache, its notes derived as the
+/// index would hold them; the same groups, the same newest-first choice
+/// per target and the same `older_count` as the index's answer.
+fn suggestions_from_files(
+    partitions: &[&Partition],
+    limit: usize,
+) -> Result<Vec<Suggestion>, MemoryError> {
+    // Each target's newest pending suggestion, with when it was last
+    // written: the index lists the groups in that order, and keeps `limit`.
+    let mut listed: Vec<(chrono::DateTime<chrono::Utc>, Suggestion)> = Vec::new();
+    for p in partitions {
+        let loaded = p.load()?;
+        let mut candidates: Vec<&NoteView> = loaded
+            .views
+            .iter()
+            .filter(|v| v.derived.effective_status == EffectiveStatus::Candidate)
+            .filter(|v| v.note.supersedes.len() == 1)
+            .collect();
+        candidates.sort_by(|a, b| newest_first(a, b));
+        let mut groups: Vec<(NoteId, Vec<&NoteView>)> = Vec::new();
+        for c in candidates {
+            let target = c.note.supersedes[0];
+            match groups.iter_mut().find(|(t, _)| *t == target) {
+                Some((_, members)) => members.push(c),
+                None => groups.push((target, vec![c])),
+            }
+        }
+        for (target, members) in groups {
+            let Some(t) = loaded.get(&target) else {
+                continue;
+            };
+            if t.derived.effective_status != EffectiveStatus::Active {
+                continue;
+            }
+            let (excerpt, excerpt_left_out) = target_excerpt(&t.note.body);
+            let newest = members[0];
+            let (knowledge, knowledge_left_out) = suggested_knowledge(&newest.note.body);
+            listed.push((
+                newest.note.updated_at,
+                Suggestion {
+                    id: newest.note.id,
+                    revision: newest.revision.clone(),
+                    knowledge,
+                    knowledge_left_out,
+                    reason: replace_reason(&newest.note.body),
+                    title: newest.note.title.clone(),
+                    created_at: newest.note.created_at,
+                    observed_at: newest.note.observed_at,
+                    origin: newest.derived.origin,
+                    scope: scope_of(p),
+                    sources: newest.note.sources.clone(),
+                    older_count: members.len() - 1,
+                    target: SuggestionTarget {
+                        id: t.note.id,
+                        revision: t.revision.clone(),
+                        title: t.note.title.clone(),
+                        excerpt,
+                        excerpt_left_out,
+                        origin: t.derived.origin,
+                        scope: scope_of(p),
+                    },
+                },
+            ));
+        }
+    }
+    listed.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.id.to_string().cmp(&b.1.id.to_string()))
+    });
+    listed.truncate(limit);
+    let mut out: Vec<Suggestion> = listed.into_iter().map(|(_, s)| s).collect();
+    sort_newest_first(&mut out);
+    Ok(out)
+}
+
+/// The index's order of pending suggestions: last written first, ties by id.
+fn newest_first(a: &NoteView, b: &NoteView) -> std::cmp::Ordering {
+    b.note
+        .updated_at
+        .cmp(&a.note.updated_at)
+        .then_with(|| a.note.id.to_string().cmp(&b.note.id.to_string()))
 }
 
 /// The note a suggestion names, re-read: `None` when it is gone or no longer

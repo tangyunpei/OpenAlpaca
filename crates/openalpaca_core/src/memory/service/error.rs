@@ -55,6 +55,12 @@ pub enum MemoryError {
     /// `fixture:write_pending` (design §3, workspace move step 1): a memory
     /// write for that project is in flight.
     WritePending { key: String },
+    /// `index_rebuilding` (the L8 product slice's P8): a read only the
+    /// search index can answer — `memory_timeline` — met a whole rebuild of
+    /// it, owed or running, and answers at once rather than wait it out (up
+    /// to half a minute at 100K notes). Search and recall read the note
+    /// files meanwhile; the timeline answers once the index is back.
+    IndexRebuilding,
     /// Anything the file system or the index refused.
     Internal(anyhow::Error),
 }
@@ -75,6 +81,7 @@ impl MemoryError {
             Self::ApprovalRequired { .. } => "approval_required",
             Self::Quarantined { .. } => "quarantined",
             Self::WritePending { .. } => "fixture:write_pending",
+            Self::IndexRebuilding => "index_rebuilding",
             Self::Internal(_) => "io",
         }
     }
@@ -129,6 +136,10 @@ impl fmt::Display for MemoryError {
             Self::WritePending { key } => {
                 write!(f, "a memory write for {key} is in flight; try again")
             }
+            Self::IndexRebuilding => f.write_str(
+                "the memory search index is being rebuilt, so the timeline cannot be read now; \
+                 try again in a minute. memory_search and memory_read answer meanwhile",
+            ),
             Self::Internal(e) => write!(f, "{e:#}"),
         }
     }

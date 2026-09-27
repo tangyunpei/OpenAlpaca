@@ -275,6 +275,11 @@ pub(crate) struct TestGates {
     /// slice's P6).
     pub after_open: std::sync::RwLock<()>,
     pub opened: std::sync::atomic::AtomicBool,
+    /// Where recall or search waits once it has found the index serving,
+    /// before its stat scans — counted first in `serving_seen` (the L8
+    /// product slice's P7).
+    pub serving: std::sync::RwLock<()>,
+    pub serving_seen: std::sync::atomic::AtomicUsize,
 }
 
 /// The owner's partitions for one request (design §3 rule 1).
@@ -481,10 +486,10 @@ impl MemoryService {
         !self.rebuild_pending()
     }
 
-    /// Blocks while a whole rebuild runs — what a read of the index that
-    /// has no file-scan answer (learning's lookups, the timeline, the
-    /// suggestions list) does, rather than read an index being refilled —
-    /// and answers the generation it then sees.
+    /// Blocks while a whole rebuild runs — what background learning's reads
+    /// of the index do, rather than read an index being refilled — and
+    /// answers the generation it then sees. No read a person or a model
+    /// waits on comes here (the L8 product slice's P7, P8).
     fn wait_for_rebuild(&self) -> u64 {
         let mut state = self.rebuild_state();
         while state.running {
@@ -507,9 +512,9 @@ impl MemoryService {
     /// so what it read may be an index being emptied and refilled — it
     /// waits for that rebuild to end and reads again. A rebuild starts only
     /// at boot, after damage met on use or for a bloated cache, so a read
-    /// is repeated rarely. What a read with no file-scan answer goes
-    /// through: learning's lookups, the timeline, the suggestions list, a
-    /// deleted conversation's summaries.
+    /// is repeated rarely. What background learning's lookups go through;
+    /// a read a person or a model waits on goes through
+    /// [`Self::read_index_or`] instead.
     pub(super) fn read_index<T>(
         &self,
         mut read: impl FnMut() -> Result<T, MemoryError>,
@@ -524,14 +529,34 @@ impl MemoryService {
     }
 
     /// The generation the index serves reads at, or `None` while a whole
-    /// rebuild is owed or running — for a reply-path read that then goes
-    /// without the index ([`Self::pending_suggestions`]). It is read once, at
-    /// the read's start: a rebuild that starts after it makes the read's
-    /// `touch` wait, which the reply's 1.5 s bound (scale slice S7) cuts
-    /// short for the turn.
+    /// rebuild is owed or running — for a read that then goes without the
+    /// index. A read that finds the same generation after it read the index
+    /// read one index throughout ([`Self::same_generation`]).
     fn serving_generation(&self) -> Option<u64> {
         let state = self.rebuild_state();
         (!state.pending && !state.running).then_some(state.started)
+    }
+
+    /// A read a person or a model waits on, which never waits out a whole
+    /// rebuild (the L8 product slice's P7, P8; a rebuild is up to half a
+    /// minute at 100K notes): `index`, while the index serves — its stat
+    /// scans through [`Self::touch_serving`], its `None` saying one found a
+    /// rebuild owed or running — else `rebuilding`, which answers from the
+    /// files or says the index is being rebuilt. `rebuilding` also answers
+    /// when a rebuild started while `index` read, since what it read may be
+    /// an index being emptied and refilled.
+    pub(super) fn read_index_or<T>(
+        &self,
+        index: impl FnOnce() -> Result<Option<T>, MemoryError>,
+        rebuilding: impl FnOnce() -> Result<T, MemoryError>,
+    ) -> Result<T, MemoryError> {
+        if let Some(generation) = self.serving_generation()
+            && let Some(answer) = index()?
+            && self.same_generation(generation)
+        {
+            return Ok(answer);
+        }
+        rebuilding()
     }
 
     /// What an error from the index means for it: damage to the cache file

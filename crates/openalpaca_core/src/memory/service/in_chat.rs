@@ -243,11 +243,9 @@ impl MemoryService {
     /// While the index is rebuilt it lists nothing (scale slice S6): the
     /// list comes from the index, and the turn goes without the block —
     /// also when a rebuild starts under the read, which may then have read
-    /// an index being refilled. The check is made once, at the start: a
-    /// rebuild that starts after it and before a partition's `touch` makes
-    /// that `touch` wait for the whole rebuild. The reply's 1.5 s bound
-    /// (scale slice S7) cuts the turn's wait short; the read, left on its
-    /// blocking worker, lists nothing once the rebuild ends.
+    /// an index being refilled. It never waits for a rebuild (the L8 product
+    /// slice's P7): a rebuild that starts before a partition's stat scan is
+    /// met there, and the read lists nothing at once.
     pub fn pending_suggestions(
         &self,
         ctx: &MemoryAccessContext,
@@ -281,7 +279,9 @@ impl MemoryService {
             .filter(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)))
             .collect();
         for p in &partitions {
-            self.touch(p)?;
+            if self.touch_serving(p)?.is_none() {
+                return Ok(Vec::new());
+            }
         }
         let keys: Vec<String> = partitions
             .iter()

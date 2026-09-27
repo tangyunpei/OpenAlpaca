@@ -1167,28 +1167,34 @@ fn a_rebuild_that_panics_stays_owed_and_holds_no_reader() {
         )
         .unwrap();
     assert_eq!(search_cedar(&service, &tool).index_state, IndexState::Rebuilding);
-    // A read with no file-scan answer waits only while a rebuild runs.
+    // The timeline, which only the index answers, says it is rebuilt.
+    let err = timeline_rows(&service, &tool).unwrap_err();
+    assert_eq!(err.class(), "index_rebuilding");
+    // A read that waits for a rebuild — learning's — waits only while one
+    // runs.
+    let extraction = service
+        .context(
+            ALICE,
+            WorkspaceHint::None,
+            Surface::Extraction,
+            Capabilities::EXTRACTION,
+            Attribution::default(),
+        )
+        .unwrap();
     let (sent, read) = std::sync::mpsc::channel();
     {
-        let (service, tool) = (service.clone(), tool.clone());
+        let service = service.clone();
         std::thread::spawn(move || {
-            let rows = service
-                .timeline(
-                    &tool,
-                    TimelineInput {
-                        anchor: TimelineAnchor::Date(Utc::now()),
-                        before: Some(20),
-                        after: Some(20),
-                    },
-                )
-                .map(|t| t.rows.len());
-            let _ = sent.send(rows);
+            let notes = service
+                .learning_view(&extraction, &["cedar grove".to_string()], &[])
+                .map(|v| v.notes.len());
+            let _ = sent.send(notes);
         });
     }
-    let rows = read
+    let notes = read
         .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("the timeline returns rather than wait for a dead rebuild");
-    assert_eq!(rows.unwrap(), 4);
+        .expect("the lookup returns rather than wait for a dead rebuild");
+    assert_eq!(notes.unwrap(), 4);
     assert!(service.run_pending_rebuild().unwrap(), "the next attempt rebuilds");
     assert!(!service.rebuild_pending());
     let found = search_cedar(&service, &tool);
@@ -1216,7 +1222,7 @@ fn ready_cedar_service(
 }
 
 /// Every note on the timeline around now.
-fn timeline_rows(service: &MemoryService, tool: &MemoryAccessContext) -> usize {
+fn timeline_rows(service: &MemoryService, tool: &MemoryAccessContext) -> Result<usize, MemoryError> {
     service
         .timeline(
             tool,
@@ -1226,8 +1232,16 @@ fn timeline_rows(service: &MemoryService, tool: &MemoryAccessContext) -> usize {
                 after: Some(20),
             },
         )
+        .map(|t| t.rows.len())
+}
+
+/// How many notes learning's known-notes lookup lists for the cedar notes:
+/// a read that waits for a rebuild (background learning may).
+fn cedar_lookup(service: &MemoryService, extraction: &MemoryAccessContext) -> usize {
+    service
+        .learning_view(extraction, &["cedar grove".to_string()], &[])
         .unwrap()
-        .rows
+        .notes
         .len()
 }
 
@@ -1278,6 +1292,166 @@ fn a_learning_lookup_during_a_rebuild_waits_for_it() {
         .unwrap();
     assert!(!pending, "it answered after the rebuild");
     assert_eq!(notes.unwrap(), 4, "with every note");
+}
+
+/// The L8 product slice's P7: recall and search never wait out a rebuild —
+/// not even one that starts after they found the index serving and before
+/// their stat scans, which used to make those scans wait for the whole
+/// rebuild (up to half a minute at 100K notes). Both answer at once, from
+/// the files, and say `rebuilding`.
+#[test]
+fn a_search_or_recall_that_meets_a_rebuild_starting_under_it_reads_the_files() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let h = Harness::new();
+    let (service, tool, _) = ready_cedar_service(&h, 4);
+    let serving = service.gates.serving.write().unwrap();
+    let seen = service.gates.serving_seen.load(SeqCst);
+    let (sent, answered) = std::sync::mpsc::channel();
+    {
+        let (service, tool, sent) = (service.clone(), tool.clone(), sent.clone());
+        std::thread::spawn(move || {
+            let found = search_cedar(&service, &tool);
+            let _ = sent.send(("search", found.results.len(), found.index_state));
+        });
+    }
+    {
+        let (service, tool) = (service.clone(), tool.clone());
+        std::thread::spawn(move || {
+            let recalled = service
+                .recall(&tool, "cedar grove river", RecallBudget::default())
+                .unwrap();
+            let n = recalled.notes.len() + recalled.listed.len();
+            let _ = sent.send(("recall", n, recalled.index_state));
+        });
+    }
+    eventually("both found the index serving", || {
+        service.gates.serving_seen.load(SeqCst) >= seen + 2
+    });
+    let (hold, rebuild) = start_held_rebuild(&service);
+    drop(serving);
+    for _ in 0..2 {
+        let (read, n, state) = answered
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("answered while the rebuild runs, not after it");
+        assert_eq!(n, 4, "{read}");
+        assert_eq!(state, IndexState::Rebuilding, "{read}");
+    }
+    drop(hold);
+    assert!(rebuild.join().unwrap().unwrap());
+}
+
+/// The L8 product slice's P8: while a whole rebuild runs, the reads a model
+/// or a person waits on answer at once — `memory_timeline`, which only the
+/// index can answer, says the index is being rebuilt (a refusal the model
+/// relays); the suggestions list (the Memory view's, `openalpaca memory
+/// suggestions`, `/memories`) comes from the notes' files, as the index
+/// would list it; and a deleted conversation's summaries are forgotten from
+/// the files. Background learning's lookup still waits for the rebuild.
+#[test]
+fn the_reads_a_model_or_a_person_waits_on_answer_at_once_while_the_index_is_rebuilt() {
+    let h = Harness::new();
+    let (service, tool, extraction) = ready_cedar_service(&h, 2);
+    let user = service
+        .context(
+            ALICE,
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let saved = service
+        .store(
+            &user,
+            StoreInput {
+                title: "Commute".into(),
+                body: "# Commute\n\nThe user takes the bus.\n".into(),
+                kind: Some(NoteKind::Fact),
+                fact_key: Some("user.commute".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let message = |id: i64| NoteSource {
+        kind: SourceType::Message,
+        id: id.to_string(),
+        observed_at: None,
+    };
+    let said = h.message_row("I cycle to work now.");
+    let suggestion = service
+        .store(
+            &extraction,
+            StoreInput {
+                title: "Commute".into(),
+                body: "# Commute\n\n## Knowledge\nThe user cycles to work.\n".into(),
+                kind: Some(NoteKind::Fact),
+                fact_key: Some("user.commute".into()),
+                sources: vec![message(said)],
+                observed_at: Some(Utc::now()),
+                supersedes: Some((saved.id, saved.revision.clone())),
+                replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(suggestion.suggestion);
+    let talked = h.message_row("Let us plan the Lisbon trip.");
+    service
+        .store(
+            &extraction,
+            StoreInput {
+                title: "Conversation on 2026-09-20: Lisbon".into(),
+                body: "# Lisbon\n\n## Knowledge\nDiscussed flights.\n".into(),
+                kind: Some(NoteKind::Episode),
+                sources: vec![message(talked)],
+                provenance: Some(ExtractionProvenance::Summary),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let from_the_index = format!("{:?}", service.suggestions(&user, None).unwrap());
+
+    let (hold, rebuild) = start_held_rebuild(&service);
+    let (sent, answered) = std::sync::mpsc::channel();
+    {
+        let (service, tool, user) = (service.clone(), tool.clone(), user.clone());
+        std::thread::spawn(move || {
+            let timeline = timeline_rows(&service, &tool).map_err(|e| e.class());
+            let listed = service.suggestions(&user, None).map(|l| format!("{l:?}"));
+            let forgotten = service.forget_conversation_summaries(ALICE, None, &[talked]);
+            let _ = sent.send((timeline, listed, forgotten));
+        });
+    }
+    let (timeline, listed, forgotten) = answered
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("answered while the rebuild runs, not after it");
+    assert_eq!(timeline.unwrap_err(), "index_rebuilding");
+    assert_eq!(listed.unwrap(), from_the_index, "the files list what the index lists");
+    assert_eq!(forgotten.unwrap(), 1);
+
+    let (sent, looked) = std::sync::mpsc::channel();
+    {
+        let (service, extraction) = (service.clone(), extraction.clone());
+        std::thread::spawn(move || {
+            let _ = sent.send(cedar_lookup(&service, &extraction));
+        });
+    }
+    assert!(
+        looked
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .is_err(),
+        "learning's lookup waits for the rebuild"
+    );
+    drop(hold);
+    assert!(rebuild.join().unwrap().unwrap());
+    assert_eq!(
+        looked
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap(),
+        2
+    );
+    assert_eq!(timeline_rows(&service, &tool).unwrap(), 3, "two notes and the saved one");
 }
 
 /// The L8 product slice's P6 (the scale slice's round-3 safety review,
@@ -1481,14 +1655,14 @@ fn a_forget_while_a_rebuild_reads_its_partition_leaves_its_sources_forgotten() {
 }
 
 /// The wait above is checked before the index is read, so a rebuild can
-/// start between the check and the read: here once the timeline's `touch`
+/// start between the check and the read: here once the lookup's `touch`
 /// has done its work. The read then meets an emptied index; it waits for
 /// the rebuild and reads again rather than answer from it.
 #[test]
 fn a_rebuild_that_starts_under_a_read_makes_it_read_again() {
     let h = Harness::new();
-    let (service, tool, _) = ready_cedar_service(&h, 4);
-    assert_eq!(timeline_rows(&service, &tool), 4);
+    let (service, _, extraction) = ready_cedar_service(&h, 4);
+    assert_eq!(cedar_lookup(&service, &extraction), 4);
     let touched = service.gates.touched.write().unwrap();
     let before = service
         .gates
@@ -1496,12 +1670,12 @@ fn a_rebuild_that_starts_under_a_read_makes_it_read_again() {
         .load(std::sync::atomic::Ordering::SeqCst);
     let (sent, read) = std::sync::mpsc::channel();
     {
-        let (service, tool) = (service.clone(), tool.clone());
+        let (service, extraction) = (service.clone(), extraction.clone());
         std::thread::spawn(move || {
-            let _ = sent.send(timeline_rows(&service, &tool));
+            let _ = sent.send(cedar_lookup(&service, &extraction));
         });
     }
-    eventually("the timeline has touched its partition", || {
+    eventually("the lookup has touched its partition", || {
         service
             .gates
             .touches

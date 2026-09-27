@@ -37,8 +37,9 @@
 //!
 //! Error codes (design §7a): `MEMORY_NOT_FOUND` 404, `MEMORY_REVISION_CONFLICT`
 //! 409, `MEMORY_QUARANTINED` 409, `MEMORY_NOT_UNDOABLE` 409,
-//! `MEMORY_INVALID_INPUT` 400, `MEMORY_IF_MATCH_REQUIRED` 428. A cursor from
-//! another filter set is `MEMORY_INVALID_INPUT`.
+//! `MEMORY_INVALID_INPUT` 400, `MEMORY_IF_MATCH_REQUIRED` 428, and — for the
+//! timeline while the search index is rebuilt — `MEMORY_INDEX_REBUILDING` 503.
+//! A cursor from another filter set is `MEMORY_INVALID_INPUT`.
 //!
 //! Every write publishes `memory_changed` from inside the service (design
 //! §7a), so nothing here publishes anything. The service does synchronous
@@ -1128,6 +1129,13 @@ fn refusal(e: MemoryError) -> Response {
         MemoryError::WritePending { .. } => {
             api_error(StatusCode::CONFLICT, "MEMORY_BUSY", e.to_string())
         }
+        // The L8 product slice's P8: the timeline answers at once while the
+        // index is rebuilt, rather than hold the request for the rebuild.
+        MemoryError::IndexRebuilding => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MEMORY_INDEX_REBUILDING",
+            e.to_string(),
+        ),
         MemoryError::NoOwner(_)
         | MemoryError::CapabilityDenied { .. }
         | MemoryError::Internal(_) => {

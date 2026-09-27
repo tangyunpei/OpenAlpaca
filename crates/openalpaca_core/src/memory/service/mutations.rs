@@ -417,57 +417,85 @@ impl MemoryService {
             super::Capabilities::ALL,
             super::Attribution::default(),
         )?;
-        // One generation of the index throughout (scale slice S6): a rebuild
-        // that starts under the read makes it read again.
-        let targets = self.read_index(|| {
-            let resolved = self.resolve(&ctx)?;
-            let rows: std::collections::HashSet<String> =
-                message_ids.iter().map(|id| id.to_string()).collect();
-            let source_keys: Vec<String> = message_ids
-                .iter()
-                .map(|id| format!("message:{id}"))
-                .collect();
-            let mut targets: Vec<(NoteId, String)> = Vec::new();
-            for p in resolved.all() {
-                if matches!(p.health(), files::PartitionHealth::Quarantined(_)) {
-                    continue;
-                }
-                self.touch(p)?;
-                let key = p.partition_key().to_string();
-                for row in self.indexed(
-                    self.index
-                        .notes_citing(std::slice::from_ref(&key), &source_keys),
-                )? {
-                    let (Some(kind), Some(origin), Some(status)) = (
-                        files::NoteKind::parse(&row.kind),
-                        Origin::parse(&row.origin),
-                        NoteStatus::parse(&row.status),
-                    ) else {
-                        continue;
-                    };
-                    if !files::is_conversation_summary(kind, origin, status) {
-                        continue;
+        let resolved = self.resolve(&ctx)?;
+        let partitions: Vec<&Partition> = resolved
+            .all()
+            .into_iter()
+            .filter(|p| !matches!(p.health(), files::PartitionHealth::Quarantined(_)))
+            .collect();
+        let rows: std::collections::HashSet<String> =
+            message_ids.iter().map(|id| id.to_string()).collect();
+        let all_here = |note: &files::Note| {
+            !note.sources.is_empty()
+                && note
+                    .sources
+                    .iter()
+                    .all(|s| s.kind == SourceType::Message && rows.contains(&s.id))
+        };
+        // A conversation's deletion waits on this, so it never waits out a
+        // whole rebuild (the L8 product slice's P8): while the index is
+        // rebuilt — or when a rebuild starts under the read — the
+        // partitions' own files name the summaries, all of them.
+        let targets = self.read_index_or(
+            || {
+                let source_keys: Vec<String> = message_ids
+                    .iter()
+                    .map(|id| format!("message:{id}"))
+                    .collect();
+                let mut targets: Vec<(NoteId, String)> = Vec::new();
+                for p in &partitions {
+                    if self.touch_serving(p)?.is_none() {
+                        return Ok(None);
                     }
-                    let Ok(id) = NoteId::parse(&row.id) else {
-                        continue;
-                    };
-                    let super::recall::Verified::Fresh { note, revision, .. } =
-                        super::recall::verify(p, &row.relative_path, id, &row.revision)
-                    else {
-                        continue;
-                    };
-                    let all_here = !note.sources.is_empty()
-                        && note
-                            .sources
-                            .iter()
-                            .all(|s| s.kind == SourceType::Message && rows.contains(&s.id));
-                    if all_here && files::is_conversation_summary(note.kind, origin, note.status) {
-                        targets.push((id, revision));
+                    let key = p.partition_key().to_string();
+                    for row in self.indexed(
+                        self.index
+                            .notes_citing(std::slice::from_ref(&key), &source_keys),
+                    )? {
+                        let (Some(kind), Some(origin), Some(status)) = (
+                            files::NoteKind::parse(&row.kind),
+                            Origin::parse(&row.origin),
+                            NoteStatus::parse(&row.status),
+                        ) else {
+                            continue;
+                        };
+                        if !files::is_conversation_summary(kind, origin, status) {
+                            continue;
+                        }
+                        let Ok(id) = NoteId::parse(&row.id) else {
+                            continue;
+                        };
+                        let super::recall::Verified::Fresh { note, revision, .. } =
+                            super::recall::verify(p, &row.relative_path, id, &row.revision)
+                        else {
+                            continue;
+                        };
+                        if all_here(&note)
+                            && files::is_conversation_summary(note.kind, origin, note.status)
+                        {
+                            targets.push((id, revision));
+                        }
                     }
                 }
-            }
-            Ok(targets)
-        })?;
+                Ok(Some(targets))
+            },
+            || {
+                let mut targets: Vec<(NoteId, String)> = Vec::new();
+                for p in &partitions {
+                    for v in p.load()?.views {
+                        if files::is_conversation_summary(
+                            v.note.kind,
+                            v.derived.origin,
+                            v.note.status,
+                        ) && all_here(&v.note)
+                        {
+                            targets.push((v.note.id, v.revision));
+                        }
+                    }
+                }
+                Ok(targets)
+            },
+        )?;
         let mut forgotten = 0;
         for batch in targets.chunks(20) {
             let out = self.forget(

@@ -4,7 +4,7 @@
 //! of design §4 applied to the rendered delivery (step 8).
 
 use super::{
-    Freshness, ListedNote, MemoryAccessContext, MemoryError, MemoryService, MemoryUsed,
+    FileScan, Freshness, ListedNote, MemoryAccessContext, MemoryError, MemoryService, MemoryUsed,
     RecallBudget, RecallResult, RecalledNote, SEARCH_DEFAULT_LIMIT, SEARCH_MAX_LIMIT, SearchInput,
     SearchOutput, SearchResultItem, Timing, UsedReason, approx_tokens, scope_of,
 };
@@ -189,16 +189,70 @@ impl MemoryService {
     /// notes that differ (scale slice S1). Returns the ids the scan found
     /// changed behind the service's back, so a hit among them is answered
     /// `stale` — the index was out of date for it, and the fresh bytes are
-    /// what is served.
+    /// what is served. Damage the index reports here owes a rebuild.
     ///
-    /// A read that reaches the index waits while a whole rebuild runs
-    /// (scale slice S6) — recall and search do not come here then; they read
-    /// the files — and damage the index reports here owes a rebuild. The
-    /// wait is checked before the caller's reads, so a caller with no
-    /// file-scan answer touches and reads inside [`Self::read_index`], which
-    /// reads again when a rebuild started in between.
+    /// This one **waits** while a whole rebuild runs (scale slice S6): what
+    /// background learning's lookups call, inside [`Self::read_index`],
+    /// which reads again when a rebuild started in between. Every read a
+    /// person or a model waits on calls [`Self::touch_serving`] instead and
+    /// never waits for a rebuild (the L8 product slice's P7, P8).
     pub(super) fn touch(&self, p: &Partition) -> Result<HashSet<NoteId>, MemoryError> {
         self.wait_for_rebuild();
+        self.touch_counted(p)
+    }
+
+    /// [`Self::touch`] for a read that must not wait out a rebuild (the L8
+    /// product slice's P7, P8): `None`, at once, when a whole rebuild is
+    /// owed or running — the caller answers from the files, or says the
+    /// index is being rebuilt. A rebuild that starts after this check is
+    /// the caller's to notice ([`Self::same_generation`]).
+    pub(super) fn touch_serving(
+        &self,
+        p: &Partition,
+    ) -> Result<Option<HashSet<NoteId>>, MemoryError> {
+        if !self.index_serves() {
+            return Ok(None);
+        }
+        self.touch_counted(p).map(Some)
+    }
+
+    /// Recall's and search's partitions made ready to read (scale slice S6;
+    /// the L8 product slice's P7): while the index serves, each gets its
+    /// stat scan and the ids it found changed come back, and no file scan;
+    /// while a whole rebuild is owed or running — one that starts under the
+    /// stat scans included — no index read at all, and the bounded scan of
+    /// the files. Never waits for a rebuild.
+    pub(super) fn serving_or_files(
+        &self,
+        partitions: &[&Partition],
+    ) -> Result<(HashSet<NoteId>, Option<FileScan>), MemoryError> {
+        if let Some(generation) = self.serving_generation() {
+            #[cfg(test)]
+            {
+                self.gates
+                    .serving_seen
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(self.gates.serving.read().unwrap_or_else(|e| e.into_inner()));
+            }
+            let mut stale = HashSet::new();
+            let mut serving = true;
+            for p in partitions {
+                match self.touch_serving(p)? {
+                    Some(found) => stale.extend(found),
+                    None => {
+                        serving = false;
+                        break;
+                    }
+                }
+            }
+            if serving && self.same_generation(generation) {
+                return Ok((stale, None));
+            }
+        }
+        Ok((HashSet::new(), Some(self.file_scan(partitions)?)))
+    }
+
+    fn touch_counted(&self, p: &Partition) -> Result<HashSet<NoteId>, MemoryError> {
         let result = self.touch_once(p);
         if let Err(e) = &result {
             self.note_index_failure(e);
@@ -268,15 +322,7 @@ impl MemoryService {
             .into_iter()
             .filter(|p| !matches!(p.health(), PartitionHealth::Quarantined(_)))
             .collect();
-        let mut found_stale: HashSet<NoteId> = HashSet::new();
-        let files = if self.index_serves() {
-            for p in &partitions {
-                found_stale.extend(self.touch(p)?);
-            }
-            None
-        } else {
-            Some(self.file_scan(&partitions)?)
-        };
+        let (found_stale, files) = self.serving_or_files(&partitions)?;
         let keys: Vec<String> = partitions
             .iter()
             .map(|p| p.partition_key().to_string())
@@ -619,16 +665,9 @@ impl MemoryService {
         }
         let resolved = self.resolve(ctx)?;
         let partitions: Vec<&Partition> = resolved.in_scope(input.scope);
-        let mut found_stale: HashSet<NoteId> = HashSet::new();
-        // While the index is rebuilt, the files answer (scale slice S6).
-        let files = if self.index_serves() {
-            for p in &partitions {
-                found_stale.extend(self.touch(p)?);
-            }
-            None
-        } else {
-            Some(self.file_scan(&partitions)?)
-        };
+        // While the index is rebuilt, the files answer (scale slice S6), and
+        // a rebuild that starts under the read is never waited out (P7).
+        let (mut found_stale, files) = self.serving_or_files(&partitions)?;
         let keys: Vec<String> = partitions
             .iter()
             .map(|p| p.partition_key().to_string())
