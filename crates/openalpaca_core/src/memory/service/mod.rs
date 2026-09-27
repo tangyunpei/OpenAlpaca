@@ -58,7 +58,8 @@ pub use in_chat::{
 pub use openalpaca_storage::memory_index::SearchOrder;
 pub use recall::{INDEX_BLOCK_HEADER, TRUST_LABEL, render_delivery, wrap_delivery};
 pub use suggestions::{
-    SUGGESTION_EXCERPT_BYTES, SUGGESTIONS_DEFAULT_LIMIT, SUGGESTIONS_MAX_LIMIT, suggestion_hidden,
+    SUGGESTION_EXCERPT_BYTES, SUGGESTIONS_DEFAULT_LIMIT, SUGGESTIONS_MAX_LIMIT, change_values,
+    suggestion_hidden,
 };
 pub use types::{
     ExtractionProvenance, ForgetInput, ForgetItem, ForgetItemStatus, ForgetOutput, Freshness,
@@ -66,7 +67,7 @@ pub use types::{
     MemoryChange, MemoryUsed, Patch, ReadInput, ReadManyInput, ReadManyItem, ReadManyOutput,
     ReadOutput, RecallBudget, RecallResult, RecalledNote, RecentlyUsedItem, Retained, RowStatus,
     SearchDetail, SearchInput, SearchOutput, SearchResultItem, StoreInput, StoreOutput, Suggestion,
-    SuggestionTarget, TimelineAnchor, TimelineInput, TimelineOutput, Timing, UpdateAction,
+    SuggestionTarget, FieldChange, NoteMetadata, TimelineAnchor, TimelineInput, TimelineOutput, Timing, UpdateAction,
     UpdateInput, UpdateOutput, UsedReason, WithdrawOutput, match_reasons,
 };
 pub use write_slot::QuiesceGuard;

@@ -67,6 +67,8 @@ interface FakeNote {
   /** How many characters the listing's cut of a text left out. */
   excerpt_left_out?: number;
   knowledge_left_out?: number;
+  /** What else a suggestion changes of its note, as the listing serves it. */
+  changes?: { field: string; from: string[]; to: string[] }[];
 }
 
 interface Recorded {
@@ -280,6 +282,7 @@ function daemon(url: URL, method: string, headers: Headers, body: unknown) {
             knowledge: n.knowledge ?? n.body,
             knowledge_left_out: n.knowledge_left_out ?? 0,
             reason: n.reason ?? null,
+            changes: n.changes ?? [],
             created_at: n.created_at,
             observed_at: n.observed_at ?? null,
             origin: n.origin,
@@ -1387,6 +1390,43 @@ describe("the Memory view", () => {
       (node) => node.textContent,
     );
   const PLANTED = /[\u202E\u200B\u2800\uFE0F\uFFFC]/;
+
+  /**
+   * The L8 close-out's A4: a suggestion that changes the note's metadata —
+   * here Alpaca's, which changes only that, so "Yours" and "New" read the
+   * same — says what changes, one row per field, each value escaped as the
+   * titles are, and the count under the card includes them.
+   */
+  it("shows what else a suggestion changes, escaped, and counts it", async () => {
+    note({ id: "n-1", title: "Editor", body: "The user edits with vim.\n" });
+    note({
+      id: "n-2",
+      title: "Editor",
+      body: "# Editor\n\nThe user edits with vim.\n",
+      knowledge: "The user edits with vim.",
+      reason: null,
+      status: "candidate",
+      origin: "extracted_user",
+      observed_at: null,
+      created_at: "2026-09-25T08:00:00Z",
+      supersedes: ["n-1"],
+      changes: [
+        { field: "aliases", from: ["vi"], to: ["vi", "hx"] },
+        { field: "tags", from: [], to: ["tools\u202E"] },
+        { field: "valid_to", from: [], to: ["2026-12-31T00:00:00Z"] },
+      ],
+    });
+    renderView();
+    const section = await screen.findByRole("region", { name: "Suggestions" });
+    expect(section.textContent).not.toMatch(PLANTED);
+    expect(section).toHaveTextContent("Aliasesvi → vi, hx");
+    expect(section).toHaveTextContent("Tagsnone → tools<U+202E>");
+    expect(section).toHaveTextContent("Valid untilnone → 2026-12-31T00:00:00Z");
+    expect(section).not.toHaveTextContent("Why");
+    expect(section).toHaveTextContent(
+      "Note: this request contains 1 hidden character, shown as <U+…>.",
+    );
+  });
 
   /**
    * A suggestion's card is where the owner decides whether learning's text

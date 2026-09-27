@@ -1329,3 +1329,66 @@ async fn forget_sends_every_id_in_one_request_and_prints_each_outcome() {
     );
     assert!(lines[2].contains("Session logs are separate."), "{lines:?}");
 }
+
+/// The L8 close-out's A4: a suggestion that changes the note's metadata —
+/// here the assistant's, which gives no reason — says so on a line under
+/// its own, each value through the one-line escape, and the count under it
+/// includes those values, as the Memory view's card and the chat preview
+/// count them.
+#[test]
+fn a_suggestions_metadata_changes_are_listed_under_it_and_counted() {
+    colored::control::set_override(false);
+    let item = serde_json::json!({
+        "id": SUGGESTION,
+        "title": "Editor",
+        "knowledge": "Helix.",
+        "reason": null,
+        "changes": [
+            { "field": "tags", "from": [], "to": ["tools\u{202e}"] },
+            { "field": "aliases", "from": ["vi"], "to": ["vi", "hx"] },
+            { "field": "valid_to", "from": [], "to": ["2026-12-31T00:00:00Z"] },
+        ],
+        "origin": "extracted_user",
+        "created_at": "2026-09-25T10:00:00Z",
+        "observed_at": null,
+        "older_count": 0,
+        "target": { "id": TARGET, "title": "Editor", "origin": "user", "excerpt": "Helix." },
+    });
+    let text = suggestions_text(&serde_json::json!({ "items": [item] }), OutputFormat::Table, false);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines[0],
+        "b1c2d3e4  replace “Editor” (saved by you) → “Editor”  suggested by the assistant, 2026-09-25"
+    );
+    assert_eq!(
+        lines[1],
+        "  changes: tags none → tools<U+202E>; aliases vi → vi, hx; valid until none → 2026-12-31T00:00:00Z"
+    );
+    assert_eq!(
+        lines[2],
+        "  Note: this request contains 1 hidden character, shown as <U+…>."
+    );
+}
+
+/// The L8 close-out's A4: `memory show` prints a note's validity bounds
+/// beside its key, aliases and tags — a suggestion that bounds a note in
+/// time differs from it there alone.
+#[test]
+fn show_prints_the_validity_bounds() {
+    colored::control::set_override(false);
+    let mut note = suggestion_read(&[TARGET]);
+    note["effective_status"] = serde_json::json!("candidate");
+    note["frontmatter"]["valid_from"] = serde_json::json!("2026-01-01T00:00:00Z");
+    note["frontmatter"]["valid_to"] = serde_json::json!("2026-12-31T00:00:00Z");
+    let text = note_text(&note, false);
+    let (head, _) = text.split_once("\n\n").unwrap();
+    assert!(
+        head.contains("valid from 2026-01-01T00:00:00Z  valid until 2026-12-31T00:00:00Z"),
+        "{head}"
+    );
+    let mut open = read_answer();
+    open["frontmatter"]["valid_to"] = serde_json::json!("2027-06-30T00:00:00Z");
+    let text = note_text(&open, false);
+    assert!(text.contains("valid until 2027-06-30T00:00:00Z"), "{text}");
+    assert!(!text.contains("valid from"), "{text}");
+}

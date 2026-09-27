@@ -10,11 +10,11 @@
 
 use super::recall::{Verified, verify};
 use super::{
-    MemoryAccessContext, MemoryError, MemoryService, Suggestion, SuggestionTarget, cut_bytes,
-    scope_of, section_of,
+    FieldChange, MemoryAccessContext, MemoryError, MemoryService, NoteMetadata, Suggestion,
+    SuggestionTarget, cut_bytes, format_ts, scope_of, section_of,
 };
 use openalpaca_storage::memory_files::{
-    EffectiveStatus, NoteId, NoteStatus, NoteView, Origin, Partition, PartitionHealth,
+    EffectiveStatus, Note, NoteId, NoteStatus, NoteView, Origin, Partition, PartitionHealth,
     knowledge_text,
 };
 use openalpaca_storage::memory_index::{CatalogNote, EffectiveStatus as IndexStatus};
@@ -178,6 +178,7 @@ fn suggestions_from_files(
             let (excerpt, excerpt_left_out) = target_excerpt(&t.note.body);
             let newest = members[0];
             let (knowledge, knowledge_left_out) = suggested_knowledge(&newest.note.body);
+            let metadata = note_metadata(&t.note);
             listed.push((
                 newest.note.updated_at,
                 Suggestion {
@@ -185,7 +186,8 @@ fn suggestions_from_files(
                     revision: newest.revision.clone(),
                     knowledge,
                     knowledge_left_out,
-                    reason: replace_reason(&newest.note.body),
+                    reason: suggestion_reason(newest.derived.origin, &newest.note),
+                    changes: metadata.changes_to(&note_metadata(&newest.note)),
                     title: newest.note.title.clone(),
                     created_at: newest.note.created_at,
                     observed_at: newest.note.observed_at,
@@ -201,6 +203,7 @@ fn suggestions_from_files(
                         excerpt_left_out,
                         origin: t.derived.origin,
                         scope: scope_of(p),
+                        metadata,
                     },
                 },
             ));
@@ -263,6 +266,7 @@ pub(super) fn verified_target(
         Origin::parse(&row.origin).unwrap_or(Origin::External)
     };
     let (excerpt, excerpt_left_out) = target_excerpt(&note.body);
+    let metadata = note_metadata(&note);
     Ok(Some(SuggestionTarget {
         id: note_id,
         revision,
@@ -271,6 +275,7 @@ pub(super) fn verified_target(
         excerpt_left_out,
         origin,
         scope: scope_of(p),
+        metadata,
     }))
 }
 
@@ -312,7 +317,8 @@ fn verified_suggestion(
         revision,
         knowledge,
         knowledge_left_out,
-        reason: replace_reason(&note.body),
+        reason: suggestion_reason(origin, &note),
+        changes: target.metadata.changes_to(&note_metadata(&note)),
         title: note.title,
         created_at: note.created_at,
         observed_at: note.observed_at,
@@ -350,19 +356,92 @@ pub(super) fn suggested_knowledge(body: &str) -> (String, usize) {
 /// suggestion's knowledge with the arguments' (`escape_hidden`). One
 /// function for the Rust surfaces; the GUI's copy is held to it by
 /// `hidden-chars.json`'s `suggestion_cases`.
+///
+/// And over every value its `changes` show, `from` and `to` (the L8
+/// close-out's A4; [`change_values`]), each with the one-line escape: an
+/// alias or a tag the card and the preview show beside the one it
+/// replaces.
 pub fn suggestion_hidden(
     target_title: &str,
     title: &str,
     reason: Option<&str>,
     excerpt: &str,
     knowledge: &str,
+    change_values: &[&str],
 ) -> usize {
     use crate::utils::text::{escape_hidden, escape_hidden_line};
     [target_title, title, reason.unwrap_or("")]
         .iter()
+        .chain(change_values)
         .map(|t| escape_hidden_line(t).hidden)
         .chain([excerpt, knowledge].iter().map(|t| escape_hidden(t).hidden))
         .sum()
+}
+
+/// Every value a suggestion's `changes` show — each change's `from`, then
+/// its `to` — for [`suggestion_hidden`].
+pub fn change_values(changes: &[FieldChange]) -> Vec<&str> {
+    changes
+        .iter()
+        .flat_map(|c| c.from.iter().chain(&c.to).map(String::as_str))
+        .collect()
+}
+
+/// A note's metadata as a suggestion's `changes` compare it
+/// ([`NoteMetadata`]). Not its kind: a classification the extractor makes
+/// afresh for each item, which a chat model's edit cannot change, and which
+/// says nothing about the user a person decides on.
+pub(super) fn note_metadata(note: &Note) -> NoteMetadata {
+    let one = |value: Option<String>| value.into_iter().collect::<Vec<_>>();
+    NoteMetadata(vec![
+        ("fact_key", one(note.fact_key.clone())),
+        ("aliases", note.aliases.clone()),
+        ("tags", note.tags.clone()),
+        ("valid_from", one(note.valid_from.map(format_ts))),
+        ("valid_to", one(note.valid_to.map(format_ts))),
+    ])
+}
+
+/// How a card or a preview names a changed field.
+pub(super) fn change_label(field: &str) -> &str {
+    match field {
+        "fact_key" => "key",
+        "valid_from" => "valid from",
+        "valid_to" => "valid until",
+        other => other,
+    }
+}
+
+/// One change as the chat preview says it: `tags work → work, travel`,
+/// `valid until none → 2026-12-31T00:00:00Z`.
+pub(super) fn change_text(change: &FieldChange) -> String {
+    let values = |v: &[String]| {
+        if v.is_empty() {
+            "none".to_string()
+        } else {
+            v.join(", ")
+        }
+    };
+    format!(
+        "{} {} → {}",
+        change_label(change.field),
+        values(&change.from),
+        values(&change.to)
+    )
+}
+
+/// Why a suggestion would replace its target, as its card and the chat
+/// preview give it: its `Replaces …` evidence sentence ([`replace_reason`])
+/// — none for the chat model's own suggestion (LQ11; origin
+/// `extracted_user` with no `observed_at`, which learning alone sets): its
+/// body may be a copy of the saved note's, whose sentence explains an
+/// earlier change, not the assistant's (the L8 close-out's A4).
+pub(crate) fn suggestion_reason(origin: Origin, note: &Note) -> Option<String> {
+    if origin == Origin::ExtractedUser && super::in_chat::by_the_assistant(note) {
+        None
+    } else {
+        replace_reason(&note.body)
+    }
 }
 
 /// `text` cut to `max` bytes on a character boundary, and how many of its
@@ -394,6 +473,25 @@ pub(crate) fn replace_reason(body: &str) -> Option<String> {
 mod tests {
     use super::suggestion_hidden;
 
+    /// Every value a case's `changes` show — each change's `from`, then its
+    /// `to` — as the wire serves them.
+    fn change_values(value: &serde_json::Value) -> Vec<&str> {
+        value
+            .as_array()
+            .expect("changes is a list")
+            .iter()
+            .flat_map(|c| {
+                ["from", "to"].into_iter().flat_map(move |side| {
+                    c[side]
+                        .as_array()
+                        .expect("a change's values are a list")
+                        .iter()
+                        .map(|v| v.as_str().expect("a value is a string"))
+                })
+            })
+            .collect()
+    }
+
     /// The GUI's Suggestions card counts one suggestion with its own copy of
     /// [`suggestion_hidden`]; both are held to `hidden-chars.json`'s
     /// `suggestion_cases`, whose fields tell the two escapes apart: each
@@ -422,6 +520,7 @@ mod tests {
                     case["reason"].as_str(),
                     field("excerpt"),
                     field("knowledge"),
+                    &change_values(&case["changes"]),
                 ),
                 case["hidden"].as_u64().expect("hidden") as usize,
                 "{case}"

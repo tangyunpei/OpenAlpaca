@@ -139,6 +139,29 @@ export function suggestionWhence(
   }
 }
 
+/** How a suggestion's card names a metadata field it changes (the L8 close-out's A4). */
+export function changeLabel(field: string): string {
+  switch (field) {
+    case "fact_key":
+      return "Key";
+    case "aliases":
+      return "Aliases";
+    case "tags":
+      return "Tags";
+    case "valid_from":
+      return "Valid from";
+    case "valid_to":
+      return "Valid until";
+    default:
+      return field;
+  }
+}
+
+/** One side of a change as its card shows it: the values, or “none”. */
+export function changeValues(values: readonly string[]): string {
+  return values.length === 0 ? "none" : values.join(", ");
+}
+
 /** The toast after Replace — the old note stays, as history (design 09 §3.3). */
 export function replacedToast(target: string): string {
   return `Replaced — “${target}” is kept as history`;

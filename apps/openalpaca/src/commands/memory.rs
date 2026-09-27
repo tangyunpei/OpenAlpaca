@@ -929,10 +929,10 @@ fn escape_line(value: &Value) -> openalpaca_core::utils::text::Escaped {
     escape_hidden_line(value.as_str().unwrap_or(""))
 }
 
-/// How many hidden characters one suggestion holds: the two titles and the
-/// reason its line shows, and both notes' texts, which it does not — core's
-/// one count, which the Memory view's Suggestions card and the chat
-/// preview read too.
+/// How many hidden characters one suggestion holds: the two titles, the
+/// reason and the changed values its lines show, and both notes' texts,
+/// which they do not — core's one count, which the Memory view's
+/// Suggestions card and the chat preview read too.
 fn suggestion_hidden(item: &Value) -> usize {
     let text = |value: &Value| value.as_str().unwrap_or("").to_string();
     openalpaca_core::memory::service::suggestion_hidden(
@@ -941,7 +941,62 @@ fn suggestion_hidden(item: &Value) -> usize {
         item["reason"].as_str(),
         &text(&item["target"]["excerpt"]),
         &text(&item["knowledge"]),
+        &change_values(item),
     )
+}
+
+/// Every value a suggestion's `changes` show — each change's `from`, then
+/// its `to` — as core counts them.
+fn change_values(item: &Value) -> Vec<&str> {
+    item["changes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|c| {
+            ["from", "to"].into_iter().flat_map(move |side| {
+                c[side]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+            })
+        })
+        .collect()
+}
+
+/// The line under a suggestion's that says what else it changes of the
+/// note (the L8 close-out's A4) — `changes: tags none → tools; valid until
+/// none → 2026-12-31T00:00:00Z` — each value through the one-line escape,
+/// as the titles are. `None` when it changes only the title or the text.
+pub(crate) fn suggestion_changes_line(item: &Value) -> Option<String> {
+    let changes: Vec<String> = item["changes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| {
+            let values = |side: &str| {
+                let listed: Vec<String> = c[side]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|v| escape_line(v).text)
+                    .collect();
+                if listed.is_empty() {
+                    "none".to_string()
+                } else {
+                    listed.join(", ")
+                }
+            };
+            let label = match c["field"].as_str().unwrap_or("") {
+                "fact_key" => "key",
+                "valid_from" => "valid from",
+                "valid_to" => "valid until",
+                other => other,
+            };
+            format!("{} {} → {}", escape_hidden_line(label).text, values("from"), values("to"))
+        })
+        .collect();
+    (!changes.is_empty()).then(|| format!("  changes: {}", changes.join("; ")))
 }
 
 /// Under the lines, once, when any suggestion was counted: its notice counts
@@ -959,8 +1014,10 @@ const SUGGESTION_COUNTS_UNPRINTED: &str = "Each count includes both notes' texts
 /// machine format. The list: on a terminal first
 /// [`crate::output::TERMINAL_RESET`], as before an approval prompt — this
 /// is what a person reads before `memory confirm <id>` — then each
-/// [`suggestion_line`] and, directly under one that holds any hidden
-/// character, the notice counting them ([`suggestion_hidden`]).
+/// [`suggestion_line`], the line saying what else it changes when it
+/// changes the note's metadata ([`suggestion_changes_line`]) and, directly
+/// under one that holds any hidden character, the notice counting them
+/// ([`suggestion_hidden`]).
 pub(crate) fn suggestions_text(page: &Value, format: OutputFormat, tty: bool) -> String {
     use std::fmt::Write as _;
 
@@ -983,6 +1040,9 @@ pub(crate) fn suggestions_text(page: &Value, format: OutputFormat, tty: bool) ->
     let mut counted = false;
     for item in &items {
         let _ = writeln!(out, "{}", suggestion_line(item));
+        if let Some(changes) = suggestion_changes_line(item) {
+            let _ = writeln!(out, "{changes}");
+        }
         if let Some(notice) = hidden_notice(suggestion_hidden(item)) {
             let _ = writeln!(out, "  {}", notice.yellow());
             counted = true;
@@ -1966,6 +2026,8 @@ fn note_text(note: &Value, tty: bool) -> String {
     let aliases: Vec<String> = strings("aliases").iter().map(|a| field(a)).collect();
     let tags: Vec<String> = strings("tags").iter().map(|t| field(t)).collect();
     let fact_key = fm["fact_key"].as_str().map(&mut field);
+    let valid_from = fm["valid_from"].as_str().map(&mut field);
+    let valid_to = fm["valid_to"].as_str().map(&mut field);
     let supersedes: Vec<String> = strings("supersedes").iter().map(|s| field(s)).collect();
     let raw_body = note["body"].as_str().unwrap_or("");
     let body = if deciding {
@@ -2004,6 +2066,14 @@ fn note_text(note: &Value, tty: bool) -> String {
     }
     if !tags.is_empty() {
         facts.push(format!("tags {}", tags.join(", ")));
+    }
+    // A suggestion that bounds a note in time differs from it here alone
+    // (the L8 close-out's A4).
+    if let Some(from) = valid_from {
+        facts.push(format!("valid from {from}"));
+    }
+    if let Some(to) = valid_to {
+        facts.push(format!("valid until {to}"));
     }
     if fm["pinned"].as_bool().unwrap_or(false) {
         facts.push("pinned".into());

@@ -4752,6 +4752,9 @@ fn learned_change(
                 ),
                 kind: Some(NoteKind::Fact),
                 sources,
+                // As learning stamps every note it writes (§2.5; LQ14's
+                // datum, which tells its suggestions from the chat model's).
+                observed_at: Some(chrono::Utc::now()),
                 supersedes: Some((target.id, target.revision.clone())),
                 replace_policy: ReplacePolicy::SuggestUnlessLearned,
                 provenance: Some(ExtractionProvenance::UserWords),

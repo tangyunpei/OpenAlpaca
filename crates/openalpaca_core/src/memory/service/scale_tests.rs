@@ -1473,6 +1473,9 @@ fn the_reads_a_model_or_a_person_waits_on_answer_at_once_while_the_index_is_rebu
                 body: "# Commute\n\n## Knowledge\nThe user cycles to work.\n".into(),
                 kind: Some(NoteKind::Fact),
                 fact_key: Some("user.commute".into()),
+                // What else it changes is listed too (the L8 close-out's A4).
+                aliases: vec!["bike".into()],
+                tags: vec!["travel".into()],
                 sources: vec![message(said)],
                 observed_at: Some(Utc::now()),
                 supersedes: Some((saved.id, saved.revision.clone())),
@@ -1498,6 +1501,10 @@ fn the_reads_a_model_or_a_person_waits_on_answer_at_once_while_the_index_is_rebu
         )
         .unwrap();
     let from_the_index = format!("{:?}", service.suggestions(&user, None).unwrap());
+    assert!(
+        from_the_index.contains(r#"FieldChange { field: "aliases", from: [], to: ["bike"] }"#),
+        "{from_the_index}"
+    );
 
     let (hold, rebuild) = start_held_rebuild(&service);
     let (sent, answered) = std::sync::mpsc::channel();

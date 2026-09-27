@@ -230,6 +230,44 @@ pub struct SuggestionTarget {
     pub excerpt_left_out: usize,
     pub origin: Origin,
     pub scope: NoteScope,
+    /// Its metadata, which the suggestion's `changes` are read against (not
+    /// served on its own).
+    pub metadata: NoteMetadata,
+}
+
+/// A note's metadata a suggestion can change besides its title and text,
+/// field by field in a fixed order — `fact_key`, `aliases`, `tags`,
+/// `valid_from`, `valid_to` — each as the values a card shows: a list's
+/// items, the key or the bound; none is empty (the L8 close-out's A4).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NoteMetadata(pub Vec<(&'static str, Vec<String>)>);
+
+/// One field of that metadata a suggestion changes: the replaced note's
+/// values and the suggestion's (`GET /v1/memories/suggestions`'
+/// `changes`; the L8 close-out's A4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldChange {
+    /// `fact_key`, `aliases`, `tags`, `valid_from` or `valid_to`.
+    pub field: &'static str,
+    pub from: Vec<String>,
+    pub to: Vec<String>,
+}
+
+impl NoteMetadata {
+    /// The fields whose values differ from `other`'s, in order: what a
+    /// suggestion with metadata `other` changes of the note with this.
+    pub fn changes_to(&self, other: &NoteMetadata) -> Vec<FieldChange> {
+        self.0
+            .iter()
+            .zip(&other.0)
+            .filter(|((_, from), (_, to))| from != to)
+            .map(|((field, from), (_, to))| FieldChange {
+                field,
+                from: from.clone(),
+                to: to.clone(),
+            })
+            .collect()
+    }
 }
 
 /// One pending suggestion (`GET /v1/memories/suggestions`, design 09
@@ -248,8 +286,13 @@ pub struct Suggestion {
     /// `knowledge` is the whole of it.
     pub knowledge_left_out: usize,
     /// Why it replaces the target, from its `Replaces …` evidence sentence
-    /// (§2.6); `None` when the note carries none.
+    /// (§2.6); `None` when the note carries none, and for the chat model's
+    /// own suggestion, whose body may copy its target's with that note's
+    /// old sentence (the L8 close-out's A4).
     pub reason: Option<String>,
+    /// What else it changes of the target: each metadata field whose values
+    /// differ, empty when only the title or the text do.
+    pub changes: Vec<FieldChange>,
     pub created_at: DateTime<Utc>,
     /// When the evidence was observed: the newest cited row's time.
     pub observed_at: Option<DateTime<Utc>>,

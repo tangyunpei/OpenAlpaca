@@ -21,10 +21,17 @@
  *
  * **Hidden characters** (`lib/hidden-chars`). The row is where the owner
  * decides, and every text on it came from a file or from the model — the two
- * titles, both texts and the reason — so each hidden character in them is a
- * highlighted `<U+XXXX>`, never drawn raw (the titles and the one-line reason
- * take the one-line escape, the texts the arguments' one), and one line
- * under the texts counts them in the words every approval surface uses.
+ * titles, both texts, the reason and the values of what else it changes —
+ * so each hidden character in them is a highlighted `<U+XXXX>`, never drawn
+ * raw (the titles, the one-line reason and each changed value take the
+ * one-line escape, the texts the arguments' one), and one line under the
+ * texts counts them in the words every approval surface uses.
+ *
+ * **What else changes** (the L8 close-out's A4). A suggestion that changes
+ * the note's key, aliases, tags or validity says so, one row per field —
+ * the note's values, then the suggestion's — or a change of metadata alone
+ * would read as two identical texts. Alpaca's own suggestion carries no
+ * "Why": its text may copy the note's, whose reason is that note's.
  * Display only: Replace and Keep mine answer the notes by id and revision,
  * as read.
  *
@@ -44,6 +51,8 @@ import {
 } from "@/lib/hidden-chars";
 
 import {
+  changeLabel,
+  changeValues,
   savedByAlpaca,
   suggestionWhence,
   targetOriginLabel,
@@ -109,7 +118,8 @@ function SuggestionRow({
   const excerpt = escapeHidden(item.target.excerpt);
   const knowledge = escapeHidden(item.knowledge);
   const reason = item.reason === null ? null : escapeHiddenLine(item.reason);
-  const notice = hiddenNotice(suggestionHidden(item));
+  const changes = item.changes ?? [];
+  const notice = hiddenNotice(suggestionHidden({ ...item, changes }));
   return (
     <li className="min-w-0 text-base leading-[1.5] wrap-anywhere text-amber-ink">
       {/* Design 09 §3.5: “Replace “X” (saved by you) with “B”?” */}
@@ -136,6 +146,9 @@ function SuggestionRow({
           <EscapedText escaped={knowledge} />
           <CutNote leftOut={item.knowledge_left_out} />
         </dd>
+        {changes.map((change) => (
+          <ChangeRow key={change.field} change={change} />
+        ))}
         {reason !== null && (
           <>
             <dt className="font-mono text-2xs-plus text-muted-fg">Why</dt>
@@ -176,6 +189,31 @@ function SuggestionRow({
         </Button>
       </div>
     </li>
+  );
+}
+
+/**
+ * One metadata field the suggestion changes: its label, the note's values,
+ * then the suggestion's — each value through the one-line escape, as the
+ * titles are (the L8 close-out's A4). A change of metadata alone would
+ * otherwise show two identical texts.
+ */
+function ChangeRow({
+  change,
+}: {
+  change: MemorySuggestion["changes"][number];
+}) {
+  const from = escapeHiddenLine(changeValues(change.from));
+  const to = escapeHiddenLine(changeValues(change.to));
+  return (
+    <>
+      <dt className="font-mono text-2xs-plus text-muted-fg">
+        {changeLabel(change.field)}
+      </dt>
+      <dd className="m-0 min-w-0 break-words text-ink">
+        <EscapedText escaped={from} /> → <EscapedText escaped={to} />
+      </dd>
+    </>
   );
 }
 

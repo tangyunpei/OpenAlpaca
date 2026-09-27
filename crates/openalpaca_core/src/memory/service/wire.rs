@@ -256,7 +256,11 @@ pub fn withdraw_output_json(out: &WithdrawOutput) -> Value {
     })
 }
 
-/// `GET /v1/memories/suggestions` (design 09 §3.5).
+/// `GET /v1/memories/suggestions` (design 09 §3.5). `changes` lists each
+/// metadata field the suggestion changes of its target — `{field, from,
+/// to}`, the values as lists, empty for none — in the fixed order
+/// `fact_key`, `aliases`, `tags`, `valid_from`, `valid_to` (the L8
+/// close-out's A4).
 pub fn suggestions_json(items: &[Suggestion]) -> Value {
     json!({
         "items": items
@@ -268,6 +272,11 @@ pub fn suggestions_json(items: &[Suggestion]) -> Value {
                 "knowledge": i.knowledge,
                 "knowledge_left_out": i.knowledge_left_out,
                 "reason": i.reason,
+                "changes": i
+                    .changes
+                    .iter()
+                    .map(|c| json!({ "field": c.field, "from": c.from, "to": c.to }))
+                    .collect::<Vec<_>>(),
                 "created_at": format_ts(i.created_at),
                 "observed_at": i.observed_at.map(format_ts),
                 "origin": i.origin.as_str(),

@@ -3164,3 +3164,101 @@ fn neither_writer_says_a_plain_search_supplies_the_revision() {
         }
     }
 }
+
+/// The L8 close-out's A4: a suggestion that changes the note's metadata
+/// says so on its own line — here past its budget — and the bound still
+/// holds at the worst case: the replaced note edited by hand, every other
+/// field past its budget and a two-digit count, which includes the hidden
+/// characters of the changed values the line cuts off. The texts give up
+/// the line's bytes, so no cut reaches the date, the last line or the count.
+#[tokio::test]
+async fn the_preview_keeps_its_tail_with_a_changes_line_at_its_worst_case() {
+    use sha2::Digest;
+    let h = Harness::new();
+    let tool = MemoryConfirmTool::new(h.service.clone());
+    let long = "word ".repeat(2000);
+    let reason = format!("the user said so {}", "r".repeat(200));
+    let row = typed_row(&h, "Replace it.", "2026-09-24 10:00:00");
+    for hidden in [10, 0] {
+        let target = h.user_note(
+            ALICE,
+            &format!("A very long title {}", "x".repeat(150)),
+            &format!("# Long\n\n## Knowledge\n{long}\n"),
+        );
+        let mut aliases: Vec<String> = (0..8)
+            .map(|i| format!("alias number {i} {}", "a".repeat(40)))
+            .collect();
+        aliases[7].push_str(&"\u{200b}".repeat(hidden));
+        let title = format!("Another long title {}", "y".repeat(150));
+        let s = h
+            .service
+            .store(
+                &h.extraction_ctx(ALICE),
+                crate::memory::service::StoreInput {
+                    title: title.clone(),
+                    body: format!(
+                        "# {title}\n\n## Knowledge\n{long}\n\n## Evidence and limits\nFrom what you said. Replaces “{title}” (saved by you): {reason}\n"
+                    ),
+                    kind: Some(NoteKind::Fact),
+                    aliases,
+                    tags: vec!["travel".into(), "home".into()],
+                    valid_to: Some(ts("2027-01-01T00:00:00Z")),
+                    sources: vec![message(row)],
+                    observed_at: Some(ts("2026-09-24T10:00:00Z")),
+                    supersedes: Some((target.0, target.1.clone())),
+                    replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                    provenance: Some(crate::memory::service::ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(s.suggestion);
+        let file = file_for(&h.notes_dir(ALICE_KEY), &target.0.to_string()).unwrap();
+        let text = String::from_utf8(fs::read(&file).unwrap())
+            .unwrap()
+            .replacen("## Knowledge\nword", "## Knowledge\nWord", 1);
+        fs::write(&file, text.as_bytes()).unwrap();
+        let revision = format!("{:x}", sha2::Sha256::digest(text.as_bytes()));
+        let preview = tool
+            .confirmation_preview(
+                &serde_json::json!({"id": s.id.to_string(), "expected_revision": s.revision, "target_revision": revision}),
+                &h.tool_ctx(ALICE),
+            )
+            .await
+            .unwrap()
+            .expect("a preview");
+        assert!(
+            preview.len() <= crate::memory::service::PREVIEW_MAX_BYTES,
+            "{} bytes",
+            preview.len()
+        );
+        let lines: Vec<&str> = preview.lines().collect();
+        assert!(
+            lines[0].starts_with("Replace your note (edited by hand) “A very long title xxx"),
+            "{preview}"
+        );
+        assert!(
+            lines[3].starts_with("Changes: aliases none → alias number 0 aaa")
+                && lines[3].ends_with('…'),
+            "{preview}"
+        );
+        assert!(
+            lines[4].ends_with("r… (from what you said on 2026-09-24)"),
+            "{preview}"
+        );
+        assert_eq!(
+            lines[5], "Your note is kept as history in the Memory view.",
+            "{preview}"
+        );
+        if hidden == 0 {
+            assert_eq!(lines.len(), 6, "{preview}");
+        } else {
+            assert_eq!(lines.len(), 7, "{preview}");
+            assert_eq!(
+                lines[6],
+                "This preview leaves out 10 hidden characters; the Memory view shows them as <U+…>.",
+                "{preview}"
+            );
+        }
+    }
+}

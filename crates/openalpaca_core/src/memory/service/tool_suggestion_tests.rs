@@ -1506,3 +1506,93 @@ fn the_edit_suggestion_keeps_every_row_the_saved_note_cites_at_the_cap() {
         );
     }
 }
+
+/// Close-out A4: the assistant's edit suggestion copies the saved note's
+/// body — here with learning's evidence sentence from an earlier change —
+/// so its card and the chat preview gave that old sentence as the "Why" of
+/// the assistant's change, and a change of metadata alone showed nowhere:
+/// "Yours" and "New" read the same. The assistant's suggestion gives no
+/// reason of its body's, and the preview says what else changes.
+#[test]
+fn the_assistants_metadata_edit_shows_what_changes_and_no_borrowed_reason() {
+    let h = Harness::new();
+    let (said, _) = chat_turn(&h, "I edit with Helix since June.", None);
+    let editor = h
+        .service
+        .store(
+            &h.user(ALICE, None),
+            StoreInput {
+                title: "Editor".into(),
+                body: "# Editor\n\n## Knowledge\nSince June the user edits with Helix.\n\n\
+                       ## Evidence and limits\nFrom what you said on 2026-06-14. Replaces \
+                       “Editor” (saved by you): The user said they switched from vim to Helix \
+                       in June.\n"
+                    .into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("user.editor".into()),
+                sources: vec![message(said)],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let (_, tool) = chat_turn(&h, "Tag my editor note as tools, until the end of 2026.", None);
+    let out = h
+        .service
+        .update(
+            &tool,
+            UpdateInput {
+                id: editor.id,
+                expected_revision: editor.revision.clone(),
+                action: UpdateAction::Edit(Patch {
+                    tags: Some(vec!["tools".into()]),
+                    valid_to: Some(Some(instant("2026-12-31T00:00:00Z"))),
+                    ..Default::default()
+                }),
+                reason: Some("the user asked for a tag".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(out.suggested_for, Some(editor.id));
+    let listed = h.service.suggestions(&h.user(ALICE, None), None).unwrap();
+    let [suggestion] = &listed[..] else {
+        panic!("one suggestion: {listed:?}");
+    };
+    assert_eq!(suggestion.reason, None, "not the copied note's old reason");
+    assert_eq!(
+        suggestion.changes,
+        vec![
+            FieldChange {
+                field: "tags",
+                from: vec![],
+                to: vec!["tools".into()],
+            },
+            FieldChange {
+                field: "valid_to",
+                from: vec![],
+                to: vec!["2026-12-31T00:00:00Z".into()],
+            },
+        ]
+    );
+    assert_eq!(
+        wire::suggestions_json(&listed)["items"][0]["changes"],
+        serde_json::json!([
+            { "field": "tags", "from": [], "to": ["tools"] },
+            { "field": "valid_to", "from": [], "to": ["2026-12-31T00:00:00Z"] },
+        ])
+    );
+    let preview = h
+        .service
+        .suggestion_preview(&tool, out.id, &out.revision, &editor.revision)
+        .unwrap()
+        .text;
+    assert!(!preview.contains("vim to Helix"), "{preview}");
+    assert!(
+        preview.contains("\nChanges: tags none → tools; valid until none → 2026-12-31T00:00:00Z\n"),
+        "{preview}"
+    );
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    assert!(
+        preview.contains(&format!("\nSuggested by the assistant on {today}.\n")),
+        "{preview}"
+    );
+}

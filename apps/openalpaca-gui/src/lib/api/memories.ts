@@ -229,6 +229,17 @@ export interface MemorySuggestionTarget {
   scope: NoteScope;
 }
 
+/**
+ * One metadata field a suggestion changes of the note it names (the L8
+ * close-out's A4): the note's values and the suggestion's — a list's items,
+ * the key or a bound; empty for none.
+ */
+export interface MemorySuggestionChange {
+  field: "fact_key" | "aliases" | "tags" | "valid_from" | "valid_to" | string;
+  from: string[];
+  to: string[];
+}
+
 /** One pending suggestion — `GET /v1/memories/suggestions` (design 09 §3.5). */
 export interface MemorySuggestion {
   id: string;
@@ -238,8 +249,10 @@ export interface MemorySuggestion {
   knowledge: string;
   /** How many characters that cut left out; 0 when whole. */
   knowledge_left_out: number;
-  /** Why it replaces the target, when the note says. */
+  /** Why it replaces the target, when the note says; none for Alpaca's own. */
   reason: string | null;
+  /** What else it changes of the target, in a fixed order; empty for none. */
+  changes: MemorySuggestionChange[];
   created_at: string;
   /** When what it cites was said: the newest cited row's time. */
   observed_at: string | null;

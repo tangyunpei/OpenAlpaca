@@ -42,6 +42,16 @@ const PREVIEW_TEXT_BYTES: usize = 260;
 /// out keeps [`PREVIEW_TEXT_BYTES`], byte for byte as before the line.
 const PREVIEW_TEXT_BYTES_UNDER_COUNT: usize = 216;
 const PREVIEW_REASON_BYTES: usize = 160;
+/// The changes line's budget (the L8 close-out's A4): what else the
+/// suggestion changes of the note, `Changes: tags none → tools; …`.
+const PREVIEW_CHANGES_BYTES: usize = 160;
+/// What each text gives up when the preview carries the changes line —
+/// half of the line's most, 173 bytes ("Changes: ", the cut list, "…" and
+/// its line break) — so the bound the fields' budgets keep holds with it
+/// (the worst case, a learned suggestion's with the count line, is
+/// `the_preview_keeps_its_tail_at_its_worst_case`); a preview with no
+/// change keeps its texts' budgets byte for byte.
+const PREVIEW_CHANGES_TEXT_COST: usize = 87;
 
 /// At most this many suggestions are re-read for one `<memory_suggestions>`
 /// block (design 09 §4.5).
@@ -606,9 +616,12 @@ fn one_line_of(text: &str, served_cut: bool, max: usize) -> String {
 ///
 /// It quotes the fields the Memory view's Suggestions card serves — both
 /// titles, the reason, the replaced note's text as its excerpt
-/// ([`super::suggestions::target_excerpt`]) and the suggestion's as its
-/// knowledge ([`super::suggestions::suggested_knowledge`]) — so every
-/// character it drops is one that card shows escaped.
+/// ([`super::suggestions::target_excerpt`]), the suggestion's as its
+/// knowledge ([`super::suggestions::suggested_knowledge`]) and what else it
+/// changes ([`super::suggestions::note_metadata`], a `Changes:` line after
+/// the texts; the L8 close-out's A4) — so every character it drops is one
+/// that card shows escaped. The assistant's own suggestion gives no reason:
+/// its body may copy the saved note's, whose reason is that note's.
 ///
 /// Its fields drop every character an approval's escape would show
 /// ([`one_line`]), and when any was dropped one last line says how many and
@@ -631,22 +644,49 @@ fn render_preview(
         Origin::Imported => ("your imported note", "Yours", "Your note is kept"),
         _ => ("the note", "Current", "The current note is kept"),
     };
-    let raw_reason = super::suggestions::replace_reason(&suggestion.body);
+    // The assistant's own suggestion gives no reason of its body's: that
+    // may be a copy of the saved note's, whose sentence explains an earlier
+    // change (the L8 close-out's A4).
+    let raw_reason = if by_assistant {
+        None
+    } else {
+        super::suggestions::replace_reason(&suggestion.body)
+    };
     let (target_text, target_left_out) = super::suggestions::target_excerpt(&target.note.body);
     let (suggested_text, suggested_left_out) =
         super::suggestions::suggested_knowledge(&suggestion.body);
     let (target_cut, suggested_cut) = (target_left_out > 0, suggested_left_out > 0);
+    let changes = super::suggestions::note_metadata(&target.note)
+        .changes_to(&super::suggestions::note_metadata(suggestion));
     let left_out = left_out_line(super::suggestions::suggestion_hidden(
         &target.note.title,
         &suggestion.title,
         raw_reason.as_deref(),
         &target_text,
         &suggested_text,
+        &super::suggestions::change_values(&changes),
     ));
     let reason = raw_reason.map(|r| one_line(&r, PREVIEW_REASON_BYTES));
     let text_bytes = match left_out {
         None => PREVIEW_TEXT_BYTES,
         Some(_) => PREVIEW_TEXT_BYTES_UNDER_COUNT,
+    };
+    // What else it changes — a change of metadata alone would otherwise read
+    // as two identical texts.
+    let (changes_line, text_bytes) = if changes.is_empty() {
+        (String::new(), text_bytes)
+    } else {
+        let listed: Vec<String> = changes
+            .iter()
+            .map(super::suggestions::change_text)
+            .collect();
+        (
+            format!(
+                "\nChanges: {}",
+                one_line(&listed.join("; "), PREVIEW_CHANGES_BYTES)
+            ),
+            text_bytes - PREVIEW_CHANGES_TEXT_COST,
+        )
     };
     let when = whence(by_assistant, said_on);
     let why = match reason {
@@ -654,7 +694,7 @@ fn render_preview(
         None => format!("{}{}.", when[..1].to_uppercase(), &when[1..]),
     };
     let text = format!(
-        "Replace {named} “{}” with “{}”?\n{label}: {}\nNew: {}\n{why}\n{kept} as history in the Memory view.",
+        "Replace {named} “{}” with “{}”?\n{label}: {}\nNew: {}{changes_line}\n{why}\n{kept} as history in the Memory view.",
         one_line(&target.note.title, PREVIEW_TITLE_BYTES),
         one_line(&suggestion.title, PREVIEW_TITLE_BYTES),
         one_line_of(&target_text, target_cut, text_bytes),
@@ -672,9 +712,9 @@ fn render_preview(
 /// The preview's last line when its fields dropped anything an approval's
 /// escape shows, or `None`: how many characters, counted by
 /// [`super::suggestions::suggestion_hidden`] over the same five fields as
-/// the daemon serves them — the count the Memory view's Suggestions card
-/// and `openalpaca memory suggestions` show — not only the part the
-/// preview's byte budget kept. That card shows each of them as
+/// the daemon serves them, and the values its changes show — the count the
+/// Memory view's Suggestions card and `openalpaca memory suggestions` show
+/// — not only the part the preview's byte budget kept. That card shows each of them as
 /// `<U+XXXX>`, so the three read one number. The counterpart of an
 /// approval's notice for a text that drops: it keeps R2's drop (spec item
 /// 4) and tells the person what the drop left out and where it is (A6,

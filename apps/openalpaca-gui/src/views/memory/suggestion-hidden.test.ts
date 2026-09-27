@@ -22,6 +22,7 @@ describe("suggestionHidden — the shared table's suggestion cases", () => {
           title: c.title,
           reason: c.reason,
           knowledge: c.knowledge,
+          changes: c.changes,
           target: { title: c.target_title, excerpt: c.excerpt },
         }),
       ).toBe(c.hidden);
