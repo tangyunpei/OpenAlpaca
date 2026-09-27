@@ -975,7 +975,9 @@ impl MemoryIndex {
     /// learning's `known_keys` (design 09 §2.3 step 4), read from the
     /// catalog rather than a partition parse. A conversation summary holds
     /// no key for learning (design 09 §13.3): one a model's edit put on it
-    /// is not listed.
+    /// is not listed. Nor does a note only the chat model wrote (owner
+    /// decision LQ14, [`LEARNING_KEY_HOLDER`]): a key only such notes hold is
+    /// not listed, and one a learned or saved note also holds is.
     pub fn fact_keys(&self, partition_keys: &[String], limit: usize) -> Result<Vec<String>> {
         if partition_keys.is_empty() || limit == 0 {
             return Ok(Vec::new());
@@ -986,7 +988,7 @@ impl MemoryIndex {
             "SELECT fact_key, MAX(updated_at) AS newest FROM note
              WHERE partition_key IN ({}) AND effective_status = 'active'
                AND fact_key IS NOT NULL
-               AND NOT (kind = 'episode' AND origin = 'extracted_other')
+               AND {LEARNING_KEY_HOLDER}
              GROUP BY fact_key
              ORDER BY newest DESC, fact_key ASC
              LIMIT ?{limit_param}",
@@ -1096,7 +1098,9 @@ impl MemoryIndex {
     /// same-key loser. Derivation leaves at most one such note per key and
     /// partition. A conversation summary is never learning's target (design
     /// 09 §13.3): a key only a summary holds — a model's edit put it there —
-    /// has no winner here.
+    /// has no winner here; nor has a key only notes the chat model wrote hold
+    /// (owner decision LQ14, [`LEARNING_KEY_HOLDER`]). A key a learned or a
+    /// saved note also holds has its winner, whoever wrote that.
     pub fn fact_key_winner(
         &self,
         partition_key: &str,
@@ -1109,6 +1113,10 @@ impl MemoryIndex {
                  WHERE n.partition_key = ?1 AND n.fact_key = ?2
                    AND n.effective_status = 'active' AND n.same_key_loser = 0
                    AND NOT (n.kind = 'episode' AND n.origin = 'extracted_other')
+                   AND EXISTS (SELECT 1 FROM note
+                               WHERE partition_key = ?1 AND fact_key = ?2
+                                 AND effective_status = 'active'
+                                 AND {LEARNING_KEY_HOLDER})
                  ORDER BY n.updated_at DESC, n.id ASC
                  LIMIT 1"
             ),
@@ -1119,6 +1127,20 @@ impl MemoryIndex {
         .map_err(IndexError::from)
     }
 }
+
+/// A note whose `fact_key` background learning is offered (owner decision
+/// LQ14, 2026-09-26), as an SQL condition on a `note` row: any effectively
+/// active note but a conversation summary (design 09 §13.3) and a note only
+/// the chat model's `memory_store` wrote. That note is origin
+/// `extracted_user` with no `observed_at`: `observed_at` is set by the
+/// extractor alone — the service refuses it on every other surface, and an
+/// edit's patch cannot carry it — and every note the extractor writes from
+/// the user's words has one, the time of its newest cited row. So a key the
+/// chat model coined, and only it holds, is not offered to the extractor to
+/// reuse or to replace by; a key learning or the user also holds still is.
+/// The note itself stays searched, recalled and listed.
+pub const LEARNING_KEY_HOLDER: &str = "NOT (kind = 'episode' AND origin = 'extracted_other') \
+     AND NOT (origin = 'extracted_user' AND observed_at IS NULL)";
 
 /// The facts a note's row was built from, as the row holds them (scale
 /// slice S1): what a caller compares with the note on disk to decide

@@ -4136,6 +4136,10 @@ fn learned(
                     id: message.to_string(),
                     observed_at: None,
                 }],
+                // What the extractor stamps on every note it learns (design
+                // 09 §2.5), and what tells it from one the chat model's
+                // `memory_store` wrote (owner decision LQ14).
+                observed_at: Some("2026-09-01T09:00:00Z".parse().unwrap()),
                 provenance: Some(provenance),
                 ..Default::default()
             },
@@ -4218,6 +4222,82 @@ fn learning_view_finds_this_windows_candidates_through_note_source() {
     assert_eq!(view.notes[0].knowledge, "The user edits with vim.");
     assert_eq!(view.notes[0].fact_key.as_deref(), Some("user.editor"));
     assert_eq!(view.keys, vec!["user.editor".to_string()]);
+}
+
+/// Owner decision LQ14 (the L8 product slice's P2): a `fact_key` only the
+/// chat model's `memory_store` coined is not offered to the extractor — not
+/// among `known_keys`, not a key's target, and not on its note's line — while
+/// the note itself stays found and listed. Once a note learning wrote holds
+/// the same key, the key is offered and has its target again.
+#[test]
+fn a_key_only_the_chat_model_coined_is_withheld_from_learning() {
+    let h = Harness::new();
+    let tool = h.tool(ALICE, None);
+    let extraction = h
+        .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap();
+    let coined = h
+        .service
+        .store(
+            &tool,
+            StoreInput {
+                title: "Editor preference".into(),
+                body: "# Editor preference\n\nThe user edits with helix now.\n".into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("editor.preference".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let keys = ["editor.preference".to_string()];
+    let view = h
+        .service
+        .learning_view(&extraction, &["which editor, helix".to_string()], &[])
+        .unwrap();
+    assert!(view.keys.is_empty(), "{:?}", view.keys);
+    let listed = view
+        .notes
+        .iter()
+        .find(|n| n.id == coined.id)
+        .expect("the chat model's note is still a known note");
+    assert_eq!(listed.fact_key, None, "its key is not on its line");
+    assert!(
+        h.service
+            .learning_key_targets(&extraction, &keys)
+            .unwrap()
+            .is_empty()
+    );
+
+    // Learning uses the same key: it is offered, with its target.
+    let row = h.message_row("I switched my editor to helix.");
+    h.service
+        .store(
+            &extraction,
+            StoreInput {
+                title: "Editor".into(),
+                body: "# Editor\n\n## Knowledge\nThe user edits with helix.\n".into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("editor.preference".into()),
+                sources: vec![NoteSource {
+                    kind: SourceType::Message,
+                    id: row.to_string(),
+                    observed_at: None,
+                }],
+                observed_at: Some("2026-09-25T10:00:00Z".parse().unwrap()),
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let view = h.service.learning_view(&extraction, &[], &[]).unwrap();
+    assert_eq!(view.keys, keys.to_vec());
+    assert_eq!(
+        h.service
+            .learning_key_targets(&extraction, &keys)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// Background learning's reads are its own: every other surface is

@@ -189,7 +189,10 @@ impl MemoryService {
     ///    come first; at most 20 are returned.
     /// 4. **Keys**: the 150 most recently updated distinct `fact_key`s of
     ///    effectively active notes other than a conversation summary, from
-    ///    the index.
+    ///    the index — and, owner decision LQ14, other than a note only the
+    ///    chat model's `memory_store` wrote (`LEARNING_KEY_HOLDER`): a key
+    ///    only such notes hold is not offered, and such a note is listed
+    ///    with no key on its line.
     ///
     /// Every returned note is re-read and re-hashed first; one that changed
     /// behind the service's back is reported with origin `external` (the
@@ -231,6 +234,10 @@ impl MemoryService {
                 .map(|id| format!("message:{id}"))
                 .collect();
             let mut from_this_window: Vec<KnownNote> = Vec::new();
+            // Owner decision LQ14: a note only the chat model wrote is listed
+            // — the extractor still sees what it says — but not its key, which
+            // learning is not offered to reuse (`LEARNING_KEY_HOLDER`).
+            let mut coined: HashSet<NoteId> = HashSet::new();
             for row in self.indexed(self.index.notes_citing(&keys, &source_keys))? {
                 if !matches!(row.origin.as_str(), "extracted_user" | "extracted_other")
                     || !matches!(
@@ -251,7 +258,10 @@ impl MemoryService {
                     origin: &row.origin,
                     effective_status: row.effective_status,
                 };
-                if let Some(note) = known_note(p, &named, true, &mut dirty) {
+                if let Some((note, by_chat_model)) = known_note(p, &named, true, &mut dirty) {
+                    if by_chat_model {
+                        coined.insert(note.id);
+                    }
                     from_this_window.push(note);
                 }
             }
@@ -318,13 +328,21 @@ impl MemoryService {
                     origin: &hit.origin,
                     effective_status: hit.effective_status,
                 };
-                if let Some(note) = known_note(p, &named, false, &mut dirty)
+                if let Some((note, by_chat_model)) = known_note(p, &named, false, &mut dirty)
                     && note.effective_status == EffectiveStatus::Active
                 {
+                    if by_chat_model {
+                        coined.insert(note.id);
+                    }
                     notes.push(note);
                 }
             }
             notes.truncate(LEARNING_MAX_NOTES);
+            for note in &mut notes {
+                if coined.contains(&note.id) {
+                    note.fact_key = None;
+                }
+            }
 
             // Step 4: the keys.
             let known_keys = self.indexed(self.index.fact_keys(&keys, LEARNING_MAX_KEYS))?;
@@ -347,8 +365,9 @@ impl MemoryService {
     /// key that is not a same-key loser, looked up in the project partition
     /// first and then the home one, and verified against its file. A key
     /// no note carries is absent from the answer, and so is one only a
-    /// conversation summary holds (design 09 §13.3). Only the `Extraction`
-    /// surface may ask; it records nothing.
+    /// conversation summary holds (design 09 §13.3), or only notes the chat
+    /// model wrote (owner decision LQ14). Only the `Extraction` surface may
+    /// ask; it records nothing.
     pub fn learning_key_targets(
         &self,
         ctx: &MemoryAccessContext,
@@ -390,7 +409,7 @@ impl MemoryService {
                         origin: &row.origin,
                         effective_status: row.effective_status,
                     };
-                    if let Some(note) = known_note(p, &named, false, &mut dirty)
+                    if let Some((note, _)) = known_note(p, &named, false, &mut dirty)
                         && note.effective_status == EffectiveStatus::Active
                     {
                         out.insert(key.clone(), note);
@@ -424,13 +443,15 @@ fn is_summary_row(kind: &str, origin: &str, status: &str) -> bool {
 /// file is gone, tombstoned, unparsable, archived or another note now; its
 /// partition is then marked for re-indexing. A file whose bytes moved since
 /// indexing is served fresh with origin `external` — the snapshot no longer
-/// vouches for it — and marks its partition too.
+/// vouches for it — and marks its partition too. Beside it: whether only the
+/// chat model wrote it (owner decision LQ14) — origin `extracted_user` with
+/// no `observed_at`, which the extractor alone sets.
 fn known_note(
     p: &Partition,
     named: &Named<'_>,
     from_this_window: bool,
     dirty: &mut HashSet<String>,
-) -> Option<KnownNote> {
+) -> Option<(KnownNote, bool)> {
     let id = NoteId::parse(named.id).ok()?;
     let (note, revision, stale) = match verify(p, named.relative_path, id, named.revision) {
         Verified::Fresh {
@@ -463,7 +484,8 @@ fn known_note(
             status,
         )
     };
-    Some(KnownNote {
+    let by_chat_model = origin == Origin::ExtractedUser && note.observed_at.is_none();
+    let known = KnownNote {
         id,
         revision,
         partition_key: p.partition_key().to_string(),
@@ -476,5 +498,6 @@ fn known_note(
         fact_key: note.fact_key,
         supersedes: note.supersedes,
         from_this_window,
-    })
+    };
+    Some((known, by_chat_model))
 }

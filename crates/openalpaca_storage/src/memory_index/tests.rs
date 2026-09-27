@@ -918,6 +918,51 @@ fn fact_key_winner_skips_losers_and_inactive_notes() {
     );
 }
 
+/// Owner decision LQ14 (the L8 product slice's P2): a key held only by
+/// notes the chat model's `memory_store` wrote — origin `extracted_user`
+/// with no `observed_at`, which only the extractor sets — is not among
+/// `known_keys` and has no winner for learning. A key a learned note or a
+/// note the user saved also holds is offered as before, and its winner is
+/// the R9 winner, whoever wrote it.
+#[test]
+fn a_key_only_the_chat_model_coined_is_not_offered_to_learning() {
+    let index = ready_index();
+    // (id, key, origin, has observed_at, updated on 2026-09-…)
+    let notes = [
+        // The chat model's own keys, alone.
+        ("tool-a", "editor.preference", "extracted_user", false, 25),
+        ("tool-b", "routine.weekly", "extracted_user", false, 24),
+        // One the chat model coined that learning also uses…
+        ("tool-c", "user.commute", "extracted_user", false, 23),
+        ("learned", "user.commute", "extracted_user", true, 21),
+        // …and one the user saved as well.
+        ("tool-d", "user.laptop", "extracted_user", false, 22),
+        ("saved", "user.laptop", "user", false, 20),
+    ];
+    let records: Vec<IndexRecord> = notes
+        .iter()
+        .map(|&(id, key, origin, observed, day)| {
+            let mut r = record(id, id, "body");
+            r.fact_key = Some(key.into());
+            r.origin = origin.into();
+            r.observed_at = observed.then(|| "2026-09-20T09:00:00Z".to_string());
+            r.updated_at = format!("2026-09-{day}T10:00:00Z");
+            r
+        })
+        .collect();
+    index.upsert_many(&records).unwrap();
+
+    assert_eq!(
+        index.fact_keys(&["home-p".into()], 150).unwrap(),
+        vec!["user.commute".to_string(), "user.laptop".to_string()]
+    );
+    let winner = |key: &str| index.fact_key_winner("home-p", key).unwrap();
+    assert!(winner("editor.preference").is_none());
+    assert!(winner("routine.weekly").is_none());
+    assert!(winner("user.commute").is_some());
+    assert!(winner("user.laptop").is_some());
+}
+
 /// A conversation summary holds no key for learning (design 09 §13.3,
 /// review of L10c, R1): a key a model's edit put on one is not among
 /// `known_keys` and makes it no key's winner. An episode of another origin

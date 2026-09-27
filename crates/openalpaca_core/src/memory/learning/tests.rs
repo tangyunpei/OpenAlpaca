@@ -408,6 +408,10 @@ impl Scene {
                     ),
                     kind: Some(NoteKind::Fact),
                     fact_key: key.map(str::to_string),
+                    // What the extractor stamps on every note it learns
+                    // (design 09 §2.5) — and what tells it from one the chat
+                    // model's `memory_store` wrote (owner decision LQ14).
+                    observed_at: Some("2026-09-01T09:00:00Z".parse().unwrap()),
                     provenance: Some(ExtractionProvenance::UserWords),
                     ..Default::default()
                 },
