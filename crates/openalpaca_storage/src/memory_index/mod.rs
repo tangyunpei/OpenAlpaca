@@ -19,10 +19,10 @@
 //!   and the other scripts built with vowel signs): substrings of that text.
 //!
 //! [`query`] says which term goes where. A word-beginning or substring hit is
-//! weighted below a whole-token hit; one- and two-character queries go
-//! through a bounded substring pass that reports `partial` when its cap is
-//! hit; no stemmer. Nothing finds a term inside a word of a body written in a
-//! space-separated script; a title, an alias or a tag still does.
+//! weighted below a whole-token hit; a 1–2-character query goes through a
+//! bounded substring pass, `partial` at its cap; no stemmer. Nothing finds a
+//! term inside a body word of a script `unicode61` splits into words (Latin,
+//! Cyrillic, Greek, Arabic, Hebrew …); a title, an alias or a tag still does.
 //!
 //! **What this module is not.** It reads no note file, computes no revision,
 //! derives no supersession and holds no snapshot: those are `memory_files`.

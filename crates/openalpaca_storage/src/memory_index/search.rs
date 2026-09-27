@@ -636,19 +636,29 @@ fn substring_candidates(
     Ok((hits, false))
 }
 
-/// Whether a literal, routed as the search routes it, matches any eligible
-/// note on any table — the probe that decides whether its parts are routed.
+/// Whether a literal is found in any eligible note — the probe that decides
+/// whether its parts are routed (design 09 §6.5.2). Found is what schema 3's
+/// probe meant: the literal's tokens in sequence (the exact phrase on the
+/// word table), or a substring a trigram table holds — and, since no trigram
+/// table holds a Latin body any more, a longer form the prefix phrase finds
+/// that holds the literal verbatim (`memory_file` in `memory_files`). A
+/// longer form alone is not the literal: `dark modes` does not hide the
+/// parts of `dark-mode`, so a note that says only `dark` is still found
+/// (repair round 2 of LQ17). A header needs no verbatim check: a literal has
+/// at least three characters, so the header trigram table finds it there.
 fn literal_has_hit(conn: &Connection, literal: &query::Literal, filter: &Filter) -> Result<bool> {
     let only = ParsedQuery {
         literals: vec![literal.clone()],
         ..ParsedQuery::default()
     };
+    let (exact, prefix) = literal.word_probes();
     let probes = [
-        ("fts_word", only.word_match(&[])),
-        ("fts_tri_head", only.head_trigram_match(&[])),
-        ("fts_tri", only.body_trigram_match(&[])),
+        ("fts_word", Some(exact), None),
+        ("fts_tri_head", only.head_trigram_match(&[]), None),
+        ("fts_tri", only.body_trigram_match(&[]), None),
+        ("fts_word", prefix, Some(literal.text.as_str())),
     ];
-    for (table, phrase) in probes {
+    for (table, phrase, verbatim) in probes {
         let Some(phrase) = phrase else {
             continue;
         };
@@ -657,12 +667,20 @@ fn literal_has_hit(conn: &Connection, literal: &query::Literal, filter: &Filter)
                 SELECT 1 FROM {table}
                 CROSS JOIN chunk c ON c.id = {table}.rowid
                 CROSS JOIN note n ON n.rowid = c.note_rowid
-                WHERE {table} MATCH ? AND {filter})",
-            filter = filter.clause
+                WHERE {table} MATCH ? AND {filter}{verbatim})",
+            filter = filter.clause,
+            verbatim = if verbatim.is_some() {
+                " AND instr(c.body, ?) > 0"
+            } else {
+                ""
+            },
         );
-        let mut params: Vec<Value> = Vec::with_capacity(filter.params.len() + 1);
+        let mut params: Vec<Value> = Vec::with_capacity(filter.params.len() + 2);
         params.push(Value::Text(phrase));
         params.extend(filter.params.iter().cloned());
+        if let Some(text) = verbatim {
+            params.push(Value::Text(text.to_string()));
+        }
         let mut stmt = conn.prepare_cached(&sql)?;
         let hit: bool = stmt.query_row(params_from_iter(params.iter()), |r| r.get(0))?;
         if hit {
@@ -900,16 +918,33 @@ impl<'a> ChunkText<'a> {
 
     /// A literal as a phrase, as the tables find it: a substring where the
     /// trigram tables find one, or its tokens in sequence — the last one as
-    /// a prefix when the word table queries it as one.
+    /// a prefix when the word table queries it as one. This is the `phrase`
+    /// evidence the ranker gives.
     pub(super) fn has_phrase(&self, literal: &str) -> bool {
-        if self.contains_indexed(literal) {
-            return true;
-        }
+        self.contains_indexed(literal) || self.has_sequence(literal, query::is_prefix_term(literal))
+    }
+
+    /// The literal itself is here, for the rule that routes its parts only
+    /// when it is found nowhere — `search`'s `literal_has_hit`, chunk by
+    /// chunk: a substring where the trigram tables find one, its tokens in
+    /// sequence, or a longer form its prefix phrase finds that holds it
+    /// verbatim in the body (`memory_file` in `memory_files`, not
+    /// `dark-mode` in `dark modes`).
+    pub(super) fn finds_literal(&self, literal: &str) -> bool {
+        self.contains_indexed(literal)
+            || self.has_sequence(literal, false)
+            || (query::is_prefix_term(literal)
+                && self.fields[3].contains(literal)
+                && self.has_sequence(literal, true))
+    }
+
+    /// The literal's tokens stand in sequence in some field — the last one
+    /// as a word's beginning when `prefix`.
+    fn has_sequence(&self, literal: &str, prefix: bool) -> bool {
         let needle: Vec<&str> = query::tokens_split(literal).collect();
         let Some((last, lead)) = needle.split_last() else {
             return false;
         };
-        let prefix = query::is_prefix_term(literal);
         self.token_lists.iter().any(|list| {
             list.windows(needle.len()).any(|w| {
                 let (w_last, w_lead) = w.split_last().unwrap_or_else(|| unreachable!("non-empty"));

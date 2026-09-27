@@ -47,7 +47,7 @@ added (design 09 §6.5.6, LQ17).
 | `23-query-cjk-lengths.json` | slice-2 query fixture: CJK queries of 1, 2 and 3+ characters; a Devanagari stem found inside its inflected form (LQ17's repair round 1) | slice 2 |
 | `24-forgotten-replacement-not-revived.json` | slice-2 query fixture: a forgotten or archived replacement does not revive its predecessor | slice 2 |
 | `25-suggestion-lifecycle.json` | Learning v2 L3 (design 09 §3): a suggestion retires nothing until a confirm bound to its target's revision; an automatic replacement's withdrawal brings the old note back; a suggestion is never archived or edited by a tool call | slice 2 (the file-level loader) |
-| `26-query-prefix-in-body.json` | LQ17 query fixture (design 09 §6.5.6): "what do I prefer?" finds "User prefers kitty" through its body alone (`prefix`); a term inside a body word (`presso`, `now` in a Chinese note's heading) finds nothing; a Latin word glued to Chinese is a `term`; a literal's last token is a prefix only from three characters | slice 2; step 2's recall also at slice 3 (`prompt_ctx/sources/memory.rs`) |
+| `26-query-prefix-in-body.json` | LQ17 query fixture (design 09 §6.5.6): "what do I prefer?" finds "User prefers kitty" through its body alone (`prefix`); a term inside a body word (`presso`, `now` in a Chinese note's heading) finds nothing; a Latin word glued to Chinese is a `term`; a literal's last token is a prefix only from three characters, or as a number | slice 2; step 2's recall also at slice 3 (`prompt_ctx/sources/memory.rs`) |
 
 Rows 05 and 06 are about the database opener, not the memory library; their files
 state the expectation so the matrix is complete, and the loader that runs them is

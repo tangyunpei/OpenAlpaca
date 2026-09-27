@@ -480,6 +480,25 @@ mod query_tests {
             parsed("partner's").word_match(&[]).as_deref(),
             Some("\"partner's\"")
         );
+        // A number ends a prefix whatever its length (repair round 2).
+        assert_eq!(
+            parsed("10:30").word_match(&[]).as_deref(),
+            Some("\"10:30\"*")
+        );
+        // The word table's probes that decide whether a literal is found:
+        // its exact phrase, and the prefix phrase only when its last token
+        // is one (the search then asks for the literal verbatim too).
+        assert_eq!(
+            parsed("memory_file").literals[0].word_probes(),
+            (
+                "\"memory_file\"".to_string(),
+                Some("\"memory_file\"*".to_string())
+            )
+        );
+        assert_eq!(
+            parsed("partner's").literals[0].word_probes(),
+            ("\"partner's\"".to_string(), None)
+        );
         // A stop word routed alone, and a CJK term, match exactly; a word
         // glued to CJK is split at the boundary.
         let p = parsed("and");
@@ -520,11 +539,11 @@ mod query_tests {
             tokens_split(text).collect::<Vec<_>>()
         );
         // Written without spaces: CJK, Thai, Lao, Myanmar, Khmer, Tibetan,
-        // Yi, Javanese, Balinese, Tai Tham, New Tai Lue. Words built with
-        // vowel signs unicode61 breaks at: Devanagari, Bengali, Tamil,
-        // Thaana (repair round 1 of LQ17).
+        // Yi, Javanese, Balinese, Tai Tham, New Tai Lue, Tai Le. Words built
+        // with vowel signs unicode61 breaks at: Devanagari, Bengali, Tamil,
+        // Thaana (repair rounds 1 and 2 of LQ17).
         for c in [
-            '中', 'あ', '한', 'ก', 'ກ', 'က', 'ក', 'ཀ', 'ꆈ', 'ꦏ', 'ᬓ', 'ᨠ', 'ᦀ', 'क', 'অ', 'த', 'ދ',
+            '中', 'あ', '한', 'ก', 'ກ', 'က', 'ក', 'ཀ', 'ꆈ', 'ꦏ', 'ᬓ', 'ᨠ', 'ᦀ', 'ᥐ', 'क', 'অ', 'த', 'ދ',
         ] {
             assert!(is_unsegmented(c), "{c}");
         }
@@ -534,14 +553,35 @@ mod query_tests {
     }
 
     /// Design 09 §6.5.2: a term is a prefix when its last token has three
-    /// or more characters and is not a stop word, and it carries no
-    /// unsegmented character.
+    /// or more characters and is not a stop word — or, since repair round 2
+    /// of LQ17, is a number of any length after another token — and it
+    /// carries no unsegmented character.
     #[test]
     fn a_term_is_a_prefix_only_by_its_last_token() {
-        for term in ["prefer", "memory_file", "title:tabs", "rustfmt::skip", "p50/p950"] {
+        for term in [
+            "prefer",
+            "memory_file",
+            "title:tabs",
+            "rustfmt::skip",
+            "p50/p950",
+            "10:30",
+            "v1.2",
+            "3.12",
+            "2026-09-15",
+        ] {
             assert!(is_prefix_term(term), "{term}");
         }
-        for term in ["partner's", "x_ab", "and", "for/the", "用户喜欢", "看一遍commit", "a\"b\"c"] {
+        for term in [
+            "partner's",
+            "x_ab",
+            "x_a1",
+            "and",
+            "for/the",
+            "用户喜欢",
+            "看一遍commit",
+            "a\"b\"c",
+            "2026年7月",
+        ] {
             assert!(!is_prefix_term(term), "{term}");
         }
     }
@@ -1393,6 +1433,149 @@ fn a_literal_ends_in_a_prefix_only_from_three_characters() {
     assert_eq!(ids(&index.search(&q("x_abc")).unwrap()), vec!["flag"]);
 }
 
+/// Design 09 §6.5.2 (repair round 2 of LQ17): a literal counts as found —
+/// so its parts are not searched — when a note holds its tokens in sequence,
+/// a substring the trigram tables find, or a longer form that holds the
+/// literal verbatim (`memory_file` in `memory_files`). A longer form alone is
+/// not the literal (`dark modes` for `dark-mode`): its parts are searched, so
+/// a note holding one of them whole is still found, as schema 3 found it.
+/// The file scan agrees.
+#[test]
+fn a_literal_found_only_in_a_longer_form_still_routes_its_parts() {
+    use MatchReason::{Phrase, Prefix, Term};
+    let index = ready_index();
+    let records = vec![
+        record(
+            "dm-a",
+            "Editor setup",
+            "Dark modes are enabled in every app the user installs.\n",
+        ),
+        record("dm-b", "Theme", "The user prefers a dark theme at night.\n"),
+        record(
+            "cr-a",
+            "Team habits",
+            "The team does code reviews on Fridays.\n",
+        ),
+        record(
+            "cr-b",
+            "Pull requests",
+            "The user wants a careful review of every change.\n",
+        ),
+        record("sp-a", "Hobbies", "Side projects are for weekends only.\n"),
+        record(
+            "sp-b",
+            "Rust game",
+            "The user's current project is a small roguelike.\n",
+        ),
+        record(
+            "tz-a",
+            "Remote team",
+            "The user tracks time zones for the remote team.\n",
+        ),
+        record(
+            "tz-b",
+            "Location",
+            "The user's timezone is Europe/Berlin.\n",
+        ),
+        record(
+            "oc-a",
+            "Platform rota",
+            "The platform team keeps on calls short.\n",
+        ),
+        record("oc-b", "Pager", "The user is on call every third week.\n"),
+        record(
+            "files",
+            "Storage crate",
+            "Read memory_files before you edit a note.\n",
+        ),
+        record(
+            "trip",
+            "Trip",
+            "The memory of that trip stays with the user.\n",
+        ),
+    ];
+    index.rebuild(&records).unwrap();
+    let cases: [(&str, &[&str], &str, &[MatchReason]); 7] = [
+        ("dark-mode", &["dm-a", "dm-b"], "dm-b", &[Term]),
+        ("do I like dark-mode?", &["dm-a", "dm-b"], "dm-b", &[Term]),
+        ("code-review", &["cr-a", "cr-b"], "cr-b", &[Term]),
+        ("side-project", &["sp-a", "sp-b"], "sp-b", &[Term]),
+        ("time-zone", &["tz-a", "tz-b"], "tz-b", &[Prefix]),
+        // The note holds the phrase itself: found, parts not searched.
+        ("on-call", &["oc-a", "oc-b"], "oc-b", &[Phrase]),
+        // A longer form holding the literal verbatim: found, so `memory`
+        // is not searched and the trip note stays out.
+        ("memory_file", &["files"], "files", &[Phrase]),
+    ];
+    for (query, want, id, reasons) in cases {
+        let r = index.search(&q(query)).unwrap();
+        let mut got = ids(&r);
+        got.sort();
+        assert_eq!(got, want, "{query}");
+        assert_eq!(hit(&r, id).matches, reasons, "{query} {id}");
+        let scan = index.scan_search(&records, &q(query), false).unwrap();
+        let mut from_files = ids(&scan);
+        from_files.sort();
+        assert_eq!(
+            from_files, got,
+            "{query}: the file scan finds what the index finds"
+        );
+        for h in &scan.hits {
+            assert_eq!(h.matches, hit(&r, &h.id).matches, "{query} {}", h.id);
+        }
+    }
+}
+
+/// Design 09 §6.5.2 (repair round 2 of LQ17): a literal whose last token is
+/// a number is a prefix whatever its length, so a time, a version or a date
+/// finds the text it begins (`10:30` in `10:30am`, `v1.2` in `v1.2beta`,
+/// `2026-09-15` in `2026-09-15T10:00Z`), and counts as found there. A number
+/// inside a word is still not found (`1.2` in `v1.2beta`, design 09 §6.5.4).
+#[test]
+fn a_literal_ending_in_a_number_finds_the_text_it_begins() {
+    let index = ready_index();
+    let records = vec![
+        record(
+            "time",
+            "Standup",
+            "The daily standup is at 10:30am on weekdays.\n",
+        ),
+        record("rc", "Python", "The project pins python 3.12rc1 for now.\n"),
+        record("beta", "App version", "The desktop app is on v1.2beta.\n"),
+        record(
+            "iso",
+            "Deploy",
+            "The last deploy ran at 2026-09-15T10:00Z without errors.\n",
+        ),
+        record(
+            "next",
+            "Next deploy",
+            "The next deploy is planned for 2026-10-01.\n",
+        ),
+    ];
+    index.rebuild(&records).unwrap();
+    for (query, want) in [
+        ("10:30", vec!["time"]),
+        ("what is at 10:30?", vec!["time"]),
+        ("3.12", vec!["rc"]),
+        ("v1.2", vec!["beta"]),
+        ("2026-09-15", vec!["iso"]),
+        ("1.2", vec![]),
+    ] {
+        let r = index.search(&q(query)).unwrap();
+        assert_eq!(ids(&r), want, "{query}");
+        for h in &r.hits {
+            assert_eq!(h.matches, vec![MatchReason::Phrase], "{query} {}", h.id);
+        }
+        let scan = index.scan_search(&records, &q(query), false).unwrap();
+        assert_eq!(
+            ids(&scan),
+            want,
+            "{query}: the file scan finds what the index finds"
+        );
+    }
+}
+
 /// Design 09 §6.5.2: when the word table's query fills its candidate cap
 /// with notes a prefix found (`work*` → `worker`, `workspace`), the terms
 /// sent as prefixes are searched again as whole words in titles, aliases
@@ -1470,6 +1653,44 @@ fn a_whole_word_in_a_body_is_not_crowded_out_by_a_prefix_that_fills_the_cap() {
     );
 }
 
+/// Design 09 §6.5.2 and §6.5.4 (repair round 2 of LQ17): the body query at
+/// the cap adds a word's chunks only when there are at most as many as the
+/// cap. A word held whole by more bodies than that adds none of them, so the
+/// candidates are the prefix query's own 256 — which can hold none of those
+/// notes, when the longer words sit in titles. This pins the cliff the
+/// design names; adding the first 256 by rowid instead would rank arbitrary
+/// notes above every ranked prefix hit.
+#[test]
+fn a_body_word_held_by_more_than_the_cap_adds_none_at_the_cap() {
+    let index = ready_index();
+    let mut records: Vec<IndexRecord> = (0..CANDIDATE_CAP + 44)
+        .map(|i| {
+            record(
+                &format!("w{i:03}"),
+                &format!("Worker rota {i}"),
+                "The worker rota lives in the shared workspace; workers swap shifts.\n",
+            )
+        })
+        .collect();
+    for i in 0..=CANDIDATE_CAP {
+        records.push(record(
+            &format!("c{i:03}"),
+            &format!("Day {i}"),
+            "Today I rode along the river to work.\n",
+        ));
+    }
+    index.rebuild(&records).unwrap();
+    let mut sq = q("where do I work?");
+    sq.limit = MAX_LIMIT;
+    let r = index.search(&sq).unwrap();
+    assert!(r.partial, "the word table's query filled its cap");
+    assert_eq!(r.count, MAX_LIMIT);
+    for h in &r.hits {
+        assert!(h.id.starts_with('w'), "{}: a whole-word note joined", h.id);
+        assert_eq!(h.matches, vec![MatchReason::Prefix], "{}", h.id);
+    }
+}
+
 /// Design 09 §6.5.3: trigram relevance is the larger of the header table's
 /// and the unsegmented-body table's normalized BM25, not their sum — a term
 /// found inside a run of both a note's title and its body earns one
@@ -1502,13 +1723,15 @@ fn trigram_relevance_is_the_larger_of_the_two_tables_not_their_sum() {
 /// (`Python 版本`) as well as glued; the ranker and the file scan read the
 /// same split tokens in sequence and call it a whole-word match, `term`, so
 /// an answer given during a rebuild finds what the index finds (design 09
-/// §6.5.3).
+/// §6.5.3). The tokens must stand in that sequence: a note holding both
+/// apart is found by neither.
 #[test]
 fn a_query_word_glued_across_scripts_is_a_term_in_spaced_and_glued_text() {
     let index = ready_index();
     let records = vec![
         record("spaced", "Runtime", "Python 版本: 3.12\n"),
         record("glued", "Toolchain", "我们的python版本 是 3.11。\n"),
+        record("apart", "Notes", "版本 是 3.11，工具用 python 写。\n"),
         record("other", "Garden", "Tomatoes ripen in August.\n"),
     ];
     index.rebuild(&records).unwrap();

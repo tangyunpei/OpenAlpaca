@@ -9,9 +9,12 @@
 //!   path (`OPENALPACA_HOME_STORE`, `crate::module`, `p50/p95`) — kept whole
 //!   as a phrase; its alphanumeric parts of three or more characters are the
 //!   **fallback** the search routes as words only when the literal itself
-//!   matches no eligible note (`title:tabs` finds a note about tabs;
+//!   is found in no eligible note (`title:tabs` finds a note about tabs;
 //!   `OPENALPACA_HOME_STORE` does not drag in every note that says
-//!   `openalpaca`);
+//!   `openalpaca`). Found means its tokens in sequence, a substring a
+//!   trigram table holds, or a longer form that holds it verbatim
+//!   (`memory_file` in `memory_files`) — not a longer form alone: `dark modes`
+//!   does not hide the parts of `dark-mode` ([`Literal::word_probes`]);
 //! - a **short** term: one or two characters — routed to the bounded
 //!   substring pass when it is CJK, or when the query has no other term.
 //!
@@ -19,13 +22,14 @@
 //!
 //! - **`fts_word`** (`unicode61`) takes every one, as a phrase split at
 //!   script boundaries ([`split_scripts`]) — and as a **prefix query**
-//!   (`"prefer"*`) when its last token has three or more characters, unless
-//!   the term carries an unsegmented character ([`is_unsegmented`]) or that
-//!   token is a stop word ([`is_prefix_term`]). So `prefer` finds `prefers`
-//!   and `preference`, `memory_file` finds `memory_files`, and `partner's`,
-//!   `用户喜欢` and `and` match exactly. When that query fills its candidate
-//!   cap, the terms it sent as prefixes are searched again as whole words,
-//!   together in titles, aliases and tags and each alone in bodies
+//!   (`"prefer"*`) when its last token has three or more characters or is a
+//!   number after another token, unless the term carries an unsegmented
+//!   character ([`is_unsegmented`]) or that token is a stop word
+//!   ([`is_prefix_term`]). So `prefer` finds `prefers` and `preference`,
+//!   `memory_file` finds `memory_files`, `10:30` finds `10:30am`, and
+//!   `partner's`, `用户喜欢` and `and` match exactly. When that query fills
+//!   its candidate cap, the terms it sent as prefixes are searched again as
+//!   whole words, together in titles, aliases and tags and each alone in bodies
 //!   ([`ParsedQuery::word_match_exact_at_cap`]).
 //! - **`fts_tri_head`** (`trigram` over titles, aliases and tags) takes every
 //!   one of three or more characters, as a substring.
@@ -33,11 +37,11 @@
 //!   unsegmented character) takes only those of three or more characters
 //!   that carry such a character.
 //!
-//! So nothing finds a term **inside** a word of a body written in a
-//! space-separated script (`presso` in `espresso`); a title, an alias or a
-//! tag still does, and a body in an unsegmented script — CJK, Thai,
-//! Devanagari, Tamil and the rest [`is_unsegmented`] names — keeps
-//! substring search.
+//! So nothing finds a term **inside** a word of a body in a script
+//! `unicode61` splits into words — Latin, Cyrillic, Greek, Arabic, Hebrew …
+//! (`presso` in `espresso`); a title, an alias or a tag still does, and a
+//! body in an unsegmented script — CJK, Thai, Devanagari, Tamil and the rest
+//! [`is_unsegmented`] names — keeps substring search.
 //!
 //! The MATCH strings are built from these terms only: every term is a
 //! double-quoted FTS5 string with embedded quotes doubled, joined by `OR` —
@@ -83,6 +87,18 @@ pub(crate) struct Literal {
     /// Its alphanumeric runs of three or more characters, stop words
     /// excluded, in order.
     pub parts: Vec<String>,
+}
+
+impl Literal {
+    /// The word table's probes that decide whether this literal is found,
+    /// and so whether its parts are routed (design 09 §6.5.2): its exact
+    /// phrase, and — when its last token is a prefix — the prefix phrase,
+    /// which counts only where the text also holds the literal verbatim.
+    pub(crate) fn word_probes(&self) -> (String, Option<String>) {
+        let phrase = quote(&split_scripts(&self.text));
+        let prefix = is_prefix_term(&self.text).then(|| format!("{phrase}*"));
+        (phrase, prefix)
+    }
 }
 
 /// The MATCH strings of the whole-word queries at the word table's cap
@@ -359,15 +375,22 @@ pub(crate) const PREFIX_MIN_CHARS: usize = 3;
 
 /// Whether a word or a literal goes to the word table as a prefix query
 /// (design 09 §6.5.2): its last token has at least [`PREFIX_MIN_CHARS`]
-/// characters and is not a stop word, and the term carries no unsegmented
-/// character — such a term matches a whole run there, and anywhere inside a
-/// run through the trigram tables, so its reason does not depend on where
-/// in the run it stands.
+/// characters and is not a stop word — or is a number following another
+/// token, whatever its length, so a time, a version or a date finds the text
+/// it begins (`10:30` in `10:30am`, `3.12` in `3.12rc1`; repair round 2 of
+/// LQ17) — and the term carries no unsegmented character: such a term
+/// matches a whole run there, and anywhere inside a run through the trigram
+/// tables, so its reason does not depend on where in the run it stands.
 pub(crate) fn is_prefix_term(term: &str) -> bool {
-    !term.chars().any(is_unsegmented)
-        && tokens(term)
-            .last()
-            .is_some_and(|t| t.chars().count() >= PREFIX_MIN_CHARS && !STOP_WORDS.contains(&t))
+    if term.chars().any(is_unsegmented) {
+        return false;
+    }
+    let tokens: Vec<&str> = tokens(term).collect();
+    let Some((last, lead)) = tokens.split_last() else {
+        return false;
+    };
+    (last.chars().count() >= PREFIX_MIN_CHARS && !STOP_WORDS.contains(last))
+        || (!lead.is_empty() && last.chars().all(char::is_numeric))
 }
 
 pub(crate) fn is_cjk(c: char) -> bool {

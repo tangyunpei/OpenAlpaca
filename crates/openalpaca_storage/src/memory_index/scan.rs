@@ -121,13 +121,13 @@ impl MemoryIndex {
             notes.insert(rowid, row);
         }
 
-        // A literal's parts are routed only when the literal itself matches
-        // no eligible note — the index's rule.
+        // A literal's parts are routed only when the literal itself is found
+        // in no eligible note — the index's rule, and its meaning of found.
         let mut words: Vec<String> = parsed.words.clone();
         for literal in &parsed.literals {
             let hit = chunks
                 .iter()
-                .any(|c| ChunkText::new(c).has_phrase(&literal.text));
+                .any(|c| ChunkText::new(c).finds_literal(&literal.text));
             if !hit {
                 for part in &literal.parts {
                     if !words.contains(part) {
