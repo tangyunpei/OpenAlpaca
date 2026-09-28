@@ -632,6 +632,14 @@ fn bench_service_10k_notes_one_tombstone() {
     );
 }
 
+/// The service's design point (owner decision LQ15, 09 §10): the average mix
+/// at 30 000 notes.
+#[test]
+#[ignore = "bench: cargo test --release -p openalpaca_core --lib -- --ignored bench_service_30k --nocapture"]
+fn bench_service_30k_notes() {
+    run_service_bench("bench_service_30k_notes", 30_000, Mix::Average);
+}
+
 #[test]
 #[ignore = "bench: cargo test --release -p openalpaca_core --lib -- --ignored bench_service_100k --nocapture"]
 fn bench_service_100k_notes() {

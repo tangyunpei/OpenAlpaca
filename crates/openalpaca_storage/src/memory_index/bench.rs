@@ -579,6 +579,18 @@ fn bench_search_10k_notes_with_verification() {
     );
 }
 
+/// The service's design point (owner decision LQ15, 09 §10): the average mix
+/// at 30 000 notes.
+#[test]
+#[ignore = "bench: cargo test --release -p openalpaca_storage -- --ignored bench_search_30k --nocapture"]
+fn bench_search_30k_notes_with_verification() {
+    run_bench(
+        "bench_search_30k_notes_with_verification",
+        30_000,
+        Mix::Average,
+    );
+}
+
 /// Design 09 §6.4: the average mix at 100 000 notes.
 #[test]
 #[ignore = "bench: cargo test --release -p openalpaca_storage -- --ignored bench_search_100k --nocapture"]
