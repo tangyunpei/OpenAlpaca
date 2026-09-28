@@ -813,19 +813,21 @@ Notes:
   suggestions among them sent first — each with the revision it printed, and
   prints each one's outcome as its request returns. A forgotten note's files, history copies and index rows are
   gone and its sources are never re-extracted (a pending suggestion's or
-  candidate's, but for the messages a note you saved, or the note it would
-  replace, cites — below); the transcript messages it cited
+  candidate's, but for the messages and runs a note you saved, or the note it
+  would replace, cites — below); the transcript messages it cited
   stay in the conversation, and the command says so. Any suggestion that would
   replace a forgotten note is dismissed with it — but one you name in the same
   command is forgotten as asked, whatever the order (the daemon, too, takes
   the pending suggestions of a request first). Forgetting a pending suggestion
   or candidate leaves the note it would replace in force, whoever saved it,
   and every note you saved — such as a candidate from the same run that you
-  have since confirmed: it suppresses none of the messages those notes cite. If
-  the daemon refuses a request, the command stops with that refusal, but first says
-  which of that request's ids were already forgotten — the daemon forgets them
-  in turn, so the ones before the id that failed are gone — and how many ids
-  after it were never sent. There is no undo. An
+  have since confirmed: it suppresses none of the messages or runs those notes
+  cite. If the daemon refuses a request, the command stops with that refusal,
+  but first says which of that request's ids were already forgotten — the
+  daemon forgets them
+  in turn, the pending suggestions first and each of them even after one fails,
+  so those and the ids before the one that failed may be gone — and how many
+  ids after it were never sent. There is no undo. An
   **episode note** is the exception on sources: forgetting one forgets that note
   alone, and what its messages taught stays learned.
 - **Episode notes.** After a conversation has been quiet for 30 minutes, when you
