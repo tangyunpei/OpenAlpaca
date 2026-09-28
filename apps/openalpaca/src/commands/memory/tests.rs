@@ -1456,6 +1456,63 @@ async fn a_refused_forget_request_still_reports_what_landed() {
     assert_eq!(requests.len(), 21, "{requests:?}");
 }
 
+/// Close-out repair round 2 (RT2 nit): the verb's own path, not only its
+/// helpers — the reads it makes before the question, and the order those
+/// reads give the requests. Twenty-one ids typed, the last read back as a
+/// pending suggestion: the listing keeps the order typed, and the
+/// suggestion is the first target of the first request, the others after
+/// it in the order typed.
+#[tokio::test]
+async fn the_forget_verb_sends_the_pending_suggestion_it_read_first() {
+    colored::control::set_override(false);
+    let typed: Vec<String> = (0..20)
+        .map(nth_id)
+        .chain([SUGGESTION.to_string()])
+        .collect();
+    let mut answers: Vec<String> = typed
+        .iter()
+        .map(|id| {
+            let mut read = if id == SUGGESTION {
+                suggestion_read(&[TARGET])
+            } else {
+                read_answer()
+            };
+            read["id"] = serde_json::json!(id);
+            json_answer("200 OK", OLD_REV, &read.to_string())
+        })
+        .collect();
+    let sent: Vec<String> = std::iter::once(SUGGESTION.to_string())
+        .chain(typed[..20].iter().cloned())
+        .collect();
+    answers.push(json_answer("200 OK", OLD_REV, &forgotten_answer(&sent[..20])));
+    answers.push(json_answer("200 OK", OLD_REV, &forgotten_answer(&sent[20..])));
+    let (addr, server) = serve(answers);
+    let api = Api::for_tests(DaemonClient::for_tests(&format!("http://{addr}"), "token"));
+    let mut lines = Vec::new();
+    forget_verb(&api, &typed, true, &mut |l| lines.push(l))
+        .await
+        .expect("the forget runs");
+    let requests = server.join().expect("the server finishes");
+    assert_eq!(requests.len(), 23, "{requests:?}");
+    for (request, id) in requests[..21].iter().zip(&typed) {
+        assert!(request.starts_with(&format!("GET /v1/memories/{id} ")), "{request}");
+    }
+    let targets: Vec<String> = requests[21..]
+        .iter()
+        .flat_map(|r| {
+            assert!(r.starts_with("POST /v1/memories/forget "), "{r}");
+            post_body(r)["targets"].as_array().unwrap().clone()
+        })
+        .map(|t| t["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(targets[0], SUGGESTION, "the suggestion goes first");
+    assert_eq!(targets, sent, "the others keep the order typed");
+    for (line, id) in lines[..21].iter().zip(&typed) {
+        assert!(line.contains(id.as_str()), "the listing keeps the order typed: {lines:?}");
+    }
+    assert!(lines[21].contains(SUGGESTION) && lines[21].contains("forgotten"), "{lines:?}");
+}
+
 /// The L8 close-out's A4: a suggestion that changes the note's metadata —
 /// here the assistant's, which gives no reason — says so on a line under
 /// its own, each value through the one-line escape, and the count under it

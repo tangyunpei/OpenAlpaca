@@ -618,19 +618,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
         }
         MemoryCommands::Forget { ids, yes, at } => {
             let api = Api::connect(&at)?;
-            let mut read = Vec::new();
-            for arg in &ids {
-                let id = api.resolve_id(arg).await?;
-                let current = api.get(&format!("/v1/memories/{id}")).await?;
-                let revision = revision_of(&current)?;
-                println!("{}", forget_line(id, &current, &revision));
-                read.push((id, revision, is_pending_suggestion(&current)));
-            }
-            if !yes && !confirm_forget(read.len())? {
-                println!("Cancelled. Nothing was forgotten.");
-                return Ok(());
-            }
-            forget_notes(&api, &forget_order(read), &mut |line| println!("{line}")).await
+            forget_verb(&api, &ids, yes, &mut |line| println!("{line}")).await
         }
         MemoryCommands::Sync { at } => {
             let api = Api::connect(&at)?;
@@ -1506,6 +1494,31 @@ fn body_from_editor(title: &str) -> Result<String> {
     open_in_editor(file.path())?;
     std::fs::read_to_string(file.path())
         .with_context(|| format!("could not read {} back", file.path().display()))
+}
+
+/// `memory forget` once connected: each id resolved and read — its line
+/// printed, its revision and whether it is a pending suggestion kept — then
+/// the question (skipped by `--yes`), then [`forget_notes`] over the ids in
+/// [`forget_order`]. Every line goes to `emit`.
+pub(crate) async fn forget_verb(
+    api: &Api,
+    ids: &[String],
+    yes: bool,
+    emit: &mut dyn FnMut(String),
+) -> Result<()> {
+    let mut read = Vec::new();
+    for arg in ids {
+        let id = api.resolve_id(arg).await?;
+        let current = api.get(&format!("/v1/memories/{id}")).await?;
+        let revision = revision_of(&current)?;
+        emit(forget_line(id, &current, &revision));
+        read.push((id, revision, is_pending_suggestion(&current)));
+    }
+    if !yes && !confirm_forget(read.len())? {
+        emit("Cancelled. Nothing was forgotten.".to_string());
+        return Ok(());
+    }
+    forget_notes(api, &forget_order(read), emit).await
 }
 
 /// `memory forget`'s requests, and the lines it prints: every id in one
