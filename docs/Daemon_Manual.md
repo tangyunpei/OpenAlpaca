@@ -770,8 +770,9 @@ recalled as any other.
 Forgetting an episode note — the Memory view, `/forget`, `memory_forget`,
 `DELETE /v1/memories/{id}` — forgets that note and nothing else: unlike any
 other forget, it suppresses none of the messages it cites (a pending
-suggestion's forget spares only the messages a note you saved cites), so what
-those messages taught stays learned and recallable. Deleting or clearing a
+suggestion's or candidate's forget spares only the messages a note you saved,
+or the note it would replace, cites), so what those messages taught stays
+learned and recallable. Deleting or clearing a
 conversation (`DELETE /v1/sessions/{id}`, `DELETE /v1/chat/history`) or
 purging its project forgets the episode notes whose cited messages all
 belong to it.
@@ -832,15 +833,17 @@ your note's partition. It cites the message you typed on that turn — an edit's
 suggestion, a copy of your note's text, cites what your note cites first and
 that message when there is room (at most eight), so forgetting a message your
 note learned from takes the copy out too, while forgetting the pending
-suggestion itself leaves your note in force: a pending suggestion's forget
-suppresses none of the messages a note you saved cites (the one it names, or
-another, such as a suggestion from the same turn you have since confirmed).
-Because it cites the message you typed, the assistant may raise it with
-`memory_confirm` on a later attended turn; the Memory view,
+suggestion itself leaves your note in force: the forget of any pending
+suggestion or candidate suppresses none of the messages the note it would
+replace cites, whoever saved that note, nor any a note you saved cites — such
+as a suggestion or candidate from the same turn or run that you have since
+confirmed. Because it cites the message you typed, the assistant may raise it
+with `memory_confirm` on a later attended turn; the Memory view,
 `openalpaca memory suggestions`, the in-chat card and the `<memory_suggestions>`
-line say the assistant suggested it, give no reason of its text's (the text may
-copy your note's, whose reason is that note's), and say what else it changes —
-your note's key, aliases, tags or validity. Saving exactly what your note
+line say the assistant suggested it, and the first three give no reason of its
+text's (the text may copy your note's, whose reason is that note's) and say
+what else it changes — your note's key, aliases, tags or validity.
+Saving exactly what your note
 already says, with the same validity, returns your note, not a suggestion. The
 assistant may not edit a note of yours that a forget took out of recall (it
 cites a message you asked to forget): that is `authority_conflict`, and the edit

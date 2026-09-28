@@ -247,7 +247,8 @@ pub enum ServerEvent {
         task_id: Option<String>,
         /// What the card says about the call, written by the daemon from the
         /// tool's own read (design 09 §4.4) — shown above the literal
-        /// arguments, never the model's text. `null` for the ordinary card.
+        /// arguments, composed from the notes, never from the call's
+        /// arguments. `null` for the ordinary card.
         /// Live only: the `event_log` row keeps ids only.
         #[serde(default)]
         preview: Option<String>,

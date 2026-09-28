@@ -791,7 +791,9 @@ when, and tags for a candidate, a conflict or a file changed on disk — with
 checks the note it replaces as above, Keep mine dismisses the suggestion as on
 the card), `Archive` (an active note; a suggestion is replaced or kept, never
 archived) and `Forget`, which arms on the first click and forgets on the
-second; then four tabs:
+second (forgetting a candidate or a suggestion takes nothing you saved out of
+answers — not even a candidate from the same run or conversation that you have
+since confirmed); then four tabs:
 
 - **Note** — the Markdown rendered as text elements, never as HTML (a note is a
   file anyone can edit, so a `<script>` in one is just text), and where it came

@@ -107,8 +107,9 @@ export interface ChatConfirmationRequest {
   stream_id?: string | null;
   /**
    * What the card says about the call, written by the daemon from the tool's
-   * own read (design 09 §4.4) — shown above the literal arguments, never the
-   * model's text. `null`/absent for the ordinary card.
+   * own read (design 09 §4.4) — shown above the literal arguments, composed
+   * from the notes, never from the call's arguments. `null`/absent for the
+   * ordinary card.
    */
   preview?: string | null;
   /**
