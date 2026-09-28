@@ -320,7 +320,10 @@ impl MemoryService {
     /// now, and one of which may be the chat model's copy of its text — are
     /// withdrawn (repair round 2 of the L8 product slice) once every target
     /// has had its turn, so a suggestion the same call names is forgotten as
-    /// asked, whatever the order of the targets (the L8 close-out's A3).
+    /// asked, whatever the order of the targets (the L8 close-out's A3). A
+    /// target that fails ends the call with its error, and the notes the
+    /// targets before it forgot keep their forget — so their withdrawals run
+    /// first (the close-out's repair round 1).
     pub fn forget(
         &self,
         ctx: &MemoryAccessContext,
@@ -346,13 +349,17 @@ impl MemoryService {
         // targets left it, and the notes forgotten there (not withdrawn),
         // whose pending suggestions are withdrawn after the loop.
         let mut moot: Vec<Moot> = Vec::new();
-        for (id, expected) in &input.targets {
+        // The targets in turn; the first error ends the call, but only once
+        // the withdrawals the forgets that landed before it owe have run
+        // (the close-out's repair round 1: an error on a later target used
+        // to return before them, stranding a forgotten note's suggestions).
+        let looped = input.targets.iter().try_for_each(|(id, expected)| {
             let Some((holder, view)) = Self::find_note(&resolved, id)? else {
                 results.push(ForgetItem {
                     id: *id,
                     status: ForgetItemStatus::NotFound,
                 });
-                continue;
+                return Ok(());
             };
             let store_scope = holder.scope().clone();
             // Design 09 §13.3: forgetting a conversation summary forgets the
@@ -423,10 +430,12 @@ impl MemoryService {
                     forgotten: forgotten.into_iter().collect(),
                 }),
             }
-        }
+            Ok::<(), MemoryError>(())
+        });
         for m in moot {
             self.withdraw_suggestions_for(ctx, m);
         }
+        looped?;
         let forgotten = results
             .iter()
             .filter(|r| r.status == ForgetItemStatus::Forgotten)

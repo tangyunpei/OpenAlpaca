@@ -1406,6 +1406,105 @@ fn forgetting_a_note_and_its_suggestion_together_forgets_both_in_either_order() 
     }
 }
 
+/// Close-out repair round 1 (RT1-P1, RG1 P1): a forget whose later target
+/// fails still withdraws the suggestions of the notes it already forgot.
+/// A3 deferred the withdrawals past the loop, and an error on a later
+/// target — a quarantined partition, a file it could not remove — returned
+/// before them: the saved note was gone, and the chat model's copy of its
+/// text stayed a candidate the model lists and reads, with nothing left to
+/// withdraw it (a retry answers the note `not_found`).
+#[test]
+fn a_forget_that_fails_on_a_later_target_still_withdraws_what_it_owes() {
+    for variant in ["quarantined", "read-only"] {
+        let h = Harness::new();
+        let ws = h.workspace("lantern", Some(".git"));
+        let editor = saved(&h, "user.editor", "Editor", "The user edits with vim.");
+        let (_, tool) = chat_turn(&h, "I use the vim keymap in every editor.", None);
+        let copy = h
+            .service
+            .update(
+                &tool,
+                UpdateInput {
+                    id: editor.id,
+                    expected_revision: editor.revision.clone(),
+                    action: UpdateAction::Edit(Patch {
+                        body: Some("# Editor\n\nThe user edits with vim, and its keymap.\n".into()),
+                        ..Default::default()
+                    }),
+                    reason: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(copy.suggested_for, Some(editor.id));
+        let project = h.store(
+            &h.user(ALICE, Some(&ws)),
+            "Lantern",
+            "# Lantern\n\nThe project is Lantern.\n",
+            NoteKind::Fact,
+        );
+        let (snapshot, notes_dir) = {
+            let resolved = h.service.resolve(&h.user(ALICE, Some(&ws))).unwrap();
+            let p = resolved.project.as_ref().unwrap();
+            (p.snapshot_path().to_path_buf(), p.notes_dir().to_path_buf())
+        };
+        let restore = if variant == "quarantined" {
+            fs::remove_file(&snapshot).unwrap();
+            None
+        } else {
+            use std::os::unix::fs::PermissionsExt;
+            let before = fs::metadata(&notes_dir).unwrap().permissions();
+            fs::set_permissions(&notes_dir, fs::Permissions::from_mode(0o555)).unwrap();
+            Some(before)
+        };
+        let result = h.service.forget(
+            &h.user(ALICE, Some(&ws)),
+            ForgetInput {
+                targets: vec![
+                    (editor.id, editor.revision.clone()),
+                    (project.id, project.revision.clone()),
+                ],
+                reason: None,
+            },
+        );
+        if let Some(before) = restore {
+            fs::set_permissions(&notes_dir, before).unwrap();
+        }
+        assert!(result.is_err(), "{variant}: the later target fails");
+        let gone = |id: NoteId| {
+            h.service
+                .read(
+                    &h.tool(ALICE, None),
+                    ReadInput {
+                        id,
+                        ..Default::default()
+                    },
+                )
+                .map(|o| o.status)
+                .map_err(|e| e.class())
+        };
+        assert_eq!(gone(editor.id), Err("not_found"), "{variant}: W landed");
+        assert_eq!(
+            gone(copy.id),
+            Err("not_found"),
+            "{variant}: the model's copy of W's text is withdrawn"
+        );
+        assert!(
+            h.service
+                .list(
+                    &h.tool(ALICE, None),
+                    ListInput {
+                        status: Some(NoteStatus::Candidate),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .items
+                .is_empty(),
+            "{variant}: no candidate is left for the model to list"
+        );
+    }
+}
+
 /// Close-out A5 (round 3's nit on `edit_sources`' cap): the chat model's
 /// edit suggestion cites every row the saved note cites — the rows a later
 /// forget must follow the copy out by — and the turn's own row only where
