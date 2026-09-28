@@ -1834,6 +1834,126 @@ fn a_forget_that_fails_forgets_the_suggestion_it_names_in_either_order() {
     }
 }
 
+/// The chat model's edit suggestion of `note`: the same note with `alias`
+/// added, made on the turn `tool` runs.
+fn alias_suggestion(
+    h: &Harness,
+    tool: &MemoryAccessContext,
+    note: &StoreOutput,
+    alias: &str,
+) -> UpdateOutput {
+    let copy = h
+        .service
+        .update(
+            tool,
+            UpdateInput {
+                id: note.id,
+                expected_revision: note.revision.clone(),
+                action: UpdateAction::Edit(Patch {
+                    aliases: Some(vec![alias.into()]),
+                    ..Default::default()
+                }),
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(copy.suggested_for, Some(note.id));
+    copy
+}
+
+/// A note learning wrote, active, from the user's words in `row` alone —
+/// `source_forgotten` exactly when a forget suppressed that row.
+fn learned_from(h: &Harness, row: i64) -> StoreOutput {
+    h.service
+        .store(
+            &h.ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+                .unwrap(),
+            StoreInput {
+                title: "Editor of choice".into(),
+                body: "# Editor of choice\n\nThe user calls vim their editor of choice.\n".into(),
+                kind: Some(NoteKind::Fact),
+                sources: vec![message(row)],
+                observed_at: Some(chrono::Utc::now()),
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+
+/// Close-out repair round 3 (RT3 finding 1): a forget reads every target
+/// before any other target's turn, to put the named pending suggestions
+/// first — and a target it cannot read (its partition's `notes/` cannot be
+/// listed) must fail in its own turn, not at its read. Returning the read's
+/// error at once would end the call before the suggestion named after it,
+/// and before the note named before it, had their turns: `[note, unreadable,
+/// suggestion]` would forget neither, where `[suggestion, note, unreadable]`
+/// forgets both.
+#[test]
+fn a_target_that_cannot_be_read_fails_in_its_own_turn() {
+    use std::os::unix::fs::PermissionsExt;
+    for suggestion_last in [true, false] {
+        let h = Harness::new();
+        let ws = h.workspace("lantern", Some(".git"));
+        let editor = saved(&h, "user.editor", "Editor", "The user edits with vim.");
+        let (turn, tool) = chat_turn(&h, "Call vim my editor of choice.", None);
+        let copy = alias_suggestion(&h, &tool, &editor, "editor of choice");
+        let learned_from_the_turn = learned_from(&h, turn);
+        let project = h.store(
+            &h.user(ALICE, Some(&ws)),
+            "Lantern",
+            "# Lantern\n\nThe project is Lantern.\n",
+            NoteKind::Fact,
+        );
+        let notes_dir = {
+            let resolved = h.service.resolve(&h.user(ALICE, Some(&ws))).unwrap();
+            resolved.project.as_ref().unwrap().notes_dir().to_path_buf()
+        };
+        let note = (editor.id, editor.revision.clone());
+        let suggestion = (copy.id, copy.revision.clone());
+        let unreadable = (project.id, project.revision.clone());
+        let targets = if suggestion_last {
+            vec![note, unreadable, suggestion]
+        } else {
+            vec![suggestion, note, unreadable]
+        };
+        let before = fs::metadata(&notes_dir).unwrap().permissions();
+        fs::set_permissions(&notes_dir, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = h.service.forget(
+            &h.user(ALICE, Some(&ws)),
+            ForgetInput {
+                targets,
+                reason: None,
+            },
+        );
+        fs::set_permissions(&notes_dir, before).unwrap();
+        let case = format!("suggestion last: {suggestion_last}");
+        assert!(result.is_err(), "{case}: the project's note cannot be read");
+        assert!(
+            read_note(&h, learned_from_the_turn.id).source_forgotten,
+            "{case}: the suggestion had its turn, and its turn's row went with it"
+        );
+        let gone = |id: NoteId| {
+            h.service
+                .read(
+                    &h.tool(ALICE, None),
+                    ReadInput {
+                        id,
+                        ..Default::default()
+                    },
+                )
+                .map(|o| o.status)
+                .map_err(|e| e.class())
+        };
+        assert_eq!(
+            gone(editor.id),
+            Err("not_found"),
+            "{case}: the note named before the unreadable target had its turn"
+        );
+        assert_eq!(gone(copy.id), Err("not_found"), "{case}");
+    }
+}
+
 /// Close-out repair round 1 (RG1 P2): the in-chat card's `Changes:` line
 /// was one 160-byte cut over the fields in the wire's order, validity last,
 /// so one long alias pushed an end date off the card — and the person's
