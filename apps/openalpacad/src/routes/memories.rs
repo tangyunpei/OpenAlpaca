@@ -384,7 +384,10 @@ pub async fn create_memory_handler(
 /// forget; a forgotten note's pending suggestions are withdrawn once every
 /// target has had its turn, so a suggestion named with the note it would
 /// replace is forgotten as asked, in either order (the L8 close-out's A3).
-/// `openalpaca memory forget` sends all its ids here in one request.
+/// A target that fails ends the request with its refusal, after the
+/// withdrawals the targets before it owe (its repair round 1).
+/// `openalpaca memory forget` sends its ids here in requests of up to 20,
+/// the pending suggestions first.
 pub async fn forget_memories_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

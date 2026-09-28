@@ -769,8 +769,9 @@ recalled as any other.
 
 Forgetting an episode note — the Memory view, `/forget`, `memory_forget`,
 `DELETE /v1/memories/{id}` — forgets that note and nothing else: unlike any
-other forget, it suppresses none of the messages it cites, so what those
-messages taught stays learned and recallable. Deleting or clearing a
+other forget, it suppresses none of the messages it cites (a pending
+suggestion's forget spares only the messages a note you saved cites), so what
+those messages taught stays learned and recallable. Deleting or clearing a
 conversation (`DELETE /v1/sessions/{id}`, `DELETE /v1/chat/history`) or
 purging its project forgets the episode notes whose cited messages all
 belong to it.
@@ -832,8 +833,10 @@ suggestion, a copy of your note's text, cites what your note cites first and
 that message when there is room (at most eight), so forgetting a message your
 note learned from takes the copy out too, while forgetting the pending
 suggestion itself leaves your note in force: a pending suggestion's forget
-suppresses none of the messages the note it names cites — so the assistant may
-raise it with `memory_confirm` on a later attended turn; the Memory view,
+suppresses none of the messages a note you saved cites (the one it names, or
+another, such as a suggestion from the same turn you have since confirmed).
+Because it cites the message you typed, the assistant may raise it with
+`memory_confirm` on a later attended turn; the Memory view,
 `openalpaca memory suggestions`, the in-chat card and the `<memory_suggestions>`
 line say the assistant suggested it, give no reason of its text's (the text may
 copy your note's, whose reason is that note's), and say what else it changes —
@@ -852,8 +855,9 @@ replacement of it stands. Its replacement of a note learned from you replaces
 it at once, as learning's does. No surface
 archives a suggestion — it is replaced or kept — and forgetting a note
 withdraws every suggestion that would replace it, which could never be
-confirmed any more, once every note the same forget names has been forgotten —
-so a suggestion named with its note is forgotten as asked, in either order. `memory_update` and `memory_forget` raise the ordinary
+confirmed any more, once every note the same forget names has had its turn —
+so a suggestion named with its note is forgotten as asked, in either order —
+or, when one of them fails, before the forget returns that refusal. `memory_update` and `memory_forget` raise the ordinary
 confirmation card, and an unattended turn (a scheduled skill, a piped
 `openalpaca chat`) is refused them outright. `memory_update` with `action:
 confirm` is refused **before** any card, since nothing the model does confirms
@@ -872,7 +876,8 @@ note it would replace — the lane is `{owner}:gui`, which every app and CLI cha
 conversation of that owner shares. The call raises the ordinary card with a
 preview the **daemon** composed from the notes, never from the call's
 arguments — which note, your text, the new text, what else it changes (a
-`Changes:` line naming the key, aliases, tags or validity it changes), why (none
+`Changes:` line naming every one of the key, aliases, tags or validity it
+changes, the validity always whole), why (none
 for the assistant's own), and when — the date of the newest message you typed
 that it cites ("from what you said on …"), or for one the assistant wrote the
 day it saved it ("suggested by the assistant on …"), with every hidden character of what it quotes left out and, when any
@@ -952,7 +957,7 @@ addressed. Bodies and queries are closed objects — an unknown key is a `400`.
 | `GET /v1/memories/recently-used` | The in-memory ring of notes delivered to a model since the daemon started (`limit`, default 50, max 200): `{id, revision, reason, delivered_at, lane_key, task_id}`, `reason` as in `memory_used` — a note the recall only listed is recorded `index`, not as delivered. Cleared at restart. |
 | `GET /v1/memories/doctor` | The read-only report: every partition with its health, counts, malformed files, duplicate ids and conflicts, other owners' partitions as orphans, and stale/abandoned/orphaned move snapshots. Changes nothing. |
 | `POST /v1/memories` | Save a note: `title`, `body`, `kind`, and optionally `scope`, `aliases`, `tags`, `fact_key`, `sources` (`[{type: message\|task, id}]`, verified against the database), `valid_from`, `valid_to`, and `supersedes: {id, expected_revision}` to replace a note. `201` with the `memory_store` result and `ETag`; an exact duplicate is `200` with the existing id and `dedup: existing`; a moved `supersedes` target is `409`. |
-| `POST /v1/memories/forget` | Forget several: `{targets: [{id, expected_revision}], reason?}` (1–20), per-id status plus what is retained. A forgotten note's pending suggestions are withdrawn once every target has had its turn, so a suggestion named with its note is forgotten as asked, in either order; `openalpaca memory forget` sends its ids here in one request. |
+| `POST /v1/memories/forget` | Forget several: `{targets: [{id, expected_revision}], reason?}` (1–20), per-id status plus what is retained. A forgotten note's pending suggestions are withdrawn once every target has had its turn, so a suggestion named with its note is forgotten as asked, in either order; a target that fails ends the request with its refusal, after the withdrawals the targets before it owe. `openalpaca memory forget` sends its ids here in requests of up to 20, the pending suggestions first. |
 | `POST /v1/memories/sync` | One reconciliation scan now: `{scanned, changed, index_state, changes}`. |
 | `GET /v1/memories/{id}` | One note with its frontmatter, body (≤ 32 KiB), provenance and `ETag: "<revision>"`. `?section=<heading>` for one section; `?revision=<rev>` for one of the last five daemon-written revisions. |
 | `GET /v1/memories/{id}/history` | Those revisions, newest first: `{revisions: [{revision, written_at}]}`. |

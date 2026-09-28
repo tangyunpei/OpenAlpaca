@@ -10,7 +10,8 @@
  * approve. It is never summarised. The one exception is a **daemon-authored
  * preview** (design 09 §4.4, `memory_confirm`'s card, whose arguments are
  * three opaque ids): it is shown above the arguments, labelled as
- * OpenAlpaca's own text — never the model's — and the arguments stay.
+ * OpenAlpaca's own text — composed from the notes, never from the call's
+ * arguments — and the arguments stay.
  *
  * **Hidden characters** (`lib/hidden-chars`). The tool name, the arguments
  * and the agent's name come from the model, an MCP server or a plugin, and

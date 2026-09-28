@@ -393,8 +393,8 @@ by OpenAlpaca from the two notes, never from the call's arguments (the new
 text is the assistant's own when it saved the change itself, and the card says
 so): under a `From OpenAlpaca` label it reads
 *"Replace your saved note “X” with “B”?"*, then your text, the new text, what
-else it changes (a `Changes:` line for your note's key, aliases, tags or
-validity), why (none for the assistant's own change), where it came from — "from what you said on <date>", or "suggested by the
+else it changes (a `Changes:` line naming each of your note's key, aliases,
+tags or validity it changes, the validity always whole), why (none for the assistant's own change), where it came from — "from what you said on <date>", or "suggested by the
 assistant on <date>" for a change the assistant saved itself — and that your
 note is kept as history. The literal
 arguments (three ids) stay below it. **Approve** makes the new note yours —

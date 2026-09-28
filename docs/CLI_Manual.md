@@ -808,15 +808,21 @@ Notes:
   stays learned. Once you have edited or confirmed a note it is yours, `undo` is
   refused (`409 MEMORY_NOT_UNDOABLE`), and `forget` is the verb.
 - `forget` prints the title and revision of every note named, asks once (off a
-  terminal it refuses and says to pass `--yes`), then forgets them in one request
-  (`POST /v1/memories/forget`, 20 ids to a request), each with the revision it
-  printed, and prints each one's outcome. A forgotten note's files, history copies and index rows are
-  gone and its sources are never re-extracted; the transcript messages it cited
+  terminal it refuses and says to pass `--yes`), then forgets them with
+  `POST /v1/memories/forget` — in requests of up to 20 ids, the pending
+  suggestions among them sent first — each with the revision it printed, and
+  prints each one's outcome as its request returns. A forgotten note's files, history copies and index rows are
+  gone and its sources are never re-extracted (a pending suggestion's, but for
+  the messages a note you saved cites — below); the transcript messages it cited
   stay in the conversation, and the command says so. Any suggestion that would
   replace a forgotten note is dismissed with it — but one you name in the same
-  command is forgotten as asked, whatever the order. Forgetting a suggestion
-  leaves the note it would replace in force: it suppresses none of the messages
-  that note cites. There is no undo. An
+  command is forgotten as asked, whatever the order. Forgetting a pending
+  suggestion leaves the note it would replace in force, and every other note you
+  saved: it suppresses none of the messages a note you saved cites. If the
+  daemon refuses a request, the command stops with that refusal, but first says
+  which of that request's ids were already forgotten — the daemon forgets them
+  in turn, so the ones before the id that failed are gone — and how many ids
+  after it were never sent. There is no undo. An
   **episode note** is the exception on sources: forgetting one forgets that note
   alone, and what its messages taught stays learned.
 - **Episode notes.** After a conversation has been quiet for 30 minutes, when you
