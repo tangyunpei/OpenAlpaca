@@ -1954,6 +1954,95 @@ fn a_target_that_cannot_be_read_fails_in_its_own_turn() {
     }
 }
 
+/// Close-out repair round 3 (RG3 P3): a named pending suggestion whose own
+/// forget fails — its read succeeds, its partition is quarantined or its
+/// file cannot be removed — ended the forget at once, before the
+/// suggestions named after it had their turns: `[failing, suggestion]` left
+/// the second a candidate, its turn's row unsuppressed, where
+/// `[suggestion, failing]` forgot it. Every named pending suggestion now has
+/// its turn, and the first error ends the forget after them, so both orders
+/// agree and a suggestion's result does not depend on where it stood.
+#[test]
+fn a_suggestion_whose_forget_fails_leaves_every_other_named_suggestion_its_turn() {
+    use std::os::unix::fs::PermissionsExt;
+    for variant in ["quarantined", "read-only"] {
+        for failing_first in [true, false] {
+            let h = Harness::new();
+            let ws = h.workspace("lantern", Some(".git"));
+            let editor = saved(&h, "user.editor", "Editor", "The user edits with vim.");
+            let (turn, tool) = chat_turn(&h, "Call vim my editor of choice.", None);
+            let copy = alias_suggestion(&h, &tool, &editor, "editor of choice");
+            let learned_from_the_turn = learned_from(&h, turn);
+            let database = h
+                .service
+                .store(
+                    &h.user(ALICE, Some(&ws)),
+                    StoreInput {
+                        title: "Lantern database".into(),
+                        body: "# Lantern database\n\nLantern uses Postgres.\n".into(),
+                        kind: Some(NoteKind::Fact),
+                        fact_key: Some("project.database".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let (_, project_tool) = chat_turn(&h, "Call it the main database.", Some(&ws));
+            let project_copy = alias_suggestion(&h, &project_tool, &database, "main database");
+            let (snapshot, notes_dir) = {
+                let resolved = h.service.resolve(&h.user(ALICE, Some(&ws))).unwrap();
+                let p = resolved.project.as_ref().unwrap();
+                (p.snapshot_path().to_path_buf(), p.notes_dir().to_path_buf())
+            };
+            let failing = (project_copy.id, project_copy.revision.clone());
+            let suggestion = (copy.id, copy.revision.clone());
+            let targets = if failing_first {
+                vec![failing, suggestion.clone()]
+            } else {
+                vec![suggestion.clone(), failing]
+            };
+            let restore = if variant == "quarantined" {
+                fs::remove_file(&snapshot).unwrap();
+                None
+            } else {
+                let before = fs::metadata(&notes_dir).unwrap().permissions();
+                fs::set_permissions(&notes_dir, fs::Permissions::from_mode(0o555)).unwrap();
+                Some(before)
+            };
+            let result = h.service.forget(
+                &h.user(ALICE, Some(&ws)),
+                ForgetInput {
+                    targets,
+                    reason: None,
+                },
+            );
+            if let Some(before) = restore {
+                fs::set_permissions(&notes_dir, before).unwrap();
+            }
+            let case = format!("{variant}, failing first: {failing_first}");
+            assert!(result.is_err(), "{case}: the project's suggestion fails");
+            assert!(
+                read_note(&h, learned_from_the_turn.id).source_forgotten,
+                "{case}: the other suggestion had its turn, and its turn's row went with it"
+            );
+            let retry = h
+                .service
+                .forget(
+                    &h.user(ALICE, None),
+                    ForgetInput {
+                        targets: vec![suggestion],
+                        reason: None,
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                retry.results[0].status,
+                ForgetItemStatus::NotFound,
+                "{case}: the other suggestion was forgotten, not left pending"
+            );
+        }
+    }
+}
+
 /// Close-out repair round 1 (RG1 P2): the in-chat card's `Changes:` line
 /// was one 160-byte cut over the fields in the wire's order, validity last,
 /// so one long alias pushed an end date off the card — and the person's

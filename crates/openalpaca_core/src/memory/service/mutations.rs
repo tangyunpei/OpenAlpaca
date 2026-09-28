@@ -326,11 +326,14 @@ impl MemoryService {
     /// first (the close-out's repair round 1). The pending suggestions the
     /// call names take their turns first, the other targets after them in
     /// the order given (the close-out's repair round 2), as `openalpaca
-    /// memory forget` sends them: a failure can then end the call only once
-    /// every suggestion it names has had its turn, so none is withdrawn
-    /// before it — its row left unsuppressed, a retry answered `not_found` —
-    /// and the result does not depend on where it stood. The results come
-    /// back in the order given.
+    /// memory forget` sends them; every named suggestion has its turn even
+    /// when one of them fails, and the first failure then ends the call
+    /// before the other targets (its repair round 3). A failure can so end
+    /// the call only once every suggestion it names has had its turn: none
+    /// is withdrawn before its own forget — its row left unsuppressed, a
+    /// retry answered `not_found` — and none is left untried behind a
+    /// failing one, so a suggestion's result does not depend on where it
+    /// stood. The results come back in the order given.
     pub fn forget(
         &self,
         ctx: &MemoryAccessContext,
@@ -449,24 +452,34 @@ impl MemoryService {
             }
             Ok::<(), MemoryError>(())
         };
-        // The named pending suggestions first, as they are read; every other
-        // target after them in the order given, each with the read that
-        // placed it — a forget rewrites no other note's file, and each
-        // forget re-checks its note's revision under the lock. A target that
-        // could not be read fails in its own turn. Each target is read once,
-        // as before.
+        // The named pending suggestions first, as they are read — each of
+        // them, even after one of them has failed, whose error then ends the
+        // call once they have all had their turns (the close-out's repair
+        // round 3); every other target after them in the order given, each
+        // with the read that placed it — a forget rewrites no other note's
+        // file, and each forget re-checks its note's revision under the
+        // lock. A target that could not be read fails in its own turn. Each
+        // target is read once, as before.
         let looped = (|| {
             let mut rest = Vec::new();
+            let mut failed = None;
             for (asked, (id, expected)) in input.targets.iter().enumerate() {
                 match Self::find_note(&resolved, id) {
                     Ok(Some(found))
                         if found.1.note.status == NoteStatus::Candidate
                             && !found.1.note.supersedes.is_empty() =>
                     {
-                        turn(asked, id, expected, Some(found))?
+                        if let Err(e) = turn(asked, id, expected, Some(found))
+                            && failed.is_none()
+                        {
+                            failed = Some(e);
+                        }
                     }
                     read => rest.push((asked, id, expected, read)),
                 }
+            }
+            if let Some(e) = failed {
+                return Err(e);
             }
             rest.into_iter()
                 .try_for_each(|(asked, id, expected, read)| turn(asked, id, expected, read?))

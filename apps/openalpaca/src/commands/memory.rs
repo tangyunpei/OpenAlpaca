@@ -1532,10 +1532,11 @@ pub(crate) async fn forget_verb(
 /// and what a forget keeps is said once per request — each request's lines
 /// handed to `emit` as it returns. A refused request ends the command with
 /// its refusal, but not before saying what landed (the close-out's repair
-/// round 1): the service forgets its targets in turn, so the ids before the
-/// one that failed may be gone — each id of that request is read back and
-/// reported forgotten or not — and the ids after that request were never
-/// sent.
+/// round 1): the service forgets its targets in turn — the pending
+/// suggestions first, each of them even after one fails (its repair round
+/// 3) — so the ids before the one that failed, and every pending suggestion,
+/// may be gone; each id of that request is read back and reported forgotten
+/// or not, and the ids after that request were never sent.
 pub(crate) async fn forget_notes(
     api: &Api,
     targets: &[(NoteId, String)],
