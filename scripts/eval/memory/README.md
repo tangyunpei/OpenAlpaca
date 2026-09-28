@@ -493,9 +493,10 @@ aliases ≥ 60 %, restatements raising a suggestion or a duplicate ≤ 2, L with
 −10 pp of D′) are never read against one run. The four samples are two
 systems: the replays' spread is the extraction path's, to be read beside a
 live run's per-note `extraction` shares only (above), and the whole system —
-the pooled figures — has one sample per live run. Which of the two a target
-applies to is the owner's question, not the harness's: the report gives
-both.
+the pooled figures — has one sample per live run. The owner answered which
+one a target applies to (LQ12, 2026-09-26): the learning targets are read
+against the **extraction** path, and QA accuracy (L within −10 pp of D′)
+against the whole store the reader answers from. The report gives both.
 
 **The episode split** (design 09 §13.4, for L8) is answered after a learning
 run: an L run with `OPENALPACA_MEMORY_EVAL_QUESTIONS` naming
