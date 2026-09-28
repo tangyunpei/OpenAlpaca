@@ -1610,6 +1610,131 @@ fn retracting_one_suggestion_leaves_a_note_the_user_confirmed_from_the_same_turn
     }
 }
 
+/// A candidate the extractor took from assistant or tool output, citing
+/// `sources`.
+fn inferred(h: &Harness, title: &str, knowledge: &str, sources: Vec<NoteSource>) -> StoreOutput {
+    h.service
+        .store(
+            &h.ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+                .unwrap(),
+            StoreInput {
+                title: title.into(),
+                body: format!("# {title}\n\n{knowledge}\n"),
+                kind: Some(NoteKind::Fact),
+                sources,
+                observed_at: Some(chrono::Utc::now()),
+                provenance: Some(ExtractionProvenance::OtherOutput),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+
+/// Close-out repair round 2 (RG2 P1): round 1's shield covered a pending
+/// *suggestion* only. Every candidate of a run cites the run's `task:` row,
+/// and the candidates learning infers from one turn all cite that turn's
+/// row; the person confirms one, then rejects another with Forget — the
+/// only reject the Memory view offers a candidate that names no note — or
+/// the model forgets it under a card that names that candidate alone. The
+/// forget suppressed the shared row and took the note the user had just
+/// confirmed out of automatic recall, unannounced. A pending candidate's
+/// forget, a suggestion or not, now suppresses no row a note the user
+/// saved cites.
+#[test]
+fn forgetting_a_candidate_leaves_a_sibling_the_user_confirmed() {
+    for from_a_run in [true, false] {
+        for by_the_tool in [true, false] {
+            let case = format!("from a run: {from_a_run}, by the tool: {by_the_tool}");
+            let h = Harness::new();
+            let shared = if from_a_run {
+                h.db.with_connection(|c| {
+                    c.execute(
+                        "INSERT INTO task (id, title, created_by, source_lane)
+                         VALUES ('run-1', 'a run', ?1, 'u_example_alice:cli')",
+                        rusqlite::params![ALICE],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+                NoteSource {
+                    kind: SourceType::Task,
+                    id: "run-1".into(),
+                    observed_at: None,
+                }
+            } else {
+                let (turn, _) = chat_turn(&h, "I switched to Helix; is Dana Wu my manager?", None);
+                message(turn)
+            };
+            let editor = inferred(
+                &h,
+                "Editor: Helix",
+                "The user edits with Helix.",
+                vec![shared.clone()],
+            );
+            let manager = inferred(
+                &h,
+                "Manager: Dana Wu",
+                "The user's manager is Dana Wu.",
+                vec![shared],
+            );
+            for c in [&editor, &manager] {
+                let note = read_note(&h, c.id);
+                assert_eq!(note.status, NoteStatus::Candidate, "{case}");
+                assert!(note.supersedes.is_empty(), "{case}: it names no note");
+            }
+            h.service
+                .update(
+                    &h.user(ALICE, None),
+                    UpdateInput {
+                        id: editor.id,
+                        expected_revision: editor.revision.clone(),
+                        action: UpdateAction::Confirm {
+                            target_revision: None,
+                        },
+                        reason: None,
+                    },
+                )
+                .unwrap();
+            assert_eq!(read_note(&h, editor.id).origin, Origin::User, "{case}");
+            let recalled = |h: &Harness| {
+                let r = h
+                    .service
+                    .recall(
+                        &h.user(ALICE, None),
+                        "Which editor does the user use? Helix",
+                        RecallBudget::default(),
+                    )
+                    .unwrap();
+                r.notes.iter().any(|n| n.id == editor.id)
+                    || r.listed.iter().any(|n| n.id == editor.id)
+            };
+            assert!(recalled(&h), "{case}");
+            // "No, Dana is not my manager."
+            let forgetter = if by_the_tool {
+                h.tool(ALICE, None)
+            } else {
+                h.user(ALICE, None)
+            };
+            let out = h
+                .service
+                .forget(
+                    &forgetter,
+                    ForgetInput {
+                        targets: vec![(manager.id, manager.revision.clone())],
+                        reason: Some("not true".into()),
+                    },
+                )
+                .unwrap();
+            assert_eq!(out.results[0].status, ForgetItemStatus::Forgotten, "{case}");
+            assert!(
+                !read_note(&h, editor.id).source_forgotten,
+                "{case}: the note the user confirmed stays in force"
+            );
+            assert!(recalled(&h), "{case}");
+        }
+    }
+}
+
 /// Close-out repair round 1 (RG1 P2): the in-chat card's `Changes:` line
 /// was one 160-byte cut over the fields in the wire's order, validity last,
 /// so one long alias pushed an end date off the card — and the person's

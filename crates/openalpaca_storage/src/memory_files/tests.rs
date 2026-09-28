@@ -5803,3 +5803,57 @@ fn a_pending_suggestions_forget_suppresses_no_row_a_saved_note_cites() {
         assert!(!snapshot.is_source_suppressed("message:20"), "the job note's row");
     }
 }
+
+/// The close-out's repair round 2 (RG2 P1): round 1's shield covered a
+/// pending *suggestion* only. A candidate that names no note — every one a
+/// run proposes cites the run's row — suppressed the row it shares with a
+/// sibling the user confirmed, and took that note out of automatic recall.
+/// Every pending candidate's forget now spares the rows a saved note
+/// cites; a row only it cites is still suppressed.
+#[test]
+fn a_candidates_forget_suppresses_no_row_a_saved_note_cites() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let run = |id: &str| NoteSource {
+        kind: SourceType::Task,
+        id: id.into(),
+        observed_at: None,
+    };
+    let candidate = |title: &str, sources: Vec<NoteSource>| {
+        p.create(
+            NewNote {
+                status: Some(NoteStatus::Candidate),
+                sources,
+                ..new_note(title, &format!("# {title}\n\nFrom a run.\n"), NoteKind::Fact)
+            },
+            Actor::Extraction {
+                origin: Origin::ExtractedOther,
+            },
+        )
+        .unwrap()
+    };
+    let editor = candidate("Editor", vec![run("run-1")]);
+    let manager = candidate("Manager", vec![run("run-1"), run("run-2")]);
+    p.update(
+        &editor.id,
+        &editor.revision,
+        UpdateAction::Confirm {
+            target_revision: None,
+        },
+        Actor::UserSurface,
+    )
+    .unwrap();
+    assert!(p.read(&editor.id).unwrap().derived.origin.is_saved());
+
+    let out = p.forget(&[(manager.id, manager.revision.clone())]).unwrap();
+    assert_eq!(out[0].status, ForgetStatus::Forgotten);
+    let snapshot = p.snapshot().unwrap();
+    assert!(
+        !snapshot.is_source_suppressed("task:run-1"),
+        "the confirmed sibling's row is not the candidate's to suppress"
+    );
+    assert!(snapshot.is_source_suppressed("task:run-2"), "a row only it cites");
+    let kept = p.read(&editor.id).unwrap();
+    assert!(!kept.derived.source_forgotten);
+    assert!(kept.derived.recallable(), "still in force");
+}
