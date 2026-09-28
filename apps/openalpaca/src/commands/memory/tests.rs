@@ -1302,7 +1302,10 @@ async fn forget_sends_every_id_in_one_request_and_prints_each_outcome() {
         (NoteId::parse(TARGET).unwrap(), TARGET_REV.to_string()),
         (NoteId::parse(SUGGESTION).unwrap(), OLD_REV.to_string()),
     ];
-    let lines = forget_notes(&api, &targets).await.expect("the forget runs");
+    let mut lines = Vec::new();
+    forget_notes(&api, &targets, &mut |l| lines.push(l))
+        .await
+        .expect("the forget runs");
     let requests = server.join().expect("the server finishes");
     assert_eq!(requests.len(), 1, "{requests:?}");
     assert!(
@@ -1328,6 +1331,129 @@ async fn forget_sends_every_id_in_one_request_and_prints_each_outcome() {
         "{lines:?}"
     );
     assert!(lines[2].contains("Session logs are separate."), "{lines:?}");
+}
+
+/// The `n`th of the ids the batch tests forget, and a `forget` answer
+/// saying each id of `ids` was forgotten.
+fn nth_id(n: usize) -> String {
+    format!("c0ffee{n:02}-0000-4000-8000-0000000000{n:02}")
+}
+
+fn forgotten_answer(ids: &[String]) -> String {
+    serde_json::json!({
+        "results": ids
+            .iter()
+            .map(|id| serde_json::json!({ "id": id, "status": "forgotten" }))
+            .collect::<Vec<_>>(),
+        "retained": { "transcript": true, "session_logs": true, "note": "Session logs are separate." },
+    })
+    .to_string()
+}
+
+fn refused_answer() -> String {
+    json_answer(
+        "503 Service Unavailable",
+        OLD_REV,
+        &serde_json::json!({
+            "error": { "code": "MEMORY_QUARANTINED", "message": "the project's partition is quarantined" }
+        })
+        .to_string(),
+    )
+}
+
+/// Close-out repair round 1 (RT1 2, RG1 5): past 20 ids `memory forget`
+/// sends more than one request, and a request's withdrawals run before the
+/// next is sent — so a note in the first and its pending suggestion in the
+/// second would be the order-dependent case A3 removed (the suggestion
+/// withdrawn, then answered `not found`, its row never suppressed). The
+/// pending suggestions go first; everything else keeps the order given.
+#[test]
+fn forget_sends_pending_suggestions_first_so_no_request_withdraws_a_later_one() {
+    assert!(is_pending_suggestion(&suggestion_read(&[TARGET])));
+    assert!(!is_pending_suggestion(&suggestion_read(&[])), "a candidate naming nothing");
+    assert!(!is_pending_suggestion(&target_read()));
+    let mut read: Vec<(NoteId, String, bool)> = (0..20)
+        .map(|n| (NoteId::parse(&nth_id(n)).unwrap(), OLD_REV.to_string(), false))
+        .collect();
+    read.insert(3, (NoteId::parse(TARGET).unwrap(), TARGET_REV.to_string(), false));
+    read.push((NoteId::parse(SUGGESTION).unwrap(), OLD_REV.to_string(), true));
+    let ordered = forget_order(read.clone());
+    assert_eq!(ordered.len(), 22);
+    assert_eq!(ordered[0], (NoteId::parse(SUGGESTION).unwrap(), OLD_REV.to_string()));
+    let rest: Vec<(NoteId, String)> = read[..21]
+        .iter()
+        .map(|(id, revision, _)| (*id, revision.clone()))
+        .collect();
+    assert_eq!(ordered[1..], rest[..], "the others keep the order given");
+}
+
+/// Close-out repair round 1 (RT1 2, RG1 5, RC1 3): a refused request no
+/// longer hides what landed. The lines of the requests before it were
+/// printed as each returned; the refused one's ids are read back — a forget
+/// that landed before the target that failed is gone — and the ids after it
+/// were never sent. The refusal is still the command's error.
+#[tokio::test]
+async fn a_refused_forget_request_still_reports_what_landed() {
+    let ids: Vec<String> = (0..21).map(nth_id).collect();
+    // A second request refused: the first request's twenty lines stand.
+    let (addr, server) = serve(vec![
+        json_answer("200 OK", OLD_REV, &forgotten_answer(&ids[..20])),
+        refused_answer(),
+        json_answer("200 OK", OLD_REV, &read_answer().to_string()),
+    ]);
+    let api = Api::for_tests(DaemonClient::for_tests(&format!("http://{addr}"), "token"));
+    let targets: Vec<(NoteId, String)> = ids
+        .iter()
+        .map(|id| (NoteId::parse(id).unwrap(), OLD_REV.to_string()))
+        .collect();
+    let mut lines = Vec::new();
+    let err = forget_notes(&api, &targets, &mut |l| lines.push(l))
+        .await
+        .expect_err("the second request is refused");
+    assert!(format!("{err:#}").contains("MEMORY_QUARANTINED"), "{err:#}");
+    assert_eq!(lines.len(), 22, "{lines:?}");
+    for (line, id) in lines.iter().zip(&ids[..20]) {
+        assert!(line.contains(id.as_str()) && line.contains("forgotten"), "{lines:?}");
+    }
+    assert!(lines[20].contains("Session logs are separate."), "{lines:?}");
+    assert!(
+        lines[21].contains(ids[20].as_str()) && lines[21].contains("not forgotten"),
+        "{lines:?}"
+    );
+    let requests = server.join().expect("the server finishes");
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    assert!(requests[2].starts_with(&format!("GET /v1/memories/{} ", ids[20])), "{}", requests[2]);
+
+    // The first request refused after its first target landed: that one
+    // reads back gone, the second is still there, and the one id past the
+    // request was never sent.
+    let gone = json_answer(
+        "404 Not Found",
+        OLD_REV,
+        &serde_json::json!({ "error": { "code": "MEMORY_NOT_FOUND", "message": "no such note" } })
+            .to_string(),
+    );
+    let mut answers = vec![refused_answer(), gone];
+    answers.extend((1..20).map(|_| json_answer("200 OK", OLD_REV, &read_answer().to_string())));
+    let (addr, server) = serve(answers);
+    let api = Api::for_tests(DaemonClient::for_tests(&format!("http://{addr}"), "token"));
+    let mut lines = Vec::new();
+    forget_notes(&api, &targets, &mut |l| lines.push(l))
+        .await
+        .expect_err("the request is refused");
+    assert_eq!(lines.len(), 21, "{lines:?}");
+    assert!(
+        lines[0].contains(ids[0].as_str())
+            && lines[0].contains("forgotten")
+            && !lines[0].contains("not forgotten"),
+        "{lines:?}"
+    );
+    for (line, id) in lines[1..20].iter().zip(&ids[1..20]) {
+        assert!(line.contains(id.as_str()) && line.contains("not forgotten"), "{lines:?}");
+    }
+    assert!(lines[20].contains("1 more id") && lines[20].contains("not sent"), "{lines:?}");
+    let requests = server.join().expect("the server finishes");
+    assert_eq!(requests.len(), 21, "{requests:?}");
 }
 
 /// The L8 close-out's A4: a suggestion that changes the note's metadata —

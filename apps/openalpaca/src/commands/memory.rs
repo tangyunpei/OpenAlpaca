@@ -618,22 +618,19 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
         }
         MemoryCommands::Forget { ids, yes, at } => {
             let api = Api::connect(&at)?;
-            let mut targets = Vec::new();
+            let mut read = Vec::new();
             for arg in &ids {
                 let id = api.resolve_id(arg).await?;
                 let current = api.get(&format!("/v1/memories/{id}")).await?;
                 let revision = revision_of(&current)?;
                 println!("{}", forget_line(id, &current, &revision));
-                targets.push((id, revision));
+                read.push((id, revision, is_pending_suggestion(&current)));
             }
-            if !yes && !confirm_forget(targets.len())? {
+            if !yes && !confirm_forget(read.len())? {
                 println!("Cancelled. Nothing was forgotten.");
                 return Ok(());
             }
-            for line in forget_notes(&api, &targets).await? {
-                println!("{line}");
-            }
-            Ok(())
+            forget_notes(&api, &forget_order(read), &mut |line| println!("{line}")).await
         }
         MemoryCommands::Sync { at } => {
             let api = Api::connect(&at)?;
@@ -1512,16 +1509,26 @@ fn body_from_editor(title: &str) -> Result<String> {
 }
 
 /// `memory forget`'s requests, and the lines it prints: every id in one
-/// `POST /v1/memories/forget` (20 to a request, the route's most), in the
-/// order given, with the revision each was read at — not one `DELETE` per
-/// id. A forgotten note's pending suggestions are withdrawn once its
-/// request's targets have all been forgotten, so a suggestion named with
-/// the note it would replace is forgotten as asked, in either order (the
-/// L8 close-out's A3); one request per id would forget the note first and
-/// answer the suggestion `not found`. Each target's outcome is one line,
-/// and what a forget keeps is said once per request.
-pub(crate) async fn forget_notes(api: &Api, targets: &[(NoteId, String)]) -> Result<Vec<String>> {
-    let mut lines = Vec::new();
+/// `POST /v1/memories/forget` — in requests of up to 20 ids, the route's
+/// most — with the revision each was read at, not one `DELETE` per id. A
+/// forgotten note's pending suggestions are withdrawn once its request's
+/// targets have all had their turn, so a suggestion named with the note it
+/// would replace is forgotten as asked, in either order (the L8 close-out's
+/// A3); the caller sends the pending suggestions first ([`forget_order`]),
+/// so this holds across requests too. Each target's outcome is one line,
+/// and what a forget keeps is said once per request — each request's lines
+/// handed to `emit` as it returns. A refused request ends the command with
+/// its refusal, but not before saying what landed (the close-out's repair
+/// round 1): the service forgets its targets in turn, so the ids before the
+/// one that failed may be gone — each id of that request is read back and
+/// reported forgotten or not — and the ids after that request were never
+/// sent.
+pub(crate) async fn forget_notes(
+    api: &Api,
+    targets: &[(NoteId, String)],
+    emit: &mut dyn FnMut(String),
+) -> Result<()> {
+    let mut sent = 0;
     for batch in targets.chunks(20) {
         let body = json!({
             "targets": batch
@@ -1532,14 +1539,26 @@ pub(crate) async fn forget_notes(api: &Api, targets: &[(NoteId, String)]) -> Res
         let response = api
             .send(Method::POST, "/v1/memories/forget", None, Some(&body))
             .await?;
+        sent += batch.len();
         if response.status().as_u16() != 200 {
-            return Err(error_from_response(response).await);
+            let refusal = error_from_response(response).await;
+            for (id, _) in batch {
+                emit(read_back(api, *id).await);
+            }
+            let unsent = targets.len() - sent;
+            if unsent > 0 {
+                emit(format!(
+                    "{} {unsent} more id(s) not sent; none of them was forgotten",
+                    "✗".red()
+                ));
+            }
+            return Err(refusal);
         }
         let out: Value = response.json().await?;
         let mut forgot = false;
         for result in out["results"].as_array().into_iter().flatten() {
             let id = result["id"].as_str().unwrap_or("?");
-            lines.push(match result["status"].as_str() {
+            emit(match result["status"].as_str() {
                 Some("forgotten") => {
                     forgot = true;
                     format!("{} {id} forgotten.", "✓".green())
@@ -1554,10 +1573,50 @@ pub(crate) async fn forget_notes(api: &Api, targets: &[(NoteId, String)]) -> Res
             });
         }
         if forgot && let Some(note) = out["retained"]["note"].as_str() {
-            lines.push(format!("  {}", note.dimmed()));
+            emit(format!("  {}", note.dimmed()));
         }
     }
-    Ok(lines)
+    Ok(())
+}
+
+/// After a refused forget request, whether one of its ids landed: every id
+/// was read just before the request, so one that is gone now was forgotten
+/// by it (or, a suggestion, withdrawn with the note it named).
+async fn read_back(api: &Api, id: NoteId) -> String {
+    let answer = api
+        .send::<Value>(Method::GET, &format!("/v1/memories/{id}"), None, None)
+        .await
+        .map(|r| r.status().as_u16());
+    match answer {
+        Ok(404) => format!("{} {id} forgotten.", "✓".green()),
+        Ok(200) => format!("{} {id}: not forgotten", "✗".red()),
+        _ => format!("{} {id}: could not be read back to tell", "?".yellow()),
+    }
+}
+
+/// The order `memory forget` sends its targets in: the pending suggestions
+/// first, everything else as given. A request's withdrawals run before the
+/// next request is sent, so a note in one request and its suggestion in a
+/// later one would forget the note and withdraw the suggestion — answered
+/// `not found`, its row never suppressed — where one request forgets both
+/// (the close-out's repair round 1). A suggestion never names another
+/// suggestion, so this one order keeps every request apart.
+pub(crate) fn forget_order(read: Vec<(NoteId, String, bool)>) -> Vec<(NoteId, String)> {
+    let (first, rest): (Vec<_>, Vec<_>) = read.into_iter().partition(|(_, _, s)| *s);
+    first
+        .into_iter()
+        .chain(rest)
+        .map(|(id, revision, _)| (id, revision))
+        .collect()
+}
+
+/// Whether a note as read is a pending suggestion: a candidate naming the
+/// note it would replace.
+fn is_pending_suggestion(current: &Value) -> bool {
+    current["status"] == "candidate"
+        && current["supersedes"]
+            .as_array()
+            .is_some_and(|t| !t.is_empty())
 }
 
 /// `forget` without `--yes`: a terminal question. Off a terminal there is no
