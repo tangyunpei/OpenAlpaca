@@ -1,0 +1,23 @@
+$ python3 scripts/eval/memory/compare.py --margin=-10 scripts/eval/memory/reports/l8-final/L.json scripts/eval/memory/reports/l8-final/D-index.json
+candidate judge: qwen3.8:27b-mlx  judge_is_reader=true  judge_same_family=true  recall_mode=index
+baseline judge:  qwen3.8:27b-mlx  judge_is_reader=true  judge_same_family=true  recall_mode=index
+candidate: scripts/eval/memory/reports/l8-final/L.json (system L)
+baseline:  scripts/eval/memory/reports/l8-final/D-index.json (system D)
+paired questions: 469  (candidate judged 470, baseline judged 469)
+accuracy: candidate 88.3%  baseline 96.6%
+paired difference: -8.3 pp  95% CI [-11.3, -5.3]  SE 1.53 pp
+discordant pairs: 55 (11.7%): candidate-only 8, baseline-only 47, both 406
+
+per category (candidate vs baseline, point difference):
+  abstention               n=45   100.0% vs  95.6%  +4.4 pp
+  changed_facts_time       n=55    89.1% vs  96.4%  -7.3 pp
+  cross_language           n=70    82.9% vs  95.7%  -12.9 pp  <-- below the category block line
+  exact_recall             n=80    88.8% vs  98.8%  -10.0 pp
+  paraphrase               n=79    86.1% vs  94.9%  -8.9 pp
+  project_procedures       n=55    89.1% vs  96.4%  -7.3 pp
+  rejected_failed_actions  n=45    84.4% vs  97.8%  -13.3 pp  <-- below the category block line
+  source_conflicts         n=40    90.0% vs  97.5%  -7.5 pp
+
+gate: CI lower bound -11.3 pp <= margin -10.0 pp -> FAIL
+blocked categories (need an explanation before release): cross_language, rejected_failed_actions
+exit 1

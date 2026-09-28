@@ -1,0 +1,4234 @@
+{
+  "schema": 1,
+  "status": "complete",
+  "system": "L-S",
+  "unavailable_reason": null,
+  "run_started_at": "2026-09-28T13:39:53Z",
+  "run_finished_at": "2026-09-28T14:20:28Z",
+  "machine": {
+    "hostname": "owner-macbook-pro",
+    "os": "macos",
+    "arch": "aarch64",
+    "rustc": "rustc 1.93.0 (254b59607 2026-01-19)"
+  },
+  "build": {
+    "git_head": "82180b847cc1b5b7d2532ca0697ba145f92ab970",
+    "lockfile_sha256": "1ffa8e996552bef5e9dc63392996cf95996a036414933d5acf783e972eadb417",
+    "crate_version": "0.1.0",
+    "features": [
+      "live-eval"
+    ]
+  },
+  "conditions": {
+    "owner_id": "memory-eval-owner-46debd7f",
+    "llm_toml": "<scratch>/config-mlx/llm.toml",
+    "llm_toml_sha256": "d7cf4d8021f45b526a1e3d2c7a973320d37dd83c5b59def931fafa39369c68fb",
+    "reader_default_model": "qwen3.8:27b-mlx",
+    "reader_temperature": null,
+    "reader_max_rounds": 15,
+    "reader_max_cost_usd": 1.0,
+    "main_loop_max_rounds": 8,
+    "main_loop_max_tools_per_round": 4,
+    "tool_result_inline_bytes": 32768,
+    "autocompact_buffer_ratio": 0.165,
+    "judge_model_requested": null,
+    "judge_temperature": 0.0,
+    "judge_max_tokens": 400,
+    "judge_prompt_path": "<scratch>/wt-final/crates/openalpaca_core/../../scripts/eval/memory/judge-prompt.md",
+    "judge_prompt_sha256": "df1cc6fa6adb60b27651aa38b248567ffb6326a78cb910d51d405600852db218",
+    "notes_path": "<scratch>/wt-final/crates/openalpaca_core/../../scripts/eval/memory/notes-gold.json",
+    "notes_sha256": "575a887b9aea2a509d87cfbbb298fa848f57421ceea6ca76209b05c58ae481fb",
+    "notes_total": 83,
+    "notes_seeded": 8,
+    "notes_duplicate": 0,
+    "notes_failed": 0,
+    "questions_path": "<scratch>/wt-final/crates/openalpaca_core/../../scripts/eval/memory/questions-heldout.json",
+    "questions_sha256": "b6249847a1663e6c4e4cac7394f600f2063570a0d5b29d3fa700ebd841f640cb",
+    "questions_total": 470,
+    "questions_selected": 0,
+    "limit": null,
+    "category_filter": null,
+    "per_turn_fts_active": true,
+    "memory_search_tool_offered": true,
+    "unattended": true,
+    "extraction_disabled": false,
+    "workflow_cap": 0,
+    "home_store": "<scratch>/final/store-L-S",
+    "scratch_dir": null,
+    "system_description": "the MD-11/MD-12 check: the 8 change pairs' old notes seeded as the user's own, the suggestion sessions fed with learning on, and each suggestion confirmed through the user-directed confirm; no questions",
+    "memory_tools_offered": [
+      "memory_search",
+      "memory_read",
+      "memory_list",
+      "memory_timeline",
+      "memory_store",
+      "memory_update",
+      "memory_forget"
+    ],
+    "follow_up_search_bound": null,
+    "recall_mode": "index",
+    "recall_total_bytes": 8192,
+    "recall_pinned_bytes": 2048,
+    "recall_max_items": 8,
+    "read_max_bytes": 32768,
+    "notes_scope_applied": true,
+    "notes_superseding": 0,
+    "seeded_ids": {
+      "005e519a-6a01-5e8d-bf96-1492badedcf4": "410a7460-df2b-45bd-ad81-4cd2553f2a9a",
+      "17310b78-2539-5802-a542-9aa6380ca979": "13b0cb0f-54f5-4345-97b6-3b17813f10ac",
+      "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f": "da435c79-481c-4506-a74e-8db16f19d067",
+      "55da76c5-8f67-5628-a520-4cd45df14bb7": "3de6f1bd-93fc-4098-b78c-a5915b4dd7ad",
+      "73c3f368-d646-5e3f-845e-b319ed050190": "3495191c-fe35-4435-878b-3e5ae1936c8a",
+      "b06901d5-5151-5665-97d6-c899757dd602": "cea71c39-aa11-4d76-a350-4c37761c2cbf",
+      "d5dc170b-63bd-56f1-b478-16392d64aeee": "1a35bf4f-46c2-4f02-99d6-f47b115aa638",
+      "eca96db9-98b9-5def-a63d-c3c39a10ea0e": "acedefa4-fa90-4357-b9ae-7406df1eb734"
+    },
+    "judge_model": "qwen3.8:27b-mlx",
+    "judge_is_reader": true,
+    "judge_same_family": true,
+    "judge_is_extractor": true,
+    "learning": {
+      "corpus_path": "<scratch>/wt-final/crates/openalpaca_core/../../scripts/eval/memory/conversations-learning.json",
+      "corpus_sha256": "7ebc4da1702b1cfe88cdbcfa4e576dc742c99a0b3dfdaa6dc40dd0571daa635e",
+      "sessions_fed": 13,
+      "turns_fed": 78,
+      "session_limit": null,
+      "learning_on": true,
+      "queue_mode": "manual",
+      "turns_per_flush": 10,
+      "extraction_model": null,
+      "extract_max_calls_per_day": 0,
+      "extract_max_daily_cost_usd": 1000000.0,
+      "episode_max_per_day": 1000,
+      "learning_during_questions": false,
+      "unattended": true,
+      "seeded_old_notes": 8,
+      "seeded_as_saved_then": [
+        "eca96db9-98b9-5def-a63d-c3c39a10ea0e",
+        "17310b78-2539-5802-a542-9aa6380ca979",
+        "73c3f368-d646-5e3f-845e-b319ed050190",
+        "005e519a-6a01-5e8d-bf96-1492badedcf4"
+      ],
+      "replayed_from": null,
+      "replay_is_extraction_only": false,
+      "scratch_kept": null,
+      "summaries": false,
+      "coverage_judge_prompt_path": "<scratch>/wt-final/crates/openalpaca_core/../../scripts/eval/memory/coverage-judge-prompt.md",
+      "coverage_judge_prompt_sha256": "7a0557ce8197639ec2950fb7ece6739fb54fa6d644fa1292ddd4ea9c35bfbe1d",
+      "coverage_judge_max_tokens": 2048
+    }
+  },
+  "embedder": null,
+  "totals": null,
+  "rows": [],
+  "learning": {
+    "warnings": [],
+    "turns": [
+      {
+        "session": "cs-003",
+        "turn": 0,
+        "mode": "change",
+        "states": [
+          "d812f264-4ab3-5182-972e-919103cffa0e"
+        ],
+        "row": 1,
+        "latency_ms": 30583,
+        "is_error": false,
+        "answer_chars": 607,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 20084,
+        "reader_tokens_out": 925,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store",
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "780cd27d-9b61-4334-ae82-1faf2b6e3d15"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-003",
+        "turn": 1,
+        "mode": "explicit",
+        "states": [
+          "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31"
+        ],
+        "row": 3,
+        "latency_ms": 35260,
+        "is_error": false,
+        "answer_chars": 893,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 20512,
+        "reader_tokens_out": 1467,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store",
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "31165b7f-1ae9-4eb2-bed0-2851a9c3ea64"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-003",
+        "turn": 2,
+        "mode": "explicit",
+        "states": [
+          "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31"
+        ],
+        "row": 5,
+        "latency_ms": 43906,
+        "is_error": false,
+        "answer_chars": 738,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 15335,
+        "reader_tokens_out": 1871,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "55c6a42d-a75b-4d9f-ab6f-941fd021f56f"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-003",
+        "turn": 3,
+        "mode": "noise",
+        "states": [],
+        "row": 7,
+        "latency_ms": 14523,
+        "is_error": false,
+        "answer_chars": 1599,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7277,
+        "reader_tokens_out": 488,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-003",
+        "turn": 4,
+        "mode": "noise",
+        "states": [],
+        "row": 9,
+        "latency_ms": 34289,
+        "is_error": false,
+        "answer_chars": 2543,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7824,
+        "reader_tokens_out": 1243,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-003",
+        "turn": 5,
+        "mode": "noise",
+        "states": [],
+        "row": 11,
+        "latency_ms": 5081,
+        "is_error": false,
+        "answer_chars": 220,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7702,
+        "reader_tokens_out": 114,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-006",
+        "turn": 0,
+        "mode": "noise",
+        "states": [],
+        "row": 13,
+        "latency_ms": 28488,
+        "is_error": false,
+        "answer_chars": 4023,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 6340,
+        "reader_tokens_out": 1142,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-006",
+        "turn": 1,
+        "mode": "restate",
+        "states": [
+          "d5dc170b-63bd-56f1-b478-16392d64aeee"
+        ],
+        "row": 15,
+        "latency_ms": 27327,
+        "is_error": false,
+        "answer_chars": 318,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 15545,
+        "reader_tokens_out": 1051,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "29426461-43d0-4866-ad13-04035f0d3bf0"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-006",
+        "turn": 2,
+        "mode": "noise",
+        "states": [],
+        "row": 17,
+        "latency_ms": 25254,
+        "is_error": false,
+        "answer_chars": 2623,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7491,
+        "reader_tokens_out": 975,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-006",
+        "turn": 3,
+        "mode": "noise",
+        "states": [],
+        "row": 19,
+        "latency_ms": 31126,
+        "is_error": false,
+        "answer_chars": 4125,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7675,
+        "reader_tokens_out": 1375,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-006",
+        "turn": 4,
+        "mode": "noise",
+        "states": [],
+        "row": 21,
+        "latency_ms": 36709,
+        "is_error": false,
+        "answer_chars": 2691,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 8869,
+        "reader_tokens_out": 1459,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-006",
+        "turn": 5,
+        "mode": "noise",
+        "states": [],
+        "row": 23,
+        "latency_ms": 64400,
+        "is_error": false,
+        "answer_chars": 3703,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 9930,
+        "reader_tokens_out": 2602,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-006",
+        "turn": 6,
+        "mode": "noise",
+        "states": [],
+        "row": 25,
+        "latency_ms": 25898,
+        "is_error": false,
+        "answer_chars": 2593,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 10723,
+        "reader_tokens_out": 937,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-006",
+        "turn": 7,
+        "mode": "noise",
+        "states": [],
+        "row": 27,
+        "latency_ms": 46386,
+        "is_error": false,
+        "answer_chars": 4373,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 11947,
+        "reader_tokens_out": 1733,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-006",
+        "turn": 8,
+        "mode": "noise",
+        "states": [],
+        "row": 29,
+        "latency_ms": 13087,
+        "is_error": false,
+        "answer_chars": 1393,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 12704,
+        "reader_tokens_out": 382,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-006",
+        "turn": 9,
+        "mode": "noise",
+        "states": [],
+        "row": 31,
+        "latency_ms": 29720,
+        "is_error": false,
+        "answer_chars": 2428,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 13093,
+        "reader_tokens_out": 1051,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-006",
+        "turn": 10,
+        "mode": "noise",
+        "states": [],
+        "row": 33,
+        "latency_ms": 30793,
+        "is_error": false,
+        "answer_chars": 2780,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 14407,
+        "reader_tokens_out": 1132,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-006",
+        "turn": 11,
+        "mode": "noise",
+        "states": [],
+        "row": 35,
+        "latency_ms": 13988,
+        "is_error": false,
+        "answer_chars": 1047,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 14599,
+        "reader_tokens_out": 403,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-017",
+        "turn": 0,
+        "mode": "indirect",
+        "states": [
+          "40583509-f62c-5781-b93d-c55451845ae1"
+        ],
+        "row": 37,
+        "latency_ms": 29314,
+        "is_error": false,
+        "answer_chars": 1341,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 6149,
+        "reader_tokens_out": 792,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-017",
+        "turn": 1,
+        "mode": "noise",
+        "states": [],
+        "row": 39,
+        "latency_ms": 14023,
+        "is_error": false,
+        "answer_chars": 974,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 6336,
+        "reader_tokens_out": 494,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-017",
+        "turn": 2,
+        "mode": "restate",
+        "states": [
+          "55da76c5-8f67-5628-a520-4cd45df14bb7"
+        ],
+        "row": 41,
+        "latency_ms": 31583,
+        "is_error": false,
+        "answer_chars": 510,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 21266,
+        "reader_tokens_out": 1154,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_search",
+          "memory_read"
+        ],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-017",
+        "turn": 3,
+        "mode": "noise",
+        "states": [],
+        "row": 43,
+        "latency_ms": 9426,
+        "is_error": false,
+        "answer_chars": 471,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7114,
+        "reader_tokens_out": 330,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-017",
+        "turn": 4,
+        "mode": "noise",
+        "states": [],
+        "row": 45,
+        "latency_ms": 5363,
+        "is_error": false,
+        "answer_chars": 57,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7444,
+        "reader_tokens_out": 164,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-025",
+        "turn": 0,
+        "mode": "correction",
+        "states": [
+          "261bf869-0284-504a-8d98-50ef319ff350"
+        ],
+        "row": 47,
+        "latency_ms": 10066,
+        "is_error": false,
+        "answer_chars": 109,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 11635,
+        "reader_tokens_out": 434,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "1e063055-2df9-4815-88bf-eb04f124622c"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-025",
+        "turn": 1,
+        "mode": "explicit",
+        "states": [
+          "261bf869-0284-504a-8d98-50ef319ff350"
+        ],
+        "row": 49,
+        "latency_ms": 17950,
+        "is_error": false,
+        "answer_chars": 102,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 11951,
+        "reader_tokens_out": 748,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "f84adb91-c3e4-42a3-b2b4-280846fe0524"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-025",
+        "turn": 2,
+        "mode": "restate",
+        "states": [
+          "eca96db9-98b9-5def-a63d-c3c39a10ea0e"
+        ],
+        "row": 51,
+        "latency_ms": 5008,
+        "is_error": false,
+        "answer_chars": 157,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 6184,
+        "reader_tokens_out": 169,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-025",
+        "turn": 3,
+        "mode": "noise",
+        "states": [],
+        "row": 53,
+        "latency_ms": 11257,
+        "is_error": false,
+        "answer_chars": 412,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 6302,
+        "reader_tokens_out": 411,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-025",
+        "turn": 4,
+        "mode": "noise",
+        "states": [],
+        "row": 55,
+        "latency_ms": 2518,
+        "is_error": false,
+        "answer_chars": 37,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 6293,
+        "reader_tokens_out": 60,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-030",
+        "turn": 0,
+        "mode": "change",
+        "states": [
+          "35643d2e-a709-5dc4-99e2-d617c485740e"
+        ],
+        "row": 57,
+        "latency_ms": 55425,
+        "is_error": false,
+        "answer_chars": 1049,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 23706,
+        "reader_tokens_out": 2399,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_read"
+        ],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-030",
+        "turn": 1,
+        "mode": "noise",
+        "states": [],
+        "row": 59,
+        "latency_ms": 21565,
+        "is_error": false,
+        "answer_chars": 1862,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 12600,
+        "reader_tokens_out": 837,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_search",
+          "memory_search"
+        ],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-030",
+        "turn": 2,
+        "mode": "rejection",
+        "states": [
+          "49adb6bf-6ff0-5c3b-acd0-aa8194c9c63b"
+        ],
+        "row": 61,
+        "latency_ms": 20805,
+        "is_error": false,
+        "answer_chars": 853,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 15159,
+        "reader_tokens_out": 773,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "a70e763f-6659-408a-abd5-bb989d25d1c3"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-030",
+        "turn": 3,
+        "mode": "indirect",
+        "states": [
+          "b2b5ee9a-7dea-5edc-b93b-7de4535ac8df"
+        ],
+        "row": 63,
+        "latency_ms": 36721,
+        "is_error": false,
+        "answer_chars": 4012,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 8077,
+        "reader_tokens_out": 1482,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-030",
+        "turn": 4,
+        "mode": "noise",
+        "states": [],
+        "row": 65,
+        "latency_ms": 24443,
+        "is_error": false,
+        "answer_chars": 1733,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 8087,
+        "reader_tokens_out": 826,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-030",
+        "turn": 5,
+        "mode": "noise",
+        "states": [],
+        "row": 67,
+        "latency_ms": 7135,
+        "is_error": false,
+        "answer_chars": 234,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 8581,
+        "reader_tokens_out": 147,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-031",
+        "turn": 0,
+        "mode": "change",
+        "states": [
+          "28215b64-1fbc-5779-be03-28ff04dadb3c"
+        ],
+        "row": 69,
+        "latency_ms": 31184,
+        "is_error": false,
+        "answer_chars": 342,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 14368,
+        "reader_tokens_out": 1335,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-031",
+        "turn": 1,
+        "mode": "change",
+        "states": [
+          "28215b64-1fbc-5779-be03-28ff04dadb3c"
+        ],
+        "row": 71,
+        "latency_ms": 70300,
+        "is_error": false,
+        "answer_chars": 792,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 30769,
+        "reader_tokens_out": 3127,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_search",
+          "memory_read",
+          "memory_search",
+          "memory_search",
+          "memory_search",
+          "memory_search"
+        ],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-031",
+        "turn": 2,
+        "mode": "noise",
+        "states": [],
+        "row": 73,
+        "latency_ms": 17314,
+        "is_error": false,
+        "answer_chars": 88,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 13322,
+        "reader_tokens_out": 663,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "a24fd981-7da3-410f-bd78-caa773cbfb9c"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-031",
+        "turn": 3,
+        "mode": "noise",
+        "states": [],
+        "row": 75,
+        "latency_ms": 12017,
+        "is_error": false,
+        "answer_chars": 113,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 13451,
+        "reader_tokens_out": 438,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "4ddf7142-5431-473d-bfcb-f482e0b0d86e"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-033",
+        "turn": 0,
+        "mode": "noise",
+        "states": [],
+        "row": 77,
+        "latency_ms": 21119,
+        "is_error": false,
+        "answer_chars": 2386,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 6557,
+        "reader_tokens_out": 761,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-033",
+        "turn": 1,
+        "mode": "rejection",
+        "states": [
+          "1cdfac00-4307-5c20-b98c-d3385fafd85d"
+        ],
+        "row": 79,
+        "latency_ms": 17841,
+        "is_error": false,
+        "answer_chars": 567,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 15579,
+        "reader_tokens_out": 586,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "cee4e0a7-7eb7-4d2b-894d-60900407c7e6"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-033",
+        "turn": 2,
+        "mode": "restate",
+        "states": [
+          "b06901d5-5151-5665-97d6-c899757dd602"
+        ],
+        "row": 81,
+        "latency_ms": 43472,
+        "is_error": false,
+        "answer_chars": 814,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 24493,
+        "reader_tokens_out": 1782,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_read"
+        ],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-033",
+        "turn": 3,
+        "mode": "restate",
+        "states": [
+          "005e519a-6a01-5e8d-bf96-1492badedcf4"
+        ],
+        "row": 83,
+        "latency_ms": 26504,
+        "is_error": false,
+        "answer_chars": 485,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 23476,
+        "reader_tokens_out": 1069,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store",
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "99b560e0-c96c-4bb6-9b62-2ef15f150f85"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-033",
+        "turn": 4,
+        "mode": "noise",
+        "states": [],
+        "row": 85,
+        "latency_ms": 16651,
+        "is_error": false,
+        "answer_chars": 1644,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 8287,
+        "reader_tokens_out": 580,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-033",
+        "turn": 5,
+        "mode": "noise",
+        "states": [],
+        "row": 87,
+        "latency_ms": 4239,
+        "is_error": false,
+        "answer_chars": 110,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7334,
+        "reader_tokens_out": 123,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-034",
+        "turn": 0,
+        "mode": "change",
+        "states": [
+          "b0c61c22-beaa-5a3d-9c41-931fe42cc1e6"
+        ],
+        "row": 89,
+        "latency_ms": 23040,
+        "is_error": false,
+        "answer_chars": 178,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 18828,
+        "reader_tokens_out": 929,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store",
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "0d5bb4c9-eb14-417e-8998-1b94aba30d0e"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-034",
+        "turn": 1,
+        "mode": "noise",
+        "states": [],
+        "row": 91,
+        "latency_ms": 16405,
+        "is_error": false,
+        "answer_chars": 795,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 5818,
+        "reader_tokens_out": 631,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-034",
+        "turn": 2,
+        "mode": "noise",
+        "states": [],
+        "row": 93,
+        "latency_ms": 7659,
+        "is_error": false,
+        "answer_chars": 184,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 6359,
+        "reader_tokens_out": 233,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-035",
+        "turn": 0,
+        "mode": "change",
+        "states": [
+          "71b9cde4-585f-5b94-a15d-42cae6c0e230"
+        ],
+        "row": 95,
+        "latency_ms": 52352,
+        "is_error": false,
+        "answer_chars": 1123,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 15001,
+        "reader_tokens_out": 2295,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "1f04544d-9478-47db-abef-2ce6ab931c35"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-035",
+        "turn": 1,
+        "mode": "indirect",
+        "states": [
+          "128da25c-f994-5add-907a-1859261d4e82"
+        ],
+        "row": 97,
+        "latency_ms": 136387,
+        "is_error": false,
+        "answer_chars": 2032,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 25713,
+        "reader_tokens_out": 5780,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_read",
+          "start_workflow"
+        ],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-035",
+        "turn": 2,
+        "mode": "indirect",
+        "states": [
+          "128da25c-f994-5add-907a-1859261d4e82"
+        ],
+        "row": 99,
+        "latency_ms": 23513,
+        "is_error": false,
+        "answer_chars": 1603,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7499,
+        "reader_tokens_out": 888,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-035",
+        "turn": 3,
+        "mode": "indirect",
+        "states": [
+          "1f3b13c4-dea3-541e-a64c-20bc1efe058c"
+        ],
+        "row": 101,
+        "latency_ms": 15579,
+        "is_error": false,
+        "answer_chars": 1280,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 8392,
+        "reader_tokens_out": 514,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-035",
+        "turn": 4,
+        "mode": "noise",
+        "states": [],
+        "row": 103,
+        "latency_ms": 16156,
+        "is_error": false,
+        "answer_chars": 1899,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7870,
+        "reader_tokens_out": 570,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-035",
+        "turn": 5,
+        "mode": "noise",
+        "states": [],
+        "row": 105,
+        "latency_ms": 22469,
+        "is_error": false,
+        "answer_chars": 1168,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 8886,
+        "reader_tokens_out": 768,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-035",
+        "turn": 6,
+        "mode": "noise",
+        "states": [],
+        "row": 107,
+        "latency_ms": 13266,
+        "is_error": false,
+        "answer_chars": 1072,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 9186,
+        "reader_tokens_out": 415,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-035",
+        "turn": 7,
+        "mode": "noise",
+        "states": [],
+        "row": 109,
+        "latency_ms": 8650,
+        "is_error": false,
+        "answer_chars": 920,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 8666,
+        "reader_tokens_out": 287,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-035",
+        "turn": 8,
+        "mode": "noise",
+        "states": [],
+        "row": 111,
+        "latency_ms": 15323,
+        "is_error": false,
+        "answer_chars": 1809,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 9241,
+        "reader_tokens_out": 580,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-035",
+        "turn": 9,
+        "mode": "noise",
+        "states": [],
+        "row": 113,
+        "latency_ms": 34442,
+        "is_error": false,
+        "answer_chars": 2157,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 10692,
+        "reader_tokens_out": 1252,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-035",
+        "turn": 10,
+        "mode": "noise",
+        "states": [],
+        "row": 115,
+        "latency_ms": 22698,
+        "is_error": false,
+        "answer_chars": 958,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 10756,
+        "reader_tokens_out": 823,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-038",
+        "turn": 0,
+        "mode": "explicit",
+        "states": [
+          "d67f2bbc-9a4e-54e8-aac9-9142ac41b6ee"
+        ],
+        "row": 117,
+        "latency_ms": 34321,
+        "is_error": false,
+        "answer_chars": 417,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 28879,
+        "reader_tokens_out": 1103,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_search",
+          "memory_store",
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "fc0d115c-71d5-4278-982c-6764eba95bfe"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-038",
+        "turn": 1,
+        "mode": "explicit",
+        "states": [
+          "d67f2bbc-9a4e-54e8-aac9-9142ac41b6ee"
+        ],
+        "row": 119,
+        "latency_ms": 32809,
+        "is_error": false,
+        "answer_chars": 637,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 30991,
+        "reader_tokens_out": 1242,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_search",
+          "memory_read"
+        ],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-038",
+        "turn": 2,
+        "mode": "indirect",
+        "states": [
+          "199c045a-846c-5d2b-a28e-2929e852e9c3"
+        ],
+        "row": 121,
+        "latency_ms": 54909,
+        "is_error": false,
+        "answer_chars": 2100,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7441,
+        "reader_tokens_out": 2175,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-038",
+        "turn": 3,
+        "mode": "indirect",
+        "states": [
+          "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849"
+        ],
+        "row": 123,
+        "latency_ms": 44414,
+        "is_error": false,
+        "answer_chars": 743,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 27617,
+        "reader_tokens_out": 1645,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_search",
+          "memory_search",
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "dc918c9b-2c36-4bb8-a1e2-76276468e7af"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-038",
+        "turn": 4,
+        "mode": "indirect",
+        "states": [
+          "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849"
+        ],
+        "row": 125,
+        "latency_ms": 26475,
+        "is_error": false,
+        "answer_chars": 1388,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 8201,
+        "reader_tokens_out": 932,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-038",
+        "turn": 5,
+        "mode": "restate",
+        "states": [
+          "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f"
+        ],
+        "row": 127,
+        "latency_ms": 49035,
+        "is_error": false,
+        "answer_chars": 2045,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 8149,
+        "reader_tokens_out": 1961,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-038",
+        "turn": 6,
+        "mode": "noise",
+        "states": [],
+        "row": 129,
+        "latency_ms": 29102,
+        "is_error": false,
+        "answer_chars": 1328,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 8794,
+        "reader_tokens_out": 998,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-038",
+        "turn": 7,
+        "mode": "noise",
+        "states": [],
+        "row": 131,
+        "latency_ms": 15836,
+        "is_error": false,
+        "answer_chars": 1632,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 9278,
+        "reader_tokens_out": 526,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-041",
+        "turn": 0,
+        "mode": "change",
+        "states": [
+          "bdda0cb4-a2d7-5ee0-a896-963c2f496427"
+        ],
+        "row": 133,
+        "latency_ms": 19835,
+        "is_error": false,
+        "answer_chars": 498,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 13359,
+        "reader_tokens_out": 831,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "acf2dbc4-d311-4896-8332-82a9de504b5a"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-041",
+        "turn": 1,
+        "mode": "change",
+        "states": [
+          "bdda0cb4-a2d7-5ee0-a896-963c2f496427"
+        ],
+        "row": 135,
+        "latency_ms": 25917,
+        "is_error": false,
+        "answer_chars": 513,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 20675,
+        "reader_tokens_out": 1018,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_search"
+        ],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-041",
+        "turn": 2,
+        "mode": "noise",
+        "states": [],
+        "row": 137,
+        "latency_ms": 8133,
+        "is_error": false,
+        "answer_chars": 488,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 6287,
+        "reader_tokens_out": 249,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-041",
+        "turn": 3,
+        "mode": "noise",
+        "states": [],
+        "row": 139,
+        "latency_ms": 14695,
+        "is_error": false,
+        "answer_chars": 621,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 6971,
+        "reader_tokens_out": 505,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-041",
+        "turn": 4,
+        "mode": "noise",
+        "states": [],
+        "row": 141,
+        "latency_ms": 3830,
+        "is_error": false,
+        "answer_chars": 265,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 6356,
+        "reader_tokens_out": 123,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-042",
+        "turn": 0,
+        "mode": "change",
+        "states": [
+          "f74fe29a-4800-545e-936c-c95ddb6fbd87"
+        ],
+        "row": 143,
+        "latency_ms": 43802,
+        "is_error": false,
+        "answer_chars": 743,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 23319,
+        "reader_tokens_out": 1889,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store",
+          "memory_store",
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 2,
+        "model_tool_notes": [
+          "c43bb568-d530-475f-8437-ea7648d2aa79",
+          "18919cf3-b14c-44f1-8269-ce63a2410481"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-042",
+        "turn": 1,
+        "mode": "noise",
+        "states": [],
+        "row": 145,
+        "latency_ms": 27177,
+        "is_error": false,
+        "answer_chars": 2432,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7243,
+        "reader_tokens_out": 1035,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-042",
+        "turn": 2,
+        "mode": "noise",
+        "states": [],
+        "row": 147,
+        "latency_ms": 23645,
+        "is_error": false,
+        "answer_chars": 2731,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7450,
+        "reader_tokens_out": 893,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-042",
+        "turn": 3,
+        "mode": "noise",
+        "states": [],
+        "row": 149,
+        "latency_ms": 5197,
+        "is_error": false,
+        "answer_chars": 135,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7495,
+        "reader_tokens_out": 87,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-047",
+        "turn": 0,
+        "mode": "change",
+        "states": [
+          "7a80315b-555a-55a8-8c79-27b3a23b1615"
+        ],
+        "row": 151,
+        "latency_ms": 44279,
+        "is_error": false,
+        "answer_chars": 496,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 22253,
+        "reader_tokens_out": 2046,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "7ae898b8-ef53-489c-902d-21f18d607888"
+        ],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-047",
+        "turn": 1,
+        "mode": "noise",
+        "states": [],
+        "row": 153,
+        "latency_ms": 56180,
+        "is_error": false,
+        "answer_chars": 845,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 7274,
+        "reader_tokens_out": 2284,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [],
+        "model_tool_memory_changes": 0,
+        "model_tool_notes": [],
+        "events_lagged": 0
+      },
+      {
+        "session": "cs-047",
+        "turn": 2,
+        "mode": "noise",
+        "states": [],
+        "row": 155,
+        "latency_ms": 21704,
+        "is_error": false,
+        "answer_chars": 226,
+        "reader_llm_calls": 1,
+        "reader_tokens_in": 13439,
+        "reader_tokens_out": 761,
+        "reader_models": [
+          "qwen3.8:27b-mlx"
+        ],
+        "tools": [
+          "memory_store"
+        ],
+        "model_tool_memory_changes": 1,
+        "model_tool_notes": [
+          "ae2f2689-a452-4c53-b28c-24652a2f9a78"
+        ],
+        "events_lagged": 0
+      }
+    ],
+    "flushes": [
+      {
+        "session": "cs-003",
+        "label": "switch",
+        "latency_ms": 10897,
+        "attempts": 1,
+        "attempt_stops": [
+          null
+        ],
+        "attempt_latencies_ms": [
+          10897
+        ],
+        "turns_fed": 6,
+        "cursor_before": 0,
+        "cursor_after": 12,
+        "calls": 1,
+        "chunks": 1,
+        "input_tokens": 3594,
+        "output_tokens": 257,
+        "stored": 0,
+        "active": 0,
+        "candidates": 0,
+        "replaced": 0,
+        "suggestions": 0,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 1,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": null,
+        "written": [],
+        "events_lagged": 0,
+        "unusable_answers": []
+      },
+      {
+        "session": "cs-006",
+        "label": "turns",
+        "latency_ms": 29488,
+        "attempts": 1,
+        "attempt_stops": [
+          null
+        ],
+        "attempt_latencies_ms": [
+          29488
+        ],
+        "turns_fed": 10,
+        "cursor_before": 0,
+        "cursor_after": 32,
+        "calls": 2,
+        "chunks": 2,
+        "input_tokens": 11086,
+        "output_tokens": 595,
+        "stored": 3,
+        "active": 2,
+        "candidates": 1,
+        "replaced": 0,
+        "suggestions": 0,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 0,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": null,
+        "written": [
+          {
+            "note": "6d539441-4d6e-48b1-a258-273d97af84c0",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          },
+          {
+            "note": "0ca81a80-a479-40df-81da-abdf494c45e5",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          },
+          {
+            "note": "6125ca1a-d0c4-446e-b781-a6e9dbd11de7",
+            "change": "created",
+            "origin": "extracted_other",
+            "surface": "extraction"
+          }
+        ],
+        "events_lagged": 0,
+        "unusable_answers": []
+      },
+      {
+        "session": "cs-006",
+        "label": "switch",
+        "latency_ms": 8082,
+        "attempts": 1,
+        "attempt_stops": [
+          null
+        ],
+        "attempt_latencies_ms": [
+          8082
+        ],
+        "turns_fed": 12,
+        "cursor_before": 32,
+        "cursor_after": 36,
+        "calls": 1,
+        "chunks": 1,
+        "input_tokens": 2558,
+        "output_tokens": 221,
+        "stored": 1,
+        "active": 1,
+        "candidates": 0,
+        "replaced": 0,
+        "suggestions": 0,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 0,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": null,
+        "written": [
+          {
+            "note": "9bd45c5b-b6f1-46ac-941a-71518485baae",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          }
+        ],
+        "events_lagged": 0,
+        "unusable_answers": []
+      },
+      {
+        "session": "cs-017",
+        "label": "switch",
+        "latency_ms": 12266,
+        "attempts": 1,
+        "attempt_stops": [
+          null
+        ],
+        "attempt_latencies_ms": [
+          12266
+        ],
+        "turns_fed": 5,
+        "cursor_before": 0,
+        "cursor_after": 46,
+        "calls": 1,
+        "chunks": 1,
+        "input_tokens": 2964,
+        "output_tokens": 377,
+        "stored": 2,
+        "active": 1,
+        "candidates": 1,
+        "replaced": 0,
+        "suggestions": 1,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 0,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": null,
+        "written": [
+          {
+            "note": "9c5415aa-19e9-4151-a23d-3ee9b97aefce",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          },
+          {
+            "note": "905a3540-235b-4f43-a33f-fe7ebc17ef65",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          }
+        ],
+        "events_lagged": 0,
+        "unusable_answers": []
+      },
+      {
+        "session": "cs-025",
+        "label": "switch",
+        "latency_ms": 3272,
+        "attempts": 1,
+        "attempt_stops": [
+          null
+        ],
+        "attempt_latencies_ms": [
+          3272
+        ],
+        "turns_fed": 5,
+        "cursor_before": 0,
+        "cursor_after": 56,
+        "calls": 1,
+        "chunks": 1,
+        "input_tokens": 1959,
+        "output_tokens": 1,
+        "stored": 0,
+        "active": 0,
+        "candidates": 0,
+        "replaced": 0,
+        "suggestions": 0,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 0,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": null,
+        "written": [],
+        "events_lagged": 0,
+        "unusable_answers": []
+      },
+      {
+        "session": "cs-030",
+        "label": "switch",
+        "latency_ms": 20990,
+        "attempts": 1,
+        "attempt_stops": [
+          null
+        ],
+        "attempt_latencies_ms": [
+          20990
+        ],
+        "turns_fed": 6,
+        "cursor_before": 0,
+        "cursor_after": 68,
+        "calls": 1,
+        "chunks": 1,
+        "input_tokens": 4608,
+        "output_tokens": 727,
+        "stored": 3,
+        "active": 1,
+        "candidates": 2,
+        "replaced": 1,
+        "suggestions": 1,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 0,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": null,
+        "written": [
+          {
+            "note": "9508a42f-443b-4739-8dda-ad99a2a690cd",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          },
+          {
+            "note": "1793e010-c5d4-4e72-b13d-903f8d9bb0e0",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          },
+          {
+            "note": "f1cec6a2-6e06-44fc-ad3f-8e32d091299a",
+            "change": "created",
+            "origin": "extracted_other",
+            "surface": "extraction"
+          }
+        ],
+        "events_lagged": 0,
+        "unusable_answers": []
+      },
+      {
+        "session": "cs-031",
+        "label": "switch",
+        "latency_ms": 9375,
+        "attempts": 1,
+        "attempt_stops": [
+          null
+        ],
+        "attempt_latencies_ms": [
+          9375
+        ],
+        "turns_fed": 4,
+        "cursor_before": 0,
+        "cursor_after": 76,
+        "calls": 1,
+        "chunks": 1,
+        "input_tokens": 2680,
+        "output_tokens": 298,
+        "stored": 1,
+        "active": 0,
+        "candidates": 1,
+        "replaced": 0,
+        "suggestions": 1,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 0,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": null,
+        "written": [
+          {
+            "note": "6c1950e5-2158-43b0-b076-0ba7e2f7ed08",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          }
+        ],
+        "events_lagged": 0,
+        "unusable_answers": []
+      },
+      {
+        "session": "cs-033",
+        "label": "switch",
+        "latency_ms": 26594,
+        "attempts": 1,
+        "attempt_stops": [
+          null
+        ],
+        "attempt_latencies_ms": [
+          26594
+        ],
+        "turns_fed": 6,
+        "cursor_before": 0,
+        "cursor_after": 88,
+        "calls": 1,
+        "chunks": 1,
+        "input_tokens": 3439,
+        "output_tokens": 1010,
+        "stored": 0,
+        "active": 0,
+        "candidates": 0,
+        "replaced": 0,
+        "suggestions": 0,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 0,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": null,
+        "written": [],
+        "events_lagged": 0,
+        "unusable_answers": []
+      },
+      {
+        "session": "cs-034",
+        "label": "switch",
+        "latency_ms": 3290,
+        "attempts": 1,
+        "attempt_stops": [
+          null
+        ],
+        "attempt_latencies_ms": [
+          3290
+        ],
+        "turns_fed": 3,
+        "cursor_before": 0,
+        "cursor_after": 94,
+        "calls": 1,
+        "chunks": 1,
+        "input_tokens": 1955,
+        "output_tokens": 1,
+        "stored": 0,
+        "active": 0,
+        "candidates": 0,
+        "replaced": 0,
+        "suggestions": 0,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 0,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": null,
+        "written": [],
+        "events_lagged": 0,
+        "unusable_answers": []
+      },
+      {
+        "session": "cs-035",
+        "label": "turns",
+        "latency_ms": 71804,
+        "attempts": 1,
+        "attempt_stops": [
+          "BadOutput"
+        ],
+        "attempt_latencies_ms": [
+          71804
+        ],
+        "turns_fed": 10,
+        "cursor_before": 0,
+        "cursor_after": 0,
+        "calls": 1,
+        "chunks": 0,
+        "input_tokens": 6520,
+        "output_tokens": 2892,
+        "stored": 0,
+        "active": 0,
+        "candidates": 0,
+        "replaced": 0,
+        "suggestions": 0,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 0,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": "BadOutput",
+        "written": [],
+        "events_lagged": 0,
+        "unusable_answers": [
+          {
+            "reason": "cut at max_tokens (2892)",
+            "chars": 10464,
+            "finish_reason": "max_tokens",
+            "head": "I need to think through the conversation and extract durable knowledge that isn't already in known_notes.\n\nLet me analyze the conversation:\n\n1. R1: User says Moss's build output changed to `dist/` instead of `_site/` in PR #41 on 10 May 2026, matching wrangler's default. This replaces n2 (moss.output_dir = _site).\n\n2. R3: User gives README commands: `uv run moss build` writes dist/, `uv run moss s",
+            "tail": "es its build output to `dist/` instead of `_site/`, matching wrangler's default. Replaces the previous `_site/` output directory.\",\"kind\":\"fact\",\"stated_by\":\"user\",\"confidence\":0.95,\"rows\":[1],\"aliases\":[\"moss output\",\"build output\",\"dist\",\"_site\",\"wrangler default\",\"PR #41\"],\"fact_key\":\"moss.output_dir\",\"replaces\":\"n2\",\"replace_reason\":\"PR #41 on 2026-05-10 changed the output directory from _site"
+          }
+        ]
+      },
+      {
+        "session": "cs-035",
+        "label": "switch",
+        "latency_ms": 100186,
+        "attempts": 2,
+        "attempt_stops": [
+          "BadOutput",
+          null
+        ],
+        "attempt_latencies_ms": [
+          67127,
+          33058
+        ],
+        "turns_fed": 11,
+        "cursor_before": 0,
+        "cursor_after": 116,
+        "calls": 2,
+        "chunks": 1,
+        "input_tokens": 13646,
+        "output_tokens": 4630,
+        "stored": 7,
+        "active": 6,
+        "candidates": 1,
+        "replaced": 1,
+        "suggestions": 1,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 1,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": null,
+        "written": [
+          {
+            "note": "b820ba9b-76e4-4018-beb0-3bb9b43fa5df",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          },
+          {
+            "note": "18ad9ad7-4dc9-4be2-954b-b6011fd7abe1",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          },
+          {
+            "note": "03f799c4-8923-4181-8dc8-54145febbdde",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          },
+          {
+            "note": "1c04f24b-0a82-4a36-a552-07fa1f4f40aa",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          },
+          {
+            "note": "c2e0141e-6b92-4700-87ab-f41c2583ca7e",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          },
+          {
+            "note": "3ce32810-f979-47eb-9795-e28dfd11fc32",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          },
+          {
+            "note": "b2d68e6e-3a87-48d4-893d-6e530e37542a",
+            "change": "created",
+            "origin": "extracted_other",
+            "surface": "extraction"
+          }
+        ],
+        "events_lagged": 0,
+        "unusable_answers": [
+          {
+            "reason": "cut at max_tokens (2892)",
+            "chars": 9726,
+            "finish_reason": "max_tokens",
+            "head": "I will analyze the conversation to extract durable knowledge, focusing on the changes to the Moss project's build output directory and the associated commands, while noting that these are currently drafts pending file writes.\n\n1.  **Moss Output Directory Change**: The user stated in R1 that Moss's build output changed to `dist/` in PR #41 (dated 2026-05-10), replacing the previous `_site/`. This d",
+            "tail": "m\": null,\n      \"valid_to\": null\n    },\n    {\n      \"title\": \"Moss test command is uv run pytest -q\",\n      \"content\": \"The command to run tests for Moss is `uv run pytest -q`.\",\n      \"kind\": \"procedure\",\n      \"stated_by\": \"user\",\n      \"confidence\": 1.0,\n      \"rows\": [\n        3\n      ],\n      \"aliases\": [\n        \"moss test\",\n        \"run tests\"\n      ],\n      \"fact_key\": \"moss.test_command\","
+          }
+        ]
+      },
+      {
+        "session": "cs-038",
+        "label": "switch",
+        "latency_ms": 24179,
+        "attempts": 1,
+        "attempt_stops": [
+          null
+        ],
+        "attempt_latencies_ms": [
+          24179
+        ],
+        "turns_fed": 8,
+        "cursor_before": 0,
+        "cursor_after": 132,
+        "calls": 1,
+        "chunks": 1,
+        "input_tokens": 5122,
+        "output_tokens": 871,
+        "stored": 4,
+        "active": 4,
+        "candidates": 0,
+        "replaced": 0,
+        "suggestions": 0,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 0,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": null,
+        "written": [
+          {
+            "note": "24d4185e-a52c-4e3f-b877-4fbf249f3b6c",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          },
+          {
+            "note": "753af64f-3c6d-481a-a436-5f2827cdb929",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          },
+          {
+            "note": "2e71672b-b62b-494f-bdeb-f667ec96eba4",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          },
+          {
+            "note": "532fa30c-37f3-42f3-9a93-c7ee50fb507a",
+            "change": "created",
+            "origin": "extracted_user",
+            "surface": "extraction"
+          }
+        ],
+        "events_lagged": 0,
+        "unusable_answers": []
+      },
+      {
+        "session": "cs-041",
+        "label": "switch",
+        "latency_ms": 4497,
+        "attempts": 1,
+        "attempt_stops": [
+          null
+        ],
+        "attempt_latencies_ms": [
+          4497
+        ],
+        "turns_fed": 5,
+        "cursor_before": 0,
+        "cursor_after": 142,
+        "calls": 1,
+        "chunks": 1,
+        "input_tokens": 2420,
+        "output_tokens": 5,
+        "stored": 0,
+        "active": 0,
+        "candidates": 0,
+        "replaced": 0,
+        "suggestions": 0,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 0,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": null,
+        "written": [],
+        "events_lagged": 0,
+        "unusable_answers": []
+      },
+      {
+        "session": "cs-042",
+        "label": "switch",
+        "latency_ms": 10681,
+        "attempts": 1,
+        "attempt_stops": [
+          null
+        ],
+        "attempt_latencies_ms": [
+          10681
+        ],
+        "turns_fed": 4,
+        "cursor_before": 0,
+        "cursor_after": 150,
+        "calls": 1,
+        "chunks": 1,
+        "input_tokens": 3580,
+        "output_tokens": 263,
+        "stored": 0,
+        "active": 0,
+        "candidates": 0,
+        "replaced": 0,
+        "suggestions": 0,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 1,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": null,
+        "written": [],
+        "events_lagged": 0,
+        "unusable_answers": []
+      },
+      {
+        "session": "cs-047",
+        "label": "switch",
+        "latency_ms": 9117,
+        "attempts": 1,
+        "attempt_stops": [
+          null
+        ],
+        "attempt_latencies_ms": [
+          9117
+        ],
+        "turns_fed": 3,
+        "cursor_before": 0,
+        "cursor_after": 156,
+        "calls": 1,
+        "chunks": 1,
+        "input_tokens": 2434,
+        "output_tokens": 299,
+        "stored": 0,
+        "active": 0,
+        "candidates": 0,
+        "replaced": 0,
+        "suggestions": 0,
+        "deduplicated": 0,
+        "dropped_over_cap": 0,
+        "dropped_below_threshold": 0,
+        "dropped_invalid": 0,
+        "dropped_suppressed": 0,
+        "dropped_duplicate_key": 0,
+        "dropped_already_learned": 1,
+        "dropped_unchanged": 0,
+        "dropped_conflict": 0,
+        "replaces_unknown": 0,
+        "failed": 0,
+        "skipped_short": 0,
+        "skipped_no_owner": 0,
+        "skipped_unusable": 0,
+        "skipped_root_gone": 0,
+        "stopped": null,
+        "written": [],
+        "events_lagged": 0,
+        "unusable_answers": []
+      }
+    ],
+    "episode_flushes": [],
+    "learned": [
+      {
+        "id": "ae2f2689-a452-4c53-b28c-24652a2f9a78",
+        "title": "Moss：暂不启用 Python 3.13 自由线程（free-threading）",
+        "kind": "decision",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "moss.free_threading.preference",
+        "aliases": [],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "# Moss：暂不启用 Python 3.13 自由线程（free-threading）\n\n在 Moss 升级到 Python 3.13（见 `.python-version = 3.13`，2026-08-22）的背景下，**决定暂不采用 PEP 703 free-threading（`python --disable-gil`）**，先保持默认 GIL 模式。\n\n## 为什么\n\n- Moss 是 CLI + `python -m http.server` 的静态站点工具，构建多为短命进程，自由线程的并行收益尚未量化。\n- 用户明确表示\"先不碰\"；3.13 的 JIT（`--jit`）等也保持不依赖现状。\n\n## 后续触发条件\n\n若未来 Moss 出现明显的构建并行瓶颈，再跑一次 3.12 vs 3.13-free-threaded 的构建基准，有数据后再决定是否启用。",
+        "surface": "model_tool"
+      },
+      {
+        "id": "7ae898b8-ef53-489c-902d-21f18d607888",
+        "title": "Moss targets Python 3.13",
+        "kind": "fact",
+        "scope": "project",
+        "status": "candidate",
+        "effective_status": "candidate",
+        "origin": "extracted_user",
+        "fact_key": "moss.python_target_version",
+        "aliases": [
+          "Moss",
+          "Python",
+          "3.13",
+          ".python-version",
+          "python_version",
+          "interpreter",
+          "Python 3.12",
+          "Python 3.13",
+          "python upgrade",
+          "Moss targets Python 3.12"
+        ],
+        "valid_from": "2026-08-22T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:151"
+        ],
+        "supersedes": [
+          "cea71c39-aa11-4d76-a350-4c37761c2cbf"
+        ],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "Moss targets Python 3.13; `.python-version` says 3.13. Upgraded from 3.12.",
+        "surface": "model_tool"
+      },
+      {
+        "id": "18919cf3-b14c-44f1-8269-ce63a2410481",
+        "title": "Staging database is lantern_stg on pg-staging-2",
+        "kind": "fact",
+        "scope": "project",
+        "status": "candidate",
+        "effective_status": "candidate",
+        "origin": "extracted_user",
+        "fact_key": null,
+        "aliases": [
+          "lantern_stg",
+          "pg-staging-2",
+          "staging database",
+          "staging db",
+          "staging infrastructure"
+        ],
+        "valid_from": "2026-06-20T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:143"
+        ],
+        "supersedes": [
+          "da435c79-481c-4506-a74e-8db16f19d067"
+        ],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "After this month's infrastructure move, the Lantern staging database is `lantern_stg` on host `pg-staging-2`. The runbook was updated on 20 June 2026.\n\nThis replaces the previous staging database `lantern_staging` on host `pg-staging-1` (recorded 2 March 2026).",
+        "surface": "model_tool"
+      },
+      {
+        "id": "c43bb568-d530-475f-8437-ea7648d2aa79",
+        "title": "Smoke test targets staging database lantern_stg",
+        "kind": "fact",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": null,
+        "aliases": [
+          "lantern_stg",
+          "pg-staging-2",
+          "smoke test",
+          "staging database"
+        ],
+        "valid_from": "2026-06-20T00:00:00Z",
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [
+          "532fa30c-37f3-42f3-9a93-c7ee50fb507a"
+        ],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The smoke test for Lantern talks to the staging environment, which is currently the `lantern_stg` database on host `pg-staging-2` (as of the 20 June 2026 infrastructure move). Previously this was `lantern_staging` on `pg-staging-1`.",
+        "surface": "model_tool"
+      },
+      {
+        "id": "acf2dbc4-d311-4896-8332-82a9de504b5a",
+        "title": "Editor: Helix (hx)",
+        "kind": "preference",
+        "scope": "global",
+        "status": "candidate",
+        "effective_status": "candidate",
+        "origin": "extracted_user",
+        "fact_key": null,
+        "aliases": [],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [
+          "message:133"
+        ],
+        "supersedes": [
+          "acedefa4-fa90-4357-b9ae-7406df1eb734"
+        ],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "Lin Wei switched from vim to Helix (hx), starting in early June 2026. She tried Helix for two weeks and is keeping it. (Previously: vim with a plain vimrc and no plugin manager.)",
+        "surface": "model_tool"
+      },
+      {
+        "id": "24d4185e-a52c-4e3f-b877-4fbf249f3b6c",
+        "title": "Idempotency key for Lantern partner calls is the ledger batch id",
+        "kind": "fact",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "lantern.retry_policy.idempotency_key",
+        "aliases": [
+          "idempotency key",
+          "ledger batch id",
+          "partner call idempotency",
+          "Lantern idempotency"
+        ],
+        "valid_from": "2026-09-28T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:119"
+        ],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The idempotency key used for Lantern's outbound partner calls is the ledger batch id. This detail was not persisted to the retry policy note in this session due to approval constraints.",
+        "surface": "extraction"
+      },
+      {
+        "id": "2e71672b-b62b-494f-bdeb-f667ec96eba4",
+        "title": "Pre-push hook mirrors CI exactly without path-based skips",
+        "kind": "decision",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "lantern.pre_push_hook_strategy",
+        "aliases": [
+          "pre-push hook",
+          "git hook",
+          "CI mirroring",
+          "no clippy skip",
+          "docs-only skip"
+        ],
+        "valid_from": "2026-09-28T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:129",
+          "message:131"
+        ],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The user decided to keep the pre-push hook simple by mirroring CI exactly, meaning no path-based skips (e.g., for docs-only changes). The hook runs all four CI gates (build, nextest, clippy, fmt) regardless of the diff content to ensure local pass equals CI pass.",
+        "surface": "extraction"
+      },
+      {
+        "id": "532fa30c-37f3-42f3-9a93-c7ee50fb507a",
+        "title": "Smoke test targets staging database lantern_staging",
+        "kind": "fact",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "superseded",
+        "origin": "extracted_user",
+        "fact_key": "lantern.smoke_test_target",
+        "aliases": [
+          "smoke test",
+          "staging database",
+          "lantern_staging",
+          "pg-staging-1",
+          "just run"
+        ],
+        "valid_from": "2026-09-28T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:127"
+        ],
+        "supersedes": [],
+        "superseded_by": [
+          "c43bb568-d530-475f-8437-ea7648d2aa79"
+        ],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The smoke test for Lantern talks to the staging environment, which is currently the lantern_staging database on host pg-staging-1.",
+        "surface": "extraction"
+      },
+      {
+        "id": "753af64f-3c6d-481a-a436-5f2827cdb929",
+        "title": "Lantern secrets sourced from 1Password CLI",
+        "kind": "fact",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "lantern.secrets_source",
+        "aliases": [
+          "1Password",
+          "op CLI",
+          "LANTERN_* variables",
+          "secrets management",
+          "env.op"
+        ],
+        "valid_from": "2026-09-28T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:121"
+        ],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "Lantern does not commit secrets in environment files; all LANTERN_* variables are sourced from the 1Password CLI. The .env.op file is used as a template to resolve these references.",
+        "surface": "extraction"
+      },
+      {
+        "id": "dc918c9b-2c36-4bb8-a1e2-76276468e7af",
+        "title": "Pre-push gate: run the same checks as CI",
+        "kind": "procedure",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "lantern.pre_push_gate",
+        "aliases": [],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "# Pre-push gate\n\nBefore pushing, the user runs the same checks that CI runs, in this order:\n\n1. `cargo build --workspace`\n2. `cargo nextest run --workspace`\n3. `cargo clippy --all-targets -- -D warnings`\n4. `cargo fmt --check`\n\nA push is not sent until all four pass locally.\n\n## Environment notes\n- Run on Apple silicon natively — `aarch64-apple-darwin` toolchain; do not run these under Rosetta / x86_64 (SIGILL in `ring`). Recheck when the toolchain or target triple changes.\n- `await_holding_lock` is CI-only, so it may not fire locally even after clippy passes.",
+        "surface": "model_tool"
+      },
+      {
+        "id": "fc0d115c-71d5-4278-982c-6764eba95bfe",
+        "title": "Outbound retry policy after ADR-005 (Lantern partner calls)",
+        "kind": "decision",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "lantern.retry_policy",
+        "aliases": [
+          "retry",
+          "backoff",
+          "outbound",
+          "partner calls",
+          "partner",
+          "exponential",
+          "ADR-005"
+        ],
+        "valid_from": "2026-09-28T00:00:00Z",
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "# Outbound retry policy after ADR-005 (Lantern partner calls)\n\nADR-005 is merged, so this is the current outbound retry policy for Lantern's partner calls.\n\n## Policy\n- Partner calls **retry 3 times**.\n- **Exponential backoff** with a **200 ms base** and a **2 s cap**.\n\n## Evidence and limits\nRecorded from the user on 28 Sept 2026, citing ADR-005 (merged).\n## Recheck when\nADR-005 or a superseding ADR changes the retry parameters.",
+        "surface": "model_tool"
+      },
+      {
+        "id": "03f799c4-8923-4181-8dc8-54145febbdde",
+        "title": "Moss deploy uses wrangler pages deploy from laptop",
+        "kind": "procedure",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "moss.deploy_command",
+        "aliases": [
+          "Moss deploy",
+          "wrangler pages deploy",
+          "Cloudflare Pages",
+          "Moss deployment",
+          "no CI for Moss"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [
+          "message:101"
+        ],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "Moss is deployed manually from the laptop using `wrangler pages deploy dist --project-name moss`. DNS is managed by Cloudflare, and there is no CI pipeline for Moss.",
+        "surface": "extraction"
+      },
+      {
+        "id": "18ad9ad7-4dc9-4be2-954b-b6011fd7abe1",
+        "title": "Moss lint and format commands use ruff",
+        "kind": "procedure",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "moss.lint_format_commands",
+        "aliases": [
+          "Moss lint",
+          "Moss format",
+          "ruff check",
+          "ruff format",
+          "code style"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [
+          "message:99"
+        ],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "Linting and formatting for Moss are done with `ruff check .` and `ruff format` respectively.",
+        "surface": "extraction"
+      },
+      {
+        "id": "1c04f24b-0a82-4a36-a552-07fa1f4f40aa",
+        "title": "Moss README excludes table of contents",
+        "kind": "decision",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "moss.readme_toc",
+        "aliases": [
+          "Moss README ToC",
+          "table of contents",
+          "README structure"
+        ],
+        "valid_from": "2026-09-28T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:105"
+        ],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The Moss README should not include a table of contents, as decided on 2026-09-28.",
+        "surface": "extraction"
+      },
+      {
+        "id": "3ce32810-f979-47eb-9795-e28dfd11fc32",
+        "title": "Moss README uses shields.io for license badge",
+        "kind": "preference",
+        "scope": "global",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "moss.readme_license_badge",
+        "aliases": [
+          "license badge",
+          "shields.io",
+          "README badge",
+          "license badge service"
+        ],
+        "valid_from": "2026-09-28T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:111",
+          "message:113"
+        ],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The Moss README should use a shields.io license badge at the top, specifically the dynamic `github/license` form to avoid drift with the actual LICENSE file.",
+        "surface": "extraction"
+      },
+      {
+        "id": "b2d68e6e-3a87-48d4-893d-6e530e37542a",
+        "title": "Lantern service port corrected to 8790",
+        "kind": "fact",
+        "scope": "project",
+        "status": "candidate",
+        "effective_status": "candidate",
+        "origin": "extracted_other",
+        "fact_key": "lantern.service.port",
+        "aliases": [
+          "Lantern port",
+          "Lantern service port",
+          "port 8790",
+          "port 8080 stale"
+        ],
+        "valid_from": "2026-04-02T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:114"
+        ],
+        "supersedes": [
+          "1a35bf4f-46c2-4f02-99d6-f47b115aa638"
+        ],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The Lantern service listens on port 8790, not 8080. The fact that Lantern listens on port 8080 is stale and should be corrected to 8790, aligning with the global preference for localhost:8790 effective 2026-04-02.",
+        "surface": "extraction"
+      },
+      {
+        "id": "b820ba9b-76e4-4018-beb0-3bb9b43fa5df",
+        "title": "Moss preview uses moss serve --port 4000",
+        "kind": "procedure",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "moss.preview_command",
+        "aliases": [
+          "Moss preview",
+          "moss serve",
+          "preview Moss build",
+          "local preview"
+        ],
+        "valid_from": "2026-05-10T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:97"
+        ],
+        "supersedes": [
+          "99b560e0-c96c-4bb6-9b62-2ef15f150f85"
+        ],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "Previewing a Moss build is done by running `uv run moss serve --port 4000`, replacing the previous method of opening generated files under `_site/` directly on disk.",
+        "surface": "extraction"
+      },
+      {
+        "id": "c2e0141e-6b92-4700-87ab-f41c2583ca7e",
+        "title": "Moss Contributing section: issues welcome, friendly tone",
+        "kind": "preference",
+        "scope": "global",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "moss.readme_contributing",
+        "aliases": [
+          "Moss Contributing",
+          "issues welcome",
+          "friendly tone",
+          "README Contributing section"
+        ],
+        "valid_from": "2026-09-28T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:107",
+          "message:109"
+        ],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The Moss README Contributing section should state that issues are welcome, with a friendly and inviting tone, encouraging users to report ideas, bugs, or rough edges without a strict format.",
+        "surface": "extraction"
+      },
+      {
+        "id": "1f04544d-9478-47db-abef-2ce6ab931c35",
+        "title": "Moss writes its build output to dist/ (since PR #41, 2026-05-10)",
+        "kind": "fact",
+        "scope": "project",
+        "status": "candidate",
+        "effective_status": "candidate",
+        "origin": "extracted_user",
+        "fact_key": "moss.build.output.dir",
+        "aliases": [],
+        "valid_from": "2026-05-10T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:95"
+        ],
+        "supersedes": [
+          "410a7460-df2b-45bd-ad81-4cd2553f2a9a"
+        ],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "## Fact\nSince PR #41 (2026-05-10), Moss writes its build output to `dist/` — matching wrangler's default — instead of the previous `_site/`.\n\n## Evidence and limits\nStated by the user. Supersedes the earlier note that output went to `_site/` (note `410a7460-df2b-45bd-ad81-4cd2553f2a9a`).\n\n## Recheck when\nThe build tool changes, or the output directory is changed again.",
+        "surface": "model_tool"
+      },
+      {
+        "id": "0d5bb4c9-eb14-417e-8998-1b94aba30d0e",
+        "title": "通勤方式与卖车记录",
+        "kind": "episode",
+        "scope": "global",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": null,
+        "aliases": [
+          "飞度",
+          "通勤",
+          "地铁5号线",
+          "西湖区",
+          "滨江区",
+          "卖车",
+          "上班路线"
+        ],
+        "valid_from": "2026-04-19T16:00:00Z",
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "## 事实\n- 2026-04-20 林薇卖掉了那辆飞度（本田 Fit）。\n- 卖车后改为乘坐地铁 5 号线上班：从西湖区到滨江区，通勤约 40 分钟。\n\n## 备注\n这是当前通勤方式的起点；后续如有变动（换线路、再买车等）需要更新。",
+        "surface": "model_tool"
+      },
+      {
+        "id": "99b560e0-c96c-4bb6-9b62-2ef15f150f85",
+        "title": "Previewing a Moss build: open files under _site/ directly",
+        "kind": "fact",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "superseded",
+        "origin": "extracted_user",
+        "fact_key": null,
+        "aliases": [
+          "preview build",
+          "_site",
+          "output directory",
+          "generated files"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [
+          "b820ba9b-76e4-4018-beb0-3bb9b43fa5df"
+        ],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "## Fact\nWhen previewing a Moss build, the user opens the **generated files under `_site/` directly** (i.e., the built output on disk), rather than, say, a live server or a separate preview step.\n\n## Evidence and limits\nStated by the user (14 April 2026). Complements the fact that Moss writes build output to `_site/` (note `410a7460-df2b-45bd-ad81-4cd2553f2a9a` — \"Moss writes its build output to `_site/`\"). No live-preview tool or watch-server workflow was described.\n## Recheck when\nThe way previewing is done changes, or a live-preview/watch server is introduced.",
+        "surface": "model_tool"
+      },
+      {
+        "id": "cee4e0a7-7eb7-4d2b-894d-60900407c7e6",
+        "title": "Moss keeps Jinja2; hand-written template engine rejected",
+        "kind": "decision",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "moss.preference.template-engine",
+        "aliases": [
+          "jinja2",
+          "template engine",
+          "template engine",
+          "templating"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "## Decision\nOn 14 April 2026 the user decided **against** replacing Jinja2 with a hand-written/tiny template engine — Moss **keeps Jinja2**.\n\n## Rationale (as stated)\nThe hand-written engine \"isn't worth the maintenance.\" This echoes the standard trade-off: re-implementing autoescaping/escaping, undefined-variable semantics, inheritance, custom filters, and error diagnostics is a recurring tax with no real pay-off for a server-side build tool like Moss.\n\n## Consequence\nDo not propose, plan, or start a template-engine rewrite for Moss. If the Jinja2 dependency ever comes up again, the settled position is \"keep it.\"\n\n## Reconsider only if\nA concrete, measurable constraint appears that the decision above did not anticipate — e.g., a hard cold-start latency budget, a supply-chain removal requirement, or a change that moves Moss's output to a new surface. Reconsider at Moss's own build-time cost, not in the abstract.",
+        "surface": "model_tool"
+      },
+      {
+        "id": "6c1950e5-2158-43b0-b076-0ba7e2f7ed08",
+        "title": "周回顾时间：每周一 09:30（自 2026-04-06 起）",
+        "kind": "preference",
+        "scope": "global",
+        "status": "candidate",
+        "effective_status": "candidate",
+        "origin": "extracted_user",
+        "fact_key": "user.weekly_review",
+        "aliases": [
+          "weekly review time",
+          "周回顾时间",
+          "每周一 09:30",
+          "Monday 09:30",
+          "周回顾"
+        ],
+        "valid_from": "2026-04-06T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:69"
+        ],
+        "supersedes": [
+          "3de6f1bd-93fc-4098-b78c-a5915b4dd7ad"
+        ],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "林薇自 2026-04-06 起，每周一上午 09:30 做周回顾，需要本周完成事项列表。此变更废止了原每周五 16:00 的安排。",
+        "surface": "extraction"
+      },
+      {
+        "id": "4ddf7142-5431-473d-bfcb-f482e0b0d86e",
+        "title": "周回顾摘要：杂事放最后",
+        "kind": "preference",
+        "scope": "global",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": null,
+        "aliases": [],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "# 周回顾摘要：杂事分组位置\n\n周回顾 bullet 摘要按项目分组时，**没有归属项目的杂事 / 杂项** 固定放在**最后**一组（在 Lantern、Moss 等项目组之后），标题可用「杂项」或「其他」。\n\n## 分组顺序\n1. **Lantern**\n2. **Moss**\n3. **杂项 / 其他**（无项目归属的事项）\n\n## 备注\n- 若某周没有杂事，该组可省略\n- 新增项目时，项目按已有顺序插在杂项之前",
+        "surface": "model_tool"
+      },
+      {
+        "id": "a24fd981-7da3-410f-bd78-caa773cbfb9c",
+        "title": "周回顾摘要：杂项分组规则（无项目事项放每组序列末尾）",
+        "kind": "procedure",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "linwei.weekly-review.grouping-rule",
+        "aliases": [],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "林薇每周回顾摘要分组规则（2026-04-06 起生效）：\n\n- 有明确归属的项目笔记，按 **Lantern → Moss** 顺序分组\n- 无项目归属的杂事统一放最后，组标题固定为 **杂项 / 无项目**\n- 若某周杂事为空，省略该组，不输出空标题",
+        "surface": "model_tool"
+      },
+      {
+        "id": "1793e010-c5d4-4e72-b13d-903f8d9bb0e0",
+        "title": "Use localhost:8790 for local examples",
+        "kind": "preference",
+        "scope": "global",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": null,
+        "aliases": [
+          "local examples",
+          "localhost",
+          "8790",
+          "lantern local port"
+        ],
+        "valid_from": "2026-04-02T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:57"
+        ],
+        "supersedes": [
+          "29426461-43d0-4866-ad13-04035f0d3bf0"
+        ],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "For all local examples, use `localhost:8790`. This replaces the previous preference for `localhost:8080`, which was updated on 2026-04-02 to align with the new Lantern service port.",
+        "surface": "extraction"
+      },
+      {
+        "id": "9508a42f-443b-4739-8dda-ad99a2a690cd",
+        "title": "Lantern listens on port 8790",
+        "kind": "fact",
+        "scope": "project",
+        "status": "candidate",
+        "effective_status": "candidate",
+        "origin": "extracted_user",
+        "fact_key": "lantern.service.port",
+        "aliases": [
+          "lantern port",
+          "lantern service port",
+          "8790",
+          "lantern.service.port"
+        ],
+        "valid_from": "2026-04-02T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:57"
+        ],
+        "supersedes": [
+          "1a35bf4f-46c2-4f02-99d6-f47b115aa638"
+        ],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The Lantern service listens on port 8790 locally. This replaced port 8080 on 2026-04-02 to stop clashing with the partner mock, and the justfile has been updated to reflect the new port.",
+        "surface": "extraction"
+      },
+      {
+        "id": "f1cec6a2-6e06-44fc-ad3f-8e32d091299a",
+        "title": "Grafana alert evaluation interval for Lantern",
+        "kind": "preference",
+        "scope": "global",
+        "status": "candidate",
+        "effective_status": "candidate",
+        "origin": "extracted_other",
+        "fact_key": null,
+        "aliases": [
+          "grafana eval interval",
+          "lantern alert interval",
+          "pending period",
+          "slo alerting"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [
+          "message:65",
+          "message:66"
+        ],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "For Lantern Grafana alerts, use a folder-level evaluation interval of 1 minute. Apply a pending period of 5 minutes for the p95 latency SLO and 5–10 minutes for the error rate SLO to avoid alerting on transient blips.",
+        "surface": "extraction"
+      },
+      {
+        "id": "a70e763f-6659-408a-abd5-bb989d25d1c3",
+        "title": "reconcile_partial_batch stays #[ignore]d until issue #212",
+        "kind": "decision",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "project.decisions.reconcile_partial_batch_ignore",
+        "aliases": [
+          "reconcile partial batch",
+          "reconcile_partial_batch",
+          "ignore",
+          "flaky test",
+          "timing race",
+          "212"
+        ],
+        "valid_from": "2026-04-02T00:00:00Z",
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "# reconcile_partial_batch stays #[ignore]d until issue #212\n\nThe user decided NOT to \"fix\" the flaky `reconcile_partial_batch` test with retries or sleeps.\n\n- Root cause understood: a **timing race**, not a deterministic failure.\n- Chosen handling: keep the test `#[ignore]`d until **issue #212** is fixed.\n- Do not add a retry- or sleep-based workaround to the test; that would mask the race.\n- When issue #212 lands, the ignore should be removed and the race resolved properly.\n\n## Evidence and limits\nRecorded from the user on 2 April 2026, after the test failed again on CI.",
+        "surface": "model_tool"
+      },
+      {
+        "id": "f84adb91-c3e4-42a3-b2b4-280846fe0524",
+        "title": "上午 9:30 前不排会",
+        "kind": "preference",
+        "scope": "global",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "schedule.meeting_before_930",
+        "aliases": [
+          "会议",
+          "排会",
+          "morning meeting",
+          "schedule",
+          "日程",
+          "9:30",
+          "9点半",
+          "上午",
+          "meeting constraint",
+          "会议安排",
+          "早会"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "# 排会偏好\n\n用户一般晚上 **23:30 入睡**、早上 **6:30 起床**（每晚约 7 小时睡眠）。\n\n**排会 / 排日程规则：**\n- 上午 **9:30 之前不要安排会议**（起床 6:30，留出 3 小时缓冲）。\n- 一般把会议安排在 **9:30 之后** 开始。\n- 需要安排日程、会议、提醒时默认遵循此偏好。",
+        "surface": "model_tool"
+      },
+      {
+        "id": "1e063055-2df9-4815-88bf-eb04f124622c",
+        "title": "作息：23:30 入睡，6:30 起床",
+        "kind": "fact",
+        "scope": "global",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": null,
+        "aliases": [
+          "睡眠",
+          "睡眠时长",
+          "睡觉时间",
+          "起床时间",
+          "作息"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "# 作息\n\n- 晚上 23:30 睡觉\n- 早上 6:30 起床\n- 每晚睡眠时长约 7 小时",
+        "surface": "model_tool"
+      },
+      {
+        "id": "905a3540-235b-4f43-a33f-fe7ebc17ef65",
+        "title": "周五下午四点进行周回顾",
+        "kind": "decision",
+        "scope": "global",
+        "status": "candidate",
+        "effective_status": "candidate",
+        "origin": "extracted_user",
+        "fact_key": "user.weekly_review",
+        "aliases": [
+          "weekly review",
+          "周回顾",
+          "weekly review schedule",
+          "Friday 16:00"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [
+          "message:41"
+        ],
+        "supersedes": [
+          "3de6f1bd-93fc-4098-b78c-a5915b4dd7ad"
+        ],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "用户要求每周五下午 16:00 进行周回顾，并让助手列出本周完成的事项。",
+        "surface": "extraction"
+      },
+      {
+        "id": "9c5415aa-19e9-4151-a23d-3ee9b97aefce",
+        "title": "HHKB Professional Hybrid Type-S 的 Caps Lock 映射",
+        "kind": "preference",
+        "scope": "global",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "user.keyboard",
+        "aliases": [
+          "HHKB",
+          "HHKB Professional Hybrid Type-S",
+          "Caps Lock to Ctrl",
+          "键盘映射",
+          "keyboard remapping"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [
+          "message:37"
+        ],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "用户已将 HHKB Professional Hybrid Type-S 键盘上的 Caps Lock 键映射为 Ctrl 键，并习惯使用 QWERTY 布局。",
+        "surface": "extraction"
+      },
+      {
+        "id": "9bd45c5b-b6f1-46ac-941a-71518485baae",
+        "title": "CI-only enforcement of clippy::await_holding_lock",
+        "kind": "decision",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": null,
+        "aliases": [
+          "CI lint enforcement",
+          "clippy CI configuration",
+          "await_holding_lock CI",
+          "lint level split"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [
+          "message:33"
+        ],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The user decided to enforce the clippy::await_holding_lock lint as an error only in CI, using flags like `-D clippy::await_holding_lock` in the CI script or via environment variables, while keeping it as a warning or off locally to avoid blocking local development.",
+        "surface": "extraction"
+      },
+      {
+        "id": "0ca81a80-a479-40df-81da-abdf494c45e5",
+        "title": "User chose scope-fencing for MutexGuard across await",
+        "kind": "decision",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": null,
+        "aliases": [
+          "scope-fencing",
+          "block scoping",
+          "drop guard before await",
+          "fence guard"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [
+          "message:29"
+        ],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The user decided to fix the !Send error by scoping the MutexGuard in a block instead of switching to tokio::sync::Mutex, to keep the future Send and avoid executor serialization.",
+        "surface": "extraction"
+      },
+      {
+        "id": "6125ca1a-d0c4-446e-b781-a6e9dbd11de7",
+        "title": "Clippy lint await_holding_lock detects sync guards across await",
+        "kind": "reference",
+        "scope": "project",
+        "status": "candidate",
+        "effective_status": "candidate",
+        "origin": "extracted_other",
+        "fact_key": null,
+        "aliases": [
+          "clippy await holding lock",
+          "await_holding_lock",
+          "clippy lint for lock across await"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [
+          "message:32"
+        ],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The clippy::await_holding_lock lint warns when a synchronous lock guard (std::sync or parking_lot) is held across an .await, which is the pattern that causes !Send errors in async contexts.",
+        "surface": "extraction"
+      },
+      {
+        "id": "6d539441-4d6e-48b1-a258-273d97af84c0",
+        "title": "MutexGuard held across await caused !Send error",
+        "kind": "episode",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": null,
+        "aliases": [
+          "MutexGuard !Send",
+          "future not Send",
+          "axum handler Send error",
+          "MutexGuard across await"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [
+          "message:25"
+        ],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The user encountered a compiler error where the future was not Send in an axum handler. The cause was identified as a MutexGuard being held across an .await point, which the user confirmed was the issue.",
+        "surface": "extraction"
+      },
+      {
+        "id": "29426461-43d0-4866-ad13-04035f0d3bf0",
+        "title": "Use localhost:8080 for local examples",
+        "kind": "preference",
+        "scope": "global",
+        "status": "active",
+        "effective_status": "superseded",
+        "origin": "extracted_user",
+        "fact_key": null,
+        "aliases": [
+          "lantern",
+          "8080",
+          "localhost",
+          "port",
+          "local examples"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [
+          "1793e010-c5d4-4e72-b13d-903f8d9bb0e0"
+        ],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "# Use localhost:8080 for local examples\n\nFor all local examples, use `localhost:8080`. This is still the port the Lantern service comes up on for the user.\n\n## Evidence and limits\nReaffirmed by the user (2026) after being asked about it; consistent with the earlier note that Lantern listens on port 8080 locally (recorded 1 October 2025).\n## Recheck when\nThe default port changes.",
+        "surface": "model_tool"
+      },
+      {
+        "id": "55c6a42d-a75b-4d9f-ab6f-941fd021f56f",
+        "title": "Rosetta is not supported for Lantern",
+        "kind": "decision",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": "lantern.rosetta.not-supported",
+        "aliases": [],
+        "valid_from": "2025-12-15T00:00:00Z",
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "# Rosetta is not supported for Lantern\n\nLantern is run natively on Apple silicon (arm64 / `aarch64-apple-darwin`). Running it under Rosetta (x86_64) is not supported.\n\n## Evidence and limits\nRecorded 15 Dec 2025 by the user, after an x86_64 Rust toolchain caused `cargo nextest run` to crash with SIGILL inside `ring` under Rosetta. Switching to the native `aarch64-apple-darwin` toolchain fixed it.\n## Recheck when\nTooling support or the runtime environment changes.",
+        "surface": "model_tool"
+      },
+      {
+        "id": "31165b7f-1ae9-4eb2-bed0-2851a9c3ea64",
+        "title": "x86_64 toolchain caused SIGILL in `ring` under Rosetta",
+        "kind": "episode",
+        "scope": "global",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "extracted_user",
+        "fact_key": null,
+        "aliases": [],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "# Episode: 15 Dec 2025 — SIGILL in `ring` under Rosetta\n\n- **Event:** `cargo nextest run` crashed with SIGILL while running under Rosetta.\n- **Cause:** an x86_64 Rust toolchain had been installed by accident, so binaries built for x86_64 ended up running under Rosetta on Apple silicon.\n- **Lesson:** on the MacBook Air M3 assume arm64 / aarch64 toolchains; check that the Rust target triple and installed toolchain are arm64-apples-darwin, not x86_64-apple-darwin.\n\nReinforces the 15 Nov 2025 switch to Apple silicon as the default environment.",
+        "surface": "model_tool"
+      },
+      {
+        "id": "780cd27d-9b61-4334-ae82-1faf2b6e3d15",
+        "title": "Lin Wei's current machine: MacBook Air M3 (arm64, macOS, 16 GB)",
+        "kind": "fact",
+        "scope": "global",
+        "status": "candidate",
+        "effective_status": "candidate",
+        "origin": "extracted_user",
+        "fact_key": null,
+        "aliases": [],
+        "valid_from": "2025-11-15T00:00:00Z",
+        "valid_to": null,
+        "sources": [
+          "message:1"
+        ],
+        "supersedes": [
+          "13b0cb0f-54f5-4345-97b6-3b17813f10ac"
+        ],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "Since mid-November 2025, Lin Wei works on a MacBook Air M3 with 16 GB of memory running macOS. Assume Apple silicon (arm64) by default for machine/architecture questions. The retired ThinkPad X1 Carbon Gen 9 on Fedora is no longer in use.",
+        "surface": "model_tool"
+      },
+      {
+        "id": "13b0cb0f-54f5-4345-97b6-3b17813f10ac",
+        "title": "Laptop: ThinkPad X1 Carbon on Fedora",
+        "kind": "fact",
+        "scope": "global",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "user",
+        "fact_key": "user.laptop",
+        "aliases": [
+          "ThinkPad",
+          "Fedora",
+          "laptop"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "Lin Wei's laptop is a ThinkPad X1 Carbon Gen 9 running Fedora.",
+        "surface": null
+      },
+      {
+        "id": "3495191c-fe35-4435-878b-3e5ae1936c8a",
+        "title": "开一辆本田飞度",
+        "kind": "fact",
+        "scope": "global",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "user",
+        "fact_key": "user.commute",
+        "aliases": [
+          "car",
+          "汽车",
+          "本田",
+          "Honda Fit",
+          "飞度"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "林薇开一辆 2018 年的本田飞度。",
+        "surface": null
+      },
+      {
+        "id": "acedefa4-fa90-4357-b9ae-7406df1eb734",
+        "title": "Editor: vim",
+        "kind": "preference",
+        "scope": "global",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "user",
+        "fact_key": "user.editor",
+        "aliases": [
+          "vim",
+          "editor"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "Lin Wei's editor is vim, with a plain vimrc and no plugin manager.",
+        "surface": null
+      },
+      {
+        "id": "cea71c39-aa11-4d76-a350-4c37761c2cbf",
+        "title": "Moss targets Python 3.12",
+        "kind": "fact",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "user",
+        "fact_key": "moss.python.version",
+        "aliases": [
+          "Python version",
+          "3.12",
+          ".python-version"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "Moss targets Python 3.12; `.python-version` says 3.12.",
+        "surface": null
+      },
+      {
+        "id": "da435c79-481c-4506-a74e-8db16f19d067",
+        "title": "Staging database: lantern_staging on pg-staging-1",
+        "kind": "fact",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "user",
+        "fact_key": "lantern.staging.db",
+        "aliases": [
+          "staging database",
+          "staging DB",
+          "pg-staging"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The staging database is `lantern_staging` on host `pg-staging-1`.",
+        "surface": null
+      },
+      {
+        "id": "1a35bf4f-46c2-4f02-99d6-f47b115aa638",
+        "title": "Lantern listens on port 8080",
+        "kind": "fact",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "user",
+        "fact_key": "lantern.service.port",
+        "aliases": [
+          "port",
+          "端口",
+          "8080"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "The Lantern service listens on port 8080 locally.",
+        "surface": null
+      },
+      {
+        "id": "3de6f1bd-93fc-4098-b78c-a5915b4dd7ad",
+        "title": "周回顾：周五下午四点",
+        "kind": "preference",
+        "scope": "global",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "user",
+        "fact_key": "user.weekly_review",
+        "aliases": [
+          "weekly review",
+          "周回顾",
+          "周五"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "林薇每周五下午 16:00 做周回顾，需要一份本周完成事项的列表。",
+        "surface": null
+      },
+      {
+        "id": "410a7460-df2b-45bd-ad81-4cd2553f2a9a",
+        "title": "Moss output directory: _site",
+        "kind": "fact",
+        "scope": "project",
+        "status": "active",
+        "effective_status": "active",
+        "origin": "user",
+        "fact_key": "moss.output_dir",
+        "aliases": [
+          "_site",
+          "output directory"
+        ],
+        "valid_from": null,
+        "valid_to": null,
+        "sources": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflict": false,
+        "source_forgotten": false,
+        "knowledge": "Moss writes its build output to `_site/`.",
+        "surface": null
+      }
+    ],
+    "episodes": [],
+    "coverage": null,
+    "noise": null,
+    "changed_facts": [],
+    "changed_facts_correct": null,
+    "link_checks": null,
+    "restatements": [
+      {
+        "session": "cs-006",
+        "turn": 1,
+        "states": [
+          "d5dc170b-63bd-56f1-b478-16392d64aeee"
+        ],
+        "row": 15,
+        "outcome": "model_tool_write",
+        "notes": [],
+        "reader_notes": [
+          "29426461-43d0-4866-ad13-04035f0d3bf0"
+        ],
+        "by_surface": {
+          "extraction": "nothing_written",
+          "model_tool": "model_tool_write"
+        }
+      },
+      {
+        "session": "cs-017",
+        "turn": 2,
+        "states": [
+          "55da76c5-8f67-5628-a520-4cd45df14bb7"
+        ],
+        "row": 41,
+        "outcome": "suggestion",
+        "notes": [
+          "905a3540-235b-4f43-a33f-fe7ebc17ef65"
+        ],
+        "reader_notes": [],
+        "by_surface": {
+          "extraction": "suggestion",
+          "model_tool": "nothing_written"
+        }
+      },
+      {
+        "session": "cs-025",
+        "turn": 2,
+        "states": [
+          "eca96db9-98b9-5def-a63d-c3c39a10ea0e"
+        ],
+        "row": 51,
+        "outcome": "nothing_written",
+        "notes": [],
+        "reader_notes": [],
+        "by_surface": {
+          "extraction": "nothing_written",
+          "model_tool": "nothing_written"
+        }
+      },
+      {
+        "session": "cs-033",
+        "turn": 2,
+        "states": [
+          "b06901d5-5151-5665-97d6-c899757dd602"
+        ],
+        "row": 81,
+        "outcome": "nothing_written",
+        "notes": [],
+        "reader_notes": [],
+        "by_surface": {
+          "extraction": "nothing_written",
+          "model_tool": "nothing_written"
+        }
+      },
+      {
+        "session": "cs-033",
+        "turn": 3,
+        "states": [
+          "005e519a-6a01-5e8d-bf96-1492badedcf4"
+        ],
+        "row": 83,
+        "outcome": "model_tool_write",
+        "notes": [],
+        "reader_notes": [
+          "99b560e0-c96c-4bb6-9b62-2ef15f150f85"
+        ],
+        "by_surface": {
+          "extraction": "nothing_written",
+          "model_tool": "model_tool_write"
+        }
+      },
+      {
+        "session": "cs-038",
+        "turn": 5,
+        "states": [
+          "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f"
+        ],
+        "row": 127,
+        "outcome": "first_learned",
+        "notes": [
+          "532fa30c-37f3-42f3-9a93-c7ee50fb507a"
+        ],
+        "reader_notes": [],
+        "by_surface": {
+          "extraction": "first_learned",
+          "model_tool": "nothing_written"
+        }
+      }
+    ],
+    "restatements_by_outcome": {
+      "first_learned": 1,
+      "model_tool_write": 2,
+      "nothing_written": 2,
+      "suggestion": 1
+    },
+    "aliases": null,
+    "fact_keys": null,
+    "restatements_by_surface": {
+      "extraction": {
+        "first_learned": 1,
+        "nothing_written": 4,
+        "suggestion": 1
+      },
+      "model_tool": {
+        "model_tool_write": 2,
+        "nothing_written": 4
+      }
+    },
+    "aliases_by_surface": null,
+    "fact_keys_by_surface": null,
+    "noise_by_surface": null,
+    "forced_rerun": null,
+    "suggestion_check": {
+      "targets": [
+        {
+          "old_gold": "17310b78-2539-5802-a542-9aa6380ca979",
+          "fact_key": "user.laptop",
+          "target": "13b0cb0f-54f5-4345-97b6-3b17813f10ac",
+          "suggestions": 1,
+          "suggestion": "780cd27d-9b61-4334-ae82-1faf2b6e3d15",
+          "suggestion_title": "Lin Wei's current machine: MacBook Air M3 (arm64, macOS, 16 GB)",
+          "suggestion_knowledge": "Since mid-November 2025, Lin Wei works on a MacBook Air M3 with 16 GB of memory running macOS. Assume Apple silicon (arm64) by default for machine/architecture questions. The retired ThinkPad X1 Carbon Gen 9 on Fedora is no longer in use.",
+          "status_before_confirm": "active",
+          "confirm_error": null,
+          "status_after_confirm": "superseded"
+        },
+        {
+          "old_gold": "d5dc170b-63bd-56f1-b478-16392d64aeee",
+          "fact_key": "lantern.service.port",
+          "target": "1a35bf4f-46c2-4f02-99d6-f47b115aa638",
+          "suggestions": 2,
+          "suggestion": "b2d68e6e-3a87-48d4-893d-6e530e37542a",
+          "suggestion_title": "Lantern service port corrected to 8790",
+          "suggestion_knowledge": "The Lantern service listens on port 8790, not 8080. The fact that Lantern listens on port 8080 is stale and should be corrected to 8790, aligning with the global preference for localhost:8790 effective 2026-04-02.",
+          "status_before_confirm": "active",
+          "confirm_error": null,
+          "status_after_confirm": "superseded"
+        },
+        {
+          "old_gold": "73c3f368-d646-5e3f-845e-b319ed050190",
+          "fact_key": "user.commute",
+          "target": "3495191c-fe35-4435-878b-3e5ae1936c8a",
+          "suggestions": 0,
+          "suggestion": null,
+          "suggestion_title": null,
+          "suggestion_knowledge": null,
+          "status_before_confirm": "active",
+          "confirm_error": null,
+          "status_after_confirm": null
+        },
+        {
+          "old_gold": "55da76c5-8f67-5628-a520-4cd45df14bb7",
+          "fact_key": "user.weekly_review",
+          "target": "3de6f1bd-93fc-4098-b78c-a5915b4dd7ad",
+          "suggestions": 2,
+          "suggestion": "6c1950e5-2158-43b0-b076-0ba7e2f7ed08",
+          "suggestion_title": "周回顾时间：每周一 09:30（自 2026-04-06 起）",
+          "suggestion_knowledge": "林薇自 2026-04-06 起，每周一上午 09:30 做周回顾，需要本周完成事项列表。此变更废止了原每周五 16:00 的安排。",
+          "status_before_confirm": "active",
+          "confirm_error": null,
+          "status_after_confirm": "superseded"
+        },
+        {
+          "old_gold": "005e519a-6a01-5e8d-bf96-1492badedcf4",
+          "fact_key": "moss.output_dir",
+          "target": "410a7460-df2b-45bd-ad81-4cd2553f2a9a",
+          "suggestions": 1,
+          "suggestion": "1f04544d-9478-47db-abef-2ce6ab931c35",
+          "suggestion_title": "Moss writes its build output to dist/ (since PR #41, 2026-05-10)",
+          "suggestion_knowledge": "## Fact\nSince PR #41 (2026-05-10), Moss writes its build output to `dist/` — matching wrangler's default — instead of the previous `_site/`.\n\n## Evidence and limits\nStated by the user. Supersedes the earlier note that output went to `_site/` (note `410a7460-df2b-45bd-ad81-4cd2553f2a9a`).\n\n## Recheck when\nThe build tool changes, or the output directory is changed again.",
+          "status_before_confirm": "active",
+          "confirm_error": null,
+          "status_after_confirm": "superseded"
+        },
+        {
+          "old_gold": "eca96db9-98b9-5def-a63d-c3c39a10ea0e",
+          "fact_key": "user.editor",
+          "target": "acedefa4-fa90-4357-b9ae-7406df1eb734",
+          "suggestions": 1,
+          "suggestion": "acf2dbc4-d311-4896-8332-82a9de504b5a",
+          "suggestion_title": "Editor: Helix (hx)",
+          "suggestion_knowledge": "Lin Wei switched from vim to Helix (hx), starting in early June 2026. She tried Helix for two weeks and is keeping it. (Previously: vim with a plain vimrc and no plugin manager.)",
+          "status_before_confirm": "active",
+          "confirm_error": null,
+          "status_after_confirm": "superseded"
+        },
+        {
+          "old_gold": "b06901d5-5151-5665-97d6-c899757dd602",
+          "fact_key": "moss.python.version",
+          "target": "cea71c39-aa11-4d76-a350-4c37761c2cbf",
+          "suggestions": 1,
+          "suggestion": "7ae898b8-ef53-489c-902d-21f18d607888",
+          "suggestion_title": "Moss targets Python 3.13",
+          "suggestion_knowledge": "Moss targets Python 3.13; `.python-version` says 3.13. Upgraded from 3.12.",
+          "status_before_confirm": "active",
+          "confirm_error": null,
+          "status_after_confirm": "superseded"
+        },
+        {
+          "old_gold": "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f",
+          "fact_key": "lantern.staging.db",
+          "target": "da435c79-481c-4506-a74e-8db16f19d067",
+          "suggestions": 1,
+          "suggestion": "18919cf3-b14c-44f1-8269-ce63a2410481",
+          "suggestion_title": "Staging database is lantern_stg on pg-staging-2",
+          "suggestion_knowledge": "After this month's infrastructure move, the Lantern staging database is `lantern_stg` on host `pg-staging-2`. The runbook was updated on 20 June 2026.\n\nThis replaces the previous staging database `lantern_staging` on host `pg-staging-1` (recorded 2 March 2026).",
+          "status_before_confirm": "active",
+          "confirm_error": null,
+          "status_after_confirm": "superseded"
+        }
+      ],
+      "targets_with_a_suggestion": 7,
+      "suggestions_total": 9,
+      "suggestions_elsewhere": 0,
+      "confirmed_and_superseded": 7
+    },
+    "invariants": {
+      "user_notes_retired_without_confirm": 0,
+      "forgotten_resurrected": 0,
+      "forced_rerun_checked": false,
+      "forced_rerun_unchecked": null,
+      "violated": false
+    },
+    "cost": {
+      "flushes": 15,
+      "flushes_with_calls": 15,
+      "extraction_calls": 17,
+      "extraction_tokens_in": 68565,
+      "extraction_tokens_out": 12447,
+      "flush_latency_p50_ms": 10897,
+      "flush_latency_p95_ms": 71804,
+      "flushes_by_trigger": {
+        "switch": 13,
+        "turns": 2
+      },
+      "flush_attempts": 16,
+      "unusable_answers": 2,
+      "unusable_answers_by_reason": {
+        "cut at max_tokens": 2
+      },
+      "windows_skipped_unusable": 0,
+      "windows_left_unread": 0,
+      "episode_calls": 0,
+      "episodes_written": 0,
+      "episode_tokens_in": 0,
+      "episode_tokens_out": 0,
+      "episode_flush_attempts": 0,
+      "episode_unusable_answers": 0,
+      "episode_unusable_answers_by_reason": {},
+      "episode_windows_skipped_unusable": 0,
+      "episode_windows_left_unread": 0,
+      "memory_changes_by_surface": {
+        "extraction": 21,
+        "model_tool": 20
+      },
+      "reader_llm_calls": 78,
+      "reader_tokens_in": 960955,
+      "reader_tokens_out": 80302,
+      "feed_wall_ms": 2434068,
+      "feed_turn_errors": 0,
+      "feed_turn_errors_at": [],
+      "events_lagged": 0,
+      "events_lagged_at": []
+    }
+  }
+}
