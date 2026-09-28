@@ -1470,7 +1470,10 @@ fn the_reads_a_model_or_a_person_waits_on_answer_at_once_while_the_index_is_rebu
             &extraction,
             StoreInput {
                 title: "Commute".into(),
-                body: "# Commute\n\n## Knowledge\nThe user cycles to work.\n".into(),
+                body: "# Commute\n\n## Knowledge\nThe user cycles to work.\n\n\
+                       ## Evidence and limits\nFrom what you said. Replaces “Commute” (saved \
+                       by you): The user now cycles.\n"
+                    .into(),
                 kind: Some(NoteKind::Fact),
                 fact_key: Some("user.commute".into()),
                 // What else it changes is listed too (the L8 close-out's A4).
@@ -1486,6 +1489,40 @@ fn the_reads_a_model_or_a_person_waits_on_answer_at_once_while_the_index_is_rebu
         )
         .unwrap();
     assert!(suggestion.suggestion);
+    // The chat model's edit of a saved note whose body carries learning's
+    // reason from an earlier change: its copy borrows no reason, on the file
+    // path as on the index's (the L8 close-out's A4; its repair round 1).
+    let editor = service
+        .store(
+            &user,
+            StoreInput {
+                title: "Editor".into(),
+                body: "# Editor\n\n## Knowledge\nSince June the user edits with Helix.\n\n\
+                       ## Evidence and limits\nFrom what you said on 2026-06-14. Replaces \
+                       “Editor” (saved by you): The user said they switched from vim to Helix \
+                       in June.\n"
+                    .into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("user.editor".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let copy = service
+        .update(
+            &tool,
+            UpdateInput {
+                id: editor.id,
+                expected_revision: editor.revision.clone(),
+                action: UpdateAction::Edit(Patch {
+                    tags: Some(vec!["tools".into()]),
+                    ..Default::default()
+                }),
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(copy.suggested_for, Some(editor.id));
     let talked = h.message_row("Let us plan the Lisbon trip.");
     service
         .store(
@@ -1500,7 +1537,19 @@ fn the_reads_a_model_or_a_person_waits_on_answer_at_once_while_the_index_is_rebu
             },
         )
         .unwrap();
-    let from_the_index = format!("{:?}", service.suggestions(&user, None).unwrap());
+    let index_answer = service.suggestions(&user, None).unwrap();
+    let assistants = index_answer
+        .iter()
+        .find(|s| s.id == copy.id)
+        .expect("the assistant's suggestion is listed");
+    assert_eq!(assistants.reason, None, "not the copied note's old reason");
+    assert!(
+        index_answer
+            .iter()
+            .any(|s| s.id == suggestion.id && s.reason.is_some()),
+        "learning's gives its own: {index_answer:?}"
+    );
+    let from_the_index = format!("{index_answer:?}");
     assert!(
         from_the_index.contains(r#"FieldChange { field: "aliases", from: [], to: ["bike"] }"#),
         "{from_the_index}"
@@ -1545,7 +1594,7 @@ fn the_reads_a_model_or_a_person_waits_on_answer_at_once_while_the_index_is_rebu
             .unwrap(),
         2
     );
-    assert_eq!(timeline_rows(&service, &tool).unwrap(), 3, "two notes and the saved one");
+    assert_eq!(timeline_rows(&service, &tool).unwrap(), 4, "two notes and the saved two");
 }
 
 /// The L8 product slice's P6 (the scale slice's round-3 safety review,

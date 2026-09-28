@@ -3684,23 +3684,31 @@ fn long_section(last: &str) -> String {
 /// of such a token, and nowhere as a whole token, reports `prefix`"): a note
 /// holding `prefer` whole in one chunk and only as the beginning of
 /// `prefers` in another reports `term` alone — in the index and in the file
-/// scan. The chunk-level evidence says `prefix` in the second chunk; the
-/// note-level rule drops it.
+/// scan. The chunk-level evidence says `prefix` in one chunk; the
+/// note-level rule drops it, whichever chunk comes first (the close-out's
+/// repair round 1 added the order with the whole word first, which pins
+/// the prefix branch's own check).
 #[test]
 fn a_word_whole_in_one_chunk_drops_prefix_from_another() {
-    let index = ready_index();
-    let body = format!(
-        "# Editor\n\n## One\n{}\n## Two\n{}",
-        long_section("The user prefers vim."),
-        long_section("The user said prefer, exactly that word.")
+    let (beginning, whole) = (
+        "The user prefers vim.",
+        "The user said prefer, exactly that word.",
     );
-    assert!(chunker::chunk_body(&body).len() >= 2, "two chunks");
-    let records = vec![record("two", "Editor", &body)];
-    index.rebuild(&records).unwrap();
-    let r = index.search(&q("prefer")).unwrap();
-    assert_eq!(hit(&r, "two").matches, vec![MatchReason::Term]);
-    let scan = index.scan_search(&records, &q("prefer"), false).unwrap();
-    assert_eq!(hit(&scan, "two").matches, vec![MatchReason::Term]);
+    for (one, two) in [(beginning, whole), (whole, beginning)] {
+        let index = ready_index();
+        let body = format!(
+            "# Editor\n\n## One\n{}\n## Two\n{}",
+            long_section(one),
+            long_section(two)
+        );
+        assert!(chunker::chunk_body(&body).len() >= 2, "two chunks");
+        let records = vec![record("two", "Editor", &body)];
+        index.rebuild(&records).unwrap();
+        let r = index.search(&q("prefer")).unwrap();
+        assert_eq!(hit(&r, "two").matches, vec![MatchReason::Term], "{one}");
+        let scan = index.scan_search(&records, &q("prefer"), false).unwrap();
+        assert_eq!(hit(&scan, "two").matches, vec![MatchReason::Term], "{one}");
+    }
 }
 
 /// The L8 close-out's B1 (design 09 §6.5.2, repair round 2 of LQ17): the
