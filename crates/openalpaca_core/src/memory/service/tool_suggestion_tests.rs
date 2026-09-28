@@ -1378,6 +1378,7 @@ fn forgetting_a_note_and_its_suggestion_together_forgets_both_in_either_order() 
         } else {
             vec![suggestion, note]
         };
+        let asked: Vec<NoteId> = targets.iter().map(|(id, _)| *id).collect();
         let out = h
             .service
             .forget(
@@ -1399,6 +1400,10 @@ fn forgetting_a_note_and_its_suggestion_together_forgets_both_in_either_order() 
                 "note first: {note_first}: {statuses:?}"
             );
         }
+        // The suggestion is forgotten first whatever its place (repair
+        // round 2), and the results still come back in the order asked.
+        let answered: Vec<NoteId> = statuses.iter().map(|(id, _)| *id).collect();
+        assert_eq!(answered, asked, "note first: {note_first}");
         assert!(
             read_note(&h, keymap.id).source_forgotten,
             "note first: {note_first}: the suggestion's own row is forgotten"
@@ -1732,6 +1737,100 @@ fn forgetting_a_candidate_leaves_a_sibling_the_user_confirmed() {
             );
             assert!(recalled(&h), "{case}");
         }
+    }
+}
+
+/// Close-out repair round 2 (RG2 P4): round 1 ran a failed forget's
+/// withdrawals over every note it had forgotten — among them a pending
+/// suggestion the same forget named *after* the target that failed, whose
+/// turn never came. `[note, failing, suggestion]` withdrew the suggestion,
+/// so its row was never suppressed and a retry answered it `not_found`,
+/// where `[suggestion, note, failing]` forgot it: A3's order dependence
+/// again. A forget now takes the pending suggestions it names first, as
+/// the CLI sends them, and both orders agree.
+#[test]
+fn a_forget_that_fails_forgets_the_suggestion_it_names_in_either_order() {
+    for suggestion_last in [true, false] {
+        let h = Harness::new();
+        let ws = h.workspace("lantern", Some(".git"));
+        let editor = saved(&h, "user.editor", "Editor", "The user edits with vim.");
+        let (turn, tool) = chat_turn(&h, "Call vim my editor of choice.", None);
+        let copy = h
+            .service
+            .update(
+                &tool,
+                UpdateInput {
+                    id: editor.id,
+                    expected_revision: editor.revision.clone(),
+                    action: UpdateAction::Edit(Patch {
+                        aliases: Some(vec!["editor of choice".into()]),
+                        ..Default::default()
+                    }),
+                    reason: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(copy.suggested_for, Some(editor.id));
+        let learned_from_the_turn = h
+            .service
+            .store(
+                &h.ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+                    .unwrap(),
+                StoreInput {
+                    title: "Editor of choice".into(),
+                    body: "# Editor of choice\n\nThe user calls vim their editor of choice.\n"
+                        .into(),
+                    kind: Some(NoteKind::Fact),
+                    sources: vec![message(turn)],
+                    observed_at: Some(chrono::Utc::now()),
+                    provenance: Some(ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let project = h.store(
+            &h.user(ALICE, Some(&ws)),
+            "Lantern",
+            "# Lantern\n\nThe project is Lantern.\n",
+            NoteKind::Fact,
+        );
+        let snapshot = {
+            let resolved = h.service.resolve(&h.user(ALICE, Some(&ws))).unwrap();
+            resolved.project.as_ref().unwrap().snapshot_path().to_path_buf()
+        };
+        fs::remove_file(&snapshot).unwrap();
+        let note = (editor.id, editor.revision.clone());
+        let suggestion = (copy.id, copy.revision.clone());
+        let failing = (project.id, project.revision.clone());
+        let targets = if suggestion_last {
+            vec![note, failing, suggestion.clone()]
+        } else {
+            vec![suggestion.clone(), note, failing]
+        };
+        let result = h.service.forget(
+            &h.user(ALICE, Some(&ws)),
+            ForgetInput {
+                targets,
+                reason: None,
+            },
+        );
+        let case = format!("suggestion last: {suggestion_last}");
+        assert!(result.is_err(), "{case}: the project is quarantined");
+        assert!(
+            read_note(&h, learned_from_the_turn.id).source_forgotten,
+            "{case}: the suggestion was forgotten, and its turn's row with it"
+        );
+        let retry = h
+            .service
+            .forget(
+                &h.user(ALICE, None),
+                ForgetInput {
+                    targets: vec![suggestion],
+                    reason: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(retry.results[0].status, ForgetItemStatus::NotFound);
     }
 }
 

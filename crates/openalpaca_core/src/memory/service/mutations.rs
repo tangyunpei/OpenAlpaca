@@ -323,7 +323,14 @@ impl MemoryService {
     /// asked, whatever the order of the targets (the L8 close-out's A3). A
     /// target that fails ends the call with its error, and the notes the
     /// targets before it forgot keep their forget — so their withdrawals run
-    /// first (the close-out's repair round 1).
+    /// first (the close-out's repair round 1). The pending suggestions the
+    /// call names take their turns first, the other targets after them in
+    /// the order given (the close-out's repair round 2), as `openalpaca
+    /// memory forget` sends them: a failure can then end the call only once
+    /// every suggestion it names has had its turn, so none is withdrawn
+    /// before it — its row left unsuppressed, a retry answered `not_found` —
+    /// and the result does not depend on where it stood. The results come
+    /// back in the order given.
     pub fn forget(
         &self,
         ctx: &MemoryAccessContext,
@@ -341,7 +348,7 @@ impl MemoryService {
             }
         }
         let resolved = self.resolve(ctx)?;
-        let mut results = Vec::with_capacity(input.targets.len());
+        let mut results: Vec<(usize, ForgetItem)> = Vec::with_capacity(input.targets.len());
         let mut changes = Vec::new();
         let mut cited_messages = false;
         let mut cited_tasks = false;
@@ -349,16 +356,23 @@ impl MemoryService {
         // targets left it, and the notes forgotten there (not withdrawn),
         // whose pending suggestions are withdrawn after the loop.
         let mut moot: Vec<Moot> = Vec::new();
-        // The targets in turn; the first error ends the call, but only once
+        // One target's turn, given what reading it found (`asked` is its
+        // place in the call). The first error ends the call, but only once
         // the withdrawals the forgets that landed before it owe have run
         // (the close-out's repair round 1: an error on a later target used
         // to return before them, stranding a forgotten note's suggestions).
-        let looped = input.targets.iter().try_for_each(|(id, expected)| {
-            let Some((holder, view)) = Self::find_note(&resolved, id)? else {
-                results.push(ForgetItem {
-                    id: *id,
-                    status: ForgetItemStatus::NotFound,
-                });
+        let mut turn = |asked: usize,
+                        id: &NoteId,
+                        expected: &String,
+                        found: Option<(&Partition, NoteView)>| {
+            let Some((holder, view)) = found else {
+                results.push((
+                    asked,
+                    ForgetItem {
+                        id: *id,
+                        status: ForgetItemStatus::NotFound,
+                    },
+                ));
                 return Ok(());
             };
             let store_scope = holder.scope().clone();
@@ -410,10 +424,13 @@ impl MemoryService {
                     }
                     ForgetStatus::NotFound => ForgetItemStatus::NotFound,
                 };
-                results.push(ForgetItem {
-                    id: outcome.id,
-                    status,
-                });
+                results.push((
+                    asked,
+                    ForgetItem {
+                        id: outcome.id,
+                        status,
+                    },
+                ));
             }
             self.reindex_after_write(&partition, &after);
             let forgotten = (forgot && mode == ForgetMode::Forget).then_some(*id);
@@ -431,11 +448,35 @@ impl MemoryService {
                 }),
             }
             Ok::<(), MemoryError>(())
-        });
+        };
+        // The named pending suggestions first, as they are read; every other
+        // target after them in the order given, each with the read that
+        // placed it — a forget rewrites no other note's file, and each
+        // forget re-checks its note's revision under the lock. A target that
+        // could not be read fails in its own turn. Each target is read once,
+        // as before.
+        let looped = (|| {
+            let mut rest = Vec::new();
+            for (asked, (id, expected)) in input.targets.iter().enumerate() {
+                match Self::find_note(&resolved, id) {
+                    Ok(Some(found))
+                        if found.1.note.status == NoteStatus::Candidate
+                            && !found.1.note.supersedes.is_empty() =>
+                    {
+                        turn(asked, id, expected, Some(found))?
+                    }
+                    read => rest.push((asked, id, expected, read)),
+                }
+            }
+            rest.into_iter()
+                .try_for_each(|(asked, id, expected, read)| turn(asked, id, expected, read?))
+        })();
         for m in moot {
             self.withdraw_suggestions_for(ctx, m);
         }
         looped?;
+        results.sort_by_key(|(asked, _)| *asked);
+        let results: Vec<ForgetItem> = results.into_iter().map(|(_, item)| item).collect();
         let forgotten = results
             .iter()
             .filter(|r| r.status == ForgetItemStatus::Forgotten)

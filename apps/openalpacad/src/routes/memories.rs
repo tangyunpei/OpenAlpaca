@@ -380,14 +380,16 @@ pub async fn create_memory_handler(
     }
 }
 
-/// `POST /v1/memories/forget`: the targets in the order given, each its own
-/// forget; a forgotten note's pending suggestions are withdrawn once every
-/// target has had its turn, so a suggestion named with the note it would
-/// replace is forgotten as asked, in either order (the L8 close-out's A3).
-/// A target that fails ends the request with its refusal, after the
-/// withdrawals the targets before it owe (its repair round 1).
-/// `openalpaca memory forget` sends its ids here in requests of up to 20,
-/// the pending suggestions first.
+/// `POST /v1/memories/forget`: each target its own forget — the pending
+/// suggestions it names first, then the other targets in the order given
+/// (the L8 close-out's repair round 2), the results in the order given; a
+/// forgotten note's pending suggestions are withdrawn once every target has
+/// had its turn, so a suggestion named with the note it would replace is
+/// forgotten as asked, in either order (the close-out's A3). A target that
+/// fails ends the request with its refusal, after the withdrawals the
+/// targets before it owe (its repair round 1). `openalpaca memory forget`
+/// sends its ids here in requests of up to 20, the pending suggestions
+/// first.
 pub async fn forget_memories_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

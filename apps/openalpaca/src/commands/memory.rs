@@ -1612,8 +1612,9 @@ async fn read_back(api: &Api, id: NoteId) -> String {
 /// next request is sent, so a note in one request and its suggestion in a
 /// later one would forget the note and withdraw the suggestion — answered
 /// `not found`, its row never suppressed — where one request forgets both
-/// (the close-out's repair round 1). A suggestion never names another
-/// suggestion, so this one order keeps every request apart.
+/// (the close-out's repair round 1); the service orders one request's
+/// targets the same way (its repair round 2). A suggestion never names
+/// another suggestion, so this one order keeps every request apart.
 pub(crate) fn forget_order(read: Vec<(NoteId, String, bool)>) -> Vec<(NoteId, String)> {
     let (first, rest): (Vec<_>, Vec<_>) = read.into_iter().partition(|(_, _, s)| *s);
     first
