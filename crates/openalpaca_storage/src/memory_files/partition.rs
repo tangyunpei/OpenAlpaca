@@ -2112,25 +2112,33 @@ impl Partition {
             let (supersedes, suppressed_sources) = match mode {
                 ForgetMode::Forget => {
                     let pending = view.note.status == NoteStatus::Candidate;
-                    // A pending suggestion suppresses none of the sources the
-                    // note it would replace cites (the L8 close-out's A2):
-                    // that note stays in force until the user confirms
-                    // (design §4), and the chat model's edit suggestion
-                    // copies its sources, so suppressing them would take it
-                    // out of recall through the suggestion. A target already
+                    // A pending suggestion suppresses none of the sources a
+                    // note the user saved cites. Not the note it would
+                    // replace (the L8 close-out's A2): that note stays in
+                    // force until the user confirms (design §4), and the chat
+                    // model's edit suggestion copies its sources, so
+                    // suppressing them would take it out of recall through
+                    // the suggestion. Nor any other (the close-out's repair
+                    // round 1): a suggestion the user confirmed from the same
+                    // turn cites that turn's row too, and retracting its
+                    // sibling would retire it, unannounced. A note already
                     // gone — forgotten earlier in this call too — shields
-                    // nothing.
-                    let shielded: HashSet<String> = if pending {
-                        view.note
-                            .supersedes
-                            .iter()
-                            .filter(|t| !forgotten.contains(t))
-                            .filter_map(|t| loaded.get(t))
-                            .flat_map(|t| t.note.sources.iter().map(|s| s.suppression_key()))
-                            .collect()
-                    } else {
-                        HashSet::new()
-                    };
+                    // nothing; its own tombstone suppressed its rows.
+                    let shielded: HashSet<String> =
+                        if pending && !view.note.supersedes.is_empty() {
+                            loaded
+                                .views
+                                .iter()
+                                .filter(|v| v.note.id != *id && !forgotten.contains(&v.note.id))
+                                .filter(|v| {
+                                    v.derived.origin.is_saved()
+                                        || view.note.supersedes.contains(&v.note.id)
+                                })
+                                .flat_map(|v| v.note.sources.iter().map(|s| s.suppression_key()))
+                                .collect()
+                        } else {
+                            HashSet::new()
+                        };
                     (
                         // S3: a candidate retired nothing while it lived.
                         if pending {

@@ -1505,6 +1505,111 @@ fn a_forget_that_fails_on_a_later_target_still_withdraws_what_it_owes() {
     }
 }
 
+/// Close-out repair round 1 (RG1 P5): A2's shield covered only the note a
+/// suggestion names. One turn's two edit suggestions both cite that turn's
+/// row; the person confirms one on its card, and the model then retracts
+/// the other with `memory_forget` — whose forget suppressed the turn's row
+/// and took the note the user had just confirmed out of automatic recall,
+/// unannounced. A pending suggestion's forget now suppresses no row that
+/// any note the user saved cites; a row only it cites is still suppressed.
+#[test]
+fn retracting_one_suggestion_leaves_a_note_the_user_confirmed_from_the_same_turn() {
+    for forget_by_the_tool in [true, false] {
+        let h = Harness::new();
+        let home = saved(&h, "user.address", "Home address", "The user lives at 1 Elm Street.");
+        let job = saved(&h, "user.job", "Job", "The user works at Quillpay.");
+        let (turn, tool) = chat_turn(
+            &h,
+            "I moved to 9 Oak Road and I left Quillpay for Norden Labs.",
+            None,
+        );
+        let learned_from_the_turn = h
+            .service
+            .store(
+                &h.ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+                    .unwrap(),
+                StoreInput {
+                    title: "Moved".into(),
+                    body: "# Moved\n\nThe user moved house this year.\n".into(),
+                    kind: Some(NoteKind::Fact),
+                    sources: vec![message(turn)],
+                    observed_at: Some(chrono::Utc::now()),
+                    provenance: Some(ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let edit = |id: NoteId, revision: &str, body: &str| {
+            h.service
+                .update(
+                    &tool,
+                    UpdateInput {
+                        id,
+                        expected_revision: revision.to_string(),
+                        action: UpdateAction::Edit(Patch {
+                            body: Some(body.into()),
+                            ..Default::default()
+                        }),
+                        reason: None,
+                    },
+                )
+                .unwrap()
+        };
+        let address = edit(
+            home.id,
+            &home.revision,
+            "# Home address\n\nThe user lives at 9 Oak Road.\n",
+        );
+        let employer = edit(job.id, &job.revision, "# Job\n\nThe user works at Norden Labs.\n");
+        let (_, later) = chat_turn(&h, "Yes to the address.", None);
+        let approval = crate::tools::registry::HumanApproval::new("card-address");
+        h.service
+            .confirm_suggestion(&later, &approval, address.id, &address.revision, &home.revision)
+            .unwrap();
+        let confirmed = read_note(&h, address.id);
+        assert_eq!(confirmed.origin, Origin::User);
+        let recalled_address = |h: &Harness| {
+            let r = h
+                .service
+                .recall(
+                    &h.user(ALICE, None),
+                    "Where does the user live? Oak Road address",
+                    RecallBudget::default(),
+                )
+                .unwrap();
+            r.notes.iter().any(|n| n.id == address.id) || r.listed.iter().any(|n| n.id == address.id)
+        };
+        assert!(recalled_address(&h));
+        // "No, leave my job note": the suggestion is retracted.
+        let forgetter = if forget_by_the_tool {
+            h.tool(ALICE, None)
+        } else {
+            h.user(ALICE, None)
+        };
+        let out = h
+            .service
+            .forget(
+                &forgetter,
+                ForgetInput {
+                    targets: vec![(employer.id, employer.revision.clone())],
+                    reason: Some("the user declined the job change".into()),
+                },
+            )
+            .unwrap();
+        assert_eq!(out.results[0].status, ForgetItemStatus::Forgotten);
+        let after = read_note(&h, address.id);
+        assert!(
+            !after.source_forgotten,
+            "by the tool: {forget_by_the_tool}: the note the user confirmed stays in force"
+        );
+        assert!(recalled_address(&h), "by the tool: {forget_by_the_tool}");
+        assert!(!read_note(&h, job.id).source_forgotten);
+        // The turn's row is a saved note's source now, so nothing citing it
+        // follows the retraction out.
+        assert!(!read_note(&h, learned_from_the_turn.id).source_forgotten);
+    }
+}
+
 /// Close-out A5 (round 3's nit on `edit_sources`' cap): the chat model's
 /// edit suggestion cites every row the saved note cites — the rows a later
 /// forget must follow the copy out by — and the turn's own row only where

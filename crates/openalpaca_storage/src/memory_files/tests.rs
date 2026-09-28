@@ -5695,3 +5695,111 @@ fn a_pending_suggestions_forget_suppresses_none_of_its_targets_sources() {
     p.forget(&[(second.id, confirmed.revision)]).unwrap();
     assert!(p.snapshot().unwrap().is_source_suppressed("message:10"));
 }
+
+/// The close-out's repair round 1 (RG1 P5): A2's shield widened. A pending
+/// suggestion's forget suppresses no row that any note the user saved
+/// cites — the note it names, or another: here a suggestion the user
+/// confirmed from the same turn, which the forget of its sibling suggestion
+/// used to take out of automatic recall. A row no saved note cites is still
+/// suppressed, and a saved note forgotten in the same call shields nothing,
+/// in either order: its own tombstone suppresses its rows.
+#[test]
+fn a_pending_suggestions_forget_suppresses_no_row_a_saved_note_cites() {
+    let src = |id: &str| NoteSource {
+        kind: SourceType::Message,
+        id: id.into(),
+        observed_at: None,
+    };
+    // Two saved notes; one turn (row 12) suggested a change to each, the job
+    // one also citing a row (13) nothing else cites; the user confirmed the
+    // address. Returns the confirmed address and the pending job suggestion,
+    // each with the revision a forget sends.
+    let setup = |p: &Partition| {
+        let saved = |title: &str, row: &str| {
+            let out = p
+                .create(
+                    NewNote {
+                        sources: vec![src(row)],
+                        ..new_note(title, &format!("# {title}\n\nSaved.\n"), NoteKind::Fact)
+                    },
+                    Actor::UserSurface,
+                )
+                .unwrap();
+            p.read(&out.id).unwrap()
+        };
+        let suggest = |target: &NoteView, rows: &[&str], body: &str| {
+            p.create(
+                NewNote {
+                    sources: rows.iter().map(|r| src(r)).collect(),
+                    supersedes: Some((target.note.id, target.revision.clone())),
+                    replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                    ..new_note(&target.note.title, body, NoteKind::Fact)
+                },
+                Actor::ModelTool,
+            )
+            .unwrap()
+        };
+        let home = saved("Home", "10");
+        let job = saved("Job", "20");
+        let address = suggest(&home, &["10", "12"], "# Home\n\n9 Oak Road\n");
+        let employer = suggest(&job, &["20", "12", "13"], "# Job\n\nNorden Labs\n");
+        assert!(address.suggestion && employer.suggestion);
+        let confirmed = p
+            .update(
+                &address.id,
+                &address.revision,
+                UpdateAction::Confirm {
+                    target_revision: Some(home.revision.clone()),
+                },
+                Actor::UserSurface,
+            )
+            .unwrap();
+        assert!(p.read(&address.id).unwrap().derived.origin.is_saved());
+        (
+            (address.id, confirmed.revision),
+            (employer.id, employer.revision),
+        )
+    };
+
+    {
+        // One sandbox at a time: each holds the store's environment guard.
+        let sb = Sandbox::new();
+        let p = sb.open_home(ALICE);
+        let (address, employer) = setup(&p);
+        let out = p.forget(&[employer]).unwrap();
+        assert_eq!(out[0].status, ForgetStatus::Forgotten);
+        let snapshot = p.snapshot().unwrap();
+        assert!(
+            !snapshot.is_source_suppressed("message:12"),
+            "the confirmed note's row is not the suggestion's to suppress"
+        );
+        assert!(!snapshot.is_source_suppressed("message:20"), "nor its target's");
+        assert!(snapshot.is_source_suppressed("message:13"), "a row only it cites");
+        let kept = p.read(&address.0).unwrap();
+        assert!(!kept.derived.source_forgotten);
+        assert!(kept.derived.recallable(), "still in force");
+    }
+    for confirmed_first in [true, false] {
+        let sb = Sandbox::new();
+        let p = sb.open_home(ALICE);
+        let (address, employer) = setup(&p);
+        let targets = if confirmed_first {
+            [address, employer]
+        } else {
+            [employer, address]
+        };
+        let out = p.forget(&targets).unwrap();
+        assert!(
+            out.iter().all(|o| o.status == ForgetStatus::Forgotten),
+            "confirmed first: {confirmed_first}: {out:?}"
+        );
+        let snapshot = p.snapshot().unwrap();
+        for row in ["message:10", "message:12", "message:13"] {
+            assert!(
+                snapshot.is_source_suppressed(row),
+                "confirmed first: {confirmed_first}: {row}"
+            );
+        }
+        assert!(!snapshot.is_source_suppressed("message:20"), "the job note's row");
+    }
+}

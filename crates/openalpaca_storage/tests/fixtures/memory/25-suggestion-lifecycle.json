@@ -7,14 +7,15 @@
   "design": [
     "09 §3.1 the rule, case by case; §3.2 S1–S5, S9, S10; §3.3 withdraw and forget; ruling LR9, LR12",
     "03 §4 origins and G2; §6 derived supersession (a candidate supersedes nothing)",
-    "03 §7c R9: a suggestion never enters the same-fact_key group"
+    "03 §7c R9: a suggestion never enters the same-fact_key group",
+    "03 §6 rev 7.13, 09 §3.3 rev 3.42: a pending suggestion's forget suppresses no row a note the user saved cites"
   ],
   "loads_in": ["slice-2"],
-  "notes_for_implementer": "File-layer only: `store` is `Partition::create` with the context's actor, `update` is `Partition::update`, `withdraw` is `Partition::forget_as(.., ForgetMode::Withdraw)`, `forget` is the plain forget. The extractor's decision (design 09 §2.5) is not here: each store names its policy. X is the user's saved commute note, L a learned editor note, E a hand-dropped (`external`) style guide, S a learned note citing the same message (2502) as the suggestions and the automatic replacement — a sibling whose sources a withdrawal must not suppress. The service's S6 dismissals and S7 are the service tests', not this file's: after step 13 the second suggestion b2 is still a pending candidate here. Owner decision LQ11 (design 03 §4, rev 7.4; 09 rev 3.33): `alice_tool` here is the file layer's direct policy (`ReplacePolicy::Direct`), so a `ModelTool` supersede or edit of the `user` note is still `authority_conflict` at this layer; on the service's tool path the same supersede, and an edit that changes the note's content, is written as a suggestion instead (`memory/service/tool_suggestion_tests.rs`).",
+  "notes_for_implementer": "File-layer only: `store` is `Partition::create` with the context's actor, `update` is `Partition::update`, `withdraw` is `Partition::forget_as(.., ForgetMode::Withdraw)`, `forget` is the plain forget. The extractor's decision (design 09 §2.5) is not here: each store names its policy. X is the user's saved commute note, L a learned editor note, E a hand-dropped (`external`) style guide, S a learned note citing the same message (2502) as the suggestions and the automatic replacement — a sibling whose sources a withdrawal must not suppress. The service's S6 dismissals and S7 are the service tests', not this file's: after step 13 the second suggestion b2 is still a pending candidate here. Owner decision LQ11 (design 03 §4, rev 7.4; 09 rev 3.33): `alice_tool` here is the file layer's direct policy (`ReplacePolicy::Direct`), so a `ModelTool` supersede or edit of the `user` note is still `authority_conflict` at this layer; on the service's tool path the same supersede, and an edit that changes the note's content, is written as a suggestion instead (`memory/service/tool_suggestion_tests.rs`). Steps 16–17 (the L8 close-out's repair round 1, design 03 §6 rev 7.13, 09 §3.3 rev 3.42): the forget of b3, a pending suggestion, suppresses its own sources but none that a note the user saved cites — b1, confirmed at step 14 and now the user's, cites 2502 — so its tombstone suppresses 2503 alone and b1 stays in force; it used to suppress 2502 and take b1 out of automatic recall.",
   "owners": [
     { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
   ],
-  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice", "messages": ["2501", "2502"] },
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice", "messages": ["2501", "2502", "2503"] },
   "daemon": { "cwd": "home", "llm": "configured" },
   "partitions": [
     {
@@ -86,7 +87,7 @@
       "op": "store",
       "context": "alice_extract",
       "as": "b3",
-      "input": { "title": "Style guide", "kind": "reference", "scope": "global", "body": "# Style guide\n\n## Knowledge\nHeadings are title case.\n", "sources": [{ "type": "message", "id": "2502" }], "supersedes": { "id": "00000025-0000-4000-8000-000000000003", "expected_revision": "@rev:00000025-0000-4000-8000-000000000003" }, "replace_policy": "suggest_unless_learned" },
+      "input": { "title": "Style guide", "kind": "reference", "scope": "global", "body": "# Style guide\n\n## Knowledge\nHeadings are title case.\n", "sources": [{ "type": "message", "id": "2502" }, { "type": "message", "id": "2503" }], "supersedes": { "id": "00000025-0000-4000-8000-000000000003", "expected_revision": "@rev:00000025-0000-4000-8000-000000000003" }, "replace_policy": "suggest_unless_learned" },
       "expect": { "created": true, "suggestion": true, "note_status": { "@id:b3": "candidate" }, "effective_status": { "00000025-0000-4000-8000-000000000003": "active" } }
     },
     {
@@ -176,11 +177,20 @@
       "expect": {
         "status": { "@id:b3": "forgotten" },
         "effective_status": { "00000025-0000-4000-8000-000000000003": "active" },
-        "snapshot": { "alice_home": { "tombstones": [{ "id": "@id:b3", "supersedes": [], "suppressed_sources": ["message:2502"] }], "tombstones_count": 2 } }
+        "snapshot": { "alice_home": { "tombstones": [{ "id": "@id:b3", "supersedes": [], "suppressed_sources": ["message:2503"] }], "tombstones_count": 2 } }
       }
     },
     {
       "step": 17,
+      "op": "read",
+      "context": "alice_user",
+      "input": { "id": "@id:b1" },
+      "expect": {
+        "results": { "@id:b1": { "status": "active", "origin": "user", "sources_status": "intact" } }
+      }
+    },
+    {
+      "step": 18,
       "op": "list",
       "context": "alice_user",
       "input": { "include_candidates": true, "limit": 100 },
