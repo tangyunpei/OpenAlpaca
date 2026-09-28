@@ -63,7 +63,7 @@ The 15 changed facts of §7.3 are the corpus's 8 gold change pairs (4 `supersede
 |---|---|---|---|
 | **B-mlx** | 08's B — the old engine: hybrid FTS + E5, `memory_search` offered, the per-turn path live — on this model | `d08317fb` (`live-eval-e5`) | 2026-09-25 16:17–17:45 |
 | **D-rejudged** | 08's archived D report (470 answers of `qwen3.8:27b-mtp-q8_0`) graded again by this model; no reader call | harness at `fa09dc0c`; the report's build is `d3a3e712` | 17:46–17:57 |
-| **D-index** | the new service, `recall_mode = "index"` (the default): 09 §7.5's **D′**, the seeded run 08 §3.2 left pending | `50cf878d` | 18:04–19:44 |
+| **D-index** | the new service, `recall_mode = "index"` (the default): 09 §7.5's **D′**, the seeded run 08 §3.3 left pending | `50cf878d` | 18:04–19:44 |
 | **L** | the corpus fed through the gateway, learning on, conversation summaries written; then the questions with learning off; then the forced re-run | `50cf878d` | 19:44 – 09-26 00:48 |
 | **L-replay-1…3** | L's kept transcript learned again: extraction only, no reader call, no question | `50cf878d` | 00:48–01:54 |
 | **L-S** | the 8 change pairs' old notes seeded as the user's, then the 13 suggestion sessions (78 turns); no question | `50cf878d` | 01:54–02:36 |
