@@ -3174,6 +3174,8 @@ fn neither_writer_says_a_plain_search_supplies_the_revision() {
 /// field past its budget and a two-digit count, which includes the hidden
 /// characters of the changed values the line cuts off. The texts give up
 /// the line's bytes, so no cut reaches the date, the last line or the count.
+/// Its repair round 1: all five fields change, the key at its longest, and
+/// the line still names every one of them, in the wire's order.
 #[tokio::test]
 async fn the_preview_keeps_its_tail_with_a_changes_line_at_its_worst_case() {
     use sha2::Digest;
@@ -3205,6 +3207,8 @@ async fn the_preview_keeps_its_tail_with_a_changes_line_at_its_worst_case() {
                     kind: Some(NoteKind::Fact),
                     aliases,
                     tags: vec!["travel".into(), "home".into()],
+                    fact_key: Some("k".repeat(64)),
+                    valid_from: Some(ts("2026-01-01T00:00:00Z")),
                     valid_to: Some(ts("2027-01-01T00:00:00Z")),
                     sources: vec![message(row)],
                     observed_at: Some(ts("2026-09-24T10:00:00Z")),
@@ -3241,9 +3245,30 @@ async fn the_preview_keeps_its_tail_with_a_changes_line_at_its_worst_case() {
             "{preview}"
         );
         assert!(
-            lines[3].starts_with("Changes: aliases none → alias number 0 aaa")
-                && lines[3].ends_with('…'),
+            lines[3].starts_with("Changes: key none → kkk"),
             "{preview}"
+        );
+        let named: Vec<&str> = lines[3]["Changes: ".len()..]
+            .split("; ")
+            .map(|change| {
+                ["key", "aliases", "tags", "valid from", "valid until"]
+                    .into_iter()
+                    .find(|label| change.starts_with(&format!("{label} ")) || change.starts_with(&format!("{label}…")))
+                    .unwrap_or_else(|| panic!("{change:?} names no field: {preview}"))
+            })
+            .collect();
+        assert_eq!(
+            named,
+            ["key", "aliases", "tags", "valid from", "valid until"],
+            "{preview}"
+        );
+        assert!(
+            lines[3].contains("…; aliases none → alias") && lines[3].contains("…; tags none → "),
+            "the key and the lists share what the window leaves: {preview}"
+        );
+        assert!(
+            lines[3].ends_with("; valid from none → 2026-01-01T00:00:00Z; valid until none → 2027-01-01T00:00:00Z"),
+            "the validity window whole: {preview}"
         );
         assert!(
             lines[4].ends_with("r… (from what you said on 2026-09-24)"),

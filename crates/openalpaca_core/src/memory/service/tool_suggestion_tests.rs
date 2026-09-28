@@ -1610,6 +1610,55 @@ fn retracting_one_suggestion_leaves_a_note_the_user_confirmed_from_the_same_turn
     }
 }
 
+/// Close-out repair round 1 (RG1 P2): the in-chat card's `Changes:` line
+/// was one 160-byte cut over the fields in the wire's order, validity last,
+/// so one long alias pushed an end date off the card — and the person's
+/// Approve then took the note out of recall. Every changed field is named
+/// now, and the fields that decide what recall does — the validity window,
+/// the key — are given their bytes before the lists.
+#[test]
+fn the_card_names_a_validity_change_behind_a_long_alias() {
+    let h = Harness::new();
+    let editor = saved(&h, "user.editor", "Editor", "The user edits with vim.");
+    let (_, tool) = chat_turn(&h, "Call vim my editor of choice.", None);
+    let alias = format!("my editor of choice for every kind of file {}", "and ".repeat(40));
+    let out = h
+        .service
+        .update(
+            &tool,
+            UpdateInput {
+                id: editor.id,
+                expected_revision: editor.revision.clone(),
+                action: UpdateAction::Edit(Patch {
+                    aliases: Some(vec![alias]),
+                    valid_to: Some(Some(instant("2020-01-01T00:00:00Z"))),
+                    ..Default::default()
+                }),
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(out.suggested_for, Some(editor.id));
+    let preview = h
+        .service
+        .suggestion_preview(&tool, out.id, &out.revision, &editor.revision)
+        .unwrap()
+        .text;
+    let changes = preview
+        .lines()
+        .find(|l| l.starts_with("Changes: "))
+        .unwrap_or_else(|| panic!("{preview}"));
+    assert!(
+        changes.starts_with("Changes: aliases none → my editor of choice for every kind of file and"),
+        "{changes}"
+    );
+    assert!(
+        changes.ends_with("…; valid until none → 2020-01-01T00:00:00Z"),
+        "the end date whole, after the cut alias: {changes}"
+    );
+    assert!(changes.len() <= "Changes: ".len() + 160, "{} bytes", changes.len());
+}
+
 /// Close-out A5 (round 3's nit on `edit_sources`' cap): the chat model's
 /// edit suggestion cites every row the saved note cites — the rows a later
 /// forget must follow the copy out by — and the turn's own row only where

@@ -18,8 +18,8 @@
 
 use super::recall::{Verified, verify};
 use super::{
-    Capabilities, MemoryAccessContext, MemoryError, MemoryService, Surface, UpdateAction,
-    UpdateInput, UpdateOutput, WithdrawOutput, cut_bytes,
+    Capabilities, FieldChange, MemoryAccessContext, MemoryError, MemoryService, Surface,
+    UpdateAction, UpdateInput, UpdateOutput, WithdrawOutput, cut_bytes,
 };
 use crate::tools::registry::{HumanApproval, HumanDenial};
 use openalpaca_storage::ConversationRepository;
@@ -43,14 +43,16 @@ const PREVIEW_TEXT_BYTES: usize = 260;
 const PREVIEW_TEXT_BYTES_UNDER_COUNT: usize = 216;
 const PREVIEW_REASON_BYTES: usize = 160;
 /// The changes line's budget (the L8 close-out's A4): what else the
-/// suggestion changes of the note, `Changes: tags none → tools; …`.
+/// suggestion changes of the note, `Changes: tags none → tools; …` — the
+/// list after `Changes: `, every cut and its "…" inside it
+/// ([`changes_list`]).
 const PREVIEW_CHANGES_BYTES: usize = 160;
-/// What each text gives up when the preview carries the changes line —
-/// half of the line's most, 173 bytes ("Changes: ", the cut list, "…" and
-/// its line break) — so the bound the fields' budgets keep holds with it
-/// (the worst case, a learned suggestion's with the count line, is
-/// `the_preview_keeps_its_tail_at_its_worst_case`); a preview with no
-/// change keeps its texts' budgets byte for byte.
+/// What each text gives up when the preview carries the changes line — at
+/// least half of the line's most, 170 bytes ("Changes: ", the list and its
+/// line break) — so the bound the fields' budgets keep holds with it (the
+/// worst case, a learned suggestion's with the count line, is
+/// `the_preview_keeps_its_tail_with_a_changes_line_at_its_worst_case`); a
+/// preview with no change keeps its texts' budgets byte for byte.
 const PREVIEW_CHANGES_TEXT_COST: usize = 87;
 
 /// At most this many suggestions are re-read for one `<memory_suggestions>`
@@ -676,15 +678,8 @@ fn render_preview(
     let (changes_line, text_bytes) = if changes.is_empty() {
         (String::new(), text_bytes)
     } else {
-        let listed: Vec<String> = changes
-            .iter()
-            .map(super::suggestions::change_text)
-            .collect();
         (
-            format!(
-                "\nChanges: {}",
-                one_line(&listed.join("; "), PREVIEW_CHANGES_BYTES)
-            ),
+            format!("\nChanges: {}", changes_list(&changes, PREVIEW_CHANGES_BYTES)),
             text_bytes - PREVIEW_CHANGES_TEXT_COST,
         )
     };
@@ -707,6 +702,55 @@ fn render_preview(
             format!("{kept}\n{line}")
         }
     }
+}
+
+/// The `Changes:` line's list within `max` bytes, in the wire's order
+/// (the L8 close-out's A4; its repair round 1): **every** changed field
+/// named — each keeps at least its label and "…", so a long alias list can
+/// no longer push a field off the card — and the rest of the bytes given
+/// first to the validity window, the change that can take the note out of
+/// recall, whose two bounds fit whole at their longest beside every other
+/// field's label; then shared by the key and the lists, a short one whole
+/// before a long one is cut. Each change is one line with the hidden set
+/// dropped, as every field of this preview is.
+fn changes_list(changes: &[FieldChange], max: usize) -> String {
+    const CUT: &str = "…";
+    let texts: Vec<String> = changes
+        .iter()
+        .map(|c| crate::utils::text::one_line(&super::suggestions::change_text(c)))
+        .collect();
+    let floor = |i: usize| {
+        let label = super::suggestions::change_label(changes[i].field).len();
+        texts[i].len().min(label + " ".len() + CUT.len())
+    };
+    let mut alloc: Vec<usize> = (0..texts.len()).map(floor).collect();
+    let separators = "; ".len() * texts.len().saturating_sub(1);
+    let mut extra = max
+        .saturating_sub(separators)
+        .saturating_sub(alloc.iter().sum());
+    let validity = |i: &usize| matches!(changes[*i].field, "valid_from" | "valid_to");
+    let (first, rest): (Vec<usize>, Vec<usize>) = (0..texts.len()).partition(validity);
+    for mut tier in [first, rest] {
+        tier.sort_by_key(|&i| texts[i].len() - alloc[i]);
+        let n = tier.len();
+        for (k, i) in tier.into_iter().enumerate() {
+            let give = (texts[i].len() - alloc[i]).min(extra / (n - k));
+            alloc[i] += give;
+            extra -= give;
+        }
+    }
+    texts
+        .iter()
+        .zip(alloc)
+        .map(|(text, bytes)| {
+            if text.len() <= bytes {
+                text.clone()
+            } else {
+                format!("{}{CUT}", cut_bytes(text, bytes - CUT.len()).0.trim_end())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The preview's last line when its fields dropped anything an approval's
