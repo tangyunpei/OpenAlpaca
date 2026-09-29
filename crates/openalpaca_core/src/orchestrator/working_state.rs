@@ -4,16 +4,42 @@
 //! wants done, what is done, decided and still open, the next step, and the
 //! task ids and artifact paths the work refers to.
 //!
-//! One prompt writes it ([`render_prompt`], `working_state_prompt.txt`), one
+//! One prompt writes it ([`update`], `working_state_prompt.txt`), one
 //! parser reads the model's answer ([`WorkingState::parse`]), and it reaches a
-//! model only as quoted reference data ([`WorkingState::render`]).
+//! model only as quoted reference data ([`WorkingState::render`]). The turn
+//! end writes it to the session row ([`after_turn`]).
 
-use openalpaca_llm::{ChatResponse, FinishReason};
+use super::ConversationContext;
+use crate::daemon_config::DaemonConfig;
+use arc_swap::ArcSwap;
+use dashmap::DashMap;
+use openalpaca_llm::{
+    ChatMessage, ChatResponse, FinishReason, LlmRouter, RequestContext, RouterRequest,
+    ThinkingConfig,
+};
+use openalpaca_storage::repository::LlmUsageRepository;
+use openalpaca_storage::{ConversationRepository, Database};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
 /// The shape's version, stored as `v`.
 pub const VERSION: u32 = 1;
+
+/// The writer's output ceiling (design 11 §3.1; M2).
+pub const MAX_TOKENS: u32 = 1536;
+
+/// The one label every summariser call is made and recorded under — the
+/// agent its daily ceiling (`[orchestrator.costs] summary_max_daily_cost_usd`)
+/// is read for.
+pub const USAGE_LABEL: &str = "orchestrator_summary";
+
+/// The block's type in [`super::wrap_untrusted_context`].
+pub(crate) const BLOCK_TYPE: &str = "working_state";
+
+/// How the delivered block begins: what the assembly trim knows it by, so
+/// it is never the message the trim drops (design 11 §4, CQ-4).
+pub(crate) const BLOCK_PREFIX: &str = "<context_data type=\"working_state\"";
 
 /// The writer's prompt, committed verbatim: the system text, a `=== user ===`
 /// line, then the user message's template
@@ -76,6 +102,226 @@ pub fn render_prompt(previous: Option<&WorkingState>, lines: &str) -> (String, S
     (system.trim_end().to_string(), user.trim_end().to_string())
 }
 
+/// One line of the transcript the writer reads: a `user`, `assistant` or
+/// `tool` row and its text.
+pub struct TranscriptLine<'a> {
+    pub role: &'a str,
+    pub text: &'a str,
+}
+
+/// The writer's request (design 11 §3.1): the previous state and the new
+/// lines — `[role]: text`, each cut to `msg_trunc_chars` characters — in the
+/// working-state prompt, on `model` (`[orchestrator.costs] summary_model`;
+/// `None` is the router's default), at temperature 0, within [`MAX_TOKENS`],
+/// asking for no reasoning (M2), under [`USAGE_LABEL`].
+pub fn update(
+    previous: Option<&WorkingState>,
+    lines: &[TranscriptLine<'_>],
+    model: Option<String>,
+    msg_trunc_chars: usize,
+) -> RouterRequest {
+    let lines = lines
+        .iter()
+        .map(|line| {
+            let text: String = line.text.chars().take(msg_trunc_chars).collect();
+            format!("[{}]: {text}", line.role)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (system, user) = render_prompt(previous, &lines);
+    RouterRequest {
+        model,
+        messages: Arc::new(vec![ChatMessage::system(&system), ChatMessage::user(&user)]),
+        tools: Arc::new(vec![]),
+        temperature: Some(0.0),
+        max_tokens: Some(MAX_TOKENS),
+        context: RequestContext {
+            agent_id: Some(USAGE_LABEL.to_string()),
+            task_id: None,
+        },
+        tool_choice: None,
+        tools_token_estimate: None,
+        enable_caching: false,
+        // M2: an internal utility call on a capped budget — no reasoning.
+        thinking: Some(ThinkingConfig::Disabled),
+        context_management: None,
+        fallback_models: Vec::new(),
+        ephemeral_system_notice: None,
+    }
+}
+
+/// The turn end (design 11 §2, the session summary's old background job):
+///
+/// - `from_loop` — the state this turn's compaction wrote and the last
+///   message row it covers — is written as it is, with **no call**, and
+///   marked in `compacted_states` so the next turn's window starts after it
+///   (CQ-4);
+/// - otherwise, the lag rule: when at least `summary_min_new_older_messages`
+///   rows past the recent window are newer than `through`, **one call** folds
+///   them into the previous state and `through` becomes the last of them —
+///   under the daily ceiling, which is checked first. Fewer rows, no call.
+///
+/// Written to the session the turn read, under its optimistic version with
+/// one retry. An answer that is not a state is recorded and leaves the row
+/// untouched. A mark is only ever added: it counts while the row holds the
+/// version and `through` it names, which any later write changes.
+pub(super) async fn after_turn(
+    db: Database,
+    router: Arc<LlmRouter>,
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
+    compacted_states: Arc<DashMap<String, (i64, i64)>>,
+    ctx: ConversationContext,
+    from_loop: Option<(WorkingState, i64)>,
+) {
+    let Some(session_id) = ctx.session_id.clone() else {
+        return;
+    };
+    if let Some((state, through)) = from_loop {
+        if let Some(version) = write(&db, &session_id, ctx.working_state_version, &state, through) {
+            compacted_states.insert(session_id, (version, through));
+        }
+        return;
+    }
+
+    let dcfg = daemon_config.load();
+    let new_rows: Vec<_> = ctx
+        .older_window
+        .iter()
+        .filter(|(id, _, _)| *id > ctx.working_state_through)
+        .collect();
+    if new_rows.len() < dcfg.orchestrator.memory.summary_min_new_older_messages {
+        return;
+    }
+    let Some(through) = new_rows.last().map(|(id, _, _)| *id) else {
+        return;
+    };
+
+    // D12: the summariser's daily ceiling, before any call.
+    let spent = router
+        .cost_tracker
+        .get_agent_usage(USAGE_LABEL)
+        .await
+        .map(|s| s.total_cost_usd)
+        .unwrap_or(0.0);
+    if spent > dcfg.orchestrator.costs.summary_max_daily_cost_usd {
+        tracing::debug!("working state not refreshed: summary cost ${spent:.2} exceeds the cap");
+        return;
+    }
+
+    let lines: Vec<TranscriptLine<'_>> = new_rows
+        .iter()
+        .map(|(_, role, content)| TranscriptLine {
+            role,
+            text: content,
+        })
+        .collect();
+    let request = update(
+        ctx.working_state.as_deref(),
+        &lines,
+        dcfg.orchestrator.costs.summary_model.clone(),
+        dcfg.orchestrator.memory.msg_trunc_chars,
+    );
+    if let Some(state) = call(&db, &router, request).await {
+        // Not a compaction's state: whatever mark the session holds no
+        // longer matches the row, so the next window is the usual one.
+        write(&db, &session_id, ctx.working_state_version, &state, through);
+    }
+}
+
+/// One call of the writer: the answer read as a state, and its usage
+/// recorded under [`USAGE_LABEL`] — `success`, or `error` with why the answer
+/// was unusable. `None` when the call failed or the answer is not a state.
+async fn call(db: &Database, router: &LlmRouter, request: RouterRequest) -> Option<WorkingState> {
+    let start = std::time::Instant::now();
+    let response = match router.complete(request).await {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::warn!("the working-state call failed: {e}");
+            return None;
+        }
+    };
+    let latency_ms = start.elapsed().as_millis() as i64;
+    let parsed = WorkingState::parse(&response);
+
+    let model = response.model.as_str();
+    let provider = router
+        .model_registry()
+        .resolve_provider(model)
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let cost = router.cost_tracker.calculate_cost(
+        model,
+        response.usage.input_tokens as u32,
+        response.usage.output_tokens as u32,
+    );
+    let (status, error) = match &parsed {
+        Ok(_) => ("success", None),
+        Err(why) => ("error", Some(why.to_string())),
+    };
+    if let Err(e) = LlmUsageRepository::new(db).record_and_log(
+        USAGE_LABEL,
+        None,
+        &provider,
+        model,
+        response.usage.input_tokens as i32,
+        response.usage.output_tokens as i32,
+        cost,
+        latency_ms,
+        status,
+        error.as_deref(),
+    ) {
+        tracing::warn!("failed to persist the working-state call's usage: {e}");
+    }
+    match parsed {
+        Ok(state) => Some(state),
+        Err(why) => {
+            tracing::warn!("the working state was not updated: {why}");
+            None
+        }
+    }
+}
+
+/// Writes `state` to the session row while it holds `version`; on a
+/// conflict it re-reads the version and tries once more. The version the
+/// row holds after the write, or `None` when it did not land.
+fn write(
+    db: &Database,
+    session_id: &str,
+    version: i64,
+    state: &WorkingState,
+    through: i64,
+) -> Option<i64> {
+    let json = serde_json::to_string(state).expect("a working state serialises");
+    let repo = ConversationRepository::new(db);
+    match repo.update_working_state(session_id, version, &json, through) {
+        Ok(true) => return Some(version + 1),
+        Ok(false) => tracing::debug!("working state: version mismatch, retrying once"),
+        Err(e) => {
+            tracing::warn!("working state: save failed: {e}");
+            return None;
+        }
+    }
+    let current = match repo.get_session(session_id) {
+        Ok(Some(session)) => session.working_state_version,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!("working state: re-read failed: {e}");
+            return None;
+        }
+    };
+    match repo.update_working_state(session_id, current, &json, through) {
+        Ok(true) => Some(current + 1),
+        Ok(false) => {
+            tracing::warn!("working state: version conflict persists, discarding");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("working state: retry failed: {e}");
+            None
+        }
+    }
+}
+
 impl WorkingState {
     /// Reads the writer's answer. Owner decision LQ13: one JSON object, found
     /// as [`crate::memory::task_extraction::read_json_answer`] finds it — the
@@ -122,7 +368,7 @@ impl WorkingState {
     pub fn render(&self, updated_at: &str, max_chars: usize) -> String {
         super::wrap_untrusted_context(
             &self.text(updated_at, max_chars),
-            "working_state",
+            BLOCK_TYPE,
             "user_derived",
         )
     }
@@ -133,8 +379,9 @@ impl WorkingState {
     /// session log still hold before what is unsettled. Past every item,
     /// `goal`, then `topic`, is shortened on a character boundary and marked
     /// `…`, so `next` is kept whole unless it and the heading alone are over.
-    /// Only the rendering is cut; the state itself is not changed.
-    fn text(&self, updated_at: &str, max_chars: usize) -> String {
+    /// Only the rendering is cut; the state itself is not changed. The
+    /// history layer wraps this text as [`Self::render`] does.
+    pub fn text(&self, updated_at: &str, max_chars: usize) -> String {
         let mut state = self.clone();
         loop {
             let text = state.lines(updated_at);
@@ -703,5 +950,344 @@ mod tests {
         ] {
             assert_eq!(parse(bad), Err(Unusable(why.to_string())), "{bad}");
         }
+    }
+
+    // ── The writer at turn end (design 11 §2, §3.1; slice 2) ─────────
+
+    use crate::test_util::{RecordingProvider, router_recording};
+
+    const LANE: &str = "owner:cli";
+
+    /// A store with one active session on [`LANE`]; keep the directory alive
+    /// while the database is used.
+    fn store() -> (tempfile::TempDir, Database, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("t.db")).expect("db");
+        let session = ConversationRepository::new(&db)
+            .get_or_create_active_session(LANE, "cli", None)
+            .expect("session");
+        (dir, db, session.id)
+    }
+
+    /// What `build_context` hands the turn end for `session`: the rows past
+    /// the recent window, and a state at version 0 covering nothing.
+    fn turn(session: &str, older: &[(i64, &str, &str)]) -> ConversationContext {
+        ConversationContext {
+            session_id: Some(session.to_string()),
+            older_window: older
+                .iter()
+                .map(|(id, role, text)| (*id, role.to_string(), text.to_string()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// `n` alternating user and assistant rows, ids 1..=n.
+    fn rows(n: i64) -> Vec<(i64, &'static str, &'static str)> {
+        (1..=n)
+            .map(|id| {
+                (
+                    id,
+                    if id % 2 == 1 { "user" } else { "assistant" },
+                    "where do files go?",
+                )
+            })
+            .collect()
+    }
+
+    async fn run(
+        db: &Database,
+        router: &Arc<LlmRouter>,
+        cfg: DaemonConfig,
+        marks: &Arc<DashMap<String, (i64, i64)>>,
+        ctx: ConversationContext,
+        from_loop: Option<(WorkingState, i64)>,
+    ) {
+        after_turn(
+            db.clone(),
+            router.clone(),
+            Arc::new(ArcSwap::from_pointee(cfg)),
+            marks.clone(),
+            ctx,
+            from_loop,
+        )
+        .await;
+    }
+
+    fn row(db: &Database, session: &str) -> openalpaca_storage::Conversation {
+        ConversationRepository::new(db)
+            .get_session(session)
+            .expect("read")
+            .expect("the session exists")
+    }
+
+    /// **M2**, re-targeted from the session summary's
+    /// `the_summarizer_asks_for_no_reasoning`: the turn end's refresh is an
+    /// internal utility call — no reasoning, 1 536 output tokens, on
+    /// `summary_model`, made and recorded under `orchestrator_summary` — that
+    /// reads the previous state and the new rows (each cut to
+    /// `msg_trunc_chars`), and its state lands on the row with `through` at
+    /// the last row it read.
+    #[tokio::test]
+    async fn the_turn_end_refresh_asks_for_no_reasoning_under_the_summary_label() {
+        let (_dir, db, session) = store();
+        let provider = RecordingProvider::new(serde_json::to_string(&lisbon()).unwrap());
+        let router = router_recording(provider.clone());
+        let mut cfg = DaemonConfig::default();
+        cfg.orchestrator.memory.summary_min_new_older_messages = 1;
+        cfg.orchestrator.costs.summary_model = Some("claude-haiku-4-5-20251001".to_string());
+        let previous = WorkingState {
+            next: "Pick the dates".to_string(),
+            ..lisbon()
+        };
+        let long = "x".repeat(2000);
+        let mut ctx = turn(
+            &session,
+            &[
+                (3, "user", "where do files go?"),
+                (4, "assistant", long.as_str()),
+            ],
+        );
+        ctx.working_state = Some(Arc::new(previous.clone()));
+
+        run(&db, &router, cfg, &Arc::new(DashMap::new()), ctx, None).await;
+
+        let request = provider.first_request();
+        assert!(
+            matches!(request.thinking, Some(ThinkingConfig::Disabled)),
+            "the writer must ask for no reasoning, got {:?}",
+            request.thinking
+        );
+        assert_eq!(request.max_tokens, Some(1536));
+        assert_eq!(request.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+        let user = &request
+            .messages
+            .iter()
+            .find(|m| m.role == openalpaca_llm::Role::User)
+            .expect("the prompt's user message")
+            .content;
+        assert!(
+            user.contains(&serde_json::to_string(&previous).unwrap()),
+            "{user}"
+        );
+        assert!(user.contains("[user]: where do files go?"), "{user}");
+        assert!(
+            user.contains(&format!("[assistant]: {}\n", "x".repeat(1500))),
+            "{user}"
+        );
+        assert!(
+            !user.contains(&"x".repeat(1501)),
+            "each line is cut to msg_trunc_chars"
+        );
+
+        let calls = LlmUsageRepository::new(&db)
+            .get_agent_usage(USAGE_LABEL, 10)
+            .unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "one call, recorded under the summariser's label"
+        );
+        assert_eq!(calls[0].status, "success");
+
+        let row = row(&db, &session);
+        assert_eq!(
+            serde_json::from_str::<WorkingState>(&row.working_state).unwrap(),
+            lisbon()
+        );
+        assert_eq!(row.working_state_through, 4);
+        assert_eq!(row.working_state_version, 1);
+    }
+
+    /// The lag rule (design 11 §2): a refresh needs
+    /// `summary_min_new_older_messages` (12) rows past the recent window and
+    /// newer than `through` — 11 make no call, 12 make exactly one.
+    #[tokio::test]
+    async fn the_lag_rule_calls_at_twelve_rows_and_not_at_eleven() {
+        let (_dir, db, session) = store();
+        let provider = RecordingProvider::new(serde_json::to_string(&lisbon()).unwrap());
+        let router = router_recording(provider.clone());
+        let marks = Arc::new(DashMap::new());
+        assert_eq!(
+            DaemonConfig::default()
+                .orchestrator
+                .memory
+                .summary_min_new_older_messages,
+            12
+        );
+
+        run(
+            &db,
+            &router,
+            DaemonConfig::default(),
+            &marks,
+            turn(&session, &rows(11)),
+            None,
+        )
+        .await;
+        assert_eq!(
+            provider.request_count(),
+            0,
+            "11 rows are under the lag rule"
+        );
+
+        // Twelve rows, one of them already covered by the state: still 11.
+        let mut covered = turn(&session, &rows(12));
+        covered.working_state_through = 1;
+        run(&db, &router, DaemonConfig::default(), &marks, covered, None).await;
+        assert_eq!(
+            provider.request_count(),
+            0,
+            "a row the state covers does not count"
+        );
+        assert_eq!(row(&db, &session).working_state_version, 0);
+
+        run(
+            &db,
+            &router,
+            DaemonConfig::default(),
+            &marks,
+            turn(&session, &rows(12)),
+            None,
+        )
+        .await;
+        assert_eq!(provider.request_count(), 1, "12 rows make exactly one call");
+        let row = row(&db, &session);
+        assert_eq!(row.working_state_through, 12);
+        assert_eq!(row.working_state_version, 1);
+    }
+
+    /// The daily ceiling (`summary_max_daily_cost_usd`) is read before every
+    /// call: once the summariser has spent it, the next refresh is not made.
+    #[tokio::test]
+    async fn the_daily_ceiling_is_checked_before_the_call() {
+        let (_dir, db, session) = store();
+        let provider = RecordingProvider::new(serde_json::to_string(&lisbon()).unwrap());
+        let router = router_recording(provider.clone());
+        let marks = Arc::new(DashMap::new());
+        let mut cfg = DaemonConfig::default();
+        cfg.orchestrator.costs.summary_max_daily_cost_usd = 0.0;
+
+        run(
+            &db,
+            &router,
+            cfg.clone(),
+            &marks,
+            turn(&session, &rows(12)),
+            None,
+        )
+        .await;
+        assert_eq!(
+            provider.request_count(),
+            1,
+            "nothing spent yet: the call is made"
+        );
+
+        let mut next = turn(&session, &rows(24));
+        next.working_state_version = 1;
+        next.working_state_through = 12;
+        run(&db, &router, cfg, &marks, next, None).await;
+        assert_eq!(
+            provider.request_count(),
+            1,
+            "over the ceiling: no second call"
+        );
+        assert_eq!(row(&db, &session).working_state_through, 12);
+    }
+
+    /// An answer that is not a state is recorded as an error under the
+    /// label and leaves the row as it was (design 11 §3.1).
+    #[tokio::test]
+    async fn an_unusable_answer_leaves_the_row_untouched() {
+        let (_dir, db, session) = store();
+        let router = router_recording(RecordingProvider::new("I would rather chat."));
+
+        run(
+            &db,
+            &router,
+            DaemonConfig::default(),
+            &Arc::new(DashMap::new()),
+            turn(&session, &rows(12)),
+            None,
+        )
+        .await;
+
+        let row = row(&db, &session);
+        assert_eq!(row.working_state, "");
+        assert_eq!(row.working_state_version, 0);
+        assert_eq!(row.working_state_through, 0);
+        let calls = LlmUsageRepository::new(&db)
+            .get_agent_usage(USAGE_LABEL, 10)
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].status, "error");
+        assert_eq!(
+            calls[0].error_message.as_deref(),
+            Some("the answer is not JSON")
+        );
+    }
+
+    /// The state a compacting turn wrote reaches the row with no call — the
+    /// lag rule is not consulted — and is marked as the compaction's, so the
+    /// next window starts after it; the next write that is not a
+    /// compaction's (here a lag refresh) leaves a row the mark no longer
+    /// matches.
+    #[tokio::test]
+    async fn a_compaction_state_is_written_with_no_call_and_marked() {
+        let (_dir, db, session) = store();
+        let provider = RecordingProvider::new(serde_json::to_string(&lisbon()).unwrap());
+        let router = router_recording(provider.clone());
+        let marks = Arc::new(DashMap::new());
+        let compacted = WorkingState {
+            next: "Book the hotel".to_string(),
+            ..lisbon()
+        };
+
+        run(
+            &db,
+            &router,
+            DaemonConfig::default(),
+            &marks,
+            turn(&session, &rows(12)),
+            Some((compacted.clone(), 5)),
+        )
+        .await;
+        assert_eq!(
+            provider.request_count(),
+            0,
+            "a compaction's state costs no call"
+        );
+        let written = row(&db, &session);
+        assert_eq!(
+            serde_json::from_str::<WorkingState>(&written.working_state).unwrap(),
+            compacted
+        );
+        assert_eq!(
+            (written.working_state_version, written.working_state_through),
+            (1, 5)
+        );
+        assert_eq!(marks.get(&session).map(|m| *m), Some((1, 5)));
+
+        let mut lag = turn(&session, &rows(17));
+        lag.working_state_version = 1;
+        lag.working_state_through = 5;
+        run(&db, &router, DaemonConfig::default(), &marks, lag, None).await;
+        assert_eq!(provider.request_count(), 1);
+        let refreshed = row(&db, &session);
+        assert_eq!(
+            (
+                refreshed.working_state_version,
+                refreshed.working_state_through
+            ),
+            (2, 17)
+        );
+        assert_ne!(
+            marks.get(&session).map(|m| *m),
+            Some((
+                refreshed.working_state_version,
+                refreshed.working_state_through
+            )),
+            "a lag refresh is not a compaction"
+        );
     }
 }

@@ -5769,7 +5769,6 @@ Look.
     // A history turn carrying an image and a document, as the transcript
     // replays them.
     let ctx = ConversationContext {
-        summary: None,
         recent_messages: vec![ChatMessage::user_with_parts(vec![
             ContentPart::Image {
                 source: ImageSource::Base64 {
@@ -5785,10 +5784,7 @@ Look.
                 extracted_text: Some("the codeword is WOMBAT".to_string()),
             },
         ])],
-        older_window: Vec::new(),
-        summary_version: 0,
-        last_summarized_id: 0,
-        old_summary_text: String::new(),
+        ..Default::default()
     };
     let scope = crate::memory::scope_context::MemoryScopeContext::new(None);
 
@@ -8243,4 +8239,248 @@ async fn onboarding_waits_while_the_user_file_is_still_the_seeded_template() {
 
     assert!(bootstrap.exists(), "nothing learned yet: onboarding goes on");
     assert!(orch.is_bootstrapping());
+}
+
+// ── Design 11 §2, §4: the working state at turn end and in the window ─
+
+/// `u1`, `a2`, `u3`, … — the label of row `i` of [`session_with_rows`].
+fn row_label(i: usize) -> String {
+    format!("{}{i}", if i % 2 == 1 { "u" } else { "a" })
+}
+
+/// The lane `user1:cli`'s active session with `n` alternating user and
+/// assistant rows labelled by [`row_label`]; the session id and the row ids.
+fn session_with_rows(db: &openalpaca_storage::Database, n: usize) -> (String, Vec<i64>) {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    let session = repo
+        .get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+    let ids = (1..=n)
+        .map(|i| {
+            repo.insert(&openalpaca_storage::ConversationMessage {
+                lane_key: "user1:cli".to_string(),
+                role: if i % 2 == 1 { "user" } else { "assistant" }.to_string(),
+                content: row_label(i),
+                ..Default::default()
+            })
+            .unwrap()
+        })
+        .collect();
+    (session.id, ids)
+}
+
+fn window_of(ctx: &ConversationContext) -> Vec<String> {
+    ctx.recent_messages
+        .iter()
+        .map(|m| m.content.clone())
+        .collect()
+}
+
+fn labels(range: std::ops::RangeInclusive<usize>) -> Vec<String> {
+    range.map(row_label).collect()
+}
+
+fn lisbon_state(next: &str) -> working_state::WorkingState {
+    working_state::WorkingState {
+        v: working_state::VERSION,
+        topic: "Lisbon trip".to_string(),
+        goal: "Book the October trip".to_string(),
+        done: vec!["Flight booked".to_string()],
+        decisions: Vec::new(),
+        open: Vec::new(),
+        next: next.to_string(),
+        refs: Vec::new(),
+    }
+}
+
+/// The turn end of a turn whose loop compacted: `state`, covering the rows
+/// up to `through`, handed to `after_turn` as slice 3's main loop will.
+async fn a_compacting_turn_ends(
+    orch: &Orchestrator,
+    state: working_state::WorkingState,
+    through: i64,
+) {
+    let ctx = orch.build_context("user1:cli", "next");
+    working_state::after_turn(
+        orch.db.clone().unwrap(),
+        orch.llm_router.clone().unwrap(),
+        orch.daemon_config.clone(),
+        orch.compacted_states.clone(),
+        ctx,
+        Some((state, through)),
+    )
+    .await;
+}
+
+/// CQ-4: after a compaction, the next turn's window starts after the rows
+/// the state covers — with `min_recent_messages` (4) rows kept verbatim when
+/// fewer lie after it — and the state rides ahead of the window.
+#[tokio::test]
+async fn after_a_compaction_the_window_starts_after_through_with_a_four_row_floor() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let (_, ids) = session_with_rows(&db, 20);
+    assert_eq!(
+        window_of(&orch.build_context("user1:cli", "next")),
+        labels(1..=20)
+    );
+
+    a_compacting_turn_ends(&orch, lisbon_state("Compare the hotels"), ids[11]).await;
+    let ctx = orch.build_context("user1:cli", "next");
+    assert_eq!(
+        window_of(&ctx),
+        labels(13..=20),
+        "the window starts after `through`"
+    );
+    assert_eq!(
+        ctx.working_state.as_deref(),
+        Some(&lisbon_state("Compare the hotels"))
+    );
+    assert!(
+        ctx.older_window.is_empty(),
+        "no row lies between the state and the window"
+    );
+
+    a_compacting_turn_ends(&orch, lisbon_state("Book the hotel"), ids[17]).await;
+    let ctx = orch.build_context("user1:cli", "next");
+    assert_eq!(window_of(&ctx), labels(17..=20), "four rows stay verbatim");
+    assert_eq!(
+        ctx.working_state.as_deref(),
+        Some(&lisbon_state("Book the hotel"))
+    );
+}
+
+/// CQ-4 moves the window after a compaction **only**: a lag refresh and a
+/// close leave it as it is — the close even when it follows a compaction,
+/// whose moved window it puts back.
+#[tokio::test]
+async fn the_window_is_unchanged_after_a_lag_refresh_or_a_close() {
+    // A lag refresh: 20 rows and a 6-row window leave 14 rows behind it.
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let mut config = DaemonConfig::default();
+    config.orchestrator.memory.prompt_recent_messages = 6;
+    let answer = serde_json::to_string(&lisbon_state("Compare the hotels")).unwrap();
+    let (orch, _) =
+        make_tool_mode_orchestrator_with_db(None, &answer, config, Vec::new(), Some(db.clone()));
+    let (_, ids) = session_with_rows(&db, 20);
+    let before = orch.build_context("user1:cli", "next");
+    assert_eq!(window_of(&before), labels(15..=20));
+    working_state::after_turn(
+        db.clone(),
+        orch.llm_router.clone().unwrap(),
+        orch.daemon_config.clone(),
+        orch.compacted_states.clone(),
+        before,
+        None,
+    )
+    .await;
+    let after = orch.build_context("user1:cli", "next");
+    assert_eq!(
+        after.working_state_through, ids[13],
+        "the lag refresh covered the 14 rows"
+    );
+    assert!(after.working_state.is_some());
+    assert_eq!(
+        window_of(&after),
+        labels(15..=20),
+        "and left the window as it was"
+    );
+
+    // A close after a compaction: the compaction moved the window …
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let (session, ids) = session_with_rows(&db, 20);
+    a_compacting_turn_ends(&orch, lisbon_state("Compare the hotels"), ids[11]).await;
+    let compacted = orch.build_context("user1:cli", "next");
+    assert_eq!(window_of(&compacted), labels(13..=20));
+
+    // … and the close — here the write its job makes (slice 4): the state
+    // through the session's newest row — puts the whole window back.
+    let closed = serde_json::to_string(&lisbon_state("Book the hotel")).unwrap();
+    assert!(
+        openalpaca_storage::ConversationRepository::new(&db)
+            .update_working_state(&session, compacted.working_state_version, &closed, ids[19])
+            .unwrap()
+    );
+    let ctx = orch.build_context("user1:cli", "next");
+    assert_eq!(
+        ctx.working_state.as_deref(),
+        Some(&lisbon_state("Book the hotel"))
+    );
+    assert_eq!(
+        window_of(&ctx),
+        labels(1..=20),
+        "a close does not move the window"
+    );
+}
+
+/// The main loop's request carries the session's working state as the
+/// history layer's first message: after the fixed zone, ahead of the rows.
+#[tokio::test]
+async fn a_main_loop_turn_carries_the_working_state_ahead_of_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let (session, ids) = session_with_rows(&db, 4);
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let state = lisbon_state("Compare the hotels");
+    assert!(
+        repo.update_working_state(&session, 0, &serde_json::to_string(&state).unwrap(), ids[1])
+            .unwrap()
+    );
+    let updated_at = repo
+        .get_session(&session)
+        .unwrap()
+        .unwrap()
+        .working_state_updated_at
+        .unwrap();
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+
+    let request = requests.lock().unwrap()[0].clone();
+    let blocks: Vec<usize> = request
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.content.starts_with(working_state::BLOCK_PREFIX))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(blocks.len(), 1, "one working-state block");
+    assert_eq!(
+        request.messages[blocks[0]].content,
+        state.render(
+            &updated_at,
+            DaemonConfig::default()
+                .orchestrator
+                .memory
+                .summary_max_chars
+        )
+    );
+    let first_row = request
+        .messages
+        .iter()
+        .position(|m| m.content == "u1")
+        .expect("the rows reach the model");
+    assert!(blocks[0] < first_row, "the state comes before the rows");
 }

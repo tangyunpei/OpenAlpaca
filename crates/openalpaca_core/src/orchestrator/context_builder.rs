@@ -1,6 +1,8 @@
+use super::working_state::WorkingState;
 use super::{ConversationContext, Orchestrator};
 use openalpaca_llm::{ChatMessage, ContentPart};
 use openalpaca_storage::ConversationRepository;
+use std::sync::Arc;
 
 /// H1 — the one line that says where a replayed delegation came from.
 ///
@@ -24,21 +26,13 @@ pub(super) fn delegation_provenance_line(task_id: &str) -> String {
 
 impl Orchestrator {
     /// Build the full conversation context for a turn: loads history, deduplicates
-    /// the current user message (Bug A fix, D6), loads unsummarized older messages
-    /// via ID-range query (fixes 120-window bug), and loads the summary from the
-    /// conversations table.
+    /// the current user message (Bug A fix, D6), loads the rows between the
+    /// working state's `through` and the recent window via ID-range query
+    /// (fixes 120-window bug), and reads the working state from the session row.
     pub(super) fn build_context(&self, lane_key: &str, current_query: &str) -> ConversationContext {
-        let empty = ConversationContext {
-            summary: None,
-            recent_messages: Vec::new(),
-            older_window: Vec::new(),
-            summary_version: 0,
-            last_summarized_id: 0,
-            old_summary_text: String::new(),
-        };
         let db = match &self.db {
             Some(db) => db,
-            None => return empty,
+            None => return ConversationContext::default(),
         };
 
         let repo = ConversationRepository::new(db);
@@ -49,11 +43,23 @@ impl Orchestrator {
         // — a lane that has never persisted a turn through the gateway —
         // falls back to the lane-wide read, which is what the rows written
         // before any session existed are reachable by.
-        let session_id = repo.active_session_id(lane_key).unwrap_or_default();
-
-        // Step 1: Load summary from the session row
-        let (summary_text, summary_version, last_summarized_id) =
-            repo.get_summary(lane_key).unwrap_or_default();
+        //
+        // Step 1: the working state comes from the same read of the row
+        // (design 11 §2), so the id the turn end writes to and the version it
+        // locks on belong to one another.
+        let session = repo
+            .get_active_session_for_lane(lane_key)
+            .unwrap_or_default();
+        let session_id = session.as_ref().map(|s| s.id.clone());
+        let (working_state, working_state_updated_at, version, through) = match &session {
+            Some(s) => (
+                stored_working_state(&s.working_state, &s.id),
+                s.working_state_updated_at.clone().unwrap_or_default(),
+                s.working_state_version,
+                s.working_state_through,
+            ),
+            None => (None, String::new(), 0, 0),
+        };
 
         // Step 2: Load recent messages (40, not 120)
         let dcfg = self.daemon_config.load();
@@ -64,7 +70,7 @@ impl Orchestrator {
         };
         let raw_messages = match raw_messages {
             Ok(msgs) => msgs,
-            Err(_) => return empty,
+            Err(_) => return ConversationContext::default(),
         };
 
         // Step 3: Build canonical list and dedup current query
@@ -98,21 +104,39 @@ impl Orchestrator {
             chat_rows.pop();
         }
 
+        // Design 11 §4 (c), CQ-4 — after a compaction only: when the state on
+        // the row is the one a compacting turn wrote, the window starts after
+        // the rows it covers, keeping `min_recent_messages` rows verbatim, so
+        // a small window does not re-send (and re-compact) what the state
+        // already carries. A lag refresh or a close leaves the window as it
+        // is: their write changes the row, and the mark no longer matches.
+        let compacted = session_id.as_ref().is_some_and(|id| {
+            self.compacted_states
+                .get(id)
+                .is_some_and(|mark| *mark == (version, through))
+        });
+        if compacted {
+            let floor = dcfg.execution.context.min_recent_messages;
+            let after_through = chat_rows
+                .iter()
+                .position(|(id, _, _, _, _)| *id > through)
+                .unwrap_or(chat_rows.len());
+            let start = after_through.min(chat_rows.len().saturating_sub(floor));
+            chat_rows.drain(..start);
+        }
+
         // Step 4: Get first_recent_id for the ID-range query
         let first_recent_id = chat_rows
             .first()
             .map(|(id, _, _, _, _)| *id)
             .unwrap_or(i64::MAX);
 
-        // Step 5: Load unsummarized older messages via ID-range query (fixes 120-window bug)
-        let older_window = if last_summarized_id < first_recent_id {
+        // Step 5: Load the rows the state does not cover yet and the window
+        // does not hold, via ID-range query (fixes 120-window bug)
+        let older_window = if through < first_recent_id {
             let older = match &session_id {
-                Some(id) => {
-                    repo.list_by_session_id_range(id, last_summarized_id, first_recent_id, 500)
-                }
-                None => {
-                    repo.list_by_lane_id_range(lane_key, last_summarized_id, first_recent_id, 500)
-                }
+                Some(id) => repo.list_by_session_id_range(id, through, first_recent_id, 500),
+                None => repo.list_by_lane_id_range(lane_key, through, first_recent_id, 500),
             };
             match older {
                 Ok(msgs) => msgs
@@ -157,19 +181,33 @@ impl Orchestrator {
             })
             .collect();
 
-        let summary = if summary_text.is_empty() {
-            None
-        } else {
-            Some(summary_text.clone())
-        };
-
         ConversationContext {
-            summary,
+            session_id,
+            working_state,
+            working_state_updated_at,
+            working_state_version: version,
+            working_state_through: through,
             recent_messages,
             older_window,
-            summary_version,
-            last_summarized_id,
-            old_summary_text: summary_text,
+        }
+    }
+}
+
+/// The session row's `working_state` as a state: `None` while it is empty,
+/// and — logged — when the text is not one, so the next write starts over
+/// rather than feeding the writer something it cannot read.
+fn stored_working_state(text: &str, session_id: &str) -> Option<Arc<WorkingState>> {
+    if text.is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<WorkingState>(text) {
+        Ok(state) => Some(Arc::new(state)),
+        Err(e) => {
+            tracing::warn!(
+                session_id,
+                "the session's working state is not readable, ignored: {e}"
+            );
+            None
         }
     }
 }

@@ -1,13 +1,13 @@
 //! Layer 4 — Conversation History.
 //!
-//! Assembles the per-turn messages: summary (if any) + recent_messages +
+//! Assembles the per-turn messages: working state (if any) + recent_messages +
 //! current user turn. Supports two modes:
 //!
-//! - `Default` — summary (optionally wrapped) + recent history + current turn.
+//! - `Default` — working state (optionally wrapped) + recent history + current turn.
 //! - `Skip`    — empty output (used by lead-agent / subagent paths).
 //!
 //! Fingerprint covers:
-//! `blake3(lane_tip_fingerprint || hash_opt_arc_str(summary) || summary_wrap_mode_tag
+//! `blake3(lane_tip_fingerprint || hash_opt_arc_str(working_state) || summary_wrap_mode_tag
 //!  || hash_opt_msg(current_user_turn) || mode_tag)`.
 
 use openalpaca_llm::ChatMessage;
@@ -32,18 +32,18 @@ pub fn compute(input: &HistoryInput) -> HistoryOutput {
 fn build_default(input: &HistoryInput) -> Vec<ChatMessage> {
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(input.recent_messages.len() + 2);
 
-    // 1. Summary (optional) — wrapped per summary_wrap_mode. The untrusted
-    //    path reuses the same `wrap_untrusted_context` envelope the live
-    //    orchestrator uses so Phase 4's Social/Skill migrations can route
-    //    through compose without shape drift.
-    if let Some(ref summary) = input.summary {
+    // 1. The working state (optional), in the session summary's old slot
+    //    (design 11 §4) — wrapped per summary_wrap_mode. The untrusted path
+    //    is the block `WorkingState::render` writes: quoted reference data
+    //    under the trust label, never an instruction.
+    if let Some(ref state) = input.working_state {
         let content = match input.summary_wrap_mode {
             SummaryWrapMode::UntrustedWrap => crate::orchestrator::wrap_untrusted_context(
-                summary.as_ref(),
-                "session_summary",
+                state.as_ref(),
+                crate::orchestrator::working_state::BLOCK_TYPE,
                 "user_derived",
             ),
-            SummaryWrapMode::Plain => summary.as_ref().to_string(),
+            SummaryWrapMode::Plain => state.as_ref().to_string(),
         };
         messages.push(ChatMessage::user(&content));
     }
@@ -64,7 +64,7 @@ fn build_default(input: &HistoryInput) -> Vec<ChatMessage> {
 pub(super) fn compute_fingerprint(input: &HistoryInput) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(&input.lane_tip_fingerprint);
-    h.update(&hash_opt_arc_str(&input.summary));
+    h.update(&hash_opt_arc_str(&input.working_state));
     h.update(&[summary_wrap_mode_tag(input.summary_wrap_mode)]);
     h.update(&hash_opt_msg(&input.current_user_turn));
     h.update(&[mode_tag(&input.mode)]);

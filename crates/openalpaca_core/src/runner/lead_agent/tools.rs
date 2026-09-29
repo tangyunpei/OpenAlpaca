@@ -511,7 +511,7 @@ impl BuiltInTool for SpawnSubagentTool {
         // objective → current_user_turn (no summary, no recent history).
         let history_input = HistoryInput {
             lane_tip_fingerprint: [0u8; 32],
-            summary: None,
+            working_state: None,
             summary_wrap_mode: SummaryWrapMode::Plain,
             recent_messages: Arc::new(Vec::new()),
             current_user_turn: Some(ChatMessage::user(objective)),

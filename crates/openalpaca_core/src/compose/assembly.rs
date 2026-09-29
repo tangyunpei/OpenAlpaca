@@ -67,17 +67,21 @@ pub fn compose(input: AssemblyInput<'_>) -> ComposedRequest {
     // If the stitched messages exceed `model_window * TRIM_THRESHOLD`, drop the
     // oldest non-system messages until we fit. The system message at index 0
     // is preserved — the spec is explicit that Layer 5 trims from the head of
-    // history, not from the system prompt.
+    // history, not from the system prompt. So is the working-state block
+    // (design 11 §4, CQ-4): it is the one carrier of what the trim removes,
+    // so the trim takes the message after it.
     let threshold = (input.model_window as f64 * TRIM_THRESHOLD) as u32;
     let mut total = crate::runner::estimate_messages_tokens(&messages);
     let mut trimmed = 0usize;
     while total > threshold && messages.len() > 1 {
-        let Some(idx_to_trim) = messages
-            .iter()
-            .position(|m| !matches!(m.role, Role::System))
-        else {
-            // No non-system messages left — stop trimming (spec forbids
-            // removing the system prompt).
+        let Some(idx_to_trim) = messages.iter().position(|m| {
+            !matches!(m.role, Role::System)
+                && !m
+                    .content
+                    .starts_with(crate::orchestrator::working_state::BLOCK_PREFIX)
+        }) else {
+            // Nothing left the trim may take — stop (spec forbids removing
+            // the system prompt, and the working state stays).
             break;
         };
         let removed = messages.remove(idx_to_trim);

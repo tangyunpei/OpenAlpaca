@@ -165,6 +165,12 @@ impl RecordingProvider {
         let seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
         seen.first().cloned()
     }
+
+    /// How many requests reached this provider — for a test whose point is
+    /// how many calls were made.
+    pub(crate) fn request_count(&self) -> usize {
+        self.seen.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
 }
 
 #[async_trait::async_trait]

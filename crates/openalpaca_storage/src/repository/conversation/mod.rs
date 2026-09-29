@@ -925,22 +925,26 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
-    /// Update the active session's working state with optimistic locking.
-    /// Returns true if the update succeeded.
-    pub fn update_summary_optimistic(
+    /// Write one session's working state (design 11 §2) with optimistic
+    /// locking: only while the row still holds `expected_version`, which the
+    /// write bumps. Addressed by the session's id, never by its lane, so a
+    /// state computed for one conversation cannot land in the one the lane
+    /// switched to meanwhile — and an archived conversation can still be
+    /// written. Returns true if the update succeeded.
+    pub fn update_working_state(
         &self,
-        lane_key: &str,
+        session_id: &str,
         expected_version: i64,
-        summary: &str,
-        last_id: i64,
+        state: &str,
+        through: i64,
     ) -> Result<bool> {
         self.db.with_connection(|conn| {
             let rows = conn.execute(
                 "UPDATE session SET working_state = ?1, working_state_version = working_state_version + 1,
                  working_state_through = ?2, working_state_updated_at = datetime('now'),
                  updated_at = datetime('now')
-                 WHERE lane_key = ?3 AND status = 'active' AND working_state_version = ?4",
-                rusqlite::params![summary, last_id, lane_key, expected_version],
+                 WHERE id = ?3 AND working_state_version = ?4",
+                rusqlite::params![state, through, session_id, expected_version],
             )?;
             Ok(rows > 0)
         })

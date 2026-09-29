@@ -630,7 +630,13 @@ impl Orchestrator {
 
         let history_input = HistoryInput {
             lane_tip_fingerprint: [0u8; 32],
-            summary: ctx.summary.as_deref().map(Arc::<str>::from),
+            working_state: ctx.working_state_text(
+                self.daemon_config
+                    .load()
+                    .orchestrator
+                    .memory
+                    .summary_max_chars,
+            ),
             summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
             recent_messages: Arc::new(adapted_recent),
             current_user_turn,

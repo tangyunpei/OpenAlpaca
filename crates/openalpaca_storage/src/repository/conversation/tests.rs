@@ -199,11 +199,13 @@ fn test_update_summary_optimistic_success() {
     let db = test_db();
     let repo = ConversationRepository::new(&db);
 
-    repo.get_or_create_active_session("user1:gui", "gui", None).unwrap();
+    let session = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
 
     // Update with correct version (0)
     let ok = repo
-        .update_summary_optimistic("user1:gui", 0, "Test summary", 42)
+        .update_working_state(&session.id, 0, "Test summary", 42)
         .unwrap();
     assert!(ok);
 
@@ -218,17 +220,19 @@ fn test_update_summary_optimistic_conflict() {
     let db = test_db();
     let repo = ConversationRepository::new(&db);
 
-    repo.get_or_create_active_session("user1:gui", "gui", None).unwrap();
+    let session = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
 
     // First update succeeds
     assert!(
-        repo.update_summary_optimistic("user1:gui", 0, "Summary v1", 10)
+        repo.update_working_state(&session.id, 0, "Summary v1", 10)
             .unwrap()
     );
 
     // Second update with stale version (0) fails
     let ok = repo
-        .update_summary_optimistic("user1:gui", 0, "Summary v2", 20)
+        .update_working_state(&session.id, 0, "Summary v2", 20)
         .unwrap();
     assert!(!ok);
 
@@ -239,13 +243,47 @@ fn test_update_summary_optimistic_conflict() {
     assert_eq!(last_id, 10);
 }
 
+/// A working state is written to the session it was computed for (design 11
+/// §2): after "new chat" the write still lands on the archived conversation,
+/// and the lane's new session — at the same version 0 — is left empty.
+#[test]
+fn the_working_state_write_addresses_its_session_not_the_lane() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let first = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
+    let second = repo.create_session("user1:gui", "gui", None, None).unwrap();
+
+    assert!(
+        repo.update_working_state(&first.id, 0, "{\"v\":1}", 7)
+            .unwrap()
+    );
+
+    let first = repo.get_session(&first.id).unwrap().unwrap();
+    assert_eq!(first.status, "archived");
+    assert_eq!(first.working_state, "{\"v\":1}");
+    assert_eq!(first.working_state_version, 1);
+    assert_eq!(first.working_state_through, 7);
+    assert!(first.working_state_updated_at.is_some());
+
+    let second = repo.get_session(&second.id).unwrap().unwrap();
+    assert_eq!(second.status, "active");
+    assert_eq!(second.working_state, "");
+    assert_eq!(second.working_state_version, 0);
+    assert_eq!(second.working_state_through, 0);
+}
+
 #[test]
 fn test_clear_summary() {
     let db = test_db();
     let repo = ConversationRepository::new(&db);
 
-    repo.get_or_create_active_session("user1:gui", "gui", None).unwrap();
-    repo.update_summary_optimistic("user1:gui", 0, "Some summary", 50)
+    let session = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
+    repo.update_working_state(&session.id, 0, "Some summary", 50)
         .unwrap();
     repo.increment_message_count("user1:gui").unwrap();
 
