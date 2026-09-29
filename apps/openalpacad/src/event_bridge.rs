@@ -503,10 +503,13 @@ pub fn spawn_event_bridge(
                     );
                 }
                 openalpaca_core::events::SystemEvent::CompactionTriggered {
-                    request_id, messages_before, messages_after, memories_extracted, ..
+                    request_id,
+                    messages_before,
+                    messages_after,
+                    ..
                 } => {
                     tracing::info!(
-                        %request_id, messages_before, messages_after, memories_extracted,
+                        %request_id, messages_before, messages_after,
                         "Context compaction triggered"
                     );
                 }

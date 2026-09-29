@@ -539,9 +539,10 @@ pub async fn run_lead_agent(
         lead_agent.llm_config.model.as_deref(),
     );
 
-    // Set compaction model from daemon config
-    loop_config.compaction_model = daemon_config.load()
-        .execution.context.compaction_model.clone();
+    // Design 11, CQ-3: compaction's working-state writer runs on
+    // `[orchestrator.costs] summary_model`, under its daily ceiling.
+    loop_config.writer =
+        crate::orchestrator::working_state::WriterConfig::new(&daemon_config.load());
     loop_config.event_bus = Some(bus.clone());
     loop_config.experimental_ephemeral_pressure =
         daemon_config.load().experimental.ephemeral_pressure_layer;

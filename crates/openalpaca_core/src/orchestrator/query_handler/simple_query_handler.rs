@@ -849,6 +849,25 @@ impl Orchestrator {
                 per_request_sandbox.set_confirmation_broker(broker.clone());
             }
 
+            // Design 11 §3.3, CQ-3: a compaction folds the older messages
+            // into the session's working state on `summary_model`, and the
+            // §3.2 cursor says which row that state then covers through.
+            let cursor = crate::orchestrator::working_state::Cursor::new(
+                ctx.working_state_through,
+                &ctx.recent_row_ids,
+                composed.history_head_dropped,
+                !ctx.older_window.is_empty(),
+                composed.messages.len(),
+            );
+            let config_for_loop = LoopConfig {
+                writer: crate::orchestrator::working_state::WriterConfig::new(
+                    &self.daemon_config.load(),
+                ),
+                working_state: ctx.working_state.clone(),
+                working_state_cursor: Some(cursor.clone()),
+                ..config_for_loop
+            };
+
             let call_start = std::time::Instant::now();
             let result = run_agentic_loop_routed(
                 router.as_ref(),
@@ -866,6 +885,13 @@ impl Orchestrator {
             )
             .await;
             let latency_ms = call_start.elapsed().as_millis() as i64;
+
+            // Design 11 §3.3: the state this turn's compaction wrote goes to
+            // the turn end, which writes it to the session row with no call.
+            if let Some((state, boundary)) = result.working_state.clone() {
+                self.compacted_turns
+                    .insert(request_id, (state, cursor.after(boundary)));
+            }
 
             // Routing V2: structured delegation from the start_workflow
             // result cell (SpawnSubagentTool result-cell precedent). The

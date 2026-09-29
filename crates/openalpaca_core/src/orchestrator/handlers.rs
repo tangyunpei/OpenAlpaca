@@ -370,13 +370,26 @@ impl Orchestrator {
         // learning is not here any more: the gateway queues every persisted
         // turn, and the learning queue extracts a session's turns together,
         // off the reply path (Learning v2, design 09 §1.9).
+        // A main-loop turn that compacted hands its state over here (design
+        // 11 §3.3): written with no call.
+        let from_loop = self
+            .compacted_turns
+            .remove(&request_id)
+            .map(|(_, compacted)| compacted);
         if let (Some(db), Some(router)) = (self.db.clone(), self.llm_router.clone()) {
             let config = self.daemon_config.clone();
             let compacted_states = self.compacted_states.clone();
             // NOTE: ctx is intentionally moved into this job — do not reference it after this block
             self.background.spawn(async move {
-                super::working_state::after_turn(db, router, config, compacted_states, ctx, None)
-                    .await;
+                super::working_state::after_turn(
+                    db,
+                    router,
+                    config,
+                    compacted_states,
+                    ctx,
+                    from_loop,
+                )
+                .await;
             });
         }
 

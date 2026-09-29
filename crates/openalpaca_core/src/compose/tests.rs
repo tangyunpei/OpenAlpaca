@@ -3869,6 +3869,72 @@ fn a_trim_under_pressure_removes_the_first_row_never_the_state_block() {
     assert_eq!(contents[3], "what next?");
 }
 
+/// Design 11 §3.2: the assembly reports how many of the history layer's
+/// leading rows its trim dropped — rows the working state's writer never
+/// reads — and counts nothing it took from ahead of the history (a
+/// dynamic-context message goes first) and nothing when it trims nothing.
+#[test]
+fn the_trim_reports_the_history_rows_it_dropped_and_nothing_else() {
+    use super::assembly::{self, AssemblyInput};
+
+    let compose = |context_messages: Vec<ChatMessage>, window: u32| {
+        let mut input = make_history_input(HistoryMode::Default);
+        input.working_state = Some(Arc::from(
+            a_working_state("Compare the hotels")
+                .text(STATE_AT, 4000)
+                .as_str(),
+        ));
+        // Each row is ~1 000 tokens.
+        input.recent_messages = Arc::new(vec![
+            ChatMessage::user(&format!("first row {}", "a".repeat(4000))),
+            ChatMessage::assistant(&format!("second row {}", "b".repeat(4000))),
+        ]);
+        input.current_user_turn = Some(ChatMessage::user("what next?"));
+        let history = super::history::compute(&input);
+        assembly::compose(AssemblyInput {
+            persona: &PersonaOutput {
+                blocks: vec![],
+                fingerprint: [0u8; 32],
+            },
+            static_prompt: &StaticPromptOutput {
+                system_message: Arc::from("system"),
+                section_registry: vec!["system"],
+                fingerprint: [0u8; 32],
+            },
+            dynamic_context: &DynamicContextOutput {
+                context_messages,
+                additional_system_blocks: vec![],
+                fingerprint: [0u8; 32],
+            },
+            history: &history,
+            tools: Arc::new(vec![]),
+            model_window: window,
+            layer_trace: LayerTrace {
+                persona_mode: PersonaMode::Minimal,
+                static_prompt_mode: StaticPromptMode::Default,
+                dynamic_context_mode: DynamicContextMode::Default,
+                history_mode: HistoryMode::Default,
+                memo_hits: LayerMemoHits::default(),
+            },
+        })
+    };
+
+    // The 75 % threshold is 1 500: the context message goes, then one row.
+    let context = vec![ChatMessage::user(&format!("context {}", "c".repeat(400)))];
+    let out = compose(context.clone(), 2000);
+    let contents: Vec<&str> = out.messages.iter().map(|m| m.content.as_str()).collect();
+    assert!(
+        !contents.iter().any(|c| c.starts_with("context ")),
+        "the context message went first: {contents:?}"
+    );
+    assert!(!contents.iter().any(|c| c.starts_with("first row")));
+    assert_eq!(out.history_head_dropped, 1, "one history row, not two");
+
+    let out = compose(context, 100_000);
+    assert!(!out.section_registry.contains(&"<trimmed:history>"));
+    assert_eq!(out.history_head_dropped, 0, "nothing trimmed");
+}
+
 /// The history layer's cache key follows the working state: the same state
 /// keys the same, a changed state (or one written again later) keys anew,
 /// and so does a state appearing where there was none.

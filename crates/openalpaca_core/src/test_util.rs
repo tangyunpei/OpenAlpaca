@@ -171,6 +171,11 @@ impl RecordingProvider {
     pub(crate) fn request_count(&self) -> usize {
         self.seen.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
+
+    /// Every request that reached this provider, in arrival order.
+    pub(crate) fn requests(&self) -> Vec<openalpaca_llm::ChatRequest> {
+        self.seen.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
 }
 
 #[async_trait::async_trait]

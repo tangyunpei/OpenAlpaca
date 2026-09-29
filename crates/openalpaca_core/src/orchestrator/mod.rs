@@ -234,6 +234,11 @@ pub struct Orchestrator {
     /// the window is the usual one again. Kept in memory: after a restart
     /// the next turn simply gets the usual window.
     compacted_states: Arc<DashMap<String, (i64, i64)>>,
+    /// Design 11 §3.3: the working state a main-loop turn's compaction wrote
+    /// and the row it covers through (§3.2), keyed by request id — put here
+    /// by the main loop, taken by the turn end, which writes it to the row
+    /// with no call.
+    compacted_turns: DashMap<Uuid, (working_state::WorkingState, i64)>,
     /// Optional broker for interactive tool confirmation (set post-construction via `set_confirmation_broker()`).
     pub confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
     /// The memory service (design §7a), set post-construction by the daemon
@@ -271,6 +276,9 @@ pub(super) struct ConversationContext {
     /// The row's `working_state_through`: the highest message id it covers.
     pub(super) working_state_through: i64,
     pub(super) recent_messages: Vec<ChatMessage>,
+    /// The ids of the rows in `recent_messages`, oldest first — what a
+    /// compaction's `through` is counted in (§3.2).
+    pub(super) recent_row_ids: Vec<i64>,
     /// Raw (id, role, content) tuples between `working_state_through` and the
     /// recent window — never sent to the model; what the lag refresh reads
     /// (`working_state::after_turn`).
@@ -423,6 +431,7 @@ impl Orchestrator {
             delegation_map: DashMap::new(),
             attachments_skipped_map: DashMap::new(),
             compacted_states: Arc::new(DashMap::new()),
+            compacted_turns: DashMap::new(),
             confirmation_broker: Arc::new(RwLock::new(None)),
             memory_service,
             context_manager,

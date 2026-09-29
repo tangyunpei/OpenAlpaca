@@ -1,5 +1,6 @@
 use crate::agent::subagent::AgentConstraints;
 use crate::bus::EventBus;
+use crate::orchestrator::working_state::{Cursor, WorkingState, WriterConfig};
 use crate::runner::agentic_loop::AnswerGuard;
 use crate::runner::steering::SteeringInbox;
 use crate::session_log::SessionLogHandle;
@@ -56,9 +57,18 @@ pub struct LoopConfig {
     /// If `collect_stream()` exceeds this, it is cancelled and the loop
     /// falls back to non-streaming. Default: 10 minutes.
     pub max_stream_duration: Duration,
-    /// Model to use for LLM-based context compaction (extraction + summarization).
-    /// When `None`, falls back to heuristic-only compaction.
-    pub compaction_model: Option<String>,
+    /// What compaction's working-state writer is called with (design 11
+    /// §3.1, CQ-3): `[orchestrator.costs] summary_model` (`None` the
+    /// router's default), its daily ceiling, the line cut and the block's
+    /// limit. Every loop that compacts sets it from the daemon config.
+    pub writer: WriterConfig,
+    /// The conversation's working state when the loop begins (design 11
+    /// §3.3): what the first `LlmSummary` compaction folds the older messages
+    /// into. The main loop sets it from the session row; `None` elsewhere.
+    pub working_state: Option<Arc<WorkingState>>,
+    /// The §3.2 cursor over the rows the loop was handed — the main loop's
+    /// only; what a compaction's `compaction` record names as `state_through`.
+    pub working_state_cursor: Option<Cursor>,
     /// Optional event bus for emitting compaction telemetry.
     /// When set, the agentic loop publishes `CompactionTriggered` events.
     pub event_bus: Option<EventBus>,
@@ -114,7 +124,9 @@ impl Clone for LoopConfig {
             thinking: self.thinking.clone(),
             stream_callback: self.stream_callback.clone(),
             max_stream_duration: self.max_stream_duration,
-            compaction_model: self.compaction_model.clone(),
+            writer: self.writer.clone(),
+            working_state: self.working_state.clone(),
+            working_state_cursor: self.working_state_cursor.clone(),
             event_bus: self.event_bus.clone(),
             experimental_ephemeral_pressure: self.experimental_ephemeral_pressure,
             steering: self.steering.clone(),
@@ -140,7 +152,9 @@ impl std::fmt::Debug for LoopConfig {
             .field("thinking", &self.thinking)
             .field("stream_callback", &self.stream_callback.is_some())
             .field("max_stream_duration", &self.max_stream_duration)
-            .field("compaction_model", &self.compaction_model)
+            .field("writer", &self.writer)
+            .field("working_state", &self.working_state.is_some())
+            .field("working_state_cursor", &self.working_state_cursor)
             .field("event_bus", &self.event_bus.is_some())
             .field(
                 "experimental_ephemeral_pressure",
@@ -173,7 +187,9 @@ impl Default for LoopConfig {
             thinking: None,
             stream_callback: None,
             max_stream_duration: Duration::from_secs(600),
-            compaction_model: None,
+            writer: WriterConfig::default(),
+            working_state: None,
+            working_state_cursor: None,
             event_bus: None,
             experimental_ephemeral_pressure: false,
             steering: None,
@@ -243,7 +259,9 @@ impl LoopConfig {
             thinking: None,
             stream_callback: None,
             max_stream_duration: Duration::from_secs(600),
-            compaction_model: None,
+            writer: WriterConfig::default(),
+            working_state: None,
+            working_state_cursor: None,
             event_bus: None,
             experimental_ephemeral_pressure: false,
             steering: None,
@@ -322,6 +340,13 @@ pub struct LoopResult {
     /// without the reason. `None` when no tool failed — the loop tracks the
     /// last one, not a list: the reader wants the one it stopped on.
     pub last_tool_error: Option<String>,
+    /// The working state this loop's last `LlmSummary` compaction wrote, and
+    /// its boundary: `messages[2..boundary]` of the list the loop was handed
+    /// lie behind it (design 11 §3.3). Counted in the list as the compaction
+    /// found it, so once an earlier tier or compaction had shortened the list
+    /// it falls short of the truth, never past it. `None` when the loop never
+    /// wrote one.
+    pub working_state: Option<(WorkingState, usize)>,
 }
 
 impl LoopResult {

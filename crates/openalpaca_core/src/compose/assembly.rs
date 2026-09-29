@@ -40,6 +40,7 @@ pub fn compose(input: AssemblyInput<'_>) -> ComposedRequest {
         messages.push(ChatMessage::system(&block.content));
     }
     messages.extend(input.dynamic_context.context_messages.iter().cloned());
+    let mut history_start = messages.len();
     messages.extend(input.history.messages.iter().cloned());
 
     // === Per-layer token accounting ==========================================
@@ -73,6 +74,7 @@ pub fn compose(input: AssemblyInput<'_>) -> ComposedRequest {
     let threshold = (input.model_window as f64 * TRIM_THRESHOLD) as u32;
     let mut total = crate::runner::estimate_messages_tokens(&messages);
     let mut trimmed = 0usize;
+    let mut history_head_dropped = 0usize;
     while total > threshold && messages.len() > 1 {
         let Some(idx_to_trim) = messages.iter().position(|m| {
             !matches!(m.role, Role::System)
@@ -85,6 +87,11 @@ pub fn compose(input: AssemblyInput<'_>) -> ComposedRequest {
             break;
         };
         let removed = messages.remove(idx_to_trim);
+        if idx_to_trim < history_start {
+            history_start -= 1;
+        } else {
+            history_head_dropped += 1;
+        }
         let removed_tokens = crate::runner::estimate_messages_tokens(std::slice::from_ref(&removed));
         total = total.saturating_sub(removed_tokens);
         history_tokens = history_tokens.saturating_sub(removed_tokens);
@@ -131,6 +138,7 @@ pub fn compose(input: AssemblyInput<'_>) -> ComposedRequest {
         token_budget,
         section_registry,
         layer_trace: input.layer_trace,
+        history_head_dropped,
     }
 }
 

@@ -26,7 +26,6 @@ max_tools_per_round = 3
 [execution.context]
 autocompact_buffer_ratio = 0.165
 compaction_target_ratio = 0.50
-# compaction_model = "claude-haiku-4-5-20251001"
 min_recent_messages = 4
 
 [extensions]

@@ -150,6 +150,105 @@ pub fn update(
     }
 }
 
+/// What a compaction's call of the writer is made with (design 11 §3.1, §8,
+/// CQ-3): the model (`[orchestrator.costs] summary_model`; `None` the router's
+/// default), the daily ceiling read before the call
+/// (`summary_max_daily_cost_usd`), each line's cut
+/// (`[orchestrator.memory] msg_trunc_chars`) and the limit of the block it
+/// renders (`summary_max_chars`). Every loop that compacts carries one.
+#[derive(Debug, Clone)]
+pub struct WriterConfig {
+    pub model: Option<String>,
+    pub max_daily_cost_usd: f64,
+    pub msg_trunc_chars: usize,
+    pub max_chars: usize,
+}
+
+impl WriterConfig {
+    pub fn new(dcfg: &DaemonConfig) -> Self {
+        Self::of(&dcfg.orchestrator.costs, &dcfg.orchestrator.memory)
+    }
+
+    fn of(
+        costs: &crate::daemon_config::CostsConfig,
+        memory: &crate::daemon_config::MemoryConfig,
+    ) -> Self {
+        Self {
+            model: costs.summary_model.clone(),
+            max_daily_cost_usd: costs.summary_max_daily_cost_usd,
+            msg_trunc_chars: memory.msg_trunc_chars,
+            max_chars: memory.summary_max_chars,
+        }
+    }
+}
+
+impl Default for WriterConfig {
+    fn default() -> Self {
+        Self::of(&Default::default(), &Default::default())
+    }
+}
+
+/// The §3.2 cursor (design 11): the message row a compaction's state covers
+/// through — only rows its writer read. The main loop builds it from the rows
+/// it placed in the prompt; a compaction whose state covers
+/// `messages[2..boundary]` of that list moves `through` to the last row
+/// before `boundary`.
+#[derive(Debug, Clone, Default)]
+pub struct Cursor {
+    /// `working_state_through` when the turn began.
+    pub through: i64,
+    /// Where the rows begin in the list the loop was handed.
+    pub first_row: usize,
+    /// The rows' ids, oldest first — none when the state may not pass them
+    /// (see [`Cursor::new`]).
+    pub row_ids: Vec<i64>,
+}
+
+impl Cursor {
+    /// `row_ids` are the rows `build_context` placed in the prompt, oldest
+    /// first, and `list_len` the length of the composed list — its last
+    /// message the current turn, right after the rows. The state may pass
+    /// them only when no row before them went unread: none that the assembly
+    /// trim dropped (`head_dropped`), none past the recent window that the
+    /// lag refresh has not covered (`gap`), and not a first row at
+    /// `messages[1]`, which a compaction keeps and does not read. Otherwise
+    /// `through` stays where it was, and the lag refresh or the close reads
+    /// those rows later.
+    pub fn new(
+        through: i64,
+        row_ids: &[i64],
+        head_dropped: usize,
+        gap: bool,
+        list_len: usize,
+    ) -> Self {
+        let rows = row_ids.len().saturating_sub(head_dropped);
+        let first_row = list_len.saturating_sub(1 + rows);
+        let passable = head_dropped == 0 && !gap && first_row >= 2;
+        Self {
+            through,
+            first_row,
+            row_ids: if passable {
+                row_ids.to_vec()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// `through` after a compaction whose state covers `messages[2..boundary]`
+    /// of the list: the last row before `boundary`, and never less than what
+    /// the state covered before (the writer folded that state in).
+    pub fn after(&self, boundary: usize) -> i64 {
+        let covered = boundary
+            .saturating_sub(self.first_row)
+            .min(self.row_ids.len());
+        match covered.checked_sub(1) {
+            Some(last) => self.row_ids[last].max(self.through),
+            None => self.through,
+        }
+    }
+}
+
 /// The turn end (design 11 §2, the session summary's old background job):
 ///
 /// - `from_loop` — the state this turn's compaction wrote and the last
@@ -950,6 +1049,59 @@ mod tests {
         ] {
             assert_eq!(parse(bad), Err(Unusable(why.to_string())), "{bad}");
         }
+    }
+
+    // ── The §3.2 cursor (slice 3) ─────────────────────────────────────
+
+    /// The rows 101..=108 as `build_context` placed them: after the system
+    /// prompt and the state's block, before the current turn — a list of 11.
+    const ROWS: [i64; 8] = [101, 102, 103, 104, 105, 106, 107, 108];
+
+    /// §3.2: `through` is the last row inside `messages[2..boundary]` —
+    /// `recent_row_ids[covered − 1]` — never a row past the boundary, and
+    /// unchanged when the compaction read no row.
+    #[test]
+    fn the_cursor_moves_to_the_last_row_the_compaction_read() {
+        let cursor = Cursor::new(40, &ROWS, 0, false, 11);
+        assert_eq!(cursor.first_row, 2, "system, block, then the rows");
+        assert_eq!(cursor.after(2), 40, "no row read: unchanged");
+        assert_eq!(cursor.after(3), 101);
+        assert_eq!(cursor.after(8), 106, "messages[2..8] are rows 101..=106");
+        assert_eq!(cursor.after(20), 108, "never past the last row");
+    }
+
+    /// §3.2 (panel defect U-2): when the assembly trim dropped rows at the
+    /// head, `through` is not advanced past them — the writer never read
+    /// them — whatever the compaction read after them.
+    #[test]
+    fn the_cursor_does_not_move_when_the_trim_dropped_head_rows() {
+        // Two rows trimmed: six of the eight are in a list of 9.
+        let cursor = Cursor::new(40, &ROWS, 2, false, 9);
+        for boundary in [2, 5, 8, 20] {
+            assert_eq!(cursor.after(boundary), 40, "boundary {boundary}");
+        }
+    }
+
+    /// The same for the other rows before the read ones that nobody read: a
+    /// row past the recent window the lag refresh has not covered yet, and a
+    /// first row at `messages[1]` (no block ahead of it), which a compaction
+    /// keeps where it is and does not read.
+    #[test]
+    fn the_cursor_does_not_move_past_a_row_nobody_read() {
+        let behind_the_window = Cursor::new(40, &ROWS, 0, true, 11);
+        assert_eq!(behind_the_window.after(8), 40);
+        let at_messages_1 = Cursor::new(40, &ROWS, 0, false, 10);
+        assert_eq!(at_messages_1.first_row, 1);
+        assert_eq!(at_messages_1.after(8), 40);
+    }
+
+    /// Rows the state already covered stay covered: after a close the window
+    /// holds rows at or below `through`, and a compaction that read only
+    /// some of them leaves `through` where it was.
+    #[test]
+    fn the_cursor_never_moves_back() {
+        let after_a_close = Cursor::new(108, &ROWS, 0, false, 11);
+        assert_eq!(after_a_close.after(5), 108);
     }
 
     // ── The writer at turn end (design 11 §2, §3.1; slice 2) ─────────

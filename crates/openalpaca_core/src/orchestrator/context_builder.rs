@@ -188,6 +188,7 @@ impl Orchestrator {
             working_state_version: version,
             working_state_through: through,
             recent_messages,
+            recent_row_ids: chat_rows.iter().map(|(id, ..)| *id).collect(),
             older_window,
         }
     }

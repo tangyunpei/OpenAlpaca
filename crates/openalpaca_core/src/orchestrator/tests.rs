@@ -8484,3 +8484,265 @@ async fn a_main_loop_turn_carries_the_working_state_ahead_of_its_rows() {
         .expect("the rows reach the model");
     assert!(blocks[0] < first_row, "the state comes before the rows");
 }
+
+// ── Design 11 §10.2: the compaction invariant (slice 3) ─────────────
+
+/// The tool-mode orchestrator over `db`, every answer `reply`, its answering
+/// model's window 4 096 tokens and the compaction buffer forced high: a turn
+/// over ten 800-character rows compacts at `LlmSummary` without the assembly
+/// trimming a row, and a turn over four does not compact. The summariser's
+/// model is `claude-haiku-4-5-20251001`; the recent window holds `recent`
+/// rows.
+fn a_4k_orchestrator(
+    reply: &str,
+    db: &openalpaca_storage::Database,
+    recent: usize,
+) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.memory.prompt_recent_messages = recent;
+    config.execution.context.autocompact_buffer_ratio = 0.3;
+    config.orchestrator.costs.summary_model = Some("claude-haiku-4-5-20251001".to_string());
+    let (orch, requests) =
+        make_tool_mode_orchestrator_with_db(None, reply, config, Vec::new(), Some(db.clone()));
+    let registry = orch.llm_router.as_ref().unwrap().model_registry();
+    let mut info = registry
+        .get_model_info("claude-sonnet-4-5-20250929")
+        .expect("the tool-mode model is in the catalogue");
+    info.context_window = 4096;
+    registry.register("claude-sonnet-4-5-20250929".to_string(), info);
+    (orch, requests)
+}
+
+/// `user1:cli`'s active session with `n` 800-character rows (`r1 …` to
+/// `r<n> …`) and a working state at version 1 covering none of them.
+fn a_long_session(db: &openalpaca_storage::Database, n: usize) -> (String, Vec<i64>) {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    let session = repo
+        .get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+    let ids = (1..=n)
+        .map(|i| {
+            repo.insert(&openalpaca_storage::ConversationMessage {
+                lane_key: "user1:cli".to_string(),
+                role: if i % 2 == 1 { "user" } else { "assistant" }.to_string(),
+                content: format!("r{i} {}", "x".repeat(800)),
+                ..Default::default()
+            })
+            .unwrap()
+        })
+        .collect();
+    let state = serde_json::to_string(&lisbon_state("Pick the dates")).unwrap();
+    assert!(
+        repo.update_working_state(&session.id, 0, &state, 0)
+            .unwrap()
+    );
+    (session.id, ids)
+}
+
+/// Whether a request is the working-state writer's.
+fn is_writer_call(request: &ChatRequest) -> bool {
+    let (system, _) = working_state::render_prompt(None, "");
+    request
+        .messages
+        .first()
+        .is_some_and(|m| m.content == system)
+}
+
+/// **Design 11 §10.2, the compaction invariant.** On a 4K window, a turn that
+/// compacts makes **exactly one** summariser call, and its state reaches the
+/// session row at turn end with no other call — `through` the last row the
+/// writer read (§3.2: `messages[2..10]` are rows 1–8). The next turn's
+/// request carries that state's block ahead of the rows, the rows after
+/// `through` with the four-row floor, and nothing trimmed.
+#[tokio::test]
+async fn a_compacting_turn_writes_its_state_and_the_next_request_carries_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let written = lisbon_state("Book the hotel");
+    let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 25);
+    let (session, ids) = a_long_session(&db, 10);
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+    orch.background.wait_idle().await;
+
+    let turn = requests.lock().unwrap().clone();
+    assert_eq!(
+        turn.iter().filter(|r| is_writer_call(r)).count(),
+        1,
+        "one summariser call for the compaction"
+    );
+    assert_eq!(turn.len(), 2, "and the answer: no other call at turn end");
+    assert_eq!(
+        turn.iter()
+            .find(|r| is_writer_call(r))
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("claude-haiku-4-5-20251001"),
+        "on `summary_model` (CQ-3)"
+    );
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<working_state::WorkingState>(&row.working_state).unwrap(),
+        written
+    );
+    assert_eq!(row.working_state_through, ids[7], "rows 1–8 were read");
+    assert_eq!(row.working_state_version, 2);
+
+    send_tool_mode(&orch, Uuid::new_v4(), "and then?").await;
+    let next = requests.lock().unwrap()[2].clone();
+    assert!(!is_writer_call(&next), "the next turn does not compact");
+    let blocks: Vec<usize> = next
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.content.starts_with(working_state::BLOCK_PREFIX))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(blocks.len(), 1, "one working-state block");
+    assert_eq!(
+        next.messages[blocks[0]].content,
+        written.render(
+            row.working_state_updated_at.as_deref().unwrap(),
+            DaemonConfig::default()
+                .orchestrator
+                .memory
+                .summary_max_chars
+        )
+    );
+    let rows: Vec<&str> = next
+        .messages
+        .iter()
+        .filter_map(|m| m.content.split_once(' ').map(|(label, _)| label))
+        .filter(|label| label.starts_with('r') && label[1..].parse::<u32>().is_ok())
+        .collect();
+    assert_eq!(
+        rows,
+        vec!["r7", "r8", "r9", "r10"],
+        "the rows after `through`, four kept verbatim, none trimmed"
+    );
+    let first_row = next
+        .messages
+        .iter()
+        .position(|m| m.content.starts_with("r7 "))
+        .unwrap();
+    assert!(blocks[0] < first_row, "the state comes before the rows");
+}
+
+/// **Design 11 §10.2, its second half.** An answer that is not a state
+/// leaves the session row as it was, and the turn goes on over the heuristic
+/// summary (`compress_context`).
+#[tokio::test]
+async fn an_unusable_compaction_answer_leaves_the_row_and_the_loop_on_the_heuristic() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, requests) = a_4k_orchestrator("I would rather chat.", &db, 25);
+    let (session, _) = a_long_session(&db, 10);
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+    orch.background.wait_idle().await;
+
+    let turn = requests.lock().unwrap().clone();
+    assert_eq!(turn.iter().filter(|r| is_writer_call(r)).count(), 1);
+    let answer = turn.iter().find(|r| !is_writer_call(r)).unwrap();
+    assert!(
+        answer
+            .messages
+            .iter()
+            .any(|m| m.content.starts_with("[Context compressed:")),
+        "the heuristic summary stands in"
+    );
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<working_state::WorkingState>(&row.working_state).unwrap(),
+        lisbon_state("Pick the dates"),
+        "the row is untouched"
+    );
+    assert_eq!(
+        (row.working_state_version, row.working_state_through),
+        (1, 0)
+    );
+}
+
+/// §3.2 (panel defect U-2) through the main loop: fourteen rows are over the
+/// assembly's budget, so its trim drops the oldest before the loop ever runs
+/// — rows the compaction's writer never reads. The state it wrote reaches
+/// the row, and `through` stays where it was.
+#[tokio::test]
+async fn a_compaction_after_the_trim_dropped_rows_leaves_through_where_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let written = lisbon_state("Book the hotel");
+    let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 25);
+    let (session, _) = a_long_session(&db, 14);
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+    orch.background.wait_idle().await;
+
+    let turn = requests.lock().unwrap().clone();
+    let call = turn
+        .iter()
+        .find(|r| is_writer_call(r))
+        .expect("it compacted");
+    assert!(
+        !call.messages[1].content.contains("[user]: r1 "),
+        "the trim took the first row before the compaction"
+    );
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<working_state::WorkingState>(&row.working_state).unwrap(),
+        written
+    );
+    assert_eq!(
+        (row.working_state_version, row.working_state_through),
+        (2, 0),
+        "`through` does not pass the rows the trim dropped"
+    );
+}
+
+/// The same for rows behind the recent window that the lag refresh has not
+/// covered yet: with a ten-row window over fourteen rows, rows 1–4 are in no
+/// prompt and in no state, so a compaction of rows 5 on may not pass them.
+#[tokio::test]
+async fn a_compaction_never_passes_rows_behind_the_window_it_did_not_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let written = lisbon_state("Book the hotel");
+    let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 10);
+    let (session, _) = a_long_session(&db, 14);
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+    orch.background.wait_idle().await;
+
+    let turn = requests.lock().unwrap().clone();
+    let call = turn
+        .iter()
+        .find(|r| is_writer_call(r))
+        .expect("it compacted");
+    assert!(
+        call.messages[1].content.contains("[user]: r5 "),
+        "the compaction read the window's first row"
+    );
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<working_state::WorkingState>(&row.working_state).unwrap(),
+        written
+    );
+    assert_eq!(
+        (row.working_state_version, row.working_state_through),
+        (2, 0),
+        "`through` does not pass rows 1–4"
+    );
+}

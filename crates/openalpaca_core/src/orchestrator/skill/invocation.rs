@@ -435,6 +435,9 @@ impl Orchestrator {
             .orchestrator
             .sessions
             .tool_result_inline_bytes;
+        // Design 11, CQ-3: compaction's writer runs on `summary_model`.
+        config_for_loop.writer =
+            crate::orchestrator::working_state::WriterConfig::new(&self.daemon_config.load());
 
         // **K1 — the skill tier streams like any other turn.** Set the same
         // way the main loop sets it (`query_handler/simple_query_handler.rs`),

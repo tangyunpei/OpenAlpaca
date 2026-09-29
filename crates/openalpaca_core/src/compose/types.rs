@@ -328,6 +328,10 @@ pub struct ComposedRequest {
     pub token_budget: TokenBudget,
     pub section_registry: Vec<&'static str>,
     pub layer_trace: LayerTrace,
+    /// How many of the history layer's leading messages the budget trim
+    /// removed — rows the working state's writer never reads, so a
+    /// compaction's `through` may not pass them (design 11 §3.2).
+    pub history_head_dropped: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
