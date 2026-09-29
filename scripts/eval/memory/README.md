@@ -16,6 +16,12 @@ the reader can answer from? Systems `L`, `L0` and `L-S` feed a corpus of
 conversations through the gateway before anything is asked; see
 [The learning evaluation](#the-learning-evaluation) below.
 
+The **continuity evaluation** (design 11 §10, `tasks/memory-redesign/11-continuity-design.md`)
+asks a third: does a new conversation pick up where the last one on its lane
+and project left off? Systems `K0` and `K` feed a corpus conversation up to
+a split, close it, and ask where it left off as the next conversation's
+first turns; see [The continuity split](#the-continuity-split) below.
+
 ## Layout
 
 | File | Purpose |
@@ -26,11 +32,12 @@ conversations through the gateway before anything is asked; see
 | `judge-prompt.md` | The frozen binary judge protocol (CORRECT / INCORRECT). Its SHA-256 is recorded in every report; change it and every report before the change is a different experiment. |
 | `conversations-learning.json` | The learning corpus (design 09 §7.1): **51 sessions, 300 user turns** in story order from October 2025 to September 2026 (32 English, 14 Chinese, 5 mixed — the questions' proportions; 26 with no project, 18 Lantern, 7 Moss). Written from `notes-gold.json` only, never from the held-out questions. Every gold note is stated, 23 only in passing; the 8 change pairs old-then-new (laptop, editor and weekly review changing in a Lantern session after a session with no project); 7 in-turn corrections; 15 restatements (6 of the pairs' old notes); 11 rejections; 54 % noise. A dated fact states its date in the text, never only as "today" or "this month" — a learning run stamps the wall clock — though four give no year (two a month and day, two only a month) and assume a run in 2026; and no turn states a fact outside the gold set that a held-out abstention question asks about (09 rev 3.21). `suggestion_sessions` lists the 13 sessions L-S feeds. Each turn: `user`, `states` (gold ids), `mode` (`explicit`, `indirect`, `change`, `correction`, `restate`, `rejection`, `noise`). |
 | `questions-episodes.json` | The **episode split** (design 09 §13.4): **20** questions about what a corpus conversation discussed, decided or left open — one per conversation, each with at least 4 turns, in its language (en 13, zh 5, mixed 2), each drawing on a noise or rejection turn that no gold note states — answered from the conversation summaries an L run writes. The held-out schema (`category` `episodes`, `relies_on` empty) plus `session` and `turns` (0-based) naming what the gold answer comes from. |
+| `questions-continuity.json` | The **continuity split** (design 11 §10.1): **24 sets** over the 24 corpus conversations of at least 6 user turns — 20 sets of three questions (`doing`, `decided`, `next`, asked in that order) and 4 sets of one question about work the user dropped before the split (`expect_abstain`), each set with a `split` that leaves at least 3 turns on each side and its questions in its conversation's language (en 18, zh 5, mixed 1). Gold answers come from the turns before the split only. Each set: `id` (`kq-NNN`), `session`, `split`, `language`, `questions[]` (`kind`, `question`, `gold_answer`, `expect_abstain`); a row's id is `<set>-<kind>`. |
 | `coverage-judge-prompt.md` | The frozen coverage protocol (design 09 §7.3): given a gold note and up to five notes a search returned, `MATCH <n>` or `NONE`. Its SHA-256 is recorded in every learning report beside `judge_prompt_sha256`. |
 | `compare.py` | The paired comparison: accuracy per system, the paired difference with its 95 % CI, the discordant-pair rate, per-category point differences, the gate verdict. It prints both reports' judge models first — with each report's `recall_mode` beside its judge when the report records one — and **refuses two reports graded by different judges** unless `--allow-judge-mismatch`; a recall-mode mismatch is never refused. `--self-test` checks the refusal and the printout. |
 | `reports/` | The archived baselines of the deleted engine, measured on 2026-09-24 on a local Ollama as reader and judge: `baseline-A-2026-09-24.json` (13.0 %), `baseline-B-2026-09-24.json` (90.6 %), and their comparison. **B is the comparator** for D and E. |
 | `crates/openalpaca_core/tests/memory_eval.rs` | The runner: a data-validation test and the harness's own tests — the judge guard, the coverage verdict, the learning measures and invariants, a re-judge of a fixture-sized report, a replay of a fixture-sized scratch database, the gateway feed, forced re-run and L-S confirm on two short sessions, and the recall-mode switch with the listed-versus-delivered counts and the read recorder, all on an offline stub model (run under `--features live-eval`, no network) — and the `#[ignore]`d live eval. |
-| `crates/openalpaca_core/tests/memory_eval_corpus.rs` | The corpus's validation, in **default CI** with no model and no feature: coverage, the change pairs' order, the counts, the language shares within 5 points, the size, and the leakage check — no held-out question shares an 8-word shingle, or a 12-character Han/kana/Hangul shingle, with any turn. It validates the episode split too, and that the check catches each planted fault. |
+| `crates/openalpaca_core/tests/memory_eval_corpus.rs` | The corpus's validation, in **default CI** with no model and no feature: coverage, the change pairs' order, the counts, the language shares within 5 points, the size, and the leakage check — no held-out question shares an 8-word shingle, or a 12-character Han/kana/Hangul shingle, with any turn. It validates the episode split and the continuity split too (for the latter: the counts, the kinds and their order, at least 3 turns on each side of every split, a rejection before an abstention set's split, and no question or gold answer sharing a shingle with a turn after its split), and that each check catches its planted fault. |
 | `crates/openalpaca_core/tests/common/eval.rs` | The data files' types, shared by both test files. |
 
 ## How it works
@@ -82,6 +89,8 @@ Systems (`OPENALPACA_MEMORY_EVAL_SYSTEM`):
 | `L` | **Conversations in, learning on** (design 09 §7.2): the notes the extractor learned from the corpus, then the service as D runs it | Nothing seeded; the corpus fed through the gateway with a manual learning queue, flushed after every 10th user turn of a session and at its end; the questions then asked as D asks them, learning off |
 | `L0` | **Conversations in, learning off**: only what the reader's own `memory_store` calls kept | L with no flush |
 | `L-S` | No questions: the **MD-11/MD-12 check** | The change pairs' 8 old notes seeded as the user's own — as saved at the time, see below — the suggestion sessions fed with learning on, each suggestion confirmed through the user-directed confirm |
+| `K0` | **The continuity split, carry-over off** (design 11 §10.1) | Nothing seeded; memory as D runs it; each set's conversation fed through the gateway up to its split, closed by the queue, then the next conversation opened on the same lane and project and the set's questions asked as its first turns; `[orchestrator.memory] carry_over_turns = 0` |
+| `K` | **The continuity split, carry-over on** | K0 with the shipped `carry_over_turns` (3) |
 | `A` `B` | The deleted engine: per-turn FTS; the `memory_search` tool path with E5 vectors | **Archived** (`reports/`). Selecting either refuses before any call and names the archived file. |
 | `C` | One bounded `MEMORY.md` | Never built; selecting it refuses. |
 
@@ -229,8 +238,8 @@ Optional variables:
 
 | Variable | Effect |
 |---|---|
-| `OPENALPACA_MEMORY_EVAL_QUESTIONS` | Another question file (the tuning split, or a subset). Default: `questions-heldout.json`. With `LEARN_FROM`, naming a file makes the replay write the conversation summaries and ask it (the episode split on a replay, below); a replay without it asks nothing. |
-| `OPENALPACA_MEMORY_EVAL_LIMIT` | Take only the first N selected questions — for a smoke run. Recorded in the report. |
+| `OPENALPACA_MEMORY_EVAL_QUESTIONS` | Another question file (the tuning split, or a subset). Default: `questions-heldout.json`, and `questions-continuity.json` for K0 and K. With `LEARN_FROM`, naming a file makes the replay write the conversation summaries and ask it (the episode split on a replay, below); a replay without it asks nothing. |
+| `OPENALPACA_MEMORY_EVAL_LIMIT` | Take only the first N selected questions — for a smoke run; for K0 and K, the first N sets. Recorded in the report. |
 | `OPENALPACA_MEMORY_EVAL_CATEGORY` | One category only. Recorded. |
 | `OPENALPACA_MEMORY_EVAL_JUDGE_MODEL` | Judge model id; default: the reader's model, the router's effective default (owner answer LQ1). `none` makes no judge call: every row is `not_judged` (the dry run below). See [The judge](#the-judge). |
 | `OPENALPACA_MEMORY_EVAL_KEEP` | `1` keeps the tempdir (the scratch DB and project, with the project partition) and prints its path. L always keeps it. |
@@ -329,12 +338,13 @@ goes through `Gateway::handle_event` — persisted, answered by the reader
 deterministically: `flush_session` after every 10th user turn of a session
 (`turns`) and at its end (`switch`). The idle trigger has no deterministic
 stand-in; L1's tests cover it. The extraction's daily caps are lifted
-(`extract_max_calls_per_day = 0`), and so is the conversation summaries'
-daily count, `[orchestrator.learning] episode_max_per_day`, to the most the
-config's validation accepts (1000; never 0, which writes none): the whole
-corpus is fed on one UTC day, and at the default of 20 every summary from
-the corpus's 21st session on stopped `Cap` (L8, before the fix slice). All
-three are recorded (`conditions.learning`), so a cap never stops the phase
+(`extract_max_calls_per_day = 0`), and so is the summariser's daily
+ceiling, `[orchestrator.costs] summary_max_daily_cost_usd`, which a
+conversation's close reads before it refreshes the working state its
+summary is projected from (design 11 §3.4): the whole corpus is fed on one
+UTC day, and the conversation summaries' old daily count, at its default of
+20, stopped every summary from the corpus's 21st session on (L8, before the
+fix slice). All three are recorded (`conditions.learning`), so a cap never stops the phase
 part-way; if one ever does, the run says so first (`learning.warnings`,
 printed as `!! WARNING` at the head of the summary block), as it does for a
 fed turn that ended in an error (`learning.cost.feed_turn_errors`).
@@ -539,6 +549,61 @@ flushes stopped by the daily cap of 20 — every session from the 21st on
 had no summary. The report's `system` is `L`: its printed totals say
 `L (a replay of …: extraction-only store)`, and `compare.py` labels it
 `(system L, replay)` and warns that it is not a live L run.
+
+## The continuity split
+
+Design 11 §10.1: after a conversation closes, does the next one on the same
+lane and project start from where it left off? The judge and its prompt are
+D's; what is asked, and where, is new.
+
+**How K0 and K run.** Nothing is seeded; the memory service runs as in D
+(the per-turn recall, the read tools, the main loop's writers). Every set
+runs on one lane, `<owner>:gui`, in file order — story order — through the
+same gateway and manual queue as L's feed. For each set the harness opens a
+conversation as "Start fresh" opens one (`inherit: false`, so the last
+set's conversation never reaches it; on the scratch project when its
+corpus session has a project, on none when it has none), feeds its turns
+`[0, split)` with the reader answering, and closes it with the queue's
+deterministic close (`flush_episodes`: the working state's refresh, then the
+summaries it projects, retried as a summary flush is; no learning flush
+runs). It then opens the next conversation on the same lane and project,
+as "New chat" opens one, and asks the set's questions as its first turns,
+through the gateway, and judges
+each. K0 runs with `[orchestrator.memory] carry_over_turns = 0`; K with the
+shipped 3, so its questions' requests carry the fed conversation's
+`previous_conversation` block (design 11 §4 (b)). In both, the reader may
+still find the fed conversation through memory — the summary the close
+projected (at 4 or more user turns) and its own `memory_store` notes — so K0
+is memory without the carry-over, not nothing. `[orchestrator.learning]
+enabled` is on (the close needs it; the manual queue flushes nothing on its
+own) and the summariser's daily ceiling is lifted.
+
+```sh
+for system in K0 K; do
+  OPENALPACA_MEMORY_EVAL_SYSTEM=$system \
+  OPENALPACA_MEMORY_EVAL_REPORT=/tmp/memory-eval/report-$system.json \
+    cargo test -p openalpaca_core --features live-eval \
+    --test memory_eval -- --ignored memory_eval --nocapture
+done
+python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-K.json \
+  /tmp/memory-eval/report-K0.json
+```
+
+**What a continuity report adds** (`conditions.continuity`, `continuity`,
+`rows[].continuity`):
+
+| Field | What it is |
+|---|---|
+| `rows[].continuity` | The set, the corpus session, the question's `kind` and `turn` (1–3) in the next conversation, and `carry_over_delivered`: the turn's request carried the previous conversation's block and it named the fed conversation — read from the turn's continuity as the daemon's bridge takes it for `done.continued_from`, which the orchestrator records where it assembles the request, only when the composed messages hold the block (design 11 rev 1.5 item 6); the harness's offline test checks it against the requests the stub model received. `continued_from_topic` is the topic it named. |
+| `continuity.sessions[]` | Per set: the fed and the asked conversation's ids, the fed turns, the close (its calls, the summaries it wrote, its unusable answers), the fed conversation's stored working state after the close, its `through`, the conversation's newest row, `state_fresh` (the state covers every fed row: `through ≥` the newest row — the block is read live and nothing writes the fed conversation after its close), the projected summary's id, and `summariser_calls`. |
+| `continuity.totals` | `answers` — the target's: every question that expects an answer, 60 in the full split — and `by_kind` (`doing`, `decided`, `next`), `abstain` apart, `carry_over_delivered` (and by turn), `sessions_state_fresh`, the first question turn's input tokens (mean and median over sets, every round of the turn) and `summariser_calls` summed. |
+| `summariser_calls` | Design 11 §10.4: the calls the router booked, by label, from a set's first fed turn to its last question — every label but the reader's (`orchestrator`), the two judges' and the extractor's. On this build `orchestrator_summary` alone; a second label is a summariser coming back. A learning report carries the same per fed session in `learning.summariser_calls`. |
+
+The targets (design 11 §10.1): **K ≥ 80 % over the 60 answers, and at
+least +30 pp over K0** — read on the paired rows `compare.py` prints — and
+the episode split, re-run on L-episodes, at least 17 of 20 (CQ-10). On the
+local test model a K or K0 run is about an hour: 105 fed turns, 24 closes,
+64 questions and 64 judge calls.
 
 ## The judge
 

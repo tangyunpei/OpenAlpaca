@@ -638,7 +638,9 @@ fn sse_frame(event: &openalpaca_core::chat::ChatStreamEvent) -> (&'static str, S
 
 /// SSE data payload for a `done` event: the serde form of the event minus the
 /// `"event"` tag. Optional fields (`attachments_used`, `attachments_skipped`,
-/// `memory_used`, `delegation`) appear only when present.
+/// `memory_used`, `delegation`) appear only when present; the turn's
+/// continuity (`working_state_updated`, `continued_from` — design 11 §5) is
+/// always there, `false` and `null` on an ordinary turn.
 fn done_event_data(event: &openalpaca_core::chat::ChatStreamEvent) -> String {
     let mut value = serde_json::to_value(event).unwrap_or_default();
     if let Some(obj) = value.as_object_mut() {
@@ -1124,6 +1126,8 @@ mod tests {
             attachments_skipped: None,
             memory_used: None,
             delegation,
+            working_state_updated: false,
+            continued_from: None,
         }
     }
 
@@ -1151,6 +1155,8 @@ mod tests {
                 reason: openalpaca_core::memory::service::UsedReason::Recall,
             }]),
             delegation: None,
+            working_state_updated: false,
+            continued_from: None,
         };
         let data: serde_json::Value = serde_json::from_str(&done_event_data(&event)).unwrap();
         assert_eq!(data["memory_used"].as_array().map(Vec::len), Some(1));
@@ -1180,6 +1186,8 @@ mod tests {
             }]),
             memory_used: None,
             delegation: None,
+            working_state_updated: false,
+            continued_from: None,
         };
         let data: serde_json::Value = serde_json::from_str(&done_event_data(&event)).unwrap();
         assert_eq!(data["attachments_skipped"][0]["id"], "img-1");
@@ -1403,6 +1411,39 @@ mod tests {
         let data: serde_json::Value = serde_json::from_str(&done_event_data(&event)).unwrap();
         assert_eq!(data["delegation"]["task_id"], "task-123");
         assert_eq!(data["delegation"]["title"], "Research Rust");
+    }
+
+    /// **Design 11 §5 (owner decision CQ-7).** `done` says whether the turn
+    /// compacted — its working state changed — and which previous
+    /// conversation it was given, `{session_id, topic}`; an ordinary turn
+    /// says `false` and `null`, both always present.
+    #[test]
+    fn done_says_whether_the_working_state_changed_and_what_it_continued_from() {
+        let data: serde_json::Value =
+            serde_json::from_str(&done_event_data(&make_done(None))).unwrap();
+        assert_eq!(data["working_state_updated"], false);
+        assert!(data["continued_from"].is_null());
+        assert!(data.as_object().unwrap().contains_key("continued_from"));
+
+        let mut event = make_done(None);
+        if let openalpaca_core::chat::ChatStreamEvent::Done {
+            working_state_updated,
+            continued_from,
+            ..
+        } = &mut event
+        {
+            *working_state_updated = true;
+            *continued_from = Some(openalpaca_core::gateway::ContinuedFrom {
+                session_id: "s-prev".to_string(),
+                topic: "Lisbon trip".to_string(),
+            });
+        }
+        let data: serde_json::Value = serde_json::from_str(&done_event_data(&event)).unwrap();
+        assert_eq!(data["working_state_updated"], true);
+        assert_eq!(
+            data["continued_from"],
+            serde_json::json!({"session_id": "s-prev", "topic": "Lisbon trip"})
+        );
     }
 
     /// LQ4: clearing a conversation drops its turns not yet learned — the

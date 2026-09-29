@@ -683,6 +683,7 @@ impl TaskDispatcher {
                 compose_engine,
                 resume,
                 unattended,
+                session_id.as_deref(),
             )
             .await;
 

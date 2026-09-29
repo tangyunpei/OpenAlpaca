@@ -39,12 +39,6 @@ pub struct LearningConfig {
     /// makes the session due at once. Range 1..=100.
     #[serde(default = "default_learning_turns_per_flush")]
     pub turns_per_flush: u32,
-    /// Conversation summaries a day (design 09 §13.3, MD-16): at most this
-    /// many `episode` calls per UTC day, read durably from
-    /// `llm_usage_daily`, on top of the extraction's own daily caps, which
-    /// the summaries count under too. `0` writes none. Range 0..=1000.
-    #[serde(default = "default_learning_episode_max_per_day")]
-    pub episode_max_per_day: u32,
 }
 
 fn default_learning_enabled() -> bool {
@@ -56,9 +50,6 @@ fn default_learning_idle_secs() -> u64 {
 fn default_learning_turns_per_flush() -> u32 {
     10
 }
-fn default_learning_episode_max_per_day() -> u32 {
-    100
-}
 
 impl Default for LearningConfig {
     fn default() -> Self {
@@ -66,7 +57,6 @@ impl Default for LearningConfig {
             enabled: default_learning_enabled(),
             idle_secs: default_learning_idle_secs(),
             turns_per_flush: default_learning_turns_per_flush(),
-            episode_max_per_day: default_learning_episode_max_per_day(),
         }
     }
 }
@@ -277,6 +267,10 @@ pub struct MemoryConfig {
     /// How each turn's automatic recall delivers what it finds (design 09
     /// §13.2, MD-15): `index` (the default) or `excerpts`.
     pub recall_mode: RecallMode,
+    /// A new conversation on a lane and project is given the previous one's
+    /// working state for its first this-many user turns, while it has none
+    /// of its own (design 11 §4 (b), owner decision CQ-5); `0` never.
+    pub carry_over_turns: usize,
 }
 
 impl Default for MemoryConfig {
@@ -288,6 +282,7 @@ impl Default for MemoryConfig {
             msg_trunc_chars: 1500,
             memory_confidence_threshold: 0.65,
             recall_mode: RecallMode::default(),
+            carry_over_turns: 3,
         }
     }
 }

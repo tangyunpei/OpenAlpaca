@@ -507,7 +507,7 @@ The total injected context is capped at `budget_tokens * 4` characters (16,000 c
 
 ### What Else the Skill's Model Sees
 
-A slash or auto-routed skill runs as the turn's answer, so beyond the two blocks above its prompt carries the usual chat context: the persona documents, relevant memories, the lane's conversation summary and recent messages, and the query as the user message.
+A slash or auto-routed skill runs as the turn's answer, so beyond the two blocks above its prompt carries the usual chat context: the persona documents, relevant memories, the conversation's working state (and, on a new conversation's first turns, the previous conversation's) and recent messages, and the query as the user message.
 
 **Attachments.** Files attached to the turn travel in the skill's user message, exactly as they do on a normal chat turn:
 

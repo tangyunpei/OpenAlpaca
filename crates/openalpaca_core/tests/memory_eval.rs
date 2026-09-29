@@ -105,9 +105,9 @@ const MEMORY_WRITE_TOOLS: [&str; 3] = ["memory_store", "memory_update", "memory_
 mod eval;
 
 use eval::{
-    Category, ChangePair, Corpus, CorpusSession, CorpusTurn, GoldNote, Language, Question,
-    TurnMode, change_pairs, eval_dir, is_uuid, load_json, parse_instant, read_bytes, relied_on,
-    repo_root, sha256_hex,
+    Category, ChangePair, ContinuityKind, ContinuitySet, Corpus, CorpusSession, CorpusTurn,
+    GoldNote, Language, Question, TurnMode, change_pairs, eval_dir, is_uuid, load_json,
+    parse_instant, read_bytes, relied_on, repo_root, sha256_hex,
 };
 
 // ─── Seeding through the service ────────────────────────────────────────────
@@ -843,6 +843,11 @@ enum System {
     /// The MD-11/MD-12 check: suggestions against notes the user saved.
     #[serde(rename = "L-S")]
     LS,
+    /// The continuity split with the carry-over off (design 11 §10.1):
+    /// `[orchestrator.memory] carry_over_turns = 0`.
+    K0,
+    /// The continuity split with the carry-over on, as shipped.
+    K,
 }
 
 impl System {
@@ -854,6 +859,8 @@ impl System {
             "L" | "l" => Ok(System::L),
             "L0" | "l0" => Ok(System::L0),
             "L-S" | "l-s" | "LS" | "ls" => Ok(System::LS),
+            "K0" | "k0" => Ok(System::K0),
+            "K" | "k" => Ok(System::K),
             label @ ("A" | "a" | "B" | "b") => {
                 let upper = label.to_ascii_uppercase();
                 Err(format!(
@@ -866,7 +873,7 @@ impl System {
                 "system C (one bounded MEMORY.md) was never built; nothing measures it".to_string(),
             ),
             other => Err(format!(
-                "{other:?} is not one of none | D | E | L | L0 | L-S"
+                "{other:?} is not one of none | D | E | L | L0 | L-S | K0 | K"
             )),
         }
     }
@@ -879,6 +886,8 @@ impl System {
             System::L => "L",
             System::L0 => "L0",
             System::LS => "L-S",
+            System::K0 => "K0",
+            System::K => "K",
         }
     }
 
@@ -912,6 +921,17 @@ impl System {
                  the suggestion sessions fed with learning on, and each suggestion confirmed \
                  through the user-directed confirm; no questions"
             }
+            System::K0 => {
+                "the continuity split with the carry-over off (carry_over_turns = 0): each \
+                 conversation fed through the gateway up to its split and closed by the queue, \
+                 then the next conversation opened on the same lane and project and the \
+                 questions asked as its first turns; memory as D runs it, nothing seeded"
+            }
+            System::K => {
+                "the continuity split with the carry-over on (the shipped carry_over_turns): \
+                 as K0, so the next conversation's first turns carry the previous one's \
+                 working state"
+            }
         }
     }
 
@@ -925,9 +945,16 @@ impl System {
         matches!(self, System::L | System::LS)
     }
 
-    /// The held-out questions are asked: every system but L-S.
+    /// The held-out questions are asked, each on a fresh lane: every system
+    /// but L-S and the continuity split's.
     fn asks_questions(self) -> bool {
-        self != System::LS
+        !matches!(self, System::LS | System::K0 | System::K)
+    }
+
+    /// The continuity split (design 11 §10.1): conversations fed and
+    /// closed, and the next one's first turns asked where they left off.
+    fn is_continuity(self) -> bool {
+        matches!(self, System::K0 | System::K)
     }
 }
 
@@ -962,7 +989,13 @@ struct MainLoopBudget {
 impl MainLoopBudget {
     fn for_system(system: System, shipped: &RoutingConfig) -> Self {
         match system {
-            System::NoMemory | System::D | System::L | System::L0 | System::LS => Self {
+            System::NoMemory
+            | System::D
+            | System::L
+            | System::L0
+            | System::LS
+            | System::K0
+            | System::K => Self {
                 max_rounds: shipped.main_loop_max_rounds,
                 max_tools_per_round: shipped.main_loop_max_tools_per_round,
                 follow_up_search_bound: None,
@@ -1102,6 +1135,17 @@ fn recall_mode_from_env_value(value: Option<String>) -> Result<Option<RecallMode
         })
 }
 
+/// The question file a system asks when `OPENALPACA_MEMORY_EVAL_QUESTIONS`
+/// names none: the continuity split for K0 and K, the held-out set for the
+/// others.
+fn default_questions(system: Option<System>) -> PathBuf {
+    eval_dir().join(if system.is_some_and(System::is_continuity) {
+        "questions-continuity.json"
+    } else {
+        "questions-heldout.json"
+    })
+}
+
 fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
@@ -1151,7 +1195,7 @@ impl Settings {
             }
             None if rejudge_from.is_some() => None,
             None => panic!(
-                "memory_eval: OPENALPACA_MEMORY_EVAL_SYSTEM must be one of none | D | E | L | L0 | L-S \
+                "memory_eval: OPENALPACA_MEMORY_EVAL_SYSTEM must be one of none | D | E | L | L0 | L-S | K0 | K \
                  (or set OPENALPACA_MEMORY_EVAL_REJUDGE to re-grade an archived report)"
             ),
         };
@@ -1206,7 +1250,7 @@ impl Settings {
         let questions_named = env_nonempty("OPENALPACA_MEMORY_EVAL_QUESTIONS").is_some();
         let questions_path = env_nonempty("OPENALPACA_MEMORY_EVAL_QUESTIONS")
             .map(PathBuf::from)
-            .unwrap_or_else(|| eval_dir().join("questions-heldout.json"));
+            .unwrap_or_else(|| default_questions(system));
         let category = env_nonempty("OPENALPACA_MEMORY_EVAL_CATEGORY").map(|v| {
             Category::ALL
                 .into_iter()
@@ -1368,6 +1412,8 @@ struct Conditions {
     /// The learning phase's conditions (L, L0, L-S, a replay); `null` for D,
     /// E and none.
     learning: Option<LearningConditions>,
+    /// The continuity split's conditions (K0, K); `null` for the others.
+    continuity: Option<ContinuityConditions>,
 }
 
 /// How the learning phase ran (design 09 §7.2).
@@ -1395,10 +1441,12 @@ struct LearningConditions {
     /// `0` calls is no cap.
     extract_max_calls_per_day: u32,
     extract_max_daily_cost_usd: f64,
-    /// `[orchestrator.learning] episode_max_per_day`, the conversation
-    /// summaries' daily count: lifted to the validation's maximum for a
-    /// system that learns (the L8 fix slice's H1).
-    episode_max_per_day: u32,
+    /// `[orchestrator.costs] summary_max_daily_cost_usd`, the summariser's
+    /// daily ceiling, which a conversation's close reads before refreshing
+    /// its working state (design 11 §3.1): lifted for a system that learns,
+    /// as the conversation summaries' daily count was before a summary was
+    /// projected with no call (the L8 fix slice's H1; design 11 CQ-2).
+    summary_max_daily_cost_usd: f64,
     /// The questions run with `[orchestrator.learning] enabled = false`.
     learning_during_questions: bool,
     /// Every fed turn is unattended, as every question is (M6).
@@ -1613,6 +1661,10 @@ struct Row {
     /// `mode`, `tools` and reader calls, tokens and cost are read from those
     /// events and may be undercounted (`totals.events_lagged`).
     events_lagged: u64,
+    // ── Added with the continuity split (design 11 §10.1) ─────────────────
+    /// K0, K: the set, the question's kind and turn, and whether its request
+    /// carried the previous conversation; `null` for every other system.
+    continuity: Option<ContinuityRow>,
 }
 
 /// A note a memory read tool returned, named as `memory_used` names it.
@@ -1712,6 +1764,9 @@ struct Report {
     /// L, L0, L-S and a replay: what the learning phase did and what the
     /// store holds after it (design 09 §7.3). `null` for D, E and none.
     learning: Option<LearningResults>,
+    /// K0, K: each set's fed conversation and close, and the split's
+    /// measures (design 11 §10.1). `null` for every other system.
+    continuity: Option<ContinuityResults>,
 }
 
 fn now_rfc3339() -> String {
@@ -2294,21 +2349,16 @@ const FLUSH_FORCED_RERUN: &str = "forced_rerun";
 const LIFTED_DAILY_COST_USD: f64 = 1_000_000.0;
 const COVERAGE_JUDGE_AGENT_ID: &str = "memory_eval_coverage_judge";
 
-/// The most conversation summaries a day the config's validation accepts
-/// (`DaemonConfig::validate`'s clamp), read from it rather than copied.
-fn lifted_episode_cap() -> u32 {
-    let mut cfg = openalpaca_core::daemon_config::DaemonConfig::default();
-    cfg.orchestrator.learning.episode_max_per_day = u32::MAX;
-    cfg.validate();
-    cfg.orchestrator.learning.episode_max_per_day
-}
-
 /// The eval's daemon config for a run: no workflow can dispatch, task-output
 /// extraction is off, and — for a system that learns — the extraction's
-/// daily caps and the conversation summaries' daily count are lifted, so a
-/// cap never stops a learning phase part-way (the summaries' since the L8
-/// fix slice's H1: all 51 sessions are fed on one UTC day, and at its
-/// default of 20 the count stopped every summary from the 21st session on).
+/// daily caps and the summariser's daily ceiling are lifted, so a cap never
+/// stops a learning phase part-way (the L8 fix slice's H1: all 51 sessions
+/// are fed on one UTC day, and the conversation summaries' old daily count,
+/// at its default of 20, stopped every summary from the 21st session on; a
+/// summary is now projected at a conversation's close, whose one call is
+/// the summariser's — design 11 §3.4). The continuity split (K0, K) lifts
+/// the summariser's ceiling too, for its closes, and K0 turns the
+/// carry-over off (`carry_over_turns = 0`, design 11 §10.1).
 /// `recall_mode` is `OPENALPACA_MEMORY_EVAL_RECALL_MODE`: every automatic
 /// recall of the run reads it from this config (design 09 §13.4); `None`
 /// keeps the default.
@@ -2325,13 +2375,19 @@ fn eval_daemon_config(
     cfg.orchestrator.routing.max_workflows_per_lane = 0;
     cfg.orchestrator.costs.task_extract_enabled = false;
     // Learning runs only in the learning phase of a system that learns; the
-    // questions switch it off (`learning_off`).
-    cfg.orchestrator.learning.enabled = system.learns();
+    // questions switch it off (`learning_off`). The continuity split needs
+    // it on for the queue's close, which it turns off with the rest of the
+    // queue (design 11 rev 1.3 item 9); the manual queue flushes nothing.
+    cfg.orchestrator.learning.enabled = system.learns() || system.is_continuity();
     if system.learns() {
         cfg.orchestrator.costs.extract_max_calls_per_day = 0;
         cfg.orchestrator.costs.extract_max_daily_cost_usd = LIFTED_DAILY_COST_USD;
-        // The maximum, never 0: 0 writes no summary at all.
-        cfg.orchestrator.learning.episode_max_per_day = lifted_episode_cap();
+    }
+    if system.learns() || system.is_continuity() {
+        cfg.orchestrator.costs.summary_max_daily_cost_usd = LIFTED_DAILY_COST_USD;
+    }
+    if system == System::K0 {
+        cfg.orchestrator.memory.carry_over_turns = 0;
     }
     let budget = MainLoopBudget::for_system(system, &cfg.orchestrator.routing);
     cfg.orchestrator.routing.main_loop_max_rounds = budget.max_rounds;
@@ -2385,11 +2441,13 @@ impl openalpaca_core::gateway::MessageHandler for EvalHandler {
         self.0.delegation_map.remove(&request_id);
         self.0.attachments_skipped_map.remove(&request_id);
         let memory_used = self.0.take_memory_used(request_id);
+        let continuity = self.0.take_continuity(request_id);
         Ok(openalpaca_core::gateway::HandleResult {
             model: meta.as_ref().map(|m| m.model.clone()),
             tokens_in: meta.as_ref().map(|m| m.tokens_in),
             tokens_out: meta.as_ref().map(|m| m.tokens_out),
             memory_used,
+            continuity,
             ..openalpaca_core::gateway::HandleResult::text(content?)
         })
     }
@@ -2491,6 +2549,23 @@ impl ReadLog {
     fn take(&self, request_id: uuid::Uuid) -> TurnReads {
         let mut log = self.0.lock().unwrap_or_else(|p| p.into_inner());
         log.remove(&request_id).unwrap_or_default()
+    }
+
+    /// Every request's reads, removed from the log, as one turn's: a turn
+    /// fed through the gateway, whose request id the harness never sees —
+    /// the log is drained before the turn and again after it.
+    fn drain(&self) -> TurnReads {
+        let mut log = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let mut all = TurnReads::default();
+        for (_, turn) in log.drain() {
+            for id in turn.read {
+                if !all.read.contains(&id) {
+                    all.read.push(id);
+                }
+            }
+            all.listings.extend(turn.listings);
+        }
+        all
     }
 }
 
@@ -3179,6 +3254,11 @@ struct Learner {
     /// Write each session's conversation summaries at its end (design 09
     /// §13.3): L does, for the episode split.
     summaries: bool,
+    /// The reader's router: the calls it booked under each label, read
+    /// around every fed turn and session ([`calls_by_label`]).
+    router: Option<Arc<openalpaca_llm::LlmRouter>>,
+    /// What the memory read tools returned, drained around every fed turn.
+    reads: Arc<ReadLog>,
 }
 
 #[derive(Default)]
@@ -3188,6 +3268,80 @@ struct Fed {
     episodes: Vec<EpisodeRecord>,
     transcript: Vec<TranscriptSession>,
     wall_ms: u64,
+    /// Each fed turn's answer, in feed order — kept in memory for the
+    /// continuity split's questions (design 11 §10.1); a learning run
+    /// reports none of it.
+    answers: Vec<FedAnswer>,
+    /// The summariser's calls by label for each fed session, from its first
+    /// turn to its last flush (design 11 §10.4).
+    summariser_calls: Vec<SessionCalls>,
+}
+
+/// One fed turn's answer as the gateway returned it, with what the bus, the
+/// router and the read tools said of the turn beyond its [`TurnRecord`].
+struct FedAnswer {
+    content: String,
+    is_error: bool,
+    memory_used: Vec<openalpaca_core::memory::service::MemoryUsed>,
+    /// The turn's continuity, as the daemon's bridge takes it for `done`
+    /// (design 11 §5): the previous conversation its request carried.
+    continuity: openalpaca_core::gateway::TurnContinuity,
+    mode: String,
+    ack_ms: u64,
+    cost_usd: f64,
+    /// The model calls the router booked to the main loop in the turn.
+    reader_rounds: u64,
+    reads: TurnReads,
+}
+
+/// The labels a call is booked under that are not a summariser's (design
+/// 11 §10.4): the reader's (the main loop), the two judges' and chat
+/// learning's extractor's — `memory::learning::extractor::AGENT_LABEL`,
+/// crate-private.
+const NOT_SUMMARISER_LABELS: [&str; 4] = [
+    openalpaca_core::orchestrator::MAIN_LOOP_AGENT_ID,
+    JUDGE_AGENT_ID,
+    COVERAGE_JUDGE_AGENT_ID,
+    "orchestrator_user_extract",
+];
+
+/// The calls the router has booked so far under each label: its cost
+/// tracker's `total_requests`, one a response.
+async fn calls_by_label(router: &openalpaca_llm::LlmRouter) -> HashMap<String, u64> {
+    router
+        .cost_tracker
+        .snapshot_for_flush()
+        .await
+        .agent_usage
+        .into_iter()
+        .map(|(label, usage)| (label, usage.total_requests))
+        .collect()
+}
+
+/// The summariser's calls between two readings of [`calls_by_label`], by
+/// label (design 11 §10.4): the new calls of every label but
+/// [`NOT_SUMMARISER_LABELS`]. On this build that is `orchestrator_summary`
+/// alone — the loop's compaction, the turn end's refresh and the close share
+/// one writer (§1) — so a second label is a summariser coming back.
+fn summariser_calls(
+    before: &HashMap<String, u64>,
+    after: &HashMap<String, u64>,
+) -> BTreeMap<String, u64> {
+    after
+        .iter()
+        .filter(|(label, _)| !NOT_SUMMARISER_LABELS.contains(&label.as_str()))
+        .filter_map(|(label, n)| {
+            let new = n.saturating_sub(before.get(label).copied().unwrap_or(0));
+            (new > 0).then(|| (label.clone(), new))
+        })
+        .collect()
+}
+
+/// One corpus session's summariser calls, by label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SessionCalls {
+    session: String,
+    calls: BTreeMap<String, u64>,
 }
 
 impl Learner {
@@ -3217,6 +3371,16 @@ impl Learner {
             project: project.to_path_buf(),
             turns_per_flush,
             summaries: false,
+            router: stack.orch.llm_router.clone(),
+            reads: stack.reads.clone(),
+        }
+    }
+
+    /// [`calls_by_label`] of the reader's router; empty with none.
+    async fn calls_by_label(&self) -> HashMap<String, u64> {
+        match &self.router {
+            Some(router) => calls_by_label(router).await,
+            None => HashMap::new(),
         }
     }
 
@@ -3238,6 +3402,13 @@ impl Learner {
     /// summaries, after its facts — the quiet period, the switch and the
     /// drain all come to that one deterministic flush here.
     async fn feed(&self, sessions: &[&CorpusSession], learn: bool) -> Fed {
+        self.feed_with(sessions, learn, true).await
+    }
+
+    /// [`Self::feed`], each session opened with `inherit` (design 11 CQ-5):
+    /// `false` is "Start fresh", a conversation never given the previous
+    /// one's block.
+    async fn feed_with(&self, sessions: &[&CorpusSession], learn: bool, inherit: bool) -> Fed {
         use openalpaca_api::events::EventSource;
         use openalpaca_core::events::SystemEvent;
         use openalpaca_core::gateway::GatewayRequest;
@@ -3254,7 +3425,13 @@ impl Learner {
             let workspace = session.workspace.map(|_| project.clone());
             let repo = ConversationRepository::new(&self.db);
             let created = repo
-                .create_session(&lane, "gui", workspace.as_deref(), Some(&session.id))
+                .create_session_inheriting(
+                    &lane,
+                    "gui",
+                    workspace.as_deref(),
+                    Some(&session.id),
+                    inherit,
+                )
                 .unwrap_or_else(|e| panic!("memory_eval: cannot open session {}: {e}", session.id));
             repo.activate_session(&created.id)
                 .unwrap_or_else(|e| panic!("memory_eval: cannot activate {}: {e}", session.id));
@@ -3268,8 +3445,11 @@ impl Learner {
                 session.turns.len()
             );
             let first_turn = fed.turns.len();
+            let session_calls = self.calls_by_label().await;
             for (ti, turn) in session.turns.iter().enumerate() {
                 let mut rx = self.bus.subscribe();
+                self.reads.drain();
+                let calls_before = self.calls_by_label().await;
                 let t0 = Instant::now();
                 let response = self
                     .gateway
@@ -3293,6 +3473,22 @@ impl Learner {
                     })
                     .await;
                 let latency_ms = t0.elapsed().as_millis() as u64;
+                let loop_calls = |calls: &HashMap<String, u64>| {
+                    calls.get(MAIN_LOOP_AGENT_ID).copied().unwrap_or(0)
+                };
+                let reader_rounds = loop_calls(&self.calls_by_label().await)
+                    .saturating_sub(loop_calls(&calls_before));
+                let mut answer = FedAnswer {
+                    content: String::new(),
+                    is_error: response.is_error,
+                    memory_used: Vec::new(),
+                    continuity: Default::default(),
+                    mode: "?".to_string(),
+                    ack_ms: 0,
+                    cost_usd: 0.0,
+                    reader_rounds,
+                    reads: self.reads.drain(),
+                };
                 let mut record = TurnRecord {
                     session: session.id.clone(),
                     turn: ti,
@@ -3319,12 +3515,18 @@ impl Learner {
                             model,
                             input_tokens,
                             output_tokens,
+                            cost_usd,
                             ..
                         }) if agent_id == MAIN_LOOP_AGENT_ID => {
                             record.reader_llm_calls += 1;
                             record.reader_tokens_in += u64::from(input_tokens);
                             record.reader_tokens_out += u64::from(output_tokens);
+                            answer.cost_usd += cost_usd;
                             models.insert(model);
+                        }
+                        Ok(SystemEvent::OrchestrationStage { mode, ack_ms, .. }) => {
+                            answer.mode = mode;
+                            answer.ack_ms = ack_ms;
                         }
                         Ok(SystemEvent::ToolExecuted {
                             agent_id,
@@ -3358,6 +3560,10 @@ impl Learner {
                     if record.is_error { " (error)" } else { "" }
                 );
                 fed.turns.push(record);
+                answer.content = response.content;
+                answer.memory_used = response.memory_used;
+                answer.continuity = response.continuity;
+                fed.answers.push(answer);
                 if learn && (ti + 1) % self.turns_per_flush.max(1) as usize == 0 {
                     let mut flush = flush_one(
                         &self.queue,
@@ -3398,6 +3604,10 @@ impl Learner {
                     );
                 }
             }
+            fed.summariser_calls.push(SessionCalls {
+                session: session.id.clone(),
+                calls: summariser_calls(&session_calls, &self.calls_by_label().await),
+            });
             // Each fed turn persisted one user row, in order.
             let user_rows: Vec<i64> = repo
                 .learning_window(&created.id, 0, 100_000)
@@ -5044,6 +5254,10 @@ struct LearningResults {
     /// The conversation summaries' flushes (design 09 §13.3): L's, and a
     /// replay's when it asks questions.
     episode_flushes: Vec<EpisodeRecord>,
+    /// Each fed session's summariser calls by label, from its first turn to
+    /// its close (design 11 §10.4): a live feed's; a replay's are not
+    /// counted.
+    summariser_calls: Vec<SessionCalls>,
     /// The learned store, conversation summaries left out: what every fact
     /// measure below reads.
     learned: Vec<LearnedNote>,
@@ -5783,6 +5997,7 @@ fn new_report(system: System) -> Report {
         totals: None,
         rows: Vec::new(),
         learning: None,
+        continuity: None,
     }
 }
 
@@ -5824,7 +6039,7 @@ fn learning_conditions(
         extraction_model: cfg.orchestrator.costs.extraction_model.clone(),
         extract_max_calls_per_day: cfg.orchestrator.costs.extract_max_calls_per_day,
         extract_max_daily_cost_usd: cfg.orchestrator.costs.extract_max_daily_cost_usd,
-        episode_max_per_day: cfg.orchestrator.learning.episode_max_per_day,
+        summary_max_daily_cost_usd: cfg.orchestrator.costs.summary_max_daily_cost_usd,
         learning_during_questions: false,
         unattended: true,
         seeded_old_notes,
@@ -5871,7 +6086,21 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
     let coverage_prompt_path = dir.join("coverage-judge-prompt.md");
     let corpus_path = dir.join("conversations-learning.json");
     let (notes, notes_sha256) = load_json::<Vec<GoldNote>>(&notes_path);
-    let (all_questions, questions_sha256) = load_json::<Vec<Question>>(&settings.questions_path);
+    // K0, K: the continuity split's sets (design 11 §10.1); a smoke run's
+    // `OPENALPACA_MEMORY_EVAL_LIMIT` takes the first N sets.
+    let continuity_sets = system
+        .is_continuity()
+        .then(|| load_json::<Vec<ContinuitySet>>(&settings.questions_path));
+    let sets: &[ContinuitySet] = continuity_sets.as_ref().map_or(&[], |(sets, _)| {
+        &sets[..sets.len().min(settings.limit.unwrap_or(usize::MAX))]
+    });
+    let (all_questions, questions_sha256) = match &continuity_sets {
+        Some((sets, sha256)) => (
+            sets.iter().flat_map(ContinuitySet::as_questions).collect(),
+            sha256.clone(),
+        ),
+        None => load_json::<Vec<Question>>(&settings.questions_path),
+    };
     let judge_bytes = read_bytes(&judge_prompt_path);
     let judge_prompt_sha256 = sha256_hex(&judge_bytes);
     let judge_template = String::from_utf8(judge_bytes).expect("judge prompt is UTF-8");
@@ -5882,7 +6111,12 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
     let corpus = system
         .feeds_corpus()
         .then(|| load_json::<Corpus>(&corpus_path));
-    let questions: Vec<Question> = if system.asks_questions() {
+    let continuity_corpus = system
+        .is_continuity()
+        .then(|| load_json::<Corpus>(&corpus_path));
+    let questions: Vec<Question> = if system.is_continuity() {
+        sets.iter().flat_map(ContinuitySet::as_questions).collect()
+    } else if system.asks_questions() {
         all_questions
             .iter()
             .filter(|q| settings.category.is_none_or(|c| q.category == c))
@@ -5893,7 +6127,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
         Vec::new()
     };
     assert!(
-        !system.asks_questions() || !questions.is_empty(),
+        !(system.asks_questions() || system.is_continuity()) || !questions.is_empty(),
         "memory_eval: no questions selected"
     );
 
@@ -5957,7 +6191,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
     let to_seed: Vec<GoldNote> = match system {
         System::D | System::E => notes.clone(),
         System::LS => ls_seed_notes(&notes, &pairs),
-        System::NoMemory | System::L | System::L0 => Vec::new(),
+        System::NoMemory | System::L | System::L0 | System::K0 | System::K => Vec::new(),
     };
     let seed = match &service {
         Some(service) if !to_seed.is_empty() => {
@@ -5985,6 +6219,22 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
         .map(|(c, _)| corpus_sessions(c, system, settings.session_limit))
         .unwrap_or_default();
     let recall = RecallBudget::for_mode(recall_mode);
+    let continuity_conditions =
+        continuity_corpus
+            .as_ref()
+            .map(|(_, corpus_sha256)| ContinuityConditions {
+                corpus_path: corpus_path.to_string_lossy().into_owned(),
+                corpus_sha256: corpus_sha256.clone(),
+                sets: sets.len(),
+                turns_fed: sets.iter().map(|s| s.split).sum(),
+                carry_over_turns: cfg.orchestrator.memory.carry_over_turns,
+                lane: format!("{owner_id}:gui"),
+                close: "the learning queue's deterministic close after the fed turns \
+                        (flush_episodes: the working state's refresh, then the summaries it \
+                        projects), retried as a summary flush is; no learning flush; the queue \
+                        is manual, so nothing else flushes",
+                summary_max_daily_cost_usd: cfg.orchestrator.costs.summary_max_daily_cost_usd,
+            });
     report.conditions = Some(Conditions {
         owner_id: owner_id.clone(),
         llm_toml: settings.llm_toml.to_string_lossy().into_owned(),
@@ -6069,13 +6319,15 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
             }
             c
         }),
+        continuity: continuity_conditions,
     });
     write_report(&settings.report_path, &report);
 
     // ── The learning phase (L, L0, L-S) ─────────────────────────────────
     // The queue runs in `Manual` mode (design 09 §1.5): nothing starts a
     // flush on its own, so reader timing cannot change what is learned when.
-    let queue = corpus.as_ref().and(service.as_ref()).map(|service| {
+    let fed_corpus = corpus.as_ref().or(continuity_corpus.as_ref());
+    let queue = fed_corpus.and(service.as_ref()).map(|service| {
         LearningQueue::new(
             LearningDeps {
                 db: db.clone(),
@@ -6134,6 +6386,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
         learning.turns = fed.turns;
         learning.flushes = fed.flushes;
         learning.episode_flushes = fed.episodes;
+        learning.summariser_calls = fed.summariser_calls;
         transcript = Some(t);
         report.learning = Some(std::mem::take(&mut learning));
         write_report(&settings.report_path, &report);
@@ -6174,6 +6427,29 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
         }
         report.learning = Some(learning);
         write_report(&settings.report_path, &report);
+    }
+
+    // ── K0, K: the continuity split (design 11 §10.1) ──────────────────
+    if let (Some((corpus, _)), Some(queue)) = (&continuity_corpus, &queue) {
+        let learner = Learner::new(
+            &stack,
+            queue,
+            &bus,
+            &db,
+            &owner_id,
+            &project,
+            cfg.orchestrator.learning.turns_per_flush,
+        );
+        continuity_phase(
+            &learner,
+            corpus,
+            sets,
+            judge_gate.as_mut(),
+            &judge_template,
+            &mut report,
+            &settings.report_path,
+        )
+        .await;
     }
 
     // ── Ask every question through the front door (learning off) ────────
@@ -6223,7 +6499,7 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
 
     // ── Totals ──────────────────────────────────────────────────────────
     let wall_ms = started.elapsed().as_millis() as u64;
-    if system.asks_questions() {
+    if system.asks_questions() || system.is_continuity() {
         let judge_cost = router
             .cost_tracker
             .get_agent_usage(JUDGE_AGENT_ID)
@@ -6236,6 +6512,9 @@ async fn run_system(settings: &Settings, system: System, router: Arc<openalpaca_
     }
     if let Some(learning) = &report.learning {
         print_learning(learning);
+    }
+    if let Some(totals) = report.continuity.as_ref().and_then(|c| c.totals.as_ref()) {
+        print_continuity(totals);
     }
     report.status = "complete";
     report.run_finished_at = Some(now_rfc3339());
@@ -6797,6 +7076,7 @@ fn replay_conditions(
         judge_same_family: judge.map(|g| g.choice.judge_same_family),
         judge_is_extractor: judge.map(|g| g.choice.judge_is_extractor),
         learning: Some(learning),
+        continuity: None,
     }
 }
 
@@ -6871,9 +7151,46 @@ fn print_totals(label: &str, t: &Totals) {
     );
 }
 
+fn print_continuity(t: &ContinuityTotals) {
+    let line = |b: &Bucket| {
+        format!(
+            "{}/{} ({:.1}%)",
+            b.correct,
+            b.n,
+            b.accuracy.unwrap_or(0.0) * 100.0
+        )
+    };
+    println!(
+        "continuity: answers {} — {}; abstentions {}; carried {}/{} rows (by turn {:?}); \
+         state fresh {}/{} sets; turn-1 input tokens mean={:.0} median={:.0}; summariser calls {:?}",
+        line(&t.answers),
+        t.by_kind
+            .iter()
+            .map(|(kind, b)| format!("{kind} {}", line(b)))
+            .collect::<Vec<_>>()
+            .join(", "),
+        line(&t.abstain),
+        t.carry_over_delivered,
+        t.rows,
+        t.carry_over_delivered_by_turn,
+        t.sessions_state_fresh,
+        t.sessions,
+        t.turn1_tokens_in_mean.unwrap_or(0.0),
+        t.turn1_tokens_in_median.unwrap_or(0.0),
+        t.summariser_calls,
+    );
+}
+
 fn print_learning(l: &LearningResults) {
     for w in &l.warnings {
         println!("!! WARNING: {w}");
+    }
+    if !l.summariser_calls.is_empty() {
+        println!(
+            "summariser calls by label over {} fed session(s): {:?}",
+            l.summariser_calls.len(),
+            total_calls(l.summariser_calls.iter().map(|s| &s.calls))
+        );
     }
     let pct = |share: Option<f64>| format!("{:.1}%", share.unwrap_or(0.0) * 100.0);
     if let Some(c) = &l.coverage {
@@ -7217,6 +7534,7 @@ async fn ask_questions(
             relied_notes_read_or_excerpted: delivered.relied_notes_read_or_excerpted,
             reader_rounds,
             events_lagged: obs.events_lagged,
+            continuity: None,
         };
 
         // A turn that errored still gets judged: an empty answer to a
@@ -7270,6 +7588,426 @@ async fn ask_questions(
             }
         );
         report.rows.push(row);
+        write_report(report_path, &*report);
+    }
+}
+
+// ─── The continuity split (design 11 §10.1) ─────────────────────────────────
+
+/// How the continuity split ran (design 11 §10.1).
+#[derive(Debug, Serialize)]
+struct ContinuityConditions {
+    corpus_path: String,
+    corpus_sha256: String,
+    /// The sets run: every set of the question file, or its first
+    /// `OPENALPACA_MEMORY_EVAL_LIMIT` (a smoke run).
+    sets: usize,
+    /// The turns fed before the splits.
+    turns_fed: usize,
+    /// `[orchestrator.memory] carry_over_turns`: `0` for K0.
+    carry_over_turns: usize,
+    /// The one lane every conversation runs on, the sets in file order
+    /// (story order): each conversation opened as "New chat" opens one, on
+    /// the scratch project when its corpus session has a project and on
+    /// none when it has none.
+    lane: String,
+    /// What closes a fed conversation.
+    close: &'static str,
+    /// `[orchestrator.costs] summary_max_daily_cost_usd`, lifted: the
+    /// close's refresh reads it first (design 11 §3.1).
+    summary_max_daily_cost_usd: f64,
+}
+
+/// One question row of the continuity split.
+#[derive(Debug, Serialize)]
+struct ContinuityRow {
+    set: String,
+    /// The corpus session the set continues.
+    session: String,
+    kind: ContinuityKind,
+    /// The turn of the next conversation that asked it: 1, 2 or 3.
+    turn: usize,
+    /// §10.1's `carry_over_delivered`: the turn's request carried the
+    /// previous conversation's block, and it named the fed conversation —
+    /// the turn's continuity as the daemon's bridge takes it for
+    /// `done.continued_from`, recorded where the request is assembled only
+    /// when its messages hold the block (design 11 rev 1.5 item 6).
+    carry_over_delivered: bool,
+    /// The topic `continued_from` named; `null` when nothing was carried.
+    continued_from_topic: Option<String>,
+}
+
+/// One set: the fed conversation, its close, and what its row held after.
+#[derive(Debug, Serialize)]
+struct ContinuitySession {
+    set: String,
+    session: String,
+    split: usize,
+    /// The fed conversation, and the next one, where the questions were
+    /// asked.
+    fed_session_id: String,
+    asked_session_id: Option<String>,
+    fed_turns: Vec<TurnRecord>,
+    /// The close: its refresh's calls and the summaries it projected.
+    close: EpisodeRecord,
+    /// The fed conversation's working state after its close, as stored (the
+    /// JSON; `""` for none): what the previous conversation's block renders.
+    state: String,
+    state_through: i64,
+    /// The fed conversation's newest row: the last fed turn's answer.
+    last_fed_row: Option<i64>,
+    /// §10.1's `state_fresh`: the delivered state covers every fed row —
+    /// `state_through ≥ last_fed_row`. The block is read live on every turn
+    /// and nothing writes the fed conversation after its close, so this is
+    /// the `through` of every block its next conversation was given.
+    state_fresh: bool,
+    episode_note_id: Option<String>,
+    /// The summariser's calls by label (§10.4), from the first fed turn to
+    /// the last question.
+    summariser_calls: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ContinuityTotals {
+    /// The target's answers (design 11 §10.1: K ≥ 80 % over the 60): every
+    /// question that expects one — no `expect_abstain`.
+    answers: Bucket,
+    /// Those answers by kind: `doing`, `decided`, `next`.
+    by_kind: BTreeMap<String, Bucket>,
+    /// The questions about work the user dropped (`expect_abstain`).
+    abstain: Bucket,
+    rows: usize,
+    /// Rows whose request carried the fed conversation's block, and those
+    /// of each turn of the next conversation (1, 2, 3).
+    carry_over_delivered: usize,
+    carry_over_delivered_by_turn: BTreeMap<usize, usize>,
+    sessions: usize,
+    sessions_state_fresh: usize,
+    /// Each set's first question turn's input tokens (every round of the
+    /// turn): mean and median.
+    turn1_tokens_in_mean: Option<f64>,
+    turn1_tokens_in_median: Option<f64>,
+    summariser_calls: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct ContinuityResults {
+    sessions: Vec<ContinuitySession>,
+    totals: Option<ContinuityTotals>,
+}
+
+/// The previous conversation a turn's request carried, when it is the one
+/// fed (§10.1's `carry_over_delivered`): a block naming any other
+/// conversation is not the carry-over the split measures.
+fn carried_over(
+    continuity: openalpaca_core::gateway::TurnContinuity,
+    fed_id: &str,
+) -> Option<openalpaca_core::gateway::ContinuedFrom> {
+    continuity.continued_from.filter(|c| c.session_id == fed_id)
+}
+
+/// Calls by label, summed over sessions.
+fn total_calls<'a>(
+    each: impl IntoIterator<Item = &'a BTreeMap<String, u64>>,
+) -> BTreeMap<String, u64> {
+    let mut total = BTreeMap::new();
+    for calls in each {
+        for (label, n) in calls {
+            *total.entry(label.clone()).or_insert(0) += n;
+        }
+    }
+    total
+}
+
+/// The continuity split's measures (design 11 §10.1) over its rows and sets.
+fn continuity_totals(rows: &[Row], sessions: &[ContinuitySession]) -> ContinuityTotals {
+    let mut answers = Bucket::default();
+    let mut by_kind: BTreeMap<String, Bucket> = BTreeMap::new();
+    let mut abstain = Bucket::default();
+    let mut carried = 0;
+    let mut carried_by_turn = BTreeMap::new();
+    let mut turn1 = Vec::new();
+    let mut n = 0;
+    for row in rows {
+        let Some(c) = &row.continuity else {
+            continue;
+        };
+        n += 1;
+        let correct = usize::from(row.correct == Some(true));
+        let bump = |b: &mut Bucket| {
+            b.n += 1;
+            b.correct += correct;
+        };
+        if row.expect_abstain {
+            bump(&mut abstain);
+        } else {
+            bump(&mut answers);
+            bump(by_kind.entry(c.kind.as_str().to_string()).or_default());
+        }
+        if c.carry_over_delivered {
+            carried += 1;
+            *carried_by_turn.entry(c.turn).or_insert(0) += 1;
+        }
+        if c.turn == 1 {
+            turn1.push(row.reader_tokens_in as f64);
+        }
+    }
+    bucket_accuracy(&mut answers);
+    bucket_accuracy(&mut abstain);
+    by_kind.values_mut().for_each(bucket_accuracy);
+    ContinuityTotals {
+        answers,
+        by_kind,
+        abstain,
+        rows: n,
+        carry_over_delivered: carried,
+        carry_over_delivered_by_turn: carried_by_turn,
+        sessions: sessions.len(),
+        sessions_state_fresh: sessions.iter().filter(|s| s.state_fresh).count(),
+        turn1_tokens_in_mean: mean(turn1.iter().copied()),
+        turn1_tokens_in_median: median(turn1.iter().copied()),
+        summariser_calls: total_calls(sessions.iter().map(|s| &s.summariser_calls)),
+    }
+}
+
+/// The continuity split (design 11 §10.1), K0's and K's phase: for each set,
+/// its corpus conversation fed up to the split through the gateway, in a new
+/// session on the learner's one lane opened fresh (`inherit: false`, so no
+/// earlier set reaches it); closed by the queue's deterministic
+/// close (`flush_episodes`, retried as a summary flush is); then the next
+/// session opened on the same lane and project — "New chat" — and the
+/// set's questions asked as its first turns through the gateway, each judged
+/// with the frozen prompt. The rows go to `report.rows` and each set to
+/// `report.continuity`, and the report is written after every set.
+async fn continuity_phase(
+    learner: &Learner,
+    corpus: &Corpus,
+    sets: &[ContinuitySet],
+    mut gate: Option<&mut JudgeGate>,
+    judge_template: &str,
+    report: &mut Report,
+    report_path: &Path,
+) {
+    use openalpaca_storage::ConversationRepository;
+
+    let router = learner
+        .router
+        .clone()
+        .expect("memory_eval: the continuity split needs the reader's router");
+    for set in sets {
+        let source = corpus
+            .sessions
+            .iter()
+            .find(|s| s.id == set.session)
+            .unwrap_or_else(|| {
+                panic!("memory_eval: {}: no corpus session {}", set.id, set.session)
+            });
+        let calls_before = learner.calls_by_label().await;
+        let fed_part = CorpusSession {
+            turns: source.turns[..set.split].to_vec(),
+            ..source.clone()
+        };
+        // The fed conversation starts fresh: on the one lane its
+        // predecessor is the last set's asked conversation, whose block
+        // would reach the fed turns and, through them, the state (design
+        // 11 rev 1.6 item 3).
+        let fed = learner.feed_with(&[&fed_part], false, false).await;
+        let fed_id = fed.transcript[0].session_id.clone();
+        let close = episode_one(
+            &learner.queue,
+            &learner.bus,
+            &learner.db,
+            &fed_id,
+            &set.session,
+            FLUSH_SWITCH,
+        )
+        .await;
+        let (db, id) = (learner.db.clone(), fed_id.clone());
+        let (stored, last_fed_row) = blocking(move || {
+            let repo = ConversationRepository::new(&db);
+            let last = repo
+                .learning_window(&id, 0, 100_000)
+                .ok()
+                .and_then(|rows| rows.last().map(|r| r.id));
+            (repo.get_session(&id).ok().flatten(), last)
+        })
+        .await;
+        let stored =
+            stored.unwrap_or_else(|| panic!("memory_eval: the fed conversation {fed_id} is gone"));
+
+        let questions = set.as_questions();
+        let asked = CorpusSession {
+            id: set.id.clone(),
+            turns: questions
+                .iter()
+                .map(|q| CorpusTurn {
+                    user: q.question.clone(),
+                    states: Vec::new(),
+                    mode: TurnMode::Noise,
+                })
+                .collect(),
+            ..source.clone()
+        };
+        let next = learner.feed(&[&asked], false).await;
+        for (i, ((q, turn), answer)) in questions
+            .iter()
+            .zip(next.turns)
+            .zip(next.answers)
+            .enumerate()
+        {
+            let kind = set.questions[i].kind;
+            let seen = |id: String| SeenNote {
+                note: id,
+                gold: false,
+            };
+            let memory_used: Vec<UsedNote> = answer
+                .memory_used
+                .iter()
+                .map(|u| UsedNote {
+                    note: u.id.to_string(),
+                    gold: false,
+                    reason: u.reason,
+                })
+                .collect();
+            let memory_reads: Vec<SeenNote> = answer.reads.read.into_iter().map(seen).collect();
+            let memory_listings: Vec<MemoryListing> = answer
+                .reads
+                .listings
+                .into_iter()
+                .map(|l| MemoryListing {
+                    tool: l.tool,
+                    detail: l.detail,
+                    notes: l.ids.into_iter().map(seen).collect(),
+                })
+                .collect();
+            let delivered = delivery(&[], &memory_used, &memory_reads, &memory_listings);
+            let continued = carried_over(answer.continuity, &fed_id);
+            let carried = continued.is_some();
+            let (text, turn_error) = if answer.is_error {
+                (String::new(), Some(answer.content))
+            } else {
+                (answer.content, None)
+            };
+            let mut row = Row {
+                id: q.id.clone(),
+                category: q.category,
+                language: q.language,
+                question: q.question.clone(),
+                gold_answer: q.gold_answer.clone(),
+                expect_abstain: q.expect_abstain,
+                relies_on: Vec::new(),
+                answer: text.clone(),
+                turn_error,
+                correct: None,
+                judge_verdict: "not_judged",
+                judge_raw: String::new(),
+                judge_model: None,
+                judge_tokens_in: 0,
+                judge_tokens_out: 0,
+                judge_error: None,
+                latency_ms: turn.latency_ms,
+                ack_ms: answer.ack_ms,
+                mode: answer.mode,
+                reader_models: turn.reader_models,
+                reader_llm_calls: turn.reader_llm_calls,
+                reader_tokens_in: turn.reader_tokens_in,
+                reader_tokens_out: turn.reader_tokens_out,
+                reader_cost_usd: answer.cost_usd,
+                memory_search_calls: turn
+                    .tools
+                    .iter()
+                    .filter(|t| t.as_str() == "memory_search")
+                    .count() as u32,
+                tools: turn.tools,
+                per_turn_fts_hits: delivered.per_turn_fts_hits,
+                memory_used,
+                relied_notes_delivered: 0,
+                relied_notes_listed: 0,
+                index_lines: delivered.index_lines,
+                memory_reads,
+                memory_listings,
+                relied_notes_read: 0,
+                relied_notes_read_or_excerpted: 0,
+                reader_rounds: answer.reader_rounds,
+                events_lagged: turn.events_lagged,
+                continuity: Some(ContinuityRow {
+                    set: set.id.clone(),
+                    session: set.session.clone(),
+                    kind,
+                    turn: i + 1,
+                    carry_over_delivered: carried,
+                    continued_from_topic: continued.map(|c| c.topic),
+                }),
+            };
+            if let Some(gate) = gate.as_deref_mut() {
+                match judge(&router, gate, judge_template, q, &text).await {
+                    Ok(out) => {
+                        row.correct = out.verdict;
+                        row.judge_verdict = match out.verdict {
+                            Some(true) => "correct",
+                            Some(false) => "incorrect",
+                            None => "unparsed",
+                        };
+                        row.judge_raw = out.raw;
+                        row.judge_model = Some(out.model);
+                        row.judge_tokens_in = out.tokens_in;
+                        row.judge_tokens_out = out.tokens_out;
+                    }
+                    Err(e) => {
+                        row.judge_verdict = "judge_error";
+                        row.judge_error = Some(e);
+                    }
+                }
+            }
+            println!(
+                "[{}] {:<14} turn {} carried={} tokens={}/{} tools={:?}{}",
+                match row.correct {
+                    Some(true) => " OK ",
+                    Some(false) => "MISS",
+                    None => " ?? ",
+                },
+                row.id,
+                i + 1,
+                carried,
+                row.reader_tokens_in,
+                row.reader_tokens_out,
+                row.tools,
+                match (&row.turn_error, &row.judge_error) {
+                    (Some(e), _) => format!(" (turn returned Err: {e})"),
+                    (None, Some(e)) => format!(" (judge failed: {e})"),
+                    _ => String::new(),
+                }
+            );
+            report.rows.push(row);
+        }
+        let state_fresh = last_fed_row.is_some_and(|last| stored.working_state_through >= last);
+        eprintln!(
+            "memory_eval: {} ({}, split {}): state through {} of {:?} (fresh: {state_fresh}), summary note {:?}",
+            set.id,
+            set.session,
+            set.split,
+            stored.working_state_through,
+            last_fed_row,
+            stored.episode_note_id
+        );
+        let results = report.continuity.get_or_insert_default();
+        results.sessions.push(ContinuitySession {
+            set: set.id.clone(),
+            session: set.session.clone(),
+            split: set.split,
+            fed_session_id: fed_id,
+            asked_session_id: next.transcript.first().map(|t| t.session_id.clone()),
+            fed_turns: fed.turns,
+            close,
+            state: stored.working_state,
+            state_through: stored.working_state_through,
+            last_fed_row,
+            state_fresh,
+            episode_note_id: stored.episode_note_id,
+            summariser_calls: summariser_calls(&calls_before, &learner.calls_by_label().await),
+        });
+        let totals = continuity_totals(&report.rows, &results.sessions);
+        results.totals = Some(totals);
         write_report(report_path, &*report);
     }
 }
@@ -8303,19 +9041,12 @@ fn cohens_kappa_reads_two_binary_gradings() {
 
 /// The learning systems' config: no workflow, no task extraction, learning
 /// on only where it learns, and the extraction caps lifted there — the
-/// conversation summaries' daily count too (the L8 fix slice's H1: at its
-/// default of 20 it stopped every summary from the corpus's 21st session
-/// on). The summaries' cap is lifted to the most the config's validation
-/// accepts, never to 0, which writes none; the run's conditions record it.
+/// summariser's daily ceiling too, which a conversation's close reads (the
+/// L8 fix slice's H1 kept for the summaries, design 11 §3.4); the run's
+/// conditions record it.
 #[test]
 fn a_learning_system_lifts_the_extraction_caps() {
     use openalpaca_core::daemon_config::DaemonConfig;
-    let most_accepted = {
-        let mut cfg = DaemonConfig::default();
-        cfg.orchestrator.learning.episode_max_per_day = u32::MAX;
-        cfg.validate();
-        cfg.orchestrator.learning.episode_max_per_day
-    };
     let l = eval_daemon_config(System::L, None);
     assert!(l.orchestrator.learning.enabled);
     assert_eq!(l.orchestrator.costs.extract_max_calls_per_day, 0, "no cap");
@@ -8324,21 +9055,8 @@ fn a_learning_system_lifts_the_extraction_caps() {
         LIFTED_DAILY_COST_USD
     );
     assert_eq!(
-        l.orchestrator.learning.episode_max_per_day, most_accepted,
-        "the summaries' cap at the validation's maximum"
-    );
-    assert!(
-        most_accepted
-            > DaemonConfig::default()
-                .orchestrator
-                .learning
-                .episode_max_per_day
-    );
-    let mut validated = l.clone();
-    validated.validate();
-    assert_eq!(
-        validated.orchestrator.learning.episode_max_per_day, most_accepted,
-        "a value the validation keeps"
+        l.orchestrator.costs.summary_max_daily_cost_usd, LIFTED_DAILY_COST_USD,
+        "the summariser's ceiling, which the close reads"
     );
     assert_eq!(l.orchestrator.routing.max_workflows_per_lane, 0);
     assert!(!l.orchestrator.costs.task_extract_enabled);
@@ -8353,11 +9071,11 @@ fn a_learning_system_lifts_the_extraction_caps() {
                 .extract_max_calls_per_day
         );
         assert_eq!(
-            cfg.orchestrator.learning.episode_max_per_day,
+            cfg.orchestrator.costs.summary_max_daily_cost_usd,
             DaemonConfig::default()
                 .orchestrator
-                .learning
-                .episode_max_per_day
+                .costs
+                .summary_max_daily_cost_usd
         );
     }
     let conditions = serde_json::to_value(learning_conditions(
@@ -8372,7 +9090,10 @@ fn a_learning_system_lifts_the_extraction_caps() {
         "coverage",
     ))
     .unwrap();
-    assert_eq!(conditions["episode_max_per_day"], most_accepted);
+    assert_eq!(
+        conditions["summary_max_daily_cost_usd"],
+        LIFTED_DAILY_COST_USD
+    );
     let e = eval_daemon_config(System::E, None);
     assert_eq!(e.orchestrator.routing.main_loop_max_tools_per_round, 1);
 }
@@ -9556,11 +10277,13 @@ async fn the_gateway_feed_maps_every_turn_and_the_forced_rerun_checks() {
 }
 
 /// L's conversation summaries, offline (design 09 §13.3, slice L10c): with
-/// summaries on, each session's end writes its summary after its facts —
-/// the harness's one deterministic stand-in for the quiet period, the switch
-/// and the drain — a session with fewer than four turns gets none, and the
-/// dump keeps the summary apart from the learned notes every fact measure
-/// reads; the cost block counts its calls.
+/// summaries on, each session's end closes it after its facts — the
+/// harness's one deterministic stand-in for the quiet period, the switch and
+/// the drain: its working state refreshed (one call), its summary projected
+/// from the state (design 11 §3.4) — a session with fewer than four turns
+/// gets its state and no summary, and the dump keeps the summary apart from
+/// the learned notes every fact measure reads; the cost block counts the
+/// closes' calls.
 #[tokio::test(flavor = "multi_thread")]
 async fn l_writes_one_summary_per_long_session_and_keeps_it_out_of_the_fact_measures() {
     use openalpaca_core::bus::EventBus;
@@ -9578,14 +10301,8 @@ async fn l_writes_one_summary_per_long_session_and_keeps_it_out_of_the_fact_meas
         .unwrap();
     let (router, stub) = stub_router(&[TEST_MODEL], |request| {
         let prompt = prompt_of(request);
-        if prompt.contains("You are the conversation recorder") {
-            return serde_json::json!({
-                "topic": "Locker numbers",
-                "discussed": "The user's locker numbers this week.",
-                "decided": "",
-                "open": "",
-            })
-            .to_string();
+        if prompt.contains(WRITER_PROMPT_MARKER) {
+            return locker_state();
         }
         if !prompt.contains("You are the memory extractor") {
             return "Noted.".to_string();
@@ -9652,7 +10369,7 @@ async fn l_writes_one_summary_per_long_session_and_keeps_it_out_of_the_fact_meas
         episodes,
         [
             ("cs-t11", FLUSH_SWITCH, 1, 1),
-            ("cs-t12", FLUSH_SWITCH, 0, 0)
+            ("cs-t12", FLUSH_SWITCH, 1, 0)
         ],
         "{:?}",
         fed.episodes
@@ -9666,7 +10383,24 @@ async fn l_writes_one_summary_per_long_session_and_keeps_it_out_of_the_fact_meas
         fed.episodes[0]
     );
     let cost = learning_cost(&fed.turns, &fed.flushes, &fed.episodes, fed.wall_ms);
-    assert_eq!((cost.episode_calls, cost.episodes_written), (1, 1));
+    assert_eq!((cost.episode_calls, cost.episodes_written), (2, 1));
+    // Design 11 §10.4: each session's summariser calls by label — its
+    // close's one refresh; the reader's and the extractor's calls are not
+    // the summariser's.
+    let one_refresh = BTreeMap::from([("orchestrator_summary".to_string(), 1)]);
+    assert_eq!(
+        fed.summariser_calls,
+        [
+            SessionCalls {
+                session: "cs-t11".to_string(),
+                calls: one_refresh.clone(),
+            },
+            SessionCalls {
+                session: "cs-t12".to_string(),
+                calls: one_refresh,
+            },
+        ]
+    );
 
     let ctx = service
         .context(
@@ -9692,9 +10426,9 @@ async fn l_writes_one_summary_per_long_session_and_keeps_it_out_of_the_fact_meas
     let recorder_calls = stub
         .requests()
         .iter()
-        .filter(|r| prompt_of(r).contains("You are the conversation recorder"))
+        .filter(|r| prompt_of(r).contains(WRITER_PROMPT_MARKER))
         .count();
-    assert_eq!(recorder_calls, 1);
+    assert_eq!(recorder_calls, 2);
 }
 
 /// L-S's own path, offline (review of L7, finding 3): an old note seeded as
@@ -9905,6 +10639,15 @@ impl OfflineRun {
 
     /// [`Self::new`] on this bus.
     fn on_bus(router: Arc<openalpaca_llm::LlmRouter>, bus: openalpaca_core::bus::EventBus) -> Self {
+        Self::build(router, bus, System::L)
+    }
+
+    /// [`Self::new`] with the config `system` runs with.
+    fn build(
+        router: Arc<openalpaca_llm::LlmRouter>,
+        bus: openalpaca_core::bus::EventBus,
+        system: System,
+    ) -> Self {
         use openalpaca_core::memory::learning::{LearningDeps, LearningQueue, QueueMode};
         use openalpaca_storage::{Database, IdentityRepository};
         let home = tempfile::tempdir().unwrap();
@@ -9916,7 +10659,7 @@ impl OfflineRun {
         IdentityRepository::new(&db)
             .create_global_user(&owner, None)
             .unwrap();
-        let cfg = eval_daemon_config(System::L, None);
+        let cfg = eval_daemon_config(system, None);
         let turns_per_flush = cfg.orchestrator.learning.turns_per_flush;
         let daemon_config = Arc::new(arc_swap::ArcSwap::from_pointee(cfg));
         let service = Arc::new(MemoryService::open_default(Some(db.clone())).with_bus(bus.clone()));
@@ -10126,6 +10869,22 @@ async fn a_flush_that_stops_bad_output_is_flushed_again_up_to_max_attempts() {
 /// The extractor's unusable answer in the stub models below: prose, no JSON.
 const UNUSABLE_ANSWER: &str = "Let me think about which facts matter here.";
 
+/// How the working-state writer's prompt begins (a conversation's close
+/// refreshes the state its summary is projected from — design 11 §3.1, §3.4):
+/// what the stub models below answer a state to.
+const WRITER_PROMPT_MARKER: &str = "You keep the working state of a conversation";
+
+/// The stub models' working state: a summary projected from it is titled
+/// `Conversation on <date>: Locker numbers`.
+fn locker_state() -> String {
+    serde_json::json!({
+        "topic": "Locker numbers",
+        "goal": "The user's locker numbers this week.",
+        "done": [], "decisions": [], "open": [], "next": "", "refs": [],
+    })
+    .to_string()
+}
+
 /// The `<conversation>` section of an extraction prompt: the transcript
 /// alone, without the known notes.
 fn conversation_of(prompt: &str) -> String {
@@ -10330,17 +11089,11 @@ async fn a_summary_that_stops_bad_output_is_flushed_again() {
     let calls = recorder_calls.clone();
     let (router, _stub) = stub_router(&[TEST_MODEL], move |request| {
         let prompt = prompt_of(request);
-        if prompt.contains("You are the conversation recorder") {
+        if prompt.contains(WRITER_PROMPT_MARKER) {
             if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                 return "The user talked about lockers.".to_string();
             }
-            return serde_json::json!({
-                "topic": "Locker numbers",
-                "discussed": "The user's locker numbers this week.",
-                "decided": "",
-                "open": "",
-            })
-            .to_string();
+            return locker_state();
         }
         if prompt.contains("You are the memory extractor") {
             return first_row_item(&prompt);
@@ -10379,53 +11132,27 @@ async fn a_summary_that_stops_bad_output_is_flushed_again() {
     );
 }
 
-/// Repair round 2 of the L8 fix slice for a conversation summary (the
-/// fidelity review's M2; the round-3 tests review's F1): `episode_one`
-/// bounds a summary's retries per position of the session's **episode**
-/// cursor, the one the queue counts a summary's unusable answers against.
-/// A session whose summary window spans two chunks, the first never usable:
-/// three attempts on the first — the third skips it and fails the second
-/// once — and a fourth summarises the second. A bound of three in all, or
-/// one read at a cursor a summary never moves (the learning cursor), would
-/// leave the second chunk held after one answer, never summarised.
+/// H2 for a close whose refresh is never usable (design 11 §3.1; the L8 fix
+/// slice's repair round 2 kept for the close): `episode_one` flushes it
+/// again while it stops `BadOutput`, and the queue gives the refresh up on
+/// the `MAX_ATTEMPTS`-th unusable answer — the close then ends with no stop
+/// and no summary, since the state covers nothing — so the harness makes
+/// exactly `MAX_ATTEMPTS` attempts and warns of nothing left unread.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_summary_over_two_windows_is_retried_until_each_is_read_or_skipped() {
-    let omega_answers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let seen = omega_answers.clone();
+async fn a_close_whose_refresh_is_never_usable_is_retried_until_given_up() {
     let (router, _stub) = stub_router(&[TEST_MODEL], move |request| {
         let prompt = prompt_of(request);
         if prompt.contains("You are the memory extractor") {
             return r#"{"items": []}"#.to_string();
         }
-        if !prompt.contains("You are the conversation recorder") {
-            return "Noted.".to_string();
-        }
-        if conversation_of(&prompt).contains("marker-alpha")
-            || seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
-        {
+        if prompt.contains(WRITER_PROMPT_MARKER) {
             return UNUSABLE_ANSWER.to_string();
         }
-        serde_json::json!({
-            "topic": "The omega marker",
-            "discussed": "The user named the omega marker.",
-            "decided": "",
-            "open": "",
-        })
-        .to_string()
+        "Noted.".to_string()
     });
     let run = OfflineRun::new(router);
-    // Three turns of about 7 KB fill one chunk's 24 KiB of transcript; the
-    // fourth, as long, starts a second chunk, and the three short turns
-    // after it leave past the first chunk the four user turns a summary
-    // waits for (`EPISODE_MIN_USER_TURNS`).
-    let filler = "lorem ipsum ".repeat(580);
-    let turns: Vec<(String, TurnMode)> = (0..7)
-        .map(|i| match i {
-            0 => (format!("marker-alpha {filler}"), TurnMode::Explicit),
-            3 => (format!("marker-omega {filler}"), TurnMode::Explicit),
-            1 | 2 => (format!("Noise turn {i}. {filler}"), TurnMode::Noise),
-            i => (format!("Short turn {i}."), TurnMode::Noise),
-        })
+    let turns: Vec<(String, TurnMode)> = (0..5)
+        .map(|i| (format!("Short turn {i}."), TurnMode::Noise))
         .collect();
     let turns: Vec<(&str, TurnMode)> = turns.iter().map(|(t, m)| (t.as_str(), *m)).collect();
     let session = fixture_session("cs-t62", &turns);
@@ -10440,8 +11167,8 @@ async fn a_summary_over_two_windows_is_retried_until_each_is_read_or_skipped() {
     let json = serde_json::to_value(summary).unwrap();
     assert_eq!(
         json["attempt_stops"],
-        serde_json::json!(["BadOutput", "BadOutput", "BadOutput", null]),
-        "three on the first chunk (the third skips it and fails the second), one more summarises the second: {summary:?}"
+        serde_json::json!(["BadOutput", "BadOutput", null]),
+        "{summary:?}"
     );
     assert_eq!(
         (
@@ -10451,21 +11178,8 @@ async fn a_summary_over_two_windows_is_retried_until_each_is_read_or_skipped() {
             summary.episodes,
             summary.stopped.as_deref()
         ),
-        (4, 5, 1, 1, None),
+        (3, 3, 1, 0, None),
         "{summary:?}"
-    );
-    assert_eq!(
-        omega_answers.load(std::sync::atomic::Ordering::SeqCst),
-        2,
-        "the second chunk was answered twice"
-    );
-    let session_id = &fed.transcript[0].session_id;
-    let through = openalpaca_storage::LearningCursorRepository::new(&run.db)
-        .episode_through(session_id)
-        .unwrap();
-    assert!(
-        Some(through) >= fed.transcript[0].user_rows.last().copied(),
-        "the episode cursor passed the last turn: {through}"
     );
     let warnings = learning_warnings(&fed.turns, &fed.flushes, &fed.episodes);
     assert!(
@@ -11135,13 +11849,8 @@ async fn a_replay_with_questions_writes_summaries_and_asks_them() {
         let settings = Settings::from_env();
         let (router, stub) = stub_router(&[TEST_MODEL], |request| {
             let prompt = prompt_of(request);
-            if prompt.contains("You are the conversation recorder") {
-                return serde_json::json!({
-                    "topic": "Locker numbers",
-                    "discussed": "The user's locker numbers this week.",
-                    "decided": "", "open": "",
-                })
-                .to_string();
+            if prompt.contains(WRITER_PROMPT_MARKER) {
+                return locker_state();
             }
             if prompt.contains("You are the memory extractor") {
                 return first_row_item(&prompt);
@@ -12146,4 +12855,351 @@ async fn the_recall_mode_the_run_names_is_the_one_its_report_records() {
         );
         assert_eq!(conditions.recall_mode, recorded, "a replay's conditions");
     }
+}
+
+// ─── The continuity split's own tests (design 11 §10.1) ─────────────────────
+
+/// K0 and K: what they are, what they ask and the config they run with —
+/// the carry-over off for K0 and as shipped for K, learning on for the
+/// queue's close, the summariser's ceiling lifted and the extraction's caps
+/// left alone (no learning flush runs), and the continuity split as their
+/// default question file.
+#[test]
+fn the_continuity_systems_differ_only_in_the_carry_over() {
+    assert_eq!(System::from_label("K0"), Ok(System::K0));
+    assert_eq!(System::from_label("k"), Ok(System::K));
+    assert_eq!(serde_json::to_value(System::K0).unwrap(), "K0");
+    assert_eq!(serde_json::to_value(System::K).unwrap(), "K");
+    let shipped = openalpaca_core::daemon_config::DaemonConfig::default();
+    for system in [System::K0, System::K] {
+        assert!(system.is_continuity(), "{}", system.as_str());
+        assert!(!system.feeds_corpus() && !system.learns() && !system.asks_questions());
+        let cfg = eval_daemon_config(system, None);
+        assert!(
+            cfg.orchestrator.learning.enabled,
+            "the close needs the queue"
+        );
+        assert_eq!(
+            cfg.orchestrator.costs.summary_max_daily_cost_usd,
+            LIFTED_DAILY_COST_USD
+        );
+        assert_eq!(
+            cfg.orchestrator.costs.extract_max_calls_per_day,
+            shipped.orchestrator.costs.extract_max_calls_per_day
+        );
+        assert!(
+            default_questions(Some(system)).ends_with("questions-continuity.json"),
+            "{}",
+            system.as_str()
+        );
+    }
+    assert_eq!(
+        eval_daemon_config(System::K0, None)
+            .orchestrator
+            .memory
+            .carry_over_turns,
+        0
+    );
+    assert_eq!(
+        eval_daemon_config(System::K, None)
+            .orchestrator
+            .memory
+            .carry_over_turns,
+        shipped.orchestrator.memory.carry_over_turns
+    );
+    for system in [System::NoMemory, System::D, System::L] {
+        assert!(!system.is_continuity());
+        assert!(default_questions(Some(system)).ends_with("questions-heldout.json"));
+    }
+    assert!(default_questions(None).ends_with("questions-heldout.json"));
+}
+
+/// Design 11 §10.4: the summariser's calls are every label's new calls but
+/// the reader's, the judges' and the extractor's.
+#[test]
+fn summariser_calls_leave_out_the_reader_the_judges_and_the_extractor() {
+    let before = HashMap::from([
+        ("orchestrator".to_string(), 4),
+        ("orchestrator_summary".to_string(), 2),
+    ]);
+    let after = HashMap::from([
+        ("orchestrator".to_string(), 9),
+        ("orchestrator_summary".to_string(), 3),
+        ("orchestrator_episode".to_string(), 1),
+        (JUDGE_AGENT_ID.to_string(), 5),
+        (COVERAGE_JUDGE_AGENT_ID.to_string(), 2),
+        ("orchestrator_user_extract".to_string(), 7),
+    ]);
+    assert_eq!(
+        summariser_calls(&before, &after),
+        BTreeMap::from([
+            ("orchestrator_episode".to_string(), 1),
+            ("orchestrator_summary".to_string(), 1),
+        ])
+    );
+    assert!(summariser_calls(&after, &after).is_empty());
+}
+
+/// A block naming a conversation other than the fed one is not delivered.
+#[test]
+fn only_the_fed_conversations_block_is_a_carry_over() {
+    use openalpaca_core::gateway::{ContinuedFrom, TurnContinuity};
+    let from = |session_id: &str| TurnContinuity {
+        working_state_updated: false,
+        continued_from: Some(ContinuedFrom {
+            session_id: session_id.to_string(),
+            topic: "Locker numbers".to_string(),
+        }),
+    };
+    assert_eq!(
+        carried_over(from("fed"), "fed").map(|c| c.topic),
+        Some("Locker numbers".to_string())
+    );
+    assert_eq!(carried_over(from("older"), "fed"), None);
+    assert_eq!(carried_over(TurnContinuity::default(), "fed"), None);
+}
+
+/// The question the judge stub answers `INCORRECT` to; every other is
+/// judged `CORRECT`.
+const MISSED_QUESTION: &str = "What did we decide about the locker?";
+
+/// A corpus of two six-turn conversations on one project — the second
+/// turning something down before its split — and a continuity split over
+/// them: three questions after the first's third turn, one abstention after
+/// the second's. The second set's fed conversation follows the first's
+/// asked one on the same lane and project.
+fn continuity_fixture() -> (Corpus, Vec<ContinuitySet>) {
+    let mut project = long_fixture_session(
+        "cs-t71",
+        6,
+        "My locker number this week is 111.",
+        "Thanks, that is all.",
+    );
+    project.workspace = Some(eval::Project::Lantern);
+    let mut dropped = fixture_session(
+        "cs-t72",
+        &[
+            ("Should I get a second locker?", TurnMode::Noise),
+            ("No, forget the second locker.", TurnMode::Rejection),
+            ("My locker number this week is 222.", TurnMode::Explicit),
+            ("Noise turn 3.", TurnMode::Noise),
+            ("Noise turn 4.", TurnMode::Noise),
+            ("Thanks.", TurnMode::Noise),
+        ],
+    );
+    dropped.workspace = Some(eval::Project::Lantern);
+    let question = |kind, question: &str, expect_abstain| eval::ContinuityQuestion {
+        kind,
+        question: question.to_string(),
+        gold_answer: "The locker numbers.".to_string(),
+        expect_abstain,
+    };
+    let sets = vec![
+        ContinuitySet {
+            id: "kq-t1".to_string(),
+            session: "cs-t71".to_string(),
+            split: 3,
+            language: Language::En,
+            questions: vec![
+                question(ContinuityKind::Doing, "What were we working on?", false),
+                question(ContinuityKind::Decided, MISSED_QUESTION, false),
+                question(ContinuityKind::Next, "What was the next step?", false),
+            ],
+        },
+        ContinuitySet {
+            id: "kq-t2".to_string(),
+            session: "cs-t72".to_string(),
+            split: 3,
+            language: Language::En,
+            questions: vec![question(
+                ContinuityKind::Next,
+                "What's the next step on the second locker?",
+                true,
+            )],
+        },
+    ];
+    let corpus = Corpus {
+        schema: 1,
+        sessions: vec![project, dropped],
+        suggestion_sessions: Vec::new(),
+    };
+    (corpus, sets)
+}
+
+/// The continuity phase of `system` over [`continuity_fixture`] on the stub
+/// model, whose working-state writer answers `writer`: the report and every
+/// request the stub received.
+async fn continuity_run(
+    system: System,
+    writer: fn() -> String,
+) -> (Report, Vec<openalpaca_llm::ChatRequest>) {
+    let (router, stub) = stub_router(&[TEST_MODEL], move |request| {
+        let prompt = prompt_of(request);
+        if prompt.contains(WRITER_PROMPT_MARKER) {
+            writer()
+        } else if prompt.contains("You are grading one answer") {
+            if prompt.contains(MISSED_QUESTION) {
+                "No.\nINCORRECT".to_string()
+            } else {
+                "Yes.\nCORRECT".to_string()
+            }
+        } else {
+            "Noted.".to_string()
+        }
+    });
+    let run = OfflineRun::build(router, openalpaca_core::bus::EventBus::default(), system);
+    let (corpus, sets) = continuity_fixture();
+    let template = String::from_utf8(read_bytes(&eval_dir().join("judge-prompt.md"))).unwrap();
+    let mut gate = JudgeGate::new(JudgeChoice {
+        model: TEST_MODEL.to_string(),
+        reader: Some(TEST_MODEL.to_string()),
+        judge_is_reader: true,
+        judge_same_family: true,
+        judge_is_extractor: true,
+    });
+    let out = tempfile::tempdir().unwrap();
+    let mut report = new_report(system);
+    continuity_phase(
+        &run.learner(),
+        &corpus,
+        &sets,
+        Some(&mut gate),
+        &template,
+        &mut report,
+        &out.path().join("report.json"),
+    )
+    .await;
+    (report, stub.requests())
+}
+
+/// The request recorder (design 11 §10.1, `carry_over_delivered`): whether
+/// the reader's request for `question` — the one whose last message is it —
+/// carried the previous conversation's block, as the stub received it.
+fn request_carried_the_block(requests: &[openalpaca_llm::ChatRequest], question: &str) -> bool {
+    let asked: Vec<&openalpaca_llm::ChatRequest> = requests
+        .iter()
+        .filter(|r| r.messages.last().is_some_and(|m| m.content == question))
+        .collect();
+    assert!(!asked.is_empty(), "no reader request for {question:?}");
+    asked.iter().all(|r| {
+        r.messages.iter().any(|m| {
+            m.content
+                .starts_with("<context_data type=\"previous_conversation\"")
+        })
+    })
+}
+
+/// Design 11 §10.1, offline: K feeds each conversation up to its split,
+/// closes it — one summariser call, a state covering every fed row — and
+/// asks the set's questions as the next conversation's first turns, whose
+/// requests carry the fed conversation's block; the report says so row by
+/// row, and the stub's own record of the requests agrees. No fed turn's
+/// request carries a block: a fed conversation starts fresh, though it
+/// follows the last set's asked one on the same lane and project. K0 does
+/// the same with the carry-over off: the state is written, and no request
+/// carries it. The totals read the three answers apart from the abstention.
+#[tokio::test(flavor = "multi_thread")]
+async fn k_carries_the_fed_conversation_into_the_next_ones_first_turns_and_k0_does_not() {
+    for system in [System::K, System::K0] {
+        let (report, requests) = continuity_run(system, locker_state).await;
+        let carried = system == System::K;
+        let label = system.as_str();
+        let rows: Vec<(&str, usize, bool, Option<&str>)> = report
+            .rows
+            .iter()
+            .map(|r| {
+                let c = r.continuity.as_ref().expect("a continuity row");
+                (
+                    r.id.as_str(),
+                    c.turn,
+                    c.carry_over_delivered,
+                    c.continued_from_topic.as_deref(),
+                )
+            })
+            .collect();
+        let topic = carried.then_some("Locker numbers");
+        assert_eq!(
+            rows,
+            [
+                ("kq-t1-doing", 1, carried, topic),
+                ("kq-t1-decided", 2, carried, topic),
+                ("kq-t1-next", 3, carried, topic),
+                ("kq-t2-next", 1, carried, topic),
+            ],
+            "{label}"
+        );
+        for row in &report.rows {
+            assert_eq!(
+                request_carried_the_block(&requests, &row.question),
+                carried,
+                "{label}: {}",
+                row.id
+            );
+        }
+        let (corpus, sets) = continuity_fixture();
+        for set in &sets {
+            let session = corpus
+                .sessions
+                .iter()
+                .find(|s| s.id == set.session)
+                .unwrap();
+            for turn in &session.turns[..set.split] {
+                assert!(
+                    !request_carried_the_block(&requests, &turn.user),
+                    "{label}: the fed turn {:?} was given a previous conversation",
+                    turn.user
+                );
+            }
+        }
+        let continuity = report.continuity.as_ref().expect("the split's results");
+        for s in &continuity.sessions {
+            assert!(!s.state.is_empty(), "{label}: {}", s.set);
+            assert!(s.state_fresh, "{label}: {s:?}");
+            assert_eq!(s.close.calls, 1, "{label}: {:?}", s.close);
+            assert_eq!(
+                s.summariser_calls,
+                BTreeMap::from([("orchestrator_summary".to_string(), 1)]),
+                "{label}"
+            );
+        }
+        let t = continuity.totals.as_ref().expect("totals");
+        assert_eq!((t.answers.n, t.answers.correct), (3, 2), "{label}");
+        assert_eq!((t.abstain.n, t.abstain.correct), (1, 1), "{label}");
+        assert_eq!(t.by_kind["decided"].correct, 0);
+        assert_eq!(t.by_kind["doing"].correct, 1);
+        assert_eq!(t.rows, 4);
+        assert_eq!(t.carry_over_delivered, if carried { 4 } else { 0 });
+        let by_turn = if carried {
+            BTreeMap::from([(1, 2), (2, 1), (3, 1)])
+        } else {
+            BTreeMap::new()
+        };
+        assert_eq!(t.carry_over_delivered_by_turn, by_turn, "{label}");
+        assert_eq!((t.sessions, t.sessions_state_fresh), (2, 2));
+        assert_eq!(t.summariser_calls["orchestrator_summary"], 2);
+        assert!(t.turn1_tokens_in_mean.is_some());
+    }
+}
+
+/// `state_fresh` is the state's, apart from `carry_over_delivered`: a close
+/// whose refresh is never usable leaves the fed conversation with no state
+/// (`through` 0) after `MAX_ATTEMPTS` summariser calls, and K still carries
+/// its last exchange — delivered, not fresh.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_close_that_never_refreshes_the_state_is_carried_but_not_fresh() {
+    use openalpaca_core::memory::learning::MAX_ATTEMPTS;
+    let (report, _) = continuity_run(System::K, || UNUSABLE_ANSWER.to_string()).await;
+    let continuity = report.continuity.as_ref().unwrap();
+    for s in &continuity.sessions {
+        assert_eq!((s.state.as_str(), s.state_through), ("", 0), "{s:?}");
+        assert!(!s.state_fresh);
+        assert_eq!(s.close.calls, MAX_ATTEMPTS as usize);
+    }
+    assert!(report.rows.iter().all(|r| {
+        r.continuity.as_ref().is_some_and(|c| {
+            c.carry_over_delivered && c.continued_from_topic.as_deref() == Some("")
+        })
+    }));
+    let t = continuity.totals.as_ref().unwrap();
+    assert_eq!((t.sessions_state_fresh, t.carry_over_delivered), (0, 4));
 }

@@ -582,6 +582,7 @@
 | `source` | `Option<String>` |
 | `workspace_path` | `Option<String>` |
 | `title` | `Option<String>` |
+| `inherit` | `Option<bool>` |
 
 ### `sessions::ListSessionsQuery`
 

@@ -414,6 +414,29 @@ fn skipped_attachment_lines(done: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
+/// Design 11 §5 (owner decision CQ-7): the one line a terminal is shown when
+/// the turn was given the previous conversation — `continuing from: <topic>`,
+/// from `done.continued_from` — or `None`: into a pipe, which carries the
+/// answer alone (S13), and on a turn that continued from nothing. The topic is
+/// the working-state writer's text, so every hidden character in it is shown
+/// as `<U+XXXX>` (`escape_hidden_line`); a previous conversation that left no
+/// state is named as such.
+fn continued_from_line(done: &serde_json::Value, tty: bool) -> Option<String> {
+    if !tty {
+        return None;
+    }
+    let from = done.get("continued_from").filter(|v| v.is_object())?;
+    let topic = from["topic"].as_str().unwrap_or("");
+    Some(if topic.is_empty() {
+        "continuing from: the previous conversation".to_string()
+    } else {
+        format!(
+            "continuing from: {}",
+            openalpaca_core::utils::text::escape_hidden_line(topic).text
+        )
+    })
+}
+
 /// What a `reasoning` frame prints (S2).
 ///
 /// Dim, on a terminal, as it arrives — it is the 13 s a thinking model spends
@@ -753,6 +776,12 @@ fn process_sse_event_to(
                 // the daemon gave.
                 for line in skipped_attachment_lines(&parsed) {
                     eprintln!("{}", line.yellow());
+                }
+
+                // Design 11 §5: the previous conversation this turn was
+                // given, dim, at a terminal only.
+                if let Some(line) = continued_from_line(&parsed, opts.tty) {
+                    writeln!(out, "{}", line.dimmed())?;
                 }
 
                 let model = parsed["model"].as_str().unwrap_or("").to_string();

@@ -64,8 +64,19 @@ export interface MemoryUsedRef {
 }
 
 /**
+ * The previous conversation a turn was given (design 11 §4 (b), §5): its
+ * session and its working state's topic — `""` when it left no state, only
+ * its last exchange.
+ */
+export interface ContinuedFrom {
+  session_id: string;
+  topic: string;
+}
+
+/**
  * SSE `done`. `attachments_used`/`attachments_skipped`/`memory_used`/
- * `delegation` are omitted when absent.
+ * `delegation` are omitted when absent; `working_state_updated` and
+ * `continued_from` are always sent (absent only from an older daemon).
  *
  * Since U3 the two attachment lists are disjoint and `attachments_used` is
  * truthful: an attachment the adaptation withheld leaves it and appears in
@@ -87,6 +98,16 @@ export interface ChatStreamDone {
    */
   memory_used?: MemoryUsedRef[];
   delegation?: DelegationInfo;
+  /**
+   * The turn compacted, so its conversation's working state changed (design
+   * 11 §5): the session is worth re-reading.
+   */
+  working_state_updated?: boolean;
+  /**
+   * The previous conversation the turn was given, or `null`. **Live only**:
+   * the chat view says "Continuing from …" while the latest turn carries it.
+   */
+  continued_from?: ContinuedFrom | null;
 }
 
 /** SSE `confirmation_requested`. The WS twin adds `agent_id`/`lane_key`. */

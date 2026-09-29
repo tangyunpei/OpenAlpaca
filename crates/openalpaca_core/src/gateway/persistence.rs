@@ -492,6 +492,7 @@ mod tests {
                     attachments_skipped: Vec::new(),
                     memory_used: Vec::new(),
                     delegation: None,
+                    continuity: Default::default(),
                 },
                 Some(1234),
                 "gui",

@@ -364,18 +364,39 @@ impl Orchestrator {
         // Emit OrchestrationStage event + persist the latency record
         self.record_orchestration_stage(request_id, mode, ack_ms, None, None);
 
-        // 6. The summary update runs after the answer, as a tracked
-        // background job (`BackgroundJobs`): never on the response path, and
-        // stopped by the shutdown token. Memory learning is not here any
-        // more: the gateway queues every persisted turn, and the learning
-        // queue extracts a session's turns together, off the reply path
-        // (Learning v2, design 09 §1.9).
+        // 6. The working state's turn-end update (design 11 §2) runs after
+        // the answer, as a tracked background job (`BackgroundJobs`): never
+        // on the response path, and stopped by the shutdown token. Memory
+        // learning is not here any more: the gateway queues every persisted
+        // turn, and the learning queue extracts a session's turns together,
+        // off the reply path (Learning v2, design 09 §1.9).
+        // A main-loop turn that compacted hands its state over here (design
+        // 11 §3.3): written with no call.
+        let from_loop = self
+            .compacted_turns
+            .remove(&request_id)
+            .map(|(_, compacted)| compacted);
+        // Design 11 §5 (CQ-7): and its `done` frame says so.
+        if from_loop.is_some() {
+            self.continuity_map
+                .entry(request_id)
+                .or_default()
+                .working_state_updated = true;
+        }
         if let (Some(db), Some(router)) = (self.db.clone(), self.llm_router.clone()) {
             let config = self.daemon_config.clone();
-            let lane = lane_key.clone();
+            let compacted_states = self.compacted_states.clone();
             // NOTE: ctx is intentionally moved into this job — do not reference it after this block
             self.background.spawn(async move {
-                super::summary::update_summary_background(db, router, config, lane, ctx).await;
+                super::working_state::after_turn(
+                    db,
+                    router,
+                    config,
+                    compacted_states,
+                    ctx,
+                    from_loop,
+                )
+                .await;
             });
         }
 

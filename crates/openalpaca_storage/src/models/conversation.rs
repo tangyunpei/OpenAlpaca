@@ -83,10 +83,22 @@ pub struct Conversation {
     pub last_message_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    pub summary: String,
-    pub summary_version: i64,
-    pub last_summarized_message_id: i64,
-    pub summary_updated_at: Option<String>,
+    /// The conversation's working state as JSON, `''` until one is written
+    /// (design 11 §2; migration 2 put these five columns in place of the
+    /// session summary's four).
+    pub working_state: String,
+    /// Bumped by every write of the state: the optimistic lock.
+    pub working_state_version: i64,
+    /// The highest `conversation_messages.id` the state covers.
+    pub working_state_through: i64,
+    pub working_state_updated_at: Option<String>,
+    /// The conversation summary last projected from the state; `None` until
+    /// a close writes one, and again after a history clear forgets it.
+    pub episode_note_id: Option<String>,
+    /// `false` for a conversation started fresh (`inherit: false`): it is
+    /// never given the previous conversation's state (design 11 §4 (b),
+    /// owner decision CQ-5).
+    pub inherit: bool,
     /// Canonical project root this conversation is bound to; `None` = none.
     /// Set from the first `x-workspace-path` the session sees, `PATCH`-able.
     /// One workspace per session — changing project means a new session.

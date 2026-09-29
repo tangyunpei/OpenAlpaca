@@ -435,6 +435,11 @@ impl Orchestrator {
             .orchestrator
             .sessions
             .tool_result_inline_bytes;
+        // Design 11, CQ-3: compaction's writer runs on `summary_model`.
+        config_for_loop.writer = crate::orchestrator::working_state::WriterConfig::new(
+            &self.daemon_config.load(),
+            self.db.clone(),
+        );
 
         // **K1 — the skill tier streams like any other turn.** Set the same
         // way the main loop sets it (`query_handler/simple_query_handler.rs`),
@@ -628,9 +633,16 @@ impl Orchestrator {
             _ => Some(ChatMessage::user(query)),
         };
 
+        let summary_max_chars = self
+            .daemon_config
+            .load()
+            .orchestrator
+            .memory
+            .summary_max_chars;
         let history_input = HistoryInput {
             lane_tip_fingerprint: [0u8; 32],
-            summary: ctx.summary.as_deref().map(Arc::<str>::from),
+            working_state: ctx.working_state_text(summary_max_chars),
+            previous: ctx.previous_text(summary_max_chars),
             summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
             recent_messages: Arc::new(adapted_recent),
             current_user_turn,
@@ -724,6 +736,9 @@ impl Orchestrator {
             // + session summary + recent_messages + current_user_turn in the
             // same order the pre-migration manual assembly produced.
             let mut messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
+            // Design 11 §5 (CQ-7): the previous conversation, when the
+            // request carries its block — `done.continued_from`.
+            self.record_continued_from(request_id, ctx, &messages);
 
             // Design §5 step 8 (plan 3.3): this turn's memory, right before
             // the current user turn, outside the cached layer; recorded as

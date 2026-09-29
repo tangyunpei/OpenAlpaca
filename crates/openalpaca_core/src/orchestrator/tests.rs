@@ -5769,7 +5769,6 @@ Look.
     // A history turn carrying an image and a document, as the transcript
     // replays them.
     let ctx = ConversationContext {
-        summary: None,
         recent_messages: vec![ChatMessage::user_with_parts(vec![
             ContentPart::Image {
                 source: ImageSource::Base64 {
@@ -5785,10 +5784,7 @@ Look.
                 extracted_text: Some("the codeword is WOMBAT".to_string()),
             },
         ])],
-        older_window: Vec::new(),
-        summary_version: 0,
-        last_summarized_id: 0,
-        old_summary_text: String::new(),
+        ..Default::default()
     };
     let scope = crate::memory::scope_context::MemoryScopeContext::new(None);
 
@@ -7091,12 +7087,13 @@ async fn the_main_loop_recalls_the_natural_question_fixture_through_the_service(
 /// those, several at once — on a turn whose surface carries the memory read
 /// tools, and not on a turn without them. Owner decision LQ19 (F-C) adds one
 /// line: before saving a changed fact, search for the note it changes and
-/// name it.
+/// name it. Design 11 §4 (CQ-5) adds another: a `previous_conversation`
+/// block names the note that records it, to read when the work goes on.
 #[tokio::test]
 async fn the_main_loop_prompt_says_search_pick_read_in_one_line() {
     let guidance = crate::tools::builtins::main_loop_memory_guidance();
     let lines: Vec<&str> = guidance.lines().collect();
-    assert_eq!(lines.len(), 4, "a tag, two lines, a tag: {guidance}");
+    assert_eq!(lines.len(), 5, "a tag, three lines, a tag: {guidance}");
     for word in [
         "memory_search",
         "index",
@@ -7110,6 +7107,11 @@ async fn the_main_loop_prompt_says_search_pick_read_in_one_line() {
         lines[2],
         "Before saving a fact about the user that changes an earlier one, memory_search for the \
          note it changes and pass its id in supersedes (or its fact_key)."
+    );
+    assert_eq!(
+        lines[3],
+        "A previous_conversation block names the memory note that records it; memory_read it \
+         when the user continues that work."
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -8243,4 +8245,1137 @@ async fn onboarding_waits_while_the_user_file_is_still_the_seeded_template() {
 
     assert!(bootstrap.exists(), "nothing learned yet: onboarding goes on");
     assert!(orch.is_bootstrapping());
+}
+
+// ── Design 11 §2, §4: the working state at turn end and in the window ─
+
+/// `u1`, `a2`, `u3`, … — the label of row `i` of [`session_with_rows`].
+fn row_label(i: usize) -> String {
+    format!("{}{i}", if i % 2 == 1 { "u" } else { "a" })
+}
+
+/// The lane `user1:cli`'s active session with `n` alternating user and
+/// assistant rows labelled by [`row_label`]; the session id and the row ids.
+fn session_with_rows(db: &openalpaca_storage::Database, n: usize) -> (String, Vec<i64>) {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    let session = repo
+        .get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+    let ids = (1..=n)
+        .map(|i| {
+            repo.insert(&openalpaca_storage::ConversationMessage {
+                lane_key: "user1:cli".to_string(),
+                role: if i % 2 == 1 { "user" } else { "assistant" }.to_string(),
+                content: row_label(i),
+                ..Default::default()
+            })
+            .unwrap()
+        })
+        .collect();
+    (session.id, ids)
+}
+
+fn window_of(ctx: &ConversationContext) -> Vec<String> {
+    ctx.recent_messages
+        .iter()
+        .map(|m| m.content.clone())
+        .collect()
+}
+
+fn labels(range: std::ops::RangeInclusive<usize>) -> Vec<String> {
+    range.map(row_label).collect()
+}
+
+fn lisbon_state(next: &str) -> working_state::WorkingState {
+    working_state::WorkingState {
+        v: working_state::VERSION,
+        topic: "Lisbon trip".to_string(),
+        goal: "Book the October trip".to_string(),
+        done: vec!["Flight booked".to_string()],
+        decisions: Vec::new(),
+        open: Vec::new(),
+        next: next.to_string(),
+        refs: Vec::new(),
+    }
+}
+
+/// The turn end of a turn whose loop compacted: `state`, covering the rows
+/// up to `through`, handed to `after_turn` as slice 3's main loop will.
+async fn a_compacting_turn_ends(
+    orch: &Orchestrator,
+    state: working_state::WorkingState,
+    through: i64,
+) {
+    let ctx = orch.build_context("user1:cli", "next");
+    working_state::after_turn(
+        orch.db.clone().unwrap(),
+        orch.llm_router.clone().unwrap(),
+        orch.daemon_config.clone(),
+        orch.compacted_states.clone(),
+        ctx,
+        Some((state, through)),
+    )
+    .await;
+}
+
+/// CQ-4: after a compaction, the next turn's window starts after the rows
+/// the state covers — with `min_recent_messages` (4) rows kept verbatim when
+/// fewer lie after it — and the state rides ahead of the window.
+#[tokio::test]
+async fn after_a_compaction_the_window_starts_after_through_with_a_four_row_floor() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let (_, ids) = session_with_rows(&db, 20);
+    assert_eq!(
+        window_of(&orch.build_context("user1:cli", "next")),
+        labels(1..=20)
+    );
+
+    a_compacting_turn_ends(&orch, lisbon_state("Compare the hotels"), ids[11]).await;
+    let ctx = orch.build_context("user1:cli", "next");
+    assert_eq!(
+        window_of(&ctx),
+        labels(13..=20),
+        "the window starts after `through`"
+    );
+    assert_eq!(
+        ctx.working_state.as_deref(),
+        Some(&lisbon_state("Compare the hotels"))
+    );
+    assert!(
+        ctx.older_window.is_empty(),
+        "no row lies between the state and the window"
+    );
+
+    a_compacting_turn_ends(&orch, lisbon_state("Book the hotel"), ids[17]).await;
+    let ctx = orch.build_context("user1:cli", "next");
+    assert_eq!(window_of(&ctx), labels(17..=20), "four rows stay verbatim");
+    assert_eq!(
+        ctx.working_state.as_deref(),
+        Some(&lisbon_state("Book the hotel"))
+    );
+}
+
+/// CQ-4 moves the window after a compaction **only**: a lag refresh and a
+/// close leave it as it is — the close even when it follows a compaction,
+/// whose moved window it puts back.
+#[tokio::test]
+async fn the_window_is_unchanged_after_a_lag_refresh_or_a_close() {
+    // A lag refresh: 20 rows and a 6-row window leave 14 rows behind it.
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let mut config = DaemonConfig::default();
+    config.orchestrator.memory.prompt_recent_messages = 6;
+    let answer = serde_json::to_string(&lisbon_state("Compare the hotels")).unwrap();
+    let (orch, _) =
+        make_tool_mode_orchestrator_with_db(None, &answer, config, Vec::new(), Some(db.clone()));
+    let (_, ids) = session_with_rows(&db, 20);
+    let before = orch.build_context("user1:cli", "next");
+    assert_eq!(window_of(&before), labels(15..=20));
+    working_state::after_turn(
+        db.clone(),
+        orch.llm_router.clone().unwrap(),
+        orch.daemon_config.clone(),
+        orch.compacted_states.clone(),
+        before,
+        None,
+    )
+    .await;
+    let after = orch.build_context("user1:cli", "next");
+    assert_eq!(
+        after.working_state_through, ids[13],
+        "the lag refresh covered the 14 rows"
+    );
+    assert!(after.working_state.is_some());
+    assert_eq!(
+        window_of(&after),
+        labels(15..=20),
+        "and left the window as it was"
+    );
+
+    // A close after a compaction: the compaction moved the window …
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let (session, ids) = session_with_rows(&db, 20);
+    a_compacting_turn_ends(&orch, lisbon_state("Compare the hotels"), ids[11]).await;
+    let compacted = orch.build_context("user1:cli", "next");
+    assert_eq!(window_of(&compacted), labels(13..=20));
+
+    // … and the close — here the write its job makes (slice 4): the state
+    // through the session's newest row — puts the whole window back.
+    let closed = serde_json::to_string(&lisbon_state("Book the hotel")).unwrap();
+    assert!(
+        openalpaca_storage::ConversationRepository::new(&db)
+            .update_working_state(&session, compacted.working_state_version, &closed, ids[19])
+            .unwrap()
+    );
+    let ctx = orch.build_context("user1:cli", "next");
+    assert_eq!(
+        ctx.working_state.as_deref(),
+        Some(&lisbon_state("Book the hotel"))
+    );
+    assert_eq!(
+        window_of(&ctx),
+        labels(1..=20),
+        "a close does not move the window"
+    );
+}
+
+/// The main loop's request carries the session's working state as the
+/// history layer's first message: after the fixed zone, ahead of the rows.
+#[tokio::test]
+async fn a_main_loop_turn_carries_the_working_state_ahead_of_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let (session, ids) = session_with_rows(&db, 4);
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let state = lisbon_state("Compare the hotels");
+    assert!(
+        repo.update_working_state(&session, 0, &serde_json::to_string(&state).unwrap(), ids[1])
+            .unwrap()
+    );
+    let updated_at = repo
+        .get_session(&session)
+        .unwrap()
+        .unwrap()
+        .working_state_updated_at
+        .unwrap();
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+
+    let request = requests.lock().unwrap()[0].clone();
+    let blocks: Vec<usize> = request
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.content.starts_with(working_state::BLOCK_PREFIX))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(blocks.len(), 1, "one working-state block");
+    assert_eq!(
+        request.messages[blocks[0]].content,
+        state.render(
+            &updated_at,
+            DaemonConfig::default()
+                .orchestrator
+                .memory
+                .summary_max_chars
+        )
+    );
+    let first_row = request
+        .messages
+        .iter()
+        .position(|m| m.content == "u1")
+        .expect("the rows reach the model");
+    assert!(blocks[0] < first_row, "the state comes before the rows");
+}
+
+// ── Design 11 §10.2: the compaction invariant (slice 3) ─────────────
+
+/// The tool-mode orchestrator over `db`, every answer `reply`, its answering
+/// model's window 4 096 tokens and the compaction buffer forced high: a turn
+/// over ten 800-character rows compacts at `LlmSummary` without the assembly
+/// trimming a row, and a turn over four does not compact. The summariser's
+/// model is `claude-haiku-4-5-20251001`; the recent window holds `recent`
+/// rows.
+fn a_4k_orchestrator(
+    reply: &str,
+    db: &openalpaca_storage::Database,
+    recent: usize,
+) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.memory.prompt_recent_messages = recent;
+    config.execution.context.autocompact_buffer_ratio = 0.3;
+    config.orchestrator.costs.summary_model = Some("claude-haiku-4-5-20251001".to_string());
+    let (orch, requests) =
+        make_tool_mode_orchestrator_with_db(None, reply, config, Vec::new(), Some(db.clone()));
+    let registry = orch.llm_router.as_ref().unwrap().model_registry();
+    let mut info = registry
+        .get_model_info("claude-sonnet-4-5-20250929")
+        .expect("the tool-mode model is in the catalogue");
+    info.context_window = 4096;
+    registry.register("claude-sonnet-4-5-20250929".to_string(), info);
+    (orch, requests)
+}
+
+/// `user1:cli`'s active session with `n` 800-character rows (`r1 …` to
+/// `r<n> …`) and a working state at version 1 covering none of them.
+fn a_long_session(db: &openalpaca_storage::Database, n: usize) -> (String, Vec<i64>) {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    let session = repo
+        .get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+    let ids = (1..=n)
+        .map(|i| {
+            repo.insert(&openalpaca_storage::ConversationMessage {
+                lane_key: "user1:cli".to_string(),
+                role: if i % 2 == 1 { "user" } else { "assistant" }.to_string(),
+                content: format!("r{i} {}", "x".repeat(800)),
+                ..Default::default()
+            })
+            .unwrap()
+        })
+        .collect();
+    let state = serde_json::to_string(&lisbon_state("Pick the dates")).unwrap();
+    assert!(
+        repo.update_working_state(&session.id, 0, &state, 0)
+            .unwrap()
+    );
+    (session.id, ids)
+}
+
+/// Whether a request is the working-state writer's.
+fn is_writer_call(request: &ChatRequest) -> bool {
+    let (system, _) = working_state::render_prompt(None, "");
+    request
+        .messages
+        .first()
+        .is_some_and(|m| m.content == system)
+}
+
+/// **Design 11 §10.2, the compaction invariant.** On a 4K window, a turn that
+/// compacts makes **exactly one** summariser call, and its state reaches the
+/// session row at turn end with no other call — `through` the last row the
+/// writer read (§3.2: `messages[2..10]` are rows 1–8). The next turn's
+/// request carries that state's block ahead of the rows, the rows after
+/// `through` with the four-row floor, and nothing trimmed.
+#[tokio::test]
+async fn a_compacting_turn_writes_its_state_and_the_next_request_carries_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let written = lisbon_state("Book the hotel");
+    let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 25);
+    let (session, ids) = a_long_session(&db, 10);
+
+    let compacting = Uuid::new_v4();
+    send_tool_mode(&orch, compacting, "what next?").await;
+    orch.background.wait_idle().await;
+    assert!(
+        orch.take_continuity(compacting).working_state_updated,
+        "its `done` says the working state changed (§5, CQ-7)"
+    );
+
+    let turn = requests.lock().unwrap().clone();
+    assert_eq!(
+        turn.iter().filter(|r| is_writer_call(r)).count(),
+        1,
+        "one summariser call for the compaction"
+    );
+    assert_eq!(turn.len(), 2, "and the answer: no other call at turn end");
+    assert_eq!(
+        turn.iter()
+            .find(|r| is_writer_call(r))
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("claude-haiku-4-5-20251001"),
+        "on `summary_model` (CQ-3)"
+    );
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<working_state::WorkingState>(&row.working_state).unwrap(),
+        written
+    );
+    assert_eq!(row.working_state_through, ids[7], "rows 1–8 were read");
+    assert_eq!(row.working_state_version, 2);
+    let usage = openalpaca_storage::repository::LlmUsageRepository::new(&db)
+        .get_agent_usage(working_state::USAGE_LABEL, 10)
+        .unwrap();
+    assert_eq!(
+        usage.iter().map(|c| c.status.as_str()).collect::<Vec<_>>(),
+        vec!["success"],
+        "the compaction's call has its usage row, under the summariser's label"
+    );
+    assert_eq!(usage[0].task_id, None);
+
+    let quiet = Uuid::new_v4();
+    send_tool_mode(&orch, quiet, "and then?").await;
+    assert!(!orch.take_continuity(quiet).working_state_updated);
+    let next = requests.lock().unwrap()[2].clone();
+    assert!(!is_writer_call(&next), "the next turn does not compact");
+    let blocks: Vec<usize> = next
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.content.starts_with(working_state::BLOCK_PREFIX))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(blocks.len(), 1, "one working-state block");
+    assert_eq!(
+        next.messages[blocks[0]].content,
+        written.render(
+            row.working_state_updated_at.as_deref().unwrap(),
+            DaemonConfig::default()
+                .orchestrator
+                .memory
+                .summary_max_chars
+        )
+    );
+    let rows: Vec<&str> = next
+        .messages
+        .iter()
+        .filter_map(|m| m.content.split_once(' ').map(|(label, _)| label))
+        .filter(|label| label.starts_with('r') && label[1..].parse::<u32>().is_ok())
+        .collect();
+    assert_eq!(
+        rows,
+        vec!["r7", "r8", "r9", "r10"],
+        "the rows after `through`, four kept verbatim, none trimmed"
+    );
+    let first_row = next
+        .messages
+        .iter()
+        .position(|m| m.content.starts_with("r7 "))
+        .unwrap();
+    assert!(blocks[0] < first_row, "the state comes before the rows");
+}
+
+/// **Design 11 §10.2, its second half.** An answer that is not a state
+/// leaves the session row as it was, and the turn goes on over the heuristic
+/// summary (`compress_context`).
+#[tokio::test]
+async fn an_unusable_compaction_answer_leaves_the_row_and_the_loop_on_the_heuristic() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, requests) = a_4k_orchestrator("I would rather chat.", &db, 25);
+    let (session, _) = a_long_session(&db, 10);
+
+    let request_id = Uuid::new_v4();
+    send_tool_mode(&orch, request_id, "what next?").await;
+    orch.background.wait_idle().await;
+    assert!(
+        !orch.take_continuity(request_id).working_state_updated,
+        "no state goes to the row, and `done` says none changed"
+    );
+
+    let turn = requests.lock().unwrap().clone();
+    assert_eq!(turn.iter().filter(|r| is_writer_call(r)).count(), 1);
+    let answer = turn.iter().find(|r| !is_writer_call(r)).unwrap();
+    assert!(
+        answer
+            .messages
+            .iter()
+            .any(|m| m.content.starts_with("[Context compressed:")),
+        "the heuristic summary stands in"
+    );
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<working_state::WorkingState>(&row.working_state).unwrap(),
+        lisbon_state("Pick the dates"),
+        "the row is untouched"
+    );
+    assert_eq!(
+        (row.working_state_version, row.working_state_through),
+        (1, 0)
+    );
+    let usage = openalpaca_storage::repository::LlmUsageRepository::new(&db)
+        .get_agent_usage(working_state::USAGE_LABEL, 10)
+        .unwrap();
+    assert_eq!(
+        usage
+            .iter()
+            .map(|c| (c.status.as_str(), c.error_message.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![("error", Some("the answer is not JSON"))],
+        "and its usage row says why"
+    );
+}
+
+/// §3.2 (panel defect U-2) through the main loop: fourteen rows are over the
+/// assembly's budget, so its trim drops the oldest before the loop ever runs
+/// — rows the compaction's writer never reads. The state it wrote reaches
+/// the row, and `through` stays where it was.
+#[tokio::test]
+async fn a_compaction_after_the_trim_dropped_rows_leaves_through_where_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let written = lisbon_state("Book the hotel");
+    let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 25);
+    let (session, _) = a_long_session(&db, 14);
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+    orch.background.wait_idle().await;
+
+    let turn = requests.lock().unwrap().clone();
+    let call = turn
+        .iter()
+        .find(|r| is_writer_call(r))
+        .expect("it compacted");
+    assert!(
+        !call.messages[1].content.contains("[user]: r1 "),
+        "the trim took the first row before the compaction"
+    );
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<working_state::WorkingState>(&row.working_state).unwrap(),
+        written
+    );
+    assert_eq!(
+        (row.working_state_version, row.working_state_through),
+        (2, 0),
+        "`through` does not pass the rows the trim dropped"
+    );
+}
+
+/// Design 11 rev 1.2 (the slice-3 review's F1): rows behind the recent
+/// window that the lag refresh has not covered yet — with a ten-row window
+/// over fourteen rows, rows 1–4, in no prompt and in no state — are read by
+/// the compaction's one writer call ahead of the window's, oldest first, so
+/// `through` passes them with the rows it read (`messages[2..10]` are rows
+/// 5–12). The next turn's window starts after it with the four-row floor,
+/// and no row lies between the state and the window: a conversation longer
+/// than the window stops re-sending and re-compacting it (CQ-4).
+#[tokio::test]
+async fn a_compaction_reads_the_rows_behind_the_window_and_moves_the_window_past_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let written = lisbon_state("Book the hotel");
+    let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 10);
+    let (session, ids) = a_long_session(&db, 14);
+    assert_eq!(
+        orch.build_context("user1:cli", "what next?")
+            .older_window
+            .len(),
+        4,
+        "rows 1–4 lie behind the window"
+    );
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+    orch.background.wait_idle().await;
+
+    let turn = requests.lock().unwrap().clone();
+    let calls: Vec<&ChatRequest> = turn.iter().filter(|r| is_writer_call(r)).collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "one summariser call, no second one at turn end"
+    );
+    let user = &calls[0].messages[1].content;
+    let at = |line: &str| {
+        user.find(line)
+            .unwrap_or_else(|| panic!("the writer read {line:?}"))
+    };
+    assert!(
+        at("[user]: r1 ") < at("[assistant]: r4 ") && at("[assistant]: r4 ") < at("[user]: r5 "),
+        "the rows behind the window first, then the window's"
+    );
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<working_state::WorkingState>(&row.working_state).unwrap(),
+        written
+    );
+    assert_eq!(
+        (row.working_state_version, row.working_state_through),
+        (2, ids[11]),
+        "`through` passes rows 1–4 and the window's rows 5–12"
+    );
+
+    let ctx = orch.build_context("user1:cli", "and then?");
+    assert!(
+        ctx.older_window.is_empty(),
+        "no row between the state and the window"
+    );
+    send_tool_mode(&orch, Uuid::new_v4(), "and then?").await;
+    let next = requests.lock().unwrap()[2].clone();
+    assert!(!is_writer_call(&next), "the next turn does not compact");
+    let rows: Vec<&str> = next
+        .messages
+        .iter()
+        .filter_map(|m| m.content.split_once(' ').map(|(label, _)| label))
+        .filter(|label| label.starts_with('r') && label[1..].parse::<u32>().is_ok())
+        .collect();
+    assert_eq!(
+        rows,
+        vec!["r11", "r12", "r13", "r14"],
+        "the window starts after `through`, four rows kept verbatim"
+    );
+}
+
+// ── Design 11 §4 (b), CQ-5: a new conversation carries the previous one ─
+
+/// A conversation on the lane `user1:cli` bound to `workspace`, with rows
+/// labelled `p1`, `p2`, … (odd ones the user's, each counted as the gateway
+/// counts it), and — when given — `state` covering the first `covered` of
+/// them; then closed by a new conversation on the same lane bound to
+/// `next_workspace`. The closed conversation's id and its row ids.
+fn a_closed_conversation(
+    db: &openalpaca_storage::Database,
+    workspace: Option<&str>,
+    rows: usize,
+    state: Option<(&working_state::WorkingState, usize)>,
+    next_workspace: Option<&str>,
+) -> (String, Vec<i64>) {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    let closed = repo
+        .create_session("user1:cli", "cli", workspace, None)
+        .unwrap();
+    let ids: Vec<i64> = (1..=rows)
+        .map(|i| {
+            let id = repo
+                .insert(&openalpaca_storage::ConversationMessage {
+                    lane_key: "user1:cli".to_string(),
+                    role: if i % 2 == 1 { "user" } else { "assistant" }.to_string(),
+                    content: format!("p{i}"),
+                    ..Default::default()
+                })
+                .unwrap();
+            repo.increment_message_count_for_session(&closed.id)
+                .unwrap();
+            id
+        })
+        .collect();
+    if let Some((state, covered)) = state {
+        let through = covered.checked_sub(1).map_or(0, |i| ids[i]);
+        assert!(
+            repo.update_working_state(
+                &closed.id,
+                0,
+                &serde_json::to_string(state).unwrap(),
+                through
+            )
+            .unwrap()
+        );
+    }
+    repo.create_session("user1:cli", "cli", next_workspace, None)
+        .unwrap();
+    (closed.id, ids)
+}
+
+/// A user turn of the lane's active conversation as the gateway runs it:
+/// the user row persisted first, the context built on the same text, then
+/// the answer row.
+fn a_turn(
+    orch: &Orchestrator,
+    db: &openalpaca_storage::Database,
+    text: &str,
+) -> ConversationContext {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    let row = |role: &str, content: &str| {
+        repo.insert(&openalpaca_storage::ConversationMessage {
+            lane_key: "user1:cli".to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    row("user", text);
+    let ctx = orch.build_context("user1:cli", text);
+    row("assistant", &format!("answer to {text}"));
+    ctx
+}
+
+/// Owner decision CQ-5: a new conversation on the lane and project is given
+/// the previous one — its state, and its last exchange after what the state
+/// covers — for its first three user turns, and not the fourth; the heading
+/// names the timeline's date before the close projected a note, and the
+/// note, by id and title, after.
+#[test]
+fn a_new_conversation_is_given_the_previous_one_for_three_user_turns_and_not_the_fourth() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let state = lisbon_state("Compare the hotels");
+    let (closed, _) = a_closed_conversation(&db, None, 4, Some((&state, 2)), None);
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&closed)
+        .unwrap()
+        .unwrap();
+    let ended_at = row.ended_at.clone().unwrap();
+    let date = &row.last_message_at.clone().unwrap()[..10];
+
+    let first = a_turn(&orch, &db, "go on");
+    let previous = first.previous.clone().expect("the first turn is given it");
+    assert_eq!(previous.state.as_deref(), Some(&state));
+    assert_eq!(
+        previous.exchange,
+        vec![
+            ("user".to_string(), "p3".to_string()),
+            ("assistant".to_string(), "p4".to_string())
+        ],
+        "the last exchange after what the state covers"
+    );
+    assert!(
+        first.previous_text(4000).unwrap().starts_with(&format!(
+            "The previous conversation on this project ended {ended_at}; its record will be \
+             listed by memory_timeline under Conversation on {date}.\nTopic: Lisbon trip"
+        )),
+        "{:?}",
+        first.previous_text(4000)
+    );
+
+    let note = "55e811b6-3220-4758-a47b-034bd1023f38";
+    openalpaca_storage::ConversationRepository::new(&db)
+        .set_episode_note_id(&closed, note)
+        .unwrap();
+    let second = a_turn(&orch, &db, "and then?");
+    assert!(
+        second.previous_text(4000).unwrap().starts_with(&format!(
+            "The previous conversation on this project ended {ended_at}; its record is memory \
+             note {note} 'Conversation on {date}: Lisbon trip' — memory_read it for the full \
+             record; memory_timeline shows what surrounds it.\nTopic: Lisbon trip"
+        )),
+        "{:?}",
+        second.previous_text(4000)
+    );
+    assert!(a_turn(&orch, &db, "the third").previous.is_some());
+    assert!(
+        a_turn(&orch, &db, "the fourth").previous.is_none(),
+        "not the fourth user turn"
+    );
+}
+
+/// Only while the new conversation has no state of its own: once one is
+/// written — by a compaction, a lag refresh or a close — it is given its own
+/// state and the previous one no longer.
+#[test]
+fn a_conversation_with_a_state_of_its_own_is_not_given_the_previous_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    a_closed_conversation(
+        &db,
+        None,
+        2,
+        Some((&lisbon_state("Compare the hotels"), 2)),
+        None,
+    );
+    let ctx = a_turn(&orch, &db, "go on");
+    assert!(ctx.previous.is_some());
+
+    let own = lisbon_state("Book the Alfama hotel");
+    assert!(
+        openalpaca_storage::ConversationRepository::new(&db)
+            .update_working_state(
+                ctx.session_id.as_deref().unwrap(),
+                0,
+                &serde_json::to_string(&own).unwrap(),
+                0
+            )
+            .unwrap()
+    );
+    let ctx = a_turn(&orch, &db, "and then?");
+    assert_eq!(ctx.working_state.as_deref(), Some(&own));
+    assert!(
+        ctx.previous.is_none(),
+        "its own state, not the previous one"
+    );
+}
+
+/// The previous conversation is the lane's newest closed one — or nothing:
+/// one with neither a state nor a row gives no block, and an older
+/// conversation's state is never given in its place; one with rows and no
+/// state gives its last exchange alone.
+#[test]
+fn the_previous_conversation_is_the_newest_one_or_nothing_never_an_older_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let state = lisbon_state("Compare the hotels");
+    a_closed_conversation(&db, None, 4, Some((&state, 4)), None);
+    a_closed_conversation(&db, None, 0, None, None);
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_none(),
+        "the newest has no state and no rows: nothing, not the older one's state"
+    );
+
+    a_closed_conversation(&db, None, 2, None, None);
+    let previous = orch
+        .build_context("user1:cli", "go on")
+        .previous
+        .expect("rows and no state: the last exchange");
+    assert_eq!(previous.state, None, "not the older conversation's state");
+    assert_eq!(
+        previous.exchange,
+        vec![
+            ("user".to_string(), "p1".to_string()),
+            ("assistant".to_string(), "p2".to_string())
+        ]
+    );
+}
+
+/// The previous conversation is one on the same project — `NULL` matching
+/// `NULL` — never another project's, however recent.
+#[test]
+fn the_previous_conversation_is_never_another_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let state = lisbon_state("Compare the hotels");
+    a_closed_conversation(&db, Some("/p1"), 2, Some((&state, 2)), Some("/p2"));
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_none(),
+        "/p1's conversation is not given to /p2's"
+    );
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    repo.create_session("user1:cli", "cli", None, None).unwrap();
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_none(),
+        "nor to one with no project"
+    );
+    repo.create_session("user1:cli", "cli", Some("/p1"), None)
+        .unwrap();
+    let previous = orch
+        .build_context("user1:cli", "go on")
+        .previous
+        .expect("a new conversation on /p1 is given it");
+    assert_eq!(previous.state.as_deref(), Some(&state));
+    assert!(
+        previous.exchange.is_empty(),
+        "the state covers its last exchange: {:?}",
+        previous.exchange
+    );
+}
+
+/// A conversation started fresh (`inherit: false`) is never given the
+/// previous one; nor is any while `carry_over_turns` is 0.
+#[test]
+fn a_conversation_started_fresh_or_with_carry_over_off_is_given_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let closed = repo.create_session("user1:cli", "cli", None, None).unwrap();
+    let ids: Vec<i64> = ["p1", "p2"]
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            repo.insert(&openalpaca_storage::ConversationMessage {
+                lane_key: "user1:cli".to_string(),
+                role: if i == 0 { "user" } else { "assistant" }.to_string(),
+                content: text.to_string(),
+                ..Default::default()
+            })
+            .unwrap()
+        })
+        .collect();
+    let state = lisbon_state("Compare the hotels");
+    assert!(
+        repo.update_working_state(
+            &closed.id,
+            0,
+            &serde_json::to_string(&state).unwrap(),
+            ids[1]
+        )
+        .unwrap()
+    );
+    let fresh = repo
+        .create_session_inheriting("user1:cli", "cli", None, None, false)
+        .unwrap();
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_none(),
+        "started fresh"
+    );
+    db.with_connection(|c| {
+        c.execute("UPDATE session SET inherit = 1 WHERE id = ?1", [&fresh.id])?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_some(),
+        "the same conversation, not started fresh, is given it"
+    );
+
+    let mut off = DaemonConfig::default();
+    off.orchestrator.memory.carry_over_turns = 0;
+    let (orch_off, _) =
+        make_tool_mode_orchestrator_with_db(None, "ok", off, Vec::new(), Some(db.clone()));
+    assert!(
+        orch_off
+            .build_context("user1:cli", "go on")
+            .previous
+            .is_none(),
+        "carry_over_turns = 0 is off"
+    );
+}
+
+/// The main loop's request carries the previous conversation as the history
+/// layer's first message, ahead of the memory delivery and the current turn;
+/// the turn's `memory_used` still names what recall delivered and nothing
+/// else — the block is not a note, and the note it names is not delivered.
+#[tokio::test]
+async fn a_main_loop_turn_carries_the_previous_conversation_and_memory_used_is_unchanged() {
+    use crate::memory::service::UsedReason;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "vim, as you told me",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+    let state = lisbon_state("Compare the hotels");
+    let (closed, _) = a_closed_conversation(&db, None, 2, Some((&state, 2)), None);
+    openalpaca_storage::ConversationRepository::new(&db)
+        .set_episode_note_id(&closed, &scene.coffee.id.to_string())
+        .unwrap();
+    let expected = crate::orchestrator::wrap_untrusted_context(
+        &orch
+            .build_context("user1:cli", "what editor do I prefer?")
+            .previous_text(4000)
+            .unwrap(),
+        "previous_conversation",
+        "user_derived",
+    );
+    assert!(expected.contains(&scene.coffee.id.to_string()));
+
+    let request_id = Uuid::new_v4();
+    send_tool_mode(&orch, request_id, "what editor do I prefer?").await;
+
+    let request = requests.lock().unwrap()[0].clone();
+    let blocks: Vec<usize> = request
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.content.starts_with(working_state::PREVIOUS_BLOCK_PREFIX))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(blocks.len(), 1, "one previous-conversation block");
+    assert_eq!(request.messages[blocks[0]].content, expected);
+    let memory = request
+        .messages
+        .iter()
+        .position(|m| m.content.contains("<memory_context>"))
+        .expect("recall delivered");
+    assert!(
+        blocks[0] < memory,
+        "the block comes before the memory delivery"
+    );
+
+    let used = orch.take_memory_used(request_id);
+    assert_eq!(used.len(), 1, "{used:?}");
+    assert_eq!(used[0].id, scene.vim.id);
+    assert_eq!(used[0].reason, UsedReason::Recall);
+}
+
+// ── Design 11 §5, CQ-7: the turn's continuity on the `done` frame ─────
+
+/// `continued_from` names what the request carries, not what the context
+/// held: the assembly trim may take the previous conversation's block (rev
+/// 1.4 item 7), and a turn that was not given it continues from nothing. A
+/// previous conversation with no state is named with an empty topic.
+#[test]
+fn continued_from_is_recorded_only_when_the_request_carries_the_block() {
+    let orch = make_orchestrator();
+    let mut ctx = ConversationContext {
+        previous: Some(working_state::PreviousConversation {
+            session_id: "s-prev".to_string(),
+            ended_at: "2026-09-28 11:00:00".to_string(),
+            date: "2026-09-28".to_string(),
+            episode_note_id: None,
+            state: Some(Arc::new(lisbon_state("Compare the hotels"))),
+            exchange: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let block = |ctx: &ConversationContext| {
+        wrap_untrusted_context(
+            &ctx.previous_text(4000).unwrap(),
+            working_state::PREVIOUS_BLOCK_TYPE,
+            "user_derived",
+        )
+    };
+
+    let trimmed = Uuid::new_v4();
+    orch.record_continued_from(trimmed, &ctx, &[ChatMessage::user("go on")]);
+    assert_eq!(
+        orch.take_continuity(trimmed),
+        crate::gateway::TurnContinuity::default(),
+        "the block is not in the request"
+    );
+
+    let given = Uuid::new_v4();
+    orch.record_continued_from(
+        given,
+        &ctx,
+        &[ChatMessage::user(&block(&ctx)), ChatMessage::user("go on")],
+    );
+    assert_eq!(
+        orch.take_continuity(given).continued_from,
+        Some(crate::gateway::ContinuedFrom {
+            session_id: "s-prev".to_string(),
+            topic: "Lisbon trip".to_string(),
+        })
+    );
+    assert_eq!(
+        orch.take_continuity(given),
+        crate::gateway::TurnContinuity::default(),
+        "taken once"
+    );
+
+    if let Some(previous) = ctx.previous.as_mut() {
+        previous.state = None;
+        previous.exchange = vec![("user".to_string(), "and the hotel?".to_string())];
+    }
+    let no_state = Uuid::new_v4();
+    orch.record_continued_from(no_state, &ctx, &[ChatMessage::user(&block(&ctx))]);
+    assert_eq!(
+        orch.take_continuity(no_state).continued_from,
+        Some(crate::gateway::ContinuedFrom {
+            session_id: "s-prev".to_string(),
+            topic: String::new(),
+        })
+    );
+}
+
+/// Through the main loop: a new conversation's turn given the previous one
+/// says so — its session and its state's topic — and a turn with no
+/// previous conversation says nothing; neither compacted.
+#[tokio::test]
+async fn a_main_loop_turn_says_what_it_continued_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+
+    let alone = Uuid::new_v4();
+    send_tool_mode(&orch, alone, "hello").await;
+    assert_eq!(
+        orch.take_continuity(alone),
+        crate::gateway::TurnContinuity::default()
+    );
+
+    let state = lisbon_state("Compare the hotels");
+    let (closed, _) = a_closed_conversation(&db, None, 2, Some((&state, 2)), None);
+    let continued = Uuid::new_v4();
+    send_tool_mode(&orch, continued, "where were we?").await;
+    assert_eq!(
+        orch.take_continuity(continued),
+        crate::gateway::TurnContinuity {
+            working_state_updated: false,
+            continued_from: Some(crate::gateway::ContinuedFrom {
+                session_id: closed,
+                topic: "Lisbon trip".to_string(),
+            }),
+        }
+    );
+}
+
+/// The skill tier builds the same history layer (rev 1.4 item 8), so a
+/// `/slash` turn given the previous conversation says so too.
+#[tokio::test]
+async fn a_skill_turn_says_what_it_continued_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(ToolModeMockLlm {
+            tool_call: None,
+            final_text: "review done".to_string(),
+            requests: requests.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let (_tmp, catalog) = make_review_skill_catalog();
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(Arc::new(router)),
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        Some(db.clone()),
+        catalog,
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    let state = lisbon_state("Compare the hotels");
+    let (closed, _) = a_closed_conversation(&db, None, 2, Some((&state, 2)), None);
+
+    let request_id = Uuid::new_v4();
+    assert_eq!(
+        send_tool_mode(&orch, request_id, "/review some code").await,
+        "review done"
+    );
+    assert!(
+        requests.lock().unwrap()[0]
+            .messages
+            .iter()
+            .any(|m| m.content.starts_with(working_state::PREVIOUS_BLOCK_PREFIX)),
+        "the skill's request carries the block"
+    );
+    assert_eq!(
+        orch.take_continuity(request_id).continued_from,
+        Some(crate::gateway::ContinuedFrom {
+            session_id: closed,
+            topic: "Lisbon trip".to_string(),
+        })
+    );
 }

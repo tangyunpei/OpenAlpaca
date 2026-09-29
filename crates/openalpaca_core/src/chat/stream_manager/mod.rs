@@ -4,7 +4,9 @@
 //! gets a unique stream_id with a broadcast channel for SSE delivery.
 
 use crate::events::ConfirmationOutcome;
-use crate::gateway::{DelegationInfo, MemoryUsed, SkippedAttachment};
+use crate::gateway::{
+    ContinuedFrom, DelegationInfo, MemoryUsed, SkippedAttachment, TurnContinuity,
+};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -51,6 +53,14 @@ pub enum ChatStreamEvent {
         memory_used: Option<Vec<MemoryUsed>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         delegation: Option<DelegationInfo>,
+        /// Design 11 §5 (CQ-7) — the turn compacted, so the conversation's
+        /// working state changed: a client re-reads its session. Always sent.
+        #[serde(default)]
+        working_state_updated: bool,
+        /// Design 11 §5 (CQ-7) — the previous conversation this turn was
+        /// given, `{session_id, topic}`, or `null`. Always sent; live only.
+        #[serde(default)]
+        continued_from: Option<ContinuedFrom>,
     },
     Error {
         message: String,
@@ -137,6 +147,7 @@ impl StreamSink {
             Vec::new(),
             Vec::new(),
             delegation,
+            TurnContinuity::default(),
         );
     }
 
@@ -147,7 +158,9 @@ impl StreamSink {
     /// byte-identical to what it always was. A turn whose *every* attachment
     /// was withheld has an empty `used` and a non-empty `skipped`, which is
     /// why the two are one call rather than two. `memory_used` (plan 3.3) is
-    /// omitted the same way when the turn delivered no note.
+    /// omitted the same way when the turn delivered no note. `continuity`
+    /// (design 11 §5) is always sent: `working_state_updated` and
+    /// `continued_from`, `false` and `null` on an ordinary turn.
     #[allow(clippy::too_many_arguments)]
     pub fn send_done_with_attachments(
         &self,
@@ -160,6 +173,7 @@ impl StreamSink {
         attachments_skipped: Vec<SkippedAttachment>,
         memory_used: Vec<MemoryUsed>,
         delegation: Option<DelegationInfo>,
+        continuity: TurnContinuity,
     ) {
         self.send_event(ChatStreamEvent::Done {
             content: content.to_string(),
@@ -171,6 +185,8 @@ impl StreamSink {
             attachments_skipped: (!attachments_skipped.is_empty()).then_some(attachments_skipped),
             memory_used: (!memory_used.is_empty()).then_some(memory_used),
             delegation,
+            working_state_updated: continuity.working_state_updated,
+            continued_from: continuity.continued_from,
         });
     }
 

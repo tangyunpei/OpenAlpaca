@@ -134,12 +134,19 @@ fn test_find_mapping_recall_mode() {
     assert_eq!(mapping.field, "recall_mode");
 }
 
-/// Conversation summaries (design 09 §13.3): `episode_max_per_day` lives in
-/// `[orchestrator.learning]`, beside the cadence it bounds.
+/// Carry-over (design 11 §4 (b), §8): `carry_over_turns` lives in
+/// `[orchestrator.memory]`, where `DaemonConfig` reads it.
 #[test]
-fn test_find_mapping_episode_max_per_day() {
-    let mapping = find_mapping("daemon.orchestrator.learning.episode_max_per_day")
-        .expect("daemon.orchestrator.learning.episode_max_per_day has a mapping");
-    assert_eq!(mapping.section, &["orchestrator", "learning"]);
-    assert_eq!(mapping.field, "episode_max_per_day");
+fn test_find_mapping_carry_over_turns() {
+    let mapping = find_mapping("daemon.orchestrator.carry_over_turns")
+        .expect("daemon.orchestrator.carry_over_turns has a mapping");
+    assert_eq!(mapping.section, &["orchestrator", "memory"]);
+    assert_eq!(mapping.field, "carry_over_turns");
+}
+
+/// Conversation summaries (design 09 §13.3): `episode_max_per_day` is gone
+/// with its registry row (design 11 §8, CQ-2), and so is its mapping.
+#[test]
+fn test_no_mapping_for_episode_max_per_day() {
+    assert!(find_mapping("daemon.orchestrator.learning.episode_max_per_day").is_none());
 }

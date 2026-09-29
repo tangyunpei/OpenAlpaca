@@ -1,35 +1,32 @@
+use crate::orchestrator::working_state::{BLOCK_PREFIX, WorkingState};
 use crate::utils::social::is_social_phrase;
 use async_trait::async_trait;
 use openalpaca_llm::{ChatMessage, Role};
 use tracing;
 
-/// A memory entry extracted during compaction Phase 1.
-#[derive(Debug, Clone)]
-pub struct ExtractedMemory {
-    pub kind: String,
-    pub content: String,
-}
-
-/// Trait for LLM-based memory extraction (mockable in tests).
-#[async_trait]
-pub trait MemoryExtractor: Send + Sync {
-    async fn extract(&self, messages: &[ChatMessage]) -> Result<Vec<ExtractedMemory>, String>;
-}
-
-/// Trait for LLM-based message summarization (mockable in tests).
+/// The working-state writer at compaction (mockable in tests): the state
+/// after `messages`, folded into `previous` — one model call (design 11
+/// §3.3).
 #[async_trait]
 pub trait Summarizer: Send + Sync {
-    async fn summarize(&self, messages: &[ChatMessage]) -> Result<String, String>;
+    async fn summarize(
+        &self,
+        previous: Option<&WorkingState>,
+        messages: &[ChatMessage],
+    ) -> Result<WorkingState, String>;
 }
 
-/// 3-phase compaction pipeline for context window management.
+/// 2-phase compaction pipeline for context window management.
 pub struct CompactionPipeline;
 
 /// Result of a full compaction pipeline run.
 #[derive(Debug)]
 pub struct CompactionResult {
     pub compacted_messages: Vec<ChatMessage>,
-    pub extracted_memories: Vec<ExtractedMemory>,
+    /// The state the summary wrote and its boundary: `messages[2..boundary]`
+    /// of the list the pipeline was handed lie behind it. `None` when nothing
+    /// was summarised or the summary fell back to the heuristic.
+    pub working_state: Option<(WorkingState, usize)>,
     #[allow(dead_code)]
     pub messages_discarded: usize,
     #[allow(dead_code)]
@@ -40,47 +37,57 @@ pub struct CompactionResult {
 }
 
 impl CompactionPipeline {
-    /// Run the full 3-phase compaction pipeline.
+    /// Run the compaction pipeline (design 11 §3.3, CQ-1: the extraction
+    /// phase is gone).
     ///
-    /// Phase 1: Extract memories (LLM). On error: skip, log.
     /// Phase 2: Discard social messages (heuristic). Always succeeds.
-    /// Phase 3: Summarize older messages (LLM). On error: fall back to
-    ///          existing `compress_context()` heuristic.
+    /// Phase 3: Write the working state over the older messages (LLM) — the
+    ///          rows `behind` the list first — and put it in their place,
+    ///          rendered within `max_chars`. On error (an unusable answer
+    ///          too): fall back to the existing `compress_context()`
+    ///          heuristic.
     pub async fn compact(
         messages: Vec<ChatMessage>,
         min_recent: usize,
-        extractor: &dyn MemoryExtractor,
+        previous: Option<&WorkingState>,
+        behind: &[ChatMessage],
         summarizer: &dyn Summarizer,
+        max_chars: usize,
     ) -> CompactionResult {
         let messages_before = messages.len();
-
-        // Phase 1: Memory extraction (best-effort)
-        let boundary = messages.len().saturating_sub(min_recent).max(2);
-        let older = if boundary > 2 { &messages[2..boundary] } else { &[] as &[ChatMessage] };
-
-        let extracted_memories = match extractor.extract(older).await {
-            Ok(memories) => {
-                tracing::info!(count = memories.len(), "Compaction Phase 1: extracted memories");
-                memories
-            }
-            Err(e) => {
-                tracing::warn!("Compaction Phase 1 (extraction) failed, skipping: {e}");
-                vec![]
-            }
-        };
 
         // Phase 2: Discard social messages (always succeeds)
         let after_discard = Self::discard_social(&messages, min_recent);
         let messages_discarded = messages_before - after_discard.len();
-        tracing::info!(discarded = messages_discarded, "Compaction Phase 2: social discard");
+        tracing::info!(
+            discarded = messages_discarded,
+            "Compaction Phase 2: social discard"
+        );
 
         // Phase 3: Summarize older messages (with fallback)
-        match Self::summarize_older(after_discard.clone(), min_recent, summarizer).await {
-            Ok(compacted) => {
+        match Self::summarize_older(
+            after_discard.clone(),
+            min_recent,
+            previous,
+            behind,
+            summarizer,
+            max_chars,
+        )
+        .await
+        {
+            Ok(summarised) => {
+                let (compacted, working_state) = match summarised {
+                    // Phase 2 keeps the last `min_recent` messages, so the
+                    // boundary in the list as handed is its length less them.
+                    Some((compacted, state)) => {
+                        (compacted, Some((state, messages_before - min_recent)))
+                    }
+                    None => (after_discard, None),
+                };
                 let messages_after = compacted.len();
                 CompactionResult {
                     compacted_messages: compacted,
-                    extracted_memories,
+                    working_state,
                     messages_discarded,
                     messages_before,
                     messages_after,
@@ -97,7 +104,7 @@ impl CompactionPipeline {
                 let messages_after = fallback.len();
                 CompactionResult {
                     compacted_messages: fallback,
-                    extracted_memories,
+                    working_state: None,
                     messages_discarded,
                     messages_before,
                     messages_after,
@@ -153,33 +160,57 @@ impl CompactionPipeline {
         result
     }
 
-    /// Phase 3: Summarize older messages using an LLM.
+    /// Phase 3: Write the working state over the older messages.
     ///
-    /// Replaces messages[2..boundary] with a single summary message.
-    /// boundary = messages.len() - min_recent.
+    /// `messages[2..boundary]` (boundary = `messages.len() - min_recent`) go
+    /// to the writer with `previous`, after the rows `behind` the list —
+    /// rows between `previous` and the list that neither holds, oldest first
+    /// (the main loop's §3.2 cursor; empty elsewhere) — and the state it
+    /// returns takes their place, rendered within `max_chars`. A message that
+    /// is the previous state's block is not read — `previous` is the state —
+    /// and is taken out of the list wherever it stands, so the list holds one
+    /// block after (design 11 §3.3). `Ok(None)` when the list has nothing to
+    /// summarise, whatever lies behind it.
     pub async fn summarize_older(
         messages: Vec<ChatMessage>,
         min_recent: usize,
+        previous: Option<&WorkingState>,
+        behind: &[ChatMessage],
         summarizer: &dyn Summarizer,
-    ) -> Result<Vec<ChatMessage>, String> {
+        max_chars: usize,
+    ) -> Result<Option<(Vec<ChatMessage>, WorkingState)>, String> {
         if messages.len() <= 2 + min_recent {
-            return Ok(messages);
+            return Ok(None);
         }
 
         let boundary = messages.len().saturating_sub(min_recent);
         if boundary <= 2 {
-            return Ok(messages);
+            return Ok(None);
         }
 
-        let older = &messages[2..boundary];
-        let summary_text = summarizer.summarize(older).await?;
+        let is_block = |m: &&ChatMessage| m.content.starts_with(BLOCK_PREFIX);
+        let older: Vec<ChatMessage> = messages[2..boundary]
+            .iter()
+            .filter(|m| !is_block(m))
+            .cloned()
+            .collect();
+        if older.is_empty() {
+            return Ok(None);
+        }
+        let read: Vec<ChatMessage> = behind.iter().cloned().chain(older).collect();
+        let state = summarizer.summarize(previous, &read).await?;
+        let updated_at = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut result = Vec::with_capacity(2 + 1 + min_recent);
-        result.push(messages[0].clone()); // system
-        result.push(messages[1].clone()); // initial query
-        result.push(ChatMessage::user(&summary_text)); // summary
-        result.extend_from_slice(&messages[boundary..]); // recent
+        result.extend(messages[..2].iter().filter(|m| !is_block(m)).cloned()); // system + initial query
+        result.push(ChatMessage::user(&state.render(&updated_at, max_chars))); // the state
+        result.extend(
+            messages[boundary..]
+                .iter()
+                .filter(|m| !is_block(m))
+                .cloned(),
+        ); // recent
 
-        Ok(result)
+        Ok(Some((result, state)))
     }
 }

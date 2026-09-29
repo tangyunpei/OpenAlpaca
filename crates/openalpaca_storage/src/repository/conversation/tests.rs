@@ -199,11 +199,13 @@ fn test_update_summary_optimistic_success() {
     let db = test_db();
     let repo = ConversationRepository::new(&db);
 
-    repo.get_or_create_active_session("user1:gui", "gui", None).unwrap();
+    let session = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
 
     // Update with correct version (0)
     let ok = repo
-        .update_summary_optimistic("user1:gui", 0, "Test summary", 42)
+        .update_working_state(&session.id, 0, "Test summary", 42)
         .unwrap();
     assert!(ok);
 
@@ -218,17 +220,19 @@ fn test_update_summary_optimistic_conflict() {
     let db = test_db();
     let repo = ConversationRepository::new(&db);
 
-    repo.get_or_create_active_session("user1:gui", "gui", None).unwrap();
+    let session = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
 
     // First update succeeds
     assert!(
-        repo.update_summary_optimistic("user1:gui", 0, "Summary v1", 10)
+        repo.update_working_state(&session.id, 0, "Summary v1", 10)
             .unwrap()
     );
 
     // Second update with stale version (0) fails
     let ok = repo
-        .update_summary_optimistic("user1:gui", 0, "Summary v2", 20)
+        .update_working_state(&session.id, 0, "Summary v2", 20)
         .unwrap();
     assert!(!ok);
 
@@ -239,13 +243,193 @@ fn test_update_summary_optimistic_conflict() {
     assert_eq!(last_id, 10);
 }
 
+/// A working state is written to the session it was computed for (design 11
+/// §2): after "new chat" the write still lands on the archived conversation,
+/// and the lane's new session — at the same version 0 — is left empty.
+#[test]
+fn the_working_state_write_addresses_its_session_not_the_lane() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let first = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
+    let second = repo.create_session("user1:gui", "gui", None, None).unwrap();
+
+    assert!(
+        repo.update_working_state(&first.id, 0, "{\"v\":1}", 7)
+            .unwrap()
+    );
+
+    let first = repo.get_session(&first.id).unwrap().unwrap();
+    assert_eq!(first.status, "archived");
+    assert_eq!(first.working_state, "{\"v\":1}");
+    assert_eq!(first.working_state_version, 1);
+    assert_eq!(first.working_state_through, 7);
+    assert!(first.working_state_updated_at.is_some());
+
+    let second = repo.get_session(&second.id).unwrap().unwrap();
+    assert_eq!(second.status, "active");
+    assert_eq!(second.working_state, "");
+    assert_eq!(second.working_state_version, 0);
+    assert_eq!(second.working_state_through, 0);
+}
+
+/// The close records the episode note it projected (design 11 §2) on the
+/// session it closed — archived or not — and nowhere else.
+#[test]
+fn the_episode_note_id_is_written_to_its_session() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let first = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
+    assert_eq!(first.episode_note_id, None);
+    let second = repo.create_session("user1:gui", "gui", None, None).unwrap();
+
+    repo.set_episode_note_id(&first.id, "55e811b6-3220-4758-a47b-034bd1023f38")
+        .unwrap();
+
+    let first = repo.get_session(&first.id).unwrap().unwrap();
+    assert_eq!(first.status, "archived");
+    assert_eq!(
+        first.episode_note_id.as_deref(),
+        Some("55e811b6-3220-4758-a47b-034bd1023f38")
+    );
+    let second = repo.get_session(&second.id).unwrap().unwrap();
+    assert_eq!(second.episode_note_id, None);
+}
+
+/// A history clear forgets the session's conversation summaries (LQ4), so
+/// the session stops naming the one last projected — by either clear.
+#[test]
+fn a_history_clear_forgets_the_episode_note_id() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let note = "55e811b6-3220-4758-a47b-034bd1023f38";
+
+    let first = repo.create_session("user1:gui", "gui", None, None).unwrap();
+    repo.set_episode_note_id(&first.id, note).unwrap();
+    repo.clear_summary_for_session(&first.id).unwrap();
+    assert_eq!(
+        repo.get_session(&first.id)
+            .unwrap()
+            .unwrap()
+            .episode_note_id,
+        None
+    );
+
+    repo.set_episode_note_id(&first.id, note).unwrap();
+    repo.clear_summary("user1:gui").unwrap();
+    assert_eq!(
+        repo.get_session(&first.id)
+            .unwrap()
+            .unwrap()
+            .episode_note_id,
+        None
+    );
+}
+
+/// Design 11 §4 (b), owner decision CQ-5: a conversation carries the
+/// previous one's state unless it was started fresh, and a fresh start is
+/// stored with the row.
+#[test]
+fn a_session_started_fresh_is_stored_as_not_inheriting() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let implicit = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
+    assert!(implicit.inherit);
+    let new_chat = repo.create_session("user1:gui", "gui", None, None).unwrap();
+    assert!(new_chat.inherit);
+    let fresh = repo
+        .create_session_inheriting("user1:gui", "gui", None, None, false)
+        .unwrap();
+    assert!(!fresh.inherit);
+    assert!(!repo.get_session(&fresh.id).unwrap().unwrap().inherit);
+    assert_eq!(
+        repo.get_active_session_for_lane("user1:gui")
+            .unwrap()
+            .unwrap()
+            .id,
+        fresh.id
+    );
+}
+
+/// Design 11 §4 (b): the conversation a new one continues from is the
+/// lane's newest archived session — the last one closed, not the last one
+/// created — bound to the same workspace, `NULL` matching `NULL`; never an
+/// older one, never another lane's, never the active one.
+#[test]
+fn the_previous_session_is_the_lanes_last_closed_one_in_the_same_workspace() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let lane = "user1:gui";
+
+    let a = repo.create_session(lane, "gui", None, Some("a")).unwrap();
+    let p = repo
+        .create_session(lane, "gui", Some("/p"), Some("p"))
+        .unwrap();
+    let b = repo.create_session(lane, "gui", None, Some("b")).unwrap();
+    let now = repo.create_session(lane, "gui", None, Some("now")).unwrap();
+    let elsewhere = repo
+        .create_session("user1:cli", "cli", None, Some("other lane"))
+        .unwrap();
+    repo.create_session("user1:cli", "cli", None, None).unwrap();
+    // `a` was closed last, although it was created first.
+    let ended_at = |id: &str, at: &str| {
+        db.with_connection(|c| {
+            c.execute(
+                "UPDATE session SET ended_at = ?1 WHERE id = ?2",
+                rusqlite::params![at, id],
+            )?;
+            Ok(())
+        })
+        .unwrap()
+    };
+    ended_at(&b.id, "2026-09-28 10:00:00");
+    ended_at(&a.id, "2026-09-28 11:00:00");
+    ended_at(&p.id, "2026-09-28 09:00:00");
+    ended_at(&elsewhere.id, "2026-09-28 13:00:00");
+
+    let previous = |workspace: Option<&str>| {
+        repo.previous_session(lane, workspace)
+            .unwrap()
+            .map(|s| s.title)
+    };
+    assert_eq!(previous(None).as_deref(), Some("a"), "the last one closed");
+    assert_eq!(previous(Some("/p")).as_deref(), Some("p"));
+    assert_eq!(
+        previous(Some("/q")),
+        None,
+        "no conversation on that project"
+    );
+    ended_at(&b.id, "2026-09-28 12:00:00");
+    assert_eq!(
+        previous(None).as_deref(),
+        Some("b"),
+        "only the newest: `a` is not read in its place"
+    );
+    assert_ne!(previous(None).as_deref(), Some(now.title.as_str()));
+    assert_ne!(
+        previous(None).as_deref(),
+        Some("other lane"),
+        "another lane's is never read"
+    );
+}
+
 #[test]
 fn test_clear_summary() {
     let db = test_db();
     let repo = ConversationRepository::new(&db);
 
-    repo.get_or_create_active_session("user1:gui", "gui", None).unwrap();
-    repo.update_summary_optimistic("user1:gui", 0, "Some summary", 50)
+    let session = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
+    repo.update_working_state(&session.id, 0, "Some summary", 50)
         .unwrap();
     repo.increment_message_count("user1:gui").unwrap();
 

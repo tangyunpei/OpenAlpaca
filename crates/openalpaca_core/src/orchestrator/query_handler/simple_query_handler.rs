@@ -644,12 +644,19 @@ impl Orchestrator {
             crate::lane::LaneKey::from_str(lane_key)
                 .map(|k| self.lane_manager.get_or_create_conversation(k));
 
+        let summary_max_chars = self
+            .daemon_config
+            .load()
+            .orchestrator
+            .memory
+            .summary_max_chars;
         let history_input = HistoryInput {
             lane_tip_fingerprint: lane_opt
                 .as_ref()
                 .map(|l| l.compute_tip_fingerprint())
                 .unwrap_or([0u8; 32]),
-            summary: ctx.summary.as_deref().map(Arc::<str>::from),
+            working_state: ctx.working_state_text(summary_max_chars),
+            previous: ctx.previous_text(summary_max_chars),
             summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
             recent_messages: Arc::new(adapted_recent),
             current_user_turn,
@@ -700,6 +707,9 @@ impl Orchestrator {
             // + session summary + recent_messages + current_user_turn in the
             // same order the pre-migration manual assembly produced.
             let mut messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
+            // Design 11 §5 (CQ-7): the previous conversation, when the
+            // request carries its block — `done.continued_from`.
+            self.record_continued_from(request_id, ctx, &messages);
 
             // Design §5 step 8 (plan 3.3): what this turn recalled, as quoted
             // data, right before the current user turn and ahead of the
@@ -843,6 +853,29 @@ impl Orchestrator {
                 per_request_sandbox.set_confirmation_broker(broker.clone());
             }
 
+            // Design 11 §3.3, CQ-3: a compaction folds the older messages
+            // into the session's working state on `summary_model`, and the
+            // §3.2 cursor says which row that state then covers through. The
+            // rows behind the window that no state covers yet
+            // (`older_window`) are read first, so a compaction passes them
+            // too (design 11 rev 1.2).
+            let cursor = crate::orchestrator::working_state::Cursor::new(
+                ctx.working_state_through,
+                &ctx.recent_row_ids,
+                composed.history_head_dropped,
+                &ctx.older_window,
+                composed.messages.len(),
+            );
+            let config_for_loop = LoopConfig {
+                writer: crate::orchestrator::working_state::WriterConfig::new(
+                    &self.daemon_config.load(),
+                    self.db.clone(),
+                ),
+                working_state: ctx.working_state.clone(),
+                working_state_cursor: Some(cursor.clone()),
+                ..config_for_loop
+            };
+
             let call_start = std::time::Instant::now();
             let result = run_agentic_loop_routed(
                 router.as_ref(),
@@ -860,6 +893,13 @@ impl Orchestrator {
             )
             .await;
             let latency_ms = call_start.elapsed().as_millis() as i64;
+
+            // Design 11 §3.3: the state this turn's compaction wrote goes to
+            // the turn end, which writes it to the session row with no call.
+            if let Some((state, boundary)) = result.working_state.clone() {
+                self.compacted_turns
+                    .insert(request_id, (state, cursor.after(boundary)));
+            }
 
             // Routing V2: structured delegation from the start_workflow
             // result cell (SpawnSubagentTool result-cell precedent). The
@@ -1111,7 +1151,8 @@ impl Orchestrator {
                 .as_ref()
                 .map(|l| l.compute_tip_fingerprint())
                 .unwrap_or([0u8; 32]),
-            summary: None,
+            working_state: None,
+            previous: None,
             summary_wrap_mode: SummaryWrapMode::Plain,
             recent_messages: Arc::new(ctx.recent_messages.clone()),
             current_user_turn: Some(ChatMessage::user(query)),

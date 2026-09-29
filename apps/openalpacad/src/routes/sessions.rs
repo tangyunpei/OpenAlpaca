@@ -2,7 +2,7 @@
 //!
 //! ```http
 //! GET    /v1/sessions?workspace_id=&source=&status=&q=&limit=&offset=
-//! POST   /v1/sessions {source?, workspace_path?, title?}
+//! POST   /v1/sessions {source?, workspace_path?, title?, inherit?}
 //! GET    /v1/sessions/{id}
 //! GET    /v1/sessions/{id}/messages?limit=&offset=&before_id=
 //! GET    /v1/sessions/{id}/events?after_seq=&types=&limit=&agent=&span_id=
@@ -37,6 +37,7 @@ use std::sync::Arc;
 use openalpaca_core::bus::EventBus;
 use openalpaca_core::context::SharedContext;
 use openalpaca_core::events::SystemEvent;
+use openalpaca_core::orchestrator::working_state::WorkingState;
 use openalpaca_storage::{
     Conversation, ConversationRepository, Database, SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter,
 };
@@ -72,12 +73,12 @@ const MAX_EVENTS_BYTES: usize = 4 * 1024 * 1024;
 
 /// One session, as a client sees it (§5.7).
 ///
-/// The stored row minus the summary columns: `summary`, `summary_version` and
-/// friends are the context compactor's bookkeeping, not the conversation's
-/// description, and a sidebar that rendered them would be showing the model's
-/// notes to the user. `active_task_count` and `interrupted_task_count` are
-/// derived — the first from the live lane registry, the second from one
-/// grouped query over `task.session_id`.
+/// The stored row with its working state (design 11 §5, owner decision CQ-7:
+/// the state is for the user too — the chat aside's card draws it), minus the
+/// writer's bookkeeping (`working_state_version`, `working_state_through`),
+/// the projected note's id and the `inherit` flag. `active_task_count` and
+/// `interrupted_task_count` are derived — the first from the live lane
+/// registry, the second from one grouped query over `task.session_id`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionView {
     pub id: String,
@@ -92,6 +93,11 @@ pub struct SessionView {
     pub created_at: String,
     pub updated_at: String,
     pub ended_at: Option<String>,
+    /// The conversation's working state (design 11 §2), `null` while it has
+    /// none — or holds a text that is not one.
+    pub working_state: Option<WorkingState>,
+    /// When the state was last written; `null` while it has none.
+    pub working_state_updated_at: Option<String>,
     /// Runs this session's lane has in flight right now.
     pub active_task_count: i64,
     /// Runs started from this session that were left interrupted.
@@ -124,6 +130,11 @@ pub struct CreateSessionRequest {
     pub workspace_path: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    /// `false` starts the conversation fresh ("Start fresh"): it is never
+    /// given the previous conversation's state (design 11 §4 (b), owner
+    /// decision CQ-5). Absent is `true`.
+    #[serde(default)]
+    pub inherit: Option<bool>,
 }
 
 /// `?after_seq=&types=&limit=&agent=&span_id=` (§5.4/§5.7).
@@ -231,20 +242,27 @@ impl Deps<'_> {
 
         sessions
             .into_iter()
-            .map(|s| SessionView {
-                active_task_count: self.ctx.workflows_for_lane(&s.lane_key).len() as i64,
-                interrupted_task_count: interrupted.get(&s.id).copied().unwrap_or(0),
-                id: s.id,
-                lane_key: s.lane_key,
-                source: s.source,
-                title: s.title,
-                workspace_id: s.workspace_id,
-                status: s.status,
-                message_count: s.message_count,
-                last_message_at: s.last_message_at,
-                created_at: s.created_at,
-                updated_at: s.updated_at,
-                ended_at: s.ended_at,
+            .map(|s| {
+                let working_state = serde_json::from_str::<WorkingState>(&s.working_state).ok();
+                SessionView {
+                    active_task_count: self.ctx.workflows_for_lane(&s.lane_key).len() as i64,
+                    interrupted_task_count: interrupted.get(&s.id).copied().unwrap_or(0),
+                    id: s.id,
+                    lane_key: s.lane_key,
+                    source: s.source,
+                    title: s.title,
+                    workspace_id: s.workspace_id,
+                    status: s.status,
+                    message_count: s.message_count,
+                    last_message_at: s.last_message_at,
+                    created_at: s.created_at,
+                    updated_at: s.updated_at,
+                    ended_at: s.ended_at,
+                    working_state_updated_at: s
+                        .working_state_updated_at
+                        .filter(|_| working_state.is_some()),
+                    working_state,
+                }
             })
             .collect()
     }
@@ -436,11 +454,12 @@ pub(super) fn create_session(deps: &Deps<'_>, request: CreateSessionRequest) -> 
     let lane_key = format!("{}:{}", deps.owner, source);
     let workspace = request_project_root(request.workspace_path.as_deref());
 
-    match deps.repo().create_session(
+    match deps.repo().create_session_inheriting(
         &lane_key,
         source,
         workspace.as_deref(),
         request.title.as_deref(),
+        request.inherit.unwrap_or(true),
     ) {
         Ok(session) => {
             deps.announce(&session.id, &session.lane_key, SESSION_ACTIVE);

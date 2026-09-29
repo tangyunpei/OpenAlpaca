@@ -709,6 +709,28 @@ fn recall_mode_defaults_to_index_and_reads_excerpts() {
     );
 }
 
+/// Design 11 §8 (CQ-5): `[orchestrator.memory] carry_over_turns` is 3
+/// unless the file says otherwise, the shipped file names 3, `0` (off) is
+/// kept, and a value past the registry's 20 is clamped.
+#[test]
+fn carry_over_turns_defaults_to_three_and_zero_turns_it_off() {
+    for config in [
+        DaemonConfig::default(),
+        toml::from_str("").unwrap(),
+        toml::from_str(include_str!("../../../../config/daemon.toml")).unwrap(),
+    ] {
+        assert_eq!(config.orchestrator.memory.carry_over_turns, 3);
+    }
+    let mut off: DaemonConfig =
+        toml::from_str("[orchestrator.memory]\ncarry_over_turns = 0\n").unwrap();
+    off.validate();
+    assert_eq!(off.orchestrator.memory.carry_over_turns, 0);
+    let mut high: DaemonConfig =
+        toml::from_str("[orchestrator.memory]\ncarry_over_turns = 500\n").unwrap();
+    high.validate();
+    assert_eq!(high.orchestrator.memory.carry_over_turns, 20);
+}
+
 /// The shipped `config/daemon.toml` names the key with its default, and the
 /// whole file still parses.
 #[test]
@@ -721,36 +743,20 @@ fn the_shipped_daemon_toml_names_recall_mode_index() {
 
 // ── Conversation summaries (design 09 §13.3, MD-16) ─────────────────────
 
-/// `[orchestrator.learning] episode_max_per_day` is 100 (owner decision LQ21;
-/// 20 before) unless the file says
-/// otherwise — from the struct default, an empty file and a learning table
-/// that does not name it — survives a round trip, is clamped to 0..=1000,
-/// and the shipped `config/daemon.toml` names it with its default.
+/// `[orchestrator.learning] episode_max_per_day` is gone (design 11 §8,
+/// owner decision CQ-2): a summary is projected from the working state with
+/// no call, so no daily count bounds it. A hand-edited file that still names
+/// it is read as every stale key is — ignored — and the shipped
+/// `config/daemon.toml` no longer names it.
 #[test]
-fn episode_max_per_day_defaults_to_100_and_is_clamped() {
-    for config in [
-        DaemonConfig::default(),
-        toml::from_str("").unwrap(),
-        toml::from_str("[orchestrator.learning]\nidle_secs = 60\n").unwrap(),
-    ] {
-        assert_eq!(config.orchestrator.learning.episode_max_per_day, 100);
-    }
-    let config: DaemonConfig =
-        toml::from_str("[orchestrator.learning]\nepisode_max_per_day = 0\n").unwrap();
-    assert_eq!(config.orchestrator.learning.episode_max_per_day, 0);
-    let round: DaemonConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
-    assert_eq!(round.orchestrator.learning.episode_max_per_day, 0);
-
-    let mut high: DaemonConfig =
-        toml::from_str("[orchestrator.learning]\nepisode_max_per_day = 5000\n").unwrap();
-    high.validate();
-    assert_eq!(high.orchestrator.learning.episode_max_per_day, 1000);
+fn episode_max_per_day_is_gone_and_a_stale_key_is_ignored() {
+    let stale: DaemonConfig =
+        toml::from_str("[orchestrator.learning]\nidle_secs = 60\nepisode_max_per_day = 0\n")
+            .unwrap();
+    assert_eq!(stale.orchestrator.learning.idle_secs, 60);
+    let round = toml::to_string(&stale).unwrap();
+    assert!(!round.contains("episode_max_per_day"), "{round}");
 
     let shipped = include_str!("../../../../config/daemon.toml");
-    assert!(
-        shipped.contains("\nepisode_max_per_day = 100\n"),
-        "{shipped}"
-    );
-    let config: DaemonConfig = toml::from_str(shipped).unwrap();
-    assert_eq!(config.orchestrator.learning.episode_max_per_day, 100);
+    assert!(!shipped.contains("episode_max_per_day"), "{shipped}");
 }

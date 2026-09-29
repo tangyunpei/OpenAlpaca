@@ -67,6 +67,8 @@ const SESSION: Session = {
   created_at: "2026-09-06 09:00:00",
   updated_at: "2026-09-06 10:00:00",
   ended_at: null,
+  working_state: null,
+  working_state_updated_at: null,
   active_task_count: 0,
   interrupted_task_count: 0,
 };
@@ -127,6 +129,13 @@ describe("createSession", () => {
     reply = () => json(SESSION, 201);
     await createSession();
     expect(requests[0]?.body).toEqual({ source: "gui" });
+  });
+
+  /** Design 11 §4 (b), CQ-5: "Start fresh" says `inherit: false`. */
+  it("sends `inherit: false` for a conversation started fresh", async () => {
+    reply = () => json(SESSION, 201);
+    await createSession({ inherit: false });
+    expect(requests[0]?.body).toEqual({ source: "gui", inherit: false });
   });
 });
 

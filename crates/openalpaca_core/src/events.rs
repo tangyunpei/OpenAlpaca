@@ -392,7 +392,6 @@ pub enum SystemEvent {
         utilization_pct: f64,
         messages_before: usize,
         messages_after: usize,
-        memories_extracted: usize,
         messages_discarded: usize,
         summary_tokens: usize,
         timestamp: DateTime<Utc>,

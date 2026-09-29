@@ -14,13 +14,18 @@
 //! design 09 §13.4, slice L10c): questions about what a corpus conversation
 //! discussed or decided, answered from its conversation summary after a
 //! learning run.
+//!
+//! And the **continuity split** (`questions-continuity.json`, design 11
+//! §10.1): questions about where a corpus conversation left off, asked as
+//! the first turns of the next conversation on its lane and project.
 
 #[path = "common/eval.rs"]
 mod eval;
 
 use eval::{
-    Category, ChangePair, Corpus, CorpusSession, CorpusTurn, EpisodeQuestion, GoldNote, Language,
-    Question, TurnAt, TurnMode, change_pairs, eval_dir, is_cjk, load_json, relied_on,
+    Category, ChangePair, ContinuityKind, ContinuitySet, Corpus, CorpusSession, CorpusTurn,
+    EpisodeQuestion, GoldNote, Language, Question, TurnAt, TurnMode, change_pairs, eval_dir,
+    is_cjk, load_json, relied_on,
 };
 use openalpaca_storage::memory_index::query::normalize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -748,6 +753,246 @@ fn the_episode_split_check_catches_each_planted_fault() {
         "too few of the user's turns",
         "not its conversation's language",
         "no noise or rejection turn",
+    ] {
+        assert!(has(needle), "no `{needle}` in {problems:#?}");
+    }
+}
+
+// ─── The continuity split (design 11 §10.1, slice 7) ────────────────────────
+
+/// "For 20 conversations … a `split` index and three questions … plus 4
+/// `expect_abstain` rows (work the user dropped)."
+const CONTINUITY_SETS: usize = 20;
+const CONTINUITY_ABSTAIN_SETS: usize = 4;
+/// A continued conversation has "≥ 6 user turns", and a split leaves "≥ 3
+/// turns each side".
+const CONTINUITY_MIN_TURNS: usize = 6;
+const CONTINUITY_MIN_SIDE: usize = 3;
+/// The three questions of a set, in the order they are asked.
+const CONTINUITY_KINDS: [ContinuityKind; 3] = [
+    ContinuityKind::Doing,
+    ContinuityKind::Decided,
+    ContinuityKind::Next,
+];
+/// The split's language mix: at least this many sets of each.
+const MIN_CONTINUITY_LANGUAGE: [(Language, usize); 3] =
+    [(Language::En, 10), (Language::Zh, 3), (Language::Mixed, 1)];
+
+/// What is wrong with a continuity split, one sentence per problem; empty
+/// when nothing is. `taken` holds the held-out, tuning and episode ids.
+fn continuity_split_problems(
+    split: &[ContinuitySet],
+    corpus: &Corpus,
+    taken: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let abstaining = |s: &ContinuitySet| s.questions.iter().any(|q| q.expect_abstain);
+    let (abstain, three): (Vec<&ContinuitySet>, Vec<&ContinuitySet>) =
+        split.iter().partition(|s| abstaining(s));
+    if three.len() != CONTINUITY_SETS || abstain.len() != CONTINUITY_ABSTAIN_SETS {
+        problems.push(format!(
+            "{} three-question sets and {} abstention sets, not {CONTINUITY_SETS} and {CONTINUITY_ABSTAIN_SETS}",
+            three.len(),
+            abstain.len()
+        ));
+    }
+    let sessions: HashMap<&str, &CorpusSession> =
+        corpus.sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+    let mut ids = BTreeSet::new();
+    let mut continued = BTreeSet::new();
+    for set in split {
+        let at = &set.id;
+        if !set.id.starts_with("kq-") {
+            problems.push(format!("{at}: a continuity set's id starts with `kq-`"));
+        }
+        if !ids.insert(set.id.clone()) {
+            problems.push(format!("{at}: duplicate id"));
+        }
+        for q in &set.questions {
+            if taken.contains(&set.question_id(q.kind)) {
+                problems.push(format!(
+                    "{at}: {} is already a question id",
+                    set.question_id(q.kind)
+                ));
+            }
+            if q.question.trim().is_empty() || q.gold_answer.trim().is_empty() {
+                problems.push(format!("{at}: an empty question or gold answer"));
+            }
+        }
+        if abstaining(set) {
+            if set.questions.len() != 1 || !set.questions[0].expect_abstain {
+                problems.push(format!(
+                    "{at}: an abstention set asks one question, and it expects an abstention"
+                ));
+            }
+        } else {
+            let kinds: Vec<ContinuityKind> = set.questions.iter().map(|q| q.kind).collect();
+            if kinds != CONTINUITY_KINDS {
+                problems.push(format!(
+                    "{at}: asks {kinds:?}, not doing, decided and next in that order"
+                ));
+            }
+        }
+        if !continued.insert(set.session.clone()) {
+            problems.push(format!("{at}: a second set continues {}", set.session));
+        }
+        let Some(session) = sessions.get(set.session.as_str()) else {
+            problems.push(format!("{at}: no corpus session {}", set.session));
+            continue;
+        };
+        if session.turns.len() < CONTINUITY_MIN_TURNS {
+            problems.push(format!(
+                "{at}: {} has {} user turns, fewer than {CONTINUITY_MIN_TURNS}",
+                session.id,
+                session.turns.len()
+            ));
+        }
+        if set.split < CONTINUITY_MIN_SIDE
+            || session.turns.len().saturating_sub(set.split) < CONTINUITY_MIN_SIDE
+        {
+            problems.push(format!(
+                "{at}: split {} of {} turns leaves fewer than {CONTINUITY_MIN_SIDE} turns on a side",
+                set.split,
+                session.turns.len()
+            ));
+            continue;
+        }
+        if set.language != session.language {
+            problems.push(format!(
+                "{at}: {} is not its conversation's language ({})",
+                set.language.as_str(),
+                session.language.as_str()
+            ));
+        }
+        if abstaining(set)
+            && !session.turns[..set.split]
+                .iter()
+                .any(|t| t.mode == TurnMode::Rejection)
+        {
+            problems.push(format!(
+                "{at}: no rejection before the split — no work the user dropped to abstain on"
+            ));
+        }
+        // The gold comes from the turns before the split: neither a
+        // question nor its answer shares a shingle with a turn after it.
+        let after: Vec<&str> = session.turns[set.split..]
+            .iter()
+            .map(|t| t.user.as_str())
+            .collect();
+        let texts: Vec<(String, &str)> = set
+            .questions
+            .iter()
+            .flat_map(|q| {
+                let id = set.question_id(q.kind);
+                [
+                    (id.clone(), q.question.as_str()),
+                    (format!("{id} (gold)"), q.gold_answer.as_str()),
+                ]
+            })
+            .collect();
+        let found = leaks(
+            texts.iter().map(|(id, text)| (id.as_str(), *text)),
+            after.iter().copied(),
+        );
+        if !found.is_empty() {
+            problems.push(format!(
+                "{at}: shares a shingle with a turn after the split: {found:?}"
+            ));
+        }
+    }
+    for (language, min) in MIN_CONTINUITY_LANGUAGE {
+        let n = split.iter().filter(|s| s.language == language).count();
+        if n < min {
+            problems.push(format!("{n} {} sets, fewer than {min}", language.as_str()));
+        }
+    }
+    problems
+}
+
+fn continuity_split() -> Vec<ContinuitySet> {
+    load_json::<Vec<ContinuitySet>>(&eval_dir().join("questions-continuity.json")).0
+}
+
+/// The split holds what design 11 §10.1 asks of it: 20 corpus conversations
+/// of at least 6 user turns, each with a split leaving at least 3 turns on
+/// each side and three questions in its language — `doing`, `decided`,
+/// `next` — plus 4 sets of one question about work the user dropped before
+/// the split (`expect_abstain`), no id another split uses, and no shingle
+/// shared between a question or its gold answer and a turn after the split.
+#[test]
+fn the_continuity_split_is_well_formed() {
+    let f = fixture();
+    let mut taken = taken_question_ids(&f);
+    taken.extend(episode_split().into_iter().map(|q| q.id));
+    let split = continuity_split();
+    let problems = continuity_split_problems(&split, &f.corpus, &taken);
+    assert!(problems.is_empty(), "{problems:#?}");
+    let questions: Vec<Question> = split.iter().flat_map(ContinuitySet::as_questions).collect();
+    assert_eq!(
+        questions.iter().filter(|q| !q.expect_abstain).count(),
+        CONTINUITY_SETS * CONTINUITY_KINDS.len(),
+        "the 60 answers the target is read over"
+    );
+    assert!(
+        questions
+            .iter()
+            .all(|q| q.category == Category::Continuity && q.relies_on.is_empty())
+    );
+}
+
+/// The validator itself: a planted split with each kind of fault reports
+/// each one — so a green run of the test above means something.
+#[test]
+fn the_continuity_split_check_catches_each_planted_fault() {
+    let f = fixture();
+    let good = continuity_split();
+    let short = f
+        .corpus
+        .sessions
+        .iter()
+        .find(|s| s.turns.len() < CONTINUITY_MIN_TURNS)
+        .expect("a conversation too short to continue");
+    let three = good
+        .iter()
+        .position(|s| !s.questions[0].expect_abstain)
+        .unwrap();
+    let mut bad: Vec<ContinuitySet> = good[three..three + 5].to_vec();
+    bad[1].id = bad[0].id.clone(); // a duplicate id
+    bad[2].session = short.id.clone(); // too short, and a split with no room
+    bad[3].questions.swap(0, 1); // decided before doing
+    bad[3].language = match bad[3].language {
+        Language::Zh => Language::En,
+        _ => Language::Zh,
+    };
+    // A gold answer that pastes a turn after the split.
+    let session = f
+        .corpus
+        .sessions
+        .iter()
+        .find(|s| s.id == bad[4].session)
+        .unwrap();
+    bad[4].questions[2].gold_answer = session.turns[bad[4].split].user.clone();
+    // An abstention set whose conversation dropped nothing before its split.
+    let mut no_rejection = good[three].clone();
+    no_rejection.id = "kq-099".to_string();
+    no_rejection.session = "cs-050".to_string();
+    no_rejection.questions.truncate(1);
+    no_rejection.questions[0].expect_abstain = true;
+    bad.push(no_rejection);
+    let mut taken = BTreeSet::new();
+    taken.insert(bad[0].question_id(ContinuityKind::Doing));
+    let problems = continuity_split_problems(&bad, &f.corpus, &taken);
+    let has = |needle: &str| problems.iter().any(|p| p.contains(needle));
+    for needle in [
+        "three-question sets and",
+        "duplicate id",
+        "is already a question id",
+        "fewer than 6",
+        "on a side",
+        "not doing, decided and next",
+        "not its conversation's language",
+        "shares a shingle with a turn after the split",
+        "no rejection before the split",
     ] {
         assert!(has(needle), "no `{needle}` in {problems:#?}");
     }

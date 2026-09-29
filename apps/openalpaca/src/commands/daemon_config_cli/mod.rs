@@ -158,12 +158,6 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["orchestrator", "learning"],
         field: "turns_per_flush",
     },
-    // Conversation summaries (design 09 §13.3)
-    TomlMapping {
-        schema_key: "daemon.orchestrator.learning.episode_max_per_day",
-        section: &["orchestrator", "learning"],
-        field: "episode_max_per_day",
-    },
     TomlMapping {
         schema_key: "daemon.orchestrator.extract_max_calls_per_day",
         section: &["orchestrator", "costs"],
@@ -179,6 +173,12 @@ static MAPPINGS: &[TomlMapping] = &[
         schema_key: "daemon.orchestrator.recall_mode",
         section: &["orchestrator", "memory"],
         field: "recall_mode",
+    },
+    // Orchestrator: carry-over (design 11 §4 (b))
+    TomlMapping {
+        schema_key: "daemon.orchestrator.carry_over_turns",
+        section: &["orchestrator", "memory"],
+        field: "carry_over_turns",
     },
     // Execution: Agent Defaults (cont.)
     TomlMapping {

@@ -1320,6 +1320,7 @@ async fn run_lead_for_test(
         Arc::new(crate::compose::ComposeEngine::new(16)),
         None,
         false,
+        None,
     )
     .await
 }
@@ -1745,6 +1746,7 @@ async fn a_resumed_run_is_primed_with_its_replayed_rounds_and_the_interjection()
             inline_note: None,
         }),
         false,
+        None,
     )
     .await;
 
@@ -1825,6 +1827,7 @@ async fn with_no_steering_rail_the_resume_note_is_still_an_interjection() {
             inline_note: Some(note),
         }),
         false,
+        None,
     )
     .await;
 
@@ -1896,6 +1899,7 @@ async fn the_resume_record_names_the_trim_and_the_rounds_it_dropped() {
             inline_note: None,
         }),
         false,
+        None,
     )
     .await;
     assert!(handle.flush().await);
@@ -1985,6 +1989,7 @@ async fn the_lead_is_budgeted_against_the_model_that_answers() {
         Arc::new(crate::compose::ComposeEngine::new(16)),
         None,
         false,
+        None,
     )
     .await;
     assert!(
@@ -2075,6 +2080,7 @@ async fn an_unattended_run_tells_the_model_the_tool_cannot_be_approved() {
         Arc::new(crate::compose::ComposeEngine::new(16)),
         None,
         true,
+        None,
     )
     .await;
     let elapsed = started.elapsed();
@@ -2252,6 +2258,7 @@ async fn a_subagents_rounds_are_budgeted_against_the_model_that_answers() {
         Arc::new(crate::compose::ComposeEngine::new(16)),
         None,
         false,
+        None,
     )
     .await;
     assert!(
@@ -3057,6 +3064,7 @@ async fn a_lead_run_is_primed_with_its_memory_once_and_its_profile_once() {
         Arc::new(crate::compose::ComposeEngine::new(16)),
         None,
         false,
+        None,
     )
     .await;
     assert!(result.success);
@@ -3120,6 +3128,7 @@ async fn lead_opening_memory(scene: &LeadMemoryScene, config: DaemonConfig) -> S
         Arc::new(crate::compose::ComposeEngine::new(16)),
         None,
         false,
+        None,
     )
     .await;
     assert!(result.success);
@@ -3332,6 +3341,7 @@ async fn a_subagents_memory_search_records_its_task_id_in_the_ring() {
         Arc::new(crate::compose::ComposeEngine::new(16)),
         None,
         false,
+        None,
     )
     .await;
     assert!(
@@ -3366,4 +3376,281 @@ async fn a_subagents_memory_search_records_its_task_id_in_the_ring() {
     assert_eq!(ring[0].task_id.as_deref(), Some("task-1"));
     // Subagents are lane-detached: the row names the run, not a lane.
     assert!(ring[0].lane_key.is_none(), "{:?}", ring[0].lane_key);
+}
+
+// ── Design 11 §4, CQ-6: the chat's working state reaches the lead ────
+
+/// The lead run over `db`, started from `session_id`, answering "done"; the
+/// messages of its one request.
+async fn lead_first_request(
+    db: &openalpaca_storage::Database,
+    session_id: Option<&str>,
+) -> Vec<openalpaca_llm::ChatMessage> {
+    let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "Book the Alfama hotel",
+        scripted_router(provider.clone()),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        Some(db.clone()),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:gui",
+        "gui",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        session_id,
+    )
+    .await;
+    assert!(result.success, "{:?}", result.loop_result.finish_reason);
+    provider.seen_messages.lock().unwrap()[0].clone()
+}
+
+/// Owner decision CQ-6: a run started from a conversation is given that
+/// conversation's working state — one block, right after its objective, as
+/// `WorkingState::render` writes it; a run from a conversation with no state,
+/// or from none, is given no block.
+#[tokio::test]
+async fn the_lead_is_given_the_chats_working_state_after_its_objective() {
+    use crate::orchestrator::working_state::{BLOCK_PREFIX, VERSION, WorkingState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let session = repo
+        .get_or_create_active_session("user-1:gui", "gui", None)
+        .unwrap();
+    let blocks = |messages: &[openalpaca_llm::ChatMessage]| {
+        messages
+            .iter()
+            .filter(|m| m.content.starts_with(BLOCK_PREFIX))
+            .count()
+    };
+    assert_eq!(
+        blocks(&lead_first_request(&db, Some(&session.id)).await),
+        0,
+        "a conversation with no state gives no block"
+    );
+
+    let state = WorkingState {
+        v: VERSION,
+        topic: "Lisbon trip".to_string(),
+        goal: "Book the October trip".to_string(),
+        done: vec!["Flight booked".to_string()],
+        decisions: vec!["A hotel in Alfama, not Baixa".to_string()],
+        open: Vec::new(),
+        next: "Book the Alfama hotel".to_string(),
+        refs: Vec::new(),
+    };
+    assert!(
+        repo.update_working_state(&session.id, 0, &serde_json::to_string(&state).unwrap(), 0)
+            .unwrap()
+    );
+    let updated_at = repo
+        .get_session(&session.id)
+        .unwrap()
+        .unwrap()
+        .working_state_updated_at
+        .unwrap();
+
+    let messages = lead_first_request(&db, Some(&session.id)).await;
+    let objective = messages
+        .iter()
+        .position(|m| m.content == "Book the Alfama hotel")
+        .expect("the objective");
+    assert_eq!(blocks(&messages), 1, "one working-state block");
+    assert_eq!(
+        messages[objective + 1].content,
+        state.render(&updated_at, 4000),
+        "the block follows the objective"
+    );
+    assert_eq!(
+        blocks(&lead_first_request(&db, None).await),
+        0,
+        "no conversation, no block"
+    );
+}
+
+/// A lead whose rounds are scripted and whose summariser call — told apart
+/// by the working-state prompt's system text — answers `state`; every
+/// summariser prompt and every lead request is kept.
+struct LeadCompactionProvider {
+    rounds: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    state: String,
+    writer_prompts: std::sync::Mutex<Vec<String>>,
+    lead_requests: std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for LeadCompactionProvider {
+    fn name(&self) -> &str {
+        "lead-compaction"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        let (system, _) = crate::orchestrator::working_state::render_prompt(None, "");
+        if request
+            .messages
+            .first()
+            .is_some_and(|m| m.content == system)
+        {
+            self.writer_prompts
+                .lock()
+                .unwrap()
+                .push(request.messages[1].content.clone());
+            return Ok(scripted_response(&self.state, vec![]));
+        }
+        self.lead_requests
+            .lock()
+            .unwrap()
+            .push(request.messages.as_ref().clone());
+        let next = self.rounds.lock().unwrap().pop_front();
+        Ok(next.unwrap_or_else(|| scripted_response("done", vec![])))
+    }
+}
+
+/// Design 11 §3.3 with CQ-6: the lead's compaction folds its older messages
+/// into the chat's working state it was handed — the summariser reads that
+/// state as the previous one — and the list then holds the new state's block
+/// alone, the chat's taken out.
+#[tokio::test]
+async fn the_leads_compaction_folds_into_the_chats_working_state() {
+    use crate::orchestrator::working_state::{BLOCK_PREFIX, VERSION, WorkingState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let session = repo
+        .get_or_create_active_session("user-1:gui", "gui", None)
+        .unwrap();
+    let chat = WorkingState {
+        v: VERSION,
+        topic: "Lisbon trip".to_string(),
+        goal: "Book the October trip".to_string(),
+        done: vec!["Flight booked".to_string()],
+        decisions: vec!["A hotel in Alfama, not Baixa".to_string()],
+        open: Vec::new(),
+        next: "Book the Alfama hotel".to_string(),
+        refs: Vec::new(),
+    };
+    let chat_json = serde_json::to_string(&chat).unwrap();
+    assert!(
+        repo.update_working_state(&session.id, 0, &chat_json, 0)
+            .unwrap()
+    );
+
+    let check = |content: &str| {
+        scripted_response(
+            content,
+            vec![openalpaca_llm::ToolCall {
+                id: "call".to_string(),
+                name: "check_subagent_status".to_string(),
+                arguments: serde_json::json!({ "subagent_run_id": "none" }),
+            }],
+        )
+    };
+    // Two short rounds, then one whose ~7 500 tokens put the next round past
+    // the 8 192-token window's summary tier.
+    let provider = Arc::new(LeadCompactionProvider {
+        rounds: std::sync::Mutex::new(
+            vec![check("first"), check("second"), check(&"x".repeat(30_000))].into(),
+        ),
+        state: r#"{"topic":"Lisbon hotel booking","goal":"Book the October trip","done":["Flight booked","Checked the subagents"],"decisions":["A hotel in Alfama, not Baixa"],"open":[],"next":"Book the Alfama hotel","refs":[]}"#.to_string(),
+        writer_prompts: std::sync::Mutex::new(Vec::new()),
+        lead_requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Ollama,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+    router.model_registry().register(
+        "qwen3:8b".to_string(),
+        openalpaca_llm::routing::model_registry::ModelInfo {
+            provider: openalpaca_llm::ProviderType::Ollama,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 8192,
+            discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: false,
+        },
+    );
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "Book the Alfama hotel",
+        Arc::new(router),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        Some(db.clone()),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:gui",
+        "gui",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        Some(&session.id),
+    )
+    .await;
+    assert!(result.success, "{:?}", result.loop_result.finish_reason);
+
+    let prompts = provider.writer_prompts.lock().unwrap().clone();
+    assert_eq!(prompts.len(), 1, "one summariser call");
+    assert!(
+        prompts[0].contains(&format!("<previous_state>\n{chat_json}\n</previous_state>")),
+        "the chat's state is the previous one: {}",
+        prompts[0]
+    );
+    let requests = provider.lead_requests.lock().unwrap().clone();
+    let last = requests.last().unwrap();
+    let blocks: Vec<&str> = last
+        .iter()
+        .filter(|m| m.content.starts_with(BLOCK_PREFIX))
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(blocks.len(), 1, "one state block after the compaction");
+    assert!(
+        blocks[0].contains("Topic: Lisbon hotel booking"),
+        "{}",
+        blocks[0]
+    );
 }

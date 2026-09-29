@@ -1097,6 +1097,396 @@ async fn test_two_compactions_accumulate_dropped_tokens() {
     );
 }
 
+// ─── design 11 §3.3: compaction writes the working state ─────────────
+
+/// What the routed compaction tests hand the loop: the system prompt, the
+/// previous state's block, eight 200-character rows and the current turn —
+/// over 85 % of a 500-token window, so the loop's first compaction starts at
+/// `LlmSummary`.
+fn working_state_turn(
+    previous: &crate::orchestrator::working_state::WorkingState,
+) -> Vec<ChatMessage> {
+    let mut messages = vec![
+        ChatMessage::system("You are a helpful assistant."),
+        ChatMessage::user(&previous.render("2026-09-28 10:00:00", 4000)),
+    ];
+    for i in 1..=8 {
+        let row = format!("row {i} {}", "x".repeat(200));
+        messages.push(if i % 2 == 1 {
+            ChatMessage::user(&row)
+        } else {
+            ChatMessage::assistant(&row)
+        });
+    }
+    messages.push(ChatMessage::user("What next?"));
+    messages
+}
+
+fn lisbon(topic: &str) -> crate::orchestrator::working_state::WorkingState {
+    crate::orchestrator::working_state::WorkingState {
+        v: crate::orchestrator::working_state::VERSION,
+        topic: topic.to_string(),
+        goal: "Book the October trip".to_string(),
+        done: Vec::new(),
+        decisions: Vec::new(),
+        open: Vec::new(),
+        next: "Compare the hotels".to_string(),
+        refs: Vec::new(),
+    }
+}
+
+/// The routed loop over `working_state_turn`, every answer `reply`, its
+/// compaction records in a real session log; the loop's result, the
+/// provider and the records.
+async fn run_compacting_turn(
+    reply: &str,
+) -> (
+    LoopResult,
+    std::sync::Arc<crate::test_util::RecordingProvider>,
+    Vec<crate::session_log::LoggedRecord>,
+) {
+    use crate::context_budget::ContextBudgetManager;
+    use crate::daemon_config::ContextBudgetConfig;
+    use crate::orchestrator::working_state::{Cursor, WriterConfig};
+
+    let provider = crate::test_util::RecordingProvider::new(reply);
+    let router = crate::test_util::router_recording(provider.clone());
+    let budget = ContextBudgetManager::new(500, &ContextBudgetConfig::default());
+    let dir = tempfile::tempdir().unwrap();
+    let service = crate::session_log::SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        crate::session_log::SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-state");
+    let rows: Vec<i64> = (101..=108).collect();
+    let config = LoopConfig {
+        enable_caching: false,
+        session_log: Some(handle.clone()),
+        writer: WriterConfig {
+            model: Some("claude-haiku-4-5-20251001".to_string()),
+            ..WriterConfig::default()
+        },
+        working_state: Some(std::sync::Arc::new(lisbon("Lisbon trip"))),
+        // Two rows behind the window that no state covers (§3.2, rev 1.2).
+        working_state_cursor: Some(Cursor::new(
+            40,
+            &rows,
+            0,
+            &[
+                (41, "user".to_string(), "behind 41".to_string()),
+                (42, "assistant".to_string(), "behind 42".to_string()),
+            ],
+            11,
+        )),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        working_state_turn(&lisbon("Lisbon trip")),
+        vec![],
+        &config,
+        None,
+        "orchestrator",
+        None,
+        None,
+        Some(&budget),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert!(handle.flush().await);
+    let records = crate::session_log::read_records(&dir.path().join("sess-state")).unwrap();
+    (result, provider, records)
+}
+
+/// Whether a request is the working-state writer's.
+fn is_writer_call(request: &ChatRequest) -> bool {
+    let (system, _) = crate::orchestrator::working_state::render_prompt(None, "");
+    request
+        .messages
+        .first()
+        .is_some_and(|m| m.content == system)
+}
+
+/// Design 11 §3.3, CQ-1, CQ-3: an `LlmSummary` compaction makes **exactly
+/// one** router call — the working-state writer, on `summary_model`, handed
+/// the previous state and the older rows, not the previous block — and puts
+/// the state it wrote in their place: the next request carries one block,
+/// the new one. The loop's result carries the state and its boundary.
+#[tokio::test]
+async fn an_llm_summary_compaction_makes_one_call_and_leaves_one_state_block() {
+    let written = lisbon("Lisbon trip, flights booked");
+    let (result, provider, _) =
+        run_compacting_turn(&serde_json::to_string(&written).unwrap()).await;
+
+    let requests = provider.requests();
+    let writer_calls: Vec<&ChatRequest> = requests.iter().filter(|r| is_writer_call(r)).collect();
+    assert_eq!(writer_calls.len(), 1, "one call for the compaction");
+    assert_eq!(requests.len(), 2, "and one for the answer");
+    let call = writer_calls[0];
+    assert_eq!(call.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+    let user = &call.messages[1].content;
+    assert!(
+        user.contains(&serde_json::to_string(&lisbon("Lisbon trip")).unwrap()),
+        "the previous state is handed over as itself: {user}"
+    );
+    assert!(user.contains("[user]: row 1 "), "{user}");
+    assert!(
+        !user.contains("context_data"),
+        "the previous block is not read as a row: {user}"
+    );
+    let at = |line: &str| {
+        user.find(line)
+            .unwrap_or_else(|| panic!("the writer read {line:?}: {user}"))
+    };
+    assert!(
+        at("[user]: behind 41\n") < at("[assistant]: behind 42\n")
+            && at("[assistant]: behind 42\n") < at("[user]: row 1 "),
+        "the rows behind the list first, oldest first: {user}"
+    );
+
+    let answer = requests.iter().find(|r| !is_writer_call(r)).unwrap();
+    let blocks: Vec<&ChatMessage> = answer
+        .messages
+        .iter()
+        .filter(|m| {
+            m.content
+                .starts_with(crate::orchestrator::working_state::BLOCK_PREFIX)
+        })
+        .collect();
+    assert_eq!(blocks.len(), 1, "one state block after compaction");
+    assert!(
+        blocks[0]
+            .content
+            .contains("Topic: Lisbon trip, flights booked"),
+        "{}",
+        blocks[0].content
+    );
+    assert_eq!(
+        result.working_state,
+        Some((written, 7)),
+        "11 messages less the 4 kept: messages[2..7] lie behind the state"
+    );
+}
+
+/// Design 11 §6, CQ-8: the `compaction` record carries the state the
+/// compaction wrote and the row it covers through (§3.2), and no longer a
+/// `memories_extracted` count.
+#[tokio::test]
+async fn the_compaction_record_carries_the_state_and_its_through() {
+    let written = lisbon("Lisbon trip, flights booked");
+    let (_, _, records) = run_compacting_turn(&serde_json::to_string(&written).unwrap()).await;
+    let compaction = records
+        .iter()
+        .find(|r| r.kind == "compaction")
+        .expect("the loop narrates its compaction");
+    assert_eq!(
+        compaction.data["working_state"],
+        serde_json::to_value(&written).unwrap()
+    );
+    assert_eq!(
+        compaction.data["state_through"].as_i64(),
+        Some(105),
+        "messages[2..7] are rows 101..=105"
+    );
+    assert!(compaction.data.get("memories_extracted").is_none());
+}
+
+/// Design 11 §3.1, §10.2: an answer that is not a state is not used — the
+/// compaction falls back to the heuristic summary (`compress_context`), the
+/// previous block is left as it was, the loop reports no state, and the
+/// record says none was written.
+#[tokio::test]
+async fn an_unusable_answer_falls_back_to_the_heuristic_summary() {
+    let (result, provider, records) = run_compacting_turn("I would rather chat.").await;
+
+    assert_eq!(result.working_state, None);
+    let requests = provider.requests();
+    assert_eq!(requests.iter().filter(|r| is_writer_call(r)).count(), 1);
+    let answer = requests.iter().find(|r| !is_writer_call(r)).unwrap();
+    assert!(
+        answer
+            .messages
+            .iter()
+            .any(|m| m.content.starts_with("[Context compressed:")),
+        "the heuristic summary stands in"
+    );
+    let blocks: Vec<&ChatMessage> = answer
+        .messages
+        .iter()
+        .filter(|m| {
+            m.content
+                .starts_with(crate::orchestrator::working_state::BLOCK_PREFIX)
+        })
+        .collect();
+    assert_eq!(blocks.len(), 1);
+    assert!(
+        blocks[0].content.contains("Topic: Lisbon trip\n"),
+        "{}",
+        blocks[0].content
+    );
+    let compaction = records.iter().find(|r| r.kind == "compaction").unwrap();
+    assert!(compaction.data["working_state"].is_null());
+    assert!(compaction.data["state_through"].is_null());
+}
+
+/// Behind the router: the working-state writer answered with `state`, every
+/// other request from `answers` in order; every request kept.
+struct WriterScript {
+    state: String,
+    answers: std::sync::Mutex<std::collections::VecDeque<ChatResponse>>,
+    seen: std::sync::Mutex<Vec<ChatRequest>>,
+}
+
+#[async_trait]
+impl LlmProvider for WriterScript {
+    fn name(&self) -> &str {
+        "writer-script"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        let writer = is_writer_call(&request);
+        let model = request.model.clone().unwrap_or_else(|| "scripted".into());
+        self.seen.lock().unwrap().push(request);
+        if !writer {
+            return Ok(self
+                .answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("an answer is scripted"));
+        }
+        Ok(ChatResponse {
+            content: self.state.clone(),
+            tool_calls: vec![],
+            model,
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        })
+    }
+}
+
+/// Design 11 rev 1.2: the rows behind the window go to a loop's **first**
+/// fold only. A second `LlmSummary` in the same loop folds into the state
+/// the first wrote, which already covers them, and reads only the list — so
+/// no row is read twice, and none out of order after a newer state.
+#[tokio::test]
+async fn a_second_compaction_in_one_loop_does_not_read_the_rows_behind_again() {
+    use crate::context_budget::ContextBudgetManager;
+    use crate::daemon_config::ContextBudgetConfig;
+    use crate::orchestrator::working_state::Cursor;
+
+    // Each answer carries ~500 tokens of its own, so the round after the
+    // first compaction starts the next one at `LlmSummary` again.
+    let fat = |id: &str| ChatResponse {
+        content: "x".repeat(2000),
+        tool_calls: vec![openalpaca_llm::ToolCall {
+            id: id.to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"query": "hotels"}),
+        }],
+        model: "scripted".to_string(),
+        usage: Usage {
+            input_tokens: 50,
+            output_tokens: 50,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::ToolUse,
+        thinking: None,
+        parts: None,
+    };
+    let provider = Arc::new(WriterScript {
+        state: serde_json::to_string(&lisbon("Lisbon trip, flights booked")).unwrap(),
+        answers: std::sync::Mutex::new(
+            [
+                fat("tc_a"),
+                fat("tc_b"),
+                MockProvider::simple_response("Done."),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        ProviderType::Anthropic,
+        crate::test_util::RECORDED_MODEL.to_string(),
+    );
+    let budget = ContextBudgetManager::new(500, &ContextBudgetConfig::default());
+    let rows: Vec<i64> = (101..=108).collect();
+    let config = LoopConfig {
+        enable_caching: false,
+        working_state: Some(std::sync::Arc::new(lisbon("Lisbon trip"))),
+        working_state_cursor: Some(Cursor::new(
+            40,
+            &rows,
+            0,
+            &[(41, "user".to_string(), "behind 41".to_string())],
+            11,
+        )),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        working_state_turn(&lisbon("Lisbon trip")),
+        vec![],
+        &config,
+        None,
+        "orchestrator",
+        None,
+        None,
+        Some(&budget),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.final_content, "Done.");
+
+    let seen = provider.seen.lock().unwrap().clone();
+    let writers: Vec<&String> = seen
+        .iter()
+        .filter(|r| is_writer_call(r))
+        .map(|r| &r.messages[1].content)
+        .collect();
+    assert!(
+        writers.len() >= 2,
+        "the loop compacted twice: {}",
+        writers.len()
+    );
+    assert!(
+        writers[0].contains("[user]: behind 41\n"),
+        "the first fold reads the rows behind: {}",
+        writers[0]
+    );
+    for later in &writers[1..] {
+        assert!(
+            !later.contains("behind 41"),
+            "a later fold does not read them again: {later}"
+        );
+        assert!(
+            later.contains(&serde_json::to_string(&lisbon("Lisbon trip, flights booked")).unwrap()),
+            "it folds into the state the first wrote: {later}"
+        );
+    }
+}
+
 #[test]
 fn test_truncate_min_cut_guard_skips_distant_sentence() {
     // Sentence boundary exists but is below the 75% threshold — should fall through
@@ -3496,6 +3886,7 @@ fn result_with(finish_reason: LoopFinishReason, content: &str) -> LoopResult {
         elapsed: std::time::Duration::from_secs(1),
         estimated_cost: 0.0,
         last_tool_error: None,
+        working_state: None,
     }
 }
 

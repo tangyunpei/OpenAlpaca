@@ -7,6 +7,7 @@ pub mod dispatcher;
 pub mod intent;
 pub mod skill;
 pub mod task_state;
+pub mod working_state;
 
 pub(crate) mod attachment_adapt;
 mod background_jobs;
@@ -18,7 +19,6 @@ mod handler_helpers;
 mod handlers;
 mod memory_commands;
 mod query_handler;
-mod summary;
 mod task_launch;
 mod task_ops;
 
@@ -224,6 +224,26 @@ pub struct Orchestrator {
     /// adaptation, removed by the bridge after reading. Written only when
     /// something was actually withheld, so an ordinary turn touches nothing.
     pub attachments_skipped_map: DashMap<Uuid, Vec<crate::gateway::SkippedAttachment>>,
+    /// Design 11 §4 (c), CQ-4: the sessions whose working state a compacting
+    /// turn wrote — session id → the `(working_state_version,
+    /// working_state_through)` that write left on the row. While the row
+    /// still holds exactly that pair, `build_context` starts the next turn's
+    /// window after `through` (`min_recent_messages` rows kept verbatim), so
+    /// a small window does not re-send and re-compact what the state covers.
+    /// Any later write — the lag refresh, the close — changes the pair and
+    /// the window is the usual one again. Kept in memory: after a restart
+    /// the next turn simply gets the usual window.
+    compacted_states: Arc<DashMap<String, (i64, i64)>>,
+    /// Design 11 §3.3: the working state a main-loop turn's compaction wrote
+    /// and the row it covers through (§3.2), keyed by request id — put here
+    /// by the main loop, taken by the turn end, which writes it to the row
+    /// with no call.
+    compacted_turns: DashMap<Uuid, (working_state::WorkingState, i64)>,
+    /// Design 11 §5 (CQ-7): per-request record of the turn's continuity — its
+    /// compaction's state going to the row (step 6), the previous
+    /// conversation in its request (the history layer's two builders). Taken
+    /// by the bridge on every turn, like `memory_used`.
+    continuity_map: DashMap<Uuid, crate::gateway::TurnContinuity>,
     /// Optional broker for interactive tool confirmation (set post-construction via `set_confirmation_broker()`).
     pub confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
     /// The memory service (design §7a), set post-construction by the daemon
@@ -244,18 +264,53 @@ pub struct Orchestrator {
     pub compose_engine: Arc<crate::compose::ComposeEngine>,
 }
 
-/// Full conversation context for prompt building and summary update.
+/// Full conversation context for prompt building and the turn-end update of
+/// the working state (design 11 §2).
+#[derive(Default)]
 pub(super) struct ConversationContext {
-    pub(super) summary: Option<String>,
+    /// The session this context was read from; `None` on the lane-wide
+    /// fallback of a lane that has no session row (nothing to write to).
+    pub(super) session_id: Option<String>,
+    /// The session's working state; `None` while it has none (or the stored
+    /// text is not one).
+    pub(super) working_state: Option<Arc<working_state::WorkingState>>,
+    /// When it was written (`working_state_updated_at`), for its heading.
+    pub(super) working_state_updated_at: String,
+    /// The row's `working_state_version`: the optimistic lock of the next write.
+    pub(super) working_state_version: i64,
+    /// The row's `working_state_through`: the highest message id it covers.
+    pub(super) working_state_through: i64,
     pub(super) recent_messages: Vec<ChatMessage>,
-    /// Raw (id, role, content) tuples for the "older" window — used by update_summary_background().
+    /// The ids of the rows in `recent_messages`, oldest first — what a
+    /// compaction's `through` is counted in (§3.2).
+    pub(super) recent_row_ids: Vec<i64>,
+    /// Raw (id, role, content) tuples between `working_state_through` and the
+    /// recent window — never sent to the model; what the lag refresh reads
+    /// (`working_state::after_turn`).
     pub(super) older_window: Vec<(i64, String, String)>,
-    /// Current summary version from conversations table (for optimistic locking in update).
-    pub(super) summary_version: i64,
-    /// Last message ID that was summarized.
-    pub(super) last_summarized_id: i64,
-    /// Previous summary text (for incremental update).
-    pub(super) old_summary_text: String,
+    /// The previous conversation on this lane and project, while this one is
+    /// given it (design 11 §4 (b), owner decision CQ-5).
+    pub(super) previous: Option<working_state::PreviousConversation>,
+}
+
+impl ConversationContext {
+    /// The working state as the history layer delivers it, in the session
+    /// summary's old slot (design 11 §4): its heading and fields in at most
+    /// `max_chars` characters, which the layer wraps as quoted data.
+    pub(super) fn working_state_text(&self, max_chars: usize) -> Option<Arc<str>> {
+        self.working_state
+            .as_ref()
+            .map(|state| Arc::from(state.text(&self.working_state_updated_at, max_chars)))
+    }
+
+    /// The previous conversation as the history layer delivers it (design 11
+    /// §4 (b)), in at most `max_chars` characters, which the layer wraps as
+    /// quoted data.
+    pub(super) fn previous_text(&self, max_chars: usize) -> Option<Arc<str>> {
+        self.previous
+            .as_ref()
+            .map(|previous| Arc::from(previous.text(max_chars)))
+    }
 }
 
 /// Escape XML special characters to prevent content from breaking out of XML wrappers.
@@ -392,6 +447,9 @@ impl Orchestrator {
             llm_metadata_map: DashMap::new(),
             delegation_map: DashMap::new(),
             attachments_skipped_map: DashMap::new(),
+            compacted_states: Arc::new(DashMap::new()),
+            compacted_turns: DashMap::new(),
+            continuity_map: DashMap::new(),
             confirmation_broker: Arc::new(RwLock::new(None)),
             memory_service,
             context_manager,
@@ -431,6 +489,40 @@ impl Orchestrator {
         self.memory_service()
             .map(|service| service.take_used(request_id))
             .unwrap_or_default()
+    }
+
+    /// The request's continuity (design 11 §5, CQ-7) for the turn's `done`
+    /// frame: whether its compaction's working state goes to the row, and the
+    /// previous conversation its request carried. Taken once, by the bridge,
+    /// on every turn — like [`Self::take_memory_used`].
+    pub fn take_continuity(&self, request_id: Uuid) -> crate::gateway::TurnContinuity {
+        self.continuity_map
+            .remove(&request_id)
+            .map(|(_, continuity)| continuity)
+            .unwrap_or_default()
+    }
+
+    /// Records `done.continued_from` for a request whose composed messages
+    /// carry the previous conversation's block — the block, not the context:
+    /// the assembly trim may have taken it (design 11 rev 1.4 item 7).
+    pub(super) fn record_continued_from(
+        &self,
+        request_id: Uuid,
+        ctx: &ConversationContext,
+        messages: &[ChatMessage],
+    ) {
+        let Some(previous) = &ctx.previous else {
+            return;
+        };
+        if messages
+            .iter()
+            .any(|m| m.content.starts_with(working_state::PREVIOUS_BLOCK_PREFIX))
+        {
+            self.continuity_map
+                .entry(request_id)
+                .or_default()
+                .continued_from = Some(previous.continued_from());
+        }
     }
 
     /// Set the confirmation broker for interactive tool approval.

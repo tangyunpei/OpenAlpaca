@@ -131,8 +131,20 @@ pub(crate) fn compress_context(
     // (only the LLM-summary tier may absorb them). They are re-inserted
     // right after the summary message, preserving their relative order.
     let mut kept_interjections: Vec<ChatMessage> = Vec::new();
+    // Design 11 §3.3, CQ-4: nor the conversation's working-state block, the
+    // one carrier of what the older rows said — the lead's stands inside the
+    // compressed range, after its objective. It stays whole, ahead of the
+    // summary, as the LLM-summary tier and the assembly trim keep it.
+    let mut kept_state: Vec<ChatMessage> = Vec::new();
 
     for msg in &messages[2..compress_end] {
+        if msg
+            .content
+            .starts_with(crate::orchestrator::working_state::BLOCK_PREFIX)
+        {
+            kept_state.push(msg.clone());
+            continue;
+        }
         if msg.role == Role::User
             && msg.parts.is_none()
             && msg
@@ -224,7 +236,7 @@ pub(crate) fn compress_context(
 
     let mut summary = format!(
         "[Context compressed: {} earlier messages in {} rounds]\n{}",
-        compress_end - 2 - kept_interjections.len(),
+        compress_end - 2 - kept_interjections.len() - kept_state.len(),
         round,
         summary_parts.join("\n")
     );
@@ -239,11 +251,14 @@ pub(crate) fn compress_context(
         }
     }
 
-    // Replace messages[2..compress_end] with the summary, followed by any
-    // preserved interjections (kept verbatim).
+    // Replace messages[2..compress_end] with the working state's block, the
+    // summary, and any preserved interjections (both kept verbatim).
     messages.splice(
         2..compress_end,
-        std::iter::once(ChatMessage::user(&summary)).chain(kept_interjections),
+        kept_state
+            .into_iter()
+            .chain(std::iter::once(ChatMessage::user(&summary)))
+            .chain(kept_interjections),
     );
 }
 
@@ -264,6 +279,80 @@ mod tests {
     #[test]
     fn test_estimate_empty_messages_returns_zero() {
         assert_eq!(estimate_messages_tokens(&[]), 0);
+    }
+
+    /// Design 11 §3.3 (the slice-3 review's F4): the heuristic summary does
+    /// not digest the working state's block where it stands inside the
+    /// compressed range — the lead's shape, after its objective — but keeps
+    /// it whole ahead of the summary; and it leaves the main loop's, at
+    /// `messages[1]`, where it is.
+    #[test]
+    fn the_heuristic_summary_keeps_the_working_state_block_whole() {
+        let block = crate::orchestrator::working_state::WorkingState {
+            v: crate::orchestrator::working_state::VERSION,
+            topic: "Lisbon trip".to_string(),
+            goal: "Book the October trip".to_string(),
+            done: Vec::new(),
+            decisions: Vec::new(),
+            open: Vec::new(),
+            next: "Compare the hotels".to_string(),
+            refs: Vec::new(),
+        }
+        .render("2026-09-28 10:00:00", 4000);
+        let rows = (1..=8).map(|i| {
+            if i % 2 == 1 {
+                ChatMessage::user(&format!("row {i}"))
+            } else {
+                ChatMessage::assistant(&format!("row {i}"))
+            }
+        });
+
+        for (shape, head, at) in [
+            ("lead", vec!["sys", "objective"], 2),
+            ("main loop", vec!["sys"], 1),
+        ] {
+            let mut messages: Vec<ChatMessage> = head
+                .iter()
+                .map(|text| {
+                    if *text == "sys" {
+                        ChatMessage::system(text)
+                    } else {
+                        ChatMessage::user(text)
+                    }
+                })
+                .chain(std::iter::once(ChatMessage::user(&block)))
+                .chain(rows.clone())
+                .collect();
+            compress_context(&mut messages, 1, None);
+
+            let blocks: Vec<usize> = messages
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| m.content == block)
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(
+                blocks,
+                vec![at],
+                "{shape}: the block, whole, where it stood"
+            );
+            let summary = messages
+                .iter()
+                .find(|m| m.content.starts_with("[Context compressed:"))
+                .unwrap_or_else(|| panic!("{shape}: compressed"));
+            assert!(
+                !summary
+                    .content
+                    .contains("Working state of this conversation"),
+                "{shape}: the block is not digested: {}",
+                summary.content
+            );
+            assert_eq!(
+                messages[at + 1].content,
+                summary.content,
+                "{shape}: the summary follows the block"
+            );
+        }
     }
 
     /// A4's byte-based tools estimate must be one function shared by the

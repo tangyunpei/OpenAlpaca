@@ -13,18 +13,25 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-/// Migrations in execution order. Future schema changes start at version 2:
-/// add `002_<name>.sql` ending in `INSERT INTO schema_version(version) VALUES (2);`
+/// Migrations in execution order. Future schema changes start at version 3:
+/// add `003_<name>.sql` ending in `INSERT INTO schema_version(version) VALUES (3);`
 /// and append its entry here.
 ///
 /// Each file ends by registering its own version (`run_migrations` executes a
 /// migration's SQL and nothing else). A fresh database runs all of them and
 /// opens at the last one's version.
-pub static MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "baseline",
-    sql: include_str!("001_baseline.sql"),
-}];
+pub static MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "baseline",
+        sql: include_str!("001_baseline.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "working_state",
+        sql: include_str!("002_working_state.sql"),
+    },
+];
 
 /// Oldest supported populated schema; zero represents a fresh database. It
 /// stays the baseline's version when later migrations are added: a fresh

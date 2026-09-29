@@ -456,6 +456,8 @@ function sessionRow(overrides: Record<string, unknown> = {}) {
     created_at: "2026-09-06 09:00:00",
     updated_at: "2026-09-06 10:00:00",
     ended_at: null,
+    working_state: null,
+    working_state_updated_at: null,
     active_task_count: 0,
     interrupted_task_count: 0,
     ...overrides,
@@ -4538,5 +4540,91 @@ describe("ChatView — the first-run card (D-G)", () => {
     await statusAnswered(client);
 
     expect(screen.queryByText(FIRST_RUN_TITLE)).toBeNull();
+  });
+});
+
+describe("ChatView — the conversation's continuity (design 11 §5, CQ-7)", () => {
+  const STATE = {
+    v: 1,
+    topic: "Lisbon \u{202E}trip",
+    goal: "Book the October trip",
+    done: ["Flight booked"],
+    decisions: [],
+    open: [],
+    next: "Compare the hotels",
+    refs: [],
+  };
+
+  it("draws the conversation's working state in the aside, escaped", async () => {
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-live",
+      });
+    sessionRows = [
+      sessionRow({
+        id: "sess-live",
+        working_state: STATE,
+        working_state_updated_at: "2026-09-28 11:00:00",
+      }),
+    ];
+    renderChat();
+
+    const card = await screen.findByRole("region", { name: "Working state" });
+    await waitFor(() => expect(card).toHaveTextContent("Lisbon <U+202E>trip"));
+    expect(card.textContent).not.toContain("\u{202E}");
+    expect(card).toHaveTextContent("Next: Compare the hotels");
+  });
+
+  it("says the conversation has nothing summarised yet", async () => {
+    renderChat();
+    const card = await screen.findByRole("region", { name: "Working state" });
+    expect(card).toHaveTextContent("Nothing summarised yet");
+  });
+
+  it("says what a turn continued from, above the transcript", async () => {
+    sessionRows = [
+      sessionRow({ id: "sess-live" }),
+      sessionRow({
+        id: "sess-prev",
+        status: "archived",
+        ended_at: "2026-09-28 11:00:00",
+      }),
+    ];
+    renderChat();
+    const source = await sendMessage("where were we?");
+
+    await act(async () => {
+      source.emit("done", {
+        content: "We were comparing hotels.",
+        model: "claude-sonnet-4-6",
+        tokens_in: 10,
+        tokens_out: 5,
+        duration_ms: 100,
+        working_state_updated: false,
+        continued_from: { session_id: "sess-prev", topic: "Lisbon trip" },
+      });
+    });
+
+    expect(
+      await screen.findByText("Continuing from: Lisbon trip (ended 28 Sep)"),
+    ).toBeInTheDocument();
+  });
+
+  it("starts a chat fresh with `inherit: false`", async () => {
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    fireEvent.click(screen.getByRole("button", { name: "Start fresh" }));
+
+    await waitFor(() =>
+      expect(
+        requests.find(
+          (r) => r.method === "POST" && r.url.endsWith("/v1/sessions"),
+        )?.body,
+      ).toEqual({ source: "gui", inherit: false }),
+    );
   });
 });

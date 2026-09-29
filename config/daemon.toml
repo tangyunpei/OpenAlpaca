@@ -26,7 +26,6 @@ max_tools_per_round = 3
 [execution.context]
 autocompact_buffer_ratio = 0.165
 compaction_target_ratio = 0.50
-# compaction_model = "claude-haiku-4-5-20251001"
 min_recent_messages = 4
 
 [extensions]
@@ -67,6 +66,10 @@ memory_confidence_threshold = 0.65
 # more as one-line entries the model can open with memory_read; "excerpts"
 # sends up to 8 matches as excerpts.
 recall_mode = "index"
+# A new conversation on the same project is given the previous conversation's
+# working state for its first `carry_over_turns` user turns, until it has one
+# of its own (0 = never). "Start fresh" turns it off for one conversation.
+carry_over_turns = 3
 
 [orchestrator.learning]
 # Learn from conversations in the background: every turn is queued, and a
@@ -79,10 +82,9 @@ turns_per_flush = 10
 # Episode notes: after a conversation has been quiet 30 minutes, when you
 # switch conversations and before the daemon stops, a conversation with at
 # least 4 new turns of yours gets one "episode" memory note — what was
-# discussed, decided and left open. memory_search, memory_timeline and the
-# Memory view find it; it is never recalled on its own. At most this many a
-# day (0 = none); they count under the extraction's daily caps above too.
-episode_max_per_day = 100
+# discussed, decided and left open — projected from its working state with
+# no model call. memory_search, memory_timeline and the Memory view find it;
+# it is never recalled on its own.
 
 [orchestrator.prompt_budgets]
 identity_budget = 300

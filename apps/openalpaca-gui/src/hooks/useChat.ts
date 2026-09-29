@@ -223,6 +223,11 @@ export function useChatStream(
     if (state.result?.delegation) {
       void client.invalidateQueries({ queryKey: qk.tasks.all() });
     }
+    // Design 11 §5: the turn compacted, and its working state is on the
+    // session row — the aside's card reads it from the session list.
+    if (state.result?.working_state_updated === true) {
+      void client.invalidateQueries({ queryKey: qk.sessions.all() });
+    }
   }, [state.phase, state.result, client]);
 
   // The same re-read for the *other* terminal frame (T1). A failed turn
