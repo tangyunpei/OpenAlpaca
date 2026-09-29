@@ -4144,7 +4144,13 @@ fn a_summary_takes_no_fact_key_from_a_model() {
             .update(&s.note.id, &s.revision, keyed(), actor)
             .unwrap_err();
         assert_eq!(err.class(), "authority_conflict", "{actor:?}");
-        assert!(err.to_string().contains("conversation summary"), "{err}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("conversation summary")
+                && msg.contains("Memory view")
+                && msg.contains(&format!("openalpaca memory edit {}", s.note.id)),
+            "{msg}"
+        );
     }
     assert_eq!(p.read(&s.note.id).unwrap().revision, s.revision);
 

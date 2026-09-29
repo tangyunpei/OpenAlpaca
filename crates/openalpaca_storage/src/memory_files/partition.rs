@@ -1979,7 +1979,7 @@ impl Partition {
                     return Err(MemoryFilesError::AuthorityConflict {
                         id: *id,
                         message: format!(
-                            "Note {id} is a conversation summary, and a conversation summary takes no fact key from a model: store the fact as a note of its own instead."
+                            "Note {id} is a conversation summary, and a conversation summary takes no fact key from a model: store the fact as a note of its own, or set the key yourself in the Memory view in the app or with `openalpaca memory edit {id}`."
                         ),
                     });
                 }
