@@ -4,7 +4,7 @@
 > `crates/openalpaca_core/src/security`, `crates/openalpaca_core/src/runner`,
 > `crates/openalpaca_core/src/orchestrator/skill`, `apps/openalpacad/src/services`,
 > `apps/openalpacad/src/managers` and the shipped `config/`. Workspace version 0.1.0,
-> schema version 43 (the `001_baseline.sql` baseline). The memory-tool rows
+> schema version 1 (the `001_baseline.sql` baseline, re-baselined on 2026-09-28). The memory-tool rows
 > were rewritten for the Markdown memory redesign on 2026-09-24, against
 > `feat/markdown-memory`; the rest of the page stands on the 2026-09-20
 > verification.
@@ -1581,7 +1581,7 @@ pub(super) fn format_tool_error_with_hint(tool_name: &str, msg: &str) -> String
 
 ### Database Tables
 
-Defined in `crates/openalpaca_storage/src/migrations/001_baseline.sql` (schema version 43).
+Defined in `crates/openalpaca_storage/src/migrations/001_baseline.sql` (schema version 1).
 The generated [schema reference](../api/database/schema.md) is
 authoritative.
 

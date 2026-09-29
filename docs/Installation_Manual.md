@@ -218,24 +218,33 @@ refused, and you start again with a factory reset. This was chosen knowingly
 (OpenAlpaca has never been released), so read this section before you start the
 new build on a store an older one created.
 
-When the new build meets a database from before the change, the daemon — and
-every form of `openalpaca config` that opens the database — stops with:
+The same holds for a store an earlier build of the Markdown memory created.
+On 2026-09-28 the schema was re-baselined: this build creates schema version 1,
+and every database from before that — 42 from before the memory redesign, 43 to
+45 from the Markdown-memory builds before the re-baseline — is at a version it
+does not know. The daemon, and every form of `openalpaca config` that opens the
+database, stops with:
 
 ```text
-Unsupported legacy schema version 42: this build starts at schema version 43 and
-cannot read a database from before the memory redesign — its memory storage was
-replaced. Run `openalpaca config reset --factory` to delete `<path>` (with its
--wal and -shm files) and start again at schema version 43. …
+Database `<path>` is at schema version 42, which this build does not know (it
+creates schema version 1 and knows versions up to 1). Nothing was changed. If a
+newer OpenAlpaca build created this database, use that build. If it was created
+by a build from before the schema was re-baselined at version 1, it cannot be
+read or upgraded: run `openalpaca config reset --factory` to start again (it
+deletes the database and `llm.toml`'s keys; see the Installation Manual,
+"Switching to the Markdown Memory Build").
 ```
 
-It names the file by its full path, lists what the reset removes and keeps, and
-changes nothing: the file is left exactly as it was. To switch over:
+The version is your store's own: 42 here, 43 to 45 for a store an earlier
+Markdown-memory build started on. The message names the file by its full path
+and changes nothing: the file is left exactly as it was. A store you have been
+using with an older build is the second case it names. To switch over:
 
 1. **Optionally keep a copy first.** With no daemon running
    (`openalpaca daemon stop`), copy `~/.openalpaca/state/openalpaca.db`
    together with `openalpaca.db-wal` and `openalpaca.db-shm` beside it, if they
-   exist. A build from before the memory redesign can open that copy later if
-   you want to look something up.
+   exist. The older build you were using can open that copy later if you want
+   to look something up.
 2. **Start the new build.** It refuses with the message above.
 3. **Run `openalpaca config reset --factory`** at a terminal and type the
    confirmation word, `factory-reset`. It deletes the database with its `-wal`
@@ -262,19 +271,23 @@ changes nothing: the file is left exactly as it was. To switch over:
    about you. Open it with `openalpaca persona edit user` or the app's
    Settings → Persona, keep the lines you want as standing instructions, and
    delete the rest. Nothing moves them into memory notes for you.
-7. **Optionally delete `~/.openalpaca/state/cache/fastembed`** (about 1 GB).
-   It held the removed embedding model; neither the reset nor the new build
-   touches it.
 
-**Keep the builds apart.** A pre-redesign build that contains commit
-`ae8faca8` (the memory redesign's newer-schema guard — slice 0, 2026-09-23) refuses a
-database whose schema is newer than it knows — `Database <path> is at schema
-version 43, which is newer than this build knows (42). Use the OpenAlpaca build
-that created it. Nothing was changed.` — so pointing it at the new store cannot
-damage it, and that message deliberately names no reset: nothing is wrong with
-the store, only with the build. A build without that commit has no such check:
-never run one against a store this build created. To go back, stop the new
-build and run the older one against the copy you kept in step 1.
+A store from before the memory redesign may also hold
+`~/.openalpaca/state/cache/fastembed` (about 1 GB), the removed embedding
+model's download. Neither the reset nor this build touches it; delete it by
+hand.
+
+**Keep the builds apart.** Once you have switched over, do not start a build
+from before 2026-09-28 against the store. Every build from 2026-09-21 on — the
+pre-redesign builds at schema 42 and the earlier Markdown-memory builds at 43
+to 45 — reads the new store's version 1 as older than its own baseline, refuses
+it as `Unsupported legacy schema version 1`, and tells you to delete the
+database: with `openalpaca config reset --factory` in a build from 2026-09-22
+on, by hand in one from the day before. Do not follow that advice — it deletes
+the new store. A build from before 2026-09-21 has no such check: it would take
+the store for its own version 1 and run its migrations 2 to 42 on it, so never
+run one against a store this build created. To go back, stop this build and run
+the older one against the copy you kept in step 1.
 
 ## Run and Verify
 
@@ -643,7 +656,10 @@ The uninstaller removes the GUI MSI, the prefix, the Start Menu folder and the
   - A development build's data directory is still present and this install has
     no database yet. The message lists what to move where. See [If You Have Data
     From an Older Build](#if-you-have-data-from-an-older-build).
-- `Unsupported legacy schema version 42: … from before the memory redesign` at startup
-  - The database was created by a build whose memory lived in the database.
-    This build does not convert it. See [Switching to the Markdown Memory
-    Build](#switching-to-the-markdown-memory-build).
+- `Database … is at schema version <n>, which this build does not know` at startup
+  - The database was created by a build from before the schema was
+    re-baselined at version 1 (2026-09-28) — 42 from before the memory
+    redesign, 43 to 45 from an earlier Markdown-memory build — or by a newer
+    OpenAlpaca. This build does not convert an older one. See [Switching to the
+    Markdown Memory Build](#switching-to-the-markdown-memory-build). For a newer
+    one, use the build that created it.

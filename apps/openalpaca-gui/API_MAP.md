@@ -1083,7 +1083,7 @@ Plan reference: `tasks/api-fix-plan.md` §Phase 8 item 8.
 (`{ base_url, token, instance_id }` only — `discovery/mod.rs:264`), so the React client
 cannot see it without a new Tauri command. The schema version is compile-time
 (`crates/openalpaca_storage/src/migrations/`, whose registry is now the single
-`001_baseline.sql` at version 43 since the memory redesign) and never surfaced. Nothing anywhere returns a log path
+`001_baseline.sql` at version 1 since the re-baseline of 2026-09-28) and never surfaced. Nothing anywhere returns a log path
 (`grep -rn "log_path" apps/openalpacad/src/routes/` → nothing).
 
 **Proposal:**

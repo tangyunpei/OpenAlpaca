@@ -68,7 +68,7 @@ function installFetch() {
           project_root: null,
           started_at: "2026-09-24T09:00:00Z",
           uptime_secs: 60,
-          schema_version: 43,
+          schema_version: 1,
           log_path: null,
           upload_bytes: 0,
           produced_bytes: 0,

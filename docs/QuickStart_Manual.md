@@ -129,9 +129,10 @@ openalpaca daemon tail         # follow daemon events; -c N stops after N
 
 - **Upgrade:** build a newer package, run `install.sh` again with `--yes`, then
   `openalpaca daemon start`. The installer stops the running daemon; your data
-  and config are kept. Coming from a build before the memory redesign? The new
-  daemon refuses that database (`Unsupported legacy schema version 42`) rather
-  than convert it; read [Switching to the Markdown Memory
+  and config are kept. Coming from a build from before 2026-09-28, when the
+  schema was re-baselined at version 1? The new daemon refuses that database
+  (`Database … is at schema version <n>, which this build does not know`)
+  rather than convert it; read [Switching to the Markdown Memory
   Build](Installation_Manual.md#switching-to-the-markdown-memory-build) before
   you start it.
 - **Uninstall:** `./scripts/release/uninstall.sh`. It leaves `~/.openalpaca`

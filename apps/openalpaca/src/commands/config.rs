@@ -111,10 +111,11 @@ pub(super) fn run_with(args: ConfigArgs, env: &mut dyn ConfigEnv) -> Result<()> 
         Some(ConfigAction::Reset { key, factory }) => cmd_reset(env, key, factory),
         None => {
             // Names no remedy (ruling C6): the error underneath carries its
-            // own, and it is not always the same one. A legacy-schema database
-            // names `config reset --factory`; an older install's stranded data
-            // must not be offered that verb, which deletes nothing there and
-            // does not clear it.
+            // own, and it is not always the same one. A database this build
+            // does not know names `config reset --factory` (the way through for
+            // a pre-squash one); an older install's stranded data must not be
+            // offered that verb, which deletes nothing there and does not
+            // clear it.
             let db = env.database().context(
                 "the interactive configuration editor needs the store database, and it \
                  could not be opened (`openalpaca config set|get|reset` on an `ai.*` or \
