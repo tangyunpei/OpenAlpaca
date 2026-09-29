@@ -8591,6 +8591,15 @@ async fn a_compacting_turn_writes_its_state_and_the_next_request_carries_it() {
     );
     assert_eq!(row.working_state_through, ids[7], "rows 1–8 were read");
     assert_eq!(row.working_state_version, 2);
+    let usage = openalpaca_storage::repository::LlmUsageRepository::new(&db)
+        .get_agent_usage(working_state::USAGE_LABEL, 10)
+        .unwrap();
+    assert_eq!(
+        usage.iter().map(|c| c.status.as_str()).collect::<Vec<_>>(),
+        vec!["success"],
+        "the compaction's call has its usage row, under the summariser's label"
+    );
+    assert_eq!(usage[0].task_id, None);
 
     send_tool_mode(&orch, Uuid::new_v4(), "and then?").await;
     let next = requests.lock().unwrap()[2].clone();
@@ -8667,6 +8676,17 @@ async fn an_unusable_compaction_answer_leaves_the_row_and_the_loop_on_the_heuris
     assert_eq!(
         (row.working_state_version, row.working_state_through),
         (1, 0)
+    );
+    let usage = openalpaca_storage::repository::LlmUsageRepository::new(&db)
+        .get_agent_usage(working_state::USAGE_LABEL, 10)
+        .unwrap();
+    assert_eq!(
+        usage
+            .iter()
+            .map(|c| (c.status.as_str(), c.error_message.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![("error", Some("the answer is not JSON"))],
+        "and its usage row says why"
     );
 }
 

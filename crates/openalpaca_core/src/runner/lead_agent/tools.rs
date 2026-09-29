@@ -376,8 +376,10 @@ impl BuiltInTool for SpawnSubagentTool {
                 );
         loop_config.event_bus = Some(self.bus.clone());
         // Design 11, CQ-3: compaction's writer runs on `summary_model`.
-        loop_config.writer =
-            crate::orchestrator::working_state::WriterConfig::new(&self.daemon_config.load());
+        loop_config.writer = crate::orchestrator::working_state::WriterConfig::new(
+            &self.daemon_config.load(),
+            self.db.clone(),
+        );
         loop_config.experimental_ephemeral_pressure = self
             .daemon_config
             .load()

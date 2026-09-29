@@ -212,8 +212,10 @@ fn estimate_cost(input_tokens: u32, output_tokens: u32, input_rate: f64, output_
 /// Compaction's one call (design 11 §3.3, CQ-1, CQ-3): the working-state
 /// writer over the older messages, on `summary_model`, under the summariser's
 /// label and its daily ceiling — read before the call, as at every site of
-/// the writer (§3.1). A spent ceiling, a failed call and an answer that is not
-/// a state are all an `Err`: the pipeline falls back to its heuristic.
+/// the writer (§3.1) — and its usage row written under that label when the
+/// loop has a store (`WriterConfig::db`), as the turn end's is. A spent
+/// ceiling, a failed call and an answer that is not a state are all an
+/// `Err`: the pipeline falls back to its heuristic.
 #[async_trait::async_trait]
 impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
     async fn summarize(
@@ -258,8 +260,7 @@ impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
             writer.model.clone(),
             writer.msg_trunc_chars,
         );
-        let response = router.complete(request).await.map_err(|e| e.to_string())?;
-        WorkingState::parse(&response).map_err(|why| why.0)
+        working_state::call(writer.db.as_ref(), router, request).await
     }
 }
 
@@ -359,5 +360,48 @@ mod tests {
         let why = backend.summarize(None, &older).await.unwrap_err();
         assert!(why.contains("daily ceiling"), "{why}");
         assert_eq!(provider.request_count(), 1, "over the ceiling: no call");
+    }
+
+    /// Design 11 §3.1: compaction's call leaves its `llm_usage` row under the
+    /// summariser's label and no task — `success`, or `error` with why the
+    /// answer was unusable — as the turn end's does, so a restart rebuilds
+    /// the ceiling's spend from it and the usage listing shows the call.
+    #[tokio::test]
+    async fn compaction_records_its_usage_under_the_summary_label() {
+        use openalpaca_storage::repository::LlmUsageRepository;
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+        let older = [ChatMessage::user("where do files go?")];
+
+        for (reply, status, error) in [
+            (serde_json::to_string(&state()).unwrap(), "success", None),
+            (
+                "I would rather chat.".to_string(),
+                "error",
+                Some("the answer is not JSON"),
+            ),
+        ] {
+            let router = router_recording(RecordingProvider::new(reply));
+            let backend = LlmBackend::Router {
+                router: &router,
+                context: RequestContext::default(),
+                writer: WriterConfig {
+                    db: Some(db.clone()),
+                    ..WriterConfig::default()
+                },
+                fallback_models: Vec::new(),
+            };
+            let _ = backend.summarize(None, &older).await;
+
+            let calls = LlmUsageRepository::new(&db)
+                .get_agent_usage(working_state::USAGE_LABEL, 10)
+                .unwrap();
+            let call = calls
+                .iter()
+                .find(|c| c.status == status)
+                .unwrap_or_else(|| panic!("a {status} row: {calls:?}"));
+            assert_eq!(call.task_id, None, "no task: the summariser's spend");
+            assert_eq!(call.error_message.as_deref(), error);
+        }
     }
 }

@@ -542,7 +542,7 @@ pub async fn run_lead_agent(
     // Design 11, CQ-3: compaction's working-state writer runs on
     // `[orchestrator.costs] summary_model`, under its daily ceiling.
     loop_config.writer =
-        crate::orchestrator::working_state::WriterConfig::new(&daemon_config.load());
+        crate::orchestrator::working_state::WriterConfig::new(&daemon_config.load(), db.clone());
     loop_config.event_bus = Some(bus.clone());
     loop_config.experimental_ephemeral_pressure =
         daemon_config.load().experimental.ephemeral_pressure_layer;

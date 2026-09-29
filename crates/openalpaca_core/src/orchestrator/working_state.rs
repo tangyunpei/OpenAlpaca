@@ -154,19 +154,25 @@ pub fn update(
 /// CQ-3): the model (`[orchestrator.costs] summary_model`; `None` the router's
 /// default), the daily ceiling read before the call
 /// (`summary_max_daily_cost_usd`), each line's cut
-/// (`[orchestrator.memory] msg_trunc_chars`) and the limit of the block it
-/// renders (`summary_max_chars`). Every loop that compacts carries one.
-#[derive(Debug, Clone)]
+/// (`[orchestrator.memory] msg_trunc_chars`), the limit of the block it
+/// renders (`summary_max_chars`), and the store its usage row is written to
+/// under [`USAGE_LABEL`] (`None` in a test that has none). Every loop that
+/// compacts carries one.
+#[derive(Clone)]
 pub struct WriterConfig {
     pub model: Option<String>,
     pub max_daily_cost_usd: f64,
     pub msg_trunc_chars: usize,
     pub max_chars: usize,
+    pub db: Option<Database>,
 }
 
 impl WriterConfig {
-    pub fn new(dcfg: &DaemonConfig) -> Self {
-        Self::of(&dcfg.orchestrator.costs, &dcfg.orchestrator.memory)
+    pub fn new(dcfg: &DaemonConfig, db: Option<Database>) -> Self {
+        Self {
+            db,
+            ..Self::of(&dcfg.orchestrator.costs, &dcfg.orchestrator.memory)
+        }
     }
 
     fn of(
@@ -178,6 +184,7 @@ impl WriterConfig {
             max_daily_cost_usd: costs.summary_max_daily_cost_usd,
             msg_trunc_chars: memory.msg_trunc_chars,
             max_chars: memory.summary_max_chars,
+            db: None,
         }
     }
 }
@@ -185,6 +192,18 @@ impl WriterConfig {
 impl Default for WriterConfig {
     fn default() -> Self {
         Self::of(&Default::default(), &Default::default())
+    }
+}
+
+impl std::fmt::Debug for WriterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriterConfig")
+            .field("model", &self.model)
+            .field("max_daily_cost_usd", &self.max_daily_cost_usd)
+            .field("msg_trunc_chars", &self.msg_trunc_chars)
+            .field("max_chars", &self.max_chars)
+            .field("db", &self.db.is_some())
+            .finish()
     }
 }
 
@@ -345,28 +364,49 @@ pub(super) async fn after_turn(
         dcfg.orchestrator.costs.summary_model.clone(),
         dcfg.orchestrator.memory.msg_trunc_chars,
     );
-    if let Some(state) = call(&db, &router, request).await {
+    match call(Some(&db), &router, request).await {
         // Not a compaction's state: whatever mark the session holds no
         // longer matches the row, so the next window is the usual one.
-        write(&db, &session_id, ctx.working_state_version, &state, through);
+        Ok(state) => {
+            write(&db, &session_id, ctx.working_state_version, &state, through);
+        }
+        Err(why) => tracing::warn!("the working state was not updated: {why}"),
     }
 }
 
-/// One call of the writer: the answer read as a state, and its usage
-/// recorded under [`USAGE_LABEL`] — `success`, or `error` with why the answer
-/// was unusable. `None` when the call failed or the answer is not a state.
-async fn call(db: &Database, router: &LlmRouter, request: RouterRequest) -> Option<WorkingState> {
+/// One call of the writer, at every site that makes one (the turn end, and
+/// compaction through [`WriterConfig`]): the answer read as a state, and —
+/// with a `db` — its usage recorded under [`USAGE_LABEL`], `success`, or
+/// `error` with why the answer was unusable. `Err` says why there is no
+/// state: the call failed, or the answer is not one.
+pub(crate) async fn call(
+    db: Option<&Database>,
+    router: &LlmRouter,
+    request: RouterRequest,
+) -> Result<WorkingState, String> {
     let start = std::time::Instant::now();
-    let response = match router.complete(request).await {
-        Ok(response) => response,
-        Err(e) => {
-            tracing::warn!("the working-state call failed: {e}");
-            return None;
-        }
-    };
+    let response = router
+        .complete(request)
+        .await
+        .map_err(|e| format!("the working-state call failed: {e}"))?;
     let latency_ms = start.elapsed().as_millis() as i64;
     let parsed = WorkingState::parse(&response);
+    if let Some(db) = db {
+        record_usage(db, router, &response, latency_ms, &parsed);
+    }
+    parsed.map_err(|why| why.0)
+}
 
+/// The writer call's `llm_usage` row, under [`USAGE_LABEL`] and no task:
+/// what `restore_cost_tracker` rebuilds the summariser's daily spend from
+/// after a restart, and what `GET /v1/settings/llm/usage` lists.
+fn record_usage(
+    db: &Database,
+    router: &LlmRouter,
+    response: &ChatResponse,
+    latency_ms: i64,
+    parsed: &Result<WorkingState, Unusable>,
+) {
     let model = response.model.as_str();
     let provider = router
         .model_registry()
@@ -378,7 +418,7 @@ async fn call(db: &Database, router: &LlmRouter, request: RouterRequest) -> Opti
         response.usage.input_tokens as u32,
         response.usage.output_tokens as u32,
     );
-    let (status, error) = match &parsed {
+    let (status, error) = match parsed {
         Ok(_) => ("success", None),
         Err(why) => ("error", Some(why.to_string())),
     };
@@ -395,13 +435,6 @@ async fn call(db: &Database, router: &LlmRouter, request: RouterRequest) -> Opti
         error.as_deref(),
     ) {
         tracing::warn!("failed to persist the working-state call's usage: {e}");
-    }
-    match parsed {
-        Ok(state) => Some(state),
-        Err(why) => {
-            tracing::warn!("the working state was not updated: {why}");
-            None
-        }
     }
 }
 

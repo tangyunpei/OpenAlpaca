@@ -865,6 +865,7 @@ impl Orchestrator {
             let config_for_loop = LoopConfig {
                 writer: crate::orchestrator::working_state::WriterConfig::new(
                     &self.daemon_config.load(),
+                    self.db.clone(),
                 ),
                 working_state: ctx.working_state.clone(),
                 working_state_cursor: Some(cursor.clone()),
