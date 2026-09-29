@@ -118,36 +118,6 @@ fn bare_config_error() -> String {
     format!("{error:?}")
 }
 
-/// Ruling C6: no message names another message's remedy. An older install's
-/// stranded data is not fixed by `config reset --factory` — that deletes this
-/// install's database, which does not exist — so the editor must not put the
-/// verb in front of the stranded explanation.
-#[test]
-fn the_editor_does_not_offer_the_factory_reset_for_stranded_data() {
-    let tmp = tempdir().unwrap();
-    let _env = EnvSandbox::enter(tmp.path());
-    assert_sandboxed(tmp.path());
-    let legacy = store::legacy_root::legacy_app_dir().unwrap();
-    assert!(legacy.starts_with(tmp.path()));
-    std::fs::create_dir_all(&legacy).unwrap();
-    std::fs::write(legacy.join("openalpaca.db"), b"an older install's data").unwrap();
-
-    let rendered = bare_config_error();
-
-    assert!(
-        rendered.contains("an older OpenAlpaca install's data is still on this machine"),
-        "{rendered}"
-    );
-    assert!(
-        !rendered.contains("reset --factory"),
-        "the stranded refusal must not be offered the factory reset:\n{rendered}"
-    );
-    assert!(
-        !store::database_path().unwrap().exists(),
-        "refusing must not create the database it refused over"
-    );
-}
-
 /// The refusal of a schema this build does not know — what every store from
 /// before the re-baseline at version 1 reads as — names the factory reset
 /// itself, once. The editor adds nothing to it.

@@ -61,8 +61,8 @@ async fn ensure_daemon_running() -> Result<ConnectionInfo, String> {
     }
 
     // It did not come up. The daemon's own reason — a database this build
-    // does not know, an older install's data, a store it cannot create,
-    // another daemon holding the lock — is in its log, and nothing else can
+    // does not know, a store it cannot create, another daemon holding the
+    // lock — is in its log, and nothing else can
     // say it: with no daemon serving `GET /v1/status` there is nobody to ask
     // where the log is. Only what *this* spawn wrote is read, so an earlier
     // run's last words are never presented as this one's.
@@ -234,9 +234,9 @@ fn spawn_daemon() -> anyhow::Result<u64> {
     let config_dir = store::ensure_runtime_config_dir()?;
 
     // The sidecar's output used to go to /dev/null on both platforms, so a
-    // daemon that refused to boot — a database this build does not know, an
-    // older install's data, a store it cannot create, a master key it cannot
-    // read, another daemon already holding the lock — told the user nothing
+    // daemon that refused to boot — a database this build does not know, a
+    // store it cannot create, a master key it cannot read, another daemon
+    // already holding the lock — told the user nothing
     // beyond "did not become ready within timeout". It now writes the same
     // `daemon.log` the CLI launcher writes, under the same rotation, and marks
     // itself as that file's owner so `GET /v1/status` hands the path back

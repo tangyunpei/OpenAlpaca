@@ -106,16 +106,11 @@ fn main() -> Result<()> {
 
     info!("OpenAlpaca Daemon starting...");
 
-    // D1: everything lives under ~/.openalpaca. Seed the home store, then say
-    // so loudly if an older install's data directory is still on this machine:
-    // this build does not move it (D-D), and coming up on a fresh, empty
-    // database while that data sits somewhere else is the one failure worth
-    // refusing to start over.
+    // D1: everything lives under ~/.openalpaca. Seed the home store.
     if let Err(e) = store::ensure_store(&store::StoreScope::Home) {
         error!("FATAL: cannot create the OpenAlpaca home store: {e:#}");
         std::process::exit(1);
     }
-    store::legacy_root::check_legacy_root();
 
     // D3: Singleton lock FIRST — prevents all multi-process races.
     // Acquired before any config I/O or key generation.

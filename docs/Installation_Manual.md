@@ -146,66 +146,6 @@ config the installed daemon actually reads (not any repo checkout).
 The whole runtime root can be moved with `OPENALPACA_HOME_STORE`; see
 [Runtime Overrides](#runtime-overrides).
 
-## If You Have Data From an Older Build
-
-Builds before this one kept everything under
-`~/Library/Application Support/OpenAlpaca` (macOS),
-`~/.local/share/openalpaca` (Linux) or `%APPDATA%\OpenAlpaca\data` (Windows),
-and moved that directory into `~/.openalpaca` on their first boot. **This build
-does not move anything.** OpenAlpaca was never released, so no installed copy
-ever wrote to the old location; if you have one, it is from a development build.
-
-What happens instead:
-
-- If an old directory holds a database, a `.master_key` or a `config/`
-  directory **and** `~/.openalpaca/state/openalpaca.db` does not exist yet, the
-  daemon **refuses to start**. Starting would create an empty database and leave
-  your conversations, memories, tasks and encrypted config with nothing pointing
-  at them. The error names both directories and lists exactly what to move
-  where. Nothing is changed and nothing is lost — it is a refusal, not a
-  failure.
-- Otherwise — `~/.openalpaca` already has its own database, or the old
-  directory holds only `assets/`, `plugins/` or a stray `openalpaca.db-wal` /
-  `-shm` — the daemon starts and logs one warning per boot naming both paths.
-  The warning continues while the old directory holds any of `openalpaca.db`
-  (or its `-wal` / `-shm`), `.master_key`, `config/`, `plugins/` or `assets/` —
-  so it continues after the hand move below, which leaves `assets/` there on
-  purpose.
-- **Do not delete the old directory while any upload row points into it.** If
-  you carried its database over, the uploads that database recorded are still
-  read from the old `assets/` by absolute path, and deleting the directory
-  loses their files. As the warning itself says, check for uploaded files
-  still addressed by absolute path before deleting anything. On macOS this
-  must print `0`:
-
-  ```bash
-  sqlite3 ~/.openalpaca/state/openalpaca.db \
-    "SELECT count(*) FROM file_assets WHERE storage_path LIKE '$HOME/Library/Application Support/OpenAlpaca/%'"
-  ```
-
-  Once nothing points there, move or delete the directory and the warning
-  stops.
-- `openalpaca config` — the one CLI command that opens the database directly
-  instead of asking the daemon — applies the same rule and exits with the same
-  message, in every form that opens the database (`config reset --factory` and
-  a file-backed `ai.*` or `daemon.*` key open none, so they do not check — and
-  a factory reset never touches the old directory, so it does not clear this).
-  Every other `openalpaca` subcommand talks to the daemon over HTTP
-  and is unaffected in itself, though it still needs a daemon that will start.
-
-To carry old data over by hand, with no OpenAlpaca process running:
-
-| From the old directory | To |
-|---|---|
-| `openalpaca.db`, `openalpaca.db-wal`, `openalpaca.db-shm`, `.master_key` | `~/.openalpaca/state/` |
-| `config/`, `plugins/` | `~/.openalpaca/` (merge into what is there) |
-| `assets/` | **leave it where it is** |
-
-`assets/` stays put because uploaded files are recorded by absolute path:
-moving that directory breaks every row that points into it. Everything else in
-the old directory — logs, `discovery.json`, `openalpacad.lock`, `repl_history` —
-is regenerated and can be discarded.
-
 ## Switching to the Markdown Memory Build
 
 Memory used to live inside the database, in three tables searched by keyword
@@ -533,9 +473,7 @@ Re-run installer with a newer artifact:
 
 Upgrade keeps:
 
-- `~/.openalpaca` data and config (if you have a development build's data
-  elsewhere, see [If You Have Data From an Older
-  Build](#if-you-have-data-from-an-older-build) — it is not moved for you)
+- `~/.openalpaca` data and config
 
 An upgrade from any build before the schema re-baseline of 2026-09-28 is the one
 exception — a pre-redesign build at schema 42 as well as an earlier
@@ -593,9 +531,6 @@ the platform's data-directory convention.
   `openalpaca daemon start`, after the daemon itself has started. Use
   `openalpaca daemon start --daemon-only`, and open the app from the desktop
   entry or by running the AppImage.
-- **Older installs:** a development build's data may sit at
-  `~/.local/share/openalpaca`. It is **not** moved for you; see [If You Have
-  Data From an Older Build](#if-you-have-data-from-an-older-build).
 
 ### Windows
 
@@ -654,10 +589,6 @@ The uninstaller removes the GUI MSI, the prefix, the Start Menu folder and the
 - `No model is available: no enabled provider offers one`
   - A fresh install has every provider switched off. Turn one on; see
     [Connect a model](#connect-a-model).
-- `FATAL: an older OpenAlpaca install's data is still on this machine` at startup
-  - A development build's data directory is still present and this install has
-    no database yet. The message lists what to move where. See [If You Have Data
-    From an Older Build](#if-you-have-data-from-an-older-build).
 - `Database … is at schema version <n>, which this build does not know` at startup
   - The database was created by a build from before the schema was
     re-baselined at version 1 (2026-09-28) — 42 from before the memory

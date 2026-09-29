@@ -25,7 +25,6 @@
 //! root.
 
 mod artifact;
-pub mod legacy_root;
 pub mod project_move;
 
 pub use artifact::{
@@ -119,12 +118,7 @@ pub fn database_path() -> Result<PathBuf> {
 /// this is where the private directory is guaranteed. Going through
 /// [`database_path`] instead would let SQLite create `state/` at the process
 /// umask, leaving `.master_key` and `discovery.json` world-readable.
-///
-/// It also runs [`legacy_root::check_legacy_root_result`] first: opening the
-/// database **creates** it, so a process that opens before checking is exactly
-/// the process that strands an older install's data.
 pub fn open_home_database() -> Result<crate::database::Database> {
-    legacy_root::check_legacy_root_result()?;
     let path = state_dir()?.join(DB_FILE);
     crate::database::Database::open(&path)
         .with_context(|| format!("Failed to open {}", path.display()))
@@ -283,9 +277,9 @@ pub fn read_log_tail(path: &Path, from: u64, lines: usize) -> std::io::Result<St
 /// The last `lines` lines of `text`, newest last, as a person should read them.
 ///
 /// Verbatim otherwise: no line is reworded, prefixed or cut, and a blank line
-/// *inside* the window stays — a multi-paragraph refusal (the legacy-root one
-/// is) must still read as the paragraphs it was written in. Three things are
-/// removed, none of them text: trailing blank lines (a log ends in a newline,
+/// *inside* the window stays — a multi-paragraph message must still read as
+/// the paragraphs it was written in. Three things are removed, none of them
+/// text: trailing blank lines (a log ends in a newline,
 /// and a daemon that died mid-write can leave more), the blank lines the
 /// window would otherwise open with, and ANSI colour escapes — the daemon's
 /// `tracing` output carries them even into a file, and a panel that renders

@@ -72,9 +72,7 @@ pub(super) struct RealConfigEnv {
 impl ConfigEnv for RealConfigEnv {
     fn database(&mut self) -> Result<Database> {
         if self.opened.is_none() {
-            // Checks for an older install's data directory first: opening the
-            // database *creates* one, so opening before checking is what strands
-            // it. Through `state_dir()`, so `state/` is 0700 even when no daemon
+            // Through `state_dir()`, so `state/` is 0700 even when no daemon
             // has ever run here. This is the CLI's one call site.
             self.opened = Some(store::open_home_database()?);
         }
@@ -111,11 +109,9 @@ pub(super) fn run_with(args: ConfigArgs, env: &mut dyn ConfigEnv) -> Result<()> 
         Some(ConfigAction::Reset { key, factory }) => cmd_reset(env, key, factory),
         None => {
             // Names no remedy (ruling C6): the error underneath carries its
-            // own, and it is not always the same one. A database this build
-            // does not know names `config reset --factory` (the way through for
-            // a pre-squash one); an older install's stranded data must not be
-            // offered that verb, which deletes nothing there and does not
-            // clear it.
+            // own. A database this build does not know names `config reset
+            // --factory` itself (the way through for a pre-squash one), so
+            // repeating it here would only say it twice.
             let db = env.database().context(
                 "the interactive configuration editor needs the store database, and it \
                  could not be opened (`openalpaca config set|get|reset` on an `ai.*` or \

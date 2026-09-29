@@ -98,16 +98,6 @@ writes (`src-tauri/src/lib.rs`, `spawn_daemon`). A project you point the GUI at 
 its own store at `<project>/.openalpaca/`, with that project's memory notes under
 `memory/` (git-ignored by a `.gitignore` of its own).
 
-Nothing is moved into this root for you. If a development build's data directory
-(`~/Library/Application Support/OpenAlpaca` on macOS) is still on the machine,
-the daemon says so. It refuses to start only when that directory holds a
-database, a `.master_key` or a `config/` **and** this root has no database yet —
-rather than come up on an empty database beside it; the app then shows the
-daemon's own message in Settings → Connection, read from `daemon.log`. Otherwise
-it starts, and logs one warning per boot while that directory still holds a
-database, `.master_key`, `config/`, `plugins/` or `assets/`. See [If You Have Data From an Older
-Build](Installation_Manual.md#if-you-have-data-from-an-older-build).
-
 ## Connection lifecycle
 
 The webview asks the Rust shell for a connection; these Tauri commands are the
@@ -121,10 +111,10 @@ whole bridge (`src-tauri/src/lib.rs`):
   `state/logs/daemon.log`, and the command polls for up to about five seconds
   (25 × 200 ms) for a daemon that both advertises itself and accepts
   connections. **If none does, the error says why:** it ends with the last
-  lines this spawn wrote to the log — the daemon's own refusal, verbatim (an
-  older schema, an older install's data still on the machine, another daemon
-  holding the lock) — or says the daemon wrote nothing at all. Only this
-  spawn's lines are quoted, never an earlier run's.
+  lines this spawn wrote to the log — the daemon's own refusal, verbatim (a
+  database this build does not know, another daemon holding the lock) — or
+  says the daemon wrote nothing at all. Only this spawn's lines are quoted,
+  never an earlier run's.
 - `get_connection_info` — the reconnect path. It re-reads discovery and checks
   the expiry without spawning anything.
 - `await_daemon_stopped` — waits until a daemon asked to stop is really gone:

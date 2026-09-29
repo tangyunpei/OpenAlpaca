@@ -148,8 +148,8 @@ export interface ConnectionStatus {
    *
    * For a daemon that would not start this is `ensure_daemon_running`'s
    * rejection, which ends with the daemon's own log lines — a database this
-   * build does not know, an older install's data, another daemon holding the
-   * lock. It used to reach nobody: the sidecar's output went to `/dev/null`. A
+   * build does not know, another daemon holding the lock. It used to reach
+   * nobody: the sidecar's output went to `/dev/null`. A
    * later socket failure does not replace it (a daemon that died after writing
    * discovery leaves a stale endpoint the ladder dials); only a socket that
    * opens clears it.

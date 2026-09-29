@@ -106,13 +106,7 @@ root is the human's:
 ## Startup and Lifecycle
 
 1. Parse the command line (none expected; `--help`/`--version` print and exit here), then initialize tracing/logging.
-2. Seed the `~/.openalpaca` home store, then check whether a development build's
-   data directory is still on this machine (`store::ensure_store` +
-   `store::legacy_root::check_legacy_root`). Nothing is moved. A directory
-   holding a database, a `.master_key` or a `config/` **while this install has no
-   database yet** stops the boot with a message naming both paths; anything less
-   is one `WARN`. See [If You Have Data From an Older
-   Build](Installation_Manual.md#if-you-have-data-from-an-older-build).
+2. Seed the `~/.openalpaca` home store (`store::ensure_store`).
 3. Acquire single-instance lock (`openalpacad.lock`).
 4. Resolve config directory, seed missing default configs, and ensure master key.
 5. Install signal handlers.
@@ -1417,7 +1411,7 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 - **If your database is refused.** No migration runs — the schema and its rows are left exactly as they were — and the message names the absolute path of the file. There is one refusal, for a database at a schema version above the newest this build knows:
   - ``Database `<path>` is at schema version <n>, which this build does not know (it creates schema version 1 and knows versions up to 1). Nothing was changed.`` The message goes on to name both builds that could have written the file, because it cannot tell them apart. **A newer OpenAlpaca:** that database is fine and this build is the wrong one — use the build that created it, and do not reset. **A build from before the schema was re-baselined at version 1** (2026-09-28): 42, the complete, working database of the build before memory moved to files, or 43 to 45 from an earlier build of the Markdown memory. Such a database cannot be read or upgraded, and it is not converted: the message names `openalpaca config reset --factory`, which deletes it and `llm.toml`'s keys. The whole procedure — keeping a copy first, reconnecting a model, reviewing `USER.md` — is [Installation Manual → Switching to the Markdown Memory Build](Installation_Manual.md#switching-to-the-markdown-memory-build).
 
-  `openalpaca config reset --factory` deletes that file together with its `-wal` and `-shm` siblings and clears `llm.toml` and `daemon.toml`, after which the next start builds a fresh database at version 1; the artifact, upload and session *files* stay on disk unreferenced, and the memory notes and `state/memory-control/` are not touched (the new owner id leaves them orphaned until `openalpaca memory adopt`). The verb reaches a database in this state precisely because it opens none — it deletes files and asks the schema nothing — and it is the only form of `openalpaca config` that clears one (`set`, `get` and a keyed `reset` on an `ai.*` or `daemon.*` key open no database either, and work meanwhile, but leave it refused); it refuses while a daemon is running, prints the absolute store root, and requires you to type `factory-reset` at a terminal. A different startup failure — `an older OpenAlpaca install's data is still on this machine` — is not this one; see [Installation Manual → If You Have Data From an Older Build](Installation_Manual.md#if-you-have-data-from-an-older-build).
+  `openalpaca config reset --factory` deletes that file together with its `-wal` and `-shm` siblings and clears `llm.toml` and `daemon.toml`, after which the next start builds a fresh database at version 1; the artifact, upload and session *files* stay on disk unreferenced, and the memory notes and `state/memory-control/` are not touched (the new owner id leaves them orphaned until `openalpaca memory adopt`). The verb reaches a database in this state precisely because it opens none — it deletes files and asks the schema nothing — and it is the only form of `openalpaca config` that clears one (`set`, `get` and a keyed `reset` on an `ai.*` or `daemon.*` key open no database either, and work meanwhile, but leave it refused); it refuses while a daemon is running, prints the absolute store root, and requires you to type `factory-reset` at a terminal.
 - Session logs live at `~/.openalpaca/sessions/<id>/` and are bounded by **size only**:
   - `[orchestrator.sessions] log_max_session_bytes` (default 256 MiB) per session. On exceed the writer drops whole oldest segments, never the live one, and records the `seq` range that went.
   - `log_max_total_bytes` (default 2 GiB) across all of them, swept once at boot, oldest-touched archived session first, never an active one.
