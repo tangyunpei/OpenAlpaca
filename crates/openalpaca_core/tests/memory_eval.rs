@@ -1395,10 +1395,12 @@ struct LearningConditions {
     /// `0` calls is no cap.
     extract_max_calls_per_day: u32,
     extract_max_daily_cost_usd: f64,
-    /// `[orchestrator.learning] episode_max_per_day`, the conversation
-    /// summaries' daily count: lifted to the validation's maximum for a
-    /// system that learns (the L8 fix slice's H1).
-    episode_max_per_day: u32,
+    /// `[orchestrator.costs] summary_max_daily_cost_usd`, the summariser's
+    /// daily ceiling, which a conversation's close reads before refreshing
+    /// its working state (design 11 §3.1): lifted for a system that learns,
+    /// as the conversation summaries' daily count was before a summary was
+    /// projected with no call (the L8 fix slice's H1; design 11 CQ-2).
+    summary_max_daily_cost_usd: f64,
     /// The questions run with `[orchestrator.learning] enabled = false`.
     learning_during_questions: bool,
     /// Every fed turn is unattended, as every question is (M6).
@@ -2294,21 +2296,14 @@ const FLUSH_FORCED_RERUN: &str = "forced_rerun";
 const LIFTED_DAILY_COST_USD: f64 = 1_000_000.0;
 const COVERAGE_JUDGE_AGENT_ID: &str = "memory_eval_coverage_judge";
 
-/// The most conversation summaries a day the config's validation accepts
-/// (`DaemonConfig::validate`'s clamp), read from it rather than copied.
-fn lifted_episode_cap() -> u32 {
-    let mut cfg = openalpaca_core::daemon_config::DaemonConfig::default();
-    cfg.orchestrator.learning.episode_max_per_day = u32::MAX;
-    cfg.validate();
-    cfg.orchestrator.learning.episode_max_per_day
-}
-
 /// The eval's daemon config for a run: no workflow can dispatch, task-output
 /// extraction is off, and — for a system that learns — the extraction's
-/// daily caps and the conversation summaries' daily count are lifted, so a
-/// cap never stops a learning phase part-way (the summaries' since the L8
-/// fix slice's H1: all 51 sessions are fed on one UTC day, and at its
-/// default of 20 the count stopped every summary from the 21st session on).
+/// daily caps and the summariser's daily ceiling are lifted, so a cap never
+/// stops a learning phase part-way (the L8 fix slice's H1: all 51 sessions
+/// are fed on one UTC day, and the conversation summaries' old daily count,
+/// at its default of 20, stopped every summary from the 21st session on; a
+/// summary is now projected at a conversation's close, whose one call is
+/// the summariser's — design 11 §3.4).
 /// `recall_mode` is `OPENALPACA_MEMORY_EVAL_RECALL_MODE`: every automatic
 /// recall of the run reads it from this config (design 09 §13.4); `None`
 /// keeps the default.
@@ -2330,8 +2325,7 @@ fn eval_daemon_config(
     if system.learns() {
         cfg.orchestrator.costs.extract_max_calls_per_day = 0;
         cfg.orchestrator.costs.extract_max_daily_cost_usd = LIFTED_DAILY_COST_USD;
-        // The maximum, never 0: 0 writes no summary at all.
-        cfg.orchestrator.learning.episode_max_per_day = lifted_episode_cap();
+        cfg.orchestrator.costs.summary_max_daily_cost_usd = LIFTED_DAILY_COST_USD;
     }
     let budget = MainLoopBudget::for_system(system, &cfg.orchestrator.routing);
     cfg.orchestrator.routing.main_loop_max_rounds = budget.max_rounds;
@@ -5824,7 +5818,7 @@ fn learning_conditions(
         extraction_model: cfg.orchestrator.costs.extraction_model.clone(),
         extract_max_calls_per_day: cfg.orchestrator.costs.extract_max_calls_per_day,
         extract_max_daily_cost_usd: cfg.orchestrator.costs.extract_max_daily_cost_usd,
-        episode_max_per_day: cfg.orchestrator.learning.episode_max_per_day,
+        summary_max_daily_cost_usd: cfg.orchestrator.costs.summary_max_daily_cost_usd,
         learning_during_questions: false,
         unattended: true,
         seeded_old_notes,
@@ -8303,19 +8297,12 @@ fn cohens_kappa_reads_two_binary_gradings() {
 
 /// The learning systems' config: no workflow, no task extraction, learning
 /// on only where it learns, and the extraction caps lifted there — the
-/// conversation summaries' daily count too (the L8 fix slice's H1: at its
-/// default of 20 it stopped every summary from the corpus's 21st session
-/// on). The summaries' cap is lifted to the most the config's validation
-/// accepts, never to 0, which writes none; the run's conditions record it.
+/// summariser's daily ceiling too, which a conversation's close reads (the
+/// L8 fix slice's H1 kept for the summaries, design 11 §3.4); the run's
+/// conditions record it.
 #[test]
 fn a_learning_system_lifts_the_extraction_caps() {
     use openalpaca_core::daemon_config::DaemonConfig;
-    let most_accepted = {
-        let mut cfg = DaemonConfig::default();
-        cfg.orchestrator.learning.episode_max_per_day = u32::MAX;
-        cfg.validate();
-        cfg.orchestrator.learning.episode_max_per_day
-    };
     let l = eval_daemon_config(System::L, None);
     assert!(l.orchestrator.learning.enabled);
     assert_eq!(l.orchestrator.costs.extract_max_calls_per_day, 0, "no cap");
@@ -8324,21 +8311,8 @@ fn a_learning_system_lifts_the_extraction_caps() {
         LIFTED_DAILY_COST_USD
     );
     assert_eq!(
-        l.orchestrator.learning.episode_max_per_day, most_accepted,
-        "the summaries' cap at the validation's maximum"
-    );
-    assert!(
-        most_accepted
-            > DaemonConfig::default()
-                .orchestrator
-                .learning
-                .episode_max_per_day
-    );
-    let mut validated = l.clone();
-    validated.validate();
-    assert_eq!(
-        validated.orchestrator.learning.episode_max_per_day, most_accepted,
-        "a value the validation keeps"
+        l.orchestrator.costs.summary_max_daily_cost_usd, LIFTED_DAILY_COST_USD,
+        "the summariser's ceiling, which the close reads"
     );
     assert_eq!(l.orchestrator.routing.max_workflows_per_lane, 0);
     assert!(!l.orchestrator.costs.task_extract_enabled);
@@ -8353,11 +8327,11 @@ fn a_learning_system_lifts_the_extraction_caps() {
                 .extract_max_calls_per_day
         );
         assert_eq!(
-            cfg.orchestrator.learning.episode_max_per_day,
+            cfg.orchestrator.costs.summary_max_daily_cost_usd,
             DaemonConfig::default()
                 .orchestrator
-                .learning
-                .episode_max_per_day
+                .costs
+                .summary_max_daily_cost_usd
         );
     }
     let conditions = serde_json::to_value(learning_conditions(
@@ -8372,7 +8346,10 @@ fn a_learning_system_lifts_the_extraction_caps() {
         "coverage",
     ))
     .unwrap();
-    assert_eq!(conditions["episode_max_per_day"], most_accepted);
+    assert_eq!(
+        conditions["summary_max_daily_cost_usd"],
+        LIFTED_DAILY_COST_USD
+    );
     let e = eval_daemon_config(System::E, None);
     assert_eq!(e.orchestrator.routing.main_loop_max_tools_per_round, 1);
 }

@@ -419,19 +419,6 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         backend: ConfigBackend::DaemonToml,
     },
     ConfigKeyDef {
-        key: "daemon.orchestrator.learning.episode_max_per_day",
-        kind: ConfigKind::Int {
-            min: Some(0),
-            max: Some(1000),
-        },
-        default: Some("100"),
-        description: "Max episode notes (summaries of conversations) written per UTC day (0 = none)",
-        category: "Daemon",
-        subcategory: Some("Orchestrator"),
-        sensitive: false,
-        backend: ConfigBackend::DaemonToml,
-    },
-    ConfigKeyDef {
         key: "daemon.orchestrator.extract_max_calls_per_day",
         kind: ConfigKind::Int {
             min: Some(0),

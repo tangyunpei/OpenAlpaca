@@ -315,7 +315,6 @@ otherwise the conservative cloud fallback still applies.
 | One workflow's lead agent | $5 | `[execution.lead_agent_defaults] max_cost` |
 | Learning from conversations, per UTC day | $0.25 | `[orchestrator.costs] extract_max_daily_cost_usd` |
 | Learning from conversations, calls per UTC day | 200 (`0` = no cap) | `[orchestrator.costs] extract_max_calls_per_day` |
-| Episode notes, per UTC day | 100 (`0` = none) | `[orchestrator.learning] episode_max_per_day` |
 | Conversation summaries, per day | $0.50 | `[orchestrator.costs] summary_max_daily_cost_usd` |
 | Task-output extraction, per UTC day | $0.50 | `[orchestrator.costs] task_extract_max_daily_cost_usd` |
 
@@ -328,9 +327,7 @@ and `writing_agent` set none and run at the $1 default.
 There is no overall daily budget for turns or workflows. Only the background
 jobs in the table carry a daily ceiling. The two memory jobs read today's calls
 and spend from the usage table (`llm_usage_daily`) for the **UTC** date, so
-their day starts at 00:00 UTC whatever the daemon's uptime. Episode notes
-are billed apart (`orchestrator_episode`) but count under learning's two
-daily caps as well as under their own count. The call cap is
+their day starts at 00:00 UTC whatever the daemon's uptime. The call cap is
 what bounds a local model, where the cost cap never binds at price `0`. A
 capped learning window is not dropped: it waits, with one `INFO` per
 conversation per day, and is learned once the cap no longer binds. The summary
@@ -740,12 +737,12 @@ conversation has been quiet for **30 minutes**, when you switch to another
 conversation, and before the daemon stops (its durable half, as for
 learning, is the boot catch-up), and only once **at least 4 of your turns**
 have accumulated since that conversation's last episode note; a
-conversation's facts are learned first. One model call per note, under
-learning's rules: the same chunks of the stored conversation, the quiet
-start and the yielding to chat, the daily caps (it counts under
-`extract_max_calls_per_day` and `extract_max_daily_cost_usd`) and its own
-`[orchestrator.learning] episode_max_per_day` (100; `0` writes none). A
-message you forgot a note from is left out of the note, with its answer.
+conversation's facts are learned first. No model call writes the note: it
+is projected from the conversation's working state, which the queue brings
+up to date first — one call on `[orchestrator.costs] summary_model`,
+only when a turn of yours lies past what the state covers, under
+`summary_max_daily_cost_usd` and learning's quiet start and yielding to chat.
+The note does not cite a message you forgot a note from, nor its answer.
 
 The note is titled `Conversation on <YYYY-MM-DD>: <topic>`, the date its last
 turn's; its `## Knowledge` holds at most 1 KiB of prose — `Discussed: …`,

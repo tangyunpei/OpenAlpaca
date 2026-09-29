@@ -721,36 +721,20 @@ fn the_shipped_daemon_toml_names_recall_mode_index() {
 
 // ── Conversation summaries (design 09 §13.3, MD-16) ─────────────────────
 
-/// `[orchestrator.learning] episode_max_per_day` is 100 (owner decision LQ21;
-/// 20 before) unless the file says
-/// otherwise — from the struct default, an empty file and a learning table
-/// that does not name it — survives a round trip, is clamped to 0..=1000,
-/// and the shipped `config/daemon.toml` names it with its default.
+/// `[orchestrator.learning] episode_max_per_day` is gone (design 11 §8,
+/// owner decision CQ-2): a summary is projected from the working state with
+/// no call, so no daily count bounds it. A hand-edited file that still names
+/// it is read as every stale key is — ignored — and the shipped
+/// `config/daemon.toml` no longer names it.
 #[test]
-fn episode_max_per_day_defaults_to_100_and_is_clamped() {
-    for config in [
-        DaemonConfig::default(),
-        toml::from_str("").unwrap(),
-        toml::from_str("[orchestrator.learning]\nidle_secs = 60\n").unwrap(),
-    ] {
-        assert_eq!(config.orchestrator.learning.episode_max_per_day, 100);
-    }
-    let config: DaemonConfig =
-        toml::from_str("[orchestrator.learning]\nepisode_max_per_day = 0\n").unwrap();
-    assert_eq!(config.orchestrator.learning.episode_max_per_day, 0);
-    let round: DaemonConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
-    assert_eq!(round.orchestrator.learning.episode_max_per_day, 0);
-
-    let mut high: DaemonConfig =
-        toml::from_str("[orchestrator.learning]\nepisode_max_per_day = 5000\n").unwrap();
-    high.validate();
-    assert_eq!(high.orchestrator.learning.episode_max_per_day, 1000);
+fn episode_max_per_day_is_gone_and_a_stale_key_is_ignored() {
+    let stale: DaemonConfig =
+        toml::from_str("[orchestrator.learning]\nidle_secs = 60\nepisode_max_per_day = 0\n")
+            .unwrap();
+    assert_eq!(stale.orchestrator.learning.idle_secs, 60);
+    let round = toml::to_string(&stale).unwrap();
+    assert!(!round.contains("episode_max_per_day"), "{round}");
 
     let shipped = include_str!("../../../../config/daemon.toml");
-    assert!(
-        shipped.contains("\nepisode_max_per_day = 100\n"),
-        "{shipped}"
-    );
-    let config: DaemonConfig = toml::from_str(shipped).unwrap();
-    assert_eq!(config.orchestrator.learning.episode_max_per_day, 100);
+    assert!(!shipped.contains("episode_max_per_day"), "{shipped}");
 }

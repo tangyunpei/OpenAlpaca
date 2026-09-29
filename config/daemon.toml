@@ -78,10 +78,9 @@ turns_per_flush = 10
 # Episode notes: after a conversation has been quiet 30 minutes, when you
 # switch conversations and before the daemon stops, a conversation with at
 # least 4 new turns of yours gets one "episode" memory note — what was
-# discussed, decided and left open. memory_search, memory_timeline and the
-# Memory view find it; it is never recalled on its own. At most this many a
-# day (0 = none); they count under the extraction's daily caps above too.
-episode_max_per_day = 100
+# discussed, decided and left open — projected from its working state with
+# no model call. memory_search, memory_timeline and the Memory view find it;
+# it is never recalled on its own.
 
 [orchestrator.prompt_budgets]
 identity_budget = 300

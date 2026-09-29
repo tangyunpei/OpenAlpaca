@@ -134,12 +134,9 @@ fn test_find_mapping_recall_mode() {
     assert_eq!(mapping.field, "recall_mode");
 }
 
-/// Conversation summaries (design 09 §13.3): `episode_max_per_day` lives in
-/// `[orchestrator.learning]`, beside the cadence it bounds.
+/// Conversation summaries (design 09 §13.3): `episode_max_per_day` is gone
+/// with its registry row (design 11 §8, CQ-2), and so is its mapping.
 #[test]
-fn test_find_mapping_episode_max_per_day() {
-    let mapping = find_mapping("daemon.orchestrator.learning.episode_max_per_day")
-        .expect("daemon.orchestrator.learning.episode_max_per_day has a mapping");
-    assert_eq!(mapping.section, &["orchestrator", "learning"]);
-    assert_eq!(mapping.field, "episode_max_per_day");
+fn test_no_mapping_for_episode_max_per_day() {
+    assert!(find_mapping("daemon.orchestrator.learning.episode_max_per_day").is_none());
 }

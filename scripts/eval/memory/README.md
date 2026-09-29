@@ -329,12 +329,13 @@ goes through `Gateway::handle_event` — persisted, answered by the reader
 deterministically: `flush_session` after every 10th user turn of a session
 (`turns`) and at its end (`switch`). The idle trigger has no deterministic
 stand-in; L1's tests cover it. The extraction's daily caps are lifted
-(`extract_max_calls_per_day = 0`), and so is the conversation summaries'
-daily count, `[orchestrator.learning] episode_max_per_day`, to the most the
-config's validation accepts (1000; never 0, which writes none): the whole
-corpus is fed on one UTC day, and at the default of 20 every summary from
-the corpus's 21st session on stopped `Cap` (L8, before the fix slice). All
-three are recorded (`conditions.learning`), so a cap never stops the phase
+(`extract_max_calls_per_day = 0`), and so is the summariser's daily
+ceiling, `[orchestrator.costs] summary_max_daily_cost_usd`, which a
+conversation's close reads before it refreshes the working state its
+summary is projected from (design 11 §3.4): the whole corpus is fed on one
+UTC day, and the conversation summaries' old daily count, at its default of
+20, stopped every summary from the corpus's 21st session on (L8, before the
+fix slice). All three are recorded (`conditions.learning`), so a cap never stops the phase
 part-way; if one ever does, the run says so first (`learning.warnings`,
 printed as `!! WARNING` at the head of the summary block), as it does for a
 fed turn that ended in an error (`learning.cost.feed_turn_errors`).

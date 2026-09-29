@@ -97,12 +97,6 @@ impl DaemonConfig {
             100,
             "learning.turns_per_flush",
         );
-        clamp_val(
-            &mut self.orchestrator.learning.episode_max_per_day,
-            0,
-            1000,
-            "learning.episode_max_per_day",
-        );
         // ── Orchestrator > Prompt Budgets ──
         clamp_val(
             &mut self.orchestrator.prompt_budgets.identity_budget,
