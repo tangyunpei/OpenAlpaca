@@ -3783,6 +3783,7 @@ fn a_working_state(next: &str) -> crate::orchestrator::working_state::WorkingSta
         topic: "Lisbon trip in October".to_string(),
         goal: "Book flights and a hotel".to_string(),
         done: vec!["Flight booked (task 1a2b3c4d)".to_string()],
+        asked: Vec::new(),
         decisions: vec!["A hotel in Alfama".to_string()],
         open: vec!["Which museum pass".to_string()],
         next: next.to_string(),

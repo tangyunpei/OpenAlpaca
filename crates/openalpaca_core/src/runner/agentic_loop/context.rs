@@ -293,6 +293,7 @@ mod tests {
             topic: "Lisbon trip".to_string(),
             goal: "Book the October trip".to_string(),
             done: Vec::new(),
+            asked: Vec::new(),
             decisions: Vec::new(),
             open: Vec::new(),
             next: "Compare the hotels".to_string(),

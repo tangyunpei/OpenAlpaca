@@ -196,6 +196,7 @@ fn state(topic: &str) -> WorkingState {
         topic: topic.to_string(),
         goal: String::new(),
         done: Vec::new(),
+        asked: Vec::new(),
         decisions: Vec::new(),
         open: Vec::new(),
         next: String::new(),

@@ -1128,6 +1128,7 @@ fn lisbon(topic: &str) -> crate::orchestrator::working_state::WorkingState {
         topic: topic.to_string(),
         goal: "Book the October trip".to_string(),
         done: Vec::new(),
+        asked: Vec::new(),
         decisions: Vec::new(),
         open: Vec::new(),
         next: "Compare the hotels".to_string(),

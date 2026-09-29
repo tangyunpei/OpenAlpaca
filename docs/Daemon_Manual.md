@@ -1069,9 +1069,9 @@ Tunables live under `[orchestrator.routing]` in `config/daemon.toml` (steering, 
 ### Conversation continuity
 
 Each conversation keeps a **working state** on its session row: where its work
-stands, as one fixed-shape JSON object — `topic`, `goal`, `done`, `decisions`,
-`open`, `next` and `refs` (task ids and artifact paths), in the user's
-language. A turn's model gets it as the first message of its history, as
+stands, as one fixed-shape JSON object — `topic`, `goal`, `done`, `asked`
+(the questions you asked and had answered), `decisions`, `open`, `next` and
+`refs` (task ids and artifact paths), in the user's language. A turn's model gets it as the first message of its history, as
 quoted reference data, never trimmed, at most `[orchestrator.memory]
 summary_max_chars` (4,000) characters, its heading saying when it was
 written. It stands in for the turns the model no longer sees: the recent

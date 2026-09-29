@@ -8292,6 +8292,7 @@ fn lisbon_state(next: &str) -> working_state::WorkingState {
         topic: "Lisbon trip".to_string(),
         goal: "Book the October trip".to_string(),
         done: vec!["Flight booked".to_string()],
+        asked: Vec::new(),
         decisions: Vec::new(),
         open: Vec::new(),
         next: next.to_string(),

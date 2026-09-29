@@ -1006,6 +1006,7 @@ async fn the_dispatched_lead_is_given_the_turns_working_state() {
         topic: "Lisbon trip".to_string(),
         goal: "Book the October trip".to_string(),
         done: vec!["Flight booked".to_string()],
+        asked: Vec::new(),
         decisions: vec!["A hotel in Alfama, not Baixa".to_string()],
         open: Vec::new(),
         next: "Book the Alfama hotel".to_string(),

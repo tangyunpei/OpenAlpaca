@@ -210,6 +210,7 @@ mod tests {
                 topic: "Summary".into(),
                 goal: String::new(),
                 done: Vec::new(),
+                asked: Vec::new(),
                 decisions: Vec::new(),
                 open: Vec::new(),
                 next: String::new(),

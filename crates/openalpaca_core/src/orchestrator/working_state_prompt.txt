@@ -11,6 +11,7 @@
 {"topic": "what the conversation is about, in 3 to 8 words",
  "goal": "what the user wants done, in their terms",
  "done": ["what is established or finished, with its files, artifacts and task ids"],
+ "asked": ["a question the user asked and had answered, one per item: its topic and the gist of the answer"],
  "decisions": ["what the user chose, turned down or changed"],
  "open": ["what is still unanswered or pending, including an offer or a question of the assistant's that the user has not taken up"],
  "next": "the work's next step as the user would state it, not an offer or a question of the assistant's; \"\" when there is none",

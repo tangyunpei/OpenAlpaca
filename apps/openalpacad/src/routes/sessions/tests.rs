@@ -317,7 +317,9 @@ async fn a_session_is_served_with_its_working_state_or_null() {
         .expect("session");
     let state = serde_json::json!({
         "v": 1, "topic": "Lisbon trip", "goal": "Book the October trip",
-        "done": ["Flight booked (task 1a2b3c4d)"], "decisions": [], "open": [],
+        "done": ["Flight booked (task 1a2b3c4d)"],
+        "asked": ["Whether Lisbon needs a visa: not for an EU citizen"],
+        "decisions": [], "open": [],
         "next": "Compare the hotels", "refs": ["task 1a2b3c4d"],
     });
     assert!(

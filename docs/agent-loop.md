@@ -464,7 +464,7 @@ that passes none (the social fast path, tests) never compacts.
   CQ-3). One call — there is no memory-extraction call any more — reads the
   previous state and the older messages `messages[2..len − min_recent_messages]`
   and answers the state, a fixed-shape JSON object: `topic`, `goal`, `done`,
-  `decisions`, `open`, `next`, `refs`. It replaces those messages with the
+  `asked`, `decisions`, `open`, `next`, `refs`. It replaces those messages with the
   rendered state at `messages[2]` (a previous state block among them is taken
   out, so the list never holds two) and is carried out on
   `LoopResult.working_state`. The call is the one working-state writer the

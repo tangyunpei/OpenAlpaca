@@ -2883,6 +2883,7 @@ fn a_compaction_record_with_a_working_state_is_replayed_as_that_state() {
         topic: "Quarterly report".to_string(),
         goal: "Write the Q3 report".to_string(),
         done: vec!["Rounds 1 to 3 read the sales data".to_string()],
+        asked: Vec::new(),
         decisions: Vec::new(),
         open: Vec::new(),
         next: "Draft the summary".to_string(),

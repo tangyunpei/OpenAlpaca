@@ -14,7 +14,8 @@
 //!
 //! The note:
 //! - title `Conversation on <YYYY-MM-DD>: <topic>`, the date the last turn's;
-//! - `## Knowledge`: what was discussed (the state's goal and what is done),
+//! - `## Knowledge`: what was discussed (the state's goal, what is done and
+//!   what the user asked and had answered),
 //!   decided (its decisions) and left open (what is open, and its next
 //!   step), at most 1 KiB of prose;
 //! - `observed_at` the last turn's time; `sources` the window's message rows
@@ -50,9 +51,10 @@ pub(crate) struct Summary {
 }
 
 /// The working state as the note's lines (design 11 §3.4): the topic;
-/// `Discussed:` its goal and what is done; `Decided:` its decisions; `Left
-/// open:` what is open and `Next: <next>`. Items are joined with `; `. A
-/// state with no goal and nothing done is discussed by its topic, so the
+/// `Discussed:` its goal, what is done and the questions the user asked and
+/// had answered (rev 1.7, F3); `Decided:` its decisions; `Left open:` what
+/// is open and `Next: <next>`. Items are joined with `; `. A state with no
+/// goal, nothing done and nothing asked is discussed by its topic, so the
 /// note never says it discussed nothing.
 pub(crate) fn project(state: &WorkingState) -> Summary {
     let join = |items: Vec<&str>| {
@@ -65,6 +67,7 @@ pub(crate) fn project(state: &WorkingState) -> Summary {
     let mut discussed = join(
         std::iter::once(state.goal.as_str())
             .chain(state.done.iter().map(String::as_str))
+            .chain(state.asked.iter().map(String::as_str))
             .collect(),
     );
     if discussed.is_empty() {
@@ -329,8 +332,10 @@ mod tests {
     }
 
     /// Design 11 §3.4: the note's lines come from the working state —
-    /// `Discussed:` its goal and what is done, `Decided:` its decisions,
-    /// `Left open:` what is open and its next step — with no model call.
+    /// `Discussed:` its goal, what is done and (rev 1.7, F3; 12 §5 eq-002)
+    /// the questions the user asked and had answered, `Decided:` its
+    /// decisions, `Left open:` what is open and its next step — with no
+    /// model call.
     #[test]
     fn the_note_is_projected_from_the_working_state() {
         let state = WorkingState {
@@ -338,6 +343,7 @@ mod tests {
             topic: "Lisbon trip".into(),
             goal: "Book flights and a hotel".into(),
             done: vec!["Friday flight booked".into(), "Budget set".into()],
+            asked: vec!["What SIGILL means: an illegal CPU instruction".into()],
             decisions: vec!["Alfama, not Baixa".into()],
             open: vec!["Which museum pass".into()],
             next: "Compare three hotels".into(),
@@ -348,23 +354,27 @@ mod tests {
             summary,
             Summary {
                 topic: "Lisbon trip".into(),
-                discussed: "Book flights and a hotel; Friday flight booked; Budget set".into(),
+                discussed: "Book flights and a hotel; Friday flight booked; Budget set; \
+                            What SIGILL means: an illegal CPU instruction"
+                    .into(),
                 decided: "Alfama, not Baixa".into(),
                 open: "Which museum pass; Next: Compare three hotels".into(),
             }
         );
         assert_eq!(
             knowledge(&summary),
-            "Discussed: Book flights and a hotel; Friday flight booked; Budget set\n\
+            "Discussed: Book flights and a hotel; Friday flight booked; Budget set; \
+             What SIGILL means: an illegal CPU instruction\n\
              Decided: Alfama, not Baixa\n\
              Left open: Which museum pass; Next: Compare three hotels"
         );
 
-        // Nothing decided, open or next: those lines go; no goal and nothing
-        // done: the topic is what was discussed.
+        // Nothing decided, open or next: those lines go; no goal, nothing
+        // done and nothing asked: the topic is what was discussed.
         let bare = WorkingState {
             goal: String::new(),
             done: Vec::new(),
+            asked: Vec::new(),
             decisions: Vec::new(),
             open: Vec::new(),
             next: String::new(),

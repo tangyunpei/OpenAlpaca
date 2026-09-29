@@ -20,6 +20,7 @@ fn trip() -> WorkingState {
         topic: "Lisbon trip planning".into(),
         goal: "Flights to Lisbon and a hotel near Alfama.".into(),
         done: Vec::new(),
+        asked: Vec::new(),
         decisions: vec!["Fly out on Friday 2 October.".into()],
         open: vec!["Which museum to visit.".into()],
         next: String::new(),

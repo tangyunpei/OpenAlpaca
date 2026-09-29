@@ -65,7 +65,7 @@ const PROMPT: &str = include_str!("working_state_prompt.txt");
 const USER_MARKER: &str = "=== user ===\n";
 
 /// One conversation's working state, as its session row stores it:
-/// `{"v":1,"topic","goal","done":[],"decisions":[],"open":[],"next","refs":[]}`.
+/// `{"v":1,"topic","goal","done":[],"asked":[],"decisions":[],"open":[],"next","refs":[]}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkingState {
     /// The shape's version: [`VERSION`].
@@ -76,6 +76,11 @@ pub struct WorkingState {
     pub goal: String,
     /// What is established or finished, with its files, artifacts and task ids.
     pub done: Vec<String>,
+    /// The questions the user asked and had answered, one line each: the
+    /// topic and the answer's gist (design 11 rev 1.7, F3). Empty in a state
+    /// stored before it.
+    #[serde(default)]
+    pub asked: Vec<String>,
     /// What the user chose, turned down or changed.
     pub decisions: Vec<String>,
     /// What was asked and is still unanswered or pending.
@@ -677,8 +682,8 @@ impl WorkingState {
     /// complete value of a state's shape after its reasoning.
     ///
     /// The value is then validated: `topic` a string that says something;
-    /// `goal` and `next` strings; `done`, `decisions`, `open` and `refs` lists
-    /// of strings, a lone string being a one-item list. A missing or `null`
+    /// `goal` and `next` strings; `done`, `asked`, `decisions`, `open` and
+    /// `refs` lists of strings, a lone string being a one-item list. A missing or `null`
     /// field, and a value that says there is nothing ("none", "n/a", "无"…),
     /// is empty; text is put on one line; `v` is [`VERSION`].
     pub fn parse(answer: &ChatResponse) -> Result<WorkingState, Unusable> {
@@ -719,8 +724,8 @@ impl WorkingState {
 
     /// The heading and the state in at most `max_chars` characters. Over the
     /// limit, list items go one at a time, each list's oldest first: `done`,
-    /// then `refs`, `decisions` and `open` — what the transcript and the
-    /// session log still hold before what is unsettled. Past every item,
+    /// then `asked`, `refs`, `decisions` and `open` — what the transcript and
+    /// the session log still hold before what is unsettled. Past every item,
     /// `goal`, then `topic`, is shortened on a character boundary and marked
     /// `…`, so `next` is kept whole unless it and the heading alone are over.
     /// Only the rendering is cut; the state itself is not changed. The
@@ -768,6 +773,7 @@ impl WorkingState {
         field(&mut out, "Topic", &self.topic);
         field(&mut out, "Goal", &self.goal);
         list(&mut out, "Done", &self.done);
+        list(&mut out, "Asked", &self.asked);
         list(&mut out, "Decisions", &self.decisions);
         list(&mut out, "Open", &self.open);
         field(&mut out, "Next", &self.next);
@@ -780,6 +786,7 @@ impl WorkingState {
     fn drop_oldest_item(&mut self) -> bool {
         for items in [
             &mut self.done,
+            &mut self.asked,
             &mut self.refs,
             &mut self.decisions,
             &mut self.open,
@@ -859,6 +866,7 @@ fn state_of(value: Option<Value>) -> Result<WorkingState, String> {
         topic,
         goal: text("goal")?,
         done: list("done")?,
+        asked: list("asked")?,
         decisions: list("decisions")?,
         open: list("open")?,
         next: text("next")?,
@@ -905,6 +913,7 @@ mod tests {
             topic: "Lisbon trip in October".into(),
             goal: "Book flights and a hotel for 2–5 October".into(),
             done: vec!["Friday 2 October flight booked (task 1a2b3c4d)".into()],
+            asked: Vec::new(),
             decisions: vec!["A hotel in Alfama, not Baixa".into()],
             open: vec!["Which museum pass to buy".into()],
             next: "Compare the three Alfama hotels".into(),
@@ -939,15 +948,32 @@ mod tests {
     /// as the same state.
     #[test]
     fn a_state_round_trips_through_its_stored_json() {
-        let json = serde_json::to_string(&lisbon()).unwrap();
+        let asked = WorkingState {
+            asked: vec!["Whether Lisbon needs a visa: not for an EU citizen".into()],
+            ..lisbon()
+        };
+        let json = serde_json::to_string(&asked).unwrap();
         assert_eq!(
             json,
-            r#"{"v":1,"topic":"Lisbon trip in October","goal":"Book flights and a hotel for 2–5 October","done":["Friday 2 October flight booked (task 1a2b3c4d)"],"decisions":["A hotel in Alfama, not Baixa"],"open":["Which museum pass to buy"],"next":"Compare the three Alfama hotels","refs":["task 1a2b3c4d","artifact trips/lisbon.md"]}"#
+            r#"{"v":1,"topic":"Lisbon trip in October","goal":"Book flights and a hotel for 2–5 October","done":["Friday 2 October flight booked (task 1a2b3c4d)"],"asked":["Whether Lisbon needs a visa: not for an EU citizen"],"decisions":["A hotel in Alfama, not Baixa"],"open":["Which museum pass to buy"],"next":"Compare the three Alfama hotels","refs":["task 1a2b3c4d","artifact trips/lisbon.md"]}"#
         );
-        assert_eq!(
-            serde_json::from_str::<WorkingState>(&json).unwrap(),
-            lisbon()
-        );
+        assert_eq!(serde_json::from_str::<WorkingState>(&json).unwrap(), asked);
+    }
+
+    /// Design 11 rev 1.7 (F3): a state stored before `asked` existed reads
+    /// as one that asked nothing, and renders without the list.
+    #[test]
+    fn a_state_stored_before_asked_reads_with_nothing_asked() {
+        let stored = r#"{"v":1,"topic":"Lisbon trip in October","goal":"Book flights and a hotel for 2–5 October","done":["Friday 2 October flight booked (task 1a2b3c4d)"],"decisions":["A hotel in Alfama, not Baixa"],"open":["Which museum pass to buy"],"next":"Compare the three Alfama hotels","refs":["task 1a2b3c4d","artifact trips/lisbon.md"]}"#;
+        let read = stored_state_of(stored);
+        assert_eq!(read, lisbon());
+        assert!(!read.render(AT, 4000).contains("Asked:"));
+    }
+
+    fn stored_state_of(text: &str) -> WorkingState {
+        stored(text, "s")
+            .map(|s| (*s).clone())
+            .expect("a stored state")
     }
 
     /// Under the limit the whole state is delivered, quoted under the trust
@@ -1106,8 +1132,8 @@ mod tests {
     }
 
     /// Over the limit, list items go one at a time and each list's oldest
-    /// first — every `done` item before any `refs`, `decisions` or `open`
-    /// one, in that order — and `next` stays whole while `goal` or `topic`
+    /// first — every `done` item before any `asked`, `refs`, `decisions` or
+    /// `open` one, in that order — and `next` stays whole while `goal` or `topic`
     /// still has text to give. Every kept item is whole and every cut field
     /// a character prefix of its value, however many bytes its characters
     /// take, and the text is never over the limit.
@@ -1120,6 +1146,9 @@ mod tests {
             done: (1..=12)
                 .map(|i| format!("第 {i} 步完成 ✅ 检查了 {i} 号文件"))
                 .collect(),
+            asked: (1..=3)
+                .map(|i| format!("问过第 {i} 件事：签证？不需要"))
+                .collect(),
             decisions: (1..=4).map(|i| format!("决定 {i}：住阿尔法玛")).collect(),
             open: (1..=3).map(|i| format!("问题 {i}：博物馆通票？")).collect(),
             next: "比较阿尔法玛的三家酒店 🏨".into(),
@@ -1131,10 +1160,11 @@ mod tests {
             state.lines(&format!("Working state of this conversation, as of {AT}"))
         );
         let full_chars = full.chars().count();
-        let order = ["Done", "Refs", "Decisions", "Open"];
+        let order = ["Done", "Asked", "Refs", "Decisions", "Open"];
         let original = |label: &str| -> &Vec<String> {
             match label {
                 "Done" => &state.done,
+                "Asked" => &state.asked,
                 "Refs" => &state.refs,
                 "Decisions" => &state.decisions,
                 _ => &state.open,
@@ -1213,6 +1243,7 @@ mod tests {
             topic: "Lisbon trip in October".into(),
             goal: "Book flights and a hotel for 2–5 October".into(),
             done: Vec::new(),
+            asked: Vec::new(),
             decisions: vec!["A hotel in Alfama, not Baixa".into()],
             open: vec!["Which flight on Friday".into()],
             next: "Book the Friday flight".into(),
@@ -1385,6 +1416,7 @@ mod tests {
     fn the_answer_is_validated_and_normalised() {
         let read = parse(
             r#"{"v": 7, "topic": "Lisbon  trip", "goal": "none", "done": "Flight\nbooked.",
+                "asked": "Visa?  Not needed.",
                 "decisions": null, "open": ["n/a", "  Museum   pass? ", ""], "next": "无"}"#,
         )
         .unwrap();
@@ -1395,6 +1427,7 @@ mod tests {
                 topic: "Lisbon trip".into(),
                 goal: String::new(),
                 done: vec!["Flight booked.".into()],
+                asked: vec!["Visa? Not needed.".into()],
                 decisions: Vec::new(),
                 open: vec!["Museum pass?".into()],
                 next: String::new(),

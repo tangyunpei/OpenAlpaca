@@ -283,6 +283,7 @@ mod tests {
             topic: "Store layout".into(),
             goal: "Know where files go".into(),
             done: Vec::new(),
+            asked: Vec::new(),
             decisions: Vec::new(),
             open: Vec::new(),
             next: String::new(),
