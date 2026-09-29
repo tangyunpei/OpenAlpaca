@@ -3935,6 +3935,88 @@ fn the_trim_reports_the_history_rows_it_dropped_and_nothing_else() {
     assert_eq!(out.history_head_dropped, 0, "nothing trimmed");
 }
 
+/// Design 11 §3.2 at the seam (the slice-3 review's F3): the §3.2 cursor
+/// built from a composed request, as the main loop builds it, does not pass
+/// a row the trim dropped. A system block ahead of the history — which the
+/// trim never takes — puts the rows past `messages[2]`, where the cursor's
+/// other guard (a first row at `messages[1]`) cannot hide a miscount: with
+/// the count read as 0 the state would pass `r1`, which no writer read.
+#[test]
+fn the_cursor_built_from_a_composed_request_never_passes_a_trimmed_row() {
+    use super::assembly::{self, AssemblyInput};
+    use crate::orchestrator::working_state::Cursor;
+
+    let mut input = make_history_input(HistoryMode::Default);
+    input.working_state = Some(Arc::from(
+        a_working_state("Compare the hotels")
+            .text(STATE_AT, 4000)
+            .as_str(),
+    ));
+    // Each row is ~1 000 tokens; at a 3 400-token window the 75 % threshold
+    // (2 550) takes exactly the first.
+    input.recent_messages = Arc::new(
+        ["r1", "r2", "r3"]
+            .iter()
+            .map(|label| ChatMessage::user(&format!("{label} {}", "a".repeat(4000))))
+            .collect(),
+    );
+    input.current_user_turn = Some(ChatMessage::user("what next?"));
+    let history = super::history::compute(&input);
+    let out = assembly::compose(AssemblyInput {
+        persona: &PersonaOutput {
+            blocks: vec![],
+            fingerprint: [0u8; 32],
+        },
+        static_prompt: &StaticPromptOutput {
+            system_message: Arc::from("system"),
+            section_registry: vec!["system"],
+            fingerprint: [0u8; 32],
+        },
+        dynamic_context: &DynamicContextOutput {
+            context_messages: vec![],
+            additional_system_blocks: vec![SystemBlock {
+                name: "assignment",
+                content: Arc::from("the assignment"),
+                priority: SectionPriority::Critical,
+            }],
+            fingerprint: [0u8; 32],
+        },
+        history: &history,
+        tools: Arc::new(vec![]),
+        model_window: 3400,
+        layer_trace: LayerTrace {
+            persona_mode: PersonaMode::Minimal,
+            static_prompt_mode: StaticPromptMode::Default,
+            dynamic_context_mode: DynamicContextMode::Default,
+            history_mode: HistoryMode::Default,
+            memo_hits: LayerMemoHits::default(),
+        },
+    });
+    let heads: Vec<&str> = out
+        .messages
+        .iter()
+        .map(|m| m.content.split(' ').next().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        heads,
+        vec!["system", "the", "<context_data", "r2", "r3", "what"],
+        "the trim took r1 and nothing else"
+    );
+    assert_eq!(out.history_head_dropped, 1);
+
+    // The compaction reads messages[2..4]: the block, then r2.
+    let cursor = Cursor::new(
+        0,
+        &[1, 2, 3],
+        out.history_head_dropped,
+        &[],
+        out.messages.len(),
+    );
+    assert_eq!(cursor.after(4), 0, "`through` does not pass r1");
+    let miscounted = Cursor::new(0, &[1, 2, 3], 0, &[], out.messages.len());
+    assert_eq!(miscounted.after(4), 2, "a count of 0 would have passed r1");
+}
+
 /// The history layer's cache key follows the working state: the same state
 /// keys the same, a changed state (or one written again later) keys anew,
 /// and so does a state appearing where there was none.
