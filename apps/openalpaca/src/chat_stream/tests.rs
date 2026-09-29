@@ -634,6 +634,59 @@ fn a_reasonless_entry_still_names_the_attachment() {
     );
 }
 
+// ── Design 11 §5 (CQ-7): the turn's previous conversation ─────────────
+
+/// A terminal is told, in one dim line under the answer, which previous
+/// conversation the turn was given — its topic, every hidden character in
+/// it escaped; a pipe is told nothing, and neither is a turn that continued
+/// from nothing (`null`, or an older daemon that sends no field).
+#[test]
+fn a_terminal_is_told_what_the_turn_continued_from_and_a_pipe_is_not() {
+    colored::control::set_override(false);
+    let frame = |continued_from: serde_json::Value| {
+        format!(
+            "event: done\ndata: {}",
+            serde_json::json!({
+                "content": "hi",
+                "model": "qwen3:8b",
+                "tokens_in": 1,
+                "tokens_out": 1,
+                "duration_ms": 1,
+                "working_state_updated": false,
+                "continued_from": continued_from,
+            })
+        )
+    };
+    let shown = |frame: &str, opts: &StreamOptions| {
+        let mut state = SseState::default();
+        let mut written = Vec::new();
+        process_sse_event_to(frame, opts, &mut state, &mut written).expect("done is handled");
+        String::from_utf8(written).expect("the handler writes UTF-8")
+    };
+
+    let lisbon = frame(serde_json::json!({
+        "session_id": "s-prev",
+        "topic": "Lisbon \u{202E}trip",
+    }));
+    assert!(
+        shown(&lisbon, &terminal()).contains("continuing from: Lisbon <U+202E>trip\n"),
+        "{:?}",
+        shown(&lisbon, &terminal())
+    );
+    assert!(!shown(&lisbon, &terminal()).contains('\u{202E}'));
+    assert!(!shown(&lisbon, &piped()).contains("continuing from"));
+
+    let no_state = frame(serde_json::json!({ "session_id": "s-prev", "topic": "" }));
+    assert!(shown(&no_state, &terminal()).contains("continuing from: the previous conversation\n"));
+
+    for nothing in [
+        frame(serde_json::Value::Null),
+        "event: done\ndata: {\"content\":\"hi\"}".to_string(),
+    ] {
+        assert!(!shown(&nothing, &terminal()).contains("continuing from"));
+    }
+}
+
 /// Design 09 §4.4: the inline `[y/N]` prompt prints the daemon-authored
 /// preview first, labelled as OpenAlpaca's own text, and the literal
 /// arguments after it; the ordinary card prints the arguments alone.

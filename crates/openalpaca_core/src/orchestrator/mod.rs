@@ -239,6 +239,11 @@ pub struct Orchestrator {
     /// by the main loop, taken by the turn end, which writes it to the row
     /// with no call.
     compacted_turns: DashMap<Uuid, (working_state::WorkingState, i64)>,
+    /// Design 11 §5 (CQ-7): per-request record of the turn's continuity — its
+    /// compaction's state going to the row (step 6), the previous
+    /// conversation in its request (the history layer's two builders). Taken
+    /// by the bridge on every turn, like `memory_used`.
+    continuity_map: DashMap<Uuid, crate::gateway::TurnContinuity>,
     /// Optional broker for interactive tool confirmation (set post-construction via `set_confirmation_broker()`).
     pub confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
     /// The memory service (design §7a), set post-construction by the daemon
@@ -444,6 +449,7 @@ impl Orchestrator {
             attachments_skipped_map: DashMap::new(),
             compacted_states: Arc::new(DashMap::new()),
             compacted_turns: DashMap::new(),
+            continuity_map: DashMap::new(),
             confirmation_broker: Arc::new(RwLock::new(None)),
             memory_service,
             context_manager,
@@ -483,6 +489,40 @@ impl Orchestrator {
         self.memory_service()
             .map(|service| service.take_used(request_id))
             .unwrap_or_default()
+    }
+
+    /// The request's continuity (design 11 §5, CQ-7) for the turn's `done`
+    /// frame: whether its compaction's working state goes to the row, and the
+    /// previous conversation its request carried. Taken once, by the bridge,
+    /// on every turn — like [`Self::take_memory_used`].
+    pub fn take_continuity(&self, request_id: Uuid) -> crate::gateway::TurnContinuity {
+        self.continuity_map
+            .remove(&request_id)
+            .map(|(_, continuity)| continuity)
+            .unwrap_or_default()
+    }
+
+    /// Records `done.continued_from` for a request whose composed messages
+    /// carry the previous conversation's block — the block, not the context:
+    /// the assembly trim may have taken it (design 11 rev 1.4 item 7).
+    pub(super) fn record_continued_from(
+        &self,
+        request_id: Uuid,
+        ctx: &ConversationContext,
+        messages: &[ChatMessage],
+    ) {
+        let Some(previous) = &ctx.previous else {
+            return;
+        };
+        if messages
+            .iter()
+            .any(|m| m.content.starts_with(working_state::PREVIOUS_BLOCK_PREFIX))
+        {
+            self.continuity_map
+                .entry(request_id)
+                .or_default()
+                .continued_from = Some(previous.continued_from());
+        }
     }
 
     /// Set the confirmation broker for interactive tool approval.

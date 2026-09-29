@@ -8568,8 +8568,13 @@ async fn a_compacting_turn_writes_its_state_and_the_next_request_carries_it() {
     let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 25);
     let (session, ids) = a_long_session(&db, 10);
 
-    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+    let compacting = Uuid::new_v4();
+    send_tool_mode(&orch, compacting, "what next?").await;
     orch.background.wait_idle().await;
+    assert!(
+        orch.take_continuity(compacting).working_state_updated,
+        "its `done` says the working state changed (§5, CQ-7)"
+    );
 
     let turn = requests.lock().unwrap().clone();
     assert_eq!(
@@ -8607,7 +8612,9 @@ async fn a_compacting_turn_writes_its_state_and_the_next_request_carries_it() {
     );
     assert_eq!(usage[0].task_id, None);
 
-    send_tool_mode(&orch, Uuid::new_v4(), "and then?").await;
+    let quiet = Uuid::new_v4();
+    send_tool_mode(&orch, quiet, "and then?").await;
+    assert!(!orch.take_continuity(quiet).working_state_updated);
     let next = requests.lock().unwrap()[2].clone();
     assert!(!is_writer_call(&next), "the next turn does not compact");
     let blocks: Vec<usize> = next
@@ -8657,8 +8664,13 @@ async fn an_unusable_compaction_answer_leaves_the_row_and_the_loop_on_the_heuris
     let (orch, requests) = a_4k_orchestrator("I would rather chat.", &db, 25);
     let (session, _) = a_long_session(&db, 10);
 
-    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+    let request_id = Uuid::new_v4();
+    send_tool_mode(&orch, request_id, "what next?").await;
     orch.background.wait_idle().await;
+    assert!(
+        !orch.take_continuity(request_id).working_state_updated,
+        "no state goes to the row, and `done` says none changed"
+    );
 
     let turn = requests.lock().unwrap().clone();
     assert_eq!(turn.iter().filter(|r| is_writer_call(r)).count(), 1);
@@ -9201,4 +9213,169 @@ async fn a_main_loop_turn_carries_the_previous_conversation_and_memory_used_is_u
     assert_eq!(used.len(), 1, "{used:?}");
     assert_eq!(used[0].id, scene.vim.id);
     assert_eq!(used[0].reason, UsedReason::Recall);
+}
+
+// ── Design 11 §5, CQ-7: the turn's continuity on the `done` frame ─────
+
+/// `continued_from` names what the request carries, not what the context
+/// held: the assembly trim may take the previous conversation's block (rev
+/// 1.4 item 7), and a turn that was not given it continues from nothing. A
+/// previous conversation with no state is named with an empty topic.
+#[test]
+fn continued_from_is_recorded_only_when_the_request_carries_the_block() {
+    let orch = make_orchestrator();
+    let mut ctx = ConversationContext {
+        previous: Some(working_state::PreviousConversation {
+            session_id: "s-prev".to_string(),
+            ended_at: "2026-09-28 11:00:00".to_string(),
+            date: "2026-09-28".to_string(),
+            episode_note_id: None,
+            state: Some(Arc::new(lisbon_state("Compare the hotels"))),
+            exchange: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let block = |ctx: &ConversationContext| {
+        wrap_untrusted_context(
+            &ctx.previous_text(4000).unwrap(),
+            working_state::PREVIOUS_BLOCK_TYPE,
+            "user_derived",
+        )
+    };
+
+    let trimmed = Uuid::new_v4();
+    orch.record_continued_from(trimmed, &ctx, &[ChatMessage::user("go on")]);
+    assert_eq!(
+        orch.take_continuity(trimmed),
+        crate::gateway::TurnContinuity::default(),
+        "the block is not in the request"
+    );
+
+    let given = Uuid::new_v4();
+    orch.record_continued_from(
+        given,
+        &ctx,
+        &[ChatMessage::user(&block(&ctx)), ChatMessage::user("go on")],
+    );
+    assert_eq!(
+        orch.take_continuity(given).continued_from,
+        Some(crate::gateway::ContinuedFrom {
+            session_id: "s-prev".to_string(),
+            topic: "Lisbon trip".to_string(),
+        })
+    );
+    assert_eq!(
+        orch.take_continuity(given),
+        crate::gateway::TurnContinuity::default(),
+        "taken once"
+    );
+
+    if let Some(previous) = ctx.previous.as_mut() {
+        previous.state = None;
+        previous.exchange = vec![("user".to_string(), "and the hotel?".to_string())];
+    }
+    let no_state = Uuid::new_v4();
+    orch.record_continued_from(no_state, &ctx, &[ChatMessage::user(&block(&ctx))]);
+    assert_eq!(
+        orch.take_continuity(no_state).continued_from,
+        Some(crate::gateway::ContinuedFrom {
+            session_id: "s-prev".to_string(),
+            topic: String::new(),
+        })
+    );
+}
+
+/// Through the main loop: a new conversation's turn given the previous one
+/// says so — its session and its state's topic — and a turn with no
+/// previous conversation says nothing; neither compacted.
+#[tokio::test]
+async fn a_main_loop_turn_says_what_it_continued_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+
+    let alone = Uuid::new_v4();
+    send_tool_mode(&orch, alone, "hello").await;
+    assert_eq!(
+        orch.take_continuity(alone),
+        crate::gateway::TurnContinuity::default()
+    );
+
+    let state = lisbon_state("Compare the hotels");
+    let (closed, _) = a_closed_conversation(&db, None, 2, Some((&state, 2)), None);
+    let continued = Uuid::new_v4();
+    send_tool_mode(&orch, continued, "where were we?").await;
+    assert_eq!(
+        orch.take_continuity(continued),
+        crate::gateway::TurnContinuity {
+            working_state_updated: false,
+            continued_from: Some(crate::gateway::ContinuedFrom {
+                session_id: closed,
+                topic: "Lisbon trip".to_string(),
+            }),
+        }
+    );
+}
+
+/// The skill tier builds the same history layer (rev 1.4 item 8), so a
+/// `/slash` turn given the previous conversation says so too.
+#[tokio::test]
+async fn a_skill_turn_says_what_it_continued_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(ToolModeMockLlm {
+            tool_call: None,
+            final_text: "review done".to_string(),
+            requests: requests.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let (_tmp, catalog) = make_review_skill_catalog();
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(Arc::new(router)),
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        Some(db.clone()),
+        catalog,
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    let state = lisbon_state("Compare the hotels");
+    let (closed, _) = a_closed_conversation(&db, None, 2, Some((&state, 2)), None);
+
+    let request_id = Uuid::new_v4();
+    assert_eq!(
+        send_tool_mode(&orch, request_id, "/review some code").await,
+        "review done"
+    );
+    assert!(
+        requests.lock().unwrap()[0]
+            .messages
+            .iter()
+            .any(|m| m.content.starts_with(working_state::PREVIOUS_BLOCK_PREFIX)),
+        "the skill's request carries the block"
+    );
+    assert_eq!(
+        orch.take_continuity(request_id).continued_from,
+        Some(crate::gateway::ContinuedFrom {
+            session_id: closed,
+            topic: "Lisbon trip".to_string(),
+        })
+    );
 }

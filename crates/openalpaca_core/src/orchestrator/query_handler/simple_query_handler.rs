@@ -707,6 +707,9 @@ impl Orchestrator {
             // + session summary + recent_messages + current_user_turn in the
             // same order the pre-migration manual assembly produced.
             let mut messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
+            // Design 11 §5 (CQ-7): the previous conversation, when the
+            // request carries its block — `done.continued_from`.
+            self.record_continued_from(request_id, ctx, &messages);
 
             // Design §5 step 8 (plan 3.3): what this turn recalled, as quoted
             // data, right before the current user turn and ahead of the

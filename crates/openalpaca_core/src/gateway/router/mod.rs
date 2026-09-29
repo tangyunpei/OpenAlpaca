@@ -43,6 +43,28 @@ pub struct SkippedAttachment {
     pub reason: String,
 }
 
+/// Design 11 §5 (owner decision CQ-7): the previous conversation a turn was
+/// given (§4 (b)) — its session and its working state's topic, `""` when it
+/// carried no state, only its last exchange. The SSE `done` frame's
+/// `continued_from`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContinuedFrom {
+    pub session_id: String,
+    pub topic: String,
+}
+
+/// Design 11 §5 (CQ-7): what a turn says about its conversation's continuity.
+/// Travels `HandleResult` → `GatewayResponse` → the SSE `done` frame, like
+/// `memory_used`, and is persisted nowhere.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnContinuity {
+    /// The turn compacted, and its working state goes to the session row at
+    /// turn end (§3.3).
+    pub working_state_updated: bool,
+    /// The request carried the previous conversation's block (§4 (b)).
+    pub continued_from: Option<ContinuedFrom>,
+}
+
 /// Rich result from message handling, carrying optional LLM metadata.
 ///
 /// Non-LLM paths (task queries, commands, etc.) use `HandleResult::text()` which
@@ -66,6 +88,9 @@ pub struct HandleResult {
     pub memory_used: Vec<MemoryUsed>,
     /// Set when handling delegated the message to a background task.
     pub delegation: Option<DelegationInfo>,
+    /// Design 11 §5 (CQ-7) — the working state written by the turn's
+    /// compaction and the previous conversation it was given. Live only.
+    pub continuity: TurnContinuity,
 }
 
 impl HandleResult {
@@ -80,6 +105,7 @@ impl HandleResult {
             attachments_skipped: Vec::new(),
             memory_used: Vec::new(),
             delegation: None,
+            continuity: TurnContinuity::default(),
         }
     }
 }
@@ -235,6 +261,8 @@ pub struct GatewayResponse {
     pub memory_used: Vec<MemoryUsed>,
     /// Set when handling delegated the message to a background task.
     pub delegation: Option<DelegationInfo>,
+    /// Design 11 §5 (CQ-7) — see [`HandleResult::continuity`].
+    pub continuity: TurnContinuity,
 }
 
 /// The unified entry point for all inbound messages.
@@ -520,6 +548,7 @@ impl Gateway {
                     attachments_skipped: result.attachments_skipped,
                     memory_used: result.memory_used,
                     delegation: result.delegation,
+                    continuity: result.continuity,
                 }
             }
             Err(e) => GatewayResponse {
@@ -533,6 +562,7 @@ impl Gateway {
                 attachments_skipped: Vec::new(),
                 memory_used: Vec::new(),
                 delegation: None,
+                continuity: TurnContinuity::default(),
             },
         }
     }

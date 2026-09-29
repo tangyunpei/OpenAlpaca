@@ -376,6 +376,13 @@ impl Orchestrator {
             .compacted_turns
             .remove(&request_id)
             .map(|(_, compacted)| compacted);
+        // Design 11 §5 (CQ-7): and its `done` frame says so.
+        if from_loop.is_some() {
+            self.continuity_map
+                .entry(request_id)
+                .or_default()
+                .working_state_updated = true;
+        }
         if let (Some(db), Some(router)) = (self.db.clone(), self.llm_router.clone()) {
             let config = self.daemon_config.clone();
             let compacted_states = self.compacted_states.clone();

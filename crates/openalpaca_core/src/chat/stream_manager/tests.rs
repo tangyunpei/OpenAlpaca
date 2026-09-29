@@ -107,6 +107,7 @@ fn the_done_frame_carries_what_never_reached_the_model() {
         vec![skipped.clone()],
         Vec::new(),
         None,
+        TurnContinuity::default(),
     );
 
     match rx.try_recv().unwrap() {
@@ -145,6 +146,7 @@ fn done_carries_the_memory_notes_the_turn_used() {
         Vec::new(),
         vec![used.clone()],
         None,
+        TurnContinuity::default(),
     );
     match rx.try_recv().unwrap() {
         ChatStreamEvent::Done { memory_used, .. } => assert_eq!(memory_used, Some(vec![used])),
@@ -154,6 +156,59 @@ fn done_carries_the_memory_notes_the_turn_used() {
     sink.send_done("hi", "qwen3:8b", 1, 1, 1, None);
     match rx.try_recv().unwrap() {
         ChatStreamEvent::Done { memory_used, .. } => assert!(memory_used.is_none()),
+        other => panic!("Expected Done event, got {other:?}"),
+    }
+}
+
+/// Design 11 §5 (CQ-7): the turn's continuity rides the same frame —
+/// `working_state_updated` and `continued_from` — and a turn that neither
+/// compacted nor was given a previous conversation says `false` and `None`.
+#[test]
+fn done_carries_the_turns_continuity() {
+    let mgr = ChatStreamManager::new();
+    let (_stream_id, mut rx, sink) = mgr.create_stream("user:gui");
+    let continued_from = ContinuedFrom {
+        session_id: "s-prev".to_string(),
+        topic: "Lisbon trip".to_string(),
+    };
+
+    sink.send_done_with_attachments(
+        "hi",
+        "qwen3:8b",
+        1,
+        1,
+        1,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        TurnContinuity {
+            working_state_updated: true,
+            continued_from: Some(continued_from.clone()),
+        },
+    );
+    match rx.try_recv().unwrap() {
+        ChatStreamEvent::Done {
+            working_state_updated,
+            continued_from: carried,
+            ..
+        } => {
+            assert!(working_state_updated);
+            assert_eq!(carried, Some(continued_from));
+        }
+        other => panic!("Expected Done event, got {other:?}"),
+    }
+
+    sink.send_done("hi", "qwen3:8b", 1, 1, 1, None);
+    match rx.try_recv().unwrap() {
+        ChatStreamEvent::Done {
+            working_state_updated,
+            continued_from,
+            ..
+        } => {
+            assert!(!working_state_updated);
+            assert!(continued_from.is_none());
+        }
         other => panic!("Expected Done event, got {other:?}"),
     }
 }
@@ -174,6 +229,7 @@ fn a_clean_turn_omits_both_attachment_fields() {
         Vec::new(),
         Vec::new(),
         None,
+        TurnContinuity::default(),
     );
 
     match rx.try_recv().unwrap() {

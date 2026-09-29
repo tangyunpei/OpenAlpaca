@@ -519,6 +519,8 @@ pub(crate) fn stored(text: &str, session_id: &str) -> Option<Arc<WorkingState>> 
 /// after what that state covers.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PreviousConversation {
+    /// Its session's id — `done.continued_from.session_id` (§5).
+    pub session_id: String,
     /// `session.ended_at`.
     pub ended_at: String,
     /// The day of its last message: the date its conversation summary's
@@ -533,6 +535,19 @@ pub(crate) struct PreviousConversation {
 }
 
 impl PreviousConversation {
+    /// What the turn's `done` frame says it continued from (design 11 §5,
+    /// CQ-7): this session and its state's topic, `""` without a state.
+    pub fn continued_from(&self) -> crate::gateway::ContinuedFrom {
+        crate::gateway::ContinuedFrom {
+            session_id: self.session_id.clone(),
+            topic: self
+                .state
+                .as_ref()
+                .map(|state| state.topic.clone())
+                .unwrap_or_default(),
+        }
+    }
+
     /// The block's text, at most `max_chars` characters when it can be: the
     /// heading — the note that records the conversation, *"memory_read it for
     /// the full record; memory_timeline shows what surrounds it"*, or before
@@ -914,6 +929,7 @@ mod tests {
     #[test]
     fn the_previous_conversation_names_its_note_after_the_close_and_the_timeline_before() {
         let mut previous = PreviousConversation {
+            session_id: "s-prev".into(),
             ended_at: "2026-09-28 11:00:00".into(),
             date: "2026-09-28".into(),
             episode_note_id: None,
@@ -978,6 +994,7 @@ mod tests {
         assert_eq!(exchange_text(&"a".repeat(400)), "a".repeat(400));
 
         let previous = PreviousConversation {
+            session_id: "s-prev".into(),
             ended_at: "2026-09-28 11:00:00".into(),
             date: "2026-09-28".into(),
             episode_note_id: None,

@@ -235,6 +235,7 @@ impl ChatService {
                 // `attachments_used` and a non-empty `attachments_skipped`,
                 // and both are omitted from the frame when empty; so is
                 // `memory_used` (plan 3.3), the notes this turn delivered.
+                // The turn's continuity (design 11 §5) is always sent.
                 sink.send_done_with_attachments(
                     &response.content,
                     model,
@@ -245,6 +246,7 @@ impl ChatService {
                     response.attachments_skipped,
                     response.memory_used,
                     delegation,
+                    response.continuity,
                 );
             }
 
@@ -576,6 +578,26 @@ mod tests {
         }
     }
 
+    /// A handler whose turn compacted and was given the previous
+    /// conversation (design 11 §5).
+    struct ContinuingHandler;
+
+    #[async_trait::async_trait]
+    impl MessageHandler for ContinuingHandler {
+        async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
+            Ok(HandleResult {
+                continuity: crate::gateway::TurnContinuity {
+                    working_state_updated: true,
+                    continued_from: Some(crate::gateway::ContinuedFrom {
+                        session_id: "s-prev".to_string(),
+                        topic: "Lisbon trip".to_string(),
+                    }),
+                },
+                ..HandleResult::text("we were comparing hotels".to_string())
+            })
+        }
+    }
+
     fn service_with(handler: Arc<dyn MessageHandler>) -> (ChatService, Arc<ChatStreamManager>) {
         let bus = EventBus::default();
         let gateway = Arc::new(crate::gateway::Gateway::new(
@@ -700,6 +722,44 @@ mod tests {
         );
         match done {
             ChatStreamEvent::Done { content, .. } => assert_eq!(content, "the whole answer"),
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    /// **Design 11 §5 (CQ-7).** The handler's continuity reaches the turn's
+    /// `done` through the gateway: the working state changed, and the
+    /// previous conversation it was given.
+    #[tokio::test]
+    async fn done_carries_the_handlers_continuity() {
+        let (service, streams) = service_with(Arc::new(ContinuingHandler));
+
+        let sent = service
+            .send_message(
+                "where were we?".to_string(),
+                vec![],
+                "u1",
+                None,
+                None,
+                false,
+            )
+            .expect("send");
+        let mut rx = streams.get_receiver(&sent.stream_id).expect("stream");
+
+        match drain_until_done(&mut rx, |_| {}).await {
+            ChatStreamEvent::Done {
+                working_state_updated,
+                continued_from,
+                ..
+            } => {
+                assert!(working_state_updated);
+                assert_eq!(
+                    continued_from,
+                    Some(crate::gateway::ContinuedFrom {
+                        session_id: "s-prev".to_string(),
+                        topic: "Lisbon trip".to_string(),
+                    })
+                );
+            }
             other => panic!("expected Done, got {other:?}"),
         }
     }

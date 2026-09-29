@@ -259,6 +259,7 @@ fn previous_conversation(
         .take(10)
         .collect();
     Some(PreviousConversation {
+        session_id: session.id,
         ended_at,
         date,
         episode_note_id: session.episode_note_id,
