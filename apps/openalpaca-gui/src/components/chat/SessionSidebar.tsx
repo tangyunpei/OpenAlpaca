@@ -4,7 +4,9 @@
  * Migration 039 made a lane hold many conversations with exactly one `active`
  * at a time, and this is the surface that makes that visible: the live one at
  * the top, the archived ones below it in `updated_at` order, each with the
- * project it is bound to. `New chat` opens one; clicking a row resumes it.
+ * project it is bound to. `New chat` opens one; `Start fresh` opens one that
+ * is not given the previous conversation's working state (design 11 §4 (b),
+ * owner decision CQ-5); clicking a row resumes it.
  *
  * Purely presentational. Every verb is a callback, every state — loading,
  * failed, empty — is a prop, and nothing here invents a row: a list that could
@@ -58,6 +60,8 @@ export interface SessionSidebarProps {
   /** `›` — the column is one of four in a budgeted window, so it collapses. */
   onCollapse: () => void;
   onNewChat: () => void;
+  /** "New chat" with `inherit: false` (design 11 §4 (b), CQ-5). */
+  onStartFresh: () => void;
   onSelect: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onArchive: (id: string) => void;
@@ -94,6 +98,7 @@ export function SessionSidebar({
   onLoadMore,
   onCollapse,
   onNewChat,
+  onStartFresh,
   onSelect,
   onRename,
   onArchive,
@@ -143,6 +148,19 @@ export function SessionSidebar({
           className={verb}
         >
           ›
+        </button>
+      </div>
+      {/* Beside `New chat`, one row down: the header has no room for a
+          second verb at the column's width. */}
+      <div className="flex shrink-0 justify-end border-b border-line px-[14px] py-[6px]">
+        <button
+          type="button"
+          disabled={creating}
+          onClick={onStartFresh}
+          title="A new chat that does not carry over the previous conversation's working state"
+          className={verb}
+        >
+          Start fresh
         </button>
       </div>
 

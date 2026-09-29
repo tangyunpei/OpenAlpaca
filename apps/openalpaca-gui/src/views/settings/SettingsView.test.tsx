@@ -331,6 +331,8 @@ const CONVERSATION = {
   created_at: "2026-08-01T10:00:00Z",
   updated_at: "2026-08-29T10:00:00Z",
   ended_at: "2026-08-29T10:05:00Z",
+  working_state: null,
+  working_state_updated_at: null,
   active_task_count: 0,
   interrupted_task_count: 0,
 };

@@ -326,11 +326,37 @@ export interface FeedbackResponse {
 // A session is one conversation transcript: an epoch of a lane, bound to at
 // most one workspace, with an `active` → `archived` lifecycle. A lane holds
 // many of them and at most one active one. `/v1/sessions` replaced the two
-// `/v1/conversations` reads (daemon plan §5.7, P19); the compaction columns
-// (`summary`, `summary_version`, …) are the daemon's own bookkeeping and are
-// deliberately not on the wire.
+// `/v1/conversations` reads (daemon plan §5.7, P19). Since the continuity
+// design (11 §5, owner decision CQ-7) a session carries its **working state**
+// — where the conversation's work stands — which the chat aside's card draws;
+// the writer's own bookkeeping (its version, the last row it covers) stays off
+// the wire.
 
 export type SessionStatus = "active" | "archived";
+
+/**
+ * A conversation's working state (design 11 §2): written by the daemon's
+ * summariser at a compaction, a turn-end refresh and the conversation's
+ * close. Every string in it is model-written text — shown through
+ * `EscapedText`, never as markup.
+ */
+export interface WorkingState {
+  v: number;
+  /** What the conversation is about, in a few words. */
+  topic: string;
+  /** What the user wants done, in their terms. */
+  goal: string;
+  /** Established or finished, with files, artifacts and task ids. */
+  done: string[];
+  /** What the user chose, turned down or changed. */
+  decisions: string[];
+  /** Asked and unanswered; pending. */
+  open: string[];
+  /** The next step, or `""`. */
+  next: string;
+  /** Task ids and artifact paths — `task 1a2b3c4d`, `artifact reports/q3.md`. */
+  refs: string[];
+}
 
 export interface Session {
   id: string;
@@ -344,6 +370,10 @@ export interface Session {
   created_at: string;
   updated_at: string;
   ended_at: string | null;
+  /** `null` while the conversation has none (design 11 §5). */
+  working_state: WorkingState | null;
+  /** When the state was last written; `null` while it has none. */
+  working_state_updated_at: string | null;
   /** Runs this session's lane has in flight right now. */
   active_task_count: number;
   /** Runs started from this session that were left interrupted. */

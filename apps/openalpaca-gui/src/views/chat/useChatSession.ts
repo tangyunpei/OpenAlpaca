@@ -82,6 +82,7 @@ import { followupErrorMessage, type FollowupRecord } from "@/lib/api/followups";
 import { sessionErrorMessage } from "@/lib/api/sessions";
 import { steerErrorMessage, steerTask } from "@/lib/api/tasks";
 import type { ApprovalScope } from "@/lib/api/types";
+import type { ContinuedFrom } from "@/lib/chat-stream";
 import { ApiError } from "@/lib/http";
 import { isTerminalRunStatus } from "@/lib/query-client";
 import { useProjectStore, workspaceOption } from "@/stores/project";
@@ -329,6 +330,14 @@ export interface ChatSession {
   activeRuns: ActiveRun[];
   steer: { mode: ComposerMode; label: string } | null;
 
+  /**
+   * The previous conversation the latest turn was given (design 11 §4 (b),
+   * §5) — `done.continued_from` — or `null`. Live only: kept from one `done`
+   * to the next, so it does not blink while a turn runs, and dropped with
+   * the conversation.
+   */
+  continuedFrom: ContinuedFrom | null;
+
   /** The lane's pending follow-up queue, oldest first (claim order). */
   followups: FollowupRecord[];
   /** The queue could not be read; items may still be pending. */
@@ -487,6 +496,9 @@ export function useChatSession(): ChatSession {
   const noteToolRun = useResolutions((s) => s.noteToolRun);
   const clearResolutions = useResolutions((s) => s.clear);
   const [steers, setSteers] = useState<SteerEntry[]>([]);
+  const [continuedFrom, setContinuedFrom] = useState<ContinuedFrom | null>(
+    null,
+  );
   const [confirmationMeta, setConfirmationMeta] = useState<
     Record<string, ConfirmationMeta>
   >({});
@@ -826,6 +838,17 @@ export function useChatSession(): ChatSession {
     stream.state.phase === "done" ||
     (stream.state.phase === "error" && stream.state.error?.transport === false);
   const streamId = stream.state.streamId;
+  /**
+   * Design 11 §5: each answered turn says what it continued from — the
+   * previous conversation for a new conversation's first turns, `null`
+   * after — and the chat view's line follows the latest.
+   */
+  const doneResult = stream.state.phase === "done" ? stream.state.result : null;
+  useEffect(() => {
+    if (doneResult === null) return;
+    setContinuedFrom(doneResult.continued_from ?? null);
+  }, [doneResult]);
+
   useEffect(() => {
     if (!daemonEndedTurn || streamId === null) return;
     for (const card of shownConfirmationsRef.current) {
@@ -996,6 +1019,7 @@ export function useChatSession(): ChatSession {
     setArtifacts([]);
     clearResolutions();
     setSteers([]);
+    setContinuedFrom(null);
     clearAttachments();
     setConfirmationMeta({});
     firstSeenAtMs.current.clear();
@@ -1353,6 +1377,8 @@ export function useChatSession(): ChatSession {
 
     activeRuns,
     steer,
+
+    continuedFrom,
 
     followups: followupQueue.data ?? [],
     followupsError: followupQueue.error,

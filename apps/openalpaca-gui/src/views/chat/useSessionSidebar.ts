@@ -74,6 +74,11 @@ export interface SessionSidebarState {
    */
   windowProject: string | null;
   newChat: () => void;
+  /**
+   * "Start fresh" (design 11 §4 (b), owner decision CQ-5): "New chat" whose
+   * conversation is never given the previous one's working state.
+   */
+  startFresh: () => void;
   select: (id: string) => void;
   rename: (id: string, title: string) => void;
   archive: (id: string) => void;
@@ -226,13 +231,21 @@ export function useSessionSidebar(
    * never fire again, and an archive from another client would strand the
    * window on a `409`.
    */
-  const newChat = useCallback(() => {
-    if (create.isPending) return;
-    setActionError(null);
-    void create
-      .mutateAsync(projectPath === null ? {} : { workspacePath: projectPath })
-      .catch((error: unknown) => setActionError(sessionErrorMessage(error)));
-  }, [create, projectPath]);
+  const openChat = useCallback(
+    (inherit: boolean) => {
+      if (create.isPending) return;
+      setActionError(null);
+      void create
+        .mutateAsync({
+          ...(projectPath === null ? {} : { workspacePath: projectPath }),
+          ...(inherit ? {} : { inherit: false }),
+        })
+        .catch((error: unknown) => setActionError(sessionErrorMessage(error)));
+    },
+    [create, projectPath],
+  );
+  const newChat = useCallback(() => openChat(true), [openChat]);
+  const startFresh = useCallback(() => openChat(false), [openChat]);
 
   const onSelect = useCallback(
     (id: string) => {
@@ -307,6 +320,7 @@ export function useSessionSidebar(
     loadMore,
     windowProject,
     newChat,
+    startFresh,
     select: onSelect,
     rename,
     archive,

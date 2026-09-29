@@ -13,6 +13,8 @@
  *
  * The aside is **one slot with two modes** (§8.4): the Work pane when
  * `panelArt === null`, the file panel otherwise. They are never both rendered.
+ * In the work mode the conversation's Working state card (design 11 §5) sits
+ * above the Work pane.
  * `‹ Work` restores the pane, `›` collapses the aside, and with the aside
  * fully closed the header grows the design's own re-entry path, the
  * `RunningNowPill`.
@@ -51,12 +53,14 @@ import {
 } from "@/stores/ui";
 
 import { decideChatModel, modelReplacedToast } from "./chat-model";
+import { ContinuingFromLine } from "./ContinuingFromLine";
 import { FilePanelSlot } from "./FilePanelSlot";
 import { firstRunState } from "./first-run";
 import { FirstRunCard } from "./FirstRunCard";
 import { Transcript } from "./Transcript";
 import { useChatSession } from "./useChatSession";
 import { useSessionSidebar } from "./useSessionSidebar";
+import { WorkingStateCard } from "./WorkingStateCard";
 import { renderDefaultWorkPane, type WorkPaneRenderer } from "./WorkPaneSlot";
 
 export interface ChatViewProps {
@@ -86,6 +90,7 @@ export default function ChatView({
   const closeWorkPane = useUiStore((s) => s.closeWorkPane);
   const closePanel = useUiStore((s) => s.closePanel);
   const setView = useUiStore((s) => s.setView);
+  const focusRun = useUiStore((s) => s.focusRun);
   const setSettingsSection = useUiStore((s) => s.setSettingsSection);
   const clearSteerTarget = useUiStore((s) => s.clearSteerTarget);
   const showToast = useUiStore((s) => s.showToast);
@@ -104,6 +109,17 @@ export default function ChatView({
 
   const session = useChatSession();
   const sidebar = useSessionSidebar(session.laneKey, session.sessionId);
+  // Design 11 §5 (CQ-7): the conversation's working state rides its row in
+  // the list the sidebar already holds; so does the previous conversation's
+  // `ended_at` for the "Continuing from" line.
+  const current =
+    sidebar.sessions.find((row) => row.id === sidebar.selectedId) ?? null;
+  const continuedFrom = session.continuedFrom;
+  const continuedFromEnded =
+    continuedFrom === null
+      ? null
+      : (sidebar.sessions.find((row) => row.id === continuedFrom.session_id)
+          ?.ended_at ?? null);
 
   // The app root owns the key ladder (§4.5), the rail's blocked lane bar and
   // the palette's `Approve` row; all three read this one published slot.
@@ -228,6 +244,7 @@ export default function ChatView({
             onLoadMore={sidebar.loadMore}
             onCollapse={closeSessions}
             onNewChat={sidebar.newChat}
+            onStartFresh={sidebar.startFresh}
             onSelect={sidebar.select}
             onRename={sidebar.rename}
             onArchive={sidebar.archive}
@@ -266,6 +283,12 @@ export default function ChatView({
             className="mx-auto px-[26px]"
             style={{ maxWidth: transcriptMaxWidth }}
           >
+            {continuedFrom !== null && (
+              <ContinuingFromLine
+                continuedFrom={continuedFrom}
+                endedAt={continuedFromEnded}
+              />
+            )}
             {/* D-G: drawn only on the daemon's explicit `null`, never on a
                 status that has not answered yet, and only while the
                 transcript is empty — a conversation whose model went away
@@ -382,14 +405,26 @@ export default function ChatView({
           {panelOn && panelArtifactId !== null ? (
             <FilePanelSlot artifactId={panelArtifactId} />
           ) : (
-            renderWorkPane({
-              blocked: session.blocked,
-              blockedRunId: session.blockedRunId,
-              blockedOn: session.pendingToolName,
-              blockedHidden: session.pendingHidden,
-              onFullView: () => setView("work"),
-              onCollapse: closeWorkPane,
-            })
+            <>
+              {/* Design 11 §5: the conversation's working state, above the
+                  Work pane in the slot's work mode. */}
+              <WorkingStateCard
+                state={current?.working_state ?? null}
+                updatedAt={current?.working_state_updated_at ?? null}
+                onOpenRun={(runId) =>
+                  runId === null ? setView("work") : focusRun(runId)
+                }
+                onOpenLibrary={() => setView("library")}
+              />
+              {renderWorkPane({
+                blocked: session.blocked,
+                blockedRunId: session.blockedRunId,
+                blockedOn: session.pendingToolName,
+                blockedHidden: session.pendingHidden,
+                onFullView: () => setView("work"),
+                onCollapse: closeWorkPane,
+              })}
+            </>
           )}
         </aside>
       )}
