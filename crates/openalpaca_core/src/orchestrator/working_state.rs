@@ -53,6 +53,11 @@ pub(crate) const PREVIOUS_BLOCK_PREFIX: &str = "<context_data type=\"previous_co
 /// many characters (design 11 §4 (b)).
 pub(crate) const EXCHANGE_MAX_CHARS: usize = 400;
 
+/// What ends a line the writer reads cut to `msg_trunc_chars` (design 11
+/// rev 1.7, F4): a space and U+2026, so a long answer reads as shortened
+/// rather than as cut off (12 §6.3).
+pub(crate) const CUT_MARK: &str = " …";
+
 /// The heading the writer reads the previous conversation's state under,
 /// ahead of a conversation's own lines (design 11 rev 1.7, F2): what came
 /// only through the carry-over is not this conversation's work.
@@ -132,7 +137,8 @@ pub struct TranscriptLine<'a> {
 }
 
 /// The writer's request (design 11 §3.1): the previous state and the new
-/// lines — `[role]: text`, each cut to `msg_trunc_chars` characters — in the
+/// lines — `[role]: text`, each cut to `msg_trunc_chars` characters, a cut
+/// line ending in [`CUT_MARK`] (rev 1.7, F4) — in the
 /// working-state prompt, on `model` (`[orchestrator.costs] summary_model`;
 /// `None` is the router's default), at temperature 0, within [`MAX_TOKENS`],
 /// asking for no reasoning (M2), under [`USAGE_LABEL`]. `carried` — the
@@ -149,7 +155,10 @@ pub fn update(
         .map(str::to_string)
         .into_iter()
         .chain(lines.iter().map(|line| {
-            let text: String = line.text.chars().take(msg_trunc_chars).collect();
+            let mut text: String = line.text.chars().take(msg_trunc_chars).collect();
+            if line.text.chars().nth(msg_trunc_chars).is_some() {
+                text.push_str(CUT_MARK);
+            }
             format!("[{}]: {text}", line.role)
         }))
         .collect::<Vec<_>>()
@@ -1292,6 +1301,48 @@ mod tests {
         }
     }
 
+    /// The continuity evaluation's finding (12 §6.3; design 11 rev 1.7, F4):
+    /// a line the writer reads cut to `msg_trunc_chars` ends in ` …`, so it
+    /// reads as shortened rather than as an answer cut off, and one that
+    /// fits is left as it is — counted in characters, not bytes. The prompt
+    /// says what the mark means.
+    #[test]
+    fn a_line_cut_to_its_limit_is_marked_and_the_prompt_says_so() {
+        let over = "b".repeat(1501);
+        let at = "é".repeat(1500);
+        let request = update(
+            None,
+            None,
+            &[
+                TranscriptLine {
+                    role: "assistant",
+                    text: &over,
+                },
+                TranscriptLine {
+                    role: "user",
+                    text: &at,
+                },
+            ],
+            None,
+            1500,
+        );
+        let user = &request.messages[1].content;
+        assert!(
+            user.contains(&format!(
+                "<new_lines>\n[assistant]: {} …\n[user]: {at}\n</new_lines>",
+                "b".repeat(1500)
+            )),
+            "{user}"
+        );
+        assert!(
+            user.contains(
+                "A line that ends in \" …\" was shortened here; the message itself was not \
+                 cut off."
+            ),
+            "{user}"
+        );
+    }
+
     /// The value in an answer the L8 capture found unusable
     /// (`memory/learning/tests/unusable_answers.json`), and where it stands.
     fn value_span(answer: &str) -> (usize, usize) {
@@ -1676,12 +1727,12 @@ mod tests {
         );
         assert!(user.contains("[user]: where do files go?"), "{user}");
         assert!(
-            user.contains(&format!("[assistant]: {}\n", "x".repeat(1500))),
+            user.contains(&format!("[assistant]: {} …\n", "x".repeat(1500))),
             "{user}"
         );
         assert!(
             !user.contains(&"x".repeat(1501)),
-            "each line is cut to msg_trunc_chars"
+            "each line is cut to msg_trunc_chars, the cut marked"
         );
 
         let calls = LlmUsageRepository::new(&db)
