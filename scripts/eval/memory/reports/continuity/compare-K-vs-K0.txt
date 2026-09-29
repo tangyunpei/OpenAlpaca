@@ -1,0 +1,16 @@
+$ python3 scripts/eval/memory/compare.py scripts/eval/memory/reports/continuity/K.json scripts/eval/memory/reports/continuity/K0.json
+candidate judge: qwen3.8:27b-mlx  judge_is_reader=true  judge_same_family=true  recall_mode=index
+baseline judge:  qwen3.8:27b-mlx  judge_is_reader=true  judge_same_family=true  recall_mode=index
+candidate: scripts/eval/memory/reports/continuity/K.json (system K)
+baseline:  scripts/eval/memory/reports/continuity/K0.json (system K0)
+paired questions: 64  (candidate judged 64, baseline judged 64)
+accuracy: candidate 68.8%  baseline 56.2%
+paired difference: +12.5 pp  95% CI [-0.1, +25.1]  SE 6.44 pp
+discordant pairs: 18 (28.1%): candidate-only 13, baseline-only 5, both 31
+
+per category (candidate vs baseline, point difference):
+  continuity               n=64    68.8% vs  56.2%  +12.5 pp
+
+gate: CI lower bound -0.1 pp > margin -5.0 pp -> PASS
+claim allowed: 'comparable measured quality' (non-inferior at the margin)
+exit 0
