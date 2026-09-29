@@ -1352,7 +1352,7 @@ The learned store is dumped into the report with history and candidates.
 | **Noise** | Active learned notes never chosen as a coverage match, plus the candidates raised |
 | **Changed facts** (15) | Per pair, one of: new active and old superseded · new active and old a same-key loser · both active and unlinked · new missing · old never learned. Reported **per pair**, not only as a count. |
 | **Restatements** | Per `restate` turn: nothing written (`unchanged` or `already_learned`) · an automatic replacement · a suggestion (§2.5 case 3) · a duplicate note |
-| **Aliases** | Share of learned active notes with at least one alias in the other script (CJK against Latin, deterministic), and share with any alias |
+| **Aliases** | Share of learned active notes whose title is in their session's language (rule 8) and that carry at least one alias in the other script (rule 5; CJK against Latin, deterministic; reading A, owner decision LQ18 — the reports archived before it were read against the title's script alone), and share with any alias |
 | **Fact keys** | Share with a `fact_key`; key reuse within each change pair |
 | **QA accuracy** | Per category, L against D′ paired with `compare.py`, and L against L0 |
 | **Invariants** (hard) | User notes retired without a confirm: 0. Forgotten notes resurrected by the forced re-run: 0. A violation blocks. |
