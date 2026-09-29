@@ -504,20 +504,6 @@ fn unknown_entries_reserves_dot_versions_even_though_nothing_writes_it_at_the_ro
 }
 
 #[test]
-fn install_id_is_appended_once_to_a_pre_existing_layout() {
-    let tmp = tempdir().unwrap();
-    let _guard = HomeStoreGuard::set(tmp.path());
-    fs::write(tmp.path().join(".layout"), "1\n").unwrap();
-
-    ensure_store(&StoreScope::Home).unwrap();
-    let id = install_id(tmp.path()).unwrap().unwrap();
-    assert_eq!(layout_version(tmp.path()).unwrap(), Some(1));
-
-    ensure_store(&StoreScope::Home).unwrap();
-    assert_eq!(install_id(tmp.path()).unwrap().unwrap(), id);
-}
-
-#[test]
 fn layout_version_reports_absence_and_rejects_garbage() {
     let tmp = tempdir().unwrap();
     assert_eq!(layout_version(tmp.path()).unwrap(), None);
@@ -525,6 +511,8 @@ fn layout_version_reports_absence_and_rejects_garbage() {
     assert!(layout_version(tmp.path()).is_err());
 }
 
+/// Line 1 is repaired in place; nothing is added to a marker that exists, so
+/// one with no install id keeps having none.
 #[test]
 fn a_malformed_layout_marker_is_repaired_not_appended_to() {
     let tmp = tempdir().unwrap();
@@ -533,8 +521,11 @@ fn a_malformed_layout_marker_is_repaired_not_appended_to() {
 
     ensure_store(&StoreScope::Home).unwrap();
 
-    assert_eq!(layout_version(tmp.path()).unwrap(), Some(LAYOUT_VERSION));
-    assert!(install_id(tmp.path()).unwrap().is_some());
+    assert_eq!(
+        fs::read_to_string(tmp.path().join(".layout")).unwrap(),
+        format!("{LAYOUT_VERSION}\n")
+    );
+    assert_eq!(install_id(tmp.path()).unwrap(), None);
 }
 
 #[test]
@@ -543,8 +534,7 @@ fn layout_lines_this_module_does_not_own_are_preserved() {
     // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
     // without this it would canonicalize the owner's real store.
     let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let project = tmp.path().to_path_buf();
-    let scope = StoreScope::Project(project.clone());
+    let scope = StoreScope::Project(tmp.path().to_path_buf());
     let root = ensure_store(&scope).unwrap();
     // A future project id (P-12) must survive a repair of line 1.
     fs::write(root.join(".layout"), "garbage\nproject_id=abc\n").unwrap();
@@ -552,12 +542,11 @@ fn layout_lines_this_module_does_not_own_are_preserved() {
     ensure_store(&scope).unwrap();
 
     let text = fs::read_to_string(root.join(".layout")).unwrap();
-    let recorded = project.canonicalize().unwrap();
     assert_eq!(
-        text,
-        format!("1\nproject_id=abc\nproject_root={}\n", recorded.display()),
-        "line 1 repaired, the foreign line kept, the recorded root added"
+        text, "1\nproject_id=abc\n",
+        "line 1 repaired, the foreign line kept, nothing added"
     );
+    assert_eq!(recorded_project_root(&root).unwrap(), None);
 }
 
 #[test]

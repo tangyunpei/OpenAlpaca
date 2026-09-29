@@ -214,6 +214,9 @@ using with an older build is the second case it names. To switch over:
 
 The reset leaves `~/.openalpaca/README.md` as it is, and an older build's text
 there is out of date: delete it, and the next start seeds the current one.
+`.layout`, beside it and in each project's `.openalpaca/`, keeps whatever it
+has: nothing adds the keys a newer build writes into a new marker (a project
+store whose marker records no root is simply never reported as moved).
 
 A store from before the memory redesign may also hold
 `~/.openalpaca/state/cache/fastembed` (about 1 GB), the removed embedding

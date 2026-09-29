@@ -446,7 +446,7 @@ pub fn store_root(scope: &StoreScope) -> Result<PathBuf> {
 /// only when absent, so user edits stick.
 ///
 /// On the home root, `.layout` line 2 carries `install_id=<uuid-v4>`, written
-/// once and never rewritten.
+/// with the marker and never rewritten; a marker that lacks one keeps lacking it.
 ///
 /// Which metadata is seeded follows the **resolved root**, not the scope
 /// variant: `Project($HOME)`'s store root *is* `~/.openalpaca`, and so is a
@@ -732,10 +732,11 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     fs::rename(&tmp, path).with_context(|| format!("Failed to move {} into place", tmp.display()))
 }
 
-/// Writes `.layout` when absent; repairs an unreadable version line; on the home
-/// root, appends `install_id=<uuid>` exactly once if an existing marker predates
-/// it, and on a project root `project_root=<canonical path>` on the same terms.
-/// Any other line already there is carried through untouched.
+/// Writes `.layout` when absent — line 1 the layout version, then
+/// `install_id=<uuid>` on the home root or `project_root=<canonical path>` on a
+/// project root — and repairs an unreadable version line. Nothing is ever
+/// added to a marker that exists: it keeps whatever keys it has, and any other
+/// line already there is carried through untouched.
 ///
 /// **`project_root=` is written once and never rewritten**, which is what makes
 /// it the record of where this store *was* (§4.8's "Project moved"): `ensure_store`
@@ -751,66 +752,37 @@ fn ensure_layout(root: &Path, is_home: bool) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("Failed to read {}", path.display())),
     };
 
-    // The address this store would record for itself, resolved the way every
-    // stored `project_root` is (canonical, home root folded to `None`).
-    let recorded = match is_home {
-        true => None,
-        false => {
-            let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-            project_root_at(&canonical)?
-        }
-    };
-
     let Some(text) = existing else {
         let mut fresh = format!("{LAYOUT_VERSION}\n");
         if is_home {
             fresh.push_str(&format!("{INSTALL_ID_KEY}={}\n", uuid::Uuid::new_v4()));
-        }
-        if let Some(project_root) = &recorded {
-            fresh.push_str(&format!("{PROJECT_ROOT_KEY}={project_root}\n"));
+        } else {
+            // The address this store records for itself, resolved the way every
+            // stored `project_root` is (canonical, home root folded to `None`).
+            let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+            if let Some(project_root) = project_root_at(&canonical)? {
+                fresh.push_str(&format!("{PROJECT_ROOT_KEY}={project_root}\n"));
+            }
         }
         return write_atomic(&path, &fresh);
     };
 
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-    let mut changed = false;
-
     // Line 1 is the layout version. Something that is not an integer is not a
     // version — repair it rather than preserve it and keep failing every read.
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     if lines
         .first()
-        .is_none_or(|first| first.trim().parse::<u32>().is_err())
+        .is_some_and(|first| first.trim().parse::<u32>().is_ok())
     {
-        tracing::warn!(
-            "Repairing the layout marker in {}: line 1 was not a version",
-            path.display()
-        );
-        match lines.first_mut() {
-            Some(first) => *first = LAYOUT_VERSION.to_string(),
-            None => lines.push(LAYOUT_VERSION.to_string()),
-        }
-        changed = true;
-    }
-
-    // Written once, never rewritten: an existing id is left alone.
-    if is_home && read_install_id(&text).is_none() {
-        lines.push(format!("{INSTALL_ID_KEY}={}", uuid::Uuid::new_v4()));
-        changed = true;
-    }
-
-    // Likewise the recorded root. A store that predates this key adopts its
-    // *current* path — nothing recorded where it used to be, so the honest
-    // answer for a project moved before this shipped is "not moved", not a
-    // guess.
-    if let Some(project_root) = &recorded
-        && read_layout_value(&text, PROJECT_ROOT_KEY).is_none()
-    {
-        lines.push(format!("{PROJECT_ROOT_KEY}={project_root}"));
-        changed = true;
-    }
-
-    if !changed {
         return Ok(());
+    }
+    tracing::warn!(
+        "Repairing the layout marker in {}: line 1 was not a version",
+        path.display()
+    );
+    match lines.first_mut() {
+        Some(first) => *first = LAYOUT_VERSION.to_string(),
+        None => lines.push(LAYOUT_VERSION.to_string()),
     }
     let mut out = lines.join("\n");
     out.push('\n');
