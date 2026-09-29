@@ -91,8 +91,6 @@ apps/openalpaca-gui/src-tauri/gen/
 *.db-shm
 *.db-wal
 *.db-journal
-# The storage crate's committed schema-42 fixture (tasks/memory-redesign, slice 1).
-!crates/openalpaca_storage/tests/fixtures/*.db
 
 # ============================================
 # Markdown Documentation (Except Manuals)

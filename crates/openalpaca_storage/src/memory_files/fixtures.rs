@@ -75,8 +75,6 @@ const OTHER_LAYER_KEYS: &[&str] = &[
     "model_calls",
     "items_include",
     "preview_contains",
-    "vec0_registered",
-    "no_statement_names",
     "owner_id_after",
     "extraction",
     "ids_may_include",

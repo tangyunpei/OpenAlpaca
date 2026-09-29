@@ -148,18 +148,27 @@ fn the_editor_does_not_offer_the_factory_reset_for_stranded_data() {
     );
 }
 
-/// The legacy-schema refusal names the factory reset itself — once. The
-/// editor adds nothing to it.
+/// The refusal of a schema this build does not know — what every store from
+/// before the re-baseline at version 1 reads as — names the factory reset
+/// itself, once. The editor adds nothing to it.
 #[test]
-fn the_editor_leaves_the_legacy_schema_remedy_to_the_refusal() {
+fn the_editor_leaves_the_unknown_schema_remedy_to_the_refusal() {
     let tmp = tempdir().unwrap();
     let _env = EnvSandbox::enter(tmp.path());
     assert_sandboxed(tmp.path());
+    let refused = openalpaca_storage::migrations::MIGRATIONS
+        .last()
+        .expect("at least the baseline is registered")
+        .version
+        + 1;
     let db = store::open_home_database().unwrap();
     db.with_connection(|conn| {
-        Ok(conn.execute_batch(
-            "DELETE FROM schema_version; INSERT INTO schema_version (version) VALUES (5);",
-        )?)
+        conn.execute("DELETE FROM schema_version", [])?;
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            [refused],
+        )?;
+        Ok(())
     })
     .unwrap();
     drop(db);
@@ -167,7 +176,9 @@ fn the_editor_leaves_the_legacy_schema_remedy_to_the_refusal() {
     let rendered = bare_config_error();
 
     assert!(
-        rendered.contains("Unsupported legacy schema version 5"),
+        rendered.contains(&format!(
+            "is at schema version {refused}, which this build does not know"
+        )),
         "{rendered}"
     );
     assert_eq!(

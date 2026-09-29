@@ -1,8 +1,8 @@
--- Baseline schema: the final state of the unreleased 001-042 migration history, re-squashed as version 43 without the SQL memory engine.
+-- Baseline schema, version 1: the whole schema in one pass (the unreleased 001–045 development history squashed on 2026-09-28). A database from any earlier schema line is refused, never upgraded.
 -- The memory redesign replaced memory, memory_fts, memory_vec and their triggers
 -- with files, so this baseline creates none of them and needs no sqlite-vec.
--- Fresh databases create this schema directly; every older schema, 42 included,
--- is rejected by Database::open rather than upgraded or reset automatically.
+-- Fresh databases create this schema directly; Database::open refuses a database
+-- above the newest registered version rather than upgrading or resetting it.
 -- All statements run inside the database migration transaction.
 
 -- Version tracking
@@ -232,7 +232,9 @@ CREATE TABLE conversation_messages (
     content_json TEXT,
     display_text TEXT,
     task_id TEXT,
-    session_id TEXT
+    session_id TEXT,
+    request_id TEXT,
+    workspace_root TEXT
 );
 
 CREATE INDEX idx_conv_msg_created ON conversation_messages(created_at);
@@ -240,6 +242,17 @@ CREATE INDEX idx_conv_msg_lane ON conversation_messages(lane_key);
 CREATE INDEX idx_conv_msg_lane_id ON conversation_messages(lane_key, id);
 CREATE INDEX idx_conv_msg_session ON conversation_messages(session_id, id);
 CREATE INDEX idx_conv_msg_task ON conversation_messages(task_id);
+
+-- Per-session learning and summary cursors; a session with no row reads as the zero cursor.
+
+CREATE TABLE learning_cursor (
+    session_id TEXT PRIMARY KEY,
+    extracted_through INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    episode_through INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE message_feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -486,4 +499,4 @@ CREATE INDEX idx_tel_task ON tool_execution_log(task_id, id);
 CREATE INDEX idx_tel_timestamp ON tool_execution_log(timestamp, tool_name);
 CREATE INDEX idx_tel_tool_ts ON tool_execution_log(tool_name, timestamp DESC);
 
-INSERT INTO schema_version(version) VALUES (43);
+INSERT INTO schema_version(version) VALUES (1);

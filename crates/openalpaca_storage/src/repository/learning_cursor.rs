@@ -6,11 +6,11 @@
 //! `session`, so the session projection and its wire stay as they are, and
 //! `attempts`/`last_error` survive a restart for the bounded retry (§1.4).
 //!
-//! A session with no row reads as `extracted_through = 0`: every session
-//! created after migration 044 holds only post-044 messages, and 044 seeded
-//! every older session at its newest message. Message ids are `AUTOINCREMENT`
-//! and never reused, so a cursor above rows a clear deleted still reads
-//! correctly. `delete_session` deletes the row with the session.
+//! A session with no row reads as the zero cursor (`extracted_through = 0`,
+//! `episode_through = 0`) — that is the whole rule; nothing seeds a row.
+//! Message ids are `AUTOINCREMENT` and never reused, so a cursor above rows a
+//! clear deleted still reads correctly. `delete_session` deletes the row with
+//! the session.
 
 use crate::Database;
 use anyhow::Result;
@@ -106,9 +106,9 @@ impl<'a> LearningCursorRepository<'a> {
     }
 
     /// The last message a session's conversation summaries have covered
-    /// (design 09 §13.3, migration 045); `0` when it has no row. It moves
-    /// apart from `extracted_through`: a summary is written after a longer
-    /// quiet period than a learning flush, over the same rows.
+    /// (design 09 §13.3); `0` when it has no row. It moves apart from
+    /// `extracted_through`: a summary is written after a longer quiet period
+    /// than a learning flush, over the same rows.
     pub fn episode_through(&self, session_id: &str) -> Result<i64> {
         self.db.with_connection(|conn| {
             let through = conn

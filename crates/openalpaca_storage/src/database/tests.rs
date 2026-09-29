@@ -64,159 +64,6 @@ fn reopening_a_current_database_preserves_its_data_and_version() {
     .unwrap();
 }
 
-/// The legacy guard covers every version in `1..BASELINE_VERSION`, with two
-/// wordings: 42 — the last schema before the memory redesign — is refused
-/// because its memory storage was replaced (plan §4, the 42 arm), everything
-/// older because the baseline cannot upgrade a partly migrated development
-/// database (the 1–41 arm, unchanged). Both name the same file, the same
-/// version this build starts at and the same verb.
-#[test]
-fn an_unsupported_old_database_is_refused_without_changing_its_schema_or_data() {
-    let dir = tempdir().unwrap();
-    assert_eq!(
-        migrations::BASELINE_VERSION,
-        43,
-        "the two wordings below are pinned to the memory redesign's re-squash"
-    );
-    for version in [1, 41, 42] {
-        let db_path = dir.path().join(format!("legacy-{version}.db"));
-        let original_schema = {
-            let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
-                 CREATE TABLE legacy_data (id INTEGER PRIMARY KEY, content TEXT NOT NULL);
-                 INSERT INTO legacy_data (id, content) VALUES (7, 'Do not discard');",
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO schema_version (version) VALUES (?1)",
-                [version],
-            )
-            .unwrap();
-            conn.prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
-                .unwrap()
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
-        };
-
-        let error = Database::open(&db_path)
-            .err()
-            .unwrap_or_else(|| panic!("legacy version {version} must be refused"));
-        let message = format!("{error:#}");
-        assert!(
-            message.contains(&format!("Unsupported legacy schema version {version}")),
-            "opening an old database must deliberately refuse it: {message}"
-        );
-        // The remedy deletes the file, so the refusal has to say which file.
-        // The store root is overridable, and a developer reading this line in a
-        // log has no other way to find out.
-        let named = std::path::absolute(&db_path).unwrap();
-        assert!(
-            message.contains(&named.display().to_string()),
-            "the refusal must name the database file by its full path ({}): {message}",
-            named.display()
-        );
-        assert!(
-            message.contains(&format!("schema version {}", migrations::BASELINE_VERSION)),
-            "the refusal must name the version this build starts at: {message}"
-        );
-        // Guard and verb are pinned together on purpose: this refusal is the
-        // only place a user is told how to get out of it, and the verb it names
-        // is the only form of `openalpaca config` that opens no database
-        // (`apps/openalpaca/src/commands/config_factory_reset.rs`). If that verb
-        // is ever renamed or made to open the database again, this line fails
-        // before the manuals go stale.
-        assert!(
-            message.contains("openalpaca config reset --factory"),
-            "the refusal must name the verb that rescues the database: {message}"
-        );
-        // Start-up refusals never name each other's remedies: the newer-build
-        // sentence belongs to a different file and a different mistake.
-        assert!(
-            !message.contains("newer than this build knows"),
-            "the legacy refusal must not borrow the newer-database wording: {message}"
-        );
-        if version == 42 {
-            // The memory-redesign arm (plan §4): the reason, everything the
-            // factory reset removes — the API keys included — what survives,
-            // and that an older build still opens the file.
-            for pin in [
-                "cannot read a database from before the memory redesign",
-                "its memory storage was replaced",
-                "-wal and -shm",
-                "every task, message, session record and memory it holds",
-                "`llm.toml` with its API keys and keychain entries",
-                "returns `daemon.toml` to defaults",
-                "artifact, upload and session files stay on disk",
-                "`.master_key`, `logs/` and `backups/` are untouched",
-                "with an OpenAlpaca build from before the memory redesign",
-            ] {
-                assert!(
-                    message.contains(pin),
-                    "the version-42 refusal must say {pin:?}: {message}"
-                );
-            }
-            assert!(
-                !message.contains("cannot upgrade a database created by an older one"),
-                "a version-42 database is not a partly migrated one: {message}"
-            );
-        } else {
-            // The 1–41 arm keeps its wording verbatim: a partly migrated
-            // development database the baseline cannot upgrade.
-            assert!(
-                message.contains("cannot upgrade a database created by an older one"),
-                "the version-{version} refusal keeps the legacy wording: {message}"
-            );
-            assert!(
-                !message.contains("memory redesign"),
-                "a version-{version} database is refused for the old reason, not \
-                 because the memory storage was replaced: {message}"
-            );
-        }
-
-        let conn = Connection::open(&db_path).unwrap();
-        let schema = conn
-            .prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
-            .unwrap()
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(
-            schema, original_schema,
-            "refusal must leave the schema intact"
-        );
-        let rows = conn
-            .prepare("SELECT id, content FROM legacy_data ORDER BY id")
-            .unwrap()
-            .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(rows, vec![(7, "Do not discard".to_string())]);
-        let versions = conn
-            .prepare("SELECT version FROM schema_version ORDER BY version")
-            .unwrap()
-            .query_map([], |row| row.get::<_, i32>(0))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(
-            versions,
-            vec![version],
-            "refusal must not advance the version"
-        );
-    }
-}
-
 #[test]
 fn a_database_newer_than_this_build_is_refused_without_changing_its_schema_or_data() {
     let dir = tempdir().unwrap();
@@ -254,27 +101,39 @@ fn a_database_newer_than_this_build_is_refused_without_changing_its_schema_or_da
         .err()
         .unwrap_or_else(|| panic!("schema version {version} must be refused"));
     let message = format!("{error:#}");
-    // The whole sentence is pinned: it names the file by its full path (the
-    // store root is overridable, so nothing else identifies it), the version
-    // the file is at, and the newest version this build knows — and nothing
-    // else. A newer store is one a newer build wrote; the only remedy is that
-    // build, and start-up refusals never name each other's remedies.
+    // The whole text is pinned (store revision §1.4): it names the file by its
+    // full path (the store root is overridable, so nothing else identifies
+    // it), the version the file is at and the newest version this build
+    // knows, then both builds that could have written it — a newer one (use
+    // it) and one from before the schema was re-baselined at version 1, which
+    // is what every pre-squash store reads as (the factory reset).
     let named = std::path::absolute(&db_path).unwrap();
     assert_eq!(
         message,
         format!(
-            "Database {} is at schema version {version}, which is newer than this build \
-             knows ({newest}). Use the OpenAlpaca build that created it. Nothing was changed.",
+            "Database `{}` is at schema version {version}, which this build does not know \
+             (it creates schema version 1 and knows versions up to {newest}). Nothing was \
+             changed. If a newer OpenAlpaca build created this database, use that build. If \
+             it was created by a build from before the schema was re-baselined at version 1, \
+             it cannot be read or upgraded: run `openalpaca config reset --factory` to start \
+             again (it deletes the database and `llm.toml`'s keys; see the Installation \
+             Manual, \"Switching to the Markdown Memory Build\").",
             named.display()
         ),
-        "opening a newer database must refuse it with exactly this text"
+        "opening a database above this build must refuse it with exactly this text"
     );
-    // Pinned on its own as well, so the rule survives a rewording of the
-    // sentence: a user who followed the legacy refusal's advice against this
-    // file would delete a store that nothing is wrong with.
+    // Pinned on their own as well, so the rules survive a rewording of the
+    // sentence. The verb is named once — this refusal names its own remedy and
+    // nothing repeats it — and never with the old legacy wording, which no
+    // longer exists.
+    assert_eq!(
+        message.matches("openalpaca config reset --factory").count(),
+        1,
+        "the refusal must name the factory reset exactly once: {message}"
+    );
     assert!(
-        !message.contains("reset --factory"),
-        "the refusal must not send the user to the factory reset: {message}"
+        !message.contains("Unsupported legacy"),
+        "the refusal must not use the retired legacy wording: {message}"
     );
 
     let conn = Connection::open(&db_path).unwrap();
@@ -374,16 +233,14 @@ fn test_foreign_keys_enforced() {
     assert!(result.is_err(), "Expected foreign key constraint error");
 }
 
-/// The memory redesign's schema (plan 3.5): a fresh database gets the 43
+/// The memory redesign's schema (plan 3.5): a fresh database gets the
 /// baseline directly, and that baseline creates none of the old engine's
 /// tables — `memory`, its FTS index, the `vec0` table or the triggers that
 /// kept them in step — so opening one never needs the sqlite-vec extension.
-/// The migrations after the baseline create none either: 044's
 /// `learning_cursor` is named without the `memory_` prefix for exactly this
 /// check (design 09 §1.3).
 #[test]
 fn a_fresh_database_opens_at_the_newest_version_with_no_memory_tables() {
-    assert_eq!(migrations::BASELINE_VERSION, 43);
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
     assert_eq!(db.schema_version().unwrap(), newest_version());
@@ -1018,10 +875,14 @@ fn deleting_a_database_that_is_not_there_succeeds() {
     );
 }
 
+/// A pre-squash store reads as a version above this build's (store revision
+/// §1.3), so it is stamped `newest + 1` here: refused, its files deleted —
+/// what `openalpaca config reset --factory` does — and then it opens fresh.
 #[test]
 fn a_refused_legacy_database_opens_at_the_baseline_after_its_files_are_deleted() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("openalpaca.db");
+    let refused = newest_version() + 1;
     {
         let conn = Connection::open(&db_path).unwrap();
         conn.execute_batch(
@@ -1032,7 +893,7 @@ fn a_refused_legacy_database_opens_at_the_baseline_after_its_files_are_deleted()
         .unwrap();
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
-            [migrations::BASELINE_VERSION - 1],
+            [refused],
         )
         .unwrap();
     }
@@ -1040,8 +901,7 @@ fn a_refused_legacy_database_opens_at_the_baseline_after_its_files_are_deleted()
     std::fs::write(dir.path().join("openalpaca.db-shm"), b"stale").unwrap();
     assert!(
         Database::open(&db_path).is_err(),
-        "the version-{} database must be refused before the delete",
-        migrations::BASELINE_VERSION - 1
+        "the version-{refused} database must be refused before the delete"
     );
 
     delete_database_files(&db_path).unwrap();
@@ -1063,310 +923,78 @@ fn a_refused_legacy_database_opens_at_the_baseline_after_its_files_are_deleted()
     );
 }
 
-// ---------------------------------------------------------------------------
-// The schema-42 fixture — `tests/fixtures/schema42.db`.
-// ---------------------------------------------------------------------------
-//
-// A real schema-42 database — made by `Database::open` on the 42 baseline as
-// it shipped (WAL mode, sqlite-vec linked), with `memory_vec` and its vec0
-// shadow tables holding data — not a hand-written schema. It was generated
-// once, by the `#[ignore]`d `generate_schema42_fixture` test that commit
-// `2f500ea1` (slice 1) carried, and committed with the file. That generator
-// went with the engine it used (plan 3.5): this build's baseline is 43, it
-// declares no `memory_vec USING vec0`, and it links no sqlite-vec, so a
-// schema-42 database can no longer be *produced* here — which is exactly why
-// the file is committed. Its SHA-256 is
-// `29e111ce64b2eabd8bcd6bac01e2a3f0232f0f6e2469103d040d5d08c917f6b2`.
+// ── Learning v2's columns, in the baseline (design 09 §1.3, §13.3) ──────────
 
-/// The fixture's path, relative to the crate root.
-const SCHEMA42_FIXTURE: &str = "tests/fixtures/schema42.db";
-
-/// What the generator wrote, so the refusal test can prove the rows are still
-/// there afterwards: seven `memory` rows across two owners and both scopes
-/// (one CJK, one supersession pair), six of them embedded — `supersede`
-/// deleted the superseded row's vector — plus one task and one chat message.
-const FIXTURE_MEMORY_ROWS: i64 = 7;
-const FIXTURE_EMBEDDED_ROWS: i64 = 6;
-
-fn schema42_fixture_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(SCHEMA42_FIXTURE)
-}
-
-fn sha256_hex(path: &Path) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))
-}
-
-/// Plan §4 (MD-6) and fixture 05 of the invariant set: any opener meeting a
-/// schema-42 database is refused with the memory-redesign wording, before any
-/// statement touches a memory table, with `vec0` **not** registered on the
-/// connection, and the file's bytes are unchanged. Slice 1's sanity test
-/// opened the same copy and expected it to work; this is that test inverted.
+/// A fresh database carries Learning v2's schema from the baseline itself:
+/// `conversation_messages.request_id` and `.workspace_root`, and the
+/// per-session `learning_cursor` with its six columns. Nothing seeds a
+/// cursor: a session with no row reads as the zero cursor, and a row written
+/// with only its session gets the same zeros from the column defaults.
 #[test]
-fn the_schema42_fixture_is_refused_without_vec0_and_its_bytes_are_unchanged() {
+fn a_fresh_database_has_the_learning_columns_and_cursor_table() {
     let dir = tempdir().unwrap();
-    let copy = dir.path().join("schema42.db");
-    std::fs::copy(schema42_fixture_path(), &copy).unwrap();
-    let before = sha256_hex(&copy);
+    let db = Database::open(&dir.path().join("fresh.db")).unwrap();
+    db.with_connection(|conn| {
+        let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
+            conn.prepare(&format!("PRAGMA table_info({table})"))?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect()
+        };
 
-    let error = Database::open(&copy)
-        .err()
-        .expect("a schema-42 database must be refused by the 43 baseline");
-    let message = format!("{error:#}");
-    // The pinned phrases of the 42 arm (fixture 05's `message_contains`).
-    for pin in [
-        "Unsupported legacy schema version 42",
-        "schema version 43",
-        "cannot read a database from before the memory redesign",
-        "its memory storage was replaced",
-        "openalpaca config reset --factory",
-        "-wal and -shm",
-        "llm.toml",
-        "artifact, upload and session files stay on disk",
-        ".master_key",
-        "with an OpenAlpaca build from before the memory redesign",
-    ] {
-        assert!(
-            message.contains(pin),
-            "the refusal must say {pin:?}: {message}"
+        let messages = columns("conversation_messages")?;
+        for column in ["request_id", "workspace_root"] {
+            assert!(
+                messages.contains(&column.to_string()),
+                "conversation_messages.{column} must exist: {messages:?}"
+            );
+        }
+        assert_eq!(
+            columns("learning_cursor")?,
+            [
+                "session_id",
+                "extracted_through",
+                "attempts",
+                "last_error",
+                "updated_at",
+                "episode_through",
+            ]
         );
-    }
-    assert!(
-        !message.contains("newer than this build knows"),
-        "the refusal must not borrow the newer-database wording: {message}"
-    );
-    let named = std::path::absolute(&copy).unwrap();
-    assert!(
-        message.contains(&named.display().to_string()),
-        "the refusal must name the file by its full path: {message}"
-    );
 
-    // `vec0` is not registered on any connection this process opens: the
-    // extension's function is unknown and its module cannot be loaded. The
-    // refusal read only `schema_version`, which is why it worked anyway.
-    let conn = Connection::open(&copy).unwrap();
-    let vec_fn = conn
-        .query_row("SELECT vec_version()", [], |row| row.get::<_, String>(0))
-        .expect_err("vec_version() must be unknown without sqlite-vec");
-    assert!(
-        vec_fn.to_string().contains("no such function"),
-        "unexpected error for vec_version(): {vec_fn}"
-    );
-    let vec_table = conn
-        .query_row("SELECT COUNT(*) FROM memory_vec", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .expect_err("memory_vec must be unreadable without the vec0 module");
-    assert!(
-        vec_table.to_string().contains("no such module: vec0"),
-        "unexpected error for memory_vec: {vec_table}"
-    );
-    // The rows a pre-redesign build would read are all still there: the
-    // plain tables, the FTS index and the vec0 shadow tables the module owns.
-    let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
-    assert_eq!(count("SELECT COUNT(*) FROM memory"), FIXTURE_MEMORY_ROWS);
-    assert_eq!(count("SELECT COUNT(DISTINCT owner_id) FROM memory"), 2);
-    assert_eq!(
-        count("SELECT COUNT(*) FROM memory WHERE supersedes_id IS NOT NULL"),
-        1
-    );
-    assert_eq!(
-        count("SELECT COUNT(*) FROM memory_fts WHERE memory_fts MATCH 'vim'"),
-        1
-    );
-    assert_eq!(
-        count("SELECT COUNT(*) FROM memory_vec_rowids"),
-        FIXTURE_EMBEDDED_ROWS
-    );
-    assert_eq!(count("SELECT COUNT(*) FROM task"), 1);
-    assert_eq!(count("SELECT COUNT(*) FROM conversation_messages"), 1);
-    let versions = conn
-        .prepare("SELECT version FROM schema_version ORDER BY version")
-        .unwrap()
-        .query_map([], |row| row.get::<_, i32>(0))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(
-        versions,
-        vec![42],
-        "the refusal must not advance the version"
-    );
-    drop(conn);
-
-    // A second open is refused the same way (fixture 05, step 2): nothing the
-    // first attempt did changed the answer.
-    let again = Database::open(&copy)
-        .err()
-        .expect("the second open must be refused too");
-    assert!(format!("{again:#}").contains("Unsupported legacy schema version 42"));
-
-    // The refusal ran no migration and wrote nothing, so the file is
-    // byte-identical; the -wal and -shm SQLite opens beside the copy are
-    // outside the hash.
-    assert_eq!(
-        sha256_hex(&copy),
-        before,
-        "refusing the fixture must not rewrite it"
-    );
-}
-
-// ── Migration 044: Learning v2's cursor (design 09 §1.3) ────────────────
-
-/// A 43 database with sessions and messages opens at 44: each existing
-/// session's cursor starts at its newest message — historic sessions are not
-/// re-extracted (design §6) — a session with no message starts at 0, the two
-/// new columns exist and read NULL on the old rows, and no row is lost.
-#[test]
-fn migration_044_seeds_existing_sessions_at_their_last_message() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("at43.db");
-    {
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch(migrations::MIGRATIONS[0].sql).unwrap();
-        assert_eq!(migrations::MIGRATIONS[0].version, 43);
         conn.execute_batch(
             "INSERT INTO session (id, lane_key, source) VALUES ('talked', 'u:gui', 'gui');
-             INSERT INTO session (id, lane_key, source, status) VALUES ('silent', 'u:cli', 'cli', 'archived');
              INSERT INTO conversation_messages (lane_key, role, content, session_id)
-                 VALUES ('u:gui', 'user', 'one', 'talked');
-             INSERT INTO conversation_messages (lane_key, role, content, session_id)
-                 VALUES ('u:gui', 'assistant', 'two', 'talked');
-             INSERT INTO conversation_messages (lane_key, role, content, session_id)
-                 VALUES ('u:gui', 'user', 'three', 'talked');
-             INSERT INTO conversation_messages (lane_key, role, content)
-                 VALUES ('u:gui', 'user', 'sessionless');",
-        )
-        .unwrap();
-    }
-
-    let db = Database::open(&db_path).expect("a 43 database migrates in place");
-    assert_eq!(db.schema_version().unwrap(), newest_version());
-    db.with_connection(|conn| {
-        let newest: i64 = conn.query_row(
-            "SELECT MAX(id) FROM conversation_messages WHERE session_id = 'talked'",
+                 VALUES ('u:gui', 'user', 'one', 'talked');",
+        )?;
+        let cursors: i64 =
+            conn.query_row("SELECT COUNT(*) FROM learning_cursor", [], |row| row.get(0))?;
+        assert_eq!(cursors, 0, "nothing seeds a cursor row");
+        let stamped: i64 = conn.query_row(
+            "SELECT COUNT(request_id) + COUNT(workspace_root) FROM conversation_messages",
             [],
             |row| row.get(0),
         )?;
-        let cursors = conn
-            .prepare(
-                "SELECT session_id, extracted_through, attempts, last_error
-                   FROM learning_cursor ORDER BY session_id",
-            )?
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        assert_eq!(
-            cursors,
-            vec![
-                ("silent".to_string(), 0, 0, None),
-                ("talked".to_string(), newest, 0, None),
-            ]
-        );
+        assert_eq!(stamped, 0, "both columns are optional and default to NULL");
 
-        let (rows, stamped): (i64, i64) = conn.query_row(
-            "SELECT COUNT(*), COUNT(request_id) + COUNT(workspace_root) FROM conversation_messages",
+        conn.execute(
+            "INSERT INTO learning_cursor (session_id) VALUES ('talked')",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        assert_eq!(rows, 4, "no message is lost");
-        assert_eq!(stamped, 0, "the old rows carry no turn id and no root");
-
-        let versions = conn
-            .prepare("SELECT version FROM schema_version ORDER BY version")?
-            .query_map([], |row| row.get::<_, i32>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let registered: Vec<i32> = migrations::MIGRATIONS.iter().map(|m| m.version).collect();
-        assert_eq!(versions, registered);
-        assert_eq!(&versions[..2], &[43, 44]);
-        Ok(())
-    })
-    .unwrap();
-}
-
-// ── Migration 045: the episode cursor (design 09 §13.3) ─────────────────
-
-/// A 44 database with sessions, messages and cursors opens at 45: every
-/// existing session's episode cursor starts at its newest message — historic
-/// conversations are not summarised, as they are not re-extracted (design
-/// 03 §6) — a session with no message starts at 0, a session that had no
-/// cursor row gets one whose learning cursor still reads 0, and the learning
-/// cursor, its attempts and its error are left exactly as they were.
-#[test]
-fn migration_045_seeds_episode_cursors_at_each_sessions_last_message() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("at44.db");
-    {
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch(migrations::MIGRATIONS[0].sql).unwrap();
-        assert_eq!(migrations::MIGRATIONS[1].version, 44);
-        conn.execute_batch(migrations::MIGRATIONS[1].sql).unwrap();
-        conn.execute_batch(
-            "INSERT INTO session (id, lane_key, source) VALUES ('learned', 'u:gui', 'gui');
-             INSERT INTO session (id, lane_key, source) VALUES ('uncursored', 'u:cli', 'cli');
-             INSERT INTO session (id, lane_key, source, status) VALUES ('silent', 'u:tg', 'telegram', 'archived');
-             INSERT INTO conversation_messages (lane_key, role, content, session_id)
-                 VALUES ('u:gui', 'user', 'one', 'learned');
-             INSERT INTO conversation_messages (lane_key, role, content, session_id)
-                 VALUES ('u:gui', 'assistant', 'two', 'learned');
-             INSERT INTO conversation_messages (lane_key, role, content, session_id)
-                 VALUES ('u:cli', 'user', 'three', 'uncursored');
-             INSERT INTO learning_cursor (session_id, extracted_through, attempts, last_error)
-                 VALUES ('learned', 1, 2, 'not json');",
-        )
-        .unwrap();
-    }
-
-    let db = Database::open(&db_path).expect("a 44 database migrates in place");
-    assert_eq!(db.schema_version().unwrap(), newest_version());
-    db.with_connection(|conn| {
-        let newest = |session: &str| -> rusqlite::Result<i64> {
-            conn.query_row(
-                "SELECT MAX(id) FROM conversation_messages WHERE session_id = ?1",
-                [session],
-                |row| row.get(0),
-            )
-        };
-        let cursors = conn
-            .prepare(
-                "SELECT session_id, extracted_through, episode_through, attempts, last_error
-                   FROM learning_cursor ORDER BY session_id",
-            )?
-            .query_map([], |row| {
+        let row = conn.query_row(
+            "SELECT extracted_through, attempts, last_error, episode_through, updated_at
+               FROM learning_cursor WHERE session_id = 'talked'",
+            [],
+            |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, Option<String>>(4)?,
                 ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        assert_eq!(
-            cursors,
-            vec![
-                (
-                    "learned".to_string(),
-                    1,
-                    newest("learned")?,
-                    2,
-                    Some("not json".to_string())
-                ),
-                ("silent".to_string(), 0, 0, 0, None),
-                ("uncursored".to_string(), 0, newest("uncursored")?, 0, None),
-            ]
-        );
-        let versions = conn
-            .prepare("SELECT version FROM schema_version ORDER BY version")?
-            .query_map([], |row| row.get::<_, i32>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        assert_eq!(versions, vec![43, 44, 45]);
+            },
+        )?;
+        assert_eq!((row.0, row.1, row.2, row.3), (0, 0, None, 0));
+        assert!(row.4.is_some(), "updated_at defaults to the insert time");
         Ok(())
     })
     .unwrap();

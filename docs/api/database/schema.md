@@ -6,7 +6,7 @@
 
 - DB path resolver: `openalpaca_storage::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
-- Registered migrations: 3
+- Registered migrations: 1
 
 ## Tables
 
@@ -109,7 +109,7 @@ created_at TEXT NOT NULL DEFAULT (datetime('now'))
 
 ### `conversation_messages` (table)
 
-Source migration: `044_learning.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -256,7 +256,7 @@ unattended INTEGER NOT NULL DEFAULT 0
 
 ### `learning_cursor` (table)
 
-Source migration: `045_episodes.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 session_id TEXT PRIMARY KEY

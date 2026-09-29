@@ -26,7 +26,6 @@ added (design 09 §6.5.6, LQ17).
 | `02-no-marker-dir-global-only.json` | CLI turn in a directory with no `.openalpaca` or `.git` above it | slice 3 |
 | `03-git-repo-lazy-partition.json` | CLI turn inside a git repository with no `.openalpaca/` yet | slice 2, 3 |
 | `04-symlink-on-partition-path-refused.json` | A git-committed symlink at `.openalpaca`, `memory`, `owners/<key>` or `notes` | slice 2, 3 |
-| `05-schema42-database-refused.json` | Any opener meets a schema-42 database | slice 3 (3.5) |
 | `06-newer-database-refused.json` | Any slice-0-or-later build meets a newer database | slice 0 (landed), 3 |
 | `07-hidden-parameters-refused.json` | The model supplies hidden owner, workspace or path parameters | slice 3 |
 | `08-system-principal-no-partition.json` | A `/v1/command process` turn, its workflow and its subagents | slice 3 |
@@ -49,9 +48,11 @@ added (design 09 §6.5.6, LQ17).
 | `25-suggestion-lifecycle.json` | Learning v2 L3 (design 09 §3): a suggestion retires nothing until a confirm bound to its target's revision; an automatic replacement's withdrawal brings the old note back; a suggestion is never archived or edited by a tool call | slice 2 (the file-level loader) |
 | `26-query-prefix-in-body.json` | LQ17 query fixture (design 09 §6.5.6): "what do I prefer?" finds "User prefers kitty" through its body alone (`prefix`); a term inside a body word (`presso`, `now` in a Chinese note's heading) finds nothing; a Latin word glued to Chinese is a `term`; a literal's last token is a prefix only from three characters, or as a number | slice 2; step 2's recall also at slice 3 (`prompt_ctx/sources/memory.rs`) |
 
-Rows 05 and 06 are about the database opener, not the memory library; their files
-state the expectation so the matrix is complete, and the loader that runs them is
-the database test module, not the memory one.
+Row 06 is about the database opener, not the memory library; its file states the
+expectation so the matrix is complete, and the loader that runs it is the database
+test module, not the memory one. Row 05 (a schema-42 database refused) went with the
+schema line's re-baseline at version 1 (`tasks/store-revision/design.md`): a
+pre-squash database now meets row 06's refusal.
 
 ## How a loader runs a fixture
 
@@ -280,7 +281,7 @@ file's `loads_in` says which slice owns the whole file.
 | `restart` | `{}` — drop the service/index handles and open again; recovery runs (design §6) | library |
 | `crash_at` | `{ "mutation": "create" \| "update" \| "archive" \| "confirm" \| "forget", "after_step": 1 \| "2a" \| 2 \| 3, "input": <that mutation's input>, "then_external_edit"?: text }` — run the mutation and stop after the named step of design §6's table. `"2a"` is inside step 2: the `.history` copy is written and fsynced, the note's rename has not happened | library |
 | `concurrent` | `{ "ops": [ <op>, <op> ] }` — run both at once; each has its own `expect` | service |
-| `open_database` | `{ "fixture": "schema42.db", "vec_extension": "absent" }` — copy the sibling fixture `tests/fixtures/schema42.db` into `dir:copy` and open the copy with sqlite-vec not registered; or `{ "stamped_version": N, "path": <fixture path> }` — create a fresh database there, stamp `schema_version` to N, reopen. The database opener, not the memory library | database |
+| `open_database` | `{ "stamped_version": N, "path": <fixture path> }` — create a fresh database there, stamp `schema_version` to N, reopen. The database opener, not the memory library | database |
 | `recently_used` | `{ "limit" }` — `GET /v1/memories/recently-used` | service |
 | `remove_partition` | `{ "partition" }` — the harness deletes that partition's directory and snapshot outright (an owner clearing a collision by hand before `adopt`) | harness |
 | `ensure_project_store` | `{ "workspace": <fixture path> }` — the artifact path's `ensure_store` for that project (the first artifact write), which lays out the rest of `<project>/.openalpaca/` | store |
@@ -313,6 +314,7 @@ ordered; `*_unordered` lists are sets.
 | `results` | `{ "<id>": { "match_includes": [MatchReason], "conflict": bool, "freshness", "status", "origin", "scope", "excerpt_contains", "superseded_by", "valid_from", "valid_to", "sources_status" } }` — per-result fields |
 | `refused` | the operation is refused with this error class (below); nothing is written |
 | `message_contains` / `message_not_contains` | substrings of the refusal or diagnostic message |
+| `message_contains_once` | substrings that occur in the message exactly once |
 | `created` | a `store` succeeded; with `scope`, `origin`, `superseded` (list of ids) from its result |
 | `revision_changed` | whether the target's revision differs after the step |
 | `current_revision` | a refusal's reported current revision equals this note's |
@@ -326,7 +328,6 @@ ordered; `*_unordered` lists are sets.
 | `items_include` | a `recently_used` listing contains these items (partial match per item) |
 | `preview_contains` | substrings of the factory-reset preview text |
 | `adopted_partitions_count` | the number of partitions `adopt` reports renaming |
-| `vec0_registered`, `no_statement_names` | database opener only: whether `vec0` is registered on the connection; no statement issued before the refusal names any of these tables (the opener's five PRAGMAs and `schema_version()`'s two reads are the whole trace, `database/mod.rs`) |
 | `retained` | the `forget` result's `retained` object: `{ "transcript": bool, "session_logs": bool, "note_contains": text }` |
 | `snapshot` | `{ "<partition>": { "notes": { "<id>": { "revision": "@current" \| "@from_rev" \| "@to_rev" \| hex, "origin" } \| null }, "tombstones": [..], "tombstones_count": N, "pending": null \| {..}, "moved_from", "owner_key", "owner_id", "root_is": <fixture path> } }` — a partial match of the control snapshot on disk; a note mapped to `null` must be absent from `notes` |
 | `snapshot_missing` | `["<partition name>"]` — no snapshot file exists for that partition's (derived) key |
@@ -370,8 +371,7 @@ rather than guessing:
 | `fixture:capability_denied` | §7a `capabilities`: the context lacks the capability the operation needs (a worker's write) |
 | `fixture:path_refused` | §2 / plan 3.2: a builtin file tool refuses `state/` or a partition's control files |
 | `fixture:confirmation_unavailable` | §7 *Capabilities*: a `destructive_hint` tool on an `unattended` turn (the sandbox's M6 refusal) |
-| `fixture:legacy_schema` | plan §4: the 1–42 refusal |
-| `fixture:newer_schema` | plan slice 0.5 |
+| `fixture:newer_schema` | plan slice 0.5; `tasks/store-revision/design.md` §1.4 (the one refusal, above this build) |
 | `fixture:write_pending` | §3 *Workspace move* step 1: the move is refused while a write is pending |
 | `fixture:duplicate_id` | §6 *Management operations*: `doctor --repair` refuses on a duplicate id |
 | `fixture:adopt_collision` | §6 *Management operations*: `adopt` refuses on a collision |
