@@ -40,6 +40,11 @@ enum Say {
     Cut(String),
     /// Nothing, at the `max_tokens` cap: the router's `EmptyCompletion`.
     Spent,
+    /// The text, when the call's user message carries every one of these
+    /// strings; otherwise prose the model stopped at the `max_tokens` cap.
+    Only(Vec<String>, String),
+    /// The text this makes of the call's user message.
+    Reply(fn(&str) -> String),
     Fail(LlmError),
     /// Never answers.
     Hang,
@@ -119,11 +124,28 @@ impl LlmProvider for Scripted {
             hook(n);
         }
         let say = self.script.lock().unwrap().pop_front();
+        let user: String = request
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, openalpaca_llm::Role::User))
+            .map(|m| m.content.as_str())
+            .collect();
         let (content, finish_reason) = match say {
             None => (r#"{"items": []}"#.to_string(), FinishReason::Stop),
             Some(Say::Text(t)) => (t, FinishReason::Stop),
             Some(Say::Cut(t)) => (t, FinishReason::MaxTokens),
             Some(Say::Spent) => (String::new(), FinishReason::MaxTokens),
+            Some(Say::Only(needles, t)) => {
+                if needles.iter().all(|n| user.contains(n.as_str())) {
+                    (t, FinishReason::Stop)
+                } else {
+                    (
+                        "I need to think this through first.".into(),
+                        FinishReason::MaxTokens,
+                    )
+                }
+            }
+            Some(Say::Reply(reply)) => (reply(&user), FinishReason::Stop),
             Some(Say::Fail(e)) => return Err(e),
             Some(Say::Hang) => std::future::pending().await,
         };
@@ -1618,12 +1640,15 @@ async fn an_answer_that_is_not_an_items_object_holds_the_window() {
 
 // ── LQ13: the answer unwrapped (the L8 product slice's P3) ──────────────
 
-/// The L8 capture's eleven answers, each of the fixture file's entries.
+/// The L8 capture's eleven answers, the fixture file's entries that ended
+/// on their own (an entry with a `finish` is a cut answer, read by
+/// [`a_cut_answer_is_usable_only_when_it_ends_on_a_complete_value`]).
 fn captured_answers() -> Vec<(String, String, Vec<String>)> {
     let fixtures: Vec<serde_json::Value> =
         serde_json::from_str(include_str!("tests/unusable_answers.json")).unwrap();
     fixtures
         .iter()
+        .filter(|f| f.get("finish").is_none())
         .map(|f| {
             (
                 f["capture"].as_str().unwrap().to_string(),
@@ -1655,6 +1680,57 @@ fn the_captured_unusable_answers_parse_to_their_items() {
             .map(|i| i["title"].as_str().unwrap_or_default())
             .collect();
         assert_eq!(read, titles, "{capture}");
+    }
+}
+
+/// Owner decision LQ20 (f), 2026-09-28: an answer cut at its output ceiling
+/// is usable when, after the model's reasoning, it ends on one complete
+/// top-level value of the answer's shape — the fixture file's two cut
+/// answers from the final build: `{"items": []}` in a fence the ceiling cut
+/// before it closed is the answer "nothing to keep", and an answer cut
+/// inside an item is still cut. A complete value that more text follows,
+/// or of another shape, is not taken either.
+#[test]
+fn a_cut_answer_is_usable_only_when_it_ends_on_a_complete_value() {
+    let fixtures: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("tests/unusable_answers.json")).unwrap();
+    let cut: Vec<&serde_json::Value> = fixtures
+        .iter()
+        .filter(|f| f["finish"] == "max_tokens")
+        .collect();
+    assert_eq!(cut.len(), 2);
+    for f in cut {
+        let (capture, answer) = (
+            f["capture"].as_str().unwrap(),
+            f["answer"].as_str().unwrap(),
+        );
+        let parsed = extractor::parse_cut_items(answer);
+        match f["titles"].as_array() {
+            Some(titles) => {
+                let items = parsed.unwrap_or_else(|e| panic!("{capture}: {e}"));
+                let read: Vec<&str> = items.iter().filter_map(|i| i["title"].as_str()).collect();
+                let want: Vec<&str> = titles.iter().filter_map(|t| t.as_str()).collect();
+                assert_eq!(read, want, "{capture}");
+            }
+            None => assert!(parsed.is_err(), "{capture}: {parsed:?}"),
+        }
+    }
+    let one = format!(r#"{{"items": [{}]}}"#, vim_item(&[1]));
+    let read = extractor::parse_cut_items(&format!("Let me think.\n\n```json\n{one}\n"))
+        .expect("a complete value that ends the answer");
+    assert_eq!(read.len(), 1);
+    for answer in [
+        // Rule 9 quoted in the reasoning, which the ceiling then cut.
+        r#"Rule 9 says to return {"items": []} when there is nothing to keep. But R3"#.to_string(),
+        format!("Draft:\n{one}\nWait, R3 also says"),
+        r#"The aliases: ["vim", "vi"]"#.to_string(),
+        format!("<think>Output: {one}"),
+    ] {
+        assert!(
+            extractor::parse_cut_items(&answer).is_err(),
+            "{answer}: {:?}",
+            extractor::parse_cut_items(&answer)
+        );
     }
 }
 
@@ -2085,6 +2161,7 @@ fn request_overhead_bytes() -> usize {
             known_keys: "",
             conversation: "",
             max_items: 12,
+            after_cut: true,
         },
         2800,
         None,
@@ -2216,6 +2293,78 @@ async fn an_answer_cut_at_max_tokens_says_it_was_cut() {
 
     let report = scene.queue.flush_session(&parsed_session).await;
     assert_eq!((report.stopped, report.stored), (None, 1), "{report:?}");
+}
+
+/// Owner decision LQ20 (e), 2026-09-28: at temperature 0 the same prompt
+/// fails the same way, so the retry of an answer cut at its output ceiling
+/// asks for half the items — integer division, at least one — and ends on
+/// the line asking for the JSON first. The model below cuts any request
+/// without both, and answers the retry.
+#[tokio::test]
+async fn a_cut_answers_retry_asks_for_half_the_items_and_the_json_first() {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.costs.extract_max_items_per_call = 7;
+    let model = Scripted::new(vec![
+        Say::Cut("I need to think the conversation through. Rule 9 says".into()),
+        Say::Only(
+            vec![
+                extractor::RETRY_LINE.to_string(),
+                "Return at most 3 items".to_string(),
+            ],
+            format!(r#"{{"items": [{}]}}"#, vim_item(&[1])),
+        ),
+    ]);
+    let scene = Scene::with(model, config);
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+
+    let first = scene.queue.flush_session(&s).await;
+    assert_eq!(first.stopped, Some(FlushStop::BadOutput), "{first:?}");
+    let second = scene.queue.flush_session(&s).await;
+    assert_eq!((second.stopped, second.stored), (None, 1), "{second:?}");
+    assert_eq!(scene.model.calls(), 2);
+
+    let prompts = scene.model.prompts();
+    assert!(
+        prompts[0].contains("Return at most 7 items"),
+        "{}",
+        prompts[0]
+    );
+    assert!(
+        !prompts[0].contains(extractor::RETRY_LINE),
+        "{}",
+        prompts[0]
+    );
+    assert!(
+        prompts[1].contains("Return at most 3 items"),
+        "{}",
+        prompts[1]
+    );
+    assert!(
+        prompts[1].ends_with(extractor::RETRY_LINE),
+        "{}",
+        prompts[1]
+    );
+}
+
+/// LQ20 (e)'s limit: only a cut answer changes the retry — an answer that
+/// is not JSON is asked again with the identical prompt.
+#[tokio::test]
+async fn an_answer_that_is_not_json_is_retried_with_the_identical_prompt() {
+    let scene = Scene::new(vec![
+        Say::Text("I would rather describe it in prose.".into()),
+        items(&[vim_item(&[1])]),
+    ]);
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+
+    let first = scene.queue.flush_session(&s).await;
+    assert_eq!(first.stopped, Some(FlushStop::BadOutput), "{first:?}");
+    let second = scene.queue.flush_session(&s).await;
+    assert_eq!((second.stopped, second.stored), (None, 1), "{second:?}");
+    let prompts = scene.model.prompts();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[0], prompts[1]);
 }
 
 /// The L8 fix slice's P2: the flush report keeps each unusable answer — its
@@ -3934,6 +4083,7 @@ fn the_extractor_prompt_matches_its_fixture() {
             knowledge: knowledge.into(),
             supersedes: Vec::new(),
             from_this_window: false,
+            by_chat_model: false,
         }
     };
     let view = crate::memory::service::LearningView {
@@ -3967,6 +4117,7 @@ fn the_extractor_prompt_matches_its_fixture() {
         known_keys: &lookup.keys_text,
         conversation: &transcript,
         max_items: 12,
+        after_cut: false,
     });
     let rendered = format!("{system}\n=== rendered user message ===\n{user}\n");
     assert!(
@@ -4102,6 +4253,202 @@ async fn a_learned_statement_against_a_user_note_is_a_suggestion() {
         Some("The user said they cycle to the office now.")
     );
     assert!(b.observed_at.is_some(), "the cited row's time");
+}
+
+/// The extractor's answer to [`a_chat_model_note_is_listed_as_the_assistants_and_the_saved_note_gets_the_suggestion`]:
+/// the new commute, replacing whichever `n<k>` the saved note is listed as.
+fn replace_the_saved_note(prompt: &str) -> String {
+    let saved = prompt
+        .lines()
+        .find(|l| l.contains("origin=saved-by-you"))
+        .and_then(|l| l.split_whitespace().next())
+        .unwrap_or("n0");
+    format!(
+        r#"{{"items": [{}]}}"#,
+        full_item(serde_json::json!({
+            "title": "Commute",
+            "content": "Since 2026-04-20 the user takes metro line 5 to work; the Honda Fit was sold.",
+            "kind": "fact",
+            "fact_key": "user.commute",
+            "replaces": saved,
+            "replace_reason": "The user sold the car and takes the metro now.",
+        }))
+    )
+}
+
+/// Owner decision LQ19 (F-A), 2026-09-28 — the commute (report 10 §4.5,
+/// cs-034): the chat model stored the new value as a note of its own that
+/// named no saved note, so LQ11 had nothing to turn into a suggestion, and
+/// the extractor, told to skip what is already known, kept nothing. Its
+/// known notes now list a note only the chat model wrote — origin
+/// `extracted_user` with no `observed_at` — as `origin=assistant`, the
+/// assistant's own unconfirmed record, and the item that replaces the saved
+/// note becomes the suggestion for it; the assistant's note is left as it
+/// is. The label reads that flag: the same note unflagged is `learned`.
+#[tokio::test]
+async fn a_chat_model_note_is_listed_as_the_assistants_and_the_saved_note_gets_the_suggestion() {
+    let scene = Scene::new(vec![Say::Reply(replace_the_saved_note)]);
+    let saved = scene.save(
+        "Commute",
+        "The user drives a Honda Fit to work.",
+        Some("user.commute"),
+    );
+    let tool = scene
+        .service
+        .context(
+            OWNER,
+            WorkspaceHint::None,
+            Surface::ModelTool,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let title = "Sold the Honda Fit, takes metro line 5";
+    let knowledge = "Since 2026-04-20 the user takes metro line 5 to work; the Honda Fit was sold.";
+    let by_model = scene
+        .service
+        .store(
+            &tool,
+            StoreInput {
+                title: title.into(),
+                body: format!("# {title}\n\n## Knowledge\n{knowledge}\n"),
+                kind: Some(NoteKind::Fact),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let s = scene.session();
+    scene.turn(
+        &s,
+        "I sold the Honda Fit on April 20. Now I take metro line 5 to work, about 40 minutes.",
+        "Noted: metro line 5 now.",
+    );
+
+    let report = scene.queue.flush_session(&s).await;
+    let prompt = &scene.model.prompts()[0];
+    let line = |needle: &str| {
+        prompt
+            .lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}: {prompt}"))
+            .to_string()
+    };
+    assert!(line(title).contains(" key=- origin=assistant "), "{prompt}");
+    assert!(
+        line("\"Commute\"").contains(" key=user.commute origin=saved-by-you "),
+        "{prompt}"
+    );
+    assert_eq!(
+        (report.suggestions, report.active, report.replaced),
+        (1, 0, 0),
+        "{report:?}"
+    );
+    let ctx = scene.user_ctx();
+    let listed = scene.service.suggestions(&ctx, None).unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].target.id, saved.id);
+    assert_eq!(
+        scene.read(&ctx, by_model.id).effective_status,
+        EffectiveStatus::Active
+    );
+
+    let mut known = crate::memory::service::KnownNote {
+        id: by_model.id,
+        revision: "0".repeat(64),
+        partition_key: "home-x".into(),
+        scope: NoteScope::Global,
+        title: title.into(),
+        kind: NoteKind::Fact,
+        origin: Origin::ExtractedUser,
+        effective_status: EffectiveStatus::Active,
+        fact_key: None,
+        knowledge: knowledge.into(),
+        supersedes: Vec::new(),
+        from_this_window: false,
+        by_chat_model: true,
+    };
+    let assistant = lookup::note_line(1, &known).unwrap();
+    assert!(
+        assistant.starts_with("n1 key=- origin=assistant "),
+        "{assistant}"
+    );
+    known.by_chat_model = false;
+    let learned = lookup::note_line(1, &known).unwrap();
+    assert!(learned.starts_with("n1 key=- origin=learned "), "{learned}");
+}
+
+/// LQ19 narrowed after review: with no saved note in the store, the note
+/// only the chat model wrote is listed under the known notes, and the rules
+/// say it counts as known like any other — so extraction has no reason to
+/// store the same fact a second time. Rule 4's case, a saved note stating
+/// an older value, is the one exception (the test above).
+#[tokio::test]
+async fn with_no_saved_note_the_assistants_note_is_known() {
+    let scene = Scene::new(vec![items(&[])]);
+    let tool = scene
+        .service
+        .context(
+            OWNER,
+            WorkspaceHint::None,
+            Surface::ModelTool,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let title = "Sold the Honda Fit, takes metro line 5";
+    let knowledge = "Since 2026-04-20 the user takes metro line 5 to work; the Honda Fit was sold.";
+    scene
+        .service
+        .store(
+            &tool,
+            StoreInput {
+                title: title.into(),
+                body: format!("# {title}\n\n## Knowledge\n{knowledge}\n"),
+                kind: Some(NoteKind::Fact),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let s = scene.session();
+    scene.turn(
+        &s,
+        "I sold the Honda Fit on April 20. Now I take metro line 5 to work, about 40 minutes.",
+        "Noted: metro line 5 now.",
+    );
+
+    scene.queue.flush_session(&s).await;
+    let prompt = &scene.model.prompts()[0];
+    let known = prompt
+        .split("<known_notes>")
+        .nth(1)
+        .and_then(|rest| rest.split("</known_notes>").next())
+        .unwrap_or_else(|| panic!("no known_notes: {prompt}"));
+    assert!(
+        known
+            .lines()
+            .any(|l| l.contains(title) && l.contains(" key=- origin=assistant ")),
+        "{prompt}"
+    );
+    assert!(!known.contains("saved-by-you"), "{prompt}");
+    let rule = |n: &str| {
+        prompt
+            .lines()
+            .find(|l| l.starts_with(n))
+            .unwrap_or_else(|| panic!("rule {n}: {prompt}"))
+    };
+    assert!(
+        rule("9. ").contains("(an origin=assistant note counts too, except in rule 4's case)"),
+        "{prompt}"
+    );
+    assert!(
+        rule("4. ").contains("(origin=saved-by-you) states an older value"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("does not make a fact known"), "{prompt}");
+    assert!(
+        !prompt.contains("not a fact you must treat as known"),
+        "{prompt}"
+    );
 }
 
 /// Ruling LR9: a note the user edited by hand (`external`, found by the

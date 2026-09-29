@@ -315,7 +315,7 @@ otherwise the conservative cloud fallback still applies.
 | One workflow's lead agent | $5 | `[execution.lead_agent_defaults] max_cost` |
 | Learning from conversations, per UTC day | $0.25 | `[orchestrator.costs] extract_max_daily_cost_usd` |
 | Learning from conversations, calls per UTC day | 200 (`0` = no cap) | `[orchestrator.costs] extract_max_calls_per_day` |
-| Episode notes, per UTC day | 20 (`0` = none) | `[orchestrator.learning] episode_max_per_day` |
+| Episode notes, per UTC day | 100 (`0` = none) | `[orchestrator.learning] episode_max_per_day` |
 | Conversation summaries, per day | $0.50 | `[orchestrator.costs] summary_max_daily_cost_usd` |
 | Task-output extraction, per UTC day | $0.50 | `[orchestrator.costs] task_extract_max_daily_cost_usd` |
 
@@ -744,7 +744,7 @@ conversation's facts are learned first. One model call per note, under
 learning's rules: the same chunks of the stored conversation, the quiet
 start and the yielding to chat, the daily caps (it counts under
 `extract_max_calls_per_day` and `extract_max_daily_cost_usd`) and its own
-`[orchestrator.learning] episode_max_per_day` (20; `0` writes none). A
+`[orchestrator.learning] episode_max_per_day` (100; `0` writes none). A
 message you forgot a note from is left out of the note, with its answer.
 
 The note is titled `Conversation on <YYYY-MM-DD>: <topic>`, the date its last

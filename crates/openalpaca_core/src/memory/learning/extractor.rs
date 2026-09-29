@@ -88,7 +88,15 @@ pub(crate) struct PromptInput<'a> {
     pub conversation: &'a str,
     /// Rule 9's "at most {items} items".
     pub max_items: usize,
+    /// The chunk's last answer was cut at its output ceiling: the prompt
+    /// ends on [`RETRY_LINE`] (owner decision LQ20 (e)).
+    pub after_cut: bool,
 }
+
+/// The line the retry of a cut answer ends on (owner decision LQ20 (e),
+/// 2026-09-28); a first attempt's `{{retry_line}}` is empty.
+pub(crate) const RETRY_LINE: &str =
+    "Answer with the JSON first and nothing before it; no analysis.";
 
 /// The system text and the rendered user message. Placeholders are filled
 /// in one pass, so a transcript that happens to contain `{{items}}` is
@@ -104,6 +112,7 @@ pub(crate) fn render_prompt(input: &PromptInput<'_>) -> (String, String) {
         "known_keys" => Some(input.known_keys),
         "conversation" => Some(input.conversation),
         "items" => Some(items.as_str()),
+        "retry_line" => Some(if input.after_cut { RETRY_LINE } else { "" }),
         _ => None,
     });
     (system.trim_end().to_string(), user.trim_end().to_string())
@@ -185,12 +194,18 @@ pub(crate) fn parse_items(content: &str) -> Result<Vec<serde_json::Value>, Strin
 }
 
 /// [`parse_items`] for an answer the model stopped at its output ceiling: the
-/// forms read before LQ13 only — the whole answer or a fenced block, and
+/// forms read before LQ13 — the whole answer or a fenced block, and
 /// `{"items": [...]}` — so a cut answer is reported as cut and never rescued
-/// in part (the L8 fix slice's P1).
+/// in part (the L8 fix slice's P1). Owner decision LQ20 (f), 2026-09-28: an
+/// answer that ends on one complete value of the answer's shape after its
+/// reasoning is read too — the ceiling cut only a closing fence
+/// ([`crate::memory::task_extraction::read_cut_answer`]).
 pub(crate) fn parse_cut_items(content: &str) -> Result<Vec<serde_json::Value>, String> {
-    let value = crate::memory::task_extraction::parse_json_strict(content);
-    items_of(value, false)
+    if let Some(value) = crate::memory::task_extraction::parse_json_strict(content) {
+        return items_of(Some(value), false);
+    }
+    let value = crate::memory::task_extraction::read_cut_answer(content, is_items_answer);
+    items_of(value, true)
 }
 
 fn items_of(

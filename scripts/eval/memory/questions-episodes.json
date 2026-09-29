@@ -260,7 +260,7 @@
     "category": "episodes",
     "language": "zh",
     "question": "我让你帮我挑电饭煲那次，最后决定买哪个？",
-    "gold_answer": "比较了两个型号哪个更省电之后，决定买第一个（给我妈陈红的，五百块以内）。",
+    "gold_answer": "给我妈陈红挑一个五百块以内的电饭煲；我问了你两个型号哪个更省电，然后说“就买第一个”——具体型号我自己没有说。",
     "relies_on": [],
     "expect_abstain": false,
     "session": "cs-019",

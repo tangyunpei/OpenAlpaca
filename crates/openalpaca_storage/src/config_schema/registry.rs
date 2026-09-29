@@ -424,7 +424,7 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
             min: Some(0),
             max: Some(1000),
         },
-        default: Some("20"),
+        default: Some("100"),
         description: "Max episode notes (summaries of conversations) written per UTC day (0 = none)",
         category: "Daemon",
         subcategory: Some("Orchestrator"),

@@ -612,6 +612,10 @@ fn is_loopback_url(base_url: &str) -> bool {
     }
 }
 
+/// How the reason of an answer cut at its output ceiling begins — what the
+/// retry reads back from the cursor (owner decision LQ20 (e)).
+const CUT_REASON: &str = "cut at max_tokens";
+
 /// Why an answer that did not parse is unusable: the parser's reason, unless
 /// the model stopped at the request's output ceiling — then the answer was
 /// cut there, and the reason says so (the L8 fix slice's P1). Either way it
@@ -622,7 +626,7 @@ fn unusable_reason(
     parse_error: String,
 ) -> String {
     if response.finish_reason == openalpaca_llm::FinishReason::MaxTokens {
-        format!("cut at max_tokens ({max_tokens})")
+        format!("{CUT_REASON} ({max_tokens})")
     } else {
         parse_error
     }
@@ -1438,13 +1442,28 @@ impl LearningQueue {
             // its own estimate (§1.7) — the router's estimate, bytes ÷ 4.
             let (transcript, numbered) = chunk.transcript();
             let today = chunk.today();
+            // Owner decision LQ20 (e): at temperature 0 the same prompt
+            // fails the same way, so the retry of an answer cut at its output
+            // ceiling asks for half the items and the JSON first. Rule 14's
+            // cap stays the budget's.
+            let after_cut = read.cursor.attempts > 0
+                && read
+                    .cursor
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|e| e.starts_with(CUT_REASON));
             let request = extractor::build_request(
                 &PromptInput {
                     today: &today,
                     known_notes: &lookup.notes_text,
                     known_keys: &lookup.keys_text,
                     conversation: &transcript,
-                    max_items: budget.items,
+                    max_items: if after_cut {
+                        (budget.items / 2).max(1)
+                    } else {
+                        budget.items
+                    },
+                    after_cut,
                 },
                 budget.out_tokens,
                 setup.model.clone(),

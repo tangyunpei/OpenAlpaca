@@ -117,12 +117,17 @@ pub fn main_loop_relay_guidance() -> &'static str {
 
 /// The main loop's memory guidance (design 09 §13.1, MD-14): the layered
 /// workflow its three read tools teach, said once in the system prompt — one
-/// line, given only to a turn whose surface carries `memory_search`.
+/// line, given only to a turn whose surface carries `memory_search` — and,
+/// since owner decision LQ19 (F-C), one line on naming the note a new fact
+/// changes, without which a saved note gets no suggestion (the commute,
+/// report 10 §4.5).
 pub fn main_loop_memory_guidance() -> &'static str {
     "<memory_rules>\n\
      Memory: memory_search returns an index, one line per note and no body — pick the ids that \
      matter and read only those with memory_read, several in one call; memory_timeline shows \
      what surrounds a note in time.\n\
+     Before saving a fact about the user that changes an earlier one, memory_search for the \
+     note it changes and pass its id in supersedes (or its fact_key).\n\
      </memory_rules>"
 }
 

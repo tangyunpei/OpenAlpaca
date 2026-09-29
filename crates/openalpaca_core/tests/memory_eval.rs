@@ -3550,6 +3550,10 @@ struct LearnedNote {
     /// `model_tool` for a learned note ([`attribute_surfaces`]), `null` for
     /// any other.
     surface: Option<&'static str>,
+    /// The language of the corpus session whose fed user row it cites first
+    /// (owner decision LQ18, [`attribute_session_languages`]); `null` when it
+    /// cites none.
+    session_language: Option<&'static str>,
 }
 
 impl LearnedNote {
@@ -3605,6 +3609,7 @@ impl LearnedNote {
             source_forgotten: r.source_forgotten,
             knowledge: cut_chars(&knowledge_section(&r.body), 2_000),
             surface: None,
+            session_language: None,
         }
     }
 
@@ -3672,6 +3677,34 @@ impl<T> BySurface<T> {
             extraction: measure(SURFACE_EXTRACTION),
             model_tool: measure(SURFACE_MODEL_TOOL),
         }
+    }
+}
+
+/// Each learned note's session language (owner decision LQ18): the language
+/// of the corpus session whose fed user row the note cites first. A note
+/// citing no fed user row — the reader's own `memory_store` usually cites
+/// none — keeps `None`, which the other-script alias measure counts apart.
+fn attribute_session_languages(
+    notes: &mut [LearnedNote],
+    sessions: &[&CorpusSession],
+    transcript: &Transcript,
+) {
+    let language: HashMap<&str, &'static str> = sessions
+        .iter()
+        .map(|s| (s.id.as_str(), s.language.as_str()))
+        .collect();
+    let row_language: HashMap<i64, &'static str> = transcript
+        .sessions
+        .iter()
+        .filter_map(|t| Some((t, *language.get(t.corpus_id.as_str())?)))
+        .flat_map(|(t, l)| t.user_rows.iter().map(move |r| (*r, l)))
+        .collect();
+    for note in notes {
+        note.session_language = note
+            .sources
+            .iter()
+            .filter_map(|s| s.strip_prefix("message:")?.parse::<i64>().ok())
+            .find_map(|r| row_language.get(&r).copied());
     }
 }
 
@@ -4391,10 +4424,19 @@ fn has_cjk(text: &str) -> bool {
     text.chars().any(eval::is_cjk)
 }
 
-/// An alias in the script the title is not in (design 09 §7.3, *Aliases*):
-/// CJK for a Latin title, Latin letters for a CJK one.
-fn has_other_script_alias(title: &str, aliases: &[String]) -> bool {
-    if has_cjk(title) {
+/// Reading A of the other-script alias share (owner decision LQ18, design 09
+/// §7.3, *Aliases*): the title is in the session's language, as the
+/// extractor's rule 8 asks — CJK in a `zh` session, none in an `en` one; a
+/// `mixed` session's either — and an alias is in the other script, as rule
+/// 5 asks: Latin letters beside a CJK title, CJK beside a Latin one.
+fn has_other_script_alias(session_language: &str, title: &str, aliases: &[String]) -> bool {
+    let cjk_title = has_cjk(title);
+    match session_language {
+        "zh" if !cjk_title => return false,
+        "en" if cjk_title => return false,
+        _ => {}
+    }
+    if cjk_title {
         aliases
             .iter()
             .any(|a| a.chars().any(|c| c.is_ascii_alphabetic()))
@@ -4408,6 +4450,10 @@ struct AliasReport {
     active_learned: usize,
     with_any_alias: usize,
     with_other_script_alias: usize,
+    /// Of `active_learned`, the notes citing no fed user row, whose
+    /// session's language reading A cannot read (owner decision LQ18): never
+    /// counted in `with_other_script_alias`.
+    without_session_language: usize,
     share_any: Option<f64>,
     share_other_script: Option<f64>,
 }
@@ -4453,12 +4499,20 @@ fn measure_aliases_where(
     let any = active.iter().filter(|n| !n.aliases.is_empty()).count();
     let other = active
         .iter()
-        .filter(|n| has_other_script_alias(&n.title, &n.aliases))
+        .filter(|n| {
+            n.session_language
+                .is_some_and(|l| has_other_script_alias(l, &n.title, &n.aliases))
+        })
+        .count();
+    let without_session_language = active
+        .iter()
+        .filter(|n| n.session_language.is_none())
         .count();
     AliasReport {
         active_learned: active.len(),
         with_any_alias: any,
         with_other_script_alias: other,
+        without_session_language,
         share_any: share(any, active.len()),
         share_other_script: share(other, active.len()),
     }
@@ -5161,6 +5215,7 @@ async fn measure_learning(
     for notes in [&mut results.learned, &mut results.episodes] {
         attribute_surfaces(notes, &results.flushes, &results.episode_flushes);
     }
+    attribute_session_languages(&mut results.learned, sessions, transcript);
     let gold: Vec<&GoldNote> = notes.iter().filter(|n| relied.contains(&n.id)).collect();
     let coverage = measure_coverage(
         router,
@@ -6874,10 +6929,11 @@ fn print_learning(l: &LearningResults) {
     }
     let aliases = |a: &AliasReport| {
         format!(
-            "other script {}, any {} of {} active learned notes",
+            "other script {}, any {} of {} active learned notes ({} citing no fed row)",
             pct(a.share_other_script),
             pct(a.share_any),
-            a.active_learned
+            a.active_learned,
+            a.without_session_language
         )
     };
     if let Some(a) = &l.aliases {
@@ -8109,6 +8165,7 @@ fn learned(
         source_forgotten: false,
         knowledge: String::new(),
         surface: None,
+        session_language: None,
     }
 }
 
@@ -8169,26 +8226,64 @@ fn a_restatement_is_classified_by_the_notes_citing_its_row() {
     assert_eq!(classify_restatement(None, &[earlier]).0, "unknown_row");
 }
 
-/// Design 09 §7.3's alias measure: an alias in the other script than the
-/// title's — CJK for a Latin title, Latin for a CJK one.
+/// Design 09 §7.3's alias measure, reading A (owner decision LQ18): the
+/// title in the session's language (rule 8) and an alias in the other
+/// script (rule 5) — CJK beside a Latin title, Latin beside a CJK one. A
+/// Chinese title in an English session is no hit, whatever its aliases; an
+/// English title with a Chinese alias in a Chinese session is one only when
+/// its title is Chinese; a mixed session reads the title's own script.
 #[test]
-fn other_script_aliases_are_read_against_the_titles_script() {
+fn other_script_aliases_are_read_against_the_sessions_language() {
     let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
     assert!(has_other_script_alias(
+        "en",
         "Editor: Helix",
         &s(&["hx", "编辑器"])
     ));
     assert!(!has_other_script_alias(
+        "en",
         "Editor: Helix",
         &s(&["hx", "editor"])
     ));
-    assert!(has_other_script_alias("用户住在杭州", &s(&["Hangzhou"])));
+    assert!(has_other_script_alias(
+        "zh",
+        "用户住在杭州",
+        &s(&["Hangzhou"])
+    ));
     assert!(!has_other_script_alias(
+        "zh",
         "用户住在杭州",
         &s(&["杭州", "时区"])
     ));
-    assert!(has_other_script_alias("日本語の勉強", &s(&["Japanese"])));
-    assert!(!has_other_script_alias("Title", &[]));
+    // A Chinese title in an English session breaks rule 8: no hit.
+    assert!(!has_other_script_alias(
+        "en",
+        "用户住在杭州",
+        &s(&["Hangzhou"])
+    ));
+    // An English title in a Chinese session breaks it too, even with a
+    // Chinese alias; the same alias beside a Chinese title is a hit.
+    assert!(!has_other_script_alias(
+        "zh",
+        "Lives in Hangzhou",
+        &s(&["杭州"])
+    ));
+    assert!(has_other_script_alias(
+        "zh",
+        "住在杭州",
+        &s(&["Hangzhou", "杭州"])
+    ));
+    assert!(has_other_script_alias(
+        "mixed",
+        "日本語の勉強",
+        &s(&["Japanese"])
+    ));
+    assert!(has_other_script_alias(
+        "mixed",
+        "Studying Japanese",
+        &s(&["日本語"])
+    ));
+    assert!(!has_other_script_alias("en", "Title", &[]));
 }
 
 #[test]
@@ -10609,6 +10704,16 @@ async fn every_learning_measure_is_reported_by_surface() {
             &serde_json::json!(0),
             &serde_json::json!(2),
         ),
+        "{by}"
+    );
+    // Reading A (owner decision LQ18) reads a note's session from the fed
+    // row it cites: the extraction note cites one, the reader's two none.
+    assert_eq!(
+        (
+            &by["extraction"]["without_session_language"],
+            &by["model_tool"]["without_session_language"],
+        ),
+        (&serde_json::json!(0), &serde_json::json!(2)),
         "{by}"
     );
     let keys = &json["fact_keys_by_surface"];

@@ -432,13 +432,15 @@ async fn a_learned_episode_candidate_does_not_hold_back_the_episode_note() {
     assert_eq!(episode_cursor(&scene, &s), *rows.last().unwrap());
 }
 
-/// A key a model's edit put on a summary is no key for learning (review of
-/// L10c, R1): the extractor is not told it is known, and the user's own
-/// later statement under it is learned as an active note that replaces
-/// nothing — not parked as a suggestion to replace the assistant's record
-/// of the conversation.
+/// A model may not put a key on a summary (owner decision LQ10): its edit
+/// is `authority_conflict`, so the extractor is not told the key is known,
+/// and the user's own later statement under it is learned as an active note
+/// that replaces nothing — not parked as a suggestion to replace the
+/// assistant's record of the conversation (review of L10c, R1; a summary an
+/// older build let a model key is pinned by the service's
+/// `a_key_on_a_summary_is_no_key_for_learning`).
 #[tokio::test]
-async fn a_fact_under_a_key_a_model_put_on_a_summary_is_learned_active() {
+async fn a_model_may_not_key_a_summary_and_the_fact_under_the_key_is_learned_active() {
     let scene = Scene::new(vec![
         items(&[]),
         trip_summary(),
@@ -465,7 +467,7 @@ async fn a_fact_under_a_key_a_model_put_on_a_summary_is_learned_active() {
             Attribution::default(),
         )
         .unwrap();
-    scene
+    let err = scene
         .service
         .update(
             &tool,
@@ -479,7 +481,8 @@ async fn a_fact_under_a_key_a_model_put_on_a_summary_is_learned_active() {
                 reason: None,
             },
         )
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(err.class(), "authority_conflict", "{err}");
 
     scene.turn(
         &s,

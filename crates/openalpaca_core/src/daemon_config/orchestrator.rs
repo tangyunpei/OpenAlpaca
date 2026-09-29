@@ -57,7 +57,7 @@ fn default_learning_turns_per_flush() -> u32 {
     10
 }
 fn default_learning_episode_max_per_day() -> u32 {
-    20
+    100
 }
 
 impl Default for LearningConfig {

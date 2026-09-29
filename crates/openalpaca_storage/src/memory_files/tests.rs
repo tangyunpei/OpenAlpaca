@@ -4102,6 +4102,88 @@ fn suggest_unless_learned_suggests_for_a_saved_target_only_and_serves_a_tool_cal
     }
 }
 
+/// Owner decision LQ10 (2026-09-28): a conversation summary takes no fact
+/// key from a model. A tool call's or the extractor's edit that sets one is
+/// `authority_conflict` and writes nothing; the user's own edit sets it as
+/// before, and makes the note the user's; an edit that leaves the key alone
+/// is as it was — a model's rewording is written, and the note stays a
+/// summary.
+#[test]
+fn a_summary_takes_no_fact_key_from_a_model() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let summary = |title: &str| {
+        let created = p
+            .create(
+                NewNote {
+                    status: Some(NoteStatus::Active),
+                    ..new_note(title, "# Conversation\n\nFlights.\n", NoteKind::Episode)
+                },
+                Actor::Extraction {
+                    origin: Origin::ExtractedOther,
+                },
+            )
+            .unwrap();
+        p.read(&created.id).unwrap()
+    };
+    let keyed = || {
+        UpdateAction::Edit(NotePatch {
+            fact_key: Some(Some("user.editor".into())),
+            ..Default::default()
+        })
+    };
+
+    let s = summary("Conversation on 2026-09-20: Lisbon");
+    for actor in [
+        Actor::ModelTool,
+        Actor::Extraction {
+            origin: Origin::ExtractedOther,
+        },
+    ] {
+        let err = p
+            .update(&s.note.id, &s.revision, keyed(), actor)
+            .unwrap_err();
+        assert_eq!(err.class(), "authority_conflict", "{actor:?}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("conversation summary")
+                && msg.contains("Memory view")
+                && msg.contains(&format!("openalpaca memory edit {}", s.note.id)),
+            "{msg}"
+        );
+    }
+    assert_eq!(p.read(&s.note.id).unwrap().revision, s.revision);
+
+    let u = p
+        .update(
+            &s.note.id,
+            &s.revision,
+            UpdateAction::Edit(NotePatch {
+                body: Some("# Conversation\n\nFlights and a hotel.\n".into()),
+                ..Default::default()
+            }),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    assert!(u.written);
+    let reworded = p.read(&s.note.id).unwrap();
+    assert_eq!(
+        (reworded.derived.origin, reworded.note.fact_key),
+        (Origin::ExtractedOther, None)
+    );
+
+    let mine = summary("Conversation on 2026-09-21: Lisbon");
+    let u = p
+        .update(&mine.note.id, &mine.revision, keyed(), Actor::UserSurface)
+        .unwrap();
+    assert!(u.written);
+    let read = p.read(&mine.note.id).unwrap();
+    assert_eq!(
+        (read.derived.origin, read.note.fact_key.as_deref()),
+        (Origin::User, Some("user.editor"))
+    );
+}
+
 /// S4: a restated change does not mint a second identical suggestion — the
 /// same fields and the same `supersedes` answer `dedup` with the pending
 /// candidate's id; a different wording is a second suggestion.

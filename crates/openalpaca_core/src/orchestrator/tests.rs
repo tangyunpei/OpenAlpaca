@@ -7089,12 +7089,14 @@ async fn the_main_loop_recalls_the_natural_question_fixture_through_the_service(
 /// Design 09 §13.1 (MD-14): the main loop's system prompt says the layered
 /// workflow once, in one line — search returns an index, pick ids, read only
 /// those, several at once — on a turn whose surface carries the memory read
-/// tools, and not on a turn without them.
+/// tools, and not on a turn without them. Owner decision LQ19 (F-C) adds one
+/// line: before saving a changed fact, search for the note it changes and
+/// name it.
 #[tokio::test]
 async fn the_main_loop_prompt_says_search_pick_read_in_one_line() {
     let guidance = crate::tools::builtins::main_loop_memory_guidance();
     let lines: Vec<&str> = guidance.lines().collect();
-    assert_eq!(lines.len(), 3, "a tag, one line, a tag: {guidance}");
+    assert_eq!(lines.len(), 4, "a tag, two lines, a tag: {guidance}");
     for word in [
         "memory_search",
         "index",
@@ -7104,6 +7106,11 @@ async fn the_main_loop_prompt_says_search_pick_read_in_one_line() {
     ] {
         assert!(lines[1].contains(word), "{word}: {}", lines[1]);
     }
+    assert_eq!(
+        lines[2],
+        "Before saving a fact about the user that changes an earlier one, memory_search for the \
+         note it changes and pass its id in supersedes (or its fact_key)."
+    );
 
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();

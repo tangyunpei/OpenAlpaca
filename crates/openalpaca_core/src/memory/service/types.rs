@@ -86,6 +86,10 @@ pub struct KnownNote {
     /// A learned note (`extracted_user` or `extracted_other`) that cites a
     /// row of the chunk being learned (design 09 §2.3 step 2).
     pub from_this_window: bool,
+    /// Only the chat model wrote it: origin `extracted_user` with no
+    /// `observed_at`, which the extractor alone sets (owner decisions LQ14,
+    /// LQ19).
+    pub by_chat_model: bool,
 }
 
 /// What learning's known-notes lookup found for one chunk (design 09 §2.3).

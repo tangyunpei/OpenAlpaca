@@ -837,7 +837,7 @@ Notes:
   `extracted_other`) and active. `list --kind episode`, `search`, `timeline` and
   the model's memory search find it; it is never recalled into a chat on its
   own. `openalpaca config set daemon.orchestrator.learning.episode_max_per_day N`
-  caps them per UTC day (default 20, `0` writes none).
+  caps them per UTC day (default 100, `0` writes none).
 - `sync` runs one reconciliation scan now: the daemon re-hashes the note files,
   records any edited, added or removed behind its back as `external`, and prints
   what changed. The daemon also scans every 30 s on its own, and before every read,
