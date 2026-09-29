@@ -204,21 +204,6 @@ fn open_home_database_creates_the_state_directory_at_0700() {
     );
 }
 
-/// Where a pre-D2 upload's bytes sit: `state/assets/ab/cd/<sha256>`.
-///
-/// A fixture, not a path the system computes any more — nothing writes there
-/// and nothing moves what is there. It lives here, beside the private
-/// `state_dir_path` it is spelled from, so a test that reconstructs the old
-/// layout does not re-derive it.
-pub(crate) fn interim_blob_path(sha256: &str) -> PathBuf {
-    state_dir_path()
-        .unwrap()
-        .join("assets")
-        .join(&sha256[0..2])
-        .join(&sha256[2..4])
-        .join(sha256)
-}
-
 // ============================================================================
 // ensure_store
 // ============================================================================

@@ -26,19 +26,14 @@
 //!
 //! The address of record is `project_root` + `rel_path` (relative to
 //! `<store>/uploads`); `storage_path` stays the resolved absolute path, so the
-//! content and open routes need no change. Rows written before D2 — content-addressed
-//! blobs under `state/assets/` — are **left exactly where they are**. Nothing moves
-//! them: their `storage_path` is absolute, so they keep resolving, and a `put` never
-//! moves an existing row's bytes. Such a row has no `rel_path`; every code path that
-//! reads one must keep tolerating that.
+//! content and open routes need no change.
 //!
 //! **Dedup is a sha256 query scoped to this owner's uploads, never the path.**
 //! Two uploads of the same bytes by the same owner resolve to the first row and
-//! write nothing — including when that first row is a pre-D2 content-addressed
-//! one. The same bytes from a different owner get their own row and their own
-//! file, and a byte-identical *produced* artifact never answers at all: it is
-//! not an upload, and handing it back would put it under the upload quota and
-//! on the end of a chat message.
+//! write nothing. The same bytes from a different owner get their own row and
+//! their own file, and a byte-identical *produced* artifact never answers at
+//! all: it is not an upload, and handing it back would put it under the upload
+//! quota and on the end of a chat message.
 //!
 //! A match is an answer only while its bytes are still there. When the matched
 //! row's file is gone, the upload is placed and written as usual and that row is
@@ -233,8 +228,6 @@ impl<'a> UploadStore<'a> {
             let tx = conn.unchecked_transaction()?;
 
             // Dedup: the owner- and origin-scoped sha256 query, never the path.
-            // A pre-D2 content-addressed row answers it just as well as a new
-            // one — it carries `origin = 'upload'` from 036's column default.
             let existing = load_by_sha256(&tx, &sha256, new.owner_id)?;
             // I7: a dedup hit is only an answer while its bytes are there. A row
             // whose file is gone — marked `missing_since` or not; a removed
