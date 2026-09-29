@@ -212,6 +212,9 @@ using with an older build is the second case it names. To switch over:
    Settings → Persona, keep the lines you want as standing instructions, and
    delete the rest. Nothing moves them into memory notes for you.
 
+The reset leaves `~/.openalpaca/README.md` as it is, and an older build's text
+there is out of date: delete it, and the next start seeds the current one.
+
 A store from before the memory redesign may also hold
 `~/.openalpaca/state/cache/fastembed` (about 1 GB), the removed embedding
 model's download. Neither the reset nor this build touches it; delete it by
