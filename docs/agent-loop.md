@@ -212,9 +212,10 @@ unioned with a per-request set —
 `start_workflow`, `task_status`, `memory_store` + `memory_update` +
 `memory_forget` (when the daemon has a memory service), the
 globally-registered `memory_search`, `memory_read`, `memory_list` and
-`memory_timeline` definitions (and, with them, one `<memory_rules>` line in
-the system prompt: search returns an index, pick ids, read only those,
-several at once),
+`memory_timeline` definitions (and, with them, a two-line `<memory_rules>`
+block in the system prompt: search returns an index, pick ids, read only
+those, several at once; and before saving a fact that changes an earlier
+one, search for the note it changes and name it in `supersedes`),
 `read_result` (only when the daemon has both a session log and a
 database — the one case where a result can spill, see
 [Tool Results and the Spill](#tool-results-and-the-spill)), every

@@ -259,8 +259,8 @@ impl MemoryService {
                     origin: &row.origin,
                     effective_status: row.effective_status,
                 };
-                if let Some((note, by_chat_model)) = known_note(p, &named, true, &mut dirty) {
-                    if by_chat_model {
+                if let Some(note) = known_note(p, &named, true, &mut dirty) {
+                    if note.by_chat_model {
                         coined.insert(note.id);
                     }
                     from_this_window.push(note);
@@ -329,10 +329,10 @@ impl MemoryService {
                     origin: &hit.origin,
                     effective_status: hit.effective_status,
                 };
-                if let Some((note, by_chat_model)) = known_note(p, &named, false, &mut dirty)
+                if let Some(note) = known_note(p, &named, false, &mut dirty)
                     && note.effective_status == EffectiveStatus::Active
                 {
-                    if by_chat_model {
+                    if note.by_chat_model {
                         coined.insert(note.id);
                     }
                     notes.push(note);
@@ -431,7 +431,7 @@ impl MemoryService {
                         origin: &row.origin,
                         effective_status: row.effective_status,
                     };
-                    if let Some((note, _)) = known_note(p, &named, false, &mut dirty)
+                    if let Some(note) = known_note(p, &named, false, &mut dirty)
                         && note.effective_status == EffectiveStatus::Active
                     {
                         out.insert(key.clone(), note);
@@ -465,15 +465,15 @@ fn is_summary_row(kind: &str, origin: &str, status: &str) -> bool {
 /// file is gone, tombstoned, unparsable, archived or another note now; its
 /// partition is then marked for re-indexing. A file whose bytes moved since
 /// indexing is served fresh with origin `external` — the snapshot no longer
-/// vouches for it — and marks its partition too. Beside it: whether only the
-/// chat model wrote it (owner decision LQ14) — origin `extracted_user` with
-/// no `observed_at`, which the extractor alone sets.
+/// vouches for it — and marks its partition too. It says whether only the
+/// chat model wrote it (owner decisions LQ14, LQ19) — origin
+/// `extracted_user` with no `observed_at`, which the extractor alone sets.
 fn known_note(
     p: &Partition,
     named: &Named<'_>,
     from_this_window: bool,
     dirty: &mut HashSet<String>,
-) -> Option<(KnownNote, bool)> {
+) -> Option<KnownNote> {
     let id = NoteId::parse(named.id).ok()?;
     let (note, revision, stale) = match verify(p, named.relative_path, id, named.revision) {
         Verified::Fresh {
@@ -507,7 +507,7 @@ fn known_note(
         )
     };
     let by_chat_model = origin == Origin::ExtractedUser && note.observed_at.is_none();
-    let known = KnownNote {
+    Some(KnownNote {
         id,
         revision,
         partition_key: p.partition_key().to_string(),
@@ -520,6 +520,6 @@ fn known_note(
         fact_key: note.fact_key,
         supersedes: note.supersedes,
         from_this_window,
-    };
-    Some((known, by_chat_model))
+        by_chat_model,
+    })
 }

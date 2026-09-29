@@ -104,10 +104,13 @@ pub(crate) fn query_windows(text: &str) -> Vec<String> {
 /// How the prompt names a note's origin (design 09 §2.3 step 5): the label
 /// tells the model that replacing a note the user saved becomes a
 /// suggestion. The decision itself is the service's, never the model's.
-/// `extracted_other` is never listed: it is always a candidate.
-pub(crate) fn origin_label(origin: Origin) -> Option<&'static str> {
-    match origin {
+/// `extracted_other` is never listed: it is always a candidate. A note only
+/// the chat model wrote is `assistant` (owner decision LQ19, F-A): the
+/// assistant's own unconfirmed record, which does not make a fact known.
+pub(crate) fn origin_label(note: &KnownNote) -> Option<&'static str> {
+    match note.origin {
         Origin::User => Some("saved-by-you"),
+        Origin::ExtractedUser if note.by_chat_model => Some("assistant"),
         Origin::ExtractedUser => Some("learned"),
         Origin::External => Some("edited-by-hand"),
         Origin::Imported => Some("imported"),
@@ -129,7 +132,7 @@ fn excerpt(text: &str) -> String {
 /// One `known_notes` line (design 09 §2.1):
 /// `n1 key=user.editor origin=learned kind=preference scope=global "Editor preference" — The user edits with vim.`
 pub(crate) fn note_line(n: usize, note: &KnownNote) -> Option<String> {
-    let origin = origin_label(note.origin)?;
+    let origin = origin_label(note)?;
     let mut line = format!(
         "n{n} key={} origin={origin} kind={} scope={} \"{}\" — {}",
         note.fact_key.as_deref().unwrap_or("-"),
@@ -220,6 +223,7 @@ mod tests {
             knowledge: knowledge.into(),
             supersedes: Vec::new(),
             from_this_window: false,
+            by_chat_model: false,
         }
     }
 

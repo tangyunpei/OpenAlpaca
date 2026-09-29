@@ -43,6 +43,8 @@ enum Say {
     /// The text, when the call's user message carries every one of these
     /// strings; otherwise prose the model stopped at the `max_tokens` cap.
     Only(Vec<String>, String),
+    /// The text this makes of the call's user message.
+    Reply(fn(&str) -> String),
     Fail(LlmError),
     /// Never answers.
     Hang,
@@ -122,18 +124,18 @@ impl LlmProvider for Scripted {
             hook(n);
         }
         let say = self.script.lock().unwrap().pop_front();
+        let user: String = request
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, openalpaca_llm::Role::User))
+            .map(|m| m.content.as_str())
+            .collect();
         let (content, finish_reason) = match say {
             None => (r#"{"items": []}"#.to_string(), FinishReason::Stop),
             Some(Say::Text(t)) => (t, FinishReason::Stop),
             Some(Say::Cut(t)) => (t, FinishReason::MaxTokens),
             Some(Say::Spent) => (String::new(), FinishReason::MaxTokens),
             Some(Say::Only(needles, t)) => {
-                let user: String = request
-                    .messages
-                    .iter()
-                    .filter(|m| matches!(m.role, openalpaca_llm::Role::User))
-                    .map(|m| m.content.as_str())
-                    .collect();
                 if needles.iter().all(|n| user.contains(n.as_str())) {
                     (t, FinishReason::Stop)
                 } else {
@@ -143,6 +145,7 @@ impl LlmProvider for Scripted {
                     )
                 }
             }
+            Some(Say::Reply(reply)) => (reply(&user), FinishReason::Stop),
             Some(Say::Fail(e)) => return Err(e),
             Some(Say::Hang) => std::future::pending().await,
         };
@@ -4080,6 +4083,7 @@ fn the_extractor_prompt_matches_its_fixture() {
             knowledge: knowledge.into(),
             supersedes: Vec::new(),
             from_this_window: false,
+            by_chat_model: false,
         }
     };
     let view = crate::memory::service::LearningView {
@@ -4249,6 +4253,128 @@ async fn a_learned_statement_against_a_user_note_is_a_suggestion() {
         Some("The user said they cycle to the office now.")
     );
     assert!(b.observed_at.is_some(), "the cited row's time");
+}
+
+/// The extractor's answer to [`a_chat_model_note_is_listed_as_the_assistants_and_the_saved_note_gets_the_suggestion`]:
+/// the new commute, replacing whichever `n<k>` the saved note is listed as.
+fn replace_the_saved_note(prompt: &str) -> String {
+    let saved = prompt
+        .lines()
+        .find(|l| l.contains("origin=saved-by-you"))
+        .and_then(|l| l.split_whitespace().next())
+        .unwrap_or("n0");
+    format!(
+        r#"{{"items": [{}]}}"#,
+        full_item(serde_json::json!({
+            "title": "Commute",
+            "content": "Since 2026-04-20 the user takes metro line 5 to work; the Honda Fit was sold.",
+            "kind": "fact",
+            "fact_key": "user.commute",
+            "replaces": saved,
+            "replace_reason": "The user sold the car and takes the metro now.",
+        }))
+    )
+}
+
+/// Owner decision LQ19 (F-A), 2026-09-28 — the commute (report 10 §4.5,
+/// cs-034): the chat model stored the new value as a note of its own that
+/// named no saved note, so LQ11 had nothing to turn into a suggestion, and
+/// the extractor, told to skip what is already known, kept nothing. Its
+/// known notes now list a note only the chat model wrote — origin
+/// `extracted_user` with no `observed_at` — as `origin=assistant`, the
+/// assistant's own unconfirmed record, and the item that replaces the saved
+/// note becomes the suggestion for it; the assistant's note is left as it
+/// is. The label reads that flag: the same note unflagged is `learned`.
+#[tokio::test]
+async fn a_chat_model_note_is_listed_as_the_assistants_and_the_saved_note_gets_the_suggestion() {
+    let scene = Scene::new(vec![Say::Reply(replace_the_saved_note)]);
+    let saved = scene.save(
+        "Commute",
+        "The user drives a Honda Fit to work.",
+        Some("user.commute"),
+    );
+    let tool = scene
+        .service
+        .context(
+            OWNER,
+            WorkspaceHint::None,
+            Surface::ModelTool,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let title = "Sold the Honda Fit, takes metro line 5";
+    let knowledge = "Since 2026-04-20 the user takes metro line 5 to work; the Honda Fit was sold.";
+    let by_model = scene
+        .service
+        .store(
+            &tool,
+            StoreInput {
+                title: title.into(),
+                body: format!("# {title}\n\n## Knowledge\n{knowledge}\n"),
+                kind: Some(NoteKind::Fact),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let s = scene.session();
+    scene.turn(
+        &s,
+        "I sold the Honda Fit on April 20. Now I take metro line 5 to work, about 40 minutes.",
+        "Noted: metro line 5 now.",
+    );
+
+    let report = scene.queue.flush_session(&s).await;
+    let prompt = &scene.model.prompts()[0];
+    let line = |needle: &str| {
+        prompt
+            .lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}: {prompt}"))
+            .to_string()
+    };
+    assert!(line(title).contains(" key=- origin=assistant "), "{prompt}");
+    assert!(
+        line("\"Commute\"").contains(" key=user.commute origin=saved-by-you "),
+        "{prompt}"
+    );
+    assert_eq!(
+        (report.suggestions, report.active, report.replaced),
+        (1, 0, 0),
+        "{report:?}"
+    );
+    let ctx = scene.user_ctx();
+    let listed = scene.service.suggestions(&ctx, None).unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].target.id, saved.id);
+    assert_eq!(
+        scene.read(&ctx, by_model.id).effective_status,
+        EffectiveStatus::Active
+    );
+
+    let mut known = crate::memory::service::KnownNote {
+        id: by_model.id,
+        revision: "0".repeat(64),
+        partition_key: "home-x".into(),
+        scope: NoteScope::Global,
+        title: title.into(),
+        kind: NoteKind::Fact,
+        origin: Origin::ExtractedUser,
+        effective_status: EffectiveStatus::Active,
+        fact_key: None,
+        knowledge: knowledge.into(),
+        supersedes: Vec::new(),
+        from_this_window: false,
+        by_chat_model: true,
+    };
+    let assistant = lookup::note_line(1, &known).unwrap();
+    assert!(
+        assistant.starts_with("n1 key=- origin=assistant "),
+        "{assistant}"
+    );
+    known.by_chat_model = false;
+    let learned = lookup::note_line(1, &known).unwrap();
+    assert!(learned.starts_with("n1 key=- origin=learned "), "{learned}");
 }
 
 /// Ruling LR9: a note the user edited by hand (`external`, found by the
