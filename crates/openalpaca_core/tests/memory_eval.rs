@@ -9556,11 +9556,13 @@ async fn the_gateway_feed_maps_every_turn_and_the_forced_rerun_checks() {
 }
 
 /// L's conversation summaries, offline (design 09 §13.3, slice L10c): with
-/// summaries on, each session's end writes its summary after its facts —
-/// the harness's one deterministic stand-in for the quiet period, the switch
-/// and the drain — a session with fewer than four turns gets none, and the
-/// dump keeps the summary apart from the learned notes every fact measure
-/// reads; the cost block counts its calls.
+/// summaries on, each session's end closes it after its facts — the
+/// harness's one deterministic stand-in for the quiet period, the switch and
+/// the drain: its working state refreshed (one call), its summary projected
+/// from the state (design 11 §3.4) — a session with fewer than four turns
+/// gets its state and no summary, and the dump keeps the summary apart from
+/// the learned notes every fact measure reads; the cost block counts the
+/// closes' calls.
 #[tokio::test(flavor = "multi_thread")]
 async fn l_writes_one_summary_per_long_session_and_keeps_it_out_of_the_fact_measures() {
     use openalpaca_core::bus::EventBus;
@@ -9578,14 +9580,8 @@ async fn l_writes_one_summary_per_long_session_and_keeps_it_out_of_the_fact_meas
         .unwrap();
     let (router, stub) = stub_router(&[TEST_MODEL], |request| {
         let prompt = prompt_of(request);
-        if prompt.contains("You are the conversation recorder") {
-            return serde_json::json!({
-                "topic": "Locker numbers",
-                "discussed": "The user's locker numbers this week.",
-                "decided": "",
-                "open": "",
-            })
-            .to_string();
+        if prompt.contains(WRITER_PROMPT_MARKER) {
+            return locker_state();
         }
         if !prompt.contains("You are the memory extractor") {
             return "Noted.".to_string();
@@ -9652,7 +9648,7 @@ async fn l_writes_one_summary_per_long_session_and_keeps_it_out_of_the_fact_meas
         episodes,
         [
             ("cs-t11", FLUSH_SWITCH, 1, 1),
-            ("cs-t12", FLUSH_SWITCH, 0, 0)
+            ("cs-t12", FLUSH_SWITCH, 1, 0)
         ],
         "{:?}",
         fed.episodes
@@ -9666,7 +9662,7 @@ async fn l_writes_one_summary_per_long_session_and_keeps_it_out_of_the_fact_meas
         fed.episodes[0]
     );
     let cost = learning_cost(&fed.turns, &fed.flushes, &fed.episodes, fed.wall_ms);
-    assert_eq!((cost.episode_calls, cost.episodes_written), (1, 1));
+    assert_eq!((cost.episode_calls, cost.episodes_written), (2, 1));
 
     let ctx = service
         .context(
@@ -9692,9 +9688,9 @@ async fn l_writes_one_summary_per_long_session_and_keeps_it_out_of_the_fact_meas
     let recorder_calls = stub
         .requests()
         .iter()
-        .filter(|r| prompt_of(r).contains("You are the conversation recorder"))
+        .filter(|r| prompt_of(r).contains(WRITER_PROMPT_MARKER))
         .count();
-    assert_eq!(recorder_calls, 1);
+    assert_eq!(recorder_calls, 2);
 }
 
 /// L-S's own path, offline (review of L7, finding 3): an old note seeded as
@@ -10126,6 +10122,22 @@ async fn a_flush_that_stops_bad_output_is_flushed_again_up_to_max_attempts() {
 /// The extractor's unusable answer in the stub models below: prose, no JSON.
 const UNUSABLE_ANSWER: &str = "Let me think about which facts matter here.";
 
+/// How the working-state writer's prompt begins (a conversation's close
+/// refreshes the state its summary is projected from — design 11 §3.1, §3.4):
+/// what the stub models below answer a state to.
+const WRITER_PROMPT_MARKER: &str = "You keep the working state of a conversation";
+
+/// The stub models' working state: a summary projected from it is titled
+/// `Conversation on <date>: Locker numbers`.
+fn locker_state() -> String {
+    serde_json::json!({
+        "topic": "Locker numbers",
+        "goal": "The user's locker numbers this week.",
+        "done": [], "decisions": [], "open": [], "next": "", "refs": [],
+    })
+    .to_string()
+}
+
 /// The `<conversation>` section of an extraction prompt: the transcript
 /// alone, without the known notes.
 fn conversation_of(prompt: &str) -> String {
@@ -10330,17 +10342,11 @@ async fn a_summary_that_stops_bad_output_is_flushed_again() {
     let calls = recorder_calls.clone();
     let (router, _stub) = stub_router(&[TEST_MODEL], move |request| {
         let prompt = prompt_of(request);
-        if prompt.contains("You are the conversation recorder") {
+        if prompt.contains(WRITER_PROMPT_MARKER) {
             if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                 return "The user talked about lockers.".to_string();
             }
-            return serde_json::json!({
-                "topic": "Locker numbers",
-                "discussed": "The user's locker numbers this week.",
-                "decided": "",
-                "open": "",
-            })
-            .to_string();
+            return locker_state();
         }
         if prompt.contains("You are the memory extractor") {
             return first_row_item(&prompt);
@@ -10379,53 +10385,27 @@ async fn a_summary_that_stops_bad_output_is_flushed_again() {
     );
 }
 
-/// Repair round 2 of the L8 fix slice for a conversation summary (the
-/// fidelity review's M2; the round-3 tests review's F1): `episode_one`
-/// bounds a summary's retries per position of the session's **episode**
-/// cursor, the one the queue counts a summary's unusable answers against.
-/// A session whose summary window spans two chunks, the first never usable:
-/// three attempts on the first — the third skips it and fails the second
-/// once — and a fourth summarises the second. A bound of three in all, or
-/// one read at a cursor a summary never moves (the learning cursor), would
-/// leave the second chunk held after one answer, never summarised.
+/// H2 for a close whose refresh is never usable (design 11 §3.1; the L8 fix
+/// slice's repair round 2 kept for the close): `episode_one` flushes it
+/// again while it stops `BadOutput`, and the queue gives the refresh up on
+/// the `MAX_ATTEMPTS`-th unusable answer — the close then ends with no stop
+/// and no summary, since the state covers nothing — so the harness makes
+/// exactly `MAX_ATTEMPTS` attempts and warns of nothing left unread.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_summary_over_two_windows_is_retried_until_each_is_read_or_skipped() {
-    let omega_answers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let seen = omega_answers.clone();
+async fn a_close_whose_refresh_is_never_usable_is_retried_until_given_up() {
     let (router, _stub) = stub_router(&[TEST_MODEL], move |request| {
         let prompt = prompt_of(request);
         if prompt.contains("You are the memory extractor") {
             return r#"{"items": []}"#.to_string();
         }
-        if !prompt.contains("You are the conversation recorder") {
-            return "Noted.".to_string();
-        }
-        if conversation_of(&prompt).contains("marker-alpha")
-            || seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
-        {
+        if prompt.contains(WRITER_PROMPT_MARKER) {
             return UNUSABLE_ANSWER.to_string();
         }
-        serde_json::json!({
-            "topic": "The omega marker",
-            "discussed": "The user named the omega marker.",
-            "decided": "",
-            "open": "",
-        })
-        .to_string()
+        "Noted.".to_string()
     });
     let run = OfflineRun::new(router);
-    // Three turns of about 7 KB fill one chunk's 24 KiB of transcript; the
-    // fourth, as long, starts a second chunk, and the three short turns
-    // after it leave past the first chunk the four user turns a summary
-    // waits for (`EPISODE_MIN_USER_TURNS`).
-    let filler = "lorem ipsum ".repeat(580);
-    let turns: Vec<(String, TurnMode)> = (0..7)
-        .map(|i| match i {
-            0 => (format!("marker-alpha {filler}"), TurnMode::Explicit),
-            3 => (format!("marker-omega {filler}"), TurnMode::Explicit),
-            1 | 2 => (format!("Noise turn {i}. {filler}"), TurnMode::Noise),
-            i => (format!("Short turn {i}."), TurnMode::Noise),
-        })
+    let turns: Vec<(String, TurnMode)> = (0..5)
+        .map(|i| (format!("Short turn {i}."), TurnMode::Noise))
         .collect();
     let turns: Vec<(&str, TurnMode)> = turns.iter().map(|(t, m)| (t.as_str(), *m)).collect();
     let session = fixture_session("cs-t62", &turns);
@@ -10440,8 +10420,8 @@ async fn a_summary_over_two_windows_is_retried_until_each_is_read_or_skipped() {
     let json = serde_json::to_value(summary).unwrap();
     assert_eq!(
         json["attempt_stops"],
-        serde_json::json!(["BadOutput", "BadOutput", "BadOutput", null]),
-        "three on the first chunk (the third skips it and fails the second), one more summarises the second: {summary:?}"
+        serde_json::json!(["BadOutput", "BadOutput", null]),
+        "{summary:?}"
     );
     assert_eq!(
         (
@@ -10451,21 +10431,8 @@ async fn a_summary_over_two_windows_is_retried_until_each_is_read_or_skipped() {
             summary.episodes,
             summary.stopped.as_deref()
         ),
-        (4, 5, 1, 1, None),
+        (3, 3, 1, 0, None),
         "{summary:?}"
-    );
-    assert_eq!(
-        omega_answers.load(std::sync::atomic::Ordering::SeqCst),
-        2,
-        "the second chunk was answered twice"
-    );
-    let session_id = &fed.transcript[0].session_id;
-    let through = openalpaca_storage::LearningCursorRepository::new(&run.db)
-        .episode_through(session_id)
-        .unwrap();
-    assert!(
-        Some(through) >= fed.transcript[0].user_rows.last().copied(),
-        "the episode cursor passed the last turn: {through}"
     );
     let warnings = learning_warnings(&fed.turns, &fed.flushes, &fed.episodes);
     assert!(
@@ -11135,13 +11102,8 @@ async fn a_replay_with_questions_writes_summaries_and_asks_them() {
         let settings = Settings::from_env();
         let (router, stub) = stub_router(&[TEST_MODEL], |request| {
             let prompt = prompt_of(request);
-            if prompt.contains("You are the conversation recorder") {
-                return serde_json::json!({
-                    "topic": "Locker numbers",
-                    "discussed": "The user's locker numbers this week.",
-                    "decided": "", "open": "",
-                })
-                .to_string();
+            if prompt.contains(WRITER_PROMPT_MARKER) {
+                return locker_state();
             }
             if prompt.contains("You are the memory extractor") {
                 return first_row_item(&prompt);

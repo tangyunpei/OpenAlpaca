@@ -4,16 +4,19 @@
 //! timeline, the list and the Memory view, and never injected on its own.
 //!
 //! The learning queue decides **when** (at least four of the user's turns
-//! since the session's last summary; a quiet period of 30 minutes, a switch
-//! of conversation, the stop drain and its boot catch-up). This module is
-//! **what**: the prompt, the answer's shape, the note, and the one blocking
-//! task that writes it and moves the session's episode cursor — the same
-//! at-least-once shape as learning's store-and-advance (design 09 §1.4).
+//! since the session's last summary, at a conversation's close: a quiet
+//! period of 30 minutes, a switch of conversation, the stop drain and its
+//! boot catch-up). This module is **what**: the note, **projected** from the
+//! conversation's working state with no model call (design 11 §3.4, owner
+//! decision CQ-2), and the one blocking task that writes it and moves the
+//! session's episode cursor — the same at-least-once shape as learning's
+//! store-and-advance (design 09 §1.4).
 //!
 //! The note:
 //! - title `Conversation on <YYYY-MM-DD>: <topic>`, the date the last turn's;
-//! - `## Knowledge`: what was discussed, decided and left open, at most
-//!   1 KiB of prose;
+//! - `## Knowledge`: what was discussed (the state's goal and what is done),
+//!   decided (its decisions) and left open (what is open, and its next
+//!   step), at most 1 KiB of prose;
 //! - `observed_at` the last turn's time; `sources` the window's message rows
 //!   (at most eight, spread from its first to its last — design 03 §7a's
 //!   cap on `sources`); no `fact_key`, no aliases, no `supersedes`;
@@ -21,74 +24,23 @@
 //!   ([`crate::memory::service::ExtractionProvenance::Summary`]).
 
 use super::EPISODE_MAX_KNOWLEDGE_BYTES;
-use super::extractor::{StoreEnd, fill_template, one_line, root_gone};
+use super::extractor::{StoreEnd, root_gone};
 use super::window::{LearnRow, RowKind};
 use crate::memory::service::{
     ExtractionProvenance, MemoryAccessContext, MemoryError, MemoryService, StoreInput,
 };
+use crate::orchestrator::working_state::WorkingState;
 use chrono::{DateTime, NaiveDateTime, Utc};
-use openalpaca_llm::{ChatMessage, RequestContext, RouterRequest};
 use openalpaca_storage::memory_files::{Dedup, MAX_SOURCES, NoteKind, NoteSource, SourceType};
 use openalpaca_storage::{ConversationRepository, Database, LearningCursorRepository};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// The usage label conversation summaries are billed and gated under: their
-/// own daily count (`episode_max_per_day`), and — summed with chat
-/// learning's — the extraction's daily caps (design 09 §13.3, §1.8).
-pub(crate) const EPISODE_LABEL: &str = "orchestrator_episode";
-
-/// The prompt, committed verbatim: the system text, a `=== user ===` line,
-/// then the user message's template (`the_episode_prompt_matches_its_fixture`).
-const PROMPT: &str = include_str!("episode_prompt.txt");
-const USER_MARKER: &str = "=== user ===\n";
 /// A topic is cut to this many characters, so the title stays one short line.
 const MAX_TOPIC_CHARS: usize = 60;
 
-/// The system text and the rendered user message.
-pub(crate) fn render_prompt(today: &str, conversation: &str) -> (String, String) {
-    let (system, template) = PROMPT
-        .split_once(USER_MARKER)
-        .expect("episode_prompt.txt has a `=== user ===` line");
-    let user = fill_template(template, |name| match name {
-        "today" => Some(today),
-        "conversation" => Some(conversation),
-        _ => None,
-    });
-    (system.trim_end().to_string(), user.trim_end().to_string())
-}
-
-/// One episode's request: the fixture's prompt, `thinking: Disabled` (M2),
-/// temperature 0, no caching and no fallbacks — as learning's.
-pub(crate) fn build_request(
-    today: &str,
-    conversation: &str,
-    out_tokens: u32,
-    model: Option<String>,
-) -> RouterRequest {
-    let (system, user) = render_prompt(today, conversation);
-    RouterRequest {
-        model,
-        messages: Arc::new(vec![ChatMessage::system(&system), ChatMessage::user(&user)]),
-        tools: Arc::new(vec![]),
-        temperature: Some(0.0),
-        max_tokens: Some(out_tokens),
-        context: RequestContext {
-            agent_id: Some(EPISODE_LABEL.to_string()),
-            task_id: None,
-        },
-        tool_choice: None,
-        tools_token_estimate: None,
-        enable_caching: false,
-        thinking: Some(openalpaca_llm::ThinkingConfig::Disabled),
-        context_management: None,
-        fallback_models: Vec::new(),
-        ephemeral_system_notice: None,
-    }
-}
-
-/// What the model answered, cleaned: one line each; `decided` and `open`
-/// empty when nothing was.
+/// What the note says, one line each: the projection of a working state
+/// ([`project`]). `decided` and `open` are empty when nothing was.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Summary {
     pub topic: String,
@@ -97,68 +49,41 @@ pub(crate) struct Summary {
     pub open: String,
 }
 
-/// A value that says there is nothing: the model was told to answer `""`,
-/// and small models answer "none" as often.
-fn says_nothing(text: &str) -> bool {
-    let t = text
-        .trim()
-        .trim_end_matches(['.', '。'])
-        .trim()
-        .to_lowercase();
-    matches!(
-        t.as_str(),
-        "" | "none" | "nothing" | "n/a" | "na" | "-" | "—" | "null" | "无" | "没有" | "暂无"
-    )
-}
-
-/// The answer must be one JSON object whose `topic` and `discussed` are
-/// non-empty strings; `decided` and `open` are optional strings. Anything
-/// else is `Err` — a reachable model's unusable answer (ruling LR20). Owner
-/// decision LQ13 (2026-09-26): the object is read out of a `<think>` block or
-/// prose around it, as [`crate::memory::task_extraction::parse_json_answer`]
-/// reads it.
-pub(crate) fn parse_summary(content: &str) -> Result<Summary, String> {
-    summary_of(crate::memory::task_extraction::parse_json_answer(
-        content,
-        |v| v.get("topic").is_some() || v.get("discussed").is_some(),
-    ))
-}
-
-/// [`parse_summary`] for an answer the model stopped at its output ceiling:
-/// the forms read before LQ13 only, so a cut answer is reported as cut and
-/// never rescued in part (the L8 fix slice's P1).
-pub(crate) fn parse_cut_summary(content: &str) -> Result<Summary, String> {
-    summary_of(crate::memory::task_extraction::parse_json_strict(content))
-}
-
-fn summary_of(value: Option<serde_json::Value>) -> Result<Summary, String> {
-    let Some(value) = value else {
-        return Err("the answer is not JSON".to_string());
+/// The working state as the note's lines (design 11 §3.4): the topic;
+/// `Discussed:` its goal and what is done; `Decided:` its decisions; `Left
+/// open:` what is open and `Next: <next>`. Items are joined with `; `. A
+/// state with no goal and nothing done is discussed by its topic, so the
+/// note never says it discussed nothing.
+pub(crate) fn project(state: &WorkingState) -> Summary {
+    let join = |items: Vec<&str>| {
+        items
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("; ")
     };
-    if !value.is_object() {
-        return Err("the answer is not one JSON object".to_string());
+    let mut discussed = join(
+        std::iter::once(state.goal.as_str())
+            .chain(state.done.iter().map(String::as_str))
+            .collect(),
+    );
+    if discussed.is_empty() {
+        discussed = state.topic.clone();
     }
-    let text = |key: &str| -> Result<String, String> {
-        match value.get(key) {
-            None | Some(serde_json::Value::Null) => Ok(String::new()),
-            Some(serde_json::Value::String(s)) => Ok(one_line(s)),
-            Some(_) => Err(format!("`{key}` is not a string")),
-        }
-    };
-    let topic = text("topic")?;
-    let discussed = text("discussed")?;
-    if says_nothing(&topic) || says_nothing(&discussed) {
-        return Err("the answer names no topic or nothing discussed".to_string());
-    }
-    let decided = text("decided")?;
-    let open = text("open")?;
-    let keep = |s: String| if says_nothing(&s) { String::new() } else { s };
-    Ok(Summary {
-        topic,
+    let next = (!state.next.is_empty()).then(|| format!("Next: {}", state.next));
+    Summary {
+        topic: state.topic.clone(),
         discussed,
-        decided: keep(decided),
-        open: keep(open),
-    })
+        decided: join(state.decisions.iter().map(String::as_str).collect()),
+        open: join(
+            state
+                .open
+                .iter()
+                .map(String::as_str)
+                .chain(next.as_deref())
+                .collect(),
+        ),
+    }
 }
 
 /// `Conversation on <YYYY-MM-DD>: <topic>`, the topic cut to 60 characters.
@@ -248,15 +173,17 @@ pub(crate) fn sources(rows: &[LearnRow]) -> Vec<NoteSource> {
         .collect()
 }
 
-/// What the note is made of.
-pub(crate) fn store_input(summary: &Summary, rows: &[LearnRow], today: &str) -> StoreInput {
+/// What the note is made of: the working state's projection over the
+/// window's rows.
+pub(crate) fn store_input(state: &WorkingState, rows: &[LearnRow], today: &str) -> StoreInput {
+    let summary = project(state);
     let observed = observed_at(rows);
     let date = observed
         .map(|t| t.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| today.to_string());
     let title = title(&date, &summary.topic);
     StoreInput {
-        body: body(&title, &knowledge(summary), &date, user_turns(rows)),
+        body: body(&title, &knowledge(&summary), &date, user_turns(rows)),
         title,
         kind: Some(NoteKind::Episode),
         sources: sources(rows),
@@ -276,8 +203,8 @@ pub(crate) enum EpisodeWrite {
     /// The service refused it — a cited row deleted since the window was
     /// read, say. Nothing was written; the cursor still moves.
     Refused,
-    /// Not attempted: the window's project directory was deleted while the
-    /// model wrote the summary ([`StoreEnd::RootGone`]).
+    /// Not attempted: the window's project directory was deleted since it
+    /// was checked ([`StoreEnd::RootGone`]).
     NotAttempted,
 }
 
@@ -295,11 +222,11 @@ pub(crate) struct EpisodeJob {
     pub hooks: super::queue::StoreHooks,
 }
 
-/// The write and the episode cursor's advance, as **one** blocking task:
-/// a cancellation after the model answered cannot separate them (design 09
-/// §1.4's shape). A session deleted since the window was read gets nothing
-/// (LQ4), and so does a project directory deleted while the model wrote:
-/// the window is skipped as the check before the call skips it, and the
+/// The write, the session's `episode_note_id` and the episode cursor's
+/// advance, as **one** blocking task: a cancellation cannot separate them
+/// (design 09 §1.4's shape). A session deleted since the window was read gets
+/// nothing (LQ4), and so does a project directory deleted since the checks
+/// before the write: the window is skipped as those checks skip it, and the
 /// summary's write never re-creates the directory.
 pub(crate) fn store_and_advance(job: EpisodeJob) -> (EpisodeWrite, StoreEnd) {
     match ConversationRepository::new(&job.db).get_session(&job.session_id) {
@@ -323,8 +250,23 @@ pub(crate) fn store_and_advance(job: EpisodeJob) -> (EpisodeWrite, StoreEnd) {
         return (EpisodeWrite::NotAttempted, end);
     }
     let written = match job.service.store(&job.ctx, job.input) {
-        Ok(out) if out.dedup == Dedup::Existing => EpisodeWrite::Existing,
-        Ok(_) => EpisodeWrite::Written,
+        Ok(out) => {
+            // Design 11 §2: the session names the summary last projected from
+            // its state (a byte-identical one there already included).
+            if let Err(e) = ConversationRepository::new(&job.db)
+                .set_episode_note_id(&job.session_id, &out.id.to_string())
+            {
+                tracing::warn!(
+                    session_id = %job.session_id,
+                    "conversation summary: its id was not recorded on the session: {e:#}"
+                );
+            }
+            if out.dedup == Dedup::Existing {
+                EpisodeWrite::Existing
+            } else {
+                EpisodeWrite::Written
+            }
+        }
         Err(e @ (MemoryError::Internal(_) | MemoryError::Quarantined { .. })) => {
             return (EpisodeWrite::Refused, StoreEnd::Held(e.to_string()));
         }
@@ -386,73 +328,54 @@ mod tests {
         }
     }
 
+    /// Design 11 §3.4: the note's lines come from the working state —
+    /// `Discussed:` its goal and what is done, `Decided:` its decisions,
+    /// `Left open:` what is open and its next step — with no model call.
     #[test]
-    fn the_answer_needs_a_topic_and_what_was_discussed() {
-        let s = parse_summary(
-            r#"{"topic": "Lisbon  trip", "discussed": "Flights\nand hotels.", "decided": "none", "open": ""}"#,
-        )
-        .unwrap();
+    fn the_note_is_projected_from_the_working_state() {
+        let state = WorkingState {
+            v: 1,
+            topic: "Lisbon trip".into(),
+            goal: "Book flights and a hotel".into(),
+            done: vec!["Friday flight booked".into(), "Budget set".into()],
+            decisions: vec!["Alfama, not Baixa".into()],
+            open: vec!["Which museum pass".into()],
+            next: "Compare three hotels".into(),
+            refs: vec!["task 1a2b3c4d".into()],
+        };
+        let summary = project(&state);
         assert_eq!(
-            s,
+            summary,
             Summary {
                 topic: "Lisbon trip".into(),
-                discussed: "Flights and hotels.".into(),
-                decided: String::new(),
-                open: String::new(),
+                discussed: "Book flights and a hotel; Friday flight booked; Budget set".into(),
+                decided: "Alfama, not Baixa".into(),
+                open: "Which museum pass; Next: Compare three hotels".into(),
             }
         );
-        for bad in [
-            "not json",
-            r#"["a list"]"#,
-            r#"{"topic": "", "discussed": "x"}"#,
-            r#"{"topic": "x", "discussed": "none"}"#,
-            r#"{"topic": "x", "discussed": 3}"#,
-        ] {
-            assert!(parse_summary(bad).is_err(), "{bad}");
-        }
-    }
+        assert_eq!(
+            knowledge(&summary),
+            "Discussed: Book flights and a hotel; Friday flight booked; Budget set\n\
+             Decided: Alfama, not Baixa\n\
+             Left open: Which museum pass; Next: Compare three hotels"
+        );
 
-    /// LQ13 (the L8 product slice's P3): a summary behind a `<think>` block,
-    /// before a trailing `</think>` or inside prose is read; a truncated one
-    /// and one of the wrong shape still fail.
-    #[test]
-    fn a_summary_wrapped_in_thinking_or_prose_is_read() {
-        let summary = r#"{"topic": "Lisbon trip", "discussed": "Flights and hotels."}"#;
-        for answer in [
-            format!("<think>\nA trip. Draft: {{\"topic\": \"\"}}\n</think>\n{summary}"),
-            format!("{summary}\n</think>"),
-            format!("Here is the summary:\n{summary}\nThat is all."),
-        ] {
-            let s = parse_summary(&answer).unwrap_or_else(|e| panic!("{answer}: {e}"));
-            assert_eq!(s.topic, "Lisbon trip", "{answer}");
-        }
-        for bad in [
-            r#"Here: {"topic": "Lisbon trip", "discussed": "Flights"#,
-            r#"Here: ["Lisbon trip"] and {"note": 1}"#,
-        ] {
-            assert!(parse_summary(bad).is_err(), "{bad}");
-        }
-    }
-
-    /// A summary whose own text quotes the tags is read (repair round 2 of
-    /// the L8 product slice): a `<think>` or `</think>` inside the JSON is
-    /// text, not a marker — fenced, after a prose lead, or after the
-    /// model's reasoning — as the reader before LQ13 read it. A
-    /// conversation about stripping those tags is the one most likely to
-    /// quote them.
-    #[test]
-    fn a_summary_that_quotes_the_think_tags_is_read() {
-        let summary = r#"{"topic": "Hiding <think> blocks", "discussed": "How to strip </think> from a local model's answer."}"#;
-        for answer in [
-            format!("```json\n{summary}\n```"),
-            format!("Here is the summary:\n```json\n{summary}\n```"),
-            format!("<think>ok</think>\n```json\n{summary}\n```"),
-            format!("Here is the summary: {summary}"),
-        ] {
-            let s = parse_summary(&answer).unwrap_or_else(|e| panic!("{answer}: {e}"));
-            assert_eq!(s.topic, "Hiding <think> blocks", "{answer}");
-        }
-        assert!(parse_summary(&format!("<think>Draft: {summary}")).is_err());
+        // Nothing decided, open or next: those lines go; no goal and nothing
+        // done: the topic is what was discussed.
+        let bare = WorkingState {
+            goal: String::new(),
+            done: Vec::new(),
+            decisions: Vec::new(),
+            open: Vec::new(),
+            next: String::new(),
+            ..state.clone()
+        };
+        assert_eq!(knowledge(&project(&bare)), "Discussed: Lisbon trip");
+        let only_next = WorkingState {
+            next: "Pick a date".into(),
+            ..bare
+        };
+        assert_eq!(project(&only_next).open, "Next: Pick a date");
     }
 
     #[test]

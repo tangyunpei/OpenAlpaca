@@ -149,7 +149,8 @@ impl<'a> LearningCursorRepository<'a> {
     /// cursor — the conversation summaries' boot catch-up (design 09 §13.3,
     /// the durable half of the stop drain as §1.5 makes it for learning): a
     /// user row a turn wrote, not the assistant's own follow-up text and not
-    /// a `/slash` turn. The flush counts again, exactly, before it calls.
+    /// a `/slash` turn. The close (design 11 §2) counts again, exactly,
+    /// before it projects a summary.
     pub fn sessions_with_unsummarized_turns(&self, min_turns: u32) -> Result<Vec<String>> {
         self.db.with_connection(|conn| {
             let ids = conn

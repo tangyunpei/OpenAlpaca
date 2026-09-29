@@ -7,7 +7,8 @@
 //! One prompt writes it ([`update`], `working_state_prompt.txt`), one
 //! parser reads the model's answer ([`WorkingState::parse`]), and it reaches a
 //! model only as quoted reference data ([`WorkingState::render`]). The turn
-//! end writes it to the session row ([`after_turn`]).
+//! end writes it to the session row ([`after_turn`]), and so does a
+//! conversation's close (`memory::learning`'s queue).
 
 use super::ConversationContext;
 use crate::daemon_config::DaemonConfig;
@@ -399,8 +400,9 @@ pub(crate) async fn call(
 
 /// The writer call's `llm_usage` row, under [`USAGE_LABEL`] and no task:
 /// what `restore_cost_tracker` rebuilds the summariser's daily spend from
-/// after a restart, and what `GET /v1/settings/llm/usage` lists.
-fn record_usage(
+/// after a restart, and what `GET /v1/settings/llm/usage` lists. The close
+/// records its call through it too (`memory::learning`).
+pub(crate) fn record_usage(
     db: &Database,
     router: &LlmRouter,
     response: &ChatResponse,
@@ -440,8 +442,9 @@ fn record_usage(
 
 /// Writes `state` to the session row while it holds `version`; on a
 /// conflict it re-reads the version and tries once more. The version the
-/// row holds after the write, or `None` when it did not land.
-fn write(
+/// row holds after the write, or `None` when it did not land. The turn end
+/// and the close (`memory::learning`) write through it.
+pub(crate) fn write(
     db: &Database,
     session_id: &str,
     version: i64,

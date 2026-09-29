@@ -275,6 +275,32 @@ fn the_working_state_write_addresses_its_session_not_the_lane() {
     assert_eq!(second.working_state_through, 0);
 }
 
+/// The close records the episode note it projected (design 11 §2) on the
+/// session it closed — archived or not — and nowhere else.
+#[test]
+fn the_episode_note_id_is_written_to_its_session() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let first = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
+    assert_eq!(first.episode_note_id, None);
+    let second = repo.create_session("user1:gui", "gui", None, None).unwrap();
+
+    repo.set_episode_note_id(&first.id, "55e811b6-3220-4758-a47b-034bd1023f38")
+        .unwrap();
+
+    let first = repo.get_session(&first.id).unwrap().unwrap();
+    assert_eq!(first.status, "archived");
+    assert_eq!(
+        first.episode_note_id.as_deref(),
+        Some("55e811b6-3220-4758-a47b-034bd1023f38")
+    );
+    let second = repo.get_session(&second.id).unwrap().unwrap();
+    assert_eq!(second.episode_note_id, None);
+}
+
 #[test]
 fn test_clear_summary() {
     let db = test_db();
