@@ -866,11 +866,23 @@ impl Orchestrator {
                 &ctx.older_window,
                 composed.messages.len(),
             );
+            let mut writer = crate::orchestrator::working_state::WriterConfig::new(
+                &self.daemon_config.load(),
+                self.db.clone(),
+            );
+            // Rev 1.7 (F2): a compaction's writer reads the previous
+            // conversation this turn was given as carried, as the close and
+            // the lag refresh do — the block itself stands at `messages[1]`,
+            // which a compaction keeps and does not read.
+            writer.carried = ctx
+                .previous
+                .as_ref()
+                .and_then(|previous| previous.state.as_deref())
+                .map(|state| {
+                    crate::orchestrator::working_state::carried_text(state, writer.max_chars)
+                });
             let config_for_loop = LoopConfig {
-                writer: crate::orchestrator::working_state::WriterConfig::new(
-                    &self.daemon_config.load(),
-                    self.db.clone(),
-                ),
+                writer,
                 working_state: ctx.working_state.clone(),
                 working_state_cursor: Some(cursor.clone()),
                 ..config_for_loop

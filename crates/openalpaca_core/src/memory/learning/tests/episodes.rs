@@ -168,6 +168,136 @@ async fn the_refresh_reads_up_to_a_turn_in_flight() {
     drop(turn);
 }
 
+// ── What the previous conversation carried (design 11 rev 1.7, F2) ────────
+
+/// A writer that follows the prompt's rule 8 as the prompt lets it: it
+/// records the conversation's own lines as done, and leaves out a line that
+/// names what the section under the carried heading is about — unless a
+/// `[user]` line names it too. What it can leave out is what the rendered
+/// prompt tells apart.
+fn a_writer_keeping_to_rule_8(prompt: &str) -> String {
+    use crate::orchestrator::working_state::CARRIED_HEADING;
+    let lines = prompt
+        .split_once("<new_lines>\n")
+        .and_then(|(_, rest)| rest.split_once("\n</new_lines>"))
+        .map_or("", |(lines, _)| lines);
+    let (mut carried, mut own, mut in_carried) = (None, Vec::new(), false);
+    for line in lines.lines() {
+        if line == CARRIED_HEADING {
+            in_carried = true;
+        } else if line.starts_with("[user]: ") || line.starts_with("[assistant]: ") {
+            in_carried = false;
+            own.push(line);
+        } else if in_carried && let Some(topic) = line.strip_prefix("Topic: ") {
+            carried = topic.split_whitespace().next().map(str::to_string);
+        }
+    }
+    let taken_up = |name: &str| {
+        own.iter()
+            .any(|l| l.starts_with("[user]: ") && l.contains(name))
+    };
+    let done: Vec<&str> = own
+        .iter()
+        .filter(|l| match &carried {
+            Some(name) => !l.contains(name.as_str()) || taken_up(name),
+            None => true,
+        })
+        .filter_map(|l| l.split_once(": ").map(|(_, text)| text))
+        .collect();
+    serde_json::json!({"topic": "This conversation", "done": done}).to_string()
+}
+
+/// A conversation about Tomas's birthday with its working state, the
+/// lane's active one until the next is created.
+fn the_birthday_conversation(scene: &Scene) {
+    let previous = scene.session();
+    let birthday = WorkingState {
+        topic: "Tomas birthday plan".into(),
+        goal: "Plan Tomas's birthday dinner.".into(),
+        open: vec!["Which restaurant to book.".into()],
+        ..trip()
+    };
+    assert!(
+        scene
+            .repo()
+            .update_working_state(&previous, 0, &serde_json::to_string(&birthday).unwrap(), 0)
+            .unwrap()
+    );
+}
+
+/// Design 11 rev 1.7 (F2; 12 §6.1): at the close — after a switch, when
+/// the conversation is itself the lane's newest closed one — a conversation
+/// that was given the previous one reads that conversation's state first,
+/// under the carried heading, and the prompt says what the heading means;
+/// so what reached the conversation only through it (here the assistant's
+/// offer about the birthday) stays out of its state, while what the user
+/// took up in their own turns goes in.
+#[tokio::test]
+async fn the_close_leaves_out_what_came_only_through_the_carried_conversation() {
+    for (user, taken_up) in [
+        ("Set up my vim config.", false),
+        ("Let's keep planning Tomas's birthday.", true),
+    ] {
+        let scene = Scene::new(vec![Say::Reply(a_writer_keeping_to_rule_8)]);
+        the_birthday_conversation(&scene);
+        let s = scene.session(); // "New chat": given the birthday conversation.
+        scene.turn(
+            &s,
+            user,
+            "Done. For Tomas's birthday, shall I book the venue?",
+        );
+        scene.session(); // A switch closes it: the lane's newest closed one.
+
+        let report = scene.queue.flush_episodes(&s).await;
+        assert_eq!(report.calls, 1, "{report:?}");
+        let prompt = scene.model.prompts().remove(0);
+        assert!(
+            prompt.contains(
+                "<new_lines>\n[carried from the previous conversation — not this \
+                 conversation's work unless the user continued it]\n\
+                 Topic: Tomas birthday plan\n"
+            ),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "8. A block or section marked as carried from the previous conversation is \
+                 not this conversation's work: leave out what reached this conversation only \
+                 through it."
+            ),
+            "{prompt}"
+        );
+        let state = state_on_row(&scene, &s).expect("the state landed");
+        assert_eq!(
+            state.done.iter().any(|d| d.contains("Tomas")),
+            taken_up,
+            "{user}: {state:?}"
+        );
+    }
+}
+
+/// A conversation started fresh (`inherit: false`) was given nothing, so
+/// its close reads nothing carried.
+#[tokio::test]
+async fn a_conversation_started_fresh_reads_nothing_carried_at_its_close() {
+    let scene = Scene::new(vec![trip_state()]);
+    the_birthday_conversation(&scene);
+    let fresh = scene
+        .repo()
+        .create_session_inheriting(LANE, "gui", None, None, false)
+        .unwrap()
+        .id;
+    scene.turn(&fresh, TURNS[0], "Answer 0.");
+
+    let report = scene.queue.flush_episodes(&fresh).await;
+    assert_eq!(report.calls, 1, "{report:?}");
+    let prompt = scene.model.prompts().remove(0);
+    assert!(
+        !prompt.contains("[carried from the previous conversation"),
+        "{prompt}"
+    );
+}
+
 // ── The note (§13.3, *What*, *Authority and visibility*) ──────────────────
 
 /// "Only when at least 4 user turns have accumulated since the session's

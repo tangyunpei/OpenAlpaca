@@ -421,6 +421,73 @@ fn the_previous_session_is_the_lanes_last_closed_one_in_the_same_workspace() {
     );
 }
 
+/// Design 11 rev 1.7 (F2): the conversation a session was given as its
+/// previous one is the same whether the session is still active or closed
+/// since — never the session itself, once it is archived, and never one
+/// created after it or closed after it began.
+#[test]
+fn a_sessions_previous_one_is_the_same_before_and_after_its_close() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let lane = "user1:gui";
+    let first = repo
+        .create_session(lane, "gui", None, Some("first"))
+        .unwrap();
+    let before = repo
+        .create_session(lane, "gui", None, Some("before"))
+        .unwrap();
+    let session = repo
+        .create_session(lane, "gui", None, Some("session"))
+        .unwrap();
+    let set = |id: &str, column: &str, at: &str| {
+        db.with_connection(|c| {
+            c.execute(
+                &format!("UPDATE session SET {column} = ?1 WHERE id = ?2"),
+                rusqlite::params![at, id],
+            )?;
+            Ok(())
+        })
+        .unwrap()
+    };
+    set(&first.id, "ended_at", "2026-09-28 09:00:00");
+    set(&before.id, "ended_at", "2026-09-28 10:00:00");
+    set(&session.id, "created_at", "2026-09-28 10:00:00");
+    let previous_of = |id: &str| {
+        let row = repo.get_session(id).unwrap().unwrap();
+        repo.previous_session_of(&row).unwrap().map(|s| s.title)
+    };
+    assert_eq!(
+        previous_of(&session.id).as_deref(),
+        Some("before"),
+        "active"
+    );
+
+    // Closed by the next conversation: still the same one, not itself.
+    let after = repo
+        .create_session(lane, "gui", None, Some("after"))
+        .unwrap();
+    set(&session.id, "ended_at", "2026-09-28 11:00:00");
+    assert_eq!(
+        previous_of(&session.id).as_deref(),
+        Some("before"),
+        "closed"
+    );
+    assert_eq!(
+        repo.previous_session(lane, None)
+            .unwrap()
+            .map(|s| s.title)
+            .as_deref(),
+        Some("session"),
+        "the lane's newest archived one is the session itself"
+    );
+
+    // `first` re-opened and closed after the session began: not it either.
+    set(&first.id, "ended_at", "2026-09-28 12:00:00");
+    assert_eq!(previous_of(&session.id).as_deref(), Some("before"));
+    assert_eq!(previous_of(&after.id).as_deref(), Some("first"));
+    assert_eq!(previous_of(&first.id), None, "nothing before the first");
+}
+
 #[test]
 fn test_clear_summary() {
     let db = test_db();

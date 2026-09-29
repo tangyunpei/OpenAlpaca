@@ -53,6 +53,11 @@ pub(crate) const PREVIOUS_BLOCK_PREFIX: &str = "<context_data type=\"previous_co
 /// many characters (design 11 §4 (b)).
 pub(crate) const EXCHANGE_MAX_CHARS: usize = 400;
 
+/// The heading the writer reads the previous conversation's state under,
+/// ahead of a conversation's own lines (design 11 rev 1.7, F2): what came
+/// only through the carry-over is not this conversation's work.
+pub(crate) const CARRIED_HEADING: &str = "[carried from the previous conversation — not this conversation's work unless the user continued it]";
+
 /// The writer's prompt, committed verbatim: the system text, a `=== user ===`
 /// line, then the user message's template
 /// (`the_working_state_prompt_matches_its_fixture`).
@@ -125,19 +130,23 @@ pub struct TranscriptLine<'a> {
 /// lines — `[role]: text`, each cut to `msg_trunc_chars` characters — in the
 /// working-state prompt, on `model` (`[orchestrator.costs] summary_model`;
 /// `None` is the router's default), at temperature 0, within [`MAX_TOKENS`],
-/// asking for no reasoning (M2), under [`USAGE_LABEL`].
+/// asking for no reasoning (M2), under [`USAGE_LABEL`]. `carried` — the
+/// previous conversation's state under [`CARRIED_HEADING`] ([`carried`]) —
+/// goes ahead of the lines (rev 1.7, F2).
 pub fn update(
     previous: Option<&WorkingState>,
+    carried: Option<&str>,
     lines: &[TranscriptLine<'_>],
     model: Option<String>,
     msg_trunc_chars: usize,
 ) -> RouterRequest {
-    let lines = lines
-        .iter()
-        .map(|line| {
+    let lines = carried
+        .map(str::to_string)
+        .into_iter()
+        .chain(lines.iter().map(|line| {
             let text: String = line.text.chars().take(msg_trunc_chars).collect();
             format!("[{}]: {text}", line.role)
-        })
+        }))
         .collect::<Vec<_>>()
         .join("\n");
     let (system, user) = render_prompt(previous, &lines);
@@ -177,6 +186,10 @@ pub struct WriterConfig {
     pub msg_trunc_chars: usize,
     pub max_chars: usize,
     pub db: Option<Database>,
+    /// The previous conversation's state under [`CARRIED_HEADING`], when
+    /// the loop's request carries its block (the main loop sets it; rev
+    /// 1.7, F2): read ahead of the older messages, in place of the block.
+    pub carried: Option<String>,
 }
 
 impl WriterConfig {
@@ -197,6 +210,7 @@ impl WriterConfig {
             msg_trunc_chars: memory.msg_trunc_chars,
             max_chars: memory.summary_max_chars,
             db: None,
+            carried: None,
         }
     }
 }
@@ -215,6 +229,7 @@ impl std::fmt::Debug for WriterConfig {
             .field("msg_trunc_chars", &self.msg_trunc_chars)
             .field("max_chars", &self.max_chars)
             .field("db", &self.db.is_some())
+            .field("carried", &self.carried.is_some())
             .finish()
     }
 }
@@ -370,8 +385,20 @@ pub(super) async fn after_turn(
             text: content,
         })
         .collect();
+    // Rev 1.7 (F2): what the conversation was given from the previous one,
+    // labelled, so the writer can leave out what came only through it.
+    let carried = match ConversationRepository::new(&db).get_session(&session_id) {
+        Ok(Some(session)) => carried(
+            &db,
+            &session,
+            dcfg.orchestrator.memory.carry_over_turns,
+            dcfg.orchestrator.memory.summary_max_chars,
+        ),
+        _ => None,
+    };
     let request = update(
         ctx.working_state.as_deref(),
+        carried.as_deref(),
         &lines,
         dcfg.orchestrator.costs.summary_model.clone(),
         dcfg.orchestrator.memory.msg_trunc_chars,
@@ -591,6 +618,43 @@ impl PreviousConversation {
         };
         format!("{head}{exchange}")
     }
+}
+
+/// The previous conversation's state as the writer reads it ahead of a
+/// conversation's own lines (design 11 rev 1.7, F2): its fields under
+/// [`CARRIED_HEADING`], cut to `max_chars` as the delivered block's are.
+pub(crate) fn carried_text(state: &WorkingState, max_chars: usize) -> String {
+    state.text_headed(CARRIED_HEADING, max_chars)
+}
+
+/// What the close and the lag refresh hand the writer as carried (F2): the
+/// state of the conversation `session` was given as its previous one
+/// ([`ConversationRepository::previous_session_of`]) — only when `session`
+/// inherits (not started fresh) and the carry-over is on
+/// (`carry_over_turns` > 0), since otherwise it was given nothing. `None`
+/// when that conversation has no state; a failed read is logged and carries
+/// nothing.
+pub(crate) fn carried(
+    db: &Database,
+    session: &openalpaca_storage::Conversation,
+    carry_over_turns: usize,
+    max_chars: usize,
+) -> Option<String> {
+    if !session.inherit || carry_over_turns == 0 {
+        return None;
+    }
+    let previous = match ConversationRepository::new(db).previous_session_of(session) {
+        Ok(previous) => previous?,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session.id,
+                "working state: the previous conversation could not be read: {e}"
+            );
+            return None;
+        }
+    };
+    let state = stored(&previous.working_state, &previous.id)?;
+    Some(carried_text(&state, max_chars))
 }
 
 /// `text` cut to [`EXCHANGE_MAX_CHARS`] characters, the cut marked `…`.
@@ -1732,6 +1796,81 @@ mod tests {
             calls[0].error_message.as_deref(),
             Some("the answer is not JSON")
         );
+    }
+
+    /// The previous conversation `P` with a state, and a new conversation on
+    /// the lane — inheriting or started fresh — that closed it.
+    fn after_a_carried_conversation(db: &Database, inherit: bool) -> (String, WorkingState) {
+        let repo = ConversationRepository::new(db);
+        let previous = repo.create_session(LANE, "cli", None, Some("P")).unwrap();
+        let carried = WorkingState {
+            topic: "Tomas birthday plan".into(),
+            goal: "Plan Tomas's birthday dinner".into(),
+            open: vec!["Which restaurant to book".into()],
+            ..lisbon()
+        };
+        assert!(
+            repo.update_working_state(
+                &previous.id,
+                0,
+                &serde_json::to_string(&carried).unwrap(),
+                0
+            )
+            .unwrap()
+        );
+        let session = repo
+            .create_session_inheriting(LANE, "cli", None, Some("S"), inherit)
+            .unwrap();
+        (session.id, carried)
+    }
+
+    /// Design 11 rev 1.7 (F2): the lag refresh of a conversation that was
+    /// given the previous one reads that conversation's state first, under
+    /// the carried heading and ahead of its own lines, and the prompt says
+    /// what the heading means; a conversation started fresh, or one on an
+    /// install with the carry-over off, is handed nothing carried.
+    #[tokio::test]
+    async fn the_lag_refresh_reads_the_previous_conversation_labelled_as_carried() {
+        for (inherit, carry_over_turns, carries) in
+            [(true, 3, true), (false, 3, false), (true, 0, false)]
+        {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let db = Database::open(&dir.path().join("t.db")).expect("db");
+            let (session, previous) = after_a_carried_conversation(&db, inherit);
+            let provider = RecordingProvider::new(serde_json::to_string(&lisbon()).unwrap());
+            let router = router_recording(provider.clone());
+            let mut cfg = DaemonConfig::default();
+            cfg.orchestrator.memory.carry_over_turns = carry_over_turns;
+
+            run(
+                &db,
+                &router,
+                cfg,
+                &Arc::new(DashMap::new()),
+                turn(&session, &rows(12)),
+                None,
+            )
+            .await;
+
+            let user = provider.first_request().messages[1].content.clone();
+            let section = carried_text(&previous, 4000);
+            assert!(section.starts_with(CARRIED_HEADING), "{section}");
+            assert!(section.contains("Topic: Tomas birthday plan"), "{section}");
+            assert_eq!(
+                user.contains(&format!("<new_lines>\n{section}\n[user]: ")),
+                carries,
+                "inherit {inherit}, carry_over_turns {carry_over_turns}: {user}"
+            );
+            assert_eq!(user.contains(CARRIED_HEADING), carries, "{user}");
+            assert!(
+                user.contains(
+                    "8. A block or section marked as carried from the previous conversation is \
+                     not this conversation's work: leave out what reached this conversation \
+                     only through it."
+                ),
+                "{user}"
+            );
+        }
     }
 
     /// The state a compacting turn wrote reaches the row with no call — the

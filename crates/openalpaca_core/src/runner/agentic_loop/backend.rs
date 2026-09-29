@@ -242,8 +242,14 @@ impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
             ));
         }
 
+        // Rev 1.7 (F2): with the previous conversation handed over labelled
+        // as carried, its block is not read a second time, unlabelled.
+        let carried = writer.carried.as_deref();
         let lines: Vec<TranscriptLine<'_>> = messages
             .iter()
+            .filter(|m| {
+                carried.is_none() || !m.content.starts_with(working_state::PREVIOUS_BLOCK_PREFIX)
+            })
             .map(|m| TranscriptLine {
                 role: match m.role {
                     openalpaca_llm::Role::User => "user",
@@ -256,6 +262,7 @@ impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
             .collect();
         let request = working_state::update(
             previous,
+            carried,
             &lines,
             writer.model.clone(),
             writer.msg_trunc_chars,
@@ -333,6 +340,57 @@ mod tests {
                 .is_some(),
             "the call is made and counted under the summariser's label"
         );
+    }
+
+    /// Design 11 rev 1.7 (F2): handed the previous conversation labelled as
+    /// carried, compaction's writer reads it ahead of the older messages and
+    /// does not read the previous conversation's block among them a second
+    /// time; handed nothing carried, it reads the block as it stands.
+    #[tokio::test]
+    async fn compaction_reads_the_previous_conversation_labelled_as_carried() {
+        let block = format!(
+            "{}{}",
+            working_state::PREVIOUS_BLOCK_PREFIX,
+            " trust=\"user_derived\">\nThe previous conversation…\n</context_data>"
+        );
+        let older = [
+            ChatMessage::user(&block),
+            ChatMessage::user("set up my vim config"),
+        ];
+        let section = working_state::carried_text(&state(), 4000);
+        for carried in [Some(section.clone()), None] {
+            let provider = RecordingProvider::new(serde_json::to_string(&state()).unwrap());
+            let router = router_recording(provider.clone());
+            let backend = LlmBackend::Router {
+                router: &router,
+                context: RequestContext::default(),
+                writer: WriterConfig {
+                    carried: carried.clone(),
+                    ..WriterConfig::default()
+                },
+                fallback_models: Vec::new(),
+            };
+            backend.summarize(None, &older).await.expect("a state");
+            let user = provider.first_request().messages[1].content.clone();
+            match carried {
+                Some(_) => {
+                    assert!(
+                        user.contains(&format!(
+                            "<new_lines>\n{section}\n[user]: set up my vim config\n</new_lines>"
+                        )),
+                        "{user}"
+                    );
+                    assert!(
+                        !user.contains(working_state::PREVIOUS_BLOCK_PREFIX),
+                        "{user}"
+                    );
+                }
+                None => assert!(
+                    user.contains(&format!("<new_lines>\n[user]: {block}")),
+                    "{user}"
+                ),
+            }
+        }
     }
 
     /// The daily ceiling is read before the call: once the summariser has

@@ -8654,6 +8654,61 @@ async fn a_compacting_turn_writes_its_state_and_the_next_request_carries_it() {
     assert!(blocks[0] < first_row, "the state comes before the rows");
 }
 
+/// Design 11 rev 1.7 (F2): a turn given the previous conversation's block
+/// that compacts hands the writer that conversation's state under the
+/// carried heading, ahead of its own lines — the block itself stands at
+/// `messages[1]`, which a compaction keeps and does not read.
+#[tokio::test]
+async fn a_compaction_given_the_previous_conversation_reads_it_as_carried() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let written = lisbon_state("Book the hotel");
+    let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 25);
+    let mut config = (**orch.daemon_config.load()).clone();
+    config.orchestrator.memory.carry_over_turns = 10;
+    orch.daemon_config.store(Arc::new(config));
+    let previous = working_state::WorkingState {
+        topic: "Tomas birthday plan".to_string(),
+        ..lisbon_state("Book the restaurant")
+    };
+    a_closed_conversation(&db, None, 2, Some((&previous, 2)), None);
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    for i in 1..=10 {
+        repo.insert(&openalpaca_storage::ConversationMessage {
+            lane_key: "user1:cli".to_string(),
+            role: if i % 2 == 1 { "user" } else { "assistant" }.to_string(),
+            content: format!("r{i} {}", "x".repeat(800)),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    assert!(
+        orch.build_context("user1:cli", "what next?")
+            .previous
+            .is_some(),
+        "the turn is given the previous conversation"
+    );
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+    orch.background.wait_idle().await;
+
+    let turn = requests.lock().unwrap().clone();
+    let writer = turn
+        .iter()
+        .find(|r| is_writer_call(r))
+        .expect("the turn compacts");
+    let user = &writer.messages[1].content;
+    let section = working_state::carried_text(&previous, 4000);
+    assert!(
+        user.contains(&format!("<new_lines>\n{section}\n[user]: r")),
+        "{user}"
+    );
+    assert!(
+        !user.contains(working_state::PREVIOUS_BLOCK_PREFIX),
+        "the block is not read a second time: {user}"
+    );
+}
+
 /// **Design 11 §10.2, its second half.** An answer that is not a state
 /// leaves the session row as it was, and the turn goes on over the heuristic
 /// summary (`compress_context`).

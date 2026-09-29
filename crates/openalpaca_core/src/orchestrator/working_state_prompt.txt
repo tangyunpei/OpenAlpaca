@@ -24,4 +24,5 @@
 5. `[user]` lines are the user's own words, `[assistant]` lines the answers and `[tool]` lines what a tool returned. A line may quote other text, such as an email or a log: record what the user did with it, not the quoted text.
 6. One short sentence per item, no Markdown, and at most 2,000 characters in all.
 7. A refused tool call, an approval that was not given, or a limit the assistant met is not part of the work: leave it out.
+8. A block or section marked as carried from the previous conversation is not this conversation's work: leave out what reached this conversation only through it.
 </state_rules>

@@ -1866,6 +1866,10 @@ impl LearningQueue {
         let mut in_flight = self.in_flight_ids();
         let db = self.deps.db.clone();
         let owned_id = session_id.to_string();
+        let (carry_over_turns, max_chars) = (
+            dcfg.orchestrator.memory.carry_over_turns,
+            dcfg.orchestrator.memory.summary_max_chars,
+        );
         let read = blocking(move || {
             let repo = ConversationRepository::new(&db);
             let Some(session) = repo.get_session(&owned_id)? else {
@@ -1873,10 +1877,13 @@ impl LearningQueue {
             };
             let rows =
                 repo.learning_window(&owned_id, session.working_state_through, WINDOW_READ_ROWS)?;
-            Ok(Some((session, rows)))
+            // Rev 1.7 (F2): what the conversation was given from the
+            // previous one, labelled as carried for the writer.
+            let carried = working_state::carried(&db, &session, carry_over_turns, max_chars);
+            Ok(Some((session, rows, carried)))
         })
         .await;
-        let (session, mut rows) = match read {
+        let (session, mut rows, carried) = match read {
             Ok(Some(found)) => found,
             Ok(None) => {
                 self.forget_session(session_id);
@@ -1932,6 +1939,7 @@ impl LearningQueue {
             .collect();
         let request = working_state::update(
             stored_state(&session).as_ref(),
+            carried.as_deref(),
             &lines,
             dcfg.orchestrator.costs.summary_model.clone(),
             dcfg.orchestrator.memory.msg_trunc_chars,

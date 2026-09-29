@@ -798,6 +798,35 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
+    /// The conversation `session` was given as its previous one (design 11
+    /// §4 (b); rev 1.7, F2): what [`Self::previous_session`] answered on its
+    /// lane and workspace while it was the active one — the newest session
+    /// archived by the time it was created, and created before it — whether
+    /// it is still active or has been closed since. The close reads it for a
+    /// session that is itself archived, which the lane's newest archived
+    /// session would be.
+    pub fn previous_session_of(&self, session: &Conversation) -> Result<Option<Conversation>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM session
+                 WHERE lane_key = ?1 AND status = 'archived' AND workspace_id IS ?2
+                   AND ended_at <= ?3
+                   AND rowid < (SELECT rowid FROM session WHERE id = ?4)
+                 ORDER BY ended_at DESC, rowid DESC LIMIT 1",
+            ))?;
+            let mut rows = stmt.query(rusqlite::params![
+                session.lane_key,
+                session.workspace_id,
+                session.created_at,
+                session.id
+            ])?;
+            match rows.next()? {
+                Some(row) => Ok(Some(Self::row_to_session(row)?)),
+                None => Ok(None),
+            }
+        })
+    }
+
     /// Get a session by ID.
     pub fn get_session(&self, id: &str) -> Result<Option<Conversation>> {
         self.db.with_connection(|conn| {
