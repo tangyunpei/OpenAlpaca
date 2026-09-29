@@ -282,12 +282,13 @@ from before 2026-09-28 against the store. Every build from 2026-09-21 on — the
 pre-redesign builds at schema 42 and the earlier Markdown-memory builds at 43
 to 45 — reads the new store's version 1 as older than its own baseline, refuses
 it as `Unsupported legacy schema version 1`, and tells you to delete the
-database: with `openalpaca config reset --factory` in a build from 2026-09-22
-on, by hand in one from the day before. Do not follow that advice — it deletes
-the new store. A build from before 2026-09-21 has no such check: it would take
-the store for its own version 1 and run its migrations 2 to 42 on it, so never
-run one against a store this build created. To go back, stop this build and run
-the older one against the copy you kept in step 1.
+database: with `openalpaca config reset --factory` in a build from commit
+`73a0698d` on (the evening of 2026-09-22), by hand in a build before it. Do not
+follow that advice — it deletes the new store. A build from before 2026-09-21
+has no such check: it would take the store for its own version 1 and run its
+migrations 2 to 42 on it, so never run one against a store this build created.
+To go back, stop this build and run the older one against the copy you kept in
+step 1.
 
 ## Run and Verify
 
@@ -536,10 +537,11 @@ Upgrade keeps:
   elsewhere, see [If You Have Data From an Older
   Build](#if-you-have-data-from-an-older-build) — it is not moved for you)
 
-An upgrade from a build before the memory redesign is the one exception: the new
-daemon refuses the old database instead of starting on it. Follow [Switching to
-the Markdown Memory Build](#switching-to-the-markdown-memory-build) before you
-start it.
+An upgrade from any build before the schema re-baseline of 2026-09-28 is the one
+exception — a pre-redesign build at schema 42 as well as an earlier
+Markdown-memory build at 43 to 45: the new daemon refuses the old database
+instead of starting on it. Follow [Switching to the Markdown Memory
+Build](#switching-to-the-markdown-memory-build) before you start it.
 
 Upgrade replaces:
 

@@ -122,7 +122,8 @@ it back for as long as `USER.md` or `IDENTITY.md` beside it is still empty.
 ## Stop, upgrade, uninstall
 
 ```bash
-openalpaca daemon stop         # stops the daemon and the desktop app
+openalpaca daemon stop         # stops the daemon; an open app window stays open
+openalpaca gui stop            # quits the desktop app
 openalpaca daemon restart
 openalpaca daemon tail         # follow daemon events; -c N stops after N
 ```
