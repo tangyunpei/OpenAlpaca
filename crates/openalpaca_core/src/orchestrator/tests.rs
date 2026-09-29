@@ -7087,12 +7087,13 @@ async fn the_main_loop_recalls_the_natural_question_fixture_through_the_service(
 /// those, several at once — on a turn whose surface carries the memory read
 /// tools, and not on a turn without them. Owner decision LQ19 (F-C) adds one
 /// line: before saving a changed fact, search for the note it changes and
-/// name it.
+/// name it. Design 11 §4 (CQ-5) adds another: a `previous_conversation`
+/// block names the note that records it, to read when the work goes on.
 #[tokio::test]
 async fn the_main_loop_prompt_says_search_pick_read_in_one_line() {
     let guidance = crate::tools::builtins::main_loop_memory_guidance();
     let lines: Vec<&str> = guidance.lines().collect();
-    assert_eq!(lines.len(), 4, "a tag, two lines, a tag: {guidance}");
+    assert_eq!(lines.len(), 5, "a tag, three lines, a tag: {guidance}");
     for word in [
         "memory_search",
         "index",
@@ -7106,6 +7107,11 @@ async fn the_main_loop_prompt_says_search_pick_read_in_one_line() {
         lines[2],
         "Before saving a fact about the user that changes an earlier one, memory_search for the \
          note it changes and pass its id in supersedes (or its fact_key)."
+    );
+    assert_eq!(
+        lines[3],
+        "A previous_conversation block names the memory note that records it; memory_read it \
+         when the user continues that work."
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -8804,4 +8810,395 @@ async fn a_compaction_reads_the_rows_behind_the_window_and_moves_the_window_past
         vec!["r11", "r12", "r13", "r14"],
         "the window starts after `through`, four rows kept verbatim"
     );
+}
+
+// ── Design 11 §4 (b), CQ-5: a new conversation carries the previous one ─
+
+/// A conversation on the lane `user1:cli` bound to `workspace`, with rows
+/// labelled `p1`, `p2`, … (odd ones the user's, each counted as the gateway
+/// counts it), and — when given — `state` covering the first `covered` of
+/// them; then closed by a new conversation on the same lane bound to
+/// `next_workspace`. The closed conversation's id and its row ids.
+fn a_closed_conversation(
+    db: &openalpaca_storage::Database,
+    workspace: Option<&str>,
+    rows: usize,
+    state: Option<(&working_state::WorkingState, usize)>,
+    next_workspace: Option<&str>,
+) -> (String, Vec<i64>) {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    let closed = repo
+        .create_session("user1:cli", "cli", workspace, None)
+        .unwrap();
+    let ids: Vec<i64> = (1..=rows)
+        .map(|i| {
+            let id = repo
+                .insert(&openalpaca_storage::ConversationMessage {
+                    lane_key: "user1:cli".to_string(),
+                    role: if i % 2 == 1 { "user" } else { "assistant" }.to_string(),
+                    content: format!("p{i}"),
+                    ..Default::default()
+                })
+                .unwrap();
+            repo.increment_message_count_for_session(&closed.id)
+                .unwrap();
+            id
+        })
+        .collect();
+    if let Some((state, covered)) = state {
+        let through = covered.checked_sub(1).map_or(0, |i| ids[i]);
+        assert!(
+            repo.update_working_state(
+                &closed.id,
+                0,
+                &serde_json::to_string(state).unwrap(),
+                through
+            )
+            .unwrap()
+        );
+    }
+    repo.create_session("user1:cli", "cli", next_workspace, None)
+        .unwrap();
+    (closed.id, ids)
+}
+
+/// A user turn of the lane's active conversation as the gateway runs it:
+/// the user row persisted first, the context built on the same text, then
+/// the answer row.
+fn a_turn(
+    orch: &Orchestrator,
+    db: &openalpaca_storage::Database,
+    text: &str,
+) -> ConversationContext {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    let row = |role: &str, content: &str| {
+        repo.insert(&openalpaca_storage::ConversationMessage {
+            lane_key: "user1:cli".to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    row("user", text);
+    let ctx = orch.build_context("user1:cli", text);
+    row("assistant", &format!("answer to {text}"));
+    ctx
+}
+
+/// Owner decision CQ-5: a new conversation on the lane and project is given
+/// the previous one — its state, and its last exchange after what the state
+/// covers — for its first three user turns, and not the fourth; the heading
+/// names the timeline's date before the close projected a note, and the
+/// note, by id and title, after.
+#[test]
+fn a_new_conversation_is_given_the_previous_one_for_three_user_turns_and_not_the_fourth() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let state = lisbon_state("Compare the hotels");
+    let (closed, _) = a_closed_conversation(&db, None, 4, Some((&state, 2)), None);
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&closed)
+        .unwrap()
+        .unwrap();
+    let ended_at = row.ended_at.clone().unwrap();
+    let date = &row.last_message_at.clone().unwrap()[..10];
+
+    let first = a_turn(&orch, &db, "go on");
+    let previous = first.previous.clone().expect("the first turn is given it");
+    assert_eq!(previous.state.as_deref(), Some(&state));
+    assert_eq!(
+        previous.exchange,
+        vec![
+            ("user".to_string(), "p3".to_string()),
+            ("assistant".to_string(), "p4".to_string())
+        ],
+        "the last exchange after what the state covers"
+    );
+    assert!(
+        first.previous_text(4000).unwrap().starts_with(&format!(
+            "The previous conversation on this project ended {ended_at}; its record will be \
+             listed by memory_timeline under Conversation on {date}.\nTopic: Lisbon trip"
+        )),
+        "{:?}",
+        first.previous_text(4000)
+    );
+
+    let note = "55e811b6-3220-4758-a47b-034bd1023f38";
+    openalpaca_storage::ConversationRepository::new(&db)
+        .set_episode_note_id(&closed, note)
+        .unwrap();
+    let second = a_turn(&orch, &db, "and then?");
+    assert!(
+        second.previous_text(4000).unwrap().starts_with(&format!(
+            "The previous conversation on this project ended {ended_at}; its record is memory \
+             note {note} 'Conversation on {date}: Lisbon trip' — memory_read it for the full \
+             record; memory_timeline shows what surrounds it.\nTopic: Lisbon trip"
+        )),
+        "{:?}",
+        second.previous_text(4000)
+    );
+    assert!(a_turn(&orch, &db, "the third").previous.is_some());
+    assert!(
+        a_turn(&orch, &db, "the fourth").previous.is_none(),
+        "not the fourth user turn"
+    );
+}
+
+/// Only while the new conversation has no state of its own: once one is
+/// written — by a compaction, a lag refresh or a close — it is given its own
+/// state and the previous one no longer.
+#[test]
+fn a_conversation_with_a_state_of_its_own_is_not_given_the_previous_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    a_closed_conversation(
+        &db,
+        None,
+        2,
+        Some((&lisbon_state("Compare the hotels"), 2)),
+        None,
+    );
+    let ctx = a_turn(&orch, &db, "go on");
+    assert!(ctx.previous.is_some());
+
+    let own = lisbon_state("Book the Alfama hotel");
+    assert!(
+        openalpaca_storage::ConversationRepository::new(&db)
+            .update_working_state(
+                ctx.session_id.as_deref().unwrap(),
+                0,
+                &serde_json::to_string(&own).unwrap(),
+                0
+            )
+            .unwrap()
+    );
+    let ctx = a_turn(&orch, &db, "and then?");
+    assert_eq!(ctx.working_state.as_deref(), Some(&own));
+    assert!(
+        ctx.previous.is_none(),
+        "its own state, not the previous one"
+    );
+}
+
+/// The previous conversation is the lane's newest closed one — or nothing:
+/// one with neither a state nor a row gives no block, and an older
+/// conversation's state is never given in its place; one with rows and no
+/// state gives its last exchange alone.
+#[test]
+fn the_previous_conversation_is_the_newest_one_or_nothing_never_an_older_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let state = lisbon_state("Compare the hotels");
+    a_closed_conversation(&db, None, 4, Some((&state, 4)), None);
+    a_closed_conversation(&db, None, 0, None, None);
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_none(),
+        "the newest has no state and no rows: nothing, not the older one's state"
+    );
+
+    a_closed_conversation(&db, None, 2, None, None);
+    let previous = orch
+        .build_context("user1:cli", "go on")
+        .previous
+        .expect("rows and no state: the last exchange");
+    assert_eq!(previous.state, None, "not the older conversation's state");
+    assert_eq!(
+        previous.exchange,
+        vec![
+            ("user".to_string(), "p1".to_string()),
+            ("assistant".to_string(), "p2".to_string())
+        ]
+    );
+}
+
+/// The previous conversation is one on the same project — `NULL` matching
+/// `NULL` — never another project's, however recent.
+#[test]
+fn the_previous_conversation_is_never_another_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let state = lisbon_state("Compare the hotels");
+    a_closed_conversation(&db, Some("/p1"), 2, Some((&state, 2)), Some("/p2"));
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_none(),
+        "/p1's conversation is not given to /p2's"
+    );
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    repo.create_session("user1:cli", "cli", None, None).unwrap();
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_none(),
+        "nor to one with no project"
+    );
+    repo.create_session("user1:cli", "cli", Some("/p1"), None)
+        .unwrap();
+    let previous = orch
+        .build_context("user1:cli", "go on")
+        .previous
+        .expect("a new conversation on /p1 is given it");
+    assert_eq!(previous.state.as_deref(), Some(&state));
+    assert!(
+        previous.exchange.is_empty(),
+        "the state covers its last exchange: {:?}",
+        previous.exchange
+    );
+}
+
+/// A conversation started fresh (`inherit: false`) is never given the
+/// previous one; nor is any while `carry_over_turns` is 0.
+#[test]
+fn a_conversation_started_fresh_or_with_carry_over_off_is_given_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let closed = repo.create_session("user1:cli", "cli", None, None).unwrap();
+    let ids: Vec<i64> = ["p1", "p2"]
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            repo.insert(&openalpaca_storage::ConversationMessage {
+                lane_key: "user1:cli".to_string(),
+                role: if i == 0 { "user" } else { "assistant" }.to_string(),
+                content: text.to_string(),
+                ..Default::default()
+            })
+            .unwrap()
+        })
+        .collect();
+    let state = lisbon_state("Compare the hotels");
+    assert!(
+        repo.update_working_state(
+            &closed.id,
+            0,
+            &serde_json::to_string(&state).unwrap(),
+            ids[1]
+        )
+        .unwrap()
+    );
+    let fresh = repo
+        .create_session_inheriting("user1:cli", "cli", None, None, false)
+        .unwrap();
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_none(),
+        "started fresh"
+    );
+    db.with_connection(|c| {
+        c.execute("UPDATE session SET inherit = 1 WHERE id = ?1", [&fresh.id])?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_some(),
+        "the same conversation, not started fresh, is given it"
+    );
+
+    let mut off = DaemonConfig::default();
+    off.orchestrator.memory.carry_over_turns = 0;
+    let (orch_off, _) =
+        make_tool_mode_orchestrator_with_db(None, "ok", off, Vec::new(), Some(db.clone()));
+    assert!(
+        orch_off
+            .build_context("user1:cli", "go on")
+            .previous
+            .is_none(),
+        "carry_over_turns = 0 is off"
+    );
+}
+
+/// The main loop's request carries the previous conversation as the history
+/// layer's first message, ahead of the memory delivery and the current turn;
+/// the turn's `memory_used` still names what recall delivered and nothing
+/// else — the block is not a note, and the note it names is not delivered.
+#[tokio::test]
+async fn a_main_loop_turn_carries_the_previous_conversation_and_memory_used_is_unchanged() {
+    use crate::memory::service::UsedReason;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "vim, as you told me",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+    let state = lisbon_state("Compare the hotels");
+    let (closed, _) = a_closed_conversation(&db, None, 2, Some((&state, 2)), None);
+    openalpaca_storage::ConversationRepository::new(&db)
+        .set_episode_note_id(&closed, &scene.coffee.id.to_string())
+        .unwrap();
+    let expected = crate::orchestrator::wrap_untrusted_context(
+        &orch
+            .build_context("user1:cli", "what editor do I prefer?")
+            .previous_text(4000)
+            .unwrap(),
+        "previous_conversation",
+        "user_derived",
+    );
+    assert!(expected.contains(&scene.coffee.id.to_string()));
+
+    let request_id = Uuid::new_v4();
+    send_tool_mode(&orch, request_id, "what editor do I prefer?").await;
+
+    let request = requests.lock().unwrap()[0].clone();
+    let blocks: Vec<usize> = request
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.content.starts_with(working_state::PREVIOUS_BLOCK_PREFIX))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(blocks.len(), 1, "one previous-conversation block");
+    assert_eq!(request.messages[blocks[0]].content, expected);
+    let memory = request
+        .messages
+        .iter()
+        .position(|m| m.content.contains("<memory_context>"))
+        .expect("recall delivered");
+    assert!(
+        blocks[0] < memory,
+        "the block comes before the memory delivery"
+    );
+
+    let used = orch.take_memory_used(request_id);
+    assert_eq!(used.len(), 1, "{used:?}");
+    assert_eq!(used[0].id, scene.vim.id);
+    assert_eq!(used[0].reason, UsedReason::Recall);
 }

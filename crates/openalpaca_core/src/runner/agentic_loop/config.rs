@@ -64,7 +64,8 @@ pub struct LoopConfig {
     pub writer: WriterConfig,
     /// The conversation's working state when the loop begins (design 11
     /// §3.3): what the first `LlmSummary` compaction folds the older messages
-    /// into. The main loop sets it from the session row; `None` elsewhere.
+    /// into. The main loop sets it from the session row, the lead from the
+    /// conversation its run was started from (CQ-6); `None` elsewhere.
     pub working_state: Option<Arc<WorkingState>>,
     /// The §3.2 cursor over the rows the loop was handed — the main loop's
     /// only; what a compaction's `compaction` record names as `state_through`,

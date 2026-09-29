@@ -47,6 +47,12 @@ impl DaemonConfig {
             1.0,
             "memory_confidence_threshold",
         );
+        clamp_val(
+            &mut self.orchestrator.memory.carry_over_turns,
+            0,
+            20,
+            "carry_over_turns",
+        );
         // ── Orchestrator > Costs ──
         clamp_val(
             &mut self.orchestrator.costs.summary_max_daily_cost_usd,

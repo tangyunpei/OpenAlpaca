@@ -644,18 +644,19 @@ impl Orchestrator {
             crate::lane::LaneKey::from_str(lane_key)
                 .map(|k| self.lane_manager.get_or_create_conversation(k));
 
+        let summary_max_chars = self
+            .daemon_config
+            .load()
+            .orchestrator
+            .memory
+            .summary_max_chars;
         let history_input = HistoryInput {
             lane_tip_fingerprint: lane_opt
                 .as_ref()
                 .map(|l| l.compute_tip_fingerprint())
                 .unwrap_or([0u8; 32]),
-            working_state: ctx.working_state_text(
-                self.daemon_config
-                    .load()
-                    .orchestrator
-                    .memory
-                    .summary_max_chars,
-            ),
+            working_state: ctx.working_state_text(summary_max_chars),
+            previous: ctx.previous_text(summary_max_chars),
             summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
             recent_messages: Arc::new(adapted_recent),
             current_user_turn,
@@ -1148,6 +1149,7 @@ impl Orchestrator {
                 .map(|l| l.compute_tip_fingerprint())
                 .unwrap_or([0u8; 32]),
             working_state: None,
+            previous: None,
             summary_wrap_mode: SummaryWrapMode::Plain,
             recent_messages: Arc::new(ctx.recent_messages.clone()),
             current_user_turn: Some(ChatMessage::user(query)),

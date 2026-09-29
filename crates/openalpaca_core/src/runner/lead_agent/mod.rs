@@ -121,6 +121,10 @@ pub async fn run_lead_agent(
     // approved, instead of holding the run for the confirmation timeout with
     // no responder. Never an approval: fail-closed stays.
     unattended: bool,
+    // The conversation the run was started from (design 11 §4, owner
+    // decision CQ-6): its working state follows the objective. `None` for a
+    // run with no conversation.
+    session_id: Option<&str>,
 ) -> LeadAgentResult {
     tracing::info!(
         lead_agent = %lead_agent.id,
@@ -463,6 +467,22 @@ pub async fn run_lead_agent(
 
     messages.push(ChatMessage::user(task_description));
 
+    // Design 11 §4, owner decision CQ-6: the working state of the
+    // conversation the run was started from — what the chat decided —
+    // right after the objective, as quoted data. Read once, no call; the
+    // loop's compaction folds the run's older messages into it.
+    let chat_state = session_id.zip(db.as_ref()).and_then(|(id, db)| {
+        let session = openalpaca_storage::ConversationRepository::new(db)
+            .get_session(id)
+            .ok()??;
+        let state = crate::orchestrator::working_state::stored(&session.working_state, id)?;
+        Some((state, session.working_state_updated_at.unwrap_or_default()))
+    });
+    if let Some((state, updated_at)) = &chat_state {
+        let max_chars = daemon_config.load().orchestrator.memory.summary_max_chars;
+        messages.push(ChatMessage::user(&state.render(updated_at, max_chars)));
+    }
+
     // 7b. §5.6c — the replayed history.
     //
     // It goes in **here**, after the persona layers and the objective and
@@ -543,6 +563,7 @@ pub async fn run_lead_agent(
     // `[orchestrator.costs] summary_model`, under its daily ceiling.
     loop_config.writer =
         crate::orchestrator::working_state::WriterConfig::new(&daemon_config.load(), db.clone());
+    loop_config.working_state = chat_state.map(|(state, _)| state);
     loop_config.event_bus = Some(bus.clone());
     loop_config.experimental_ephemeral_pressure =
         daemon_config.load().experimental.ephemeral_pressure_layer;

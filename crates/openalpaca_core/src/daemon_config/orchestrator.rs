@@ -267,6 +267,10 @@ pub struct MemoryConfig {
     /// How each turn's automatic recall delivers what it finds (design 09
     /// §13.2, MD-15): `index` (the default) or `excerpts`.
     pub recall_mode: RecallMode,
+    /// A new conversation on a lane and project is given the previous one's
+    /// working state for its first this-many user turns, while it has none
+    /// of its own (design 11 §4 (b), owner decision CQ-5); `0` never.
+    pub carry_over_turns: usize,
 }
 
 impl Default for MemoryConfig {
@@ -278,6 +282,7 @@ impl Default for MemoryConfig {
             msg_trunc_chars: 1500,
             memory_confidence_threshold: 0.65,
             recall_mode: RecallMode::default(),
+            carry_over_turns: 3,
         }
     }
 }

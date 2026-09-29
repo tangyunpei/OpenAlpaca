@@ -42,6 +42,17 @@ pub(crate) const BLOCK_TYPE: &str = "working_state";
 /// it is never the message the trim drops (design 11 §4, CQ-4).
 pub(crate) const BLOCK_PREFIX: &str = "<context_data type=\"working_state\"";
 
+/// The previous conversation's block type (design 11 §4 (b)).
+pub(crate) const PREVIOUS_BLOCK_TYPE: &str = "previous_conversation";
+
+/// How the previous conversation's block begins: what the assembly trim
+/// knows it by, so dropping it is never counted as a dropped row (§3.2).
+pub(crate) const PREVIOUS_BLOCK_PREFIX: &str = "<context_data type=\"previous_conversation\"";
+
+/// Each side of the previous conversation's last exchange is cut to this
+/// many characters (design 11 §4 (b)).
+pub(crate) const EXCHANGE_MAX_CHARS: usize = 400;
+
 /// The writer's prompt, committed verbatim: the system text, a `=== user ===`
 /// line, then the user message's template
 /// (`the_working_state_prompt_matches_its_fixture`).
@@ -482,6 +493,100 @@ pub(crate) fn write(
     }
 }
 
+/// A session row's `working_state` as a state: `None` while it is empty,
+/// and — logged — when the text is not one, so the next write starts over
+/// rather than feeding the writer something it cannot read.
+pub(crate) fn stored(text: &str, session_id: &str) -> Option<Arc<WorkingState>> {
+    if text.is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<WorkingState>(text) {
+        Ok(state) => Some(Arc::new(state)),
+        Err(e) => {
+            tracing::warn!(
+                session_id,
+                "the session's working state is not readable, ignored: {e}"
+            );
+            None
+        }
+    }
+}
+
+/// The previous conversation on a lane and project (design 11 §4 (b), owner
+/// decision CQ-5), as a new conversation is given it: when it ended, the
+/// memory note that records it (once its close projected one) or the date the
+/// timeline will list it under, its working state, and its last exchange
+/// after what that state covers.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PreviousConversation {
+    /// `session.ended_at`.
+    pub ended_at: String,
+    /// The day of its last message: the date its conversation summary's
+    /// title names.
+    pub date: String,
+    /// `session.episode_note_id`, set by the close's projection.
+    pub episode_note_id: Option<String>,
+    pub state: Option<Arc<WorkingState>>,
+    /// The last user row after `working_state_through` and the assistant row
+    /// that answered it, `(role, text)`, each cut to [`EXCHANGE_MAX_CHARS`].
+    pub exchange: Vec<(String, String)>,
+}
+
+impl PreviousConversation {
+    /// The block's text, at most `max_chars` characters when it can be: the
+    /// heading — the note that records the conversation, *"memory_read it for
+    /// the full record; memory_timeline shows what surrounds it"*, or before
+    /// the close has projected one the timeline hint — then the state's
+    /// fields, cut as [`WorkingState::text`] cuts them, then the last
+    /// exchange. The history layer wraps it as quoted data.
+    pub fn text(&self, max_chars: usize) -> String {
+        let record = match &self.episode_note_id {
+            Some(id) => {
+                let topic = self.state.as_ref().map_or("", |s| s.topic.as_str());
+                format!(
+                    "its record is memory note {id} '{}' — memory_read it for the full record; \
+                     memory_timeline shows what surrounds it.",
+                    crate::memory::learning::episode_title(&self.date, topic)
+                )
+            }
+            None => format!(
+                "its record will be listed by memory_timeline under Conversation on {}.",
+                self.date
+            ),
+        };
+        let heading = format!(
+            "The previous conversation on this project ended {}; {record}",
+            self.ended_at
+        );
+        let exchange = if self.exchange.is_empty() {
+            String::new()
+        } else {
+            let lines: Vec<String> = self
+                .exchange
+                .iter()
+                .map(|(role, text)| format!("[{role}]: {text}"))
+                .collect();
+            format!("\nIts last exchange:\n{}", lines.join("\n"))
+        };
+        let head = match &self.state {
+            Some(state) => {
+                state.text_headed(&heading, max_chars.saturating_sub(exchange.chars().count()))
+            }
+            None => heading,
+        };
+        format!("{head}{exchange}")
+    }
+}
+
+/// `text` cut to [`EXCHANGE_MAX_CHARS`] characters, the cut marked `…`.
+pub(crate) fn exchange_text(text: &str) -> String {
+    if text.chars().count() <= EXCHANGE_MAX_CHARS {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(EXCHANGE_MAX_CHARS - 1).collect();
+    format!("{kept}…")
+}
+
 impl WorkingState {
     /// Reads the writer's answer. Owner decision LQ13: one JSON object, found
     /// as [`crate::memory::task_extraction::read_json_answer`] finds it — the
@@ -542,9 +647,18 @@ impl WorkingState {
     /// Only the rendering is cut; the state itself is not changed. The
     /// history layer wraps this text as [`Self::render`] does.
     pub fn text(&self, updated_at: &str, max_chars: usize) -> String {
+        self.text_headed(
+            &format!("Working state of this conversation, as of {updated_at}"),
+            max_chars,
+        )
+    }
+
+    /// [`Self::text`] under another heading: the previous conversation's
+    /// block ([`PreviousConversation::text`]).
+    fn text_headed(&self, heading: &str, max_chars: usize) -> String {
         let mut state = self.clone();
         loop {
-            let text = state.lines(updated_at);
+            let text = state.lines(heading);
             let over = text.chars().count().saturating_sub(max_chars);
             if over == 0 {
                 return text;
@@ -557,8 +671,8 @@ impl WorkingState {
 
     /// The heading, then one line per field and one per list item; an empty
     /// field or list is left out.
-    fn lines(&self, updated_at: &str) -> String {
-        let mut out = format!("Working state of this conversation, as of {updated_at}");
+    fn lines(&self, heading: &str) -> String {
+        let mut out = heading.to_string();
         let field = |out: &mut String, label: &str, value: &str| {
             if !value.is_empty() {
                 out.push_str(&format!("\n{label}: {value}"));
@@ -792,6 +906,103 @@ mod tests {
         assert!(!rendered.contains("Goal:") && !rendered.contains("Done:"));
     }
 
+    /// Design 11 §4 (b): the previous conversation's text — the heading
+    /// naming the note that records it once its close projected one (by id,
+    /// and by the title the projection gives it: the day of the last message
+    /// and the topic), the timeline hint before that; then the state's
+    /// fields; then its last exchange.
+    #[test]
+    fn the_previous_conversation_names_its_note_after_the_close_and_the_timeline_before() {
+        let mut previous = PreviousConversation {
+            ended_at: "2026-09-28 11:00:00".into(),
+            date: "2026-09-28".into(),
+            episode_note_id: None,
+            state: Some(Arc::new(lisbon())),
+            exchange: vec![
+                ("user".into(), "and the hotel?".into()),
+                ("assistant".into(), "Three in Alfama.".into()),
+            ],
+        };
+        let fields = "Topic: Lisbon trip in October\n\
+                      Goal: Book flights and a hotel for 2–5 October\n\
+                      Done:\n\
+                      - Friday 2 October flight booked (task 1a2b3c4d)\n\
+                      Decisions:\n\
+                      - A hotel in Alfama, not Baixa\n\
+                      Open:\n\
+                      - Which museum pass to buy\n\
+                      Next: Compare the three Alfama hotels\n\
+                      Refs:\n\
+                      - task 1a2b3c4d\n\
+                      - artifact trips/lisbon.md\n\
+                      Its last exchange:\n\
+                      [user]: and the hotel?\n\
+                      [assistant]: Three in Alfama.";
+        assert_eq!(
+            previous.text(4000),
+            format!(
+                "The previous conversation on this project ended 2026-09-28 11:00:00; its record \
+                 will be listed by memory_timeline under Conversation on 2026-09-28.\n{fields}"
+            )
+        );
+        previous.episode_note_id = Some("55e811b6-3220-4758-a47b-034bd1023f38".into());
+        assert_eq!(
+            previous.text(4000),
+            format!(
+                "The previous conversation on this project ended 2026-09-28 11:00:00; its record \
+                 is memory note 55e811b6-3220-4758-a47b-034bd1023f38 'Conversation on 2026-09-28: \
+                 Lisbon trip in October' — memory_read it for the full record; memory_timeline \
+                 shows what surrounds it.\n{fields}"
+            )
+        );
+        previous.state = None;
+        assert!(
+            previous
+                .text(4000)
+                .ends_with("shows what surrounds it.\nIts last exchange:\n[user]: and the hotel?\n[assistant]: Three in Alfama."),
+            "no state: the heading and the exchange"
+        );
+    }
+
+    /// Each side of the last exchange is cut to 400 characters, never inside
+    /// one, the cut marked `…`; over its limit the block cuts the state as
+    /// [`WorkingState::text`] does — `next` kept — and keeps the exchange
+    /// whole.
+    #[test]
+    fn the_exchange_is_cut_to_400_characters_and_the_block_to_its_limit() {
+        let long = "里".repeat(1000);
+        let cut = exchange_text(&long);
+        assert_eq!(cut.chars().count(), EXCHANGE_MAX_CHARS);
+        assert!(cut.ends_with('…') && cut.starts_with("里里"));
+        assert_eq!(exchange_text("short"), "short");
+        assert_eq!(exchange_text(&"a".repeat(400)), "a".repeat(400));
+
+        let previous = PreviousConversation {
+            ended_at: "2026-09-28 11:00:00".into(),
+            date: "2026-09-28".into(),
+            episode_note_id: None,
+            state: Some(Arc::new(lisbon())),
+            exchange: vec![
+                ("user".into(), cut.clone()),
+                ("assistant".into(), cut.clone()),
+            ],
+        };
+        let text = previous.text(1100);
+        assert!(text.chars().count() <= 1100, "{}", text.chars().count());
+        assert!(
+            text.contains("Next: Compare the three Alfama hotels"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Friday 2 October"),
+            "the oldest item went first: {text}"
+        );
+        assert!(
+            text.ends_with(&format!("[user]: {cut}\n[assistant]: {cut}")),
+            "the exchange is whole"
+        );
+    }
+
     /// The rendered text read back: each field's value and each list's items.
     fn read_back(text: &str) -> (BTreeMap<String, String>, BTreeMap<String, Vec<String>>) {
         let mut fields = BTreeMap::new();
@@ -834,7 +1045,10 @@ mod tests {
             refs: (1..=5).map(|i| format!("task 1a2b3c{i:02}")).collect(),
         };
         let full = state.text(AT, usize::MAX);
-        assert_eq!(full, state.lines(AT));
+        assert_eq!(
+            full,
+            state.lines(&format!("Working state of this conversation, as of {AT}"))
+        );
         let full_chars = full.chars().count();
         let order = ["Done", "Refs", "Decisions", "Open"];
         let original = |label: &str| -> &Vec<String> {

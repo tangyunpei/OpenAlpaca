@@ -455,6 +455,20 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         sensitive: false,
         backend: ConfigBackend::DaemonToml,
     },
+    // -- Daemon: Orchestrator – carry-over (design 11 §4 (b), CQ-5) --
+    ConfigKeyDef {
+        key: "daemon.orchestrator.carry_over_turns",
+        kind: ConfigKind::Int {
+            min: Some(0),
+            max: Some(20),
+        },
+        default: Some("3"),
+        description: "User turns for which a new conversation on the same project is given the previous conversation's working state (0 = never)",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
     // -- Daemon: Orchestrator – Background Models --
     ConfigKeyDef {
         key: "daemon.orchestrator.summary_model",

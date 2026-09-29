@@ -174,6 +174,12 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["orchestrator", "memory"],
         field: "recall_mode",
     },
+    // Orchestrator: carry-over (design 11 §4 (b))
+    TomlMapping {
+        schema_key: "daemon.orchestrator.carry_over_turns",
+        section: &["orchestrator", "memory"],
+        field: "carry_over_turns",
+    },
     // Execution: Agent Defaults (cont.)
     TomlMapping {
         schema_key: "daemon.execution.max_tools_per_round",

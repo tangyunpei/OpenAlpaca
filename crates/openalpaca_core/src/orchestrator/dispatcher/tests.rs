@@ -954,6 +954,123 @@ async fn a_dispatch_binds_the_turns_session_even_after_the_lane_moved_on() {
     assert_eq!(task.session_id.as_deref(), Some(newer.as_str()));
 }
 
+/// Keeps every request's messages and answers "done".
+struct RecordingLeadMock {
+    requests: Arc<std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>>,
+}
+
+#[async_trait::async_trait]
+impl openalpaca_llm::LlmProvider for RecordingLeadMock {
+    fn name(&self) -> &str {
+        "recording-lead-mock"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push(request.messages.as_ref().clone());
+        Ok(openalpaca_llm::ChatResponse {
+            content: "done".to_string(),
+            tool_calls: vec![],
+            model: "mock-model".to_string(),
+            usage: openalpaca_llm::Usage::default(),
+            finish_reason: openalpaca_llm::FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        })
+    }
+}
+
+/// Design 11 §4, owner decision CQ-6: the lead is given the working state of
+/// the conversation its `start_workflow` turn ran in — the one the dispatch
+/// carries, not whichever the lane has moved on to.
+#[tokio::test]
+async fn the_dispatched_lead_is_given_the_turns_working_state() {
+    use crate::orchestrator::working_state::{BLOCK_PREFIX, VERSION, WorkingState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let turn_session = repo
+        .create_session("user1:cli", "cli", None, Some("the turn"))
+        .unwrap()
+        .id;
+    let state = WorkingState {
+        v: VERSION,
+        topic: "Lisbon trip".to_string(),
+        goal: "Book the October trip".to_string(),
+        done: vec!["Flight booked".to_string()],
+        decisions: vec!["A hotel in Alfama, not Baixa".to_string()],
+        open: Vec::new(),
+        next: "Book the Alfama hotel".to_string(),
+        refs: Vec::new(),
+    };
+    assert!(
+        repo.update_working_state(&turn_session, 0, &serde_json::to_string(&state).unwrap(), 0)
+            .unwrap()
+    );
+    let updated_at = repo
+        .get_session(&turn_session)
+        .unwrap()
+        .unwrap()
+        .working_state_updated_at
+        .unwrap();
+    // The lane moves on to a conversation with no state.
+    repo.create_session("user1:cli", "cli", None, Some("a new chat"))
+        .unwrap();
+
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(RecordingLeadMock {
+            requests: requests.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+    let dispatcher = setup_with_specific_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+        router,
+    );
+    dispatcher
+        .dispatch_lead_agent(
+            "Book the Alfama hotel",
+            "Hotel".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            Some(&turn_session),
+            false,
+        )
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let first = loop {
+        if let Some(first) = requests.lock().unwrap().first().cloned() {
+            break first;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the lead's request"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    let blocks: Vec<&str> = first
+        .iter()
+        .filter(|m| m.content.starts_with(BLOCK_PREFIX))
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(blocks, vec![state.render(&updated_at, 4000).as_str()]);
+}
+
 #[tokio::test]
 async fn test_lead_agent_steering_attach_detach_and_leftover_conversion() {
     let mut config = DaemonConfig::default();

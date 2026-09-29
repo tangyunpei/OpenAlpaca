@@ -633,15 +633,16 @@ impl Orchestrator {
             _ => Some(ChatMessage::user(query)),
         };
 
+        let summary_max_chars = self
+            .daemon_config
+            .load()
+            .orchestrator
+            .memory
+            .summary_max_chars;
         let history_input = HistoryInput {
             lane_tip_fingerprint: [0u8; 32],
-            working_state: ctx.working_state_text(
-                self.daemon_config
-                    .load()
-                    .orchestrator
-                    .memory
-                    .summary_max_chars,
-            ),
+            working_state: ctx.working_state_text(summary_max_chars),
+            previous: ctx.previous_text(summary_max_chars),
             summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
             recent_messages: Arc::new(adapted_recent),
             current_user_turn,

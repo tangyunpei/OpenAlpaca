@@ -1,13 +1,16 @@
 //! Layer 4 — Conversation History.
 //!
-//! Assembles the per-turn messages: working state (if any) + recent_messages +
-//! current user turn. Supports two modes:
+//! Assembles the per-turn messages: the previous conversation (if any) +
+//! working state (if any) + recent_messages + current user turn. Supports two
+//! modes:
 //!
-//! - `Default` — working state (optionally wrapped) + recent history + current turn.
+//! - `Default` — previous conversation and working state (optionally wrapped)
+//!   + recent history + current turn.
 //! - `Skip`    — empty output (used by lead-agent / subagent paths).
 //!
 //! Fingerprint covers:
-//! `blake3(lane_tip_fingerprint || hash_opt_arc_str(working_state) || summary_wrap_mode_tag
+//! `blake3(lane_tip_fingerprint || hash_opt_arc_str(working_state)
+//!  || hash_opt_arc_str(previous) || summary_wrap_mode_tag
 //!  || hash_opt_msg(current_user_turn) || mode_tag)`.
 
 use openalpaca_llm::ChatMessage;
@@ -30,7 +33,22 @@ pub fn compute(input: &HistoryInput) -> HistoryOutput {
 }
 
 fn build_default(input: &HistoryInput) -> Vec<ChatMessage> {
-    let mut messages: Vec<ChatMessage> = Vec::with_capacity(input.recent_messages.len() + 2);
+    let mut messages: Vec<ChatMessage> = Vec::with_capacity(input.recent_messages.len() + 3);
+
+    // 0. The previous conversation (optional; design 11 §4 (b)), given only
+    //    while this one has no state of its own — quoted data under the
+    //    trust label, like the state.
+    if let Some(ref previous) = input.previous {
+        let content = match input.summary_wrap_mode {
+            SummaryWrapMode::UntrustedWrap => crate::orchestrator::wrap_untrusted_context(
+                previous.as_ref(),
+                crate::orchestrator::working_state::PREVIOUS_BLOCK_TYPE,
+                "user_derived",
+            ),
+            SummaryWrapMode::Plain => previous.as_ref().to_string(),
+        };
+        messages.push(ChatMessage::user(&content));
+    }
 
     // 1. The working state (optional), in the session summary's old slot
     //    (design 11 §4) — wrapped per summary_wrap_mode. The untrusted path
@@ -65,6 +83,7 @@ pub(super) fn compute_fingerprint(input: &HistoryInput) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(&input.lane_tip_fingerprint);
     h.update(&hash_opt_arc_str(&input.working_state));
+    h.update(&hash_opt_arc_str(&input.previous));
     h.update(&[summary_wrap_mode_tag(input.summary_wrap_mode)]);
     h.update(&hash_opt_msg(&input.current_user_turn));
     h.update(&[mode_tag(&input.mode)]);

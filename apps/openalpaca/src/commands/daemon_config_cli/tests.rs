@@ -134,6 +134,16 @@ fn test_find_mapping_recall_mode() {
     assert_eq!(mapping.field, "recall_mode");
 }
 
+/// Carry-over (design 11 §4 (b), §8): `carry_over_turns` lives in
+/// `[orchestrator.memory]`, where `DaemonConfig` reads it.
+#[test]
+fn test_find_mapping_carry_over_turns() {
+    let mapping = find_mapping("daemon.orchestrator.carry_over_turns")
+        .expect("daemon.orchestrator.carry_over_turns has a mapping");
+    assert_eq!(mapping.section, &["orchestrator", "memory"]);
+    assert_eq!(mapping.field, "carry_over_turns");
+}
+
 /// Conversation summaries (design 09 §13.3): `episode_max_per_day` is gone
 /// with its registry row (design 11 §8, CQ-2), and so is its mapping.
 #[test]

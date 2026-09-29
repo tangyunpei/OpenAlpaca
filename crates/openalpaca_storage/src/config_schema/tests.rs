@@ -104,8 +104,9 @@ fn test_daemon_keys_in_category() {
     // `extract_every_n_turns`, which Learning v2's cadence replaced, plus
     // index-first recall's `recall_mode` (design 09 §13.2) — the
     // conversation summaries' `learning.episode_max_per_day` (§13.3) came
-    // and went: a summary is projected with no call (design 11 §8, CQ-2).
-    assert_eq!(keys.len(), 48);
+    // and went: a summary is projected with no call (design 11 §8, CQ-2) —
+    // plus the carry-over's `carry_over_turns` (design 11 §8, CQ-5).
+    assert_eq!(keys.len(), 49);
     for gone in [
         "daemon.orchestrator.extract_every_n_turns",
         "daemon.orchestrator.learning.episode_max_per_day",
@@ -119,6 +120,7 @@ fn test_daemon_keys_in_category() {
         "daemon.orchestrator.extract_max_calls_per_day",
         "daemon.orchestrator.memory_confidence_threshold",
         "daemon.orchestrator.recall_mode",
+        "daemon.orchestrator.carry_over_turns",
     ] {
         assert!(
             keys.iter().any(|d| d.key == key),

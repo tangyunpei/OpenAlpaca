@@ -709,6 +709,28 @@ fn recall_mode_defaults_to_index_and_reads_excerpts() {
     );
 }
 
+/// Design 11 §8 (CQ-5): `[orchestrator.memory] carry_over_turns` is 3
+/// unless the file says otherwise, the shipped file names 3, `0` (off) is
+/// kept, and a value past the registry's 20 is clamped.
+#[test]
+fn carry_over_turns_defaults_to_three_and_zero_turns_it_off() {
+    for config in [
+        DaemonConfig::default(),
+        toml::from_str("").unwrap(),
+        toml::from_str(include_str!("../../../../config/daemon.toml")).unwrap(),
+    ] {
+        assert_eq!(config.orchestrator.memory.carry_over_turns, 3);
+    }
+    let mut off: DaemonConfig =
+        toml::from_str("[orchestrator.memory]\ncarry_over_turns = 0\n").unwrap();
+    off.validate();
+    assert_eq!(off.orchestrator.memory.carry_over_turns, 0);
+    let mut high: DaemonConfig =
+        toml::from_str("[orchestrator.memory]\ncarry_over_turns = 500\n").unwrap();
+    high.validate();
+    assert_eq!(high.orchestrator.memory.carry_over_turns, 20);
+}
+
 /// The shipped `config/daemon.toml` names the key with its default, and the
 /// whole file still parses.
 #[test]

@@ -120,7 +120,9 @@ pub fn main_loop_relay_guidance() -> &'static str {
 /// line, given only to a turn whose surface carries `memory_search` — and,
 /// since owner decision LQ19 (F-C), one line on naming the note a new fact
 /// changes, without which a saved note gets no suggestion (the commute,
-/// report 10 §4.5).
+/// report 10 §4.5) — and, since design 11 §4 (owner decision CQ-5), one line
+/// on the note a `previous_conversation` block names: the rule sits here, the
+/// block's content stays quoted data.
 pub fn main_loop_memory_guidance() -> &'static str {
     "<memory_rules>\n\
      Memory: memory_search returns an index, one line per note and no body — pick the ids that \
@@ -128,6 +130,8 @@ pub fn main_loop_memory_guidance() -> &'static str {
      what surrounds a note in time.\n\
      Before saving a fact about the user that changes an earlier one, memory_search for the \
      note it changes and pass its id in supersedes (or its fact_key).\n\
+     A previous_conversation block names the memory note that records it; memory_read it when \
+     the user continues that work.\n\
      </memory_rules>"
 }
 

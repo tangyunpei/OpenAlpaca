@@ -1,8 +1,7 @@
-use super::working_state::WorkingState;
+use super::working_state::{self, PreviousConversation};
 use super::{ConversationContext, Orchestrator};
 use openalpaca_llm::{ChatMessage, ContentPart};
 use openalpaca_storage::ConversationRepository;
-use std::sync::Arc;
 
 /// H1 — the one line that says where a replayed delegation came from.
 ///
@@ -53,7 +52,7 @@ impl Orchestrator {
         let session_id = session.as_ref().map(|s| s.id.clone());
         let (working_state, working_state_updated_at, version, through) = match &session {
             Some(s) => (
-                stored_working_state(&s.working_state, &s.id),
+                working_state::stored(&s.working_state, &s.id),
                 s.working_state_updated_at.clone().unwrap_or_default(),
                 s.working_state_version,
                 s.working_state_through,
@@ -103,6 +102,30 @@ impl Orchestrator {
             tracing::debug!("Dedup: dropping duplicate user message from recent window");
             chat_rows.pop();
         }
+
+        // Design 11 §4 (b), owner decision CQ-5: a conversation that has no
+        // state of its own yet is given the previous one on this lane and
+        // project — read live, every turn — before its `carry_over_turns`-th
+        // user turn has been answered, unless it was started fresh.
+        let previous = match &session {
+            Some(s) if s.inherit && working_state.is_none() => {
+                let user_turns = chat_rows
+                    .iter()
+                    .filter(|(_, role, ..)| role == "user")
+                    .count();
+                (user_turns < dcfg.orchestrator.memory.carry_over_turns)
+                    .then(|| {
+                        previous_conversation(
+                            &repo,
+                            lane_key,
+                            s.workspace_id.as_deref(),
+                            recent_limit,
+                        )
+                    })
+                    .flatten()
+            }
+            _ => None,
+        };
 
         // Design 11 §4 (c), CQ-4 — after a compaction only: when the state on
         // the row is the one a compacting turn wrote, the window starts after
@@ -190,25 +213,56 @@ impl Orchestrator {
             recent_messages,
             recent_row_ids: chat_rows.iter().map(|(id, ..)| *id).collect(),
             older_window,
+            previous,
         }
     }
 }
 
-/// The session row's `working_state` as a state: `None` while it is empty,
-/// and — logged — when the text is not one, so the next write starts over
-/// rather than feeding the writer something it cannot read.
-fn stored_working_state(text: &str, session_id: &str) -> Option<Arc<WorkingState>> {
-    if text.is_empty() {
+/// The previous conversation on `lane_key` and `workspace_id` (design 11 §4
+/// (b)): the lane's newest archived session there, with its state and its
+/// last exchange after what that state covers — or nothing, when there is no
+/// such session or it has neither (an older session is never read instead).
+fn previous_conversation(
+    repo: &ConversationRepository<'_>,
+    lane_key: &str,
+    workspace_id: Option<&str>,
+    recent_limit: i64,
+) -> Option<PreviousConversation> {
+    let session = repo.previous_session(lane_key, workspace_id).ok()??;
+    let state = working_state::stored(&session.working_state, &session.id);
+    let rows: Vec<_> = repo
+        .list_recent_by_session(&session.id, recent_limit)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| {
+            m.id > session.working_state_through
+                && (m.role == "user" || m.role == "assistant")
+                && !m.content.is_empty()
+        })
+        .collect();
+    let exchange: Vec<(String, String)> = match rows.iter().rposition(|m| m.role == "user") {
+        Some(i) => std::iter::once(&rows[i])
+            .chain(rows[i + 1..].iter().find(|m| m.role == "assistant"))
+            .map(|m| (m.role.clone(), working_state::exchange_text(&m.content)))
+            .collect(),
+        None => Vec::new(),
+    };
+    if state.is_none() && exchange.is_empty() {
         return None;
     }
-    match serde_json::from_str::<WorkingState>(text) {
-        Ok(state) => Some(Arc::new(state)),
-        Err(e) => {
-            tracing::warn!(
-                session_id,
-                "the session's working state is not readable, ignored: {e}"
-            );
-            None
-        }
-    }
+    let ended_at = session.ended_at.unwrap_or(session.updated_at);
+    let date = session
+        .last_message_at
+        .as_deref()
+        .unwrap_or(&ended_at)
+        .chars()
+        .take(10)
+        .collect();
+    Some(PreviousConversation {
+        ended_at,
+        date,
+        episode_note_id: session.episode_note_id,
+        state,
+        exchange,
+    })
 }

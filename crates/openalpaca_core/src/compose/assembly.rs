@@ -70,7 +70,8 @@ pub fn compose(input: AssemblyInput<'_>) -> ComposedRequest {
     // is preserved — the spec is explicit that Layer 5 trims from the head of
     // history, not from the system prompt. So is the working-state block
     // (design 11 §4, CQ-4): it is the one carrier of what the trim removes,
-    // so the trim takes the message after it.
+    // so the trim takes the message after it. The previous conversation's
+    // block may go, and is not counted as a history row when it does (§3.2).
     let threshold = (input.model_window as f64 * TRIM_THRESHOLD) as u32;
     let mut total = crate::runner::estimate_messages_tokens(&messages);
     let mut trimmed = 0usize;
@@ -89,7 +90,10 @@ pub fn compose(input: AssemblyInput<'_>) -> ComposedRequest {
         let removed = messages.remove(idx_to_trim);
         if idx_to_trim < history_start {
             history_start -= 1;
-        } else {
+        } else if !removed
+            .content
+            .starts_with(crate::orchestrator::working_state::PREVIOUS_BLOCK_PREFIX)
+        {
             history_head_dropped += 1;
         }
         let removed_tokens = crate::runner::estimate_messages_tokens(std::slice::from_ref(&removed));

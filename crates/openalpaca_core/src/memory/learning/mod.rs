@@ -28,6 +28,10 @@ pub mod queue;
 mod tests;
 mod window;
 
+/// A conversation summary's title (design 09 §13.3): what the previous
+/// conversation's block names its record by (design 11 §4 (b)).
+pub(crate) use episode::title as episode_title;
+
 pub use queue::{
     EpisodeReport, FlushReport, FlushStop, LearningDeps, LearningQueue, QueueMode, TurnGuard,
     UnusableAnswer,

@@ -283,6 +283,9 @@ pub(super) struct ConversationContext {
     /// recent window — never sent to the model; what the lag refresh reads
     /// (`working_state::after_turn`).
     pub(super) older_window: Vec<(i64, String, String)>,
+    /// The previous conversation on this lane and project, while this one is
+    /// given it (design 11 §4 (b), owner decision CQ-5).
+    pub(super) previous: Option<working_state::PreviousConversation>,
 }
 
 impl ConversationContext {
@@ -293,6 +296,15 @@ impl ConversationContext {
         self.working_state
             .as_ref()
             .map(|state| Arc::from(state.text(&self.working_state_updated_at, max_chars)))
+    }
+
+    /// The previous conversation as the history layer delivers it (design 11
+    /// §4 (b)), in at most `max_chars` characters, which the layer wraps as
+    /// quoted data.
+    pub(super) fn previous_text(&self, max_chars: usize) -> Option<Arc<str>> {
+        self.previous
+            .as_ref()
+            .map(|previous| Arc::from(previous.text(max_chars)))
     }
 }
 

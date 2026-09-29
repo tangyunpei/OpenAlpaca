@@ -66,6 +66,10 @@ memory_confidence_threshold = 0.65
 # more as one-line entries the model can open with memory_read; "excerpts"
 # sends up to 8 matches as excerpts.
 recall_mode = "index"
+# A new conversation on the same project is given the previous conversation's
+# working state for its first `carry_over_turns` user turns, until it has one
+# of its own (0 = never). "Start fresh" turns it off for one conversation.
+carry_over_turns = 3
 
 [orchestrator.learning]
 # Learn from conversations in the background: every turn is queued, and a
