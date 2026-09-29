@@ -4377,6 +4377,80 @@ async fn a_chat_model_note_is_listed_as_the_assistants_and_the_saved_note_gets_t
     assert!(learned.starts_with("n1 key=- origin=learned "), "{learned}");
 }
 
+/// LQ19 narrowed after review: with no saved note in the store, the note
+/// only the chat model wrote is listed under the known notes, and the rules
+/// say it counts as known like any other — so extraction has no reason to
+/// store the same fact a second time. Rule 4's case, a saved note stating
+/// an older value, is the one exception (the test above).
+#[tokio::test]
+async fn with_no_saved_note_the_assistants_note_is_known() {
+    let scene = Scene::new(vec![items(&[])]);
+    let tool = scene
+        .service
+        .context(
+            OWNER,
+            WorkspaceHint::None,
+            Surface::ModelTool,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let title = "Sold the Honda Fit, takes metro line 5";
+    let knowledge = "Since 2026-04-20 the user takes metro line 5 to work; the Honda Fit was sold.";
+    scene
+        .service
+        .store(
+            &tool,
+            StoreInput {
+                title: title.into(),
+                body: format!("# {title}\n\n## Knowledge\n{knowledge}\n"),
+                kind: Some(NoteKind::Fact),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let s = scene.session();
+    scene.turn(
+        &s,
+        "I sold the Honda Fit on April 20. Now I take metro line 5 to work, about 40 minutes.",
+        "Noted: metro line 5 now.",
+    );
+
+    scene.queue.flush_session(&s).await;
+    let prompt = &scene.model.prompts()[0];
+    let known = prompt
+        .split("<known_notes>")
+        .nth(1)
+        .and_then(|rest| rest.split("</known_notes>").next())
+        .unwrap_or_else(|| panic!("no known_notes: {prompt}"));
+    assert!(
+        known
+            .lines()
+            .any(|l| l.contains(title) && l.contains(" key=- origin=assistant ")),
+        "{prompt}"
+    );
+    assert!(!known.contains("saved-by-you"), "{prompt}");
+    let rule = |n: &str| {
+        prompt
+            .lines()
+            .find(|l| l.starts_with(n))
+            .unwrap_or_else(|| panic!("rule {n}: {prompt}"))
+    };
+    assert!(
+        rule("9. ").contains("(an origin=assistant note counts too, except in rule 4's case)"),
+        "{prompt}"
+    );
+    assert!(
+        rule("4. ").contains("(origin=saved-by-you) states an older value"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("does not make a fact known"), "{prompt}");
+    assert!(
+        !prompt.contains("not a fact you must treat as known"),
+        "{prompt}"
+    );
+}
+
 /// Ruling LR9: a note the user edited by hand (`external`, found by the
 /// stat scan) is never replaced automatically — a change to it is a
 /// suggestion, as for a note the user saved.

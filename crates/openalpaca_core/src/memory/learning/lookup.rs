@@ -106,7 +106,8 @@ pub(crate) fn query_windows(text: &str) -> Vec<String> {
 /// suggestion. The decision itself is the service's, never the model's.
 /// `extracted_other` is never listed: it is always a candidate. A note only
 /// the chat model wrote is `assistant` (owner decision LQ19, F-A): the
-/// assistant's own unconfirmed record, which does not make a fact known.
+/// assistant's own unconfirmed record, known like any other note except
+/// when a saved note states an older value of the same fact (rules 4, 9).
 pub(crate) fn origin_label(note: &KnownNote) -> Option<&'static str> {
     match note.origin {
         Origin::User => Some("saved-by-you"),
