@@ -21,7 +21,7 @@ use rusqlite::OptionalExtension;
 /// Written once so a column cannot reach one `SELECT` and miss another.
 const SESSION_COLUMNS: &str = "id, lane_key, source, title, message_count, last_message_at, \
      created_at, updated_at, working_state, working_state_version, working_state_through, \
-     working_state_updated_at, workspace_id, status, ended_at, episode_note_id";
+     working_state_updated_at, workspace_id, status, ended_at, episode_note_id, inherit";
 
 /// Every column [`ConversationRepository::row_to_message`] reads, in order.
 ///
@@ -556,6 +556,20 @@ impl<'a> ConversationRepository<'a> {
         workspace_path: Option<&str>,
         title: Option<&str>,
     ) -> Result<Conversation> {
+        self.create_session_inheriting(lane_key, source, workspace_path, title, true)
+    }
+
+    /// [`Self::create_session`], saying whether the new conversation is given
+    /// the previous one's state (design 11 §4 (b), owner decision CQ-5):
+    /// `false` starts it fresh, for good.
+    pub fn create_session_inheriting(
+        &self,
+        lane_key: &str,
+        source: &str,
+        workspace_path: Option<&str>,
+        title: Option<&str>,
+        inherit: bool,
+    ) -> Result<Conversation> {
         let id = uuid::Uuid::new_v4().to_string();
         self.db.with_connection_mut(|conn| {
             let tx = conn.transaction()?;
@@ -565,9 +579,10 @@ impl<'a> ConversationRepository<'a> {
                 [lane_key],
             )?;
             tx.execute(
-                "INSERT INTO session (id, lane_key, source, title, workspace_id, status, message_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'active', 0)",
-                rusqlite::params![id, lane_key, source, title.unwrap_or(""), workspace_path],
+                "INSERT INTO session (id, lane_key, source, title, workspace_id, status, message_count,
+                                      inherit)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'active', 0, ?6)",
+                rusqlite::params![id, lane_key, source, title.unwrap_or(""), workspace_path, inherit],
             )?;
             tx.commit()?;
             Ok(())
@@ -756,6 +771,30 @@ impl<'a> ConversationRepository<'a> {
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<String>>>()?;
             Ok(ids)
+        })
+    }
+
+    /// The conversation a new one on `lane_key` continues from (design 11 §4
+    /// (b)): the lane's **newest** archived session — the last one closed —
+    /// bound to `workspace_id` (`IS`: no workspace matches no workspace). Only
+    /// that one: an older session is never read in its place, whatever it
+    /// holds.
+    pub fn previous_session(
+        &self,
+        lane_key: &str,
+        workspace_id: Option<&str>,
+    ) -> Result<Option<Conversation>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM session
+                 WHERE lane_key = ?1 AND status = 'archived' AND workspace_id IS ?2
+                 ORDER BY ended_at DESC, rowid DESC LIMIT 1",
+            ))?;
+            let mut rows = stmt.query(rusqlite::params![lane_key, workspace_id])?;
+            match rows.next()? {
+                Some(row) => Ok(Some(Self::row_to_session(row)?)),
+                None => Ok(None),
+            }
         })
     }
 
@@ -964,12 +1003,15 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
-    /// Clear the working state and reset counters for the lane's active session.
+    /// Clear the working state and reset counters for the lane's active
+    /// session. The summary last projected from the state goes too: a history
+    /// clear forgets it (LQ4), so the session no longer names it.
     pub fn clear_summary(&self, lane_key: &str) -> Result<()> {
         self.db.with_connection(|conn| {
             conn.execute(
                 "UPDATE session SET working_state = '', working_state_version = 0,
                  working_state_through = 0, working_state_updated_at = datetime('now'),
+                 episode_note_id = NULL,
                  message_count = 0, last_message_at = NULL, updated_at = datetime('now')
                  WHERE lane_key = ?1 AND status = 'active'",
                 [lane_key],
@@ -978,12 +1020,14 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
-    /// Clear the working state and reset counters for one session by id.
+    /// Clear the working state and reset counters for one session by id, as
+    /// [`Self::clear_summary`] does.
     pub fn clear_summary_for_session(&self, session_id: &str) -> Result<()> {
         self.db.with_connection(|conn| {
             conn.execute(
                 "UPDATE session SET working_state = '', working_state_version = 0,
                  working_state_through = 0, working_state_updated_at = datetime('now'),
+                 episode_note_id = NULL,
                  message_count = 0, last_message_at = NULL, updated_at = datetime('now')
                  WHERE id = ?1",
                 [session_id],
@@ -1126,6 +1170,7 @@ impl<'a> ConversationRepository<'a> {
             status: row.get(13)?,
             ended_at: row.get(14)?,
             episode_note_id: row.get(15)?,
+            inherit: row.get(16)?,
         })
     }
 

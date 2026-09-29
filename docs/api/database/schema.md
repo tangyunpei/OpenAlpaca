@@ -385,6 +385,7 @@ working_state_version INTEGER NOT NULL DEFAULT 0
 working_state_through INTEGER NOT NULL DEFAULT 0
 working_state_updated_at TEXT
 episode_note_id TEXT
+inherit INTEGER NOT NULL DEFAULT 1
 ended_at TEXT
 created_at TEXT NOT NULL DEFAULT (datetime('now'))
 updated_at TEXT NOT NULL DEFAULT (datetime('now'))

@@ -93,8 +93,12 @@ pub struct Conversation {
     pub working_state_through: i64,
     pub working_state_updated_at: Option<String>,
     /// The conversation summary last projected from the state; `None` until
-    /// a close writes one.
+    /// a close writes one, and again after a history clear forgets it.
     pub episode_note_id: Option<String>,
+    /// `false` for a conversation started fresh (`inherit: false`): it is
+    /// never given the previous conversation's state (design 11 §4 (b),
+    /// owner decision CQ-5).
+    pub inherit: bool,
     /// Canonical project root this conversation is bound to; `None` = none.
     /// Set from the first `x-workspace-path` the session sees, `PATCH`-able.
     /// One workspace per session — changing project means a new session.

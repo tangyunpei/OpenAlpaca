@@ -1005,7 +1005,7 @@ fn a_fresh_database_has_the_learning_columns_and_cursor_table() {
 
 /// `session`'s columns from migration 2 on, in order: the working state's
 /// five stand where the session summary's four stood.
-const SESSION_COLUMNS_V2: [&str; 16] = [
+const SESSION_COLUMNS_V2: [&str; 17] = [
     "id",
     "lane_key",
     "source",
@@ -1019,6 +1019,7 @@ const SESSION_COLUMNS_V2: [&str; 16] = [
     "working_state_through",
     "working_state_updated_at",
     "episode_note_id",
+    "inherit",
     "ended_at",
     "created_at",
     "updated_at",
@@ -1078,6 +1079,14 @@ fn a_fresh_database_has_the_working_state_columns() {
             },
         )?;
         assert_eq!(state, (String::new(), 0, 0, None, None));
+        let inherit: i64 =
+            conn.query_row("SELECT inherit FROM session WHERE id = 's'", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(
+            inherit, 1,
+            "a conversation carries the previous one's state by default"
+        );
         Ok(())
     })
     .unwrap();
