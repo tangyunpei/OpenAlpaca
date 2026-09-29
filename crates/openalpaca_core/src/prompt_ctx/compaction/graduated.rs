@@ -51,13 +51,15 @@ impl<'a> GraduatedCompactor<'a> {
     }
 
     /// `previous` is the working state the LlmSummary phase folds the older
-    /// messages into.
+    /// messages into, and `behind` the rows between it and the list that
+    /// neither holds, which that phase reads first.
     pub async fn compact(
         &self,
         messages: &mut Vec<ChatMessage>,
         tail_keep: usize,
         cancel_token: Option<tokio_util::sync::CancellationToken>,
         previous: Option<&WorkingState>,
+        behind: &[ChatMessage],
     ) -> CompactionReport {
         let mut report = CompactionReport {
             initial_tokens: crate::runner::estimate_messages_tokens(messages) as usize,
@@ -96,7 +98,7 @@ impl<'a> GraduatedCompactor<'a> {
                     let result = if let Some(ref token) = cancel_token {
                         tokio::select! {
                             res = crate::context_budget::compaction::CompactionPipeline::compact(
-                                owned.clone(), min_recent, previous, self.summarizer, self.max_chars,
+                                owned.clone(), min_recent, previous, behind, self.summarizer, self.max_chars,
                             ) => res,
                             _ = token.cancelled() => {
                                 *messages = owned;
@@ -109,6 +111,7 @@ impl<'a> GraduatedCompactor<'a> {
                             owned,
                             min_recent,
                             previous,
+                            behind,
                             self.summarizer,
                             self.max_chars,
                         )
@@ -243,7 +246,7 @@ mod tests {
         messages.push(ChatMessage::assistant("recent resp"));
 
         let compactor = GraduatedCompactor::new(&budget, &StateSummarizer, 4000);
-        let report = compactor.compact(&mut messages, 2, None, None).await;
+        let report = compactor.compact(&mut messages, 2, None, None, &[]).await;
 
         let (state, boundary) = report
             .working_state
@@ -302,7 +305,7 @@ mod tests {
         messages.push(ChatMessage::assistant("You're welcome!"));
 
         let compactor = GraduatedCompactor::new(&budget, &StateSummarizer, 4000);
-        let report = compactor.compact(&mut messages, 2, None, None).await;
+        let report = compactor.compact(&mut messages, 2, None, None, &[]).await;
 
         assert!(
             report.tiers_applied.len() > 1,
@@ -343,7 +346,7 @@ mod tests {
         messages.push(ChatMessage::assistant("You're welcome!"));
 
         let compactor = GraduatedCompactor::new(&budget, &StateSummarizer, 4000);
-        let report = compactor.compact(&mut messages, 2, None, None).await;
+        let report = compactor.compact(&mut messages, 2, None, None, &[]).await;
 
         // messages_discarded should accumulate across all tiers that remove messages
         // (previously it was only set for LlmSummary)

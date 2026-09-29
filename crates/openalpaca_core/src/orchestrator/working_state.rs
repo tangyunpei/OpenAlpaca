@@ -190,9 +190,10 @@ impl Default for WriterConfig {
 
 /// The §3.2 cursor (design 11): the message row a compaction's state covers
 /// through — only rows its writer read. The main loop builds it from the rows
-/// it placed in the prompt; a compaction whose state covers
-/// `messages[2..boundary]` of that list moves `through` to the last row
-/// before `boundary`.
+/// it placed in the prompt and the rows behind them that no state covers
+/// yet; a compaction whose state covers `messages[2..boundary]` of the list
+/// reads those rows behind first, and moves `through` to the last row before
+/// `boundary`.
 #[derive(Debug, Clone, Default)]
 pub struct Cursor {
     /// `working_state_through` when the turn began.
@@ -202,49 +203,73 @@ pub struct Cursor {
     /// The rows' ids, oldest first — none when the state may not pass them
     /// (see [`Cursor::new`]).
     pub row_ids: Vec<i64>,
+    /// The rows between `through` and the first row, oldest first, as the
+    /// writer reads them: in no prompt and no state, so the loop's first
+    /// compaction reads them ahead of the list's older messages. None when
+    /// the state may not pass the rows.
+    pub behind: Vec<ChatMessage>,
+    /// The last of [`Self::behind`]; `through` when there are none.
+    behind_through: i64,
 }
 
 impl Cursor {
     /// `row_ids` are the rows `build_context` placed in the prompt, oldest
-    /// first, and `list_len` the length of the composed list — its last
-    /// message the current turn, right after the rows. The state may pass
-    /// them only when no row before them went unread: none that the assembly
-    /// trim dropped (`head_dropped`), none past the recent window that the
-    /// lag refresh has not covered (`gap`), and not a first row at
-    /// `messages[1]`, which a compaction keeps and does not read. Otherwise
-    /// `through` stays where it was, and the lag refresh or the close reads
+    /// first; `behind` the rows between `through` and them (`older_window`:
+    /// `(id, role, text)`, oldest first), which no prompt and no state holds;
+    /// and `list_len` the length of the composed list — its last message the
+    /// current turn, right after the rows. The state may pass the rows only
+    /// when every row before them is read: none that the assembly trim
+    /// dropped (`head_dropped`), and not a first row at `messages[1]`, which
+    /// a compaction keeps and does not read. Then the compaction reads the
+    /// rows behind first and passes them too. Otherwise `through` stays where
+    /// it was, nothing behind is read, and the lag refresh or the close reads
     /// those rows later.
     pub fn new(
         through: i64,
         row_ids: &[i64],
         head_dropped: usize,
-        gap: bool,
+        behind: &[(i64, String, String)],
         list_len: usize,
     ) -> Self {
         let rows = row_ids.len().saturating_sub(head_dropped);
         let first_row = list_len.saturating_sub(1 + rows);
-        let passable = head_dropped == 0 && !gap && first_row >= 2;
+        if !(head_dropped == 0 && first_row >= 2) {
+            return Self {
+                through,
+                first_row,
+                row_ids: Vec::new(),
+                behind: Vec::new(),
+                behind_through: through,
+            };
+        }
+        let behind: Vec<_> = behind.iter().filter(|(id, _, _)| *id > through).collect();
         Self {
             through,
             first_row,
-            row_ids: if passable {
-                row_ids.to_vec()
-            } else {
-                Vec::new()
-            },
+            row_ids: row_ids.to_vec(),
+            behind_through: behind.last().map_or(through, |(id, _, _)| *id),
+            behind: behind
+                .into_iter()
+                .map(|(_, role, text)| match role.as_str() {
+                    "user" => ChatMessage::user(text),
+                    _ => ChatMessage::assistant(text),
+                })
+                .collect(),
         }
     }
 
     /// `through` after a compaction whose state covers `messages[2..boundary]`
-    /// of the list: the last row before `boundary`, and never less than what
-    /// the state covered before (the writer folded that state in).
+    /// of the list — and, read first, the rows [`Self::behind`]: the last row
+    /// before `boundary`, and never less than the last row behind or what the
+    /// state covered before (the writer folded that state in).
     pub fn after(&self, boundary: usize) -> i64 {
+        let floor = self.through.max(self.behind_through);
         let covered = boundary
             .saturating_sub(self.first_row)
             .min(self.row_ids.len());
         match covered.checked_sub(1) {
-            Some(last) => self.row_ids[last].max(self.through),
-            None => self.through,
+            Some(last) => self.row_ids[last].max(floor),
+            None => floor,
         }
     }
 }
@@ -1057,12 +1082,23 @@ mod tests {
     /// prompt and the state's block, before the current turn — a list of 11.
     const ROWS: [i64; 8] = [101, 102, 103, 104, 105, 106, 107, 108];
 
+    /// The rows 41..=44 between `through` (40) and the window, as
+    /// `older_window` hands them over: in no prompt and no state.
+    fn behind() -> Vec<(i64, String, String)> {
+        (41..=44)
+            .map(|id| {
+                let role = if id % 2 == 1 { "user" } else { "assistant" };
+                (id, role.to_string(), format!("row {id}"))
+            })
+            .collect()
+    }
+
     /// §3.2: `through` is the last row inside `messages[2..boundary]` —
     /// `recent_row_ids[covered − 1]` — never a row past the boundary, and
     /// unchanged when the compaction read no row.
     #[test]
     fn the_cursor_moves_to_the_last_row_the_compaction_read() {
-        let cursor = Cursor::new(40, &ROWS, 0, false, 11);
+        let cursor = Cursor::new(40, &ROWS, 0, &[], 11);
         assert_eq!(cursor.first_row, 2, "system, block, then the rows");
         assert_eq!(cursor.after(2), 40, "no row read: unchanged");
         assert_eq!(cursor.after(3), 101);
@@ -1070,28 +1106,59 @@ mod tests {
         assert_eq!(cursor.after(20), 108, "never past the last row");
     }
 
+    /// Design 11 rev 1.2: the rows behind the window that no state covers
+    /// are handed to the compaction, oldest first and in their roles, to be
+    /// read ahead of the list's — so `through` passes them with the rows it
+    /// read, and a compaction in a conversation longer than the window moves
+    /// the window (CQ-4). A row at or below `through` is not handed over.
+    #[test]
+    fn the_cursor_hands_over_the_rows_behind_the_window_and_passes_them() {
+        let mut rows = behind();
+        rows.insert(0, (40, "user".to_string(), "row 40".to_string()));
+        let cursor = Cursor::new(40, &ROWS, 0, &rows, 11);
+        let read: Vec<(openalpaca_llm::Role, &str)> = cursor
+            .behind
+            .iter()
+            .map(|m| (m.role.clone(), m.content.as_str()))
+            .collect();
+        assert_eq!(
+            read,
+            vec![
+                (openalpaca_llm::Role::User, "row 41"),
+                (openalpaca_llm::Role::Assistant, "row 42"),
+                (openalpaca_llm::Role::User, "row 43"),
+                (openalpaca_llm::Role::Assistant, "row 44"),
+            ]
+        );
+        assert_eq!(
+            cursor.after(8),
+            106,
+            "the rows it read, past the ones behind"
+        );
+        assert_eq!(cursor.after(2), 44, "at least the rows behind");
+    }
+
     /// §3.2 (panel defect U-2): when the assembly trim dropped rows at the
     /// head, `through` is not advanced past them — the writer never read
-    /// them — whatever the compaction read after them.
+    /// them — whatever the compaction read after them, and nothing behind
+    /// them is handed over either.
     #[test]
     fn the_cursor_does_not_move_when_the_trim_dropped_head_rows() {
         // Two rows trimmed: six of the eight are in a list of 9.
-        let cursor = Cursor::new(40, &ROWS, 2, false, 9);
+        let cursor = Cursor::new(40, &ROWS, 2, &behind(), 9);
+        assert!(cursor.behind.is_empty());
         for boundary in [2, 5, 8, 20] {
             assert_eq!(cursor.after(boundary), 40, "boundary {boundary}");
         }
     }
 
-    /// The same for the other rows before the read ones that nobody read: a
-    /// row past the recent window the lag refresh has not covered yet, and a
-    /// first row at `messages[1]` (no block ahead of it), which a compaction
-    /// keeps where it is and does not read.
+    /// The same for a first row at `messages[1]` (no block ahead of it),
+    /// which a compaction keeps where it is and does not read.
     #[test]
     fn the_cursor_does_not_move_past_a_row_nobody_read() {
-        let behind_the_window = Cursor::new(40, &ROWS, 0, true, 11);
-        assert_eq!(behind_the_window.after(8), 40);
-        let at_messages_1 = Cursor::new(40, &ROWS, 0, false, 10);
+        let at_messages_1 = Cursor::new(40, &ROWS, 0, &behind(), 10);
         assert_eq!(at_messages_1.first_row, 1);
+        assert!(at_messages_1.behind.is_empty());
         assert_eq!(at_messages_1.after(8), 40);
     }
 
@@ -1100,7 +1167,7 @@ mod tests {
     /// some of them leaves `through` where it was.
     #[test]
     fn the_cursor_never_moves_back() {
-        let after_a_close = Cursor::new(108, &ROWS, 0, false, 11);
+        let after_a_close = Cursor::new(108, &ROWS, 0, &[], 11);
         assert_eq!(after_a_close.after(5), 108);
     }
 

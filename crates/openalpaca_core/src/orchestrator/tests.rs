@@ -8709,28 +8709,47 @@ async fn a_compaction_after_the_trim_dropped_rows_leaves_through_where_it_was() 
     );
 }
 
-/// The same for rows behind the recent window that the lag refresh has not
-/// covered yet: with a ten-row window over fourteen rows, rows 1–4 are in no
-/// prompt and in no state, so a compaction of rows 5 on may not pass them.
+/// Design 11 rev 1.2 (the slice-3 review's F1): rows behind the recent
+/// window that the lag refresh has not covered yet — with a ten-row window
+/// over fourteen rows, rows 1–4, in no prompt and in no state — are read by
+/// the compaction's one writer call ahead of the window's, oldest first, so
+/// `through` passes them with the rows it read (`messages[2..10]` are rows
+/// 5–12). The next turn's window starts after it with the four-row floor,
+/// and no row lies between the state and the window: a conversation longer
+/// than the window stops re-sending and re-compacting it (CQ-4).
 #[tokio::test]
-async fn a_compaction_never_passes_rows_behind_the_window_it_did_not_read() {
+async fn a_compaction_reads_the_rows_behind_the_window_and_moves_the_window_past_them() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let written = lisbon_state("Book the hotel");
     let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 10);
-    let (session, _) = a_long_session(&db, 14);
+    let (session, ids) = a_long_session(&db, 14);
+    assert_eq!(
+        orch.build_context("user1:cli", "what next?")
+            .older_window
+            .len(),
+        4,
+        "rows 1–4 lie behind the window"
+    );
 
     send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
     orch.background.wait_idle().await;
 
     let turn = requests.lock().unwrap().clone();
-    let call = turn
-        .iter()
-        .find(|r| is_writer_call(r))
-        .expect("it compacted");
+    let calls: Vec<&ChatRequest> = turn.iter().filter(|r| is_writer_call(r)).collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "one summariser call, no second one at turn end"
+    );
+    let user = &calls[0].messages[1].content;
+    let at = |line: &str| {
+        user.find(line)
+            .unwrap_or_else(|| panic!("the writer read {line:?}"))
+    };
     assert!(
-        call.messages[1].content.contains("[user]: r5 "),
-        "the compaction read the window's first row"
+        at("[user]: r1 ") < at("[assistant]: r4 ") && at("[assistant]: r4 ") < at("[user]: r5 "),
+        "the rows behind the window first, then the window's"
     );
     let row = openalpaca_storage::ConversationRepository::new(&db)
         .get_session(&session)
@@ -8742,7 +8761,27 @@ async fn a_compaction_never_passes_rows_behind_the_window_it_did_not_read() {
     );
     assert_eq!(
         (row.working_state_version, row.working_state_through),
-        (2, 0),
-        "`through` does not pass rows 1–4"
+        (2, ids[11]),
+        "`through` passes rows 1–4 and the window's rows 5–12"
+    );
+
+    let ctx = orch.build_context("user1:cli", "and then?");
+    assert!(
+        ctx.older_window.is_empty(),
+        "no row between the state and the window"
+    );
+    send_tool_mode(&orch, Uuid::new_v4(), "and then?").await;
+    let next = requests.lock().unwrap()[2].clone();
+    assert!(!is_writer_call(&next), "the next turn does not compact");
+    let rows: Vec<&str> = next
+        .messages
+        .iter()
+        .filter_map(|m| m.content.split_once(' ').map(|(label, _)| label))
+        .filter(|label| label.starts_with('r') && label[1..].parse::<u32>().is_ok())
+        .collect();
+    assert_eq!(
+        rows,
+        vec!["r11", "r12", "r13", "r14"],
+        "the window starts after `through`, four rows kept verbatim"
     );
 }

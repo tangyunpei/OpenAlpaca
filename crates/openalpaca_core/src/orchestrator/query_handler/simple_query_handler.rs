@@ -851,12 +851,15 @@ impl Orchestrator {
 
             // Design 11 §3.3, CQ-3: a compaction folds the older messages
             // into the session's working state on `summary_model`, and the
-            // §3.2 cursor says which row that state then covers through.
+            // §3.2 cursor says which row that state then covers through. The
+            // rows behind the window that no state covers yet
+            // (`older_window`) are read first, so a compaction passes them
+            // too (design 11 rev 1.2).
             let cursor = crate::orchestrator::working_state::Cursor::new(
                 ctx.working_state_through,
                 &ctx.recent_row_ids,
                 composed.history_head_dropped,
-                !ctx.older_window.is_empty(),
+                &ctx.older_window,
                 composed.messages.len(),
             );
             let config_for_loop = LoopConfig {

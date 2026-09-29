@@ -1169,7 +1169,17 @@ async fn run_compacting_turn(
             ..WriterConfig::default()
         },
         working_state: Some(std::sync::Arc::new(lisbon("Lisbon trip"))),
-        working_state_cursor: Some(Cursor::new(40, &rows, 0, false, 11)),
+        // Two rows behind the window that no state covers (§3.2, rev 1.2).
+        working_state_cursor: Some(Cursor::new(
+            40,
+            &rows,
+            0,
+            &[
+                (41, "user".to_string(), "behind 41".to_string()),
+                (42, "assistant".to_string(), "behind 42".to_string()),
+            ],
+            11,
+        )),
         ..Default::default()
     };
 
@@ -1228,6 +1238,15 @@ async fn an_llm_summary_compaction_makes_one_call_and_leaves_one_state_block() {
     assert!(
         !user.contains("context_data"),
         "the previous block is not read as a row: {user}"
+    );
+    let at = |line: &str| {
+        user.find(line)
+            .unwrap_or_else(|| panic!("the writer read {line:?}: {user}"))
+    };
+    assert!(
+        at("[user]: behind 41\n") < at("[assistant]: behind 42\n")
+            && at("[assistant]: behind 42\n") < at("[user]: row 1 "),
+        "the rows behind the list first, oldest first: {user}"
     );
 
     let answer = requests.iter().find(|r| !is_writer_call(r)).unwrap();
@@ -1313,6 +1332,159 @@ async fn an_unusable_answer_falls_back_to_the_heuristic_summary() {
     let compaction = records.iter().find(|r| r.kind == "compaction").unwrap();
     assert!(compaction.data["working_state"].is_null());
     assert!(compaction.data["state_through"].is_null());
+}
+
+/// Behind the router: the working-state writer answered with `state`, every
+/// other request from `answers` in order; every request kept.
+struct WriterScript {
+    state: String,
+    answers: std::sync::Mutex<std::collections::VecDeque<ChatResponse>>,
+    seen: std::sync::Mutex<Vec<ChatRequest>>,
+}
+
+#[async_trait]
+impl LlmProvider for WriterScript {
+    fn name(&self) -> &str {
+        "writer-script"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        let writer = is_writer_call(&request);
+        let model = request.model.clone().unwrap_or_else(|| "scripted".into());
+        self.seen.lock().unwrap().push(request);
+        if !writer {
+            return Ok(self
+                .answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("an answer is scripted"));
+        }
+        Ok(ChatResponse {
+            content: self.state.clone(),
+            tool_calls: vec![],
+            model,
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        })
+    }
+}
+
+/// Design 11 rev 1.2: the rows behind the window go to a loop's **first**
+/// fold only. A second `LlmSummary` in the same loop folds into the state
+/// the first wrote, which already covers them, and reads only the list — so
+/// no row is read twice, and none out of order after a newer state.
+#[tokio::test]
+async fn a_second_compaction_in_one_loop_does_not_read_the_rows_behind_again() {
+    use crate::context_budget::ContextBudgetManager;
+    use crate::daemon_config::ContextBudgetConfig;
+    use crate::orchestrator::working_state::Cursor;
+
+    // Each answer carries ~500 tokens of its own, so the round after the
+    // first compaction starts the next one at `LlmSummary` again.
+    let fat = |id: &str| ChatResponse {
+        content: "x".repeat(2000),
+        tool_calls: vec![openalpaca_llm::ToolCall {
+            id: id.to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"query": "hotels"}),
+        }],
+        model: "scripted".to_string(),
+        usage: Usage {
+            input_tokens: 50,
+            output_tokens: 50,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::ToolUse,
+        thinking: None,
+        parts: None,
+    };
+    let provider = Arc::new(WriterScript {
+        state: serde_json::to_string(&lisbon("Lisbon trip, flights booked")).unwrap(),
+        answers: std::sync::Mutex::new(
+            [
+                fat("tc_a"),
+                fat("tc_b"),
+                MockProvider::simple_response("Done."),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        ProviderType::Anthropic,
+        crate::test_util::RECORDED_MODEL.to_string(),
+    );
+    let budget = ContextBudgetManager::new(500, &ContextBudgetConfig::default());
+    let rows: Vec<i64> = (101..=108).collect();
+    let config = LoopConfig {
+        enable_caching: false,
+        working_state: Some(std::sync::Arc::new(lisbon("Lisbon trip"))),
+        working_state_cursor: Some(Cursor::new(
+            40,
+            &rows,
+            0,
+            &[(41, "user".to_string(), "behind 41".to_string())],
+            11,
+        )),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        working_state_turn(&lisbon("Lisbon trip")),
+        vec![],
+        &config,
+        None,
+        "orchestrator",
+        None,
+        None,
+        Some(&budget),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.final_content, "Done.");
+
+    let seen = provider.seen.lock().unwrap().clone();
+    let writers: Vec<&String> = seen
+        .iter()
+        .filter(|r| is_writer_call(r))
+        .map(|r| &r.messages[1].content)
+        .collect();
+    assert!(
+        writers.len() >= 2,
+        "the loop compacted twice: {}",
+        writers.len()
+    );
+    assert!(
+        writers[0].contains("[user]: behind 41\n"),
+        "the first fold reads the rows behind: {}",
+        writers[0]
+    );
+    for later in &writers[1..] {
+        assert!(
+            !later.contains("behind 41"),
+            "a later fold does not read them again: {later}"
+        );
+        assert!(
+            later.contains(&serde_json::to_string(&lisbon("Lisbon trip, flights booked")).unwrap()),
+            "it folds into the state the first wrote: {later}"
+        );
+    }
 }
 
 #[test]

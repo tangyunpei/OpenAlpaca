@@ -651,10 +651,19 @@ async fn run_agentic_loop_core(
                     config.writer.max_chars,
                 );
                 // Design 11 §3.3: the state the older messages are folded
-                // into — this loop's last one, else the one it was handed.
-                let previous = match &state.working_state {
-                    Some((written, _)) => Some(written),
-                    None => config.working_state.as_deref(),
+                // into — this loop's last one, else the one it was handed
+                // with the rows behind the list that it does not cover
+                // (§3.2's cursor, rev 1.2), read first. This loop's own state
+                // already covers them.
+                let (previous, behind) = match &state.working_state {
+                    Some((written, _)) => (Some(written), &[][..]),
+                    None => (
+                        config.working_state.as_deref(),
+                        config
+                            .working_state_cursor
+                            .as_ref()
+                            .map_or(&[][..], |cursor| cursor.behind.as_slice()),
+                    ),
                 };
                 let report = compactor
                     .compact(
@@ -662,6 +671,7 @@ async fn run_agentic_loop_core(
                         config.context_tail_keep,
                         cancel_token.clone(),
                         previous,
+                        behind,
                     )
                     .instrument(compaction_span.clone())
                     .await;

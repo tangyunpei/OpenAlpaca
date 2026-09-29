@@ -247,7 +247,7 @@ async fn test_summarize_replaces_older_messages() {
     ];
     let summarizer = MockSummarizer::new("Rust");
     let (result, written) =
-        CompactionPipeline::summarize_older(messages.clone(), 2, None, &summarizer, 4000)
+        CompactionPipeline::summarize_older(messages.clone(), 2, None, &[], &summarizer, 4000)
             .await
             .unwrap()
             .expect("the older messages are summarised");
@@ -275,9 +275,10 @@ async fn test_summarize_preserves_recent_when_nothing_to_summarize() {
         ChatMessage::assistant("answer"),
     ];
     let summarizer = MockSummarizer::new("summary");
-    let result = CompactionPipeline::summarize_older(messages.clone(), 4, None, &summarizer, 4000)
-        .await
-        .unwrap();
+    let result =
+        CompactionPipeline::summarize_older(messages.clone(), 4, None, &[], &summarizer, 4000)
+            .await
+            .unwrap();
     assert!(result.is_none(), "no change");
     assert!(summarizer.seen.lock().unwrap().is_empty(), "and no call");
 }
@@ -318,7 +319,7 @@ async fn one_state_block_is_left_after_compaction_wherever_the_previous_stood() 
     for (shape, messages, kept_head) in [("main loop", main_loop, 1), ("lead", lead, 2)] {
         let summarizer = MockSummarizer::new("Lisbon trip, booked");
         let result =
-            CompactionPipeline::compact(messages, 4, Some(&previous), &summarizer, 4000).await;
+            CompactionPipeline::compact(messages, 4, Some(&previous), &[], &summarizer, 4000).await;
 
         let blocks: Vec<&ChatMessage> = result
             .compacted_messages
@@ -353,6 +354,51 @@ async fn one_state_block_is_left_after_compaction_wherever_the_previous_stood() 
     }
 }
 
+/// Design 11 rev 1.2: the rows behind the list — between the previous
+/// state and the list, in neither — are read first, oldest first, and only
+/// when the list itself has older messages to summarise: no call is made
+/// for them alone.
+#[tokio::test]
+async fn the_rows_behind_the_list_are_read_first_and_never_alone() {
+    let behind = [ChatMessage::user("b1"), ChatMessage::assistant("b2")];
+    let messages: Vec<ChatMessage> = [ChatMessage::system("sys"), ChatMessage::user("init")]
+        .into_iter()
+        .chain((1..=6).map(|i| {
+            if i % 2 == 1 {
+                ChatMessage::user(&format!("u{i}"))
+            } else {
+                ChatMessage::assistant(&format!("a{i}"))
+            }
+        }))
+        .collect();
+    let summarizer = MockSummarizer::new("read");
+    CompactionPipeline::summarize_older(messages, 2, None, &behind, &summarizer, 4000)
+        .await
+        .unwrap()
+        .expect("summarised");
+    assert_eq!(
+        summarizer.seen.lock().unwrap()[0].1,
+        vec!["b1", "b2", "u1", "a2", "u3", "a4"],
+        "behind first, then messages[2..6]"
+    );
+
+    let short = vec![
+        ChatMessage::system("sys"),
+        ChatMessage::user("init"),
+        ChatMessage::user("recent"),
+        ChatMessage::assistant("answer"),
+    ];
+    let summarizer = MockSummarizer::new("read");
+    let result = CompactionPipeline::summarize_older(short, 4, None, &behind, &summarizer, 4000)
+        .await
+        .unwrap();
+    assert!(result.is_none());
+    assert!(
+        summarizer.seen.lock().unwrap().is_empty(),
+        "no call for the rows behind alone"
+    );
+}
+
 #[tokio::test]
 async fn test_compaction_full_pipeline() {
     let messages = vec![
@@ -370,7 +416,7 @@ async fn test_compaction_full_pipeline() {
 
     let summarizer = MockSummarizer::new("Rust discussion");
 
-    let result = CompactionPipeline::compact(messages, 2, None, &summarizer, 4000).await;
+    let result = CompactionPipeline::compact(messages, 2, None, &[], &summarizer, 4000).await;
     assert!(result.compacted_messages.len() < 10);
     // The social pair went before the summary, so the boundary is counted in
     // the list as handed: 10 messages less the 2 kept.
@@ -407,7 +453,8 @@ async fn test_compaction_fallback_on_summarizer_failure() {
         ChatMessage::assistant("recent response"),
     ];
 
-    let result = CompactionPipeline::compact(messages, 2, None, &FailingSummarizer, 4000).await;
+    let result =
+        CompactionPipeline::compact(messages, 2, None, &[], &FailingSummarizer, 4000).await;
     assert!(result.compacted_messages.len() < 10);
     assert!(
         result.working_state.is_none(),
@@ -433,8 +480,15 @@ async fn test_compaction_preserves_recent() {
         ChatMessage::user("recent_q"),
         ChatMessage::assistant("recent_a"),
     ];
-    let result =
-        CompactionPipeline::compact(messages, 2, None, &MockSummarizer::new("summary"), 4000).await;
+    let result = CompactionPipeline::compact(
+        messages,
+        2,
+        None,
+        &[],
+        &MockSummarizer::new("summary"),
+        4000,
+    )
+    .await;
     let last = result.compacted_messages.last().unwrap();
     assert_eq!(last.content, "recent_a");
 }

@@ -41,14 +41,16 @@ impl CompactionPipeline {
     /// phase is gone).
     ///
     /// Phase 2: Discard social messages (heuristic). Always succeeds.
-    /// Phase 3: Write the working state over the older messages (LLM) and
-    ///          put it in their place, rendered within `max_chars`. On error
-    ///          (an unusable answer too): fall back to the existing
-    ///          `compress_context()` heuristic.
+    /// Phase 3: Write the working state over the older messages (LLM) — the
+    ///          rows `behind` the list first — and put it in their place,
+    ///          rendered within `max_chars`. On error (an unusable answer
+    ///          too): fall back to the existing `compress_context()`
+    ///          heuristic.
     pub async fn compact(
         messages: Vec<ChatMessage>,
         min_recent: usize,
         previous: Option<&WorkingState>,
+        behind: &[ChatMessage],
         summarizer: &dyn Summarizer,
         max_chars: usize,
     ) -> CompactionResult {
@@ -67,6 +69,7 @@ impl CompactionPipeline {
             after_discard.clone(),
             min_recent,
             previous,
+            behind,
             summarizer,
             max_chars,
         )
@@ -160,15 +163,19 @@ impl CompactionPipeline {
     /// Phase 3: Write the working state over the older messages.
     ///
     /// `messages[2..boundary]` (boundary = `messages.len() - min_recent`) go
-    /// to the writer with `previous`, and the state it returns takes their
-    /// place, rendered within `max_chars`. A message that is the previous
-    /// state's block is not read — `previous` is the state — and is taken
-    /// out of the list wherever it stands, so the list holds one block after
-    /// (design 11 §3.3). `Ok(None)` when there is nothing to summarise.
+    /// to the writer with `previous`, after the rows `behind` the list —
+    /// rows between `previous` and the list that neither holds, oldest first
+    /// (the main loop's §3.2 cursor; empty elsewhere) — and the state it
+    /// returns takes their place, rendered within `max_chars`. A message that
+    /// is the previous state's block is not read — `previous` is the state —
+    /// and is taken out of the list wherever it stands, so the list holds one
+    /// block after (design 11 §3.3). `Ok(None)` when the list has nothing to
+    /// summarise, whatever lies behind it.
     pub async fn summarize_older(
         messages: Vec<ChatMessage>,
         min_recent: usize,
         previous: Option<&WorkingState>,
+        behind: &[ChatMessage],
         summarizer: &dyn Summarizer,
         max_chars: usize,
     ) -> Result<Option<(Vec<ChatMessage>, WorkingState)>, String> {
@@ -190,7 +197,8 @@ impl CompactionPipeline {
         if older.is_empty() {
             return Ok(None);
         }
-        let state = summarizer.summarize(previous, &older).await?;
+        let read: Vec<ChatMessage> = behind.iter().cloned().chain(older).collect();
+        let state = summarizer.summarize(previous, &read).await?;
         let updated_at = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut result = Vec::with_capacity(2 + 1 + min_recent);

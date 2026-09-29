@@ -67,7 +67,8 @@ pub struct LoopConfig {
     /// into. The main loop sets it from the session row; `None` elsewhere.
     pub working_state: Option<Arc<WorkingState>>,
     /// The §3.2 cursor over the rows the loop was handed — the main loop's
-    /// only; what a compaction's `compaction` record names as `state_through`.
+    /// only; what a compaction's `compaction` record names as `state_through`,
+    /// and the rows behind them that the loop's first compaction reads first.
     pub working_state_cursor: Option<Cursor>,
     /// Optional event bus for emitting compaction telemetry.
     /// When set, the agentic loop publishes `CompactionTriggered` events.
