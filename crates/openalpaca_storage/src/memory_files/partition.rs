@@ -1811,7 +1811,8 @@ impl Partition {
 
     /// `memory_update` (design §7a): edit, archive or confirm, under the
     /// revision check and the G2 rules — `confirm` only from a user-directed
-    /// surface; edit/archive of a `user` note only from one.
+    /// surface; edit/archive of a `user` note only from one; and a fact key
+    /// set on a conversation summary only from one (owner decision LQ10).
     pub fn update(
         &self,
         id: &NoteId,
@@ -1962,6 +1963,26 @@ impl Partition {
                     });
                 }
                 patch.apply(&mut new);
+                // Owner decision LQ10 (2026-09-28): a conversation summary
+                // takes no fact key from anyone but the user — learning
+                // ignores it, and the same-key grouping would set the
+                // assistant's record against the note that holds the key.
+                if !actor.is_user_directed()
+                    && new.fact_key.is_some()
+                    && new.fact_key != view.note.fact_key
+                    && super::is_conversation_summary(
+                        view.note.kind,
+                        view.derived.origin,
+                        view.note.status,
+                    )
+                {
+                    return Err(MemoryFilesError::AuthorityConflict {
+                        id: *id,
+                        message: format!(
+                            "Note {id} is a conversation summary, and a conversation summary takes no fact key from a model: store the fact as a note of its own instead."
+                        ),
+                    });
+                }
                 if new.serialize() == view.note.serialize() {
                     let updated = Updated {
                         id: *id,

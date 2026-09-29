@@ -471,28 +471,31 @@ fn a_model_edit_or_archive_leaves_a_summary_a_summary() {
     );
 }
 
-/// A summary holds no key for learning (review of L10c, R1). A model's
-/// edit may put a `fact_key` on one and it stays a summary; were it the
-/// key's target, the user's own later statement under that key would be
-/// parked as a suggestion to replace the assistant's record instead of
-/// being learned. It is neither a key's target nor among the known keys.
+/// A summary holds no key for learning (review of L10c, R1). Since owner
+/// decision LQ10 a model's edit may not put a `fact_key` on one — it is
+/// `authority_conflict` — but a summary an older build let a model key stays
+/// a summary; were it the key's target, the user's own later statement
+/// under that key would be parked as a suggestion to replace the
+/// assistant's record instead of being learned. It is neither a key's
+/// target nor among the known keys.
 #[test]
-fn a_key_a_model_edit_put_on_a_summary_is_no_key_for_learning() {
+fn a_key_on_a_summary_is_no_key_for_learning() {
     let h = Harness::new();
     let row = h.message_row("We planned the Lisbon trip.");
     let learning = extraction(&h, None);
-    let note = summary(
+    let refused = summary(
         &h,
-        "Conversation on 2026-09-20: Lisbon trip planning",
-        "Discussed: flights to Lisbon.",
+        "Conversation on 2026-09-19: Lisbon",
+        "Discussed.",
         &[row],
     );
-    h.service
+    let err = h
+        .service
         .update(
             &h.tool(ALICE, None),
             UpdateInput {
-                id: note.id,
-                expected_revision: note.revision.clone(),
+                id: refused.id,
+                expected_revision: refused.revision.clone(),
                 action: UpdateAction::Edit(Patch {
                     fact_key: Some(Some("user.editor".to_string())),
                     ..Default::default()
@@ -500,7 +503,32 @@ fn a_key_a_model_edit_put_on_a_summary_is_no_key_for_learning() {
                 reason: None,
             },
         )
+        .unwrap_err();
+    assert_eq!(err.class(), "authority_conflict", "{err}");
+
+    // What an older build let a model's edit leave, written below the
+    // service's rules.
+    let title = "Conversation on 2026-09-20: Lisbon trip planning";
+    let note = h
+        .service
+        .open_partition(&StoreScope::Home, ALICE)
+        .unwrap()
+        .create(
+            NewNote {
+                title: title.to_string(),
+                body: format!("# {title}\n\n## Knowledge\nDiscussed: flights to Lisbon.\n"),
+                kind: Some(NoteKind::Episode),
+                status: Some(NoteStatus::Active),
+                fact_key: Some("user.editor".to_string()),
+                sources: vec![message(row)],
+                ..Default::default()
+            },
+            files::Actor::Extraction {
+                origin: Origin::ExtractedOther,
+            },
+        )
         .unwrap();
+    h.service.rebuild_index().unwrap();
     let read = h
         .service
         .read(
