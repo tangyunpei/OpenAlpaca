@@ -415,8 +415,8 @@ fn record_usage(
         .unwrap_or_else(|| "unknown".to_string());
     let cost = router.cost_tracker.calculate_cost(
         model,
-        response.usage.input_tokens as u32,
-        response.usage.output_tokens as u32,
+        response.usage.input_tokens,
+        response.usage.output_tokens,
     );
     let (status, error) = match parsed {
         Ok(_) => ("success", None),
