@@ -8315,6 +8315,7 @@ async fn a_compacting_turn_ends(
         orch.compacted_states.clone(),
         ctx,
         Some((state, through)),
+        None,
     )
     .await;
 }
@@ -8386,6 +8387,7 @@ async fn the_window_is_unchanged_after_a_lag_refresh_or_a_close() {
         orch.daemon_config.clone(),
         orch.compacted_states.clone(),
         before,
+        None,
         None,
     )
     .await;
@@ -8708,6 +8710,120 @@ async fn a_compaction_given_the_previous_conversation_reads_it_as_carried() {
         !user.contains(working_state::PREVIOUS_BLOCK_PREFIX),
         "the block is not read a second time: {user}"
     );
+}
+
+/// A note citing the message row `row`, stored and then forgotten — the
+/// user said "forget that" — so a tombstone suppresses `message:<row>`
+/// (design 03 §6).
+fn a_forgotten_note_citing(scene: &RecallScene, row: i64) {
+    use crate::memory::service::{
+        Attribution, Capabilities, ForgetInput, StoreInput, Surface, WorkspaceHint,
+    };
+    use openalpaca_storage::memory_files::{NoteKind, NoteSource, SourceType};
+    let owner = scene
+        .service
+        .context(
+            "user1",
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let note = scene
+        .service
+        .store(
+            &owner,
+            StoreInput {
+                title: "A secret".into(),
+                body: "# A secret\n\nSomething the user asked to forget.\n".into(),
+                kind: Some(NoteKind::Fact),
+                sources: vec![NoteSource {
+                    kind: SourceType::Message,
+                    id: row.to_string(),
+                    observed_at: None,
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    scene
+        .service
+        .forget(
+            &owner,
+            ForgetInput {
+                targets: vec![(note.id, note.revision)],
+                reason: None,
+            },
+        )
+        .unwrap();
+}
+
+/// Design 11 rev 1.7 (F5; 03 §6): a turn's lag refresh never reads a row a
+/// forget took back — it reads the rows around it, and `through` still
+/// covers it.
+#[tokio::test]
+async fn the_lag_refresh_never_reads_a_row_a_forget_took_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let mut config = DaemonConfig::default();
+    config.orchestrator.memory.prompt_recent_messages = 6;
+    let answer = serde_json::to_string(&lisbon_state("Compare the hotels")).unwrap();
+    let (orch, requests) =
+        make_tool_mode_orchestrator_with_db(None, &answer, config, Vec::new(), Some(db.clone()));
+    let scene = recall_scene(&db);
+    orch.set_memory_service(scene.service.clone());
+    let (session, ids) = session_with_rows(&db, 20);
+    a_forgotten_note_citing(&scene, ids[2]);
+
+    send_tool_mode(&orch, Uuid::new_v4(), "next").await;
+    orch.background.wait_idle().await;
+
+    let requests = requests.lock().unwrap().clone();
+    let writer = requests
+        .iter()
+        .find(|r| is_writer_call(r))
+        .expect("the turn end refreshed the state");
+    let prompt = &writer.messages[1].content;
+    assert!(!prompt.contains("[user]: u3\n"), "{prompt}");
+    for kept in ["[user]: u1\n", "[assistant]: a2\n", "[assistant]: a4\n"] {
+        assert!(prompt.contains(kept), "{kept} in {prompt}");
+    }
+    assert_eq!(
+        openalpaca_storage::ConversationRepository::new(&db)
+            .get_session(&session)
+            .unwrap()
+            .unwrap()
+            .working_state_through,
+        ids[13],
+        "the refresh covered the 14 rows behind the window"
+    );
+}
+
+/// Design 11 rev 1.7 (F5; 03 §6): a compaction never reads a row a forget
+/// took back either — the one call reads the older rows around it.
+#[tokio::test]
+async fn a_compaction_never_reads_a_row_a_forget_took_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let written = lisbon_state("Book the hotel");
+    let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 25);
+    let scene = recall_scene(&db);
+    orch.set_memory_service(scene.service.clone());
+    let (_, ids) = a_long_session(&db, 10);
+    a_forgotten_note_citing(&scene, ids[2]);
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+    orch.background.wait_idle().await;
+
+    let requests = requests.lock().unwrap().clone();
+    let writers: Vec<&ChatRequest> = requests.iter().filter(|r| is_writer_call(r)).collect();
+    assert_eq!(writers.len(), 1, "one compaction call");
+    let prompt = &writers[0].messages[1].content;
+    assert!(!prompt.contains("[user]: r3 "), "{prompt}");
+    for kept in ["[assistant]: r2 ", "[assistant]: r4 ", "[user]: r5 "] {
+        assert!(prompt.contains(kept), "{kept} in {prompt}");
+    }
 }
 
 /// **Design 11 §10.2, its second half.** An answer that is not a state

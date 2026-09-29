@@ -386,6 +386,14 @@ impl Orchestrator {
         if let (Some(db), Some(router)) = (self.db.clone(), self.llm_router.clone()) {
             let config = self.daemon_config.clone();
             let compacted_states = self.compacted_states.clone();
+            // Rev 1.7 (F5): where the refresh asks what a forget took back.
+            let forget = self
+                .memory_service()
+                .map(|service| super::working_state::ForgetCheck {
+                    db: db.clone(),
+                    service,
+                    lane_key: lane_key.to_string(),
+                });
             // NOTE: ctx is intentionally moved into this job — do not reference it after this block
             self.background.spawn(async move {
                 super::working_state::after_turn(
@@ -395,6 +403,7 @@ impl Orchestrator {
                     compacted_states,
                     ctx,
                     from_loop,
+                    forget,
                 )
                 .await;
             });

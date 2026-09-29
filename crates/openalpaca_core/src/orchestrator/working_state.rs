@@ -12,6 +12,7 @@
 
 use super::ConversationContext;
 use crate::daemon_config::DaemonConfig;
+use crate::memory::service::MemoryService;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use openalpaca_llm::{
@@ -22,6 +23,7 @@ use openalpaca_storage::repository::LlmUsageRepository;
 use openalpaca_storage::{ConversationRepository, Database};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// The shape's version, stored as `v`.
@@ -204,6 +206,59 @@ pub struct WriterConfig {
     /// the loop's request carries its block (the main loop sets it; rev
     /// 1.7, F2): read ahead of the older messages, in place of the block.
     pub carried: Option<String>,
+    /// The conversation's rows the older messages may hold, and where to
+    /// ask which of them a forget took back (the main loop sets it; rev
+    /// 1.7, F5): the writer does not read those.
+    pub rows: Option<WriterRows>,
+}
+
+/// Where a writer's call site asks which rows of the conversation a forget
+/// took back (design 03 §6; design 11 rev 1.7, F5): the store the rows are
+/// read from, the memory service whose partitions hold the forgets, and the
+/// lane whose owner they are.
+#[derive(Clone)]
+pub struct ForgetCheck {
+    pub db: Database,
+    pub service: Arc<MemoryService>,
+    pub lane_key: String,
+}
+
+impl ForgetCheck {
+    /// The ids among `ids` the writer must not read
+    /// ([`crate::memory::learning::forgotten_rows`]); `Err` says why they
+    /// could not be told.
+    pub(crate) fn among(&self, ids: &[i64]) -> Result<HashSet<i64>, String> {
+        let rows = ConversationRepository::new(&self.db)
+            .learning_rows_by_ids(ids)
+            .map_err(|e| format!("the conversation's rows could not be read: {e}"))?;
+        crate::memory::learning::forgotten_rows(&self.service, &self.lane_key, &rows)
+            .map_err(|e| format!("the forgets could not be read: {e}"))
+    }
+}
+
+/// The rows a compaction's writer may meet among the older messages —
+/// `(row id, its message's text as the loop's list holds it)`, the rows the
+/// turn placed in its prompt and those behind them — and where to ask which
+/// of them a forget took back (rev 1.7, F5).
+#[derive(Clone)]
+pub struct WriterRows {
+    pub check: ForgetCheck,
+    pub rows: Arc<Vec<(i64, String)>>,
+}
+
+impl WriterRows {
+    /// The texts of the rows a forget took back, which the writer leaves
+    /// out; asked only when the writer is about to be called.
+    pub(crate) fn left_out(&self) -> Result<HashSet<String>, String> {
+        let ids: Vec<i64> = self.rows.iter().map(|(id, _)| *id).collect();
+        let forgotten = self.check.among(&ids)?;
+        Ok(self
+            .rows
+            .iter()
+            .filter(|(id, _)| forgotten.contains(id))
+            .map(|(_, text)| text.clone())
+            .collect())
+    }
 }
 
 impl WriterConfig {
@@ -225,6 +280,7 @@ impl WriterConfig {
             max_chars: memory.summary_max_chars,
             db: None,
             carried: None,
+            rows: None,
         }
     }
 }
@@ -244,6 +300,7 @@ impl std::fmt::Debug for WriterConfig {
             .field("max_chars", &self.max_chars)
             .field("db", &self.db.is_some())
             .field("carried", &self.carried.is_some())
+            .field("rows", &self.rows.is_some())
             .finish()
     }
 }
@@ -348,7 +405,9 @@ impl Cursor {
 /// Written to the session the turn read, under its optimistic version with
 /// one retry. An answer that is not a state is recorded and leaves the row
 /// untouched. A mark is only ever added: it counts while the row holds the
-/// version and `through` it names, which any later write changes.
+/// version and `through` it names, which any later write changes. With
+/// `forget`, a row a forget took back is not read (rev 1.7, F5); when that
+/// cannot be told, no call is made.
 pub(super) async fn after_turn(
     db: Database,
     router: Arc<LlmRouter>,
@@ -356,6 +415,7 @@ pub(super) async fn after_turn(
     compacted_states: Arc<DashMap<String, (i64, i64)>>,
     ctx: ConversationContext,
     from_loop: Option<(WorkingState, i64)>,
+    forget: Option<ForgetCheck>,
 ) {
     let Some(session_id) = ctx.session_id.clone() else {
         return;
@@ -392,13 +452,32 @@ pub(super) async fn after_turn(
         return;
     }
 
+    // Rev 1.7 (F5; design 03 §6): a row a forget took back is never read,
+    // nor the rest of its turn — `through` still passes them.
+    let forgotten = match &forget {
+        Some(check) => {
+            let ids: Vec<i64> = new_rows.iter().map(|(id, _, _)| *id).collect();
+            match check.among(&ids) {
+                Ok(forgotten) => forgotten,
+                Err(why) => {
+                    tracing::warn!("the working state was not refreshed: {why}");
+                    return;
+                }
+            }
+        }
+        None => HashSet::new(),
+    };
     let lines: Vec<TranscriptLine<'_>> = new_rows
         .iter()
+        .filter(|(id, _, _)| !forgotten.contains(id))
         .map(|(_, role, content)| TranscriptLine {
             role,
             text: content,
         })
         .collect();
+    if lines.is_empty() {
+        return;
+    }
     // Rev 1.7 (F2): what the conversation was given from the previous one,
     // labelled, so the writer can leave out what came only through it.
     let carried = match ConversationRepository::new(&db).get_session(&session_id) {
@@ -1665,6 +1744,7 @@ mod tests {
             marks.clone(),
             ctx,
             from_loop,
+            None,
         )
         .await;
     }

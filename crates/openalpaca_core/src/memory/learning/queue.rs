@@ -589,7 +589,7 @@ fn stored_state(session: &Conversation) -> Option<WorkingState> {
 
 /// The owner is the user part of the lane key (design §1.1): a linked
 /// connector user's lane carries their `global_id`.
-fn lane_owner(lane_key: &str) -> &str {
+pub(super) fn lane_owner(lane_key: &str) -> &str {
     lane_key.rsplit_once(':').map_or(lane_key, |(user, _)| user)
 }
 
@@ -1911,6 +1911,36 @@ impl LearningQueue {
         let Some(through) = rows.last().map(|r| r.id) else {
             return Ok(());
         };
+        // Rev 1.7 (F5; design 03 §6): a row a forget took back is never
+        // read, nor the rest of its turn — `through` still passes them.
+        let service = self.deps.memory_service.clone();
+        let (lane, checked) = (session.lane_key.clone(), rows.clone());
+        let forgotten = match tokio::task::spawn_blocking(move || {
+            window::forgotten_rows(&service, &lane, &checked)
+        })
+        .await
+        {
+            Ok(Ok(forgotten)) => forgotten,
+            Ok(Err(MemoryError::Quarantined { .. })) => return Err(FlushStop::Quarantined),
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    session_id,
+                    "memory learning: the forgotten rows of a conversation's close could not be read: {e}"
+                );
+                return Err(FlushStop::StoreError);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    session_id,
+                    "memory learning: the forgotten rows' task failed: {e}"
+                );
+                return Err(FlushStop::StoreError);
+            }
+        };
+        rows.retain(|r| !forgotten.contains(&r.id));
+        if window::user_turns(&rows, &in_flight) == 0 {
+            return Ok(());
+        }
 
         // D12: the summariser's daily ceiling, before any call.
         let spent = self

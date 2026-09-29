@@ -1102,7 +1102,8 @@ against `summary_max_daily_cost_usd` — the compaction's call included, so it
 no longer counts against the turn's $1 or the workflow's cap. An answer that
 is not a state leaves the row as it was; at a compaction the turn goes on over
 the heuristic summary. A history clear (`DELETE /v1/chat/history`) empties the
-state.
+state. The writer never reads a message a forget took back — one a
+forgotten note cited — nor the rest of that turn.
 
 **A new conversation carries the previous one.** On the same lane and
 project, a new conversation is given the previous conversation — the lane's

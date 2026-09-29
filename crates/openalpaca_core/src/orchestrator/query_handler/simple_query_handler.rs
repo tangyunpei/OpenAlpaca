@@ -881,6 +881,30 @@ impl Orchestrator {
                 .map(|state| {
                     crate::orchestrator::working_state::carried_text(state, writer.max_chars)
                 });
+            // Rev 1.7 (F5): the rows the older messages may hold — as the
+            // list holds them, and those behind it — so the writer can leave
+            // out what a forget took back. Asked only if it is called.
+            if let (Some(db), Some(service)) = (self.db.clone(), self.memory_service()) {
+                let rows: Vec<(i64, String)> = ctx
+                    .recent_row_ids
+                    .iter()
+                    .copied()
+                    .zip(ctx.recent_messages.iter().map(|m| m.content.clone()))
+                    .chain(
+                        ctx.older_window
+                            .iter()
+                            .map(|(id, _, text)| (*id, text.clone())),
+                    )
+                    .collect();
+                writer.rows = Some(crate::orchestrator::working_state::WriterRows {
+                    check: crate::orchestrator::working_state::ForgetCheck {
+                        db,
+                        service,
+                        lane_key: lane_key.to_string(),
+                    },
+                    rows: Arc::new(rows),
+                });
+            }
             let config_for_loop = LoopConfig {
                 writer,
                 working_state: ctx.working_state.clone(),

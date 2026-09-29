@@ -12,8 +12,11 @@
 use super::{
     CONTEXT_ROW_BYTES, INTERNAL_SOURCE, LONG_USER_ROW_BYTES, REPLY_CUT_BYTES, is_slash_turn,
 };
+use crate::memory::service::{
+    Attribution, Capabilities, MemoryError, MemoryService, Surface, WorkspaceHint,
+};
 use openalpaca_storage::LearningRow;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 /// What wrote a row the window keeps (design §1.2's table).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -442,6 +445,61 @@ pub(crate) fn next_chunk(
         through,
         root: root.flatten(),
     })
+}
+
+/// The rows among `rows` a forget took back (design 03 §6's forget
+/// contract): each row whose `message:<id>` a tombstone suppressed in the
+/// lane owner's home partition or in the partition of any project the rows
+/// ran in — [`MemoryService::suppressed_sources`], the predicate the
+/// extractor drops a cited row by and the projection leaves a summary's
+/// rows out by — and, as the projection leaves them out, the other rows of
+/// its turn. The working-state writer never reads them (design 11 rev 1.7,
+/// F5). None for a lane whose owner has no memory; `Err` when a partition
+/// could not be read, and the caller then makes no call.
+pub(crate) fn forgotten_rows(
+    service: &MemoryService,
+    lane_key: &str,
+    rows: &[LearningRow],
+) -> Result<HashSet<i64>, MemoryError> {
+    if rows.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let owner = super::queue::lane_owner(lane_key);
+    let keys: Vec<String> = rows.iter().map(|r| format!("message:{}", r.id)).collect();
+    // Every partition in play: the home partition, and each project's.
+    let roots: BTreeSet<Option<&str>> = std::iter::once(None)
+        .chain(rows.iter().map(|r| r.workspace_root.as_deref()))
+        .collect();
+    let mut suppressed: HashSet<String> = HashSet::new();
+    for root in roots {
+        let hint = match root {
+            Some(r) => WorkspaceHint::Root(std::path::Path::new(r)),
+            None => WorkspaceHint::None,
+        };
+        let ctx = match service.context(
+            owner,
+            hint,
+            Surface::Extraction,
+            Capabilities::EXTRACTION,
+            Attribution::default(),
+        ) {
+            Ok(ctx) => ctx,
+            Err(MemoryError::NoOwner(_)) => return Ok(HashSet::new()),
+            Err(e) => return Err(e),
+        };
+        suppressed.extend(service.suppressed_sources(&ctx, &keys)?);
+    }
+    let forgotten = |r: &LearningRow| suppressed.contains(&format!("message:{}", r.id));
+    let turns: HashSet<&str> = rows
+        .iter()
+        .filter(|r| forgotten(r))
+        .filter_map(|r| r.request_id.as_deref())
+        .collect();
+    Ok(rows
+        .iter()
+        .filter(|r| forgotten(r) || r.request_id.as_deref().is_some_and(|q| turns.contains(q)))
+        .map(|r| r.id)
+        .collect())
 }
 
 #[cfg(test)]

@@ -535,9 +535,9 @@ async fn deleting_the_conversation_forgets_its_episode() {
 
 /// A turn whose row a forget suppressed — the user said "forget that" —
 /// is left out of the summary's window: the note does not cite it, nor its
-/// answer. (Its text is the working state's to carry: the state is
-/// conversation data, as the transcript is, and the note is projected from
-/// it — design 11 §3.4.)
+/// answer. And (design 11 rev 1.7, F5; 03 §6) the close's refresh never
+/// reads it, nor its answer, so the state the note is projected from does
+/// not carry it either.
 #[tokio::test]
 async fn a_forgotten_turn_is_not_cited_by_the_episode() {
     let scene = Scene::new(vec![items(&[vim_item(&[1])]), trip_state()]);
@@ -556,10 +556,24 @@ async fn a_forgotten_turn_is_not_cited_by_the_episode() {
             },
         )
         .unwrap();
-    four_turns(&scene, &s);
+    let rows = four_turns(&scene, &s);
 
     let report = scene.queue.flush_episodes(&s).await;
     assert_eq!(report.episodes, 1, "{report:?}");
+    let refresh = scene.model.prompts().remove(1);
+    assert!(
+        !refresh.contains(PREF) && !refresh.contains("[assistant]: Noted."),
+        "the refresh reads neither the forgotten row nor its answer: {refresh}"
+    );
+    assert!(
+        refresh.contains(&format!("[user]: {}", TURNS[0])),
+        "{refresh}"
+    );
+    assert_eq!(
+        session_row(&scene, &s).working_state_through,
+        *rows.last().unwrap(),
+        "the state covers the conversation, the forgotten turn included"
+    );
     let note = scene.read(&scene.user_ctx(), episodes(&scene)[0].id);
     assert!(
         note.sources

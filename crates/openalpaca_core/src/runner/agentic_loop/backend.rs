@@ -242,11 +242,18 @@ impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
             ));
         }
 
+        // Rev 1.7 (F5; design 03 §6): a row a forget took back is not read.
+        // When that cannot be told, no call: the pipeline falls back.
+        let left_out = match &writer.rows {
+            Some(rows) => rows.left_out()?,
+            None => std::collections::HashSet::new(),
+        };
         // Rev 1.7 (F2): with the previous conversation handed over labelled
         // as carried, its block is not read a second time, unlabelled.
         let carried = writer.carried.as_deref();
         let lines: Vec<TranscriptLine<'_>> = messages
             .iter()
+            .filter(|m| !left_out.contains(&m.content))
             .filter(|m| {
                 carried.is_none() || !m.content.starts_with(working_state::PREVIOUS_BLOCK_PREFIX)
             })
