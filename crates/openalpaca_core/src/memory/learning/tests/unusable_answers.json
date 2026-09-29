@@ -85,5 +85,17 @@
   "titles": [
    "Lantern CI builds Sqlx in offline mode"
   ]
+ },
+ {
+  "capture": "L-episodes cs-010 switch, final build: a complete {\"items\": []} in a fence the ceiling cut before it closed (10450 chars, finish max_tokens)",
+  "finish": "max_tokens",
+  "answer": "I have analyzed the conversation and the known notes.\n\n**Analysis:**\n1.  **R1/R2**: User states preference for vim, plain vimrc, no plugin manager. This matches `n2` exactly. No change.\n2.  **R3/R4**: User recounts the Oct 2025 Neovim/Lua experiment and giving up. This matches `n1` exactly. No change.\n3.  **R5/R6**: User states preference for dark mode everywhere, including generated screenshots. \n\n…\n\n Lua config. I gave up after two weeks... went right back to vim.\"\n    Identical.\n\n    Final check on `n2`.\n    `n2`: \"Editor: vim, plain vimrc, no plugin manager\".\n    R1: \"Editor-wise I'm a vim person: a plain vimrc and no plugin manager at all.\"\n    Identical.\n\n    The conversation is a \"check-in\" or \"re-statement\" of known facts.\n    No new knowledge.\n\n    Output:\n    ```json\n    {\"items\": []}",
+  "titles": []
+ },
+ {
+  "capture": "L-S cs-035 switch, final build: cut inside its second item (9726 chars, finish max_tokens)",
+  "finish": "max_tokens",
+  "answer": "I will analyze the conversation to extract durable knowledge, focusing on the changes to the Moss project's build output directory and the associated commands, while noting that these are currently drafts pending file writes.\n\n1.  **Moss Output Directory Change**: The user stated in R1 that Moss's build output changed to `dist/` in PR #41 (dated 2026-05-10), replacing the previous `_site/`. This d\n\n…\n\nm\": null,\n      \"valid_to\": null\n    },\n    {\n      \"title\": \"Moss test command is uv run pytest -q\",\n      \"content\": \"The command to run tests for Moss is `uv run pytest -q`.\",\n      \"kind\": \"procedure\",\n      \"stated_by\": \"user\",\n      \"confidence\": 1.0,\n      \"rows\": [\n        3\n      ],\n      \"aliases\": [\n        \"moss test\",\n        \"run tests\"\n      ],\n      \"fact_key\": \"moss.test_command\",",
+  "titles": null
  }
 ]

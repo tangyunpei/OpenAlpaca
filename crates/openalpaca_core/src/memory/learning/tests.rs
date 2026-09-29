@@ -40,6 +40,9 @@ enum Say {
     Cut(String),
     /// Nothing, at the `max_tokens` cap: the router's `EmptyCompletion`.
     Spent,
+    /// The text, when the call's user message carries every one of these
+    /// strings; otherwise prose the model stopped at the `max_tokens` cap.
+    Only(Vec<String>, String),
     Fail(LlmError),
     /// Never answers.
     Hang,
@@ -124,6 +127,22 @@ impl LlmProvider for Scripted {
             Some(Say::Text(t)) => (t, FinishReason::Stop),
             Some(Say::Cut(t)) => (t, FinishReason::MaxTokens),
             Some(Say::Spent) => (String::new(), FinishReason::MaxTokens),
+            Some(Say::Only(needles, t)) => {
+                let user: String = request
+                    .messages
+                    .iter()
+                    .filter(|m| matches!(m.role, openalpaca_llm::Role::User))
+                    .map(|m| m.content.as_str())
+                    .collect();
+                if needles.iter().all(|n| user.contains(n.as_str())) {
+                    (t, FinishReason::Stop)
+                } else {
+                    (
+                        "I need to think this through first.".into(),
+                        FinishReason::MaxTokens,
+                    )
+                }
+            }
             Some(Say::Fail(e)) => return Err(e),
             Some(Say::Hang) => std::future::pending().await,
         };
@@ -1618,12 +1637,15 @@ async fn an_answer_that_is_not_an_items_object_holds_the_window() {
 
 // ── LQ13: the answer unwrapped (the L8 product slice's P3) ──────────────
 
-/// The L8 capture's eleven answers, each of the fixture file's entries.
+/// The L8 capture's eleven answers, the fixture file's entries that ended
+/// on their own (an entry with a `finish` is a cut answer, read by
+/// [`a_cut_answer_is_usable_only_when_it_ends_on_a_complete_value`]).
 fn captured_answers() -> Vec<(String, String, Vec<String>)> {
     let fixtures: Vec<serde_json::Value> =
         serde_json::from_str(include_str!("tests/unusable_answers.json")).unwrap();
     fixtures
         .iter()
+        .filter(|f| f.get("finish").is_none())
         .map(|f| {
             (
                 f["capture"].as_str().unwrap().to_string(),
@@ -1655,6 +1677,57 @@ fn the_captured_unusable_answers_parse_to_their_items() {
             .map(|i| i["title"].as_str().unwrap_or_default())
             .collect();
         assert_eq!(read, titles, "{capture}");
+    }
+}
+
+/// Owner decision LQ20 (f), 2026-09-28: an answer cut at its output ceiling
+/// is usable when, after the model's reasoning, it ends on one complete
+/// top-level value of the answer's shape — the fixture file's two cut
+/// answers from the final build: `{"items": []}` in a fence the ceiling cut
+/// before it closed is the answer "nothing to keep", and an answer cut
+/// inside an item is still cut. A complete value that more text follows,
+/// or of another shape, is not taken either.
+#[test]
+fn a_cut_answer_is_usable_only_when_it_ends_on_a_complete_value() {
+    let fixtures: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("tests/unusable_answers.json")).unwrap();
+    let cut: Vec<&serde_json::Value> = fixtures
+        .iter()
+        .filter(|f| f["finish"] == "max_tokens")
+        .collect();
+    assert_eq!(cut.len(), 2);
+    for f in cut {
+        let (capture, answer) = (
+            f["capture"].as_str().unwrap(),
+            f["answer"].as_str().unwrap(),
+        );
+        let parsed = extractor::parse_cut_items(answer);
+        match f["titles"].as_array() {
+            Some(titles) => {
+                let items = parsed.unwrap_or_else(|e| panic!("{capture}: {e}"));
+                let read: Vec<&str> = items.iter().filter_map(|i| i["title"].as_str()).collect();
+                let want: Vec<&str> = titles.iter().filter_map(|t| t.as_str()).collect();
+                assert_eq!(read, want, "{capture}");
+            }
+            None => assert!(parsed.is_err(), "{capture}: {parsed:?}"),
+        }
+    }
+    let one = format!(r#"{{"items": [{}]}}"#, vim_item(&[1]));
+    let read = extractor::parse_cut_items(&format!("Let me think.\n\n```json\n{one}\n"))
+        .expect("a complete value that ends the answer");
+    assert_eq!(read.len(), 1);
+    for answer in [
+        // Rule 9 quoted in the reasoning, which the ceiling then cut.
+        r#"Rule 9 says to return {"items": []} when there is nothing to keep. But R3"#.to_string(),
+        format!("Draft:\n{one}\nWait, R3 also says"),
+        r#"The aliases: ["vim", "vi"]"#.to_string(),
+        format!("<think>Output: {one}"),
+    ] {
+        assert!(
+            extractor::parse_cut_items(&answer).is_err(),
+            "{answer}: {:?}",
+            extractor::parse_cut_items(&answer)
+        );
     }
 }
 
@@ -2085,6 +2158,7 @@ fn request_overhead_bytes() -> usize {
             known_keys: "",
             conversation: "",
             max_items: 12,
+            after_cut: true,
         },
         2800,
         None,
@@ -2216,6 +2290,78 @@ async fn an_answer_cut_at_max_tokens_says_it_was_cut() {
 
     let report = scene.queue.flush_session(&parsed_session).await;
     assert_eq!((report.stopped, report.stored), (None, 1), "{report:?}");
+}
+
+/// Owner decision LQ20 (e), 2026-09-28: at temperature 0 the same prompt
+/// fails the same way, so the retry of an answer cut at its output ceiling
+/// asks for half the items — integer division, at least one — and ends on
+/// the line asking for the JSON first. The model below cuts any request
+/// without both, and answers the retry.
+#[tokio::test]
+async fn a_cut_answers_retry_asks_for_half_the_items_and_the_json_first() {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.costs.extract_max_items_per_call = 7;
+    let model = Scripted::new(vec![
+        Say::Cut("I need to think the conversation through. Rule 9 says".into()),
+        Say::Only(
+            vec![
+                extractor::RETRY_LINE.to_string(),
+                "Return at most 3 items".to_string(),
+            ],
+            format!(r#"{{"items": [{}]}}"#, vim_item(&[1])),
+        ),
+    ]);
+    let scene = Scene::with(model, config);
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+
+    let first = scene.queue.flush_session(&s).await;
+    assert_eq!(first.stopped, Some(FlushStop::BadOutput), "{first:?}");
+    let second = scene.queue.flush_session(&s).await;
+    assert_eq!((second.stopped, second.stored), (None, 1), "{second:?}");
+    assert_eq!(scene.model.calls(), 2);
+
+    let prompts = scene.model.prompts();
+    assert!(
+        prompts[0].contains("Return at most 7 items"),
+        "{}",
+        prompts[0]
+    );
+    assert!(
+        !prompts[0].contains(extractor::RETRY_LINE),
+        "{}",
+        prompts[0]
+    );
+    assert!(
+        prompts[1].contains("Return at most 3 items"),
+        "{}",
+        prompts[1]
+    );
+    assert!(
+        prompts[1].ends_with(extractor::RETRY_LINE),
+        "{}",
+        prompts[1]
+    );
+}
+
+/// LQ20 (e)'s limit: only a cut answer changes the retry — an answer that
+/// is not JSON is asked again with the identical prompt.
+#[tokio::test]
+async fn an_answer_that_is_not_json_is_retried_with_the_identical_prompt() {
+    let scene = Scene::new(vec![
+        Say::Text("I would rather describe it in prose.".into()),
+        items(&[vim_item(&[1])]),
+    ]);
+    let s = scene.session();
+    scene.turn(&s, PREF, "Noted.");
+
+    let first = scene.queue.flush_session(&s).await;
+    assert_eq!(first.stopped, Some(FlushStop::BadOutput), "{first:?}");
+    let second = scene.queue.flush_session(&s).await;
+    assert_eq!((second.stopped, second.stored), (None, 1), "{second:?}");
+    let prompts = scene.model.prompts();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[0], prompts[1]);
 }
 
 /// The L8 fix slice's P2: the flush report keeps each unusable answer — its
@@ -3967,6 +4113,7 @@ fn the_extractor_prompt_matches_its_fixture() {
         known_keys: &lookup.keys_text,
         conversation: &transcript,
         max_items: 12,
+        after_cut: false,
     });
     let rendered = format!("{system}\n=== rendered user message ===\n{user}\n");
     assert!(

@@ -571,7 +571,7 @@ pub fn read_json_answer(
     if let Some(value) = parse_json_strict(text) {
         return Some(whole(value));
     }
-    let mut values = top_level_values(text)?;
+    let (mut values, _) = top_level_values(text)?;
     let pick = values
         .iter()
         .rposition(expected)
@@ -580,6 +580,28 @@ pub fn read_json_answer(
         value: values.swap_remove(pick),
         whole: false,
     })
+}
+
+/// The JSON value an answer cut at its output ceiling carries (owner
+/// decision LQ20 (f), 2026-09-28), for a caller whose forms read before
+/// LQ13 ([`parse_json_strict`]) found none: the text after the model's
+/// reasoning ([`answer_text`]), when it **ends** on one complete top-level
+/// value of the shape `expected` names — what the ceiling cut was a closing
+/// fence. A value opened and never closed, a value more text follows (the
+/// model was still writing: a quote of the prompt's own `{"items": []}` in
+/// its reasoning), and a value of another shape are not taken, so no part
+/// of a cut answer is rescued. `None` when there is no such value.
+pub fn read_cut_answer(
+    content: &str,
+    expected: impl Fn(&serde_json::Value) -> bool,
+) -> Option<serde_json::Value> {
+    let (text, prose) = answer_text(content)?;
+    if !prose {
+        return read_whole(text).filter(|value| expected(value));
+    }
+    let (values, end) = top_level_values(text)?;
+    let last = values.into_iter().last()?;
+    (end == text.len() && expected(&last)).then_some(last)
 }
 
 /// The part of an answer that is the answer, and whether values may be
@@ -671,14 +693,16 @@ fn read_whole(text: &str) -> Option<serde_json::Value> {
 }
 
 /// The complete JSON values that begin at an `{` or `[` outside any value,
-/// in order. `None` when there is none, or when one begins and runs to the
-/// end unfinished — a truncated answer is never read in part. A bracket that
-/// does not begin a value — prose such as `[n1]`, or malformed JSON — is
-/// skipped to its matching bracket, so no value inside it is taken; one
-/// with no matching bracket is skipped by itself.
-fn top_level_values(text: &str) -> Option<Vec<serde_json::Value>> {
+/// in order, and the byte where the last one ends. `None` when there is
+/// none, or when one begins and runs to the end unfinished — a truncated
+/// answer is never read in part. A bracket that does not begin a value —
+/// prose such as `[n1]`, or malformed JSON — is skipped to its matching
+/// bracket, so no value inside it is taken; one with no matching bracket is
+/// skipped by itself.
+fn top_level_values(text: &str) -> Option<(Vec<serde_json::Value>, usize)> {
     let mut out = Vec::new();
     let mut at = 0;
+    let mut end = 0;
     while let Some(offset) = text[at..].find(['{', '[']) {
         let start = at + offset;
         let rest = &text[start..];
@@ -687,12 +711,13 @@ fn top_level_values(text: &str) -> Option<Vec<serde_json::Value>> {
             Some(Ok(value)) => {
                 out.push(value);
                 at = start + stream.byte_offset();
+                end = at;
             }
             Some(Err(e)) if e.is_eof() => return None,
             _ => at = start + matching_bracket_end(rest).unwrap_or(1),
         }
     }
-    (!out.is_empty()).then_some(out)
+    (!out.is_empty()).then_some((out, end))
 }
 
 /// How many bytes of `text` — which starts with `{` or `[` — run to the

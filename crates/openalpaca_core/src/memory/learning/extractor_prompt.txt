@@ -33,3 +33,4 @@
 8. Write "title" and "content" in the language the user used.
 9. Skip pleasantries, the questions themselves, anything true only for one reply, and anything already in known_notes unchanged. Return at most {{items}} items, most important first, and {"items": []} when there is nothing to keep.
 </extraction_rules>
+{{retry_line}}
