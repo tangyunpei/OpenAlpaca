@@ -560,13 +560,15 @@ D's; what is asked, and where, is new.
 (the per-turn recall, the read tools, the main loop's writers). Every set
 runs on one lane, `<owner>:gui`, in file order — story order — through the
 same gateway and manual queue as L's feed. For each set the harness opens a
-conversation as "New chat" opens one (on the scratch project when its
+conversation as "Start fresh" opens one (`inherit: false`, so the last
+set's conversation never reaches it; on the scratch project when its
 corpus session has a project, on none when it has none), feeds its turns
 `[0, split)` with the reader answering, and closes it with the queue's
 deterministic close (`flush_episodes`: the working state's refresh, then the
 summaries it projects, retried as a summary flush is; no learning flush
-runs). It then opens the next conversation on the same lane and project and
-asks the set's questions as its first turns, through the gateway, and judges
+runs). It then opens the next conversation on the same lane and project,
+as "New chat" opens one, and asks the set's questions as its first turns,
+through the gateway, and judges
 each. K0 runs with `[orchestrator.memory] carry_over_turns = 0`; K with the
 shipped 3, so its questions' requests carry the fed conversation's
 `previous_conversation` block (design 11 §4 (b)). In both, the reader may

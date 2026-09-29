@@ -3402,6 +3402,13 @@ impl Learner {
     /// summaries, after its facts — the quiet period, the switch and the
     /// drain all come to that one deterministic flush here.
     async fn feed(&self, sessions: &[&CorpusSession], learn: bool) -> Fed {
+        self.feed_with(sessions, learn, true).await
+    }
+
+    /// [`Self::feed`], each session opened with `inherit` (design 11 CQ-5):
+    /// `false` is "Start fresh", a conversation never given the previous
+    /// one's block.
+    async fn feed_with(&self, sessions: &[&CorpusSession], learn: bool, inherit: bool) -> Fed {
         use openalpaca_api::events::EventSource;
         use openalpaca_core::events::SystemEvent;
         use openalpaca_core::gateway::GatewayRequest;
@@ -3418,7 +3425,13 @@ impl Learner {
             let workspace = session.workspace.map(|_| project.clone());
             let repo = ConversationRepository::new(&self.db);
             let created = repo
-                .create_session(&lane, "gui", workspace.as_deref(), Some(&session.id))
+                .create_session_inheriting(
+                    &lane,
+                    "gui",
+                    workspace.as_deref(),
+                    Some(&session.id),
+                    inherit,
+                )
                 .unwrap_or_else(|e| panic!("memory_eval: cannot open session {}: {e}", session.id));
             repo.activate_session(&created.id)
                 .unwrap_or_else(|e| panic!("memory_eval: cannot activate {}: {e}", session.id));
@@ -7759,7 +7772,8 @@ fn continuity_totals(rows: &[Row], sessions: &[ContinuitySession]) -> Continuity
 
 /// The continuity split (design 11 §10.1), K0's and K's phase: for each set,
 /// its corpus conversation fed up to the split through the gateway, in a new
-/// session on the learner's one lane; closed by the queue's deterministic
+/// session on the learner's one lane opened fresh (`inherit: false`, so no
+/// earlier set reaches it); closed by the queue's deterministic
 /// close (`flush_episodes`, retried as a summary flush is); then the next
 /// session opened on the same lane and project — "New chat" — and the
 /// set's questions asked as its first turns through the gateway, each judged
@@ -7793,7 +7807,11 @@ async fn continuity_phase(
             turns: source.turns[..set.split].to_vec(),
             ..source.clone()
         };
-        let fed = learner.feed(&[&fed_part], false).await;
+        // The fed conversation starts fresh: on the one lane its
+        // predecessor is the last set's asked conversation, whose block
+        // would reach the fed turns and, through them, the state (design
+        // 11 rev 1.6 item 3).
+        let fed = learner.feed_with(&[&fed_part], false, false).await;
         let fed_id = fed.transcript[0].session_id.clone();
         let close = episode_one(
             &learner.queue,
@@ -12945,10 +12963,11 @@ fn only_the_fed_conversations_block_is_a_carry_over() {
 /// judged `CORRECT`.
 const MISSED_QUESTION: &str = "What did we decide about the locker?";
 
-/// A corpus of two six-turn conversations — one on a project, one on none
-/// and turning something down before its split — and a continuity split
-/// over them: three questions after the first's third turn, one abstention
-/// after the second's.
+/// A corpus of two six-turn conversations on one project — the second
+/// turning something down before its split — and a continuity split over
+/// them: three questions after the first's third turn, one abstention after
+/// the second's. The second set's fed conversation follows the first's
+/// asked one on the same lane and project.
 fn continuity_fixture() -> (Corpus, Vec<ContinuitySet>) {
     let mut project = long_fixture_session(
         "cs-t71",
@@ -12957,7 +12976,7 @@ fn continuity_fixture() -> (Corpus, Vec<ContinuitySet>) {
         "Thanks, that is all.",
     );
     project.workspace = Some(eval::Project::Lantern);
-    let dropped = fixture_session(
+    let mut dropped = fixture_session(
         "cs-t72",
         &[
             ("Should I get a second locker?", TurnMode::Noise),
@@ -12968,6 +12987,7 @@ fn continuity_fixture() -> (Corpus, Vec<ContinuitySet>) {
             ("Thanks.", TurnMode::Noise),
         ],
     );
+    dropped.workspace = Some(eval::Project::Lantern);
     let question = |kind, question: &str, expect_abstain| eval::ContinuityQuestion {
         kind,
         question: question.to_string(),
@@ -13073,9 +13093,11 @@ fn request_carried_the_block(requests: &[openalpaca_llm::ChatRequest], question:
 /// closes it — one summariser call, a state covering every fed row — and
 /// asks the set's questions as the next conversation's first turns, whose
 /// requests carry the fed conversation's block; the report says so row by
-/// row, and the stub's own record of the requests agrees. K0 does the same
-/// with the carry-over off: the state is written, and no request carries it.
-/// The totals read the three answers apart from the abstention.
+/// row, and the stub's own record of the requests agrees. No fed turn's
+/// request carries a block: a fed conversation starts fresh, though it
+/// follows the last set's asked one on the same lane and project. K0 does
+/// the same with the carry-over off: the state is written, and no request
+/// carries it. The totals read the three answers apart from the abstention.
 #[tokio::test(flavor = "multi_thread")]
 async fn k_carries_the_fed_conversation_into_the_next_ones_first_turns_and_k0_does_not() {
     for system in [System::K, System::K0] {
@@ -13113,6 +13135,21 @@ async fn k_carries_the_fed_conversation_into_the_next_ones_first_turns_and_k0_do
                 "{label}: {}",
                 row.id
             );
+        }
+        let (corpus, sets) = continuity_fixture();
+        for set in &sets {
+            let session = corpus
+                .sessions
+                .iter()
+                .find(|s| s.id == set.session)
+                .unwrap();
+            for turn in &session.turns[..set.split] {
+                assert!(
+                    !request_carried_the_block(&requests, &turn.user),
+                    "{label}: the fed turn {:?} was given a previous conversation",
+                    turn.user
+                );
+            }
         }
         let continuity = report.continuity.as_ref().expect("the split's results");
         for s in &continuity.sessions {
