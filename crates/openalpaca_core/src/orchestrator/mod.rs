@@ -7,6 +7,7 @@ pub mod dispatcher;
 pub mod intent;
 pub mod skill;
 pub mod task_state;
+pub mod working_state;
 
 pub(crate) mod attachment_adapt;
 mod background_jobs;
