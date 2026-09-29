@@ -82,7 +82,7 @@ turns_per_flush = 10
 # discussed, decided and left open. memory_search, memory_timeline and the
 # Memory view find it; it is never recalled on its own. At most this many a
 # day (0 = none); they count under the extraction's daily caps above too.
-episode_max_per_day = 20
+episode_max_per_day = 100
 
 [orchestrator.prompt_budgets]
 identity_budget = 300

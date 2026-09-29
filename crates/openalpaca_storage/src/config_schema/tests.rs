@@ -401,15 +401,15 @@ fn test_validate_new_daemon_keys() {
     assert!(validate("daemon.orchestrator.memory_confidence_threshold", "1.5").is_err());
     assert!(validate("daemon.orchestrator.extract_max_items_per_call", "12").is_ok());
     assert!(validate("daemon.orchestrator.extract_max_items_per_call", "51").is_err());
-    // Conversation summaries (design 09 §13.3): 0..=1000 a day, 20 the
-    // default; 0 writes none.
+    // Conversation summaries (design 09 §13.3): 0..=1000 a day, 100 the
+    // default (owner decision LQ21); 0 writes none.
     assert!(validate("daemon.orchestrator.learning.episode_max_per_day", "0").is_ok());
     assert!(validate("daemon.orchestrator.learning.episode_max_per_day", "1000").is_ok());
     assert!(validate("daemon.orchestrator.learning.episode_max_per_day", "1001").is_err());
     assert!(validate("daemon.orchestrator.learning.episode_max_per_day", "-1").is_err());
     assert_eq!(
         lookup("daemon.orchestrator.learning.episode_max_per_day").and_then(|d| d.default),
-        Some("20")
+        Some("100")
     );
     // Index-first recall (design 09 §13.2): two values, `index` the default.
     assert!(validate("daemon.orchestrator.recall_mode", "index").is_ok());
