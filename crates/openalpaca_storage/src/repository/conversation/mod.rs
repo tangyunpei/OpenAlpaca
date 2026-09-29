@@ -20,8 +20,8 @@ use rusqlite::OptionalExtension;
 /// Every column [`ConversationRepository::row_to_session`] reads, in order.
 /// Written once so a column cannot reach one `SELECT` and miss another.
 const SESSION_COLUMNS: &str = "id, lane_key, source, title, message_count, last_message_at, \
-     created_at, updated_at, summary, summary_version, last_summarized_message_id, \
-     summary_updated_at, workspace_id, status, ended_at";
+     created_at, updated_at, working_state, working_state_version, working_state_through, \
+     working_state_updated_at, workspace_id, status, ended_at, episode_note_id";
 
 /// Every column [`ConversationRepository::row_to_message`] reads, in order.
 ///
@@ -912,12 +912,12 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
-    /// Get summary data for the lane's active session.
-    /// Returns (summary, summary_version, last_summarized_message_id).
+    /// Get the working state of the lane's active session.
+    /// Returns (working_state, working_state_version, working_state_through).
     pub fn get_summary(&self, lane_key: &str) -> Result<(String, i64, i64)> {
         self.db.with_connection(|conn| {
             let result = conn.query_row(
-                "SELECT summary, summary_version, last_summarized_message_id FROM session WHERE lane_key = ?1 AND status = 'active'",
+                "SELECT working_state, working_state_version, working_state_through FROM session WHERE lane_key = ?1 AND status = 'active'",
                 [lane_key],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
             ).optional()?;
@@ -925,7 +925,7 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
-    /// Update the active session's summary with optimistic locking.
+    /// Update the active session's working state with optimistic locking.
     /// Returns true if the update succeeded.
     pub fn update_summary_optimistic(
         &self,
@@ -936,22 +936,22 @@ impl<'a> ConversationRepository<'a> {
     ) -> Result<bool> {
         self.db.with_connection(|conn| {
             let rows = conn.execute(
-                "UPDATE session SET summary = ?1, summary_version = summary_version + 1,
-                 last_summarized_message_id = ?2, summary_updated_at = datetime('now'),
+                "UPDATE session SET working_state = ?1, working_state_version = working_state_version + 1,
+                 working_state_through = ?2, working_state_updated_at = datetime('now'),
                  updated_at = datetime('now')
-                 WHERE lane_key = ?3 AND status = 'active' AND summary_version = ?4",
+                 WHERE lane_key = ?3 AND status = 'active' AND working_state_version = ?4",
                 rusqlite::params![summary, last_id, lane_key, expected_version],
             )?;
             Ok(rows > 0)
         })
     }
 
-    /// Clear the summary and reset counters for the lane's active session.
+    /// Clear the working state and reset counters for the lane's active session.
     pub fn clear_summary(&self, lane_key: &str) -> Result<()> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "UPDATE session SET summary = '', summary_version = 0,
-                 last_summarized_message_id = 0, summary_updated_at = datetime('now'),
+                "UPDATE session SET working_state = '', working_state_version = 0,
+                 working_state_through = 0, working_state_updated_at = datetime('now'),
                  message_count = 0, last_message_at = NULL, updated_at = datetime('now')
                  WHERE lane_key = ?1 AND status = 'active'",
                 [lane_key],
@@ -960,12 +960,12 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
-    /// Clear the summary and reset counters for one session by id.
+    /// Clear the working state and reset counters for one session by id.
     pub fn clear_summary_for_session(&self, session_id: &str) -> Result<()> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "UPDATE session SET summary = '', summary_version = 0,
-                 last_summarized_message_id = 0, summary_updated_at = datetime('now'),
+                "UPDATE session SET working_state = '', working_state_version = 0,
+                 working_state_through = 0, working_state_updated_at = datetime('now'),
                  message_count = 0, last_message_at = NULL, updated_at = datetime('now')
                  WHERE id = ?1",
                 [session_id],
@@ -1100,13 +1100,14 @@ impl<'a> ConversationRepository<'a> {
             last_message_at: row.get(5)?,
             created_at: row.get(6)?,
             updated_at: row.get(7)?,
-            summary: row.get(8)?,
-            summary_version: row.get(9)?,
-            last_summarized_message_id: row.get(10)?,
-            summary_updated_at: row.get(11)?,
+            working_state: row.get(8)?,
+            working_state_version: row.get(9)?,
+            working_state_through: row.get(10)?,
+            working_state_updated_at: row.get(11)?,
             workspace_id: row.get(12)?,
             status: row.get(13)?,
             ended_at: row.get(14)?,
+            episode_note_id: row.get(15)?,
         })
     }
 

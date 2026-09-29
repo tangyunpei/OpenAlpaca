@@ -636,10 +636,11 @@ fn test_session_schema_and_links() {
             "status",
             "message_count",
             "last_message_at",
-            "summary",
-            "summary_version",
-            "last_summarized_message_id",
-            "summary_updated_at",
+            "working_state",
+            "working_state_version",
+            "working_state_through",
+            "working_state_updated_at",
+            "episode_note_id",
             "ended_at",
             "created_at",
             "updated_at",
@@ -995,6 +996,245 @@ fn a_fresh_database_has_the_learning_columns_and_cursor_table() {
         )?;
         assert_eq!((row.0, row.1, row.2, row.3), (0, 0, None, 0));
         assert!(row.4.is_some(), "updated_at defaults to the insert time");
+        Ok(())
+    })
+    .unwrap();
+}
+
+// ── The working state, migration 2 (design 11 §2, §6; owner decision CQ-9) ──
+
+/// `session`'s columns from migration 2 on, in order: the working state's
+/// five stand where the session summary's four stood.
+const SESSION_COLUMNS_V2: [&str; 16] = [
+    "id",
+    "lane_key",
+    "source",
+    "title",
+    "workspace_id",
+    "status",
+    "message_count",
+    "last_message_at",
+    "working_state",
+    "working_state_version",
+    "working_state_through",
+    "working_state_updated_at",
+    "episode_note_id",
+    "ended_at",
+    "created_at",
+    "updated_at",
+];
+
+fn session_columns(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    conn.prepare("PRAGMA table_info(session)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect()
+}
+
+/// `session`'s indexes as `sqlite_master` holds them: name and statement.
+fn session_indexes(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    conn.prepare(
+        "SELECT name, sql FROM sqlite_master
+          WHERE type = 'index' AND tbl_name = 'session' AND sql IS NOT NULL
+          ORDER BY name",
+    )?
+    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+    .collect()
+}
+
+/// A fresh database runs the baseline and migration 2 and opens with the
+/// working state's columns and none of the summary's; a session written with
+/// only its identity has the empty state, version 0, nothing covered, and no
+/// time or summary note.
+#[test]
+fn a_fresh_database_has_the_working_state_columns() {
+    let dir = tempdir().unwrap();
+    assert!(
+        migrations::MIGRATIONS
+            .iter()
+            .any(|m| m.version == 2 && m.name == "working_state"),
+        "migration 2 is registered"
+    );
+    let db = Database::open(&dir.path().join("fresh.db")).unwrap();
+    assert_eq!(db.schema_version().unwrap(), newest_version());
+    db.with_connection(|conn| {
+        assert_eq!(session_columns(conn)?, SESSION_COLUMNS_V2);
+        conn.execute(
+            "INSERT INTO session (id, lane_key, source) VALUES ('s', 'u:gui', 'gui')",
+            [],
+        )?;
+        let state = conn.query_row(
+            "SELECT working_state, working_state_version, working_state_through,
+                    working_state_updated_at, episode_note_id
+               FROM session WHERE id = 's'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )?;
+        assert_eq!(state, (String::new(), 0, 0, None, None));
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// A store a version-1 build wrote — the baseline alone, a session whose
+/// summary covers a row — is migrated in place: the table is rebuilt
+/// with every other column's value kept, the working state starts empty with
+/// nothing covered (the free-text summary is not a state), the four indexes
+/// come back exactly as the baseline wrote them, and the messages are
+/// untouched.
+#[test]
+fn a_version_1_database_migrates_to_the_working_state_in_place() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("v1.db");
+    let v1_indexes = {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(migrations::MIGRATIONS[0].sql).unwrap();
+        conn.execute_batch(
+            "INSERT INTO session (id, lane_key, source, title, workspace_id, status,
+                                  message_count, last_message_at, summary, summary_version,
+                                  last_summarized_message_id, summary_updated_at, ended_at,
+                                  created_at, updated_at)
+             VALUES ('s-old', 'u:gui', 'gui', 'Lisbon trip', '/home/u/trips', 'archived',
+                     2, '2026-09-27 10:01:00', 'They planned a trip to Lisbon.', 3, 1,
+                     '2026-09-27 10:05:00', '2026-09-27 11:00:00',
+                     '2026-09-27 09:00:00', '2026-09-27 11:00:00'),
+                    ('s-now', 'u:gui', 'gui', '', NULL, 'active',
+                     0, NULL, '', 0, 0, NULL, NULL,
+                     '2026-09-28 09:00:00', '2026-09-28 09:00:00');
+             INSERT INTO conversation_messages (lane_key, role, content, session_id)
+             VALUES ('u:gui', 'user', 'Plan my Lisbon trip.', 's-old'),
+                    ('u:gui', 'assistant', 'Happy to help.', 's-old');",
+        )
+        .unwrap();
+        let version: i32 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 1, "the fixture is a version-1 store");
+        session_indexes(&conn).unwrap()
+    };
+    assert_eq!(v1_indexes.len(), 4, "{v1_indexes:?}");
+
+    let db = Database::open(&db_path).unwrap();
+    assert_eq!(db.schema_version().unwrap(), newest_version());
+    db.with_connection(|conn| {
+        let versions = conn
+            .prepare("SELECT version FROM schema_version ORDER BY version")?
+            .query_map([], |row| row.get::<_, i32>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let registered: Vec<i32> = migrations::MIGRATIONS.iter().map(|m| m.version).collect();
+        assert_eq!(versions, registered, "migration 2 ran in place");
+        assert_eq!(session_columns(conn)?, SESSION_COLUMNS_V2);
+        assert_eq!(
+            session_indexes(conn)?,
+            v1_indexes,
+            "the rebuild must re-create every index the baseline made"
+        );
+        let leftover: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'session_new'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(leftover, 0);
+
+        type Kept = (
+            String,
+            String,
+            Option<String>,
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+        );
+        let kept: Vec<Kept> = conn
+            .prepare(
+                "SELECT id, title, workspace_id, status, message_count, last_message_at,
+                        ended_at, created_at, updated_at
+                   FROM session ORDER BY id",
+            )?
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        assert_eq!(
+            kept,
+            [
+                (
+                    "s-now".to_string(),
+                    String::new(),
+                    None,
+                    "active".to_string(),
+                    0,
+                    None,
+                    None,
+                    "2026-09-28 09:00:00".to_string(),
+                    "2026-09-28 09:00:00".to_string(),
+                ),
+                (
+                    "s-old".to_string(),
+                    "Lisbon trip".to_string(),
+                    Some("/home/u/trips".to_string()),
+                    "archived".to_string(),
+                    2,
+                    Some("2026-09-27 10:01:00".to_string()),
+                    Some("2026-09-27 11:00:00".to_string()),
+                    "2026-09-27 09:00:00".to_string(),
+                    "2026-09-27 11:00:00".to_string(),
+                ),
+            ]
+        );
+        let states = conn
+            .prepare(
+                "SELECT working_state, working_state_version, working_state_through,
+                        working_state_updated_at, episode_note_id
+                   FROM session ORDER BY id",
+            )?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(states, vec![(String::new(), 0, 0, None, None); 2]);
+
+        let messages: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversation_messages WHERE session_id = 's-old'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(messages, 2);
+        assert!(
+            conn.execute(
+                "INSERT INTO session (id, lane_key, source) VALUES ('s-two', 'u:gui', 'gui')",
+                [],
+            )
+            .is_err(),
+            "one active session per lane holds after the rebuild"
+        );
         Ok(())
     })
     .unwrap();

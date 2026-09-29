@@ -6,7 +6,7 @@
 
 - DB path resolver: `openalpaca_storage::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
-- Registered migrations: 1
+- Registered migrations: 2
 
 ## Tables
 
@@ -369,7 +369,7 @@ version INTEGER PRIMARY KEY
 
 ### `session` (table)
 
-Source migration: `001_baseline.sql`
+Source migration: `002_working_state.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -380,10 +380,11 @@ workspace_id TEXT
 status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','archived'))
 message_count INTEGER DEFAULT 0
 last_message_at TEXT
-summary TEXT NOT NULL DEFAULT ''
-summary_version INTEGER NOT NULL DEFAULT 0
-last_summarized_message_id INTEGER NOT NULL DEFAULT 0
-summary_updated_at TEXT
+working_state TEXT NOT NULL DEFAULT ''
+working_state_version INTEGER NOT NULL DEFAULT 0
+working_state_through INTEGER NOT NULL DEFAULT 0
+working_state_updated_at TEXT
+episode_note_id TEXT
 ended_at TEXT
 created_at TEXT NOT NULL DEFAULT (datetime('now'))
 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -551,9 +552,9 @@ result_ref TEXT
 | `idx_orch_latency_mode` | `orchestrator_latency` | `INDEX` | `mode, timestamp DESC` | `001_baseline.sql` |
 | `idx_orch_latency_ts` | `orchestrator_latency` | `INDEX` | `timestamp DESC` | `001_baseline.sql` |
 | `idx_preference_user` | `preference` | `INDEX` | `user_id` | `001_baseline.sql` |
-| `idx_session_source` | `session` | `INDEX` | `source` | `001_baseline.sql` |
-| `idx_session_updated` | `session` | `INDEX` | `updated_at DESC` | `001_baseline.sql` |
-| `idx_session_workspace` | `session` | `INDEX` | `workspace_id, updated_at DESC` | `001_baseline.sql` |
+| `idx_session_source` | `session` | `INDEX` | `source` | `002_working_state.sql` |
+| `idx_session_updated` | `session` | `INDEX` | `updated_at DESC` | `002_working_state.sql` |
+| `idx_session_workspace` | `session` | `INDEX` | `workspace_id, updated_at DESC` | `002_working_state.sql` |
 | `idx_sel_agent` | `skill_execution_log` | `INDEX` | `agent_id, skill_id` | `001_baseline.sql` |
 | `idx_sel_request_id` | `skill_execution_log` | `UNIQUE` | `request_id` | `001_baseline.sql` |
 | `idx_sel_response_msg` | `skill_execution_log` | `INDEX` | `response_message_id` | `001_baseline.sql` |
