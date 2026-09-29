@@ -2868,6 +2868,97 @@ fn a_compaction_keeps_the_retained_tail_and_every_round_after_it() {
     );
 }
 
+/// Design 11 §6, CQ-8: a `compaction` record that carries the working state
+/// the compaction wrote has the replay splice that state — as the loop held
+/// it, dated by the record — where the head it dropped stood, instead of the
+/// bare `context_compacted` note; the record's other fields are read as
+/// before. (The record without one, as older builds wrote it, keeps the note:
+/// `a_compaction_keeps_the_retained_tail_and_every_round_after_it`.)
+#[test]
+fn a_compaction_record_with_a_working_state_is_replayed_as_that_state() {
+    use crate::orchestrator::working_state::{BLOCK_PREFIX, VERSION, WorkingState};
+
+    let state = WorkingState {
+        v: VERSION,
+        topic: "Quarterly report".to_string(),
+        goal: "Write the Q3 report".to_string(),
+        done: vec!["Rounds 1 to 3 read the sales data".to_string()],
+        decisions: Vec::new(),
+        open: Vec::new(),
+        next: "Draft the summary".to_string(),
+        refs: vec!["artifact reports/q3.md".to_string()],
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut records: Vec<(&str, &str, serde_json::Value)> = Vec::new();
+    let ids = ["tu-1", "tu-2", "tu-3", "tu-4"];
+    let texts = ["one", "two", "three", "four"];
+    for (i, (id, text)) in ids.iter().zip(texts).enumerate() {
+        records.push((
+            "round",
+            "t1",
+            round_record(
+                i as u32 + 1,
+                text,
+                &[(id, "file_read", serde_json::json!({}))],
+            ),
+        ));
+        records.push((
+            "tool_result",
+            "t1",
+            tool_result_record(id, "file_read", true, text),
+        ));
+    }
+    records.push((
+        "compaction",
+        "t1",
+        serde_json::json!({
+            "tier": "LlmSummary",
+            "trigger": "auto",
+            "pre_tokens": 9000, "post_tokens": 3000,
+            "messages_before": 12, "messages_after": 6,
+            "messages_discarded": 6,
+            "tiers_applied": "[LlmSummary]",
+            "cumulative_dropped_tokens": 6000,
+            "dropped_from_seq": serde_json::Value::Null,
+            "summary_msg_id": serde_json::Value::Null,
+            "working_state": state,
+            "state_through": serde_json::Value::Null,
+            "preserved_from_seq": 8,
+        }),
+    ));
+    records.push((
+        "round",
+        "t1",
+        round_record(5, "five", &[("tu-5", "file_read", serde_json::json!({}))]),
+    ));
+    records.push((
+        "tool_result",
+        "t1",
+        tool_result_record("tu-5", "file_read", true, "five"),
+    ));
+    seed_records(root, "s1", &records);
+
+    let plan = replay::rebuild(&root.join("s1"), "t1", 1).unwrap();
+    assert_eq!(plan.compacted_rounds_dropped, 3);
+    assert_eq!(plan.rounds, 2, "the retained tail (round 4) plus round 5");
+    let head = &plan.messages[0];
+    assert_eq!(head.role, openalpaca_llm::Role::User);
+    assert_eq!(
+        head.content,
+        state.render("2026-09-06 10:00:00", usize::MAX),
+        "the state stands in for the rounds it covers"
+    );
+    assert!(head.content.starts_with(BLOCK_PREFIX));
+    assert!(
+        !plan
+            .messages
+            .iter()
+            .any(|m| m.content.contains("context_compacted")),
+        "no bare note beside it"
+    );
+}
+
 /// Seed a log whose records carry **explicit** seqs, and whose session-wide
 /// kinds (`log_trimmed`) carry no task id at all — the two things
 /// [`seed_records`] cannot express and a trimmed log is made of.
