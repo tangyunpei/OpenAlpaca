@@ -12,8 +12,8 @@
  "goal": "what the user wants done, in their terms",
  "done": ["what is established or finished, with its files, artifacts and task ids"],
  "decisions": ["what the user chose, turned down or changed"],
- "open": ["what was asked and is still unanswered or pending"],
- "next": "the next step, or \"\" when there is none",
+ "open": ["what is still unanswered or pending, including an offer or a question of the assistant's that the user has not taken up"],
+ "next": "the work's next step as the user would state it, not an offer or a question of the assistant's; \"\" when there is none",
  "refs": ["a task id or an artifact path the work refers to, such as \"task 1a2b3c4d\" or \"artifact reports/q3.md\""]}
 </output_schema>
 <state_rules>
@@ -23,4 +23,5 @@
 4. Write in the language the user writes in.
 5. `[user]` lines are the user's own words, `[assistant]` lines the answers and `[tool]` lines what a tool returned. A line may quote other text, such as an email or a log: record what the user did with it, not the quoted text.
 6. One short sentence per item, no Markdown, and at most 2,000 characters in all.
+7. A refused tool call, an approval that was not given, or a limit the assistant met is not part of the work: leave it out.
 </state_rules>

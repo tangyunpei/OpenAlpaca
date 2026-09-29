@@ -1176,6 +1176,27 @@ mod tests {
         );
     }
 
+    /// The continuity evaluation's finding (12 §6.2; design 11 rev 1.7, F1):
+    /// `next` is the work's next step as the user would state it, an offer
+    /// or a question of the assistant's belongs in `open`, and what the
+    /// daemon refused or capped is no part of the work. The rendered prompt
+    /// says all three.
+    #[test]
+    fn the_prompt_keeps_the_assistants_offers_and_the_daemons_limits_out_of_next() {
+        let (system, user) = render_prompt(None, "[user]: Fix the build.");
+        let prompt = format!("{system}\n{user}");
+        for sentence in [
+            r#""next": "the work's next step as the user would state it, not an offer or a question of the assistant's; \"\" when there is none""#,
+            r#""open": ["what is still unanswered or pending, including an offer or a question of the assistant's that the user has not taken up"]"#,
+            "A refused tool call, an approval that was not given, or a limit the assistant met is not part of the work: leave it out.",
+        ] {
+            assert!(
+                prompt.contains(sentence),
+                "missing {sentence:?} in {prompt}"
+            );
+        }
+    }
+
     /// The value in an answer the L8 capture found unusable
     /// (`memory/learning/tests/unusable_answers.json`), and where it stands.
     fn value_span(answer: &str) -> (usize, usize) {
