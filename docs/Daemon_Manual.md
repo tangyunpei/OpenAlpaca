@@ -133,7 +133,7 @@ Shutdown can be initiated by a signal (SIGINT/SIGTERM) or by `POST
 daemon then stops accepting connections and waits for in-flight responses to
 finish, after which it runs its shutdown tail in this order: learn what is
 pending and write the episode notes due, for at most 3 seconds (the learning
-drain — what it does not finish, the next start learns); stop the background jobs — conversation summaries, a
+drain — what it does not finish, the next start learns); stop the background jobs — the working state's turn-end refresh, a
 finished run's task extraction and learning — within 3 seconds; flush the cost
 tracker to the database; flush every session log; close every MCP connection
 and kill every plugin child; stop the connectors; stop the wake scheduler and
@@ -315,7 +315,7 @@ otherwise the conservative cloud fallback still applies.
 | One workflow's lead agent | $5 | `[execution.lead_agent_defaults] max_cost` |
 | Learning from conversations, per UTC day | $0.25 | `[orchestrator.costs] extract_max_daily_cost_usd` |
 | Learning from conversations, calls per UTC day | 200 (`0` = no cap) | `[orchestrator.costs] extract_max_calls_per_day` |
-| Conversation summaries, per day | $0.50 | `[orchestrator.costs] summary_max_daily_cost_usd` |
+| The conversation's working state — compaction, turn end and close — per day | $0.50 | `[orchestrator.costs] summary_max_daily_cost_usd` |
 | Task-output extraction, per UTC day | $0.50 | `[orchestrator.costs] task_extract_max_daily_cost_usd` |
 
 An agent template's `max_cost_per_task` replaces the default for that agent.
@@ -330,9 +330,9 @@ and spend from the usage table (`llm_usage_daily`) for the **UTC** date, so
 their day starts at 00:00 UTC whatever the daemon's uptime. The call cap is
 what bounds a local model, where the cost cap never binds at price `0`. A
 capped learning window is not dropped: it waits, with one `INFO` per
-conversation per day, and is learned once the cap no longer binds. The summary
-job's ceiling is still a running total kept in memory from the daemon's start,
-seeded from today's usage rows. The two memory jobs are bounded by count as
+conversation per day, and is learned once the cap no longer binds. The working
+state's ceiling is still a running total kept in memory from the daemon's
+start, seeded from today's usage rows. The two memory jobs are bounded by count as
 well: `[orchestrator.costs] extract_max_items_per_call` (default 12, fewer when
 the extraction model's output budget is small) notes from one learning call and
 `task_extract_max_items_per_run` (default 10) candidates from one run; the
@@ -496,15 +496,18 @@ Confirmations are covered under
 
 | Method and path | Purpose |
 |---|---|
-| `GET\|POST /v1/sessions` | List or create conversations. |
+| `GET\|POST /v1/sessions` | List or create conversations. `POST` takes `{source?, workspace_path?, title?, inherit?}`; `inherit: false` starts the conversation fresh — it is never given the previous one's working state ([Conversation continuity](#conversation-continuity)). |
 | `GET\|PATCH\|DELETE /v1/sessions/{id}` | Read one, change its title or bind it to a project, or delete it — and with it the episode notes that summarise it. |
 | `GET /v1/sessions/{id}/messages` | Its transcript. |
 | `GET /v1/sessions/{id}/events` | Its session log (JSONL records), paged by `seq`. |
 | `POST /v1/sessions/{id}/activate` | Make it the lane's active conversation. |
 | `POST /v1/sessions/{id}/archive` | Archive it. |
 
-A lane holds many sessions with exactly one `active`. `DELETE
-/v1/sessions/{id}` takes the transcript with the rows:
+A lane holds many sessions with exactly one `active`. Each is served with its
+**working state** — `working_state`, the JSON object
+[Conversation continuity](#conversation-continuity) describes, or `null` while
+it has none, and `working_state_updated_at` — and without the writer's own
+bookkeeping. `DELETE /v1/sessions/{id}` takes the transcript with the rows:
 
 - One transaction deletes the messages and the session.
 - Everything that only *pointed* at it survives with its session link cleared:
@@ -1069,6 +1072,62 @@ Every chat message (any source: GUI, CLI, connectors) is routed by the orchestra
 
 Tunables live under `[orchestrator.routing]` in `config/daemon.toml` (steering, per-lane workflow cap, follow-up autostart, main-loop round/tool budgets, tool-surface selection, scheduled-skills kill switch).
 
+### Conversation continuity
+
+Each conversation keeps a **working state** on its session row: where its work
+stands, as one fixed-shape JSON object — `topic`, `goal`, `done`, `decisions`,
+`open`, `next` and `refs` (task ids and artifact paths), in the user's
+language. A turn's model gets it as the first message of its history, as
+quoted reference data, never trimmed, at most `[orchestrator.memory]
+summary_max_chars` (4,000) characters, its heading saying when it was
+written. It stands in for the turns the model no longer sees: the recent
+window holds `prompt_recent_messages` rows (40 in the shipped `daemon.toml`).
+
+One writer keeps it, with one prompt, one model and one daily ceiling, at
+three moments:
+
+- **Compaction.** When a turn's context nears the model's window, the
+  compactor's `LlmSummary` tier folds the older messages into the state with
+  one call, and the state reaches the session row at turn end with no other
+  call. The next turn's window then starts after the rows the state covers,
+  keeping `[execution.context] min_recent_messages` (4) rows verbatim.
+- **Turn end.** Otherwise, after a turn, the state is refreshed only when
+  `[orchestrator.memory] summary_min_new_older_messages` (12) rows have
+  scrolled out of the recent window past what it covers.
+- **Close.** When a conversation has been quiet for 30 minutes, when you
+  switch conversations, and in the stop drain and the boot catch-up, the
+  learning queue refreshes the state — only when a turn of yours lies past
+  what it covers — and then projects the conversation's episode note from it
+  (see [Memory](#memory)). `[orchestrator.learning] enabled = false` turns the
+  close off with the rest of learning.
+
+Every call is made on `[orchestrator.costs] summary_model` (unset: the
+router's default model), asks for no reasoning, answers at most 1,536 tokens,
+is recorded under the label `orchestrator_summary` and is checked first
+against `summary_max_daily_cost_usd` — the compaction's call included, so it
+no longer counts against the turn's $1 or the workflow's cap. An answer that
+is not a state leaves the row as it was; at a compaction the turn goes on over
+the heuristic summary. A history clear (`DELETE /v1/chat/history`) empties the
+state.
+
+**A new conversation carries the previous one.** On the same lane and
+project, a new conversation is given the previous conversation — the lane's
+last closed one with the same project, never an older one — for its first
+`[orchestrator.memory] carry_over_turns` (default 3, `0` = never) user turns,
+until it has a state of its own: its state and its last exchange, under a
+heading naming the episode note that records it (for the model to
+`memory_read`) or, before its close, the date `memory_timeline` will list it
+under. It is read live on each of those turns. A conversation created with
+`POST /v1/sessions {"inherit": false}` — the GUI's **Start fresh** — is never
+given it. The turn's `done` frame names the conversation it was given
+(`continued_from`), and a workflow's lead is given the chat's state after its
+objective.
+
+`[execution.context] compaction_model` and `[orchestrator.learning]
+episode_max_per_day` are gone (the compactor uses `summary_model`; an episode
+note costs no call). A hand-edited `daemon.toml` still carrying either is
+read as if it did not.
+
 ### Scheduled skills
 
 Skills whose frontmatter sets `invoke.cron` (see the Skill Template Reference) are registered with the wake-module cron scheduler at boot and re-synced on skill hot-reload. Each fire injects the skill's slash command as a fresh turn — through the same gateway as user messages — on the local user's `<user>:scheduled` lane, running as that user so memory and preferences apply and results appear in chat history. `scheduled_skills_enabled = false` under `[orchestrator.routing]` disables all skill cron jobs (hot-reloadable).
@@ -1128,8 +1187,10 @@ The `done` payload:
 | `attachments_skipped` | no | `[{"id", "reason"}]` — the turn's files that did not reach the model, each with a sentence saying why. |
 | `memory_used` | no | `[{"id", "revision", "reason"}]` — the memory notes the turn delivered to the model: `reason` is `pinned` or `recall` for the automatic per-turn recall, `index` for a note it only listed in its index block (`recall_mode = "index"`: the line reached the model, the body did not), `tool` for a note the model fetched itself through `memory_search`, `memory_timeline` or `memory_read` (an index row counts: its title reached the model). Live only: nothing persists it, and `GET /v1/chat/history` does not serve it. |
 | `delegation` | no | `{"task_id", "title"}` when the turn started a background workflow, so a client can track the run without parsing prose. |
+| `working_state_updated` | yes | `true` when the turn compacted, so the conversation's working state changed: its session is worth re-reading. |
+| `continued_from` | yes | `{"session_id", "topic"}` — the previous conversation the turn was given ([Conversation continuity](#conversation-continuity)), the topic `""` when it left no state — or `null`. Live only. |
 
-Optional fields are omitted when they are empty.
+The optional fields are omitted when they are empty.
 
 **The deltas are real.** A `delta` carries the provider's own tokens as they
 arrive. A **file-based skill** (a `/slash` or router-selected skill) streams the

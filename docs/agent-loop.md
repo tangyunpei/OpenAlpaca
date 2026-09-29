@@ -43,8 +43,10 @@ Two details of the budget checks:
   `max_cost_per_task` overrides either (the shipped `lead_agent`
   template sets `3.0`). There is no overall daily budget for turns or
   workflows. Three background jobs that run outside this loop — memory
-  extraction, conversation summaries and task-output extraction — each
-  carry a small daily ceiling under `[orchestrator.costs]`.
+  extraction, the conversation's working state and task-output extraction —
+  each carry a small daily ceiling under `[orchestrator.costs]`. The
+  working-state writer's call at a compaction (below) is one of them: it
+  runs under the summariser's label and ceiling, not under the loop's cap.
 - **The round cap can stretch, within a ceiling.** The effective cap is
   `max_rounds` plus any steering bonus and the answer guard's one bonus
   round, never more than `2 × max_rounds`.
@@ -455,15 +457,49 @@ that passes none (the social fast path, tests) never compacts.
   | ≥ 70% | `DropMultimedia` | Replaces image, audio and document parts with one-line text placeholders. |
   | ≥ 75% | `DiscardSocial` | Removes small-talk user messages and the replies to them. Keeps the system message, the first query and the last `min_recent_messages` (default 4). |
   | ≥ 80% | `HeuristicSummary` | Replaces older rounds with a compact summary built without a model (`runner/agentic_loop/context.rs::compress_context`). |
-  | ≥ 85% | `LlmSummary` | Extracts memories and summarises older messages with an LLM call. Cancellable: a cancel restores the messages untouched. |
+  | ≥ 85% | `LlmSummary` | Folds the older messages into the conversation's **working state** with one model call (below). Cancellable: a cancel restores the messages untouched. |
 
+- **The `LlmSummary` tier writes the working state** (design
+  `tasks/memory-redesign/11-continuity-design.md`, owner decisions CQ-1,
+  CQ-3). One call — there is no memory-extraction call any more — reads the
+  previous state and the older messages `messages[2..len − min_recent_messages]`
+  and answers the state, a fixed-shape JSON object: `topic`, `goal`, `done`,
+  `decisions`, `open`, `next`, `refs`. It replaces those messages with the
+  rendered state at `messages[2]` (a previous state block among them is taken
+  out, so the list never holds two) and is carried out on
+  `LoopResult.working_state`. The call is the one working-state writer the
+  turn end and a conversation's close use too
+  (`orchestrator/working_state.rs`): `[orchestrator.costs] summary_model`
+  (unset: the router's default), no reasoning, 1,536 output tokens, recorded
+  under the label `orchestrator_summary` and checked first against
+  `summary_max_daily_cost_usd` — so its cost counts against that daily
+  ceiling, not against the turn's or the workflow's cap. An answer that is not
+  a state falls back to the heuristic summary. `[execution.context]
+  compaction_model` is gone; a hand-edited file's key is ignored.
+- **The main loop's state reaches the session row.** At turn end the state a
+  main-loop compaction wrote goes to `session.working_state` with no further
+  call, its `working_state_through` never past a row the writer read;
+  otherwise the turn end refreshes the state only when `[orchestrator.memory]
+  summary_min_new_older_messages` (12) rows have scrolled out of the recent
+  window past what it covers. The next turn's history layer starts with the
+  state as quoted data, which the assembly's 75 % trim never takes; after a
+  compaction the recent window starts after the rows the state covers,
+  keeping `min_recent_messages` rows verbatim, so a small window does not
+  re-send and re-compact the same rows. A lead is given the chat's state
+  after its objective and folds into it; what a lead, a skill or a subagent
+  compacts never reaches the session row.
 - **Never compacted away.** `<user_interjection>` steering messages are
-  exempt from discard and truncation.
+  exempt from discard and truncation. A working-state block is never cut:
+  the heuristic summary keeps it whole ahead of its own, and `LlmSummary`
+  replaces it with the state it writes.
 - **Narration.** Each compaction publishes
   `SystemEvent::CompactionTriggered` (utilization and message counts) and,
   with a session log attached, writes a `compaction` record with the tier,
-  the token counts before and after, and the running total of dropped
-  tokens.
+  the token counts before and after, the running total of dropped tokens
+  and, for `LlmSummary`, the state (`working_state`) and the last row it
+  covers (`state_through`) — which a resumed lead's replay splices in place of
+  the rounds it drops. A main-loop turn that compacted says so on its `done`
+  frame (`working_state_updated: true`).
 
 ## Tool Results and the Spill
 

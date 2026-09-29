@@ -251,7 +251,9 @@ active at a time; the sidebar is the surface that makes that visible. The live
 one sits on top, archived ones below it by `updated_at`, each labelled with the
 project it is bound to, with `New chat`, rename, archive, delete (a two-step
 confirm — there is no undo; the conversation's episode notes, below, go with
-it) and a `Show more` when the list has further pages.
+it) and a `Show more` when the list has further pages. `Start fresh`, under
+`New chat`, opens a conversation that is **not** given the previous one's
+working state (below); `New chat` opens one that is.
 Clicking a row resumes it. A row whose runs were cut short by a daemon restart
 carries an `N interrupted` badge.
 
@@ -603,6 +605,29 @@ for every run that is not `done`) or the file panel (one artifact, with the
 same Preview / Diff / History renderers the Library uses, at compact size).
 `‹ Work` restores the pane, `›` collapses the aside, and with the aside closed
 the header grows a "running now" pill as the way back in.
+
+**The working state.** Above the Work pane, a collapsible **Working state**
+card shows where the conversation's work stands — the same record the model
+reads in place of the turns that no longer fit its window: the topic, the
+goal, what is done, what was decided, what is still open, the next step, and
+the runs and files the work refers to (a `task …` entry opens that run in Work
+— the Work view when the id is a short one — and an `artifact …` entry the
+Library), with when it was last updated. The daemon's summariser writes it
+when a long turn is compacted, when older turns scroll out of the model's
+window, and when the conversation closes (half an hour of quiet, or switching
+to another); until then the card says *"Nothing summarised yet — the whole
+conversation is still in view"*. Its text is the summariser's, so a hidden
+character in it is drawn as `<U+XXXX>`. The card reads the conversation list,
+which refreshes after every turn; a state the daemon writes later — a refresh
+behind the turn, a close — shows at the list's next refresh.
+
+**Continuing from a previous conversation.** A new conversation on the same
+project is given the previous one — its working state and its last exchange —
+for its first three turns (the daemon's `carry_over_turns`), until it has a
+state of its own. While a turn carries it, a muted line above the transcript
+says *"Continuing from: <topic> (ended <date>)"*. It comes from the turn's
+`done` frame and is live only. `Start fresh` opens a conversation that is
+never given it.
 
 ## Work
 
