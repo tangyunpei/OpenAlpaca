@@ -1,0 +1,148 @@
+# 11 — Continuity: one working state per conversation, one summariser
+
+**Status: rev 1.1 (2026-09-28) — design of record for Track B ("compaction ↔ memory"); owner decisions CQ-1…CQ-10 taken 2026-09-28 (§7): all as recommended, except CQ-9 = `002_working_state.sql`.** Synthesised from a three-design panel (memory-first, transcript-first, unified; two judges — session scratchpad `program/design-b/`), on the map `program/maps/compaction.md`; `path:line` at HEAD `9bbe19ba`. Implemented by Opus from this document after the decisions; every deviation goes in the revision log.
+
+## 0. The directive, read as three requirements
+
+Owner: *"redesign or improve our current chat compacting system to better integrate with the memory system for the chat compact and hints or the memory after the compact for the agent to better pick up from previous chat and continue the work."*
+
+- **R1** What in-loop compaction learns must not die with the loop. Today the `LlmSummary` tier makes two model calls — an extraction whose items are counted and dropped (`prompt_ctx/compaction/graduated.rs:100`) and a summary that lives only in the loop's `Vec<ChatMessage>` (`context_budget/compaction.rs:180`); `LoopResult` carries no messages, the `compaction` log record carries counts only (map §1.4–§1.5).
+- **R2** After a mid-turn compaction, after a break, and on a new conversation on the same lane and project, the model gets *where we left off* — open work, decisions, the next step — and knows where the fuller record is. Today nothing records open work (map Gaps 7–9).
+- **R3** The three summarisers — the loop's, the background `session.summary` (12-row lag, trimmed first, off the wire, map §2.2) and the episode writer (map §4.4) — become one coherent, cheaper mechanism.
+
+The panel's verdict (both judges): continuity belongs on the **session row and in the history layer**, not in memory notes — a memory-first design has to reverse the frozen summary shape (03 §7a: a `Summary` provenance carries no `fact_key`, no `supersedes`), route delivery through a lexical recall that cannot find "go on", and add a paid call to every short session. Memory keeps what it has: the episode note as the findable *record*, learned facts from rows.
+
+## 1. Summary
+
+1. **One artefact**: the conversation's **working state** — fixed-shape JSON on the session row (`topic, goal, done[], decisions[], open[], next, refs[]`; Claude Code's continuation shape cut to what a personal assistant needs), rendered ≤ 4,000 chars.
+2. **One writer**: `working_state::update(previous, new lines) → state` — one prompt, one parser (`task_extraction::read_json_answer`, LQ13), one model key (`[orchestrator.costs] summary_model`), one usage label (`orchestrator_summary`) and its one existing daily ceiling. Three call sites: the loop's compaction tier, the turn-end lag refresh (today's `update_summary_background`), and the close.
+3. **Compaction pays one call, not two**, on the summariser's model, and its output lands on the row at turn end with no second call (R1).
+4. **The episode note is a projection** of the state at the close — no episode prompt, no episode call; MD-16's note is byte-for-byte the same shape, still found by search and the timeline, never by automatic recall, forgotten with its conversation.
+5. **Delivery in the history layer**: the state takes `session.summary`'s slot and is exempt from the head-trim; a new conversation on the same lane and project reads the previous conversation's state live for its first three user turns, with an opt-out; the lead gets the state after its objective (R2).
+6. **Visible**: the state is on the wire and in a chat-aside card; a "continuing from" line comes from one `done` datum in both clients.
+7. **Measured**: a continuity split of the learning corpus (carry-over off vs on), an offline compaction invariant, and the episode split as a regression gate.
+8. Model calls per conversation: `T1 = C + S′ + Q′ ≤ T0 − C` (§9); no frozen memory contract is reversed (§7).
+
+## 2. The continuity model
+
+**`WorkingState`** (`crates/openalpaca_core/src/orchestrator/working_state.rs`, new; JSON in `session.working_state`):
+
+```json
+{"v":1,"topic":"3–8 words","goal":"what the user wants done, in their terms",
+ "done":["established or finished, with files, artifacts, task ids"],"decisions":["chosen, turned down, changed"],
+ "open":["asked and unanswered; pending"],"next":"the next step, or \"\"","refs":["task 1a2b…","artifact reports/x.md"]}
+```
+
+Rendered by one function into the wrapped `<context_data type="working_state" trust="user_derived">` form (`orchestrator/mod.rs:273-285`), heading *"Working state of this conversation, as of <updated_at>"*; over `summary_max_chars` (4,000) it is cut list-item by list-item, `next` kept, never inside a character. Written in the user's language.
+
+**Row** (`session`): `working_state TEXT NOT NULL DEFAULT ''`, `working_state_version INTEGER`, `working_state_through INTEGER` (the highest `conversation_messages.id` the state covers — **only rows the writer actually read**, §3.2), `working_state_updated_at TEXT`, `episode_note_id TEXT` (the last projected note's id; null until a close). These replace `summary`, `summary_version`, `last_summarized_message_id`, `summary_updated_at` (`migrations/001_baseline.sql:196-214`).
+
+**Lifecycle**
+
+| Moment | Who | Call | Effect |
+|---|---|---|---|
+| The loop's `LlmSummary` tier fires (`runner/agentic_loop/mod.rs:609-711`, `budget.rs:85-121`) | `Summarizer` (`backend.rs:303`) through the writer | **1** (was 2) | `state = update(previous = LoopConfig.working_state, new = messages[2..boundary])`, inserted at `messages[2]` as today; the previous state block is **removed** from the list, not just skipped (panel defect U-6); carried out on `LoopResult.working_state` with the boundary |
+| Turn end (`orchestrator/handlers.rs:371-380`'s background job) | `working_state::after_turn` (today `summary.rs:14`) | 0 if the loop compacted; else 1 only under the lag rule (≥ `summary_min_new_older_messages` = 12 rows past the 40-row window and newer than `through`, `summary.rs:21-30`) | row written with optimistic locking (`conversation/mod.rs:930-946`, one retry); `through` per §3.2 |
+| Close: quiet ≥ 30 min, a conversation switch, the stop drain, the boot catch-up (`memory/learning/queue.rs:740-748`, `:887-892`, `:1073`) | the learning queue's close job (today `Job::Summarize`, `queue.rs:343`) | 1 only if ≥ 1 user turn lies past `through` (so a short or a just-switched conversation gets a current state — panel graft); else 0 | refresh; then, when ≥ `EPISODE_MIN_USER_TURNS` (4) user turns lie past `learning_cursor.episode_through` (`learning/mod.rs:113-116`), **project** the episode note (§3.4) and advance `episode_through` to `through` |
+| Conversation deleted / history cleared (`routes/sessions.rs:787-803`, `routes/chat.rs:776-800`) | — | 0 | the row goes or the state is `''`; the episode forget is unchanged (LQ9) |
+
+A conversation that never compacts and stays inside the 40-row window has an empty state until its close: all its rows are in the prompt verbatim, nothing is missing; the close writes what the next conversation reads.
+
+## 3. Write paths
+
+**3.1 The writer.** `working_state::update(previous: Option<&WorkingState>, lines: &[TranscriptLine]) -> RouterRequest` and `parse(answer) -> Result<WorkingState, Unusable>`. Prompt committed as `working_state_prompt.txt` (pinned by a fixture test as `the_episode_prompt_matches_its_fixture` pins today's): *update the working state of this conversation; keep what the user settled, what is unfinished and the next step; keep names, ids, paths and dates exactly; write in the user's language; answer with one JSON object and nothing else.* Lines are `[user]`/`[assistant]`/`[tool]` rows, each cut to `msg_trunc_chars` (1,500), the same join the loop calls build today (`backend.rs:237-249`). Request: `model = summary_model` (unset → the router default, `routing/router/completion.rs:135-136`), `temperature 0`, `max_tokens 1536`, `thinking: Disabled` (M2), `RequestContext.agent_id = "orchestrator_summary"`, usage recorded under it (`summary.rs:111-201` kept), the daily cap `summary_max_daily_cost_usd` pre-checked at every site (`summary.rs:33-42`). A cut answer is reported cut and never rescued; an unusable answer at compaction falls back to `compress_context` as Phase 3 does today (`compaction.rs:90-106`); at turn end or close it leaves the row untouched.
+
+**3.2 The cursor — rows the writer read, nothing else.** `build_context` (`orchestrator/context_builder.rs:30-174`) returns the ids of the rows it placed in the prompt (`ConversationContext.recent_row_ids`, oldest first); compose reports how many leading history messages the assembly trim removed (`compose/assembly.rs:66-90` → `history_head_dropped`); the compactor reports how many history messages lay inside `messages[2..boundary]` (`history_covered`). Then `through = recent_row_ids[head_dropped + covered − 1]` **when `head_dropped == 0`**; when the trim dropped head rows, `through` is not advanced past them (`through = recent_row_ids[0] − 1`, i.e. unchanged) — the lag refresh summarises them later when they scroll out, exactly as today's `last_summarized_message_id` does (panel defect U-2; a small-window case, never a lost row). The lag refresh's `through` = the last `older_window` id (`context_builder.rs:108-129`), as today. The close's `through` = the session's newest row.
+
+**3.3 Compaction.** `CompactionPipeline::compact` (`context_budget/compaction.rs:49-108`) loses Phase 1: `MemoryExtractor`, `ExtractedMemory`, `CompactionResult.extracted_memories`, `CompactionReport.memories_extracted`, the `memories_extracted` keys of the log record (`mod.rs:686`) and of `SystemEvent::CompactionTriggered` (`mod.rs:703`; bridge arm `apps/openalpacad/src/event_bridge.rs:505-511`) go (CQ-1). Phase 3's `Summarizer::summarize(previous, older) -> WorkingState` inserts the rendered state; a message that *is* the previous state block (prefix `<context_data type="working_state"`) is taken out of `older` and out of the list. `LoopConfig` gains `working_state: Option<Arc<WorkingState>>` (the main loop sets it from `ConversationContext`; the lead from CQ-6; the skill tier and subagents `None`); `LoopResult` gains `working_state: Option<(WorkingState, boundary)>`. `[execution.context] compaction_model` is deleted: every summariser call resolves `summary_model` (CQ-3) — today the main loop compacts on the router default (`LoopConfig.compaction_model = None`), which on a local-only install is the answering model.
+
+**3.4 Close → episode.** `episode::store_input` (`memory/learning/episode.rs:252`) takes the projection instead of a model answer: `topic` = state.topic; `Discussed:` = goal + done; `Decided:` = decisions; `Left open:` = open + "Next: " + next; `## Knowledge` ≤ 1 KiB (`knowledge()` unchanged); title `Conversation on <date>: <topic>`; `sources` = ≤ 8 rows spread over `(episode_through, through]` (`sources()` unchanged); `observed_at` = the last row; `kind: episode`, `ExtractionProvenance::Summary` → origin `extracted_other`, `active` — MD-16's note (`memory_files/mod.rs:132`, `service/types.rs:19-30`): no `fact_key`, no aliases, no `supersedes`. Deleted: `episode_prompt.txt`, `render_prompt`, `build_request`, `parse_summary`, `parse_cut_summary`, `EPISODE_OUT_TOKENS`, the `orchestrator_episode` label, and `episode_max_per_day` (a projection costs no call; closes are bounded by the user's own switching — CQ-2; Track C's LQ21 raised that key to 100 in the meantime and this design removes it).
+
+**Deleted overall**: the compaction extraction call and parser (`backend.rs:211-298`), the compaction summary prompt (`backend.rs:318-323`), the session-summary prompt and JSON reader (`summary.rs:44-62`, `:70-80`, `:125-185`), the episode prompt and parsers (`episode.rs:43-162`), `session.summary` as free text. Three prompts → one; three parsers → one; three labels → one; one config key gone.
+
+## 4. Delivery paths
+
+Every delivery is quoted reference data under the trust label, never a system instruction (03 §7a). ≤ 4,000 chars ≈ 1,000 tokens.
+
+| Trace (map §5) | What the model sees | Layer and rule |
+|---|---|---|
+| **(c) the turn after a mid-turn compaction** | `<context_data type="working_state">` (the state the compaction wrote), then the history window, memory, the new message | The history layer's first message, in `session.summary`'s slot (`compose/history.rs:39-49`; `HistoryInput.summary` → `working_state`, already in the fingerprint `history.rs:67`). **Exempt from the head-trim** (`assembly.rs:74-90` skips the block; CQ-4). **After a compaction only**, the window starts after `through` with `min_recent_messages` (4) rows as a verbatim floor, so a 32K model does not re-send and re-compact the same 40 rows (panel graft; the window is unchanged at a close or a lag refresh). |
+| **(a) the same conversation after a day** | the same block — current, because the 30-min quiet already ran the close — then the 40 rows | as above; the heading's `as of` tells the model how old it is |
+| **(b) a new conversation on the lane and project** | `<context_data type="previous_conversation">`: heading *"The previous conversation on this project ended <ended_at>; its record is memory note <episode_note_id> '<title>' — memory_read it for the full record; memory_timeline shows what surrounds it"* (before the close has run: *"its record will be listed by memory_timeline under Conversation on <date>"*), then the state, then the last user/assistant exchange after `through` (each cut to 400 chars) | Read **live on every turn** (not copied at `create_session`, so the switch's close-out reaches the new conversation — panel graft) from the lane's **newest archived session with the same `workspace_id`** (null-aware) — *or nothing*: never an older session (panel defect U-3). Delivered while the new session's own state is empty and its user turns < `carry_over_turns` (3); off for the session when it was created with `inherit: false` (CQ-5). `HistoryInput.previous` enters the fingerprint. |
+| **the lead** | one `<context_data type="working_state">` block after the objective (`runner/lead_agent/mod.rs:464-500`) — the state of the session the `start_workflow` turn ran in (`LeadAgentDispatch` carries `session_id`: `dispatcher/lead_agent.rs:59-91`, `:319-326`) | no call (CQ-6) |
+
+**Rule block**: `main_loop_memory_guidance()` (`tools/builtins/main_loop.rs:121-127`) gains one sentence — *"A previous_conversation block names the memory note that records it; memory_read it when the user continues that work."* Content stays in quoted data, rules in the system block.
+
+**Unchanged**: per-turn recall and its query (the message alone, `prompt_ctx/sources/memory.rs:156`); the automatic filter's exclusion of episodes (`memory_index/search.rs:290-295`); `memory_used` (the state is not a note); the 8 KiB / 2 KiB budgets; the 1.5 s deadline; MD-16, LQ9, LQ10, G2, MD-1.
+
+## 5. What the user sees
+
+- **API**: `SessionView` (`routes/sessions.rs:70-82`) gains `working_state` (the JSON or `null`) and `working_state_updated_at`; SSE `done` gains `working_state_updated: bool` (true when the turn compacted) and `continued_from: {session_id, topic} | null` (CQ-7). `GET /v1/chat/history` unchanged. `POST /v1/sessions` takes `inherit: false`. No new `ServerEvent`, no `event_log` row (W6).
+- **GUI**: the chat aside's slot (`views/chat/ChatView.tsx:14`) gets a collapsible **Working state** card — topic, goal, done / decisions / open as lists, next, refs (task ids link to Work, artifact paths to Library), "updated <relative time>"; empty state *"Nothing summarised yet — the whole conversation is still in view"*; the composer's new-chat action offers **Start fresh** (`inherit: false`); a muted *"Continuing from: <topic> (ended <date>)"* line above the transcript while `done.continued_from` is set. Text through `EscapedText` (Gotchas). The Memory view is unchanged (the episode note is listed as today).
+- **CLI**: `openalpaca chat` prints one dim `continuing from: <topic>` line from the same `done` datum; `openalpaca sessions` gets no new verb in this slice (the state is readable on the wire).
+
+## 6. Data model changes
+
+- **Schema**: `002_working_state.sql` (version 2, per Track A's recipe): `session` rebuilt with the five columns of §2 in place of the four `summary` columns, its indexes re-created, `INSERT INTO schema_version(version) VALUES (2);` last; no other table changes; no note-kind or index-predicate change; `memory_index::SCHEMA_VERSION` (5) unchanged.
+- **Session log**: the `compaction` record gains `working_state` (the JSON) and `state_through`, loses `memories_extracted`; `replay::rebuild` (`session_log/replay.rs:522-535`) splices the state in place of the bare `<context_compacted rounds="N">` note when present and keeps today's note for an old record (CQ-8). `session_end` stays unwritten — the learning queue's deps (`queue.rs:77-82`) hold no session-log writer; recorded as residue.
+- **Types**: `ConversationContext` (`orchestrator/mod.rs:248-260`): `summary` → `working_state: Option<Arc<WorkingState>>`, new `previous: Option<PreviousConversation>`, `recent_row_ids`; `HistoryInput.summary` → `working_state`, new `previous`; `LoopConfig.working_state`; `LoopResult.working_state`.
+- **Events**: `SystemEvent::CompactionTriggered` loses `memories_extracted`.
+
+## 7. Contract deltas → owner decisions
+
+| Id | Question | Recommendation → **taken 2026-09-28** |
+|---|---|---|
+| **CQ-1** | Delete compaction's Phase-1 extraction call (a documented `[execution.context]` behaviour, `docs/agent-loop.md:452`). | **Yes** — learning already reads every row (MD-10); nothing reads the extraction; the loop's *work* facts go into `done`/`refs`. |
+| **CQ-2** | One writer for the three summarisers; the episode note becomes a projection with no model call; `episode_max_per_day` and the `orchestrator_episode` label go. Changes how MD-16's text is produced, not its shape, triggers, visibility or forget. | **Yes.** |
+| **CQ-3** | One model key: every summariser call resolves `summary_model`; `[execution.context] compaction_model` is deleted (today lead-only; the main loop compacts on the router default). | **Yes** — a 32K local answering model should not summarise its own overflow when a small model is configured. |
+| **CQ-4** | The state block is exempt from the assembly head-trim, and after a compaction the next turn's window starts after `through` (4-row verbatim floor). | **Yes** — the block is the one carrier of what the trim removes; the window rule stops re-compaction on small windows and moves the window at no other time. |
+| **CQ-5** | Carry the previous conversation's state into a new conversation on the same lane and project for its first `carry_over_turns` (3) user turns, read live from the archived row, with a per-session `inherit: false` opt-out ("Start fresh"); the close refreshes the state on a switch when ≥ 1 user turn is uncovered. | **Yes** — answers R2's new-conversation case without reversing MD-16 (the alternative: deliver the latest episode by recall) and without the model having to call `memory_timeline` unprompted. |
+| **CQ-6** | The lead receives the chat's working state after its objective. | **Yes** — decisions taken in chat reach the run; one block, no call. |
+| **CQ-7** | The state on the wire (`SessionView`, `done.working_state_updated`, `done.continued_from`), the GUI card and line, the CLI line — reversing `routes/sessions.rs:71-75`'s "not for the user" comment. | **Yes** — the owner asked to see continuity. |
+| **CQ-8** | The `compaction` log record carries the full state and replay splices it (P-14's promise). | **Yes.** |
+| **CQ-9** | Schema placement: edit `001_baseline.sql` (the baseline is unreleased; the owner's store is reset once at the switch-over; a `002` would rebuild a table for no existing database) — or `002_working_state.sql` with add/copy/drop (SQLite `RENAME COLUMN` is unhandled by `gen_api_docs.py`, F8). | Recommended 001; **owner took 002** — the squash's 001 stays frozen, and the rebuild is `CREATE TABLE session_new … ; INSERT … SELECT; DROP TABLE session; ALTER TABLE session_new RENAME TO session;` plus the five indexes re-created (`gen_api_docs.py` handles `CREATE`, `DROP` and `RENAME TO`). |
+| **CQ-10** | The episode body reads goal/done/decisions/open/next from the projection instead of the model's free `discussed/decided/open`. | **Yes**, gated: the episode split (`questions-episodes.json`) stays ≥ 17/20 after slice 4, else the rendering is revised before release. |
+
+## 8. Config keys
+
+| Key | After |
+|---|---|
+| `[orchestrator.costs] summary_model`, `summary_max_daily_cost_usd` | the writer's model and its one ceiling, now covering compaction, turn end and close (N4: no new ceiling) |
+| `[orchestrator.memory] summary_max_chars` (4,000), `summary_min_new_older_messages` (12), `msg_trunc_chars`, `prompt_recent_messages` | kept, names unchanged |
+| `[orchestrator.memory] carry_over_turns` | **new**, default 3, `0` = off |
+| `[execution.context] compaction_model` | **deleted** (CQ-3); a hand-edited file's key is ignored as every stale key is |
+| `[orchestrator.learning] episode_max_per_day` | **deleted** (CQ-2) |
+
+## 9. Cost
+
+Per conversation with C compactions, S lag refreshes, Q closes with new user turns: today `T0 = 2C + S + Q` (compaction on the router default — the answering model on a local-only install — 1,024 + 2,048 output tokens, the older slice read twice; a close call only after 4 user turns); design `T1 = C + S′ + Q′` with `S′ ≤ S` (a compaction moves `through` to the tip of what it read) and `Q′ ≤ Q + (closes of short conversations that had no episode call before)`, one call each of 1,536 output tokens on `summary_model`. Worked: 10 user turns, no compaction → 1 vs 1; 30 turns, one compaction on a 32K model → 4 vs ≤ 3; 100 turns over three days, three compactions → 22 vs ≤ 16. Compaction input halves (one read of the slice); at compaction one call instead of two sequential ones. Every surviving call's output is read by something.
+
+## 10. Evaluation
+
+1. **Continuity split** — `scripts/eval/memory/questions-continuity.json` (new, ~20 rows): for 20 `conversations-learning.json` sessions with ≥ 6 user turns, a `split` index and three questions in the conversation's language — `doing`, `decided`, `next` — with gold from the turns before the split, plus 4 `expect_abstain` rows (work the user dropped). The harness feeds `[0, split)` in session A, runs the queue's deterministic close, opens session B on the same lane and project, asks the three as its first turns, judges with the frozen prompt. Systems **K0** (`carry_over_turns = 0`) and **K**. Report: accuracy per sub-question, `carry_over_delivered`, `state_fresh` (the delivered block's `through` ≥ the last fed row), turn-1 input tokens. **Target: K ≥ 80 % over the 60 answers and ≥ +30 pp over K0.** The corpus validation test gains the split's checks (≥ 3 turns each side, no shingle leak).
+2. **Compaction invariant** (offline stub model, in the default suite): a 4K stub window with the buffer forced high → a compacting turn leaves `working_state` non-empty with `through` per §3.2, **exactly one** router call, and the next request carries the block before the rows and after no trim; a non-JSON stub answer leaves the row untouched and the loop on `compress_context`.
+3. **Episode split** re-run on L-episodes: ≥ 17/20 (CQ-10).
+4. **Calls**: the report gains `summariser_calls` by label per corpus session; the compaction case is pinned by the invariant's counter.
+
+## 11. Prior art — copied / not copied
+
+Claude Code (`tasks/research/claude-code-design-lessons.md:117`, `:123`, `:135`, `:141-142`, `:269`). **Copied**: the fixed-shape continuation the next context starts from (nine sections cut to seven fields — no "files and code sections", no "errors and fixes": a chat lane is not a coding session; `refs` carries task ids and artifact paths); the summary written into the record at compaction (our `compaction` log record; pre-compaction records stay, the session log keeps them); durable facts kept apart from the continuation (memory notes vs the state); "resume from summary" for an idle session (the close refreshes the state during the idle). **Not copied**: a summary *row* in the transcript (`isCompactSummary`) — the panel showed a new `conversation_messages` role reaches both clients' transcripts and the 40-row window before anything teaches them, for what one column serves; re-rendering tool listings after compaction (the fixed zone is never compacted, `budget.rs`); a memory index loaded every session (MD-1's pinned notes are that set); `compact_boundary`'s parent link (no message→seq map, T55).
+
+## 12. Risks and residue
+
+A stale `next` after abandoned work — the heading's date, the 3-turn carry-over, the abstain rows in the eval; residual over-continuation is the model's. Two writers of one row (turn end and close) interleave under the optimistic version — the loser re-reads, a re-projection is harmless. The skill tier and subagents still drop their state at loop end (only the lead's reaches the log) — acceptable, their output returns to a parent with a state. Hidden characters in the state reach the card and the CLI line — `EscapedText` / `escape_hidden`. `session_end` stays unwritten. A previous conversation with no state and no close (under one user turn) carries only its last exchange.
+
+## 13. Implementation slices (each with its tests; workspace tests and the four GUI gates green at each)
+
+1. **Schema + type** — `002_working_state.sql` (CQ-9) and its registry entry; `WorkingState` (serde, render, the cut, `parse` over `read_json_answer`); `working_state_prompt.txt`. Tests: round-trip and cut (`next` survives; no split character); the prompt fixture pin; `parse` on the `unusable_answers.json` shapes; a fresh database has the columns; `gen_api_docs.py --check` clean.
+2. **The writer, turn end and history** — `summary.rs` → `working_state::after_turn`; `ConversationContext` fields; `compose/history.rs` renders the state in the summary slot; the trim exemption and the post-compaction window (CQ-4). Tests: the M2 test (`summary.rs:251`) re-targeted; the lag rule at 12 and not 11; a trim removes the first row, never the block; the fingerprint changes with the state and not otherwise; the window after a compaction starts after `through` with the 4-row floor and is unchanged after a lag refresh.
+3. **Compaction** — Phase 1 deleted (CQ-1); `Summarizer(previous, older)`; the previous block removed; `LoopConfig`/`LoopResult` fields; `summary_model` resolution and `compaction_model` deleted (CQ-3); the record's `working_state`/`state_through` and `replay::rebuild` (CQ-8); the main loop hands the state to `after_turn`; the §3.2 cursor. Tests: the graduated compactor's tests updated; exactly one router call per `LlmSummary`; one state block in the list after compaction; the record carries the JSON and an old record still yields today's note; the §10.2 invariant.
+4. **Close and projection** — `Job::Summarize` → the close job with the ≥ 1-turn staleness rule; `episode::store_input` from the state; the episode prompt, parsers, label and `episode_max_per_day` deleted (CQ-2); `episode_note_id` written. Tests: no call when current, one when stale; no episode under 4 user turns since `episode_through`; the note's frontmatter identical to MD-16's; found by search/timeline and never by automatic recall (existing tests); the conversation's delete forgets it (existing).
+5. **Carry-over and the lead** — the `previous_conversation` query; `HistoryInput.previous` in the fingerprint; `carry_over_turns` and `inherit`; the rules sentence; the lead's block (CQ-5, CQ-6). Tests: the block for 3 user turns and not the 4th; not when the previous session has no state and no rows; never from an older session; not across a different `workspace_id`; not after `inherit: false`; the heading names the episode id after a close and the timeline hint before; the lead's messages carry the block; `memory_used` unchanged.
+6. **Surfaces and docs** — `SessionView`, `done` fields, `POST /v1/sessions {inherit}`, the GUI card, "Start fresh", the "Continuing from" line, the CLI line (CQ-7); `docs/agent-loop.md:421-465`, `Daemon_Manual.md`, `GUI_Manual.md`, `CLI_Manual.md`, `API_MAP.md`, `DESIGN_SPEC.md`, `docs/api/` regenerated, CLAUDE.md's *Routing* / *Storage* / *Configuration* rows, 03 §7a's Extraction row and 09 §13.3's cost bullet, this file's revision log. Tests: the route serialises the state and `null`; a GUI test renders the card with a U+202E escaped; the four GUI gates.
+7. **Evaluation** — `questions-continuity.json` and its validation, systems K0/K, the request recorder, `summariser_calls`; run K0/K and the episode split on the local model; the record in `12-continuity-evaluation.md` (whitelisted with the others).
+
+## Revision log
+
+- rev 1 (2026-09-28): synthesis from the panel; CQ-1…CQ-10 pending.
+- rev 1.1 (2026-09-28): CQ-1…CQ-10 taken by the owner — all as recommended except CQ-9 (`002_working_state.sql`); §6 and §13.1 say so. Implementation queued behind Track A (the squash) and Track C (the learning queue).
