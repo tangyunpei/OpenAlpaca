@@ -1,0 +1,518 @@
+[
+  {
+    "id": "kq-001",
+    "session": "cs-001",
+    "split": 3,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "What were we working on in our last conversation?",
+        "gold_answer": "Lantern, Quillpay's Rust ledger-reconciliation service: you had given me its background and asked how to share a config struct between axum handlers."
+      },
+      {
+        "kind": "decided",
+        "question": "Which team did I say Lantern belongs to?",
+        "gold_answer": "The Ledger Platform team."
+      },
+      {
+        "kind": "next",
+        "question": "Which question were we in the middle of?",
+        "gold_answer": "The idiomatic way to share a config struct between axum handlers in Lantern."
+      }
+    ]
+  },
+  {
+    "id": "kq-002",
+    "session": "cs-003",
+    "split": 3,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "Where did we leave off last time?",
+        "gold_answer": "A SIGILL crash of `cargo nextest run` for Lantern on your MacBook Air M3, caused by an x86_64 toolchain running under Rosetta."
+      },
+      {
+        "kind": "decided",
+        "question": "What did we decide about it?",
+        "gold_answer": "To use the native aarch64-apple-darwin toolchain: Rosetta isn't supported for Lantern."
+      },
+      {
+        "kind": "next",
+        "question": "Is anything still open on that?",
+        "gold_answer": "No: switching to the native aarch64-apple-darwin toolchain had already fixed the crash, so nothing was left open on it."
+      }
+    ]
+  },
+  {
+    "id": "kq-003",
+    "session": "cs-005",
+    "split": 5,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "What were we doing in our last chat?",
+        "gold_answer": "Getting acquainted: you were introducing yourself — Lin Wei (林薇), living in Hangzhou, a backend engineer at Quillpay."
+      },
+      {
+        "kind": "decided",
+        "question": "What did we settle on about how I address you?",
+        "gold_answer": "That I call you Wei in chat."
+      },
+      {
+        "kind": "next",
+        "question": "Was there anything left for me to do?",
+        "gold_answer": "No: you were still introducing yourself — the last thing you told me was that you are a backend engineer at Quillpay, which you joined in September 2021 — and no task had been started."
+      }
+    ]
+  },
+  {
+    "id": "kq-004",
+    "session": "cs-006",
+    "split": 9,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "What were we working on last time?",
+        "gold_answer": "A health-check handler for Lantern that returns the build version as JSON; it failed to compile because its future was not Send."
+      },
+      {
+        "kind": "decided",
+        "question": "What did we decide about the compile error?",
+        "gold_answer": "To scope the MutexGuard in a block (restructure the code) instead of switching to tokio::sync::Mutex."
+      },
+      {
+        "kind": "next",
+        "question": "What was I about to do next?",
+        "gold_answer": "Apply that fix: scope the MutexGuard in a block so that it is no longer held across the await."
+      }
+    ]
+  },
+  {
+    "id": "kq-005",
+    "session": "cs-008",
+    "split": 3,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "What were we working on last time?",
+        "gold_answer": "Planning something nice for your partner Tomas Lindqvist's birthday (10 August)."
+      },
+      {
+        "kind": "decided",
+        "question": "What constraint did we set for the plan?",
+        "gold_answer": "It can't eat into early mornings, because you walk Mochi, your corgi, at seven every day."
+      },
+      {
+        "kind": "next",
+        "question": "What was the next step?",
+        "gold_answer": "Coming up with ideas for what to plan for Tomas's birthday."
+      }
+    ]
+  },
+  {
+    "id": "kq-006",
+    "session": "cs-009",
+    "split": 4,
+    "language": "zh",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "我们上次在做什么？",
+        "gold_answer": "你在给我介绍你的个人项目 Moss（苔）：一个用 Python 写的静态站点生成器，用来生成你的中文读书笔记博客 moss.linwei.dev。"
+      },
+      {
+        "kind": "decided",
+        "question": "上次说 Moss 的图片怎么处理？",
+        "gold_answer": "图片放在 content/images/，构建时用 Pillow 转成 WebP，最长边不超过 1600 像素。"
+      },
+      {
+        "kind": "next",
+        "question": "还有什么事没做完吗？",
+        "gold_answer": "没有：你只是在介绍 Moss 的情况（仓库、内容格式、图片处理），还没有开始任何具体任务。"
+      }
+    ]
+  },
+  {
+    "id": "kq-007",
+    "session": "cs-010",
+    "split": 4,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "What were we talking about last time?",
+        "gold_answer": "Your editor setup and preferences: vim with a plain vimrc and no plugin manager, dark mode everywhere, Gruvbox Dark and JetBrains Mono at 13 pt."
+      },
+      {
+        "kind": "decided",
+        "question": "What did I decide about Neovim?",
+        "gold_answer": "To stay with vim: you gave up on Neovim (with a Lua config) after two weeks because of the plugin churn."
+      },
+      {
+        "kind": "next",
+        "question": "Was anything left pending?",
+        "gold_answer": "No: you had only described your editor setup and preferences; no task had been started."
+      }
+    ]
+  },
+  {
+    "id": "kq-008",
+    "session": "cs-011",
+    "split": 5,
+    "language": "zh",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "我们上次聊了什么？",
+        "gold_answer": "你的习惯和偏好：只喝茶（最喜欢龙井）、下午三点以后不喝含咖啡因的饮料，以及我回答时该用的语言和格式。"
+      },
+      {
+        "kind": "decided",
+        "question": "上次说好了我跟你交流用什么语言？",
+        "gold_answer": "平时闲聊用中文；代码评审、技术文档和 commit message 用英文。"
+      },
+      {
+        "kind": "next",
+        "question": "还有什么没做完的事吗？",
+        "gold_answer": "没有：你只是在告诉我你的习惯和回答格式偏好，还没有开始任何具体任务。"
+      }
+    ]
+  },
+  {
+    "id": "kq-009",
+    "session": "cs-012",
+    "split": 6,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "What were we working on last time?",
+        "gold_answer": "Setting down your conventions for the code and commit messages I write for you (Conventional Commits, 4-space indentation, a line width of 100, and so on)."
+      },
+      {
+        "kind": "decided",
+        "question": "What rule did I set about pushing?",
+        "gold_answer": "Nothing is ever pushed to main directly, in any repository: every change, documentation included, goes through a pull request."
+      },
+      {
+        "kind": "next",
+        "question": "Was there anything left to do?",
+        "gold_answer": "No: you had only been listing your conventions (the last was which GitHub handle to use in repo URLs); no task had been started."
+      }
+    ]
+  },
+  {
+    "id": "kq-010",
+    "session": "cs-013",
+    "split": 3,
+    "language": "zh",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "我们上次在做什么？",
+        "gold_answer": "Moss 的 Markdown 管道：用 markdown-it-py 加 footnote 插件。"
+      },
+      {
+        "kind": "decided",
+        "question": "上次 Moss 的 Markdown 管道定了用什么？",
+        "gold_answer": "markdown-it-py 加 footnote 插件（Pandoc 全量构建一次要 90 秒，太慢，放弃了）。"
+      },
+      {
+        "kind": "next",
+        "question": "下一步要做什么？",
+        "gold_answer": "弄清楚 markdown-it-py 的插件是怎么注册的，把 footnote 插件接进 Moss。"
+      }
+    ]
+  },
+  {
+    "id": "kq-011",
+    "session": "cs-014",
+    "split": 8,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "What were we working on last time?",
+        "gold_answer": "Setting up pytest for Moss's tests."
+      },
+      {
+        "kind": "decided",
+        "question": "How did I want pytest added to Moss?",
+        "gold_answer": "As a dev dependency through uv: you manage Python environments and dependencies with uv, never pip or poetry."
+      },
+      {
+        "kind": "next",
+        "question": "What was the next step?",
+        "gold_answer": "A pytest fixture for a temporary content directory."
+      }
+    ]
+  },
+  {
+    "id": "kq-012",
+    "session": "cs-015",
+    "split": 4,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "Where did we leave off last time?",
+        "gold_answer": "Drafting the description of your Lantern PR that touches a database migration."
+      },
+      {
+        "kind": "decided",
+        "question": "Who did we say needs to review that PR?",
+        "gold_answer": "Priya (@priya-r) and Chen Bo (@chenbo): Chen Bo as well because the PR touches a database migration."
+      },
+      {
+        "kind": "next",
+        "question": "What were we going to do next?",
+        "gold_answer": "Write up Lantern's release checklist (releases go out every second Wednesday)."
+      }
+    ]
+  },
+  {
+    "id": "kq-013",
+    "session": "cs-021",
+    "split": 3,
+    "language": "zh",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "我们上次聊的是什么？",
+        "gold_answer": "你的跑步训练和备赛。"
+      },
+      {
+        "kind": "decided",
+        "question": "上次我定的比赛目标是什么？",
+        "gold_answer": "2026 年 11 月杭州马拉松的半程。"
+      },
+      {
+        "kind": "next",
+        "question": "下一步要做什么？",
+        "gold_answer": "规划半马前三个月的训练该怎么加量。"
+      }
+    ]
+  },
+  {
+    "id": "kq-014",
+    "session": "cs-024",
+    "split": 6,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "next",
+        "question": "What's the next step on the dark-mode toggle for Moss?",
+        "gold_answer": "There is no next step: you turned the dark-mode toggle down (Moss keeps its one look), so nothing is pending on it. The correct answer says there is none, or that it was dropped, without inventing a step.",
+        "expect_abstain": true
+      }
+    ]
+  },
+  {
+    "id": "kq-015",
+    "session": "cs-026",
+    "split": 6,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "What were we working on last time?",
+        "gold_answer": "A new reversible sqlx migration adding a region column to Lantern's partner table."
+      },
+      {
+        "kind": "decided",
+        "question": "What did we decide for the region column's type?",
+        "gold_answer": "A text column with a CHECK constraint, not an enum type."
+      },
+      {
+        "kind": "next",
+        "question": "What was the next step?",
+        "gold_answer": "Backfilling the region of the existing partner rows in the same migration."
+      }
+    ]
+  },
+  {
+    "id": "kq-016",
+    "session": "cs-027",
+    "split": 3,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "What were we working on last time?",
+        "gold_answer": "A script that backs up ~/Vault every night."
+      },
+      {
+        "kind": "decided",
+        "question": "Which shell did we say the backup script would be written for?",
+        "gold_answer": "Fish, since that's your shell."
+      },
+      {
+        "kind": "next",
+        "question": "What was the next step?",
+        "gold_answer": "Write the nightly backup script for ~/Vault."
+      }
+    ]
+  },
+  {
+    "id": "kq-017",
+    "session": "cs-030",
+    "split": 3,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "next",
+        "question": "What's the next step on adding a retry to reconcile_partial_batch?",
+        "gold_answer": "There is no next step: you dropped the retry idea (reconcile_partial_batch stays ignored until issue #212 is fixed), so nothing is pending on it. The correct answer says there is none, or that it was dropped, without inventing a step.",
+        "expect_abstain": true
+      }
+    ]
+  },
+  {
+    "id": "kq-018",
+    "session": "cs-032",
+    "split": 3,
+    "language": "mixed",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "上次我们在弄 Lantern 的什么？",
+        "gold_answer": "给一个 partner 轮换 API key，把流程做成 checklist（`just rotate-key <partner>`、新 key 存进 1Password 的 \"Lantern-dev\" vault、在 #lantern-ops 发消息）。"
+      },
+      {
+        "kind": "decided",
+        "question": "上次说 request_id 有什么规矩？",
+        "gold_answer": "request_id 必须在所有下游调用里透传。"
+      },
+      {
+        "kind": "next",
+        "question": "Next step 是什么？",
+        "gold_answer": "在 Loki 里按 request_id 查出一个请求的日志。"
+      }
+    ]
+  },
+  {
+    "id": "kq-019",
+    "session": "cs-033",
+    "split": 3,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "next",
+        "question": "What's the next step on the hand-written template engine for Moss?",
+        "gold_answer": "There is no next step: you decided against a hand-written template engine (Moss keeps Jinja2), so nothing is pending on it. The correct answer says there is none, or that it was dropped, without inventing a step.",
+        "expect_abstain": true
+      }
+    ]
+  },
+  {
+    "id": "kq-020",
+    "session": "cs-035",
+    "split": 7,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "What were we working on last time?",
+        "gold_answer": "Updating Moss's README after the build output moved to dist/: its Usage and Deploy sections."
+      },
+      {
+        "kind": "decided",
+        "question": "Did we decide on a table of contents?",
+        "gold_answer": "Yes: no table of contents; you decided to leave it out."
+      },
+      {
+        "kind": "next",
+        "question": "What was the next thing to add?",
+        "gold_answer": "A short Contributing note saying that issues are welcome."
+      }
+    ]
+  },
+  {
+    "id": "kq-021",
+    "session": "cs-038",
+    "split": 5,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "Where did we leave off last time?",
+        "gold_answer": "A pre-push hook for Lantern: running what CI runs and then a `just run` smoke test."
+      },
+      {
+        "kind": "decided",
+        "question": "What retry policy did we settle for Lantern's partner calls?",
+        "gold_answer": "3 retries with exponential backoff: a 200 ms base and a 2 s cap (ADR-005)."
+      },
+      {
+        "kind": "next",
+        "question": "What was the next step?",
+        "gold_answer": "Turn those pre-push checks (the build, nextest, clippy, fmt, then `just run`) into a pre-push hook."
+      }
+    ]
+  },
+  {
+    "id": "kq-022",
+    "session": "cs-044",
+    "split": 3,
+    "language": "zh",
+    "questions": [
+      {
+        "kind": "next",
+        "question": "Lantern 接入 Kafka 的下一步是什么？",
+        "gold_answer": "没有下一步：团队否决了给 Lantern 上 Kafka（改用 PostgreSQL 的 LISTEN/NOTIFY 加 outbox 表），这件事没有待办。正确的回答应说明没有下一步或它已被放弃，而不是编一个步骤。",
+        "expect_abstain": true
+      }
+    ]
+  },
+  {
+    "id": "kq-023",
+    "session": "cs-046",
+    "split": 3,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "What were we talking about last time?",
+        "gold_answer": "Your trip to Stockholm from 5 to 19 October 2026 to visit Tomas's family."
+      },
+      {
+        "kind": "decided",
+        "question": "How did I want meetings scheduled during the trip?",
+        "gold_answer": "In CET during that window."
+      },
+      {
+        "kind": "next",
+        "question": "What was I trying to find out?",
+        "gold_answer": "What the weather is usually like in Stockholm in early October."
+      }
+    ]
+  },
+  {
+    "id": "kq-024",
+    "session": "cs-050",
+    "split": 3,
+    "language": "en",
+    "questions": [
+      {
+        "kind": "doing",
+        "question": "What were we working on last time?",
+        "gold_answer": "Adding a fee column to Lantern."
+      },
+      {
+        "kind": "decided",
+        "question": "What did we decide about the new column?",
+        "gold_answer": "It is a Decimal, not an f64: amounts are never floating point in Lantern."
+      },
+      {
+        "kind": "next",
+        "question": "What was the next step?",
+        "gold_answer": "Write the migration for the fee column."
+      }
+    ]
+  }
+]

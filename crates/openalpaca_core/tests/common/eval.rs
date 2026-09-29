@@ -28,6 +28,11 @@ pub enum Category {
     /// answered from its conversation summary after a learning run. Not a
     /// held-out category, so not in [`Category::ALL`].
     Episodes,
+    /// The continuity split's questions (`questions-continuity.json`, design
+    /// 11 §10.1): where a corpus conversation left off, asked as the first
+    /// turns of the next conversation on its lane and project. Not a
+    /// held-out category, so not in [`Category::ALL`].
+    Continuity,
 }
 
 impl Category {
@@ -53,6 +58,7 @@ impl Category {
             Category::Abstention => "abstention",
             Category::SourceConflicts => "source_conflicts",
             Category::Episodes => "episodes",
+            Category::Continuity => "continuity",
         }
     }
 }
@@ -140,6 +146,82 @@ pub struct EpisodeQuestion {
     pub session: String,
     /// The 0-based turns of that session the gold answer draws on.
     pub turns: Vec<usize>,
+}
+
+/// What a continuity question asks about the conversation it continues
+/// (design 11 §10.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuityKind {
+    /// What we were working on.
+    Doing,
+    /// What was decided.
+    Decided,
+    /// The next step.
+    Next,
+}
+
+impl ContinuityKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ContinuityKind::Doing => "doing",
+            ContinuityKind::Decided => "decided",
+            ContinuityKind::Next => "next",
+        }
+    }
+}
+
+/// One question of a [`ContinuitySet`], its gold answer drawn from the turns
+/// before the set's split.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuityQuestion {
+    pub kind: ContinuityKind,
+    pub question: String,
+    pub gold_answer: String,
+    /// Work the user dropped: the correct answer says nothing is pending.
+    #[serde(default)]
+    pub expect_abstain: bool,
+}
+
+/// One row of the continuity split (`scripts/eval/memory/questions-continuity.json`,
+/// design 11 §10.1): a corpus conversation fed up to `split` in one session,
+/// closed, and these questions asked as the first turns of the next session
+/// on its lane and project — `doing`, `decided`, `next`, or one question
+/// about work the user dropped (`expect_abstain`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuitySet {
+    pub id: String,
+    /// The corpus session (`cs-NNN`) the set continues.
+    pub session: String,
+    /// The turns `[0, split)` are fed; the gold answers come from them.
+    pub split: usize,
+    pub language: Language,
+    pub questions: Vec<ContinuityQuestion>,
+}
+
+impl ContinuitySet {
+    /// The id of the set's question of `kind`: `<set id>-<kind>`.
+    pub fn question_id(&self, kind: ContinuityKind) -> String {
+        format!("{}-{}", self.id, kind.as_str())
+    }
+
+    /// The set's questions as the harness asks and judges them.
+    pub fn as_questions(&self) -> Vec<Question> {
+        self.questions
+            .iter()
+            .map(|q| Question {
+                id: self.question_id(q.kind),
+                category: Category::Continuity,
+                language: self.language,
+                question: q.question.clone(),
+                gold_answer: q.gold_answer.clone(),
+                relies_on: Vec::new(),
+                expect_abstain: q.expect_abstain,
+            })
+            .collect()
+    }
 }
 
 /// The gold notes some non-abstention question relies on: the notes the
