@@ -1111,8 +1111,9 @@ last closed one with the same project, never an older one — for its first
 `[orchestrator.memory] carry_over_turns` (default 3, `0` = never) user turns,
 until it has a state of its own: its state and its last exchange, under a
 heading naming the episode note that records it (for the model to
-`memory_read`) or, before its close, the date `memory_timeline` will list it
-under. It is read live on each of those turns. A conversation created with
+`memory_read`) or, before its close, the date `memory_timeline` lists its
+summary under if one was written (a conversation of fewer than four of your
+turns gets none). It is read live on each of those turns. A conversation created with
 `POST /v1/sessions {"inherit": false}` — the GUI's **Start fresh** — is never
 given it. The turn's `done` frame names the conversation it was given
 (`continued_from`), and a workflow's lead is given the chat's state after its

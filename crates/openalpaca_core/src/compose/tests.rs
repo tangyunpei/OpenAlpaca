@@ -4067,8 +4067,8 @@ fn the_history_fingerprint_changes_with_the_state_and_not_otherwise() {
 // ── Design 11 §4 (b): the previous conversation in the history layer ───
 
 const PREVIOUS: &str = "The previous conversation on this project ended 2026-09-28 11:00:00; \
-                        its record will be listed by memory_timeline under Conversation on \
-                        2026-09-28.\nTopic: Lisbon trip";
+                        if a summary of it was written, memory_timeline lists it under \
+                        Conversation on 2026-09-28.\nTopic: Lisbon trip";
 
 /// While a new conversation is given the previous one, its block is the
 /// history layer's first message — quoted data under the trust label, of

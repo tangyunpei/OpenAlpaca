@@ -635,8 +635,8 @@ pub(crate) fn stored(text: &str, session_id: &str) -> Option<Arc<WorkingState>> 
 /// The previous conversation on a lane and project (design 11 §4 (b), owner
 /// decision CQ-5), as a new conversation is given it: when it ended, the
 /// memory note that records it (once its close projected one) or the date the
-/// timeline will list it under, its working state, and its last exchange
-/// after what that state covers.
+/// timeline lists its summary under if one was written, its working state,
+/// and its last exchange after what that state covers.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PreviousConversation {
     /// Its session's id — `done.continued_from.session_id` (§5).
@@ -671,7 +671,8 @@ impl PreviousConversation {
     /// The block's text, at most `max_chars` characters when it can be: the
     /// heading — the note that records the conversation, *"memory_read it for
     /// the full record; memory_timeline shows what surrounds it"*, or before
-    /// the close has projected one the timeline hint — then the state's
+    /// the close has projected one the timeline hint, conditional (rev 1.7,
+    /// F6) — then the state's
     /// fields, cut as [`WorkingState::text`] cuts them, then the last
     /// exchange. The history layer wraps it as quoted data.
     pub fn text(&self, max_chars: usize) -> String {
@@ -684,8 +685,11 @@ impl PreviousConversation {
                     crate::memory::learning::episode_title(&self.date, topic)
                 )
             }
+            // Rev 1.7 (F6): conditional — a conversation of fewer than
+            // four user turns is never summarised.
             None => format!(
-                "its record will be listed by memory_timeline under Conversation on {}.",
+                "if a summary of it was written, memory_timeline lists it under \
+                 Conversation on {}.",
                 self.date
             ),
         };
@@ -1102,8 +1106,9 @@ mod tests {
     /// Design 11 §4 (b): the previous conversation's text — the heading
     /// naming the note that records it once its close projected one (by id,
     /// and by the title the projection gives it: the day of the last message
-    /// and the topic), the timeline hint before that; then the state's
-    /// fields; then its last exchange.
+    /// and the topic), the timeline hint before that — conditional (rev 1.7,
+    /// F6), since a conversation of fewer than four user turns never gets a
+    /// summary; then the state's fields; then its last exchange.
     #[test]
     fn the_previous_conversation_names_its_note_after_the_close_and_the_timeline_before() {
         let mut previous = PreviousConversation {
@@ -1135,8 +1140,9 @@ mod tests {
         assert_eq!(
             previous.text(4000),
             format!(
-                "The previous conversation on this project ended 2026-09-28 11:00:00; its record \
-                 will be listed by memory_timeline under Conversation on 2026-09-28.\n{fields}"
+                "The previous conversation on this project ended 2026-09-28 11:00:00; if a \
+                 summary of it was written, memory_timeline lists it under Conversation on \
+                 2026-09-28.\n{fields}"
             )
         );
         previous.episode_note_id = Some("55e811b6-3220-4758-a47b-034bd1023f38".into());

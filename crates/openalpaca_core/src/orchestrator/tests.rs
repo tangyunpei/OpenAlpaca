@@ -9073,8 +9073,9 @@ fn a_turn(
 /// Owner decision CQ-5: a new conversation on the lane and project is given
 /// the previous one — its state, and its last exchange after what the state
 /// covers — for its first three user turns, and not the fourth; the heading
-/// names the timeline's date before the close projected a note, and the
-/// note, by id and title, after.
+/// names the timeline's date before the close projected a note — only as
+/// where a summary would be, since this conversation of two user turns gets
+/// none (rev 1.7, F6) — and the note, by id and title, after.
 #[test]
 fn a_new_conversation_is_given_the_previous_one_for_three_user_turns_and_not_the_fourth() {
     let dir = tempfile::tempdir().unwrap();
@@ -9108,8 +9109,9 @@ fn a_new_conversation_is_given_the_previous_one_for_three_user_turns_and_not_the
     );
     assert!(
         first.previous_text(4000).unwrap().starts_with(&format!(
-            "The previous conversation on this project ended {ended_at}; its record will be \
-             listed by memory_timeline under Conversation on {date}.\nTopic: Lisbon trip"
+            "The previous conversation on this project ended {ended_at}; if a summary of it \
+             was written, memory_timeline lists it under Conversation on {date}.\nTopic: \
+             Lisbon trip"
         )),
         "{:?}",
         first.previous_text(4000)
