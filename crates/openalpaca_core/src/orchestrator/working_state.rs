@@ -771,7 +771,8 @@ impl WorkingState {
     /// `topic` string). An answer the model stopped at its output ceiling is
     /// reported cut and never rescued in part: it is read only in the forms
     /// read before LQ13, or — owner decision LQ20 (f) — when it ends on one
-    /// complete value of a state's shape after its reasoning.
+    /// complete value of a state's shape after its reasoning: the writer
+    /// shares chat learning's cut read (design 11 rev 1.7, ruling F7).
     ///
     /// The value is then validated: `topic` a string that says something;
     /// `goal` and `next` strings; `done`, `asked`, `decisions`, `open` and
