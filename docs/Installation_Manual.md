@@ -159,15 +159,15 @@ refused, and you start again with a factory reset. This was chosen knowingly
 new build on a store an older one created.
 
 The same holds for a store an earlier build of the Markdown memory created.
-On 2026-09-28 the schema was re-baselined: this build creates schema version 1,
-and every database from before that — 42 from before the memory redesign, 43 to
-45 from the Markdown-memory builds before the re-baseline — is at a version it
-does not know. The daemon, and every form of `openalpaca config` that opens the
-database, stops with:
+On 2026-09-28 the schema was re-baselined at version 1 (this build's newest is
+2), and every database from before that — 42 from before the memory redesign,
+43 to 45 from the Markdown-memory builds before the re-baseline — is at a
+version it does not know. The daemon, and every form of `openalpaca config`
+that opens the database, stops with:
 
 ```text
 Database `<path>` is at schema version 42, which this build does not know (it
-creates schema version 1 and knows versions up to 1). Nothing was changed. If a
+creates schema version 1 and knows versions up to 2). Nothing was changed. If a
 newer OpenAlpaca build created this database, use that build. If it was created
 by a build from before the schema was re-baselined at version 1, it cannot be
 read or upgraded: run `openalpaca config reset --factory` to start again (it
@@ -226,13 +226,13 @@ hand.
 **Keep the builds apart.** Once you have switched over, do not start a build
 from before 2026-09-28 against the store. Every build from 2026-09-21 on — the
 pre-redesign builds at schema 42 and the earlier Markdown-memory builds at 43
-to 45 — reads the new store's version 1 as older than its own baseline, refuses
-it as `Unsupported legacy schema version 1`, and tells you to delete the
+to 45 — reads the new store's version 2 as older than its own baseline, refuses
+it as `Unsupported legacy schema version 2`, and tells you to delete the
 database: with `openalpaca config reset --factory` in a build from commit
 `73a0698d` on (the evening of 2026-09-22), by hand in a build before it. Do not
 follow that advice — it deletes the new store. A build from before 2026-09-21
-has no such check: it would take the store for its own version 1 and run its
-migrations 2 to 42 on it, so never run one against a store this build created.
+has no such check: it would take the store for its own version 2 and run its
+migrations 3 to 42 on it, so never run one against a store this build created.
 To go back, stop this build and run the older one against the copy you kept in
 step 1.
 

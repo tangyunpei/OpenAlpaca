@@ -209,7 +209,7 @@ bun run check && bun run test && bun run format:check && bun run build
 
 ## Status and limitations
 
-- **Moving target.** Config keys, API routes and the database schema change between commits. `001_baseline.sql` initializes schema version 1, and the next migration will be `002`. A database from before that re-baseline (2026-09-28) — 42, the last schema with memory inside the database, or 43 to 45 — is refused rather than upgraded; see [Switching to the Markdown Memory Build](docs/Installation_Manual.md#switching-to-the-markdown-memory-build).
+- **Moving target.** Config keys, API routes and the database schema change between commits. `001_baseline.sql` initializes schema version 1 and `002_working_state.sql` upgrades it to 2, so a fresh database opens at 2, and the next migration will be `003`. A database from before that re-baseline (2026-09-28) — 42, the last schema with memory inside the database, or 43 to 45 — is refused rather than upgraded; see [Switching to the Markdown Memory Build](docs/Installation_Manual.md#switching-to-the-markdown-memory-build).
 - **Platforms.** Developed on macOS. CI builds and tests on Linux. Windows has packaging scripts, but CI does not build the Rust workspace there.
 - **Plugins** can add tools, skills and agent templates. Plugin connectors and plugin LLM providers are declared in the manifest format but not wired. They do not work.
 - **MCP** is client-side and tools only. MCP resources and prompts are not implemented: the client has no resource or prompt methods. Serving MCP is not a goal.
