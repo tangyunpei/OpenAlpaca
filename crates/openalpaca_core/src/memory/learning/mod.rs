@@ -125,8 +125,10 @@ pub const EPISODE_QUIET: std::time::Duration = std::time::Duration::from_secs(30
 /// A summary is written only once at least this many of the user's turns
 /// have accumulated since the session's last one.
 pub const EPISODE_MIN_USER_TURNS: u32 = 4;
-/// The most prose a summary's `## Knowledge` holds.
-pub const EPISODE_MAX_KNOWLEDGE_BYTES: usize = 1024;
+/// The most prose a summary's `## Knowledge` holds: 2 KiB, so a projection
+/// whose *Discussed* carries `asked` keeps its *Decided* and *Left open*
+/// lines (design 11 rev 1.8, C2; 12 rev 2 §6.5).
+pub const EPISODE_MAX_KNOWLEDGE_BYTES: usize = 2048;
 
 /// What one extraction call may spend (design §1.6), from the extraction
 /// model's context window:

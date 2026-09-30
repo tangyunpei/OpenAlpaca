@@ -17,7 +17,7 @@
 //! - `## Knowledge`: what was discussed (the state's goal, what is done and
 //!   what the user asked and had answered),
 //!   decided (its decisions) and left open (what is open, and its next
-//!   step), at most 1 KiB of prose;
+//!   step), at most 2 KiB of prose;
 //! - `observed_at` the last turn's time; `sources` the window's message rows
 //!   (at most eight, spread from its first to its last — design 03 §7a's
 //!   cap on `sources`); no `fact_key`, no aliases, no `supersedes`;
@@ -389,7 +389,8 @@ mod tests {
     }
 
     #[test]
-    fn the_knowledge_is_at_most_1_kib_and_never_splits_a_character() {
+    fn the_knowledge_is_at_most_2_kib_and_never_splits_a_character() {
+        assert_eq!(EPISODE_MAX_KNOWLEDGE_BYTES, 2048);
         let s = Summary {
             topic: "t".into(),
             discussed: "讨论".repeat(400),
@@ -406,6 +407,28 @@ mod tests {
             open: "c".into(),
         };
         assert_eq!(knowledge(&short), "Discussed: a\nDecided: b\nLeft open: c");
+    }
+
+    /// Design 11 rev 1.8 (C2; 12 rev 2 §6.5): a *Discussed* line past the
+    /// old 1 KiB cut — goal, done and `asked` — keeps the *Decided* and
+    /// *Left open* lines after it whole.
+    #[test]
+    fn a_long_discussed_line_keeps_the_decided_and_left_open_lines() {
+        let s = Summary {
+            topic: "t".into(),
+            discussed: "The user asked about Lisbon hotels. ".repeat(30),
+            decided: "Fly out on Friday 2 October.".into(),
+            open: "Which museum to visit.; Next: Book the hotel".into(),
+        };
+        let k = knowledge(&s);
+        assert!(k.len() > 1024, "{}", k.len());
+        assert_eq!(
+            k,
+            format!(
+                "Discussed: {}\nDecided: {}\nLeft open: {}",
+                s.discussed, s.decided, s.open
+            )
+        );
     }
 
     #[test]

@@ -275,7 +275,7 @@ async fn no_episode_before_four_user_turns() {
 
 /// §13.3's note, MD-16's frontmatter unchanged: `kind: episode`, the title
 /// `Conversation on <YYYY-MM-DD>: <topic>`, what was discussed, decided and
-/// left open in at most 1 KiB of prose — projected from the working state
+/// left open in at most 2 KiB of prose — projected from the working state
 /// (design 11 §3.4) — `observed_at` the last turn's time, the window's rows
 /// as sources, no `fact_key`, no aliases, no `supersedes`; origin
 /// `extracted_other`, status `active`; its id on the session row. The one
