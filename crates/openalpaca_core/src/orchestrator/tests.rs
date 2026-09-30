@@ -8657,12 +8657,13 @@ async fn a_compacting_turn_writes_its_state_and_the_next_request_carries_it() {
     assert!(blocks[0] < first_row, "the state comes before the rows");
 }
 
-/// Design 11 rev 1.7 (F2): a turn given the previous conversation's block
-/// that compacts hands the writer that conversation's state under the
-/// carried heading, ahead of its own lines — the block itself stands at
-/// `messages[1]`, which a compaction keeps and does not read.
+/// Design 11 rev 1.8 (C1; 12 rev 2 §6.1): a turn given the previous
+/// conversation's block that compacts hands the writer only its own lines —
+/// nothing of the previous conversation, neither its block (which stands at
+/// `messages[1]`, kept and not read) nor its state — while the answer's
+/// request still carries the block.
 #[tokio::test]
-async fn a_compaction_given_the_previous_conversation_reads_it_as_carried() {
+async fn a_compaction_given_the_previous_conversation_never_reads_it() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let written = lisbon_state("Book the hotel");
@@ -8701,14 +8702,16 @@ async fn a_compaction_given_the_previous_conversation_reads_it_as_carried() {
         .find(|r| is_writer_call(r))
         .expect("the turn compacts");
     let user = &writer.messages[1].content;
-    let section = working_state::carried_text(&previous, 4000);
+    assert!(user.contains("<new_lines>\n[user]: r"), "{user}");
+    for carried in [working_state::PREVIOUS_BLOCK_PREFIX, "Tomas", "carried"] {
+        assert!(!user.contains(carried), "{carried:?} in {user}");
+    }
     assert!(
-        user.contains(&format!("<new_lines>\n{section}\n[user]: r")),
-        "{user}"
-    );
-    assert!(
-        !user.contains(working_state::PREVIOUS_BLOCK_PREFIX),
-        "the block is not read a second time: {user}"
+        turn.iter().any(|r| !is_writer_call(r)
+            && r.messages
+                .iter()
+                .any(|m| m.content.starts_with(working_state::PREVIOUS_BLOCK_PREFIX))),
+        "the answer's request carries the previous conversation's block"
     );
 }
 

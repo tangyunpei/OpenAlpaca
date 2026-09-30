@@ -1,4 +1,4 @@
-use crate::orchestrator::working_state::{BLOCK_PREFIX, WorkingState};
+use crate::orchestrator::working_state::{BLOCK_PREFIX, PREVIOUS_BLOCK_PREFIX, WorkingState};
 use crate::utils::social::is_social_phrase;
 use async_trait::async_trait;
 use openalpaca_llm::{ChatMessage, Role};
@@ -169,8 +169,12 @@ impl CompactionPipeline {
     /// returns takes their place, rendered within `max_chars`. A message that
     /// is the previous state's block is not read — `previous` is the state —
     /// and is taken out of the list wherever it stands, so the list holds one
-    /// block after (design 11 §3.3). `Ok(None)` when the list has nothing to
-    /// summarise, whatever lies behind it.
+    /// block after (design 11 §3.3). Nor is the previous conversation's block
+    /// read (design 11 rev 1.8, C1): it is not this conversation's work; the
+    /// list keeps it where it keeps any message — at `messages[..2]` or among
+    /// the recent ones — and in the older slice it goes with the rest.
+    /// `Ok(None)` when the list has nothing to summarise, whatever lies
+    /// behind it.
     pub async fn summarize_older(
         messages: Vec<ChatMessage>,
         min_recent: usize,
@@ -189,9 +193,10 @@ impl CompactionPipeline {
         }
 
         let is_block = |m: &&ChatMessage| m.content.starts_with(BLOCK_PREFIX);
+        let is_previous = |m: &&ChatMessage| m.content.starts_with(PREVIOUS_BLOCK_PREFIX);
         let older: Vec<ChatMessage> = messages[2..boundary]
             .iter()
-            .filter(|m| !is_block(m))
+            .filter(|m| !is_block(m) && !is_previous(m))
             .cloned()
             .collect();
         if older.is_empty() {

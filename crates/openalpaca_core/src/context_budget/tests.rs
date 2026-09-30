@@ -156,7 +156,9 @@ fn test_compaction_tier_thresholds() {
 
 // ── Compaction tests ──────────────────────────────────────────────
 use super::compaction::{CompactionPipeline, Summarizer};
-use crate::orchestrator::working_state::{BLOCK_PREFIX, VERSION, WorkingState};
+use crate::orchestrator::working_state::{
+    BLOCK_PREFIX, PREVIOUS_BLOCK_PREFIX, VERSION, WorkingState,
+};
 use async_trait::async_trait;
 use openalpaca_llm::ChatMessage;
 
@@ -351,6 +353,66 @@ async fn one_state_block_is_left_after_compaction_wherever_the_previous_stood() 
             boundary,
             result.messages_before - 4,
             "{shape}: the boundary in the list as handed"
+        );
+    }
+}
+
+/// Design 11 rev 1.8 (C1; 12 rev 2 §6.1): the previous conversation's block
+/// is never read by the writer, wherever it stands — at `messages[1]` (the
+/// main loop's shape), which the list keeps, or inside the older slice (a
+/// message ahead of it), which goes with the rest of that slice.
+#[tokio::test]
+async fn the_writer_never_reads_the_previous_conversations_block() {
+    let block = format!(
+        "{PREVIOUS_BLOCK_PREFIX} trust=\"user_derived\">\nThe previous conversation on this \
+         project ended…\nTopic: Tomas birthday plan\n</context_data>"
+    );
+    let rows = |n: usize| -> Vec<ChatMessage> {
+        (1..=n)
+            .map(|i| {
+                if i % 2 == 1 {
+                    ChatMessage::user(&format!("u{i}"))
+                } else {
+                    ChatMessage::assistant(&format!("a{i}"))
+                }
+            })
+            .collect()
+    };
+    let main_loop: Vec<ChatMessage> = [ChatMessage::system("sys"), ChatMessage::user(&block)]
+        .into_iter()
+        .chain(rows(8))
+        .collect();
+    let in_older: Vec<ChatMessage> = [
+        ChatMessage::system("sys"),
+        ChatMessage::user("dynamic context"),
+        ChatMessage::user(&block),
+    ]
+    .into_iter()
+    .chain(rows(8))
+    .collect();
+
+    for (shape, messages, kept) in [("main loop", main_loop, true), ("older", in_older, false)] {
+        let summarizer = MockSummarizer::new("This conversation");
+        let (result, _) =
+            CompactionPipeline::summarize_older(messages, 4, None, &[], &summarizer, 4000)
+                .await
+                .unwrap()
+                .expect("the older messages are summarised");
+        let seen = summarizer.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "{shape}: one call");
+        assert!(
+            !seen[0]
+                .1
+                .iter()
+                .any(|m| m.starts_with(PREVIOUS_BLOCK_PREFIX) || m.contains("Tomas")),
+            "{shape}: the writer read the previous conversation: {:?}",
+            seen[0].1
+        );
+        assert_eq!(seen[0].1.first().map(String::as_str), Some("u1"), "{shape}");
+        assert_eq!(
+            result.iter().any(|m| m.content == block),
+            kept,
+            "{shape}: the list keeps the block only where it keeps any message"
         );
     }
 }
