@@ -26,7 +26,7 @@ import type {
   NoteStatus,
 } from "@/lib/api/memories";
 
-import { MEMORY_EMPTY_COPY, scopeLabel } from "./copy";
+import { MEMORY_EMPTY_COPY, noteCount, scopeLabel } from "./copy";
 import { MemoryRow, listRow, searchRow } from "./MemoryRow";
 import { RecentlyLearned } from "./RecentlyLearned";
 import { Suggestions } from "./Suggestions";
@@ -114,7 +114,7 @@ export function MemoryList({
         : `${search.data.count} found`
       : feed.loading
         ? undefined
-        : `${feed.items.length}${feed.hasMore ? "+" : ""} notes`;
+        : noteCount(feed.items.length, feed.hasMore);
 
   return (
     <div

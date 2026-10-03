@@ -24,6 +24,7 @@ import {
   MEMORY_ACTION_CONFLICT,
   MEMORY_CONFLICT_COPY,
   MEMORY_EMPTY_COPY,
+  noteCount,
 } from "./copy";
 import MemoryView from "./MemoryView";
 
@@ -559,6 +560,25 @@ describe("the Memory view", () => {
     expect(MEMORY_EMPTY_COPY).toBe(
       "Nothing remembered yet. Ask Alpaca to remember something, or add a note.",
     );
+  });
+
+  /** Track D, D3 defect 1: the header read "1 notes". */
+  it("counts its notes beside the title: 1 note, 2 notes", async () => {
+    note({ id: "n-1", title: "Prefers tabs" });
+    renderView();
+    expect(await screen.findByText("1 note")).toBeInTheDocument();
+
+    note({ id: "n-2", title: "Build with bun" });
+    await memoryChanged();
+    expect(await screen.findByText("2 notes")).toBeInTheDocument();
+    expect(screen.queryByText("1 note")).toBeNull();
+  });
+
+  it("keeps the plural for none and for a list with more to load", () => {
+    expect(noteCount(0, false)).toBe("0 notes");
+    expect(noteCount(1, false)).toBe("1 note");
+    expect(noteCount(1, true)).toBe("1+ notes");
+    expect(noteCount(50, true)).toBe("50+ notes");
   });
 
   it("lists the global partition, and sends no project for a window with none", async () => {

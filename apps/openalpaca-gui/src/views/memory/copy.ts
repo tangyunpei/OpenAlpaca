@@ -24,6 +24,15 @@ import type {
 export const MEMORY_EMPTY_COPY =
   "Nothing remembered yet. Ask Alpaca to remember something, or add a note.";
 
+/**
+ * The list's count beside its title: `1 note`, `2 notes`, `50+ notes` when
+ * more pages wait. One is singular only when it is all there is.
+ */
+export function noteCount(count: number, more: boolean): string {
+  const noun = count === 1 && !more ? "note" : "notes";
+  return `${count}${more ? "+" : ""} ${noun}`;
+}
+
 /** Design §7, verbatim — shown over a draft that is kept. */
 export const MEMORY_CONFLICT_COPY =
   "This note changed since you opened it. Reload to see the current version — your text is kept.";
