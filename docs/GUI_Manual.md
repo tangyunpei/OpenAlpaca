@@ -321,7 +321,9 @@ is pending the textarea is **not rendered at all** — `Approve`, `Deny` and
 stops asking about that tool for the rest of the current turn or run — the
 chat turn, the workflow's lead, or the one subagent that raised the prompt.
 It is not remembered beyond that, and one agent's approval does not cover
-another's.
+another's; its "added to the allowlist" note appears only once the daemon has
+taken the answer. An answer is sent once: while it is on its way the buttons
+are disabled and a second ↵ or Esc does nothing.
 
 **More than one prompt pending.** A lead running subagents in parallel can
 raise several prompts at once. `Approve`, `Deny`, `Always allow`, ↵ and the
@@ -545,8 +547,9 @@ on how it ended:
 | You denied it here | `Denied · <tool> denied · the agent was told to skip it.` |
 | Nobody answered in time | `Timed out · <tool> timed out — not run. Nobody answered in time, so the agent continued without it.` |
 | It was answered somewhere else (another window, `openalpaca tasks confirmations approve`), or the run went away | the card clears, with no row — the window does not claim an answer you did not give |
+| You answered a card the daemon was no longer waiting on — it was answered somewhere else, timed out or withdrawn, or the daemon restarted, and this window had not heard yet | `Not waiting · <tool> was answered already or is no longer waiting, so nothing was changed.` The daemon refuses the answer (`404`); the card clears at once, the window re-reads what is still waiting, and the next card, if any, takes the composer. No `Approved` or `Denied` row is written, and `Always allow` adds nothing to any allowlist |
 
-`Approved`, `Denied` and `Timed out` rows stay in the transcript for as long
+`Approved`, `Denied`, `Timed out` and `Not waiting` rows stay in the transcript for as long
 as the window is open, in the order they happened — switching to Work, the
 Library or Settings and coming back leaves them where they were. They belong
 to the conversation they happened in, so switching conversations drops them,
@@ -560,9 +563,16 @@ of which come from stored history.
 live-only with no replay, so a reloaded window, a second window, or an app
 restarted while a background run is blocked would otherwise never see the
 prompt. The window reads `GET /v1/chat/confirmations`, the daemon's list of
-what is *still waiting*, on load and again whenever the socket reconnects, and
-draws a card for each prompt that belongs to this lane. A card this window has
-already retired is not brought back by it. When that read *fails*, the
+what is *still waiting*, on load, every time the chat view is opened and again
+whenever the socket reconnects, and draws a card for each prompt that belongs
+to this lane. Only a read made since the chat view was opened draws anything:
+a list read before you went to Work, the Library or Settings is never used to
+bring back a card you answered before you left, and a prompt raised while you
+were in another view appears as soon as you come back. A card this window has
+already retired is not brought back by it, and neither is a prompt the daemon
+has said is over — by taking or refusing an answer, or by announcing its
+resolution — even when a read that left before that lands after it. When that
+read *fails*, the
 transcript says so — "Could not check for pending approvals: …" — rather than
 looking like a daemon with nothing waiting; live prompts keep arriving
 regardless.

@@ -54,6 +54,7 @@ import {
   escapeConfirmation,
   executedResolutionNote,
   formatDurationMs,
+  notWaitingResolutionNote,
   resolutionNote,
   settlingRun,
   shortTitle,
@@ -66,6 +67,7 @@ import {
 import { toUiStatus, type UiStatus } from "@/components/ui";
 import { useAgentTemplates } from "@/hooks/useAgents";
 import {
+  isNoLongerPending,
   useChatHistory,
   useChatStream,
   usePendingConfirmations,
@@ -83,6 +85,7 @@ import { sessionErrorMessage } from "@/lib/api/sessions";
 import { steerErrorMessage, steerTask } from "@/lib/api/tasks";
 import type { ApprovalScope } from "@/lib/api/types";
 import type { ContinuedFrom } from "@/lib/chat-stream";
+import { isConfirmationOver } from "@/lib/confirmations-over";
 import { ApiError } from "@/lib/http";
 import { isTerminalRunStatus } from "@/lib/query-client";
 import { useProjectStore, workspaceOption } from "@/stores/project";
@@ -674,7 +677,17 @@ export function useChatSession(): ChatSession {
    *
    * A prompt this window has already seen is skipped — `confirmationMeta` is
    * the record of that, and it survives a card being retired (G1), so a
-   * dismissed card is not resurrected by the next poll.
+   * dismissed card is not resurrected by the next poll. So is one the daemon
+   * has said is over (`lib/confirmations-over`), which outlives this view and
+   * the conversation: a read that left before the answer may land after it.
+   *
+   * Only a read made during **this** mount seeds anything (G1, Round G). The
+   * views are swapped, not stacked, so this hook — and `confirmationMeta`
+   * with it — is new every time chat is opened, while the query's cache is
+   * the app's: a list read before the trip, when a prompt was still pending,
+   * used to draw its card again over its own `Approved` row, and the click
+   * then went to a prompt the daemon no longer held. The query reads on every
+   * mount, and until that read lands there is no snapshot here at all.
    *
    * A read that **failed** is carried out as `confirmationsError` rather than
    * swallowed (V9): the view says so where it says a failed history, because
@@ -682,8 +695,13 @@ export function useChatSession(): ChatSession {
    * nothing in it. The live frames are untouched by it.
    */
   const pendingConfirmations = usePendingConfirmations(stream.blocked);
-  const pendingRows = pendingConfirmations.data;
+  const [mountedAtMs] = useState(() => Date.now());
   const snapshotAtMs = pendingConfirmations.dataUpdatedAt;
+  // `>=`: a localhost read can land within the millisecond of the mount. Not
+  // `isFetchedAfterMount`, which is true after a *failed* read too — and then
+  // the data is still the pre-mount list.
+  const pendingRows =
+    snapshotAtMs >= mountedAtMs ? pendingConfirmations.data : undefined;
   const confirmationMetaRef = useRef(confirmationMeta);
   confirmationMetaRef.current = confirmationMeta;
   const adoptConfirmation = stream.adoptConfirmation;
@@ -723,6 +741,7 @@ export function useChatSession(): ChatSession {
     const fresh = pendingRows.filter(
       (row) =>
         confirmationMetaRef.current[row.request_id] === undefined &&
+        !isConfirmationOver(row.request_id) &&
         confirmationBelongsHere(row, {
           streamId: null,
           laneKey: laneKeyRef.current,
@@ -1297,11 +1316,25 @@ export function useChatSession(): ChatSession {
   // keeps `approve`/`deny` stable, which is what the window key binding wants.
   const respondRef = useRef(stream.respond);
   respondRef.current = stream.respond;
+  /**
+   * An answer is in flight (G1, Round G). The buttons are disabled on
+   * `answering`, but Enter and Escape reach `approve`/`deny` from the window's
+   * key ladder, and a second keypress can land before the re-render that
+   * would carry `answering` there — so the gate is here, set synchronously,
+   * on the one path every surface goes through. Two Enters used to post the
+   * same answer twice and draw the daemon's 404 for the second.
+   */
+  const answeringRef = useRef(false);
 
   const answer = useCallback(
-    (resolution: Resolution, scope?: ApprovalScope) => {
+    (
+      resolution: Exclude<Resolution, "timed_out" | "not_waiting">,
+      scope?: ApprovalScope,
+      onAccepted?: () => void,
+    ) => {
       const target = firstConfirmation;
-      if (target === null) return;
+      if (target === null || answeringRef.current) return;
+      answeringRef.current = true;
       // When the answer went out — the earliest a `tool_executed` for it can
       // be this one's (G6).
       const answeredAtMs = Date.now();
@@ -1322,6 +1355,7 @@ export function useChatSession(): ChatSession {
         },
         {
           onSuccess: () => {
+            onAccepted?.();
             addResolution({
               requestId: target.requestId,
               resolution,
@@ -1343,7 +1377,25 @@ export function useChatSession(): ChatSession {
             });
           },
           onError: (error: Error) => {
-            showToast(error.message);
+            if (!isNoLongerPending(error)) {
+              showToast(error.message);
+              return;
+            }
+            // The daemon held no such prompt (G1, Round G): the card is gone
+            // (`useChatStream` retired it and re-reads the list) and this row
+            // says why in the person's terms — never `Approved`/`Denied`,
+            // because nothing was answered. A prompt that already has a row
+            // keeps it: the store records one resolution per request.
+            addResolution({
+              requestId: target.requestId,
+              resolution: "not_waiting",
+              note: notWaitingResolutionNote(target.toolName),
+              at: new Date().toISOString(),
+              ...owner,
+            });
+          },
+          onSettled: () => {
+            answeringRef.current = false;
           },
         },
       );
@@ -1358,16 +1410,18 @@ export function useChatSession(): ChatSession {
     // would ignore the scope, and a toast saying otherwise would be a lie.
     if (firstConfirmation?.perCall === true) return;
     const toolName = firstConfirmation?.toolName ?? null;
-    answer("approved", "entire_tool");
     // §4.4's own copy — the daemon now caches `EntireTool` for the rest of
-    // the session, so this is no longer a polite lie.
+    // the session, so this is no longer a polite lie. Said only once the
+    // daemon took the answer: a prompt it no longer held added nothing to
+    // any allowlist (G1, Round G).
     // The name as the card showed it; a toast is a string, so the escapes
     // are the plain-text `<U+XXXX>` form.
-    if (toolName !== null) {
+    answer("approved", "entire_tool", () => {
+      if (toolName === null) return;
       showToast(
         `${escapeHiddenLine(toolName).text} added to the allowlist — it won't ask again`,
       );
-    }
+    });
   }, [answer, firstConfirmation, showToast]);
 
   return {

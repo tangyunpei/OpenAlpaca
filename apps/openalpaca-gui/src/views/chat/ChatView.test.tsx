@@ -20,6 +20,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useGlobalKeys } from "@/components/shell";
+import { clearConfirmationsOver } from "@/lib/confirmations-over";
 import { resetConnection } from "@/lib/connection";
 import { daemonEvents, type ServerEvent } from "@/lib/events";
 import { qk } from "@/lib/query-keys";
@@ -524,6 +525,9 @@ beforeEach(() => {
   // P2's rows outlive the component on purpose, so they have to be cleared
   // between tests the way the other window-lifetime stores are.
   useResolutions.getState().clear();
+  // So does the record of prompts the daemon said are over (G1, Round G),
+  // and these tests reuse request ids.
+  clearConfirmationsOver();
   useProjectStore.setState({ path: null });
   useSessionSelection.setState({ selectedId: null });
   vi.stubGlobal("EventSource", FakeEventSource);

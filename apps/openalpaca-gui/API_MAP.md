@@ -1710,6 +1710,28 @@ lane_key, preview, per_call, raised_at }] }`, oldest first (a restored card show
    subscription** — an entry can be answered a microsecond after it is read — and the
    read is unscoped (R40), so filter it to your own lane exactly as you filter the WS
    frames. Answering stays owner-scoped on the unchanged `POST` sibling.
+   **Seed only from a read made while the view is mounted** (G1, Round G): this
+   window swaps its views rather than stacking them, while the query's cache is the
+   app's, so a list read before a trip to another view — when a prompt was still
+   pending — drew the answered card again on the way back, and the click then went to
+   an id the daemon no longer held. `usePendingConfirmations` reads on every mount
+   (`refetchOnMount: "always"`) and `useChatSession` ignores rows whose
+   `dataUpdatedAt` is older than its own mount. Beside that, the ids the **daemon**
+   has said are over — the answer's `200` or `404`, an SSE `confirmation_resolved`,
+   a WS `tool_confirmation_resolved` — are kept for the life of the window
+   (`lib/confirmations-over.ts`) and never adopted again, so a read that left before
+   an answer and lands after it draws nothing. A card retired by inference (its turn
+   ended, its run finished, the snapshot stopped listing it) is never put there: the
+   `{owner}:gui` lane is shared (T18), and a later read that lists it may be right.
+   **The answer's `404` is a resolution, not an error** —
+   `{ "error": { "code": "NOT_FOUND", "message": "No pending confirmation: <id>" } }`
+   (no such id: answered already, timed out, withdrawn, or the daemon restarted), or
+   `"receiver dropped"` (the id was still listed but nothing was waiting on it; the
+   entry goes with that answer). Retire the card, re-read the list, and say what
+   happened in the user's terms, as the CLI's `tasks confirmations` refusal does for
+   an id. This window writes a `Not waiting` row:
+   `<tool> was answered already or is no longer waiting, so nothing was changed.`
+   Retrying the same id repeats the `404`.
 6. **Terminal:** exactly one of
    - `done` — `{ content, model, tokens_in, tokens_out, duration_ms, attachments_used?, attachments_skipped?, memory_used?, delegation?, working_state_updated, continued_from }`.
      `content` is the **full** text (not the tail) — prefer it over the accumulated
