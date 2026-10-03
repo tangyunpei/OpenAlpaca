@@ -422,9 +422,9 @@ impl FileWriteTool {
         };
         Ok(format!(
             "Saved: {path} is the artifact \"{}\", version {}, at {}. {kept} It is listed in the \
-             Library. This file is the deliverable: give the user this path, and do not write \
-             another copy with the shell or any other tool. {read_back} To change it, call \
-             file_write with \"{path}\" again; that saves its next version.",
+             Library. This file is the deliverable: tell the user it is saved at that absolute \
+             path, and do not write another copy with the shell or any other tool. {read_back} \
+             To change it, call file_write with \"{path}\" again; that saves its next version.",
             record.name, record.version, record.storage_path
         ))
     }
@@ -1600,10 +1600,10 @@ mod tests {
                         "Saved: {PASTA} is the artifact \"{}\", version 1, at {}. This \
                          conversation has no project folder, so its files are kept in \
                          OpenAlpaca's artifact store. It is listed in the Library. This file \
-                         is the deliverable: give the user this path, and do not write \
-                         another copy with the shell or any other tool. To read it back, \
-                         call file_read with \"{rel}\". To change it, call file_write with \
-                         \"{PASTA}\" again; that saves its next version.",
+                         is the deliverable: tell the user it is saved at that absolute \
+                         path, and do not write another copy with the shell or any other \
+                         tool. To read it back, call file_read with \"{rel}\". To change it, \
+                         call file_write with \"{PASTA}\" again; that saves its next version.",
                         row.name, row.storage_path
                     )
                 );
