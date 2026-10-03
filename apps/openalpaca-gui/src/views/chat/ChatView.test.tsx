@@ -4436,6 +4436,43 @@ describe("ChatView — a user turn's own files (T5)", () => {
     // …and the daemon's copy of the bytes is not on screen at all.
     expect(screen.queryByText(/HERON-6042/)).toBeNull();
   });
+
+  /**
+   * G3a, review round: the bubble a send draws holds the files until history
+   * has the stored row — the whole turn, on a local model. Each card reads
+   * the badge the Library gives that upload, from the type the upload's own
+   * answer named, not `OUT` for want of one.
+   */
+  it("draws a just-sent file with the Library's badge before history has its row", async () => {
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await pick(
+      new File(["# Findings"], "findings.md", { type: "text/markdown" }),
+      textFile("notes.txt"),
+      new File(["png"], "photo.png", { type: "image/png" }),
+    );
+    await waitFor(() =>
+      expect(screen.getAllByLabelText("ready")).toHaveLength(3),
+    );
+
+    await sendMessage("what is in these?");
+    // Accepted: the chips have moved into the sent bubble. No `done` has
+    // arrived, and history still answers no rows.
+    await waitFor(() =>
+      expect(screen.queryByRole("list", { name: "Attachments" })).toBeNull(),
+    );
+
+    /** The badge on the card that names `filename`. */
+    const badgeOf = (filename: string) =>
+      screen
+        .getByText(filename)
+        .closest("section")
+        ?.querySelector("span[aria-hidden]")?.textContent ?? null;
+    expect(badgeOf("findings.md")).toBe("MD");
+    expect(badgeOf("notes.txt")).toBe("TXT");
+    expect(badgeOf("photo.png")).toBe("IMG");
+  });
 });
 
 /**

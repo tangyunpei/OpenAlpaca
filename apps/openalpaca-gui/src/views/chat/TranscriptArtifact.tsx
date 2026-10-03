@@ -43,9 +43,9 @@ export function TranscriptArtifact({ attachment }: TranscriptArtifactProps) {
     attachment.filename ?? metadata.data?.filename ?? attachment.fileId;
   const mime = attachment.mimeType ?? metadata.data?.mime_type ?? null;
   const preview = textPreview(metadata.data?.extracted_text);
-  // An artifact link names its kind (GAP-23); a file part does not, and its
-  // type then gives the kind the daemon stored for it — the Library's badge
-  // (G3a).
+  // An artifact link names its kind (GAP-23); a file part and a just-sent
+  // file do not, and their type then gives the kind the daemon stored for it
+  // — the Library's badge (G3a).
   const kind = fileKind(attachment.kind, mime);
 
   const note = knownFromServer

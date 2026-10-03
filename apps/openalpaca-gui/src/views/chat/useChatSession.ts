@@ -1228,12 +1228,13 @@ export function useChatSession(): ChatSession {
       steer: null,
       // T5: the same files, drawn as files, from the moment the turn is sent
       // — the stored row's own links replace them when history catches up.
-      // The name is this client's, which is why the card issues no metadata
-      // request for it.
+      // The name and the type are the upload's answer, which is why the card
+      // issues no metadata request for it; the type gives it the Library's
+      // badge meanwhile (G3a).
       attachments: refs.map((ref) => ({
         fileId: ref.file_id,
         filename: attachments.names[ref.file_id] ?? null,
-        mimeType: null,
+        mimeType: attachments.mimeTypes[ref.file_id] ?? null,
         kind: null,
       })),
     });

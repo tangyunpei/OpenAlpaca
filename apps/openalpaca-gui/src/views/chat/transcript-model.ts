@@ -159,11 +159,13 @@ export interface AttachmentInfo {
   fileId: string;
   /** `null` when only the id is known (`done.attachments_used`). */
   filename: string | null;
+  /** The stored type — a file part's, or the upload's answer for a just-sent file. */
   mimeType: string | null;
   /**
    * The daemon's snake_case `ArtifactKind`, when the server named it (an
-   * artifact link does; a file id does not). `null` falls back to the badge
-   * the filename and mime type imply.
+   * artifact link does; a file id does not). `null` falls back to the kind
+   * the daemon stores for `mimeType` (`artifactKindForMime`, G3a), which is
+   * the Library's badge; the filename decides only a code file's language.
    */
   kind: string | null;
 }

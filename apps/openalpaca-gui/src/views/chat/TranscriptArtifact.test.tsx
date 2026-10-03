@@ -2,8 +2,10 @@
  * A file a turn carried reads the same badge in the transcript as in the
  * Library (G3a, Round G). The Library badges the kind the daemon stored —
  * for an upload, `ArtifactKind::for_mime` of its type — and a transcript chip
- * read from `content_json` carries the type but not the kind, so the card
- * derives the kind by that same projection instead of guessing its own.
+ * carries the type but not the kind, so the card derives the kind by that same
+ * projection instead of guessing its own. Two chips have that shape: a history
+ * row's `content_json` file part, and the just-sent bubble's file, whose type
+ * is the upload's answer (`ChatView.test.tsx`, T5, drives that one end to end).
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -22,7 +24,7 @@ function badge(container: HTMLElement): string | null {
   return container.querySelector("span[aria-hidden]")?.textContent ?? null;
 }
 
-/** The card a history row's file part draws: name and type, no kind. */
+/** The card a file part, or a just-sent file, draws: name and type, no kind. */
 function cardBadge(filename: string, mimeType: string): string | null {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -87,6 +89,11 @@ describe("a transcript file's badge is the Library's (G3a)", () => {
     ["notes.txt", "text/plain", "code", "TXT"],
     ["findings.md", "text/markdown", "markdown", "MD"],
     ["build.weird", "text/x-weird", "code", "WEI"],
+    ["main.rs", "text/x-rust", "code", "RS"],
+    ["photo.png", "image/png", "image", "IMG"],
+    ["data.csv", "text/csv", "table", "CSV"],
+    ["page.html", "text/html", "html", "WEB"],
+    ["report.pdf", "application/pdf", "binary", "OUT"],
   ] as const)(
     "%s (%s, stored as %s) reads %s in both places",
     (name, mimeType, kind, expected) => {
