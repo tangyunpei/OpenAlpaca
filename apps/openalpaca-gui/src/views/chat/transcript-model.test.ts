@@ -11,6 +11,7 @@ import type { ChatMessage } from "@/lib/api/types";
 import {
   buildTranscript,
   parseUserContent,
+  persistedLiveTurn,
   showsLiveTurn,
   showsPendingTurn,
   streamPhaseLabel,
@@ -184,7 +185,8 @@ describe("the live turn's reasoning (S2)", () => {
 /**
  * Memory redesign 3.3/3.9: `done.memory_used` names the notes a turn
  * delivered. Live only, like `attachments_skipped` — nothing persists it — so
- * the live row carries it and a stored row never can.
+ * the live row carries it, and a stored row only when this view watched its
+ * turn finish (Track D, D4 defect 1).
  */
 describe("the notes a turn used (memory_used)", () => {
   const used = [
@@ -227,6 +229,85 @@ describe("the notes a turn used (memory_used)", () => {
       kind: "assistant",
       memoryUsed: [],
     });
+  });
+
+  /**
+   * D4 defect 1: `done` invalidates the history, the stored copy arrives, the
+   * live row gives way to it — and the note went with the live row, one
+   * round trip after it was drawn. The stored row that replaced it keeps it.
+   */
+  it("stays on the stored row that replaced the live one when history catches up", () => {
+    const stream = drive(OPEN, {
+      type: "done",
+      data: {
+        content: "Tabs, width 4.",
+        model: "m",
+        tokens_in: 1,
+        tokens_out: 1,
+        duration_ms: 1,
+        memory_used: used,
+        attachments_skipped: [{ id: "file-1", reason: "no vision" }],
+      },
+    });
+    const history = [
+      // An older answer with the same words is not this turn's.
+      message({ id: 1, role: "assistant", content: "Tabs, width 4." }),
+      message({ id: 2, role: "user", content: "tabs or spaces?" }),
+      message({ id: 3, role: "assistant", content: "Tabs, width 4." }),
+    ];
+
+    expect(persistedLiveTurn(stream, history)?.id).toBe(3);
+    const rows = buildTranscript(
+      input({ history, stream, attachmentNames: { "file-1": "photo.png" } }),
+    ).filter((item) => item.kind === "assistant");
+
+    expect(rows.map((row) => row.key)).toEqual(["m1", "m3"]);
+    expect(rows[0]).toMatchObject({ memoryUsed: [], skipped: [] });
+    expect(rows[1]).toMatchObject({
+      memoryUsed: used,
+      skipped: [
+        { fileId: "file-1", filename: "photo.png", reason: "no vision" },
+      ],
+    });
+  });
+
+  it("stays on an earlier turn's stored row after the next turn starts", () => {
+    const done = {
+      content: "Tabs, width 4.",
+      model: "m",
+      tokens_in: 1,
+      tokens_out: 1,
+      duration_ms: 1,
+      memory_used: used,
+    };
+    const rows = buildTranscript(
+      input({
+        history: [
+          message({ id: 2, role: "user", content: "tabs or spaces?" }),
+          message({ id: 3, role: "assistant", content: "Tabs, width 4." }),
+          message({ id: 4, role: "assistant", content: "Another answer." }),
+        ],
+        stream: drive(OPEN, { type: "thinking" }),
+        answered: [{ messageId: 3, done }],
+      }),
+    ).filter((item) => item.kind === "assistant");
+
+    expect(rows.map((row) => [row.key, row.memoryUsed])).toEqual([
+      ["m3", used],
+      ["m4", []],
+      ["live-s1", []],
+    ]);
+  });
+
+  it("names no stored row while the turn runs or after it failed", () => {
+    const history = [message({ id: 3, role: "assistant", content: "" })];
+    expect(persistedLiveTurn(drive(OPEN), history)).toBeNull();
+    expect(
+      persistedLiveTurn(
+        drive(OPEN, { type: "server_error", message: "boom" }),
+        history,
+      ),
+    ).toBeNull();
   });
 });
 

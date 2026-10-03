@@ -4114,6 +4114,121 @@ describe("ChatView — composer attachments (U5, U3)", () => {
     );
   });
 
+  /**
+   * Track D, D4 defect 1: `done` invalidates the history, the stored copy of
+   * the answer replaces the live row — and the note went with it, so on a
+   * real daemon nobody ever saw it. It stays on the stored row for as long as
+   * the view keeps the conversation, and goes with the conversation.
+   */
+  it("keeps the notes an answer used once history catches up, until the conversation changes", async () => {
+    memoryTitles = { "55e811b6-3220-4758-a47b-034bd1023f38": "Prefers tabs" };
+    const conversation = (sessionId: string, stored: boolean) => () =>
+      json({
+        messages: stored
+          ? [
+              {
+                id: 41,
+                lane_key: "user:gui",
+                role: "user",
+                content: "tabs or spaces?",
+                created_at: "2026-10-02T04:33:00Z",
+              },
+              {
+                id: 42,
+                lane_key: "user:gui",
+                role: "assistant",
+                content: "Tabs, width 4.",
+                // Not the live frame's model: proves the stored row is the
+                // one on screen when the note is read.
+                model: "stored-model",
+                created_at: "2026-10-02T04:33:10Z",
+              },
+            ]
+          : [],
+        total: stored ? 2 : 0,
+        lane_key: "user:gui",
+        session_id: sessionId,
+      });
+    historyReply = conversation("sess-a", false);
+    const client = renderChat();
+    await screen.findByLabelText("Message");
+    const source = await sendMessage("tabs or spaces?");
+
+    // What the daemon answers once the turn is stored.
+    historyReply = conversation("sess-a", true);
+    await act(async () => {
+      source.emit("done", {
+        content: "Tabs, width 4.",
+        model: "qwen3.8:27b",
+        tokens_in: 10,
+        tokens_out: 6,
+        duration_ms: 900,
+        memory_used: [
+          {
+            id: "55e811b6-3220-4758-a47b-034bd1023f38",
+            revision: "a".repeat(64),
+            reason: "recall",
+          },
+        ],
+      });
+    });
+
+    expect(await screen.findByText(/stored-model/)).toBeInTheDocument();
+    expect(screen.queryByText(/qwen3\.8:27b/)).toBeNull();
+    const note = screen.getByRole("region", {
+      name: "Notes used in this answer",
+    });
+    await waitFor(() =>
+      expect(note).toHaveTextContent("Prefers tabs — recalled"),
+    );
+
+    // The next turn starts: the live stream is someone else's now, and the
+    // first answer keeps its note all the same.
+    chatSendReply = () => json({ stream_id: "stream-2", lane_key: "user:gui" });
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "and in YAML?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(2));
+    const second = FakeEventSource.instances[1];
+    if (second === undefined) throw new Error("no second stream opened");
+    expect(
+      screen.getByRole("region", { name: "Notes used in this answer" }),
+    ).toHaveTextContent("Prefers tabs — recalled");
+    await act(async () => {
+      second.emit("done", {
+        content: "Spaces, width 2.",
+        model: "qwen3.8:27b",
+        tokens_in: 4,
+        tokens_out: 3,
+        duration_ms: 400,
+      });
+    });
+    expect(await screen.findByText("Spaces, width 2.")).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("region", { name: "Notes used in this answer" }),
+    ).toHaveLength(1);
+
+    // Another conversation, then back: the note was this view's to keep, and
+    // nothing stores it, so the conversation reopened shows the answer alone.
+    historyReply = conversation("sess-b", false);
+    await act(async () => {
+      await client.invalidateQueries();
+    });
+    await waitFor(() =>
+      expect(screen.queryByText("Tabs, width 4.")).toBeNull(),
+    );
+
+    historyReply = conversation("sess-a", true);
+    await act(async () => {
+      await client.invalidateQueries();
+    });
+    expect(await screen.findByText("Tabs, width 4.")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Notes used in this answer" }),
+    ).toBeNull();
+  });
+
   it("says nothing about memory for an answer that used none", async () => {
     renderChat();
     fireEvent.change(await screen.findByLabelText("Message"), {

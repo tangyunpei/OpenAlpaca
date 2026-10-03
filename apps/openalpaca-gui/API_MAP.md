@@ -1729,9 +1729,13 @@ lane_key, preview, per_call, raised_at }] }`, oldest first (a restored card show
      model (or to any model at all), and each one is listed here with a sentence saying
      which arm answered. Nothing persists a skip, so `GET /v1/chat/history` never
      replays it. This window prints `memory_used` as **Notes used in this answer**
-     under the live answer (`components/chat/MemoryUsedNote.tsx`), each note named
-     from `GET /v1/memories/{id}` and opening the Memory view; a reload drops it,
-     exactly as it drops the skip note. `working_state_updated` (a boolean) and
+     under the answer (`components/chat/MemoryUsedNote.tsx`) — the live row, then
+     the stored row that replaces it once history catches up, which keeps the
+     frame's `memory_used` and `attachments_skipped` while the view keeps the
+     conversation (`AnsweredTurn`, `views/chat/transcript-model.ts`) — each note
+     named from `GET /v1/memories/{id}` and opening the Memory view; a switch of
+     conversation, a trip to another view or a reload drops it, exactly as it
+     drops the skip note. `working_state_updated` (a boolean) and
      `continued_from` (`{ session_id, topic }` or `null`) are always present (design
      11 §5, CQ-7): the first says the turn compacted, so the conversation's working
      state changed and its session is worth re-reading; the second names the previous

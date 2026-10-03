@@ -92,6 +92,8 @@ import { useUiStore, type ComposerMode } from "@/stores/ui";
 import { useResolutions } from "./resolution-store";
 import {
   buildTranscript,
+  persistedLiveTurn,
+  type AnsweredTurn,
   type ConfirmationEntry,
   type PendingTurn,
   type RunReportData,
@@ -499,6 +501,16 @@ export function useChatSession(): ChatSession {
   const [continuedFrom, setContinuedFrom] = useState<ContinuedFrom | null>(
     null,
   );
+  /**
+   * Each turn this view watched finish, by stream, with the stored row that
+   * replaced it — what keeps "Notes used in this answer" (and the skipped-
+   * attachment note) on the answer once history catches up and after the next
+   * turn starts (`AnsweredTurn`). By stream, so an earlier answer with the
+   * same text is never credited with this turn's notes: the entry moves to the
+   * newest matching row as history catches up. Session-local, like
+   * `continuedFrom`: cleared with the conversation, gone on a reload.
+   */
+  const [answered, setAnswered] = useState<Record<string, AnsweredTurn>>({});
   const [confirmationMeta, setConfirmationMeta] = useState<
     Record<string, ConfirmationMeta>
   >({});
@@ -849,6 +861,20 @@ export function useChatSession(): ChatSession {
     setContinuedFrom(doneResult.continued_from ?? null);
   }, [doneResult]);
 
+  const replacedBy =
+    persistedLiveTurn(stream.state, history.data?.messages ?? [])?.id ?? null;
+  useEffect(() => {
+    if (doneResult === null || streamId === null || replacedBy === null) return;
+    setAnswered((current) =>
+      current[streamId]?.messageId === replacedBy
+        ? current
+        : {
+            ...current,
+            [streamId]: { messageId: replacedBy, done: doneResult },
+          },
+    );
+  }, [doneResult, streamId, replacedBy]);
+
   useEffect(() => {
     if (!daemonEndedTurn || streamId === null) return;
     for (const card of shownConfirmationsRef.current) {
@@ -1020,6 +1046,7 @@ export function useChatSession(): ChatSession {
     clearResolutions();
     setSteers([]);
     setContinuedFrom(null);
+    setAnswered({});
     clearAttachments();
     setConfirmationMeta({});
     firstSeenAtMs.current.clear();
@@ -1046,6 +1073,7 @@ export function useChatSession(): ChatSession {
         pending,
         steerLabel: steerRun === null ? undefined : shortTitle(steerRun.title),
         attachmentNames: attachments.names,
+        answered: Object.values(answered),
       }),
     [
       history.data,
@@ -1058,6 +1086,7 @@ export function useChatSession(): ChatSession {
       pending,
       steerRun,
       attachments.names,
+      answered,
     ],
   );
 

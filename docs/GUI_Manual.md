@@ -482,8 +482,10 @@ like an ordinary message.
 When a file does not reach the model, the turn shows a muted note under the
 answer naming each file and the daemon's reason, and the file is **not** listed
 among the ones the turn used. The note is live only — the daemon stores no
-record of a skip on the message — so a reloaded transcript shows the answer
-without it.
+record of a skip on the message — so it stays under the answer, through later
+turns, only while the chat view keeps that conversation: switching to another
+conversation, leaving for another view and coming back, or reloading shows the
+answer without it.
 
 **"Notes used in this answer."** When the daemon handed the model any of your
 memory notes for a turn, a muted note under the answer lists them by title,
@@ -494,9 +496,11 @@ or read it itself), and each opens in the
 Memory view — so a note that steered an answer the wrong way is one click from
 being corrected or forgotten. It comes from the turn's `done` frame
 (`memory_used`) and, like the skipped-attachment note, it is **live only**:
-nothing stores which notes shaped an answer, so a reloaded transcript shows the
-answer without it. A note deleted since is named by its id rather than
-guessed.
+nothing stores which notes shaped an answer, so it stays under the answer,
+through later turns, only while the chat view keeps that conversation —
+switching to another conversation, leaving for another view (opening one of
+its notes in Memory is one) and coming back, or reloading shows the answer
+without it. A note deleted since is named by its id rather than guessed.
 
 **A thinking model shows its thinking.** A local reasoning model can spend ten
 seconds or more before its first token. While the turn is thinking, the

@@ -10,7 +10,9 @@
  *   * a finished turn invalidates the history query, so for a moment the same
  *     turn exists twice — once live, once persisted. The live copy is dropped
  *     as soon as history carries it (`done.content` is byte-identical to what
- *     was stored), never by a timer;
+ *     was stored), never by a timer — and what only the live copy knew (the
+ *     `done` frame's notes and skipped files) is handed to the stored row that
+ *     replaced it, for as long as the view keeps the turn (`AnsweredTurn`);
  *   * a stored message now names the run it started or reported on, and a
  *     report names the files that run produced (GAP-23, closed): the run pill
  *     and the artifact chips are read straight off history and survive a
@@ -25,7 +27,11 @@ import type { SteerRef } from "@/components/chat";
 import type { Resolution } from "@/components/chat";
 import type { RunReportStatus } from "@/components/chat";
 import type { ChatMessage, MessageArtifact } from "@/lib/api/types";
-import type { ChatStreamState, MemoryUsedRef } from "@/lib/chat-stream";
+import type {
+  ChatStreamDone,
+  ChatStreamState,
+  MemoryUsedRef,
+} from "@/lib/chat-stream";
 import { timestampMs } from "@/lib/time";
 
 /**
@@ -202,17 +208,18 @@ export type TranscriptItem =
        * Files the turn carried in that the model never received (U3), from
        * `done.attachments_skipped`.
        *
-       * Live only: the daemon stores no skip on the message, so a reloaded
-       * transcript has nothing to rebuild the note from and this is `[]` for
-       * every stored row.
+       * Live only: the daemon stores no skip on the message. A stored row
+       * carries it only when this view watched its turn finish (the `done`
+       * handed over in `AnsweredTurn`); a reloaded transcript has nothing to
+       * rebuild the note from, so it is `[]` for every other stored row.
        */
       skipped: SkippedAttachment[];
       /**
        * The memory notes the turn delivered to the model (memory redesign
        * 3.3/3.9), from `done.memory_used`.
        *
-       * Live only, like `skipped`: nothing persists it, so this is `[]` for
-       * every stored row and a reload drops the note.
+       * Live only, like `skipped`: nothing persists it, so a stored row carries
+       * it only when this view watched its turn finish, and a reload drops it.
        */
       memoryUsed: MemoryUsedRef[];
       /** Files the turn's run produced (`role='artifact'`, GAP-23). */
@@ -238,6 +245,23 @@ export type TranscriptItem =
   | { kind: "resolution"; key: string; entry: ResolutionEntry }
   | { kind: "error"; key: string; message: string };
 
+/**
+ * A turn this view watched finish, and the stored row that took its place.
+ *
+ * `done.memory_used` and `done.attachments_skipped` are live only — the daemon
+ * stores neither on the message — so once history catches up and the live row
+ * gives way to its stored copy, the stored row is the only place left to
+ * show them. Without this the "Notes used in this answer" line lived for one
+ * history round trip after `done` (Track D, D4 defect 1): a person never saw
+ * it. The view keeps these for as long as it keeps the conversation, the way
+ * it keeps the "Continuing from" line; a reload starts without them.
+ */
+export interface AnsweredTurn {
+  /** The stored row: `persistedLiveTurn` once history carried the turn. */
+  messageId: number;
+  done: ChatStreamDone;
+}
+
 export interface TranscriptInput {
   history: readonly ChatMessage[];
   reports: readonly RunReportData[];
@@ -258,6 +282,12 @@ export interface TranscriptInput {
    * the id itself — never to a guess.
    */
   attachmentNames?: Readonly<Record<string, string>>;
+  /**
+   * Earlier turns of this conversation that this view watched finish, each
+   * with the stored row it became. The live turn needs no entry: its own
+   * stored copy takes `stream.result` the moment history carries it.
+   */
+  answered?: readonly AnsweredTurn[];
 }
 
 interface Slot {
@@ -371,6 +401,24 @@ export function streamPhaseLabel(stream: ChatStreamState): StreamPhaseLabel {
   }
 }
 
+/**
+ * The stored row that took the finished live turn's place: the newest
+ * assistant row whose content is `done.content`. `null` while the turn runs,
+ * after it failed, and until history carries it.
+ */
+export function persistedLiveTurn(
+  stream: ChatStreamState,
+  history: readonly ChatMessage[],
+): ChatMessage | null {
+  if (stream.phase !== "done") return null;
+  return (
+    history.findLast(
+      (message) =>
+        message.role === "assistant" && message.content === stream.content,
+    ) ?? null
+  );
+}
+
 /** True while the live turn should be rendered as its own assistant row. */
 export function showsLiveTurn(
   stream: ChatStreamState,
@@ -379,11 +427,23 @@ export function showsLiveTurn(
   if (stream.phase === "idle" || stream.phase === "error") return false;
   if (!stream.terminal) return true;
   // Terminal: keep showing it until the persisted copy arrives.
-  const persisted = history.some(
-    (message) =>
-      message.role === "assistant" && message.content === stream.content,
-  );
-  return !persisted;
+  return persistedLiveTurn(stream, history) === null;
+}
+
+/**
+ * The skipped-attachment note's rows, from a turn's `done` (U3). Disjoint from
+ * `attachments_used` since U3 — a withheld attachment is no longer listed as
+ * used, so a file appears as a chip or in the note, never as both.
+ */
+function skippedOf(
+  done: ChatStreamDone | null | undefined,
+  attachmentNames: Readonly<Record<string, string>>,
+): SkippedAttachment[] {
+  return (done?.attachments_skipped ?? []).map((entry) => ({
+    fileId: entry.id,
+    filename: attachmentNames[entry.id] ?? null,
+    reason: entry.reason,
+  }));
 }
 
 /** True while the optimistic user row should still be rendered. */
@@ -409,7 +469,18 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
     pending,
     steerLabel = "the active workflow",
     attachmentNames = {},
+    answered = [],
   } = input;
+
+  // The `done` a stored row answered, where this view watched it land: the
+  // earlier turns it kept, then the live turn's own once its stored copy is
+  // here — at once, so the note never blinks out between the two.
+  const doneFor = new Map<number, ChatStreamDone>();
+  for (const turn of answered) doneFor.set(turn.messageId, turn.done);
+  const replacing = persistedLiveTurn(stream, history);
+  if (replacing !== null && stream.result !== null) {
+    doneFor.set(replacing.id, stream.result);
+  }
 
   const slots: Slot[] = [];
   let seq = 0;
@@ -441,6 +512,9 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       continue;
     }
 
+    // Nothing persists a skip or `memory_used`, so a stored row has them only
+    // from a `done` this view saw land; any other stored row says "none".
+    const done = doneFor.get(message.id);
     push(at, {
       kind: "assistant",
       key: `m${message.id}`,
@@ -451,10 +525,8 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       // writes, so there is nothing to replay.
       reasoning: "",
       attachments: attachmentsFromContent(message.content_json),
-      // Nothing persists a skip, so a stored row can only ever say "none".
-      skipped: [],
-      // Nor `memory_used`: which notes shaped a stored answer is not recorded.
-      memoryUsed: [],
+      skipped: skippedOf(done, attachmentNames),
+      memoryUsed: done?.memory_used ?? [],
       artifacts: toArtifacts(message.artifacts),
       runId: message.task_id ?? null,
     });
@@ -540,17 +612,6 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
         mimeType: null,
         kind: null,
       })) ?? [];
-    // Disjoint from `attachments_used` since U3 — a withheld attachment is no
-    // longer listed as used, so a file appears as a chip or in the note, never
-    // as both.
-    const skipped: SkippedAttachment[] = (
-      stream.result?.attachments_skipped ?? []
-    ).map((entry) => ({
-      fileId: entry.id,
-      filename: attachmentNames[entry.id] ?? null,
-      reason: entry.reason,
-    }));
-
     push(Number.MAX_SAFE_INTEGER, {
       kind: "assistant",
       key: `live-${stream.streamId ?? "0"}`,
@@ -559,7 +620,7 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       streamPhase: streamPhaseLabel(stream),
       reasoning: stream.reasoning,
       attachments,
-      skipped,
+      skipped: skippedOf(stream.result, attachmentNames),
       memoryUsed: stream.result?.memory_used ?? [],
       // The live turn's own delegation reaches the transcript as a report card,
       // and the pill arrives with the row when history catches up.
