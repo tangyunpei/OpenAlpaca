@@ -23,6 +23,21 @@ pub(super) fn delegation_provenance_line(task_id: &str) -> String {
     format!("[This run was started by a start_workflow tool call, which returned task {task_id}.]")
 }
 
+/// A delegating row's replayed text: `content` with its provenance line
+/// appended — once. A model that saw the line on a replayed row can echo it
+/// into its own answer, and that answer is stored; a row whose text already
+/// ends with its line (trailing whitespace aside) replays as stored, so the
+/// history never carries the line twice (G3b). The stored row is untouched
+/// either way.
+fn with_delegation_provenance(content: &str, task_id: &str) -> String {
+    let line = delegation_provenance_line(task_id);
+    if content.trim_end().ends_with(&line) {
+        content.to_string()
+    } else {
+        format!("{content}\n{line}")
+    }
+}
+
 impl Orchestrator {
     /// Build the full conversation context for a turn: loads history, deduplicates
     /// the current user message (Bug A fix, D6), loads the rows between the
@@ -185,10 +200,9 @@ impl Orchestrator {
                     // provenance. Only this branch: a user row's `task_id`
                     // (there is none today) would be somebody else's fact.
                     _ => match task_id.as_deref().filter(|id| !id.is_empty()) {
-                        Some(id) => ChatMessage::assistant(&format!(
-                            "{content}\n{}",
-                            delegation_provenance_line(id)
-                        )),
+                        Some(id) => {
+                            ChatMessage::assistant(&with_delegation_provenance(content, id))
+                        }
                         None => ChatMessage::assistant(content),
                     },
                 };

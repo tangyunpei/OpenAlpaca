@@ -4343,6 +4343,71 @@ fn a_delegating_row_replays_with_its_provenance_and_an_ordinary_one_does_not() {
     );
 }
 
+/// G3b — a model that echoed the line into its own answer stored it, and the
+/// replay must not carry it twice: a row that already ends with its own
+/// provenance line (trailing whitespace aside) replays exactly as stored,
+/// and the stored row is never rewritten.
+#[test]
+fn a_delegating_row_that_already_ends_with_its_provenance_line_replays_as_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    repo.get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+
+    let task = "f89d487e-0000-4000-8000-000000000000";
+    let line = crate::orchestrator::context_builder::delegation_provenance_line(task);
+    let echoed = format!("Started. A background workflow is running.\n{line}\n  ");
+    // The same line for another run is not this row's line.
+    let other = format!(
+        "Started another one.\n{}",
+        crate::orchestrator::context_builder::delegation_provenance_line(
+            "9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b"
+        )
+    );
+    for (content, task_id) in [(&echoed, task), (&other, task)] {
+        repo.insert(&openalpaca_storage::ConversationMessage {
+            lane_key: "user1:cli".to_string(),
+            role: "assistant".to_string(),
+            content: content.clone(),
+            task_id: Some(task_id.to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    let ctx = orch.build_context("user1:cli", "go");
+    assert_eq!(ctx.recent_messages.len(), 2);
+    assert_eq!(
+        ctx.recent_messages[0].content, echoed,
+        "a row that already ends with its line must replay as stored"
+    );
+    assert_eq!(ctx.recent_messages[0].content.matches(&line).count(), 1);
+    assert_eq!(
+        ctx.recent_messages[1].content,
+        format!("{other}\n{line}"),
+        "a row ending with another run's line still gets its own"
+    );
+
+    let stored = repo.list_recent_by_lane("user1:cli", 10).unwrap();
+    assert_eq!(
+        stored[0].content, echoed,
+        "the stored row is never rewritten"
+    );
+    assert_eq!(
+        stored[1].content, other,
+        "the stored row is never rewritten"
+    );
+}
+
 // ── GAP-13: the per-request model override ──────────────────────────
 
 /// A turn that names a model runs on it: `HandleRequest.model_override` →
