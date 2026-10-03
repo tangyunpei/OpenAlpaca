@@ -14,7 +14,9 @@
  *   * the answer route's `200` (it took this answer) or `404` (it holds no such
  *     prompt: answered already, timed out, withdrawn, or the daemon restarted);
  *   * the SSE `confirmation_resolved` frame;
- *   * the WebSocket `tool_confirmation_resolved` frame.
+ *   * the WebSocket `tool_confirmation_resolved` frame, heard while the chat
+ *     view is open (`useChatStream` listens) — one resolved while chat is away
+ *     is covered by the chat view's read on mount.
  *
  * A card this window retires by inference — its turn ended (R1), its run
  * finished, a snapshot no longer listed it — is **not** recorded. The
@@ -22,10 +24,11 @@
  * exactly like this window's, and a later snapshot that still lists an id the
  * window only guessed was over must be able to draw it again.
  *
- * Request ids are `Uuid::new_v4` and never reused, so nothing is ever taken
- * back out. The set is bounded only so a window left open for weeks does not
- * grow without end: every read it guards is at most one poll (30 s) old, and
- * no window answers a thousand prompts in that time.
+ * Request ids are `Uuid::new_v4` and never reused, so no id is ever taken back
+ * out because it stopped being true. The set keeps the newest 1,000, oldest
+ * dropped first, only so a window left open for weeks does not grow without
+ * end: every read it guards is at most one poll (30 s) old, and no window
+ * answers a thousand prompts in that time.
  */
 
 const CAP = 1_000;

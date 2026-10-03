@@ -1,8 +1,9 @@
 /**
  * The transcript's resolution rows, for the life of the window (P2).
  *
- * `Approved` / `Denied` / `Timed out` are the record of something that
- * happened **to the person**: a prompt they answered, or one nobody did. Held
+ * `Approved` / `Denied` / `Timed out` / `Not waiting` are the record of
+ * something that happened **to the person**: a prompt they answered, one
+ * nobody did, or a click on one the daemon no longer held (G1, Round G). Held
  * in `useChatSession`'s own `useState` they lasted exactly as long as the chat
  * view was mounted — and the views are swapped, not stacked (`App.tsx`'s
  * `renderView` returns a different lazy component per view), so one click on a

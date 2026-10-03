@@ -552,8 +552,8 @@ export function useChatSession(): ChatSession {
     if (!isTerminalRunStatus(event.status)) return;
 
     // A finished run is not waiting on anything any more (G1). The daemon
-    // publishes no frame for a prompt that timed out or was answered
-    // elsewhere, so this is what retires a card the run has moved past —
+    // announces a prompt that timed out or was answered elsewhere (T1), but a
+    // frame can be missed, so this too retires a card the run has moved past —
     // before the `started` check below, because a card can outlive this
     // client's memory of who started the run.
     for (const [requestId, meta] of Object.entries(confirmationMeta)) {

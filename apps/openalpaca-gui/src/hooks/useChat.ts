@@ -174,9 +174,11 @@ export interface ChatStreamController {
   /**
    * Drop a pending confirmation this client is not going to answer (G1).
    *
-   * The daemon publishes no "this prompt expired" frame, so a prompt whose run
-   * has finished — it timed out, or somebody else answered it — would sit on
-   * screen for ever. The caller that knows the run is over says so.
+   * The daemon announces every resolution (T1), but a modal card must not rest
+   * on one frame: one dropped, or sent while the socket was down, would leave
+   * the card on screen for ever. The caller that infers the prompt is over —
+   * its turn ended, its run finished, the snapshot stopped listing it — says
+   * so, and an inference is never recorded as the daemon's word.
    */
   dismissConfirmation: (requestId: string) => void;
   /** Drop the local stream state (new lane, cleared transcript). */

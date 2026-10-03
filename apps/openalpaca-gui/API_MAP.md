@@ -1695,12 +1695,13 @@ outcome, stream_id, lane_key, task_id }`. `outcome` is `approved` | `denied` |
    `timed_out` | `cancelled`, and only `approved` ran the tool: a timeout is a denial
    with a different reason. `cancelled` is a prompt withdrawn unanswered — its run was
    cancelled while it waited, for one; until Round G such a prompt stayed in the
-   pending list below for as long as the daemon lived, and its answer was refused. Before it existed a prompt that ran out its
-   `confirmation_timeout_secs` produced nothing at all, so a client that settles a
-   card only on an answer it posted itself kept the card — and its paused composer —
-   until it was reloaded. Settle on **any** outcome, and do not settle on this frame
-   alone: it is one of three signals, beside the pending list below and a terminal
-   `task_status` for the run named on the frame.
+   pending list below for as long as the daemon lived, and its answer was refused.
+   Before the frame existed, a prompt that ran out its `confirmation_timeout_secs`
+   produced nothing at all, so a client that settles a card only on an answer it
+   posted itself kept the card — and its paused composer — until it was reloaded.
+   Settle on **any** outcome, and do not settle on this frame alone: it is one of
+   three signals, beside the pending list below and a terminal `task_status` for the
+   run named on the frame.
    **`GET /v1/chat/confirmations` (S9) is the snapshot of what is still waiting** —
    `{ "confirmations": [{ request_id, tool_name, tool_arguments, task_id, agent_id,
 lane_key, preview, per_call, raised_at }] }`, oldest first (a restored card shows the
@@ -1720,11 +1721,13 @@ lane_key, preview, per_call, raised_at }] }`, oldest first (a restored card show
    (`refetchOnMount: "always"`) and `useChatSession` ignores rows whose
    `dataUpdatedAt` is older than its own mount. Beside that, the ids the **daemon**
    has said are over — the answer's `200` or `404`, an SSE `confirmation_resolved`,
-   a WS `tool_confirmation_resolved` — are kept for the life of the window
-   (`lib/confirmations-over.ts`) and never adopted again, so a read that left before
-   an answer and lands after it draws nothing. A card retired by inference (its turn
-   ended, its run finished, the snapshot stopped listing it) is never put there: the
-   `{owner}:gui` lane is shared (T18), and a later read that lists it may be right.
+   a WS `tool_confirmation_resolved` heard while the chat view is open — are kept
+   (the newest 1,000) for the life of the window (`lib/confirmations-over.ts`) and
+   never adopted again, so a read that left before an answer and lands after it
+   draws nothing; one resolved while the view was closed is covered by the read on
+   mount. A card retired by inference (its turn ended, its run finished, the snapshot
+   stopped listing it) is never put there: the `{owner}:gui` lane is shared (T18),
+   and a later read that lists it may be right.
    **The answer's `404` is a resolution, not an error** —
    `{ "error": { "code": "NOT_FOUND", "message": "No pending confirmation: <id>" } }`
    (no such id: answered already, timed out, withdrawn, or the daemon restarted), or
