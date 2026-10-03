@@ -1,10 +1,12 @@
 # OpenAlpaca GUI Manual
 
 OpenAlpaca GUI (`openalpaca-gui`) is a Tauri 2 desktop app — a React 19 +
-TypeScript + Tailwind 4 frontend in a webview, with a small Rust shell whose
-only job is finding (or starting) the local daemon. Everything on screen comes
-from the daemon over HTTP, one WebSocket and one SSE stream; the webview itself
-never reads the database, the config files or `discovery.json`.
+TypeScript + Tailwind 4 frontend in a webview, with a small Rust shell that
+finds (or starts) the local daemon, waits for it to stop, reads its log and
+shows a file in its folder (*Connection lifecycle* lists its five commands).
+Everything on screen comes from the daemon over HTTP, one WebSocket and one SSE
+stream; the webview itself never reads the database, the config files or
+`discovery.json`.
 
 One rule shapes the whole app and is worth stating before the tour: **nothing is
 invented.** Where the daemon has no answer the GUI renders the empty state plus
@@ -747,8 +749,9 @@ Finder` — over three tabs:
   its row as a version nobody in OpenAlpaca wrote. The row says so.
 
 `Open` opens the file in its default application through the daemon
-(`POST /v1/files/{id}/open`), on the machine the daemon runs on; the toast says
-so. (The design labelled this button `Reveal`; it always opened the file.)
+(`POST /v1/files/{id}/open`), on the machine the daemon runs on, and the toast
+reads `<name> opened in its default app`. (The design labelled this button
+`Reveal`; it always opened the file.)
 `Reveal in Finder` — `Show in folder` on Windows and Linux — shows the file in
 its folder instead, through the app's own shell (`reveal_path`, above): Finder
 comes forward with the file selected. It is drawn only inside the app's window,
