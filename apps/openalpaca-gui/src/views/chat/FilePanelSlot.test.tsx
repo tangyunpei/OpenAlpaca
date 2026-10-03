@@ -120,5 +120,10 @@ describe("FilePanelSlot — Open and Reveal", () => {
     );
 
     expect(invoke).toHaveBeenCalledWith("reveal_path", { path: row.path });
+    // Finder coming forward is the answer: once the shell has replied and
+    // every reaction to it has run (a macrotask runs after all of them),
+    // nothing was toasted.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(useUiStore.getState().toast).toBeNull();
   });
 });

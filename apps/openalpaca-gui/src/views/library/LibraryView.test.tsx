@@ -453,6 +453,30 @@ describe("LibraryDetail — Open and Reveal", () => {
     expect(open?.method).toBe("POST");
   });
 
+  it("toasts the daemon's reason when the open route fails", async () => {
+    route("/v1/files/art-1/open", () =>
+      json(
+        {
+          error: {
+            code: "OPEN_FAILED",
+            message: "No application knows how to open this file",
+          },
+        },
+        500,
+      ),
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "Open" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        "Could not open — No application knows how to open this file",
+      ),
+    );
+  });
+
   it("draws no Reveal in the Vite preview, where there is no shell", async () => {
     renderView();
 
