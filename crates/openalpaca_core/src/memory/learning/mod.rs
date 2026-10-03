@@ -32,9 +32,6 @@ mod window;
 /// The usage label of a conversation summary's own call (owner decision
 /// CQ-11), counted under the summariser's daily ceiling.
 pub(crate) use episode::EPISODE_LABEL;
-/// A conversation summary's title (design 09 §13.3): what the previous
-/// conversation's block names its record by (design 11 §4 (b)).
-pub(crate) use episode::title as episode_title;
 /// The rows a forget took back, which the working-state writer never reads
 /// (design 11 rev 1.7, F5).
 pub(crate) use window::forgotten_rows;

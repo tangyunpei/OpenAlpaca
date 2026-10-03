@@ -658,22 +658,21 @@ impl PreviousConversation {
     }
 
     /// The block's text, at most `max_chars` characters when it can be: the
-    /// heading — the note that records the conversation, *"memory_read it for
-    /// the full record; memory_timeline shows what surrounds it"*, or before
-    /// the close has written one the timeline hint, conditional (rev 1.7,
-    /// F6) — then the state's
-    /// fields, cut as [`WorkingState::text`] cuts them, then the last
-    /// exchange. The history layer wraps it as quoted data.
+    /// heading — the note that records the conversation, by its id, *"memory_read
+    /// it for the full record; memory_timeline shows what surrounds it"*, or
+    /// before the close has written one the timeline hint, conditional (rev
+    /// 1.7, F6) — then the state's fields, cut as [`WorkingState::text`] cuts
+    /// them, then the last exchange. The history layer wraps it as quoted
+    /// data. The note is named by its id alone: its title's topic is the
+    /// summary call's own (owner decision CQ-11), which the session row does
+    /// not hold, so the state's topic would name a title the note may not
+    /// have.
     pub fn text(&self, max_chars: usize) -> String {
         let record = match &self.episode_note_id {
-            Some(id) => {
-                let topic = self.state.as_ref().map_or("", |s| s.topic.as_str());
-                format!(
-                    "its record is memory note {id} '{}' — memory_read it for the full record; \
-                     memory_timeline shows what surrounds it.",
-                    crate::memory::learning::episode_title(&self.date, topic)
-                )
-            }
+            Some(id) => format!(
+                "its record is memory note {id} — memory_read it for the full record; \
+                 memory_timeline shows what surrounds it."
+            ),
             // Rev 1.7 (F6): conditional — a conversation of fewer than
             // four user turns is never summarised.
             None => format!(
@@ -1057,11 +1056,11 @@ mod tests {
     }
 
     /// Design 11 §4 (b): the previous conversation's text — the heading
-    /// naming the note that records it once its close projected one (by id,
-    /// and by the title the projection gives it: the day of the last message
-    /// and the topic), the timeline hint before that — conditional (rev 1.7,
-    /// F6), since a conversation of fewer than four user turns never gets a
-    /// summary; then the state's fields; then its last exchange.
+    /// naming the note that records it once its close wrote one (by its id
+    /// alone since owner decision CQ-11), the timeline hint before that —
+    /// conditional (rev 1.7, F6), since a conversation of fewer than four
+    /// user turns never gets a summary; then the state's fields; then its
+    /// last exchange.
     #[test]
     fn the_previous_conversation_names_its_note_after_the_close_and_the_timeline_before() {
         let mut previous = PreviousConversation {
@@ -1103,9 +1102,8 @@ mod tests {
             previous.text(4000),
             format!(
                 "The previous conversation on this project ended 2026-09-28 11:00:00; its record \
-                 is memory note 55e811b6-3220-4758-a47b-034bd1023f38 'Conversation on 2026-09-28: \
-                 Lisbon trip in October' — memory_read it for the full record; memory_timeline \
-                 shows what surrounds it.\n{fields}"
+                 is memory note 55e811b6-3220-4758-a47b-034bd1023f38 — memory_read it for the \
+                 full record; memory_timeline shows what surrounds it.\n{fields}"
             )
         );
         previous.state = None;

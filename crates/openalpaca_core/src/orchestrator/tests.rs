@@ -9128,8 +9128,8 @@ fn a_new_conversation_is_given_the_previous_one_for_three_user_turns_and_not_the
     assert!(
         second.previous_text(4000).unwrap().starts_with(&format!(
             "The previous conversation on this project ended {ended_at}; its record is memory \
-             note {note} 'Conversation on {date}: Lisbon trip' — memory_read it for the full \
-             record; memory_timeline shows what surrounds it.\nTopic: Lisbon trip"
+             note {note} — memory_read it for the full record; memory_timeline shows what \
+             surrounds it.\nTopic: Lisbon trip"
         )),
         "{:?}",
         second.previous_text(4000)
