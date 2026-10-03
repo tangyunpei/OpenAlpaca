@@ -1,0 +1,2 @@
+assistant rows' memoryUsed counts, done landed, history not yet refetched: [1]
+assistant rows' memoryUsed counts, after history refetch holds the stored row: [0]

@@ -1,0 +1,24 @@
+# D2 daemon left running for D3 — written 2026-10-03T04:04:39Z. No token here: read it from
+# $OPENALPACA_HOME_STORE/state/discovery.json into a shell variable when needed.
+DAEMON_PID=60493
+DAEMON_PORT=51021
+DAEMON_URL=http://127.0.0.1:51021
+DAEMON_INSTANCE_ID=950fc57d-bc30-4250-bacc-4baed134f2b0
+DISCOVERY_TOKEN_EXPIRES_AT=2026-10-04T04:03:29.914551Z
+DAEMON_STARTED_AT=2026-10-03T04:03:29Z
+DAEMON_BINARY=<repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpacad
+DAEMON_BINARY_SHA256=bdaa22a21ea3e6ac0087b9f3cbff98a862edfcafbe534af58431fa236eb6ad34
+DAEMON_GIT_SHA=8fde2925c2ce1b981ac9a92bfcf412cba8c72446
+DAEMON_SANDBOX_PROFILE=<repo>/scripts/eval/memory/no-network.sb
+DAEMON_CWD=<scratch>/program/track-d/live
+DAEMON_LOG=<scratch>/program/track-d/store/state/logs/daemon.log
+DISCOVERY=<scratch>/program/track-d/store/state/discovery.json
+CLI=<repo>/target/release/openalpaca
+# The env block every process on this store runs with (source <scratch>/program/track-d/env.sh, which also guards):
+export OPENALPACA_HOME_STORE=<scratch>/program/track-d/store
+export OPENALPACA_CONFIG_DIR=<scratch>/program/track-d/store/config
+export OPENALPACA_MANAGED_LOG=1
+# Launch line used (perl setsid detaches; sandbox-exec execs the daemon, so DAEMON_PID is openalpacad):
+# cd $DAEMON_CWD && nohup /usr/bin/perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' /usr/bin/sandbox-exec -f $DAEMON_SANDBOX_PROFILE $DAEMON_BINARY >> $DAEMON_LOG 2>&1 < /dev/null &
+# State at hand-over: the global partition holds no note (the round-trip's note was forgotten; one tombstone);
+# no llm.toml was written by hand (the daemon seeded the template); no model is routable (effective_default_model null).

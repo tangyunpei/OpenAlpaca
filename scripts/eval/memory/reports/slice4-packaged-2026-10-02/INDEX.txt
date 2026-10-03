@@ -1,0 +1,71 @@
+Slice 4's packaged verification at 8fde2925 (2026-10-02 PDT; the logs' UTC stamps read 2026-10-03)
+=====================================================================================================
+
+The evidence behind tasks/memory-redesign/08-evaluation-report.md §4.1. Four steps
+on the owner's machine (D1 and D2 by one agent, D3 and D4 by one each), every daemon, CLI and app
+process with OPENALPACA_HOME_STORE and OPENALPACA_CONFIG_DIR in a session scratch
+directory and its CWD outside the repository; ~/.openalpaca was never read or
+written.
+
+Redaction: the session scratchpad is <scratch>, the repository <repo>, the home
+directory <home>, any other temporary path <tmp>, the hostname owner-macbook-pro
+and the user name owner (the tracked bundle id com.tangyunpei.openalpaca-gui is
+kept as the app reports it). ANSI colour codes are stripped. Logs are kept as
+.txt because the repository ignores *.log. No token, key or secret is in any
+file: discovery tokens were only ever read into shell variables. The six PNGs
+are window captures, copied byte for byte; none shows a path or a hostname.
+
+D1, the bundle at HEAD
+  d1-bundle-summary.txt        the step's own summary of the raw files below
+  d1-git-sha.txt               the commit and the work tree's state
+  d1-01-cargo-build-release.txt  cargo build --release -p openalpaca -p openalpacad (exit appended)
+  d1-02-bun-install.txt        bun install (exit appended)
+  d1-03-tauri-build.txt        bunx tauri build --bundles app (exit appended)
+  d1-04-cargo-tree.txt         cargo tree -e normal -i, six crates x three packages (18 checks)
+  d1-05-cargo-lock-grep.txt    Cargo.lock grep for the same crates and onnxruntime*
+  d1-06-bundle-inspection.txt  the .app listing: files, sizes, sha256, otool -L, strings greps, Info.plist
+  d1-07-package-macos.txt      scripts/release/package-macos.sh (read first; it installs nothing; exit appended)
+  d1-08-tarball-listing.txt    the archive: listing, sha256, manifest.json, strings and find on the extracted tree
+
+D2, the .app's daemon under scripts/eval/memory/no-network.sb, and the CLI round-trip
+  d2-launch.txt, d2-daemon-env.txt   the launch (guarded environment, binary hash, pid)
+  d2-status.json               GET /v1/status (schema_version 2, home_root the scratch store)
+  d2-daemon-log.txt            the daemon's log, colour stripped (72 lines, all INFO)
+  d2-daemon-log-greps.txt      the greps over it (download, fastembed, onnx, embed, network, error, warn, ...)
+  d2-lsof-sockets.txt          the daemon's sockets (its loopback listener only)
+  d2-sandbox-probe.txt         curl under the same profile cannot reach even loopback
+  d2-cli-transcript.txt        the CLI round-trip, every verb with its exit code
+  d2-ls-state-cache.txt, d2-find-memory.txt, d2-control-snapshot.txt, d2-store-tree.txt
+                               the store afterwards
+
+D3, the GUI round-trip on the same isolated store
+  d3-launch.txt                the sandboxed attempt (loopback-only profile) and the unsandboxed launch
+  d3-loopback-probe.txt        the loopback-only profile's probe
+  d3-project-store-tree.txt    the scratch project's store after "This project" saved a note
+  d3-cli-edit.txt, d3-stale-409.txt   the CLI edit behind an open GUI edit; the daemon's 409 on a stale If-Match
+  d3-forget-disk.txt           the partition after the GUI's two-click Forget
+  d3-cli-add.txt, d3-cli-chat-remember.txt   the terminal writes the Memory view picked up live
+  d3-cli-persona-edit.txt, d3-USER-md-diff.txt   Settings -> Persona's 409 and the merged save
+  d3-stop-before.txt, d3-stop-dialog-text.txt, d3-daemon-log-during-d3.txt   Stop daemon... and the clean shutdown
+  d3-daemon-restart.txt, d3-daemon-env.txt, d3-status-after-restart.json   the daemon restarted under the same profile
+  gui-d3-08-memory-note-saved-list-detail.png
+  gui-d3-16-memory-edit-conflict-copy-after-cli-edit.png
+
+D4, the GUI on a local model (qwen3.8:27b-mlx) on a second isolated store
+  d4-store-model-prestart.txt  the store before the first start (llm.toml written by hand)
+  d4-launch-daemon.txt, d4-launch-app.txt, d4-status-boot.json   the unsandboxed daemon (it must reach Ollama) and the app
+  d4-daemon-log.txt            the whole session's daemon log, colour stripped (187 lines, 0 WARN, 0 ERROR)
+  d4-recently-used-{1,2,3}.json   GET /v1/memories/recently-used: the recall deliveries
+  d4-repro-memused.ts.txt, d4-repro-memused.txt   a scratch run of the GUI's real reducer: the "Notes used" line before and after the history refetch
+  d4-suggestions-1.json        the LQ11 suggestion
+  d4-recently-learned-{1,final}.json, d4-session-A-after-close.json, d4-sessions-final.json,
+  d4-memories-final.json, d4-memories-archived-final.json, d4-store-memory-files.txt
+                               learning, the working state and the store afterwards
+  d4-status-before-stop.json, d4-stop-before.txt, d4-stop-after.txt   Stop daemon... and the process gone
+  gui-d4-04-chat-recall-answer-settled-no-notes-used-note.png   the failure: no "Notes used in this answer"
+  gui-d4-06-memory-suggestion-card-lq11.png
+  gui-d4-07-chat-memory-confirm-card.png
+  gui-d4-14-chat-continuing-from-new-conversation.png
+
+The step records, as each step's agent wrote them (every surface, defect and concern):
+  report-d1-d2.txt, report-d3.txt, report-d4.txt

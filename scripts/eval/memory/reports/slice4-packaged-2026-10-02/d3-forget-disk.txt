@@ -1,0 +1,9 @@
+notes/:
+total 0
+drwx------@ 2 owner  wheel   64 Oct  2 21:18 .
+drwx------@ 5 owner  wheel  160 Oct  2 21:18 ..
+.history/:
+total 0
+drwx------@ 2 owner  wheel   64 Oct  2 21:18 .
+drwx------@ 5 owner  wheel  160 Oct  2 21:18 ..
+home-80a4c0bb8402f4b0597eae9792caa358.json notes [] tombstones ['8bce7aec-7229-4a50-8772-1420173d4328', 'f085d45c-cfc6-46ac-b167-b46cb36af0d8'] pending None

@@ -1,0 +1,15 @@
+OPENALPACA_HOME_STORE=<scratch>/program/track-d/store
+OPENALPACA_CONFIG_DIR=<scratch>/program/track-d/store/config
+GUARD: ok
+pre-start: find store
+store
+store/config
+store/state
+store/state/logs
+CWD=<scratch>/program/track-d/live
+daemon binary sha256: bdaa22a21ea3e6ac0087b9f3cbff98a862edfcafbe534af58431fa236eb6ad34
+launch at 2026-10-03T04:03:29Z
+launched pid=60493
+discovery after 0.54 s
+  PID  PPID  PGID   SESS ELAPSED COMM
+60493 60482 60493      0   00:00 <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpacad

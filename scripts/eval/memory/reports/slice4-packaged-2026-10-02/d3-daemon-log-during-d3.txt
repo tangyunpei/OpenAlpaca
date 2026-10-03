@@ -1,0 +1,41 @@
+2026-10-03T04:09:39.292426Z  INFO openalpacad::routes::events: WebSocket client connected
+2026-10-03T04:18:52.678758Z  INFO openalpaca_core::chat::service: Chat stream c680c789-cd87-41e8-b7a8-c9d616f6f959 completed in 46ms
+2026-10-03T04:19:15.023837Z  INFO openalpaca_core::chat::service: Chat stream 4b4b4a7c-7a35-4e93-ad60-83950def4e0b completed in 44ms
+2026-10-03T04:19:59.349842Z  INFO openalpacad::hot_reload: UserProfileUpdated via EventBus (actor=user, sha256=949517cf1382f0d0), reloading profile
+2026-10-03T04:19:59.349880Z  INFO user_audit: USER.md updated actor=user mode=replace content_sha256=949517cf1382f0d004b4face16bd8a0141a0f9f211981369765abf26bf5785a7 modified_sections=["all"]
+2026-10-03T04:19:59.349929Z  INFO openalpacad::hot_reload: User profile hot-reloaded via EventBus: <scratch>/program/track-d/store/config/orchestrator/USER.md
+2026-10-03T04:19:59.354995Z  INFO openalpacad::hot_reload: Received WakeEvent: FileChanged { path: "<scratch>/program/track-d/store/config/orchestrator/USER.md", change_type: "Modify(Metadata(WriteTime))" }
+2026-10-03T04:19:59.355159Z  INFO openalpacad::hot_reload: Watcher dedup: skipping USER reload for hash 949517cf1382f0d0 (already applied via EventBus)
+2026-10-03T04:20:11.859111Z  INFO user_audit: USER.md updated actor=user mode=replace content_sha256=e2b1a1a53f4b6e7e103213771b984b77cec227b8b60c40703902267e0ae30758 modified_sections=["all"]
+2026-10-03T04:20:11.859138Z  INFO openalpacad::hot_reload: UserProfileUpdated via EventBus (actor=user, sha256=e2b1a1a53f4b6e7e), reloading profile
+2026-10-03T04:20:11.859204Z  INFO openalpacad::hot_reload: User profile hot-reloaded via EventBus: <scratch>/program/track-d/store/config/orchestrator/USER.md
+2026-10-03T04:20:12.025835Z  INFO openalpacad::hot_reload: Received WakeEvent: FileChanged { path: "<scratch>/program/track-d/store/config/orchestrator/USER.md", change_type: "Modify(Metadata(WriteTime))" }
+2026-10-03T04:20:12.025965Z  INFO openalpacad::hot_reload: Watcher dedup: skipping USER reload for hash e2b1a1a53f4b6e7e (already applied via EventBus)
+2026-10-03T04:20:41.484570Z  INFO user_audit: USER.md updated actor=user mode=replace content_sha256=81e08d550fbe1f2925c9f0b0f5b41c55241655a9bc4265ec0e71e1db12ddfb99 modified_sections=["all"]
+2026-10-03T04:20:41.484596Z  INFO openalpacad::hot_reload: UserProfileUpdated via EventBus (actor=user, sha256=81e08d550fbe1f29), reloading profile
+2026-10-03T04:20:41.484689Z  INFO openalpacad::hot_reload: User profile hot-reloaded via EventBus: <scratch>/program/track-d/store/config/orchestrator/USER.md
+2026-10-03T04:20:41.609993Z  INFO openalpacad::hot_reload: Received WakeEvent: FileChanged { path: "<scratch>/program/track-d/store/config/orchestrator/USER.md", change_type: "Modify(Metadata(WriteTime))" }
+2026-10-03T04:20:41.610146Z  INFO openalpacad::hot_reload: Watcher dedup: skipping USER reload for hash 81e08d550fbe1f29 (already applied via EventBus)
+2026-10-03T04:21:24.303214Z  INFO openalpacad::routes::events: WebSocket client disconnected
+2026-10-03T04:21:24.310688Z  INFO openalpacad::routes::command: Command received request_id=7f3ec4f0-82e1-42ab-bc6c-e733ad073c51 command=shutdown
+2026-10-03T04:21:24.310729Z  INFO openalpacad::routes::command: Shutdown command received via API
+2026-10-03T04:21:24.413234Z  INFO openalpacad: Shutdown signal received (API)
+2026-10-03T04:21:24.413324Z  INFO openalpacad::background: Telemetry cleanup task shutting down
+2026-10-03T04:21:24.413340Z  INFO openalpacad::background: Heartbeat task shutting down
+2026-10-03T04:21:24.413353Z  INFO openalpacad::background: File processing worker shutting down
+2026-10-03T04:21:24.413343Z  INFO openalpacad::background: Asset cleanup task shutting down
+2026-10-03T04:21:24.413381Z  INFO openalpacad::notification: NotificationDispatcher: cancelled, shutting down
+2026-10-03T04:21:24.413389Z  INFO openalpacad::background: Memory reconciliation task shutting down
+2026-10-03T04:21:24.413370Z  INFO openalpaca_llm::keys::credential_discovery: TokenManager refresh loop shutting down
+2026-10-03T04:21:24.413392Z  INFO openalpacad::background: Chat cleanup task shutting down
+2026-10-03T04:21:24.413467Z  INFO openalpacad::services::llm: Flushed CostTracker to DB: 0 row(s)
+2026-10-03T04:21:24.413476Z  INFO openalpacad: Flushing session logs...
+2026-10-03T04:21:24.418082Z  INFO openalpacad: Shutting down extensions...
+2026-10-03T04:21:24.418113Z  INFO openalpacad::managers::mcp: MCP servers shut down servers=0 readers_running=0
+2026-10-03T04:21:24.418125Z  INFO openalpaca_plugins::manager: plugins shut down plugins=0
+2026-10-03T04:21:24.418147Z  INFO openalpacad: Shutting down connectors...
+2026-10-03T04:21:24.418153Z  INFO openalpaca_wake::manager: Stopping WakeManager...
+2026-10-03T04:21:24.418161Z  INFO openalpaca_wake::watcher::filesystem: FilesystemWatcher stopped
+2026-10-03T04:21:24.418168Z  INFO openalpaca_wake::scheduler: WakeScheduler shut down
+2026-10-03T04:21:24.418184Z  INFO openalpacad: Cleaning up...
+2026-10-03T04:21:24.418387Z  INFO openalpacad: Daemon stopped

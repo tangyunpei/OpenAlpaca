@@ -1,0 +1,30 @@
+OPENALPACA_HOME_STORE=<scratch>/program/track-d/store
+OPENALPACA_CONFIG_DIR=<scratch>/program/track-d/store/config
+GUARD: ok
+CWD=<scratch>/program/track-d/live
+gui binary sha256: 627108aa5547d6015af467c98daf7e2df0904189f4acc7d25add0040589c2757
+launch at 2026-10-03T04:08:18Z (mode sandboxed)
+launched pid=62649
+  PID  PPID  PGID ELAPSED COMMAND
+62649 62643 62649   00:03 <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpaca_gui
+exit=0
+## sandboxed attempt (no-network-loopback.sb), pid 62649
+lsappinfo: process checked in as 'openalpaca-gui' with bundleID=[ NULL ] and the 'sandboxed' flag -> computer-use (addresses apps by bundle id) reports 'App not running: com.tangyunpei.openalpaca-gui'; app_list_windows returns []
+window 10525 (1080x1080) came up; captured with screencapture -l 10525 -> gui/00-sandboxed-launch-window.png
+window shows: sidebar status 'disconnected' with instance prefix 950f (discovery read), chat 'Could not load this lane: Load failed', 'Could not check for pending approvals: Load failed', Work pane 'Could not reach the daemon.'
+daemon.log: no new line after 'memory index rebuilt' (72 lines)
+kill -TERM 62649 exit=0
+gui gone
+  PID ELAPSED COMMAND
+60493   06:05 <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpacad
+## unsandboxed launch
+OPENALPACA_HOME_STORE=<scratch>/program/track-d/store
+OPENALPACA_CONFIG_DIR=<scratch>/program/track-d/store/config
+GUARD: ok
+CWD=<scratch>/program/track-d/live
+gui binary sha256: 627108aa5547d6015af467c98daf7e2df0904189f4acc7d25add0040589c2757
+launch at 2026-10-03T04:09:38Z (mode plain)
+launched pid=63352
+  PID  PPID  PGID ELAPSED COMMAND
+63352 63346 63352   00:03 <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpaca_gui
+exit=0

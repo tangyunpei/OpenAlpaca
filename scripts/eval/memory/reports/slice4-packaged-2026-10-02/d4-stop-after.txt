@@ -1,0 +1,13 @@
+checked at 2026-10-03T04:47:37Z
+ps for pid 72243:
+  PID ELAPSED COMMAND
+ps exit 1
+kill -0:
+(eval):kill:1: kill 72243 failed: no such process
+kill -0 exit 1
+openalpacad processes:
+70283 <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpacad
+discovery.json:
+ls: <scratch>/program/track-d/store-model/state/discovery.json: No such file or directory
+lock holder (lsof on openalpacad.lock):
+lsof exit 0

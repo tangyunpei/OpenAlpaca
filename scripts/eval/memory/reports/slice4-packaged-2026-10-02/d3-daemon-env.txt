@@ -1,0 +1,19 @@
+# D3 hand-over: D2's daemon restarted by D3 (same binary, same no-network profile, same store). No token here;
+# read $OPENALPACA_HOME_STORE/state/discovery.json into a shell variable when needed.
+DAEMON_PID=70283
+DAEMON_PORT=51667
+DAEMON_URL=http://127.0.0.1:51667
+DAEMON_INSTANCE_ID=206fc373-7ca5-46a6-a446-0ecfba173267
+DAEMON_STARTED_AT=2026-10-03T04:21:50.984053Z
+DAEMON_TOKEN_EXPIRES_AT=2026-10-04T04:21:50.984053Z
+DAEMON_BINARY=<repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpacad
+DAEMON_SANDBOX_PROFILE=<repo>/scripts/eval/memory/no-network.sb
+DAEMON_CWD=<scratch>/program/track-d/live
+DAEMON_LOG=<scratch>/program/track-d/store/state/logs/daemon.log
+LAUNCH_SCRIPT=<scratch>/program/track-d/d3-restart-daemon.sh
+export OPENALPACA_HOME_STORE=<scratch>/program/track-d/store
+export OPENALPACA_CONFIG_DIR=<scratch>/program/track-d/store/config
+export OPENALPACA_MANAGED_LOG=1
+# Store at hand-over: global partition 3 notes (Tea in the afternoon; The bike is locked...; The recycling goes out...), 2 tombstones;
+# project partition at live/proj 1 note (Track D project note); USER.md edited (Name/Pronouns/Timezone filled, trailing newline lost);
+# no llm.toml edit; no model routable (effective_default_model null).

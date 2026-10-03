@@ -1,0 +1,81 @@
+
+### git rev-parse HEAD
+8fde2925c2ce1b981ac9a92bfcf412cba8c72446
+
+### .app files with sizes (bytes)
+993 Contents/Info.plist
+9608656 Contents/MacOS/openalpaca_gui
+57975440 Contents/MacOS/openalpacad
+98451 Contents/Resources/icon.icns
+total files: 4
+
+### du -sk .app
+66108	<repo>/target/release/bundle/macos/openalpaca-gui.app
+
+### model/tokenizer/ONNX/dylib files in .app (find -iname)
+exit=0 (no lines above = none)
+
+### binaries: size, mtime, sha256
+57975440 Oct  2 21:01:25 2026 <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpacad
+bdaa22a21ea3e6ac0087b9f3cbff98a862edfcafbe534af58431fa236eb6ad34  <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpacad
+57975440 Oct  2 21:01:25 2026 <repo>/apps/openalpaca-gui/src-tauri/bin/openalpacad-aarch64-apple-darwin
+bdaa22a21ea3e6ac0087b9f3cbff98a862edfcafbe534af58431fa236eb6ad34  <repo>/apps/openalpaca-gui/src-tauri/bin/openalpacad-aarch64-apple-darwin
+57978128 Oct  2 21:00:17 2026 <repo>/target/release/openalpacad
+cdfef8e75fcadc449b0a7402875e909fbd76c6e0165670406f26f96e85585afb  <repo>/target/release/openalpacad
+15474624 Oct  2 20:59:53 2026 <repo>/target/release/openalpaca
+d285864642bbc6d01baef278e06f1d35c0552875e09710a05a752ae8b528c07c  <repo>/target/release/openalpaca
+9608656 Oct  2 21:02:21 2026 <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpaca_gui
+627108aa5547d6015af467c98daf7e2df0904189f4acc7d25add0040589c2757  <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpaca_gui
+
+### file(1) of the bundled binaries
+<repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpacad:    Mach-O 64-bit executable arm64
+<repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpaca_gui: Mach-O 64-bit executable arm64
+<repo>/target/release/openalpaca:                                                    Mach-O 64-bit executable arm64
+
+### otool -L (dynamic libraries) of bundled openalpacad and openalpaca CLI
+<repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpacad:
+	/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 5027.0.69)
+	/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices (compatibility version 1.0.0, current version 1226.0.0)
+	/usr/lib/liblzma.5.dylib (compatibility version 6.0.0, current version 6.3.0)
+	/usr/lib/libbz2.1.0.dylib (compatibility version 1.0.0, current version 1.0.8)
+	/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 62460.1.2)
+	/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)
+	/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit (compatibility version 1.0.0, current version 275.0.0)
+	/usr/lib/libiconv.2.dylib (compatibility version 7.0.0, current version 7.0.0)
+	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1359.0.0)
+<repo>/target/release/openalpaca:
+	/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 62460.1.2)
+	/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)
+	/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit (compatibility version 1.0.0, current version 275.0.0)
+	/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 5027.0.69)
+	/usr/lib/libiconv.2.dylib (compatibility version 7.0.0, current version 7.0.0)
+	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1359.0.0)
+
+### strings -a openalpacad | grep -i -E 'onnxruntime|fastembed|sqlite-vec|sqlite_vec|vec0|hf-hub|hf_hub|huggingface|tokenizers|multilingual-e5|\.onnx' (count, then distinct lines, cut to 200 chars)
+count=1
+   1 -- with files, so this baseline creates none of them and needs no sqlite-vec.
+
+### strings -a openalpaca | grep -i -E 'onnxruntime|fastembed|sqlite-vec|sqlite_vec|vec0|hf-hub|hf_hub|huggingface|tokenizers|multilingual-e5|\.onnx' (count, then distinct lines, cut to 200 chars)
+count=1
+   1 -- with files, so this baseline creates none of them and needs no sqlite-vec.
+
+### strings -a openalpaca_gui | grep -i -E 'onnxruntime|fastembed|sqlite-vec|sqlite_vec|vec0|hf-hub|hf_hub|huggingface|tokenizers|multilingual-e5|\.onnx' (count, then distinct lines, cut to 200 chars)
+count=0
+
+### Info.plist
+{
+  "CFBundleDevelopmentRegion" => "English"
+  "CFBundleDisplayName" => "openalpaca-gui"
+  "CFBundleExecutable" => "openalpaca_gui"
+  "CFBundleIconFile" => "icon.icns"
+  "CFBundleIdentifier" => "com.tangyunpei.openalpaca-gui"
+  "CFBundleInfoDictionaryVersion" => "6.0"
+  "CFBundleName" => "openalpaca-gui"
+  "CFBundlePackageType" => "APPL"
+  "CFBundleShortVersionString" => "0.1.0"
+  "CFBundleVersion" => "0.1.0"
+  "CSResourcesFileMapped" => true
+  "LSMinimumSystemVersion" => "10.13"
+  "LSRequiresCarbon" => true
+  "NSHighResolutionCapable" => true
+}

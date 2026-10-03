@@ -1,0 +1,11 @@
+OPENALPACA_HOME_STORE=<scratch>/program/track-d/store-model
+OPENALPACA_CONFIG_DIR=<scratch>/program/track-d/store-model/config
+GUARD: ok
+CWD=<scratch>/program/track-d/live-model
+gui binary sha256: 627108aa5547d6015af467c98daf7e2df0904189f4acc7d25add0040589c2757
+launch at 2026-10-03T04:27:57Z
+launched pid=72538
+  PID  PPID  PGID ELAPSED COMMAND
+72538 72531 72538   00:04 <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpaca_gui
+70283 <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpacad
+72243 <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpacad

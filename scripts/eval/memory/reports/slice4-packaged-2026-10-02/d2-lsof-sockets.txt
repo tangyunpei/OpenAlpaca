@@ -1,0 +1,4 @@
+$ lsof -nP -a -p 60493 -i
+COMMAND     PID       USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+openalpac 60493 owner   10u  IPv4 0x1ca5694bb0cea353      0t0  TCP 127.0.0.1:51021 (LISTEN)
+exit=0

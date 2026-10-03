@@ -1,0 +1,94 @@
+# Track D: D1 and D2 report
+
+**Status: D1 and D2 both passed. The daemon is LEFT RUNNING for D3** (pid 60493, port 51021, `evidence/d2-daemon.env`). Nothing was committed, because neither step names a commit. The task text was followed. **`track-d/SPEC.md` and `maps/slices34.md` did not exist** when this ran (see concern 1).
+
+## D1: the bundle
+
+- **git sha:** `8fde2925c2ce1b981ac9a92bfcf412cba8c72446`. The tree is clean apart from the untracked `tasks/deps-upgrade/`. The tarball's `manifest.json` says `git_sha: 8fde2925`.
+- **Builds:**
+  - `cargo build --release -p openalpaca -p openalpacad`: exit 0.
+  - `bun install`: exit 0, no changes.
+  - `bunx tauri build --bundles app`: exit 0.
+  - `scripts/release/package-macos.sh`: exit 0. It was read first; it installs nothing and only builds, stages and tars.
+  - The archive is `dist/openalpaca-macos-aarch64-apple-darwin-v0.1.0.tar.gz`: 55,129,775 B, sha256 `2c18d2cb…7125`, which matches its `.sha256` file.
+- **The `.app` has 4 files:** `Info.plist`, `icon.icns`, `openalpaca_gui` (9,608,656 B) and `openalpacad` (57,975,440 B, sha256 `bdaa22a2…ad34`).
+  - It holds no `.onnx`, tokenizer, ORT, `.dylib`, `.safetensors` or `.bin` file. The extracted tarball holds none either.
+  - The daemon links system libraries only.
+- **Strings:** the pattern `onnxruntime|fastembed|sqlite-vec|sqlite_vec|vec0|hf-hub|hf_hub|huggingface|tokenizers|multilingual-e5|\.onnx` matches **1** line in the bundled daemon, the tarball's `libexec/openalpacad` and the CLI. That line is the baseline SQL's comment, "…needs no sqlite-vec.", which is text, not code. The GUI binary matches **0**. The superseded home-README texts that 08 §4 found are gone, since SQ-2 (b).
+- **cargo tree:** `-p {openalpacad, openalpaca, openalpaca_gui} -e normal -i {fastembed, ort, ort-sys, tokenizers, hf-hub, sqlite-vec}` covers 18 checks. All 18 exit 101 with "did not match any packages", so each crate is absent. `Cargo.lock` has no entry for any of them (grep exit 1).
+- **Record:** `evidence/d1-bundle.md`, with the raw output in `evidence/build/01…08`.
+
+## D2: network-denied start and the CLI round-trip
+
+- **Launch:**
+  - The `.app`'s `Contents/MacOS/openalpacad` (`bdaa22a2…`) ran under `sandbox-exec -f scripts/eval/memory/no-network.sb`.
+  - Environment: `OPENALPACA_HOME_STORE=…/track-d/store`, `OPENALPACA_CONFIG_DIR=…/track-d/store/config`, `OPENALPACA_MANAGED_LOG=1`.
+  - CWD was `…/track-d/live`. Output was appended to `store/state/logs/daemon.log`.
+  - It was detached with `perl POSIX::setsid` and `nohup`. Its parent is now 1, and its pgid is its own.
+  - Before launch, `config/` and `state/logs/` were empty and there was no `llm.toml`. The daemon seeded the release template, with every provider `enabled = false`.
+  - Both store variables were echoed and checked against `track-d/` before every launch (`track-d/env.sh`).
+- **Up:** `discovery.json` appeared after 0.54 s. Boot to "Daemon ready" took 69 ms, and the memory index was rebuilt in 2 ms.
+- **`GET /v1/status` (HTTP 200):**
+  - **`schema_version` 2.**
+  - `home_root` `…/track-d/store`.
+  - `db_path` `…/track-d/store/state/openalpaca.db`.
+  - `log_path` `…/store/state/logs/daemon.log`, non-null because the log is managed.
+  - `project_root` null.
+  - `llm`: `default_model` claude-haiku-4-5-20251001, `default_model_routable` false, `effective_default_model` null.
+  - `busy`: all 0.
+  - Saved to `evidence/d2-status.json`, which contains no token.
+- **CLI round-trip** (`target/release/openalpaca`, sha256 `d2858646…`, not sandboxed, same environment, CWD `live/`, stdin `/dev/null`). The transcript is `evidence/d2-cli-transcript.txt`.
+
+  | Verb | Exit |
+  |---|---|
+  | `daemon status` | 0 |
+  | `memory list` | 0 ("No notes.") |
+  | `memory add --kind fact --title "Espresso grinder setting" --alias "coffee mill" --tag track-d "<body>"` | 0: saved `8bce7aec-7229-4a50-8772-1420173d4328` in the global partition. No project is found from `live/`. |
+  | `memory list` | 0 |
+  | `memory list --format json` | 0 |
+  | `memory search espresso` | 0 (matched on term) |
+  | `memory search "coffee mill"` | 0 (matched on alias and term) |
+  | `memory search grind` | 0 (matched on prefix) |
+  | `memory show <id>` | 0 (freshness verified) |
+  | `memory show <id> --raw` | 0 |
+  | `memory timeline <id>` | 0 |
+  | `memory sync` | 0 (1 file, 0 changed, index ready) |
+  | `memory forget <id> --yes` | 0 |
+  | `memory list` | 0 ("No notes.") |
+  | `memory search espresso` | 0 ("Nothing matched.") |
+  | `memory show <id>` | **1**: `MEMORY_NOT_FOUND … (HTTP 404)`. This is expected after the forget. |
+  | `daemon status` | 0 |
+
+  `daemon stop` was **not** run, because the daemon must stay up for D3.
+- **`daemon.log` grep** (72 lines, all INFO; ERROR 0, WARN 0): 0 matches for each of `download`, `fastembed`, `onnx`, `ort`, `hf-hub|huggingface`, `tokenizer`, `embed`, `sqlite-vec|vec0`, `connection|refused|timed out|timeout`, `network|dns|resolve`, `panic`, `error`, `warn` and `fail` (`evidence/d2-daemon-log-greps.txt`).
+- **Sockets:** `lsof -i` on the daemon shows only `TCP 127.0.0.1:51021 (LISTEN)`.
+- **Sandbox probe:** curl under the same profile cannot reach the daemon even on loopback (exit 7). The same curl unsandboxed gets 401 (`evidence/d2-sandbox-probe.txt`).
+- **`ls -la state/cache/`:** `memory-index-v1.sqlite` (143,360 B) plus its `-wal` (164,832 B) and `-shm` (32,768 B). There is nothing else and no `fastembed/`.
+- **`find memory -type f`:** only `memory/owners/80a4c0bb8402f4b0597eae9792caa358/MEMORY.md` (79 B, 0600). `notes/` and `.history/` are empty, both 0700.
+- **Control snapshot:** `state/memory-control/home-80a4c0bb….json` (760 B, 0600) has `notes: {}`, `pending: null` and **one tombstone**: `8bce7aec…`, origin `user`, `forgotten_at` 2026-10-03T04:03:50Z (`evidence/d2-control-snapshot.txt`).
+- **Other evidence:**
+  - `evidence/d2-daemon.log` is the raw log and `d2-daemon.nocolor.log` is the same log with colour codes stripped.
+  - `d2-store-tree.txt` lists names only.
+  - `d2-launch.txt` is the launch output.
+  - `d2-daemon.env` holds the pid, port, instance id, binary, profile, CWD and the environment block, and no token.
+
+## Concerns
+
+1. **The spec and the map were absent.** `program/track-d/SPEC.md` and `program/maps/slices34.md` did not exist, and a search of `<tmp> found neither. The round-trip and the evidence set were rebuilt from the task text, plan 04 §2 *Gates* and §6, and 08 §4. That round-trip was add → list → search → show → forget, without `daemon stop`. The lead should check the verbs and the evidence names against the spec once it exists.
+2. **The archive ships two different `openalpacad` builds** from the same commit:
+   - `libexec/openalpacad` is `cdfef8e7…` (57,978,128 B), from `cargo build -p openalpaca -p openalpacad`.
+   - The `.app`'s sidecar is `bdaa22a2…` (57,975,440 B), from `prepare-sidecar`'s `cargo build -p openalpacad`.
+
+   Cargo feature unification compiles the shared crates differently for the two invocations. D2 tested the `.app`'s build only. This predates the branch and was not changed.
+3. **The isolated store does not isolate `$HOME`.** At boot the daemon ran credential discovery: `TokenManager initialized with credential discovery` (`apps/openalpacad/src/services/llm.rs:178`). By default that reads `~/.claude/.credentials.json` and `~/.codex/auth.json` (`crates/openalpaca_llm/src/keys/credential_discovery/mod.rs:373`, `:424`). It also logged `Auto-detected Claude Code CLI at /opt/homebrew/bin/claude`, which is the CLI-backend fallback. I read none of those files.
+   - Here nothing could leave the sandbox, and status shows no routable model.
+   - For **D4**, the daemon reaches the real Ollama and is presumably not sandboxed. A failed model call could then fall through to the Claude Code CLI backend on the owner's account. The lead may want credential discovery and the CLI backend switched off in D4's scratch `llm.toml`. That is a decision; it was not applied here.
+4. **For D3:**
+   - The GUI must see the same `OPENALPACA_HOME_STORE` and `OPENALPACA_CONFIG_DIR`. `open -a` does not pass the environment unless `--env` is used; running `Contents/MacOS/openalpaca_gui` with the variables exported does. Otherwise the app looks at the default store, or spawns a sidecar of its own, unsandboxed.
+   - The discovery token expires at **2026-10-04T04:03:29Z** (24 h, enforced by the clients).
+   - The store holds no notes at hand-over, only the tombstone.
+5. **`state/cache/` holds the index's WAL sidecars.** Besides `memory-index-v1.sqlite` it holds the same database's `-wal` and `-shm`. Plan §6's wording, "only `memory-index-v1.sqlite`", does not mention them. They are that one SQLite file's journal, not another artifact.
+6. **Minor points:**
+   - The daemon logs nothing at INFO for memory operations, so the no-network evidence is three things: the absence of error and warn lines, the sandbox probe, and the LISTEN-only `lsof`.
+   - `memory show --raw` prints no trailing newline, which is cosmetic.
+   - One unauthenticated request (answered 401) reached the daemon from the probe's control.

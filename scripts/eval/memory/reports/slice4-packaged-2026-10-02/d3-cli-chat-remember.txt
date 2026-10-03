@@ -1,0 +1,6 @@
+$ script -q /dev/null openalpaca chat --message "/remember The recycling goes out on Thursday evenings"   (a pty, so the turn is attended)
+^DAlpaca: Saved as a note you wrote: “The recycling goes out on Thursday evenings” (9d8c9855, global). It is used from your next message.
+[default | 0 in | 0 out | 44ms]
+
+exit=0
+at 04:19:15Z

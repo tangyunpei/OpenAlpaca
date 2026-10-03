@@ -1,0 +1,87 @@
+# Track D: D4 report (the GUI on a live local model, isolated store-model root)
+
+**Status: done, one FAIL.** Eight of the nine surfaces passed. **"Notes used in this answer" failed:** the daemon delivers the note, but the GUI drops the line as soon as the transcript catches up (defect 1). The daemon was stopped from the GUI and its process is gone. The app was quit afterwards. Nothing was committed, because the step names no commit. The git tree is unchanged at `8fde2925`; only `tasks/deps-upgrade/` is untracked. **`track-d/SPEC.md` and `maps/slices34.md` still do not exist**, so D4 was run from the task text alone.
+
+## Setup
+
+- **Root.** `track-d/store-model/` was new. `config/llm.toml` and `state/logs/` were created before the first start (`evidence/d4-store-model-prestart.txt`).
+- **`llm.toml`** is the runbook's block:
+  - `[orchestrator] model = "qwen3.8:27b-mlx"`, `fallback_models = []`;
+  - `[providers.ollama] enabled = true`, `base_url = http://localhost:11434/v1`, `default_model = "qwen3.8:27b-mlx"`;
+  - anthropic and openai `enabled = false`.
+
+  "The others off" also covers three switches the runbook's dry-run section names. I added them because of D2's concern 3:
+  - `[cli_backends.claude_code] enabled = false`;
+  - `[cli_backends.codex] enabled = false`;
+  - `[credential_discovery] claude_code = false, codex = false`.
+
+  The boot log has no credential-discovery or CLI-backend line, so no failed call could fall through to the owner's account.
+- **Daemon.** The `.app`'s `Contents/MacOS/openalpacad` (sha256 `bdaa22a2…`) was started unsandboxed by hand.
+  - Script: `track-d/d4-launch-daemon.sh`. Environment: `OPENALPACA_HOME_STORE=…/track-d/store-model`, `OPENALPACA_CONFIG_DIR=…/store-model/config`, `OPENALPACA_MANAGED_LOG=1`.
+  - Both variables were echoed and guarded by `track-d/env-model.sh`. The guard also refuses a missing config dir, because otherwise the daemon would walk up to the repo's `config/`.
+  - CWD was `track-d/live-model`. The process ran as pid 72243 on port 51748, instance `ceb71552…`.
+  - Boot: "Refreshed 2 models from Ollama", default model `qwen3.8:27b-mlx`.
+  - `/v1/status` returned `schema_version` 2 and `home_root` …/store-model. `llm` had `default_model_routable: true` and `effective_default_model: qwen3.8:27b-mlx` (`evidence/d4-status-boot.json`).
+- **App.** `Contents/MacOS/openalpaca_gui` (sha256 `627108aa…`) was started unsandboxed with the same environment and CWD (`d4-launch-app.sh`, pid 72538).
+  - It reused the daemon and spawned none. Only D3's 70283 (on `track-d/store`, left untouched) and D4's daemon were running.
+- **Driving.** `request_access` granted `com.tangyunpei.openalpaca-gui` at tier full.
+  - This time background pointer clicks reached the webview: `app_click`, raw input, on screen.
+  - Background typing did not. Composer text was set through Accessibility (`ax.js setvalue AXTextArea Message`).
+  - A screenshot was taken before every click. Evidence PNGs are window captures (`screencapture -l 11136`) in `evidence/gui-model/`.
+- **Onboarding came first.** A fresh store starts in bootstrap mode (BOOTSTRAP.md). In that mode the main loop gets only `update_persona` and none of the memory tools.
+  - I answered the onboarding question once: "call me Track D tester. You are Alpaca, a calm and concise assistant".
+  - I approved the two `update_persona` cards.
+  - The daemon logged "Bootstrap onboarding complete" and from then on offered the 12-tool main-loop surface.
+
+## Surfaces
+
+| # | Surface | Result | Screenshot(s) / evidence |
+|---|---|---|---|
+| 1 | **Settings → Connection shows store-model's root first** | **PASS.** Daemon connected, instance `ceb7`, endpoint 127.0.0.1:51748, schema v2. The Project card reads "…files go to the home store (<tmp>". The composer showed `qwen3.8:27b-mlx` and no first-run card. | `00-launch-chat-empty.png`, `01-settings-connection-store-model-root.png` |
+| 2 | **A chat turn answered by the local model** | **PASS.** "Hi! … what is 17 times 3?" was answered "51. …", plus the onboarding question. The meta line reads `qwen3.8:27b-mlx · 9.8s · 2278/99 tok`, and the daemon logged `LLM call … model=qwen3.8:27b-mlx`. | `02-chat-turn-answered-by-local-model.png` |
+| 3 | **"Notes used in this answer"** | **FAIL (never seen).** `/remember My favourite tea is jasmine green tea` saved note `97ddf695` (origin user, `03-…`). Questions about the tea were then answered correctly ("Jasmine green tea", "(Note 97ddf695)"). The daemon's recently-used ring records a **recall** delivery of `97ddf695` for each of those turns at 04:31:41, 04:33:10, 04:35:01 and 04:35:49 (`evidence/d4-recently-used-3.json`). The settled transcript never shows the note. Two burst captures around `done` show no note in any frame: every ~0.3 s for one turn (`burst-memused/`) and every ~0.16 s for another (`burst-lq11/`). Cause: defect 1. | `04-chat-recall-answer-settled-no-notes-used-note.png`, `evidence/burst-*`, `evidence/d4-repro-memused.txt` |
+| 4 | **Suggestion card after changing a saved note through chat (LQ11)** | **PASS.** "Actually, my favourite tea has changed: it is oolong now…" led the model to `memory_store` with a replacement, with no prompt. It answered that the change "is queued as a suggestion, not applied". Memory → Suggestions shows: "Replace "My favourite tea is jasmine green tea" (saved by you) with "My favourite tea is oolong tea"?", the Yours and New rows, "Aliases none → oolong, favourite tea, favorite tea", "Suggested by Alpaca on 2026-10-03", and the **Replace** and **Keep mine** buttons. `GET /v1/memories/suggestions` agrees: candidate `9a46c9ce`, origin extracted_user, target `97ddf695` origin user (`d4-suggestions-1.json`). | `05-chat-lq11-change-answered-as-suggestion.png`, `06-memory-suggestion-card-lq11.png` |
+| 5 | **memory_confirm's card** | **PASS.** "Yes, please apply that pending suggestion…" produced a `memory_confirm` card. It has the daemon-written preview "FROM OPENALPACA — Replace your saved note … Yours / New / Changes: aliases … / Suggested by the assistant on 2026-10-03 / Your note is kept as history", the three ids in JSON, and **Approve / Deny only**, with no "Always allow" (per_call). On Approve the daemon logged "a suggestion confirmed on its approval card", and the answer read "Done — applied…". | `07-chat-memory-confirm-card.png`, `08-chat-memory-confirm-approved-applied.png` |
+| 6 | **Recently learned + Undo** | **PASS.** The **switch** case is the one asked for. B (one Porto/Lena turn the model did not store) was left by reopening A. Learning then reported `stored=2 active=2` for B at 04:43:58: "Visiting sister Lena in Porto in November 2026" and "Sister Lena lives in Porto", both shown under Recently learned with Undo (`16-…`). One-click **Undo** on "Sister Lena lives in Porto" showed the toast "Undone — … is not remembered any more", and the row left (`17-…`). Earlier, the 120 s idle trigger had learned two notes from A (04:38:43; see observation 5), and Undo on "Assistant identity is Alpaca" worked the same way (`12-…`, `13-…`). The first switch, A→B via New chat, ran a flush that stored 0, because the chat model had already stored the cello note itself. | `12-…`, `13-…`, `16-memory-recently-learned-after-switch.png`, `17-memory-undo-switch-learned-note.png` |
+| 7 | **The Working state card after a few turns** | **PASS, with a caveat.** During conversation A, after 9 user turns, the card still read "Nothing summarised yet — the whole conversation is still in view" (`09-…`). That is by design: the turn-end refresh needs `summary_min_new_older_messages` (12) rows past the recent window, and nothing compacted. A's close at the switch wrote the state (04:40:32; `d4-session-A-after-close.json`). Reopening A then showed the card with topic "Identity setup, memory updates, and cello tips", Goal, Done ×3, Decided ×2, refs `note 97ddf695` and `suggestion 9a46c9ce-…`, and "updated 3m ago". | `09-working-state-card-empty-after-turns.png`, `15-…`, `15b-working-state-card-full-width.png` |
+| 8 | **"Continuing from" on a new conversation on the same lane** | **PASS.** After New chat (A archived and closed: working state written, `episodes=1`), B's first turn "Where did we leave off last time?" showed the muted line "Continuing from: Identity setup, memory updates, and cello tips (ended 2 Oct)" above the transcript. The answer recapped A. | `11-new-chat-switch-previous-archived.png`, `14-chat-continuing-from-new-conversation.png` |
+| 9 | **Start fresh** | **PASS.** START FRESH opened conversation C and archived A. The same opener sent in C showed **no** "Continuing from" line. The model reached A's content only through its own memory tools (3 tool calls; the episode note is searchable by design). | `18-start-fresh-new-conversation.png`, `19-start-fresh-turn-no-continuing-from.png` |
+| 10 | **Stop daemon… and the process is gone** | **PASS.** The dialog "Stop the OpenAlpaca daemon?" carries the four paragraphs and "Right now: 1 window connected." Steps and results: <br>• `Stop daemon` → the GUI shows "Daemon stopped · stopped just now", `Start daemon`, and the sidebar reads `stopped`. <br>• `ps -p 72243` → nothing; `kill -0` → "no such process". <br>• `pgrep` → only D3's 70283. <br>• `discovery.json` is removed, and `lsof` on `openalpacad.lock` → no holder (`evidence/d4-stop-after.txt`). <br>• The log shows a clean sequence: stop drain ("Learning drain stopped at its budget; the boot catch-up learns the rest"), CostTracker flush (4 rows), session logs, extensions, connectors, wake, "Daemon stopped". <br>• Whole D4 daemon log: 187 lines, **0 WARN, 0 ERROR** (`evidence/d4-daemon.nocolor.log`). | `20-settings-connection-stop-daemon-dialog.png`, `21-settings-connection-daemon-stopped.png` |
+
+`Start daemon` was not pressed, and the app was then quit from its menu.
+
+## Defects
+
+1. **"Notes used in this answer" disappears the moment the transcript catches up, so a person never sees it (major for this surface).**
+   - Mechanism:
+     1. `done.memory_used` rides only on the *live* assistant row (`apps/openalpaca-gui/src/views/chat/transcript-model.ts:563`).
+     2. `chat_stream_ended` invalidates the chat history (`lib/query-client.ts:143`).
+     3. `showsLiveTurn` (`transcript-model.ts:375`) hides the live row as soon as a stored assistant row has the same content.
+     4. A stored row always has `memoryUsed: []` (`:457`).
+   - So the line exists for roughly one history round trip after `done`.
+   - A scratch run of the real reducer and `buildTranscript` confirms it: memoryUsed counts are `[1]` before the refetch and `[0]` after (`track-d/repro-memused.ts`, output in `evidence/d4-repro-memused.txt`).
+   - The tests never let history catch up: `transcript-model.test.ts`'s "rides on the live row once `done` lands" and `ChatView.test.tsx`'s "says which memory notes an answer used".
+   - `docs/GUI_Manual.md:488` promises the line until a **reload**.
+   - "Continuing from" survives because it is kept in its own state (`useChatSession.ts:499`, `:849`). `memory_used` could be held the same way.
+   - The skipped-attachment note ("Not sent to the model", `transcript-model.ts:455`) has the same shape and very likely the same fault. That is **inferred, not exercised**.
+2. **Layout: with the conversations column open in the 1080-pt window, the composer's Send button overflows its card.** It is drawn outside the composer border, over the column edge (`10-…`, `11-…`, `18-…`). The transcript column is about 150 pt wide at that point. Cosmetic.
+3. **"1 notes"** (D3 defect 1) is seen again in `06-…` (`MemoryList.tsx:117`).
+
+## Observations
+
+1. **The Working state card does not show `asked`.** The state carries `asked` (the fix round's F3, 11 rev 1.7); A's state held 3 entries. The GUI's `WorkingState` type and `WorkingStateCard.tsx` render only topic, goal, done, decided, open, next and refs. This may predate F3 rather than be a choice. The lead should check it against 11 §5.
+2. **Recently learned labels the chat model's own note as "Learned from what you said".** That note is "Learning the cello", from `memory_store`: origin extracted_user with no `observed_at`, which is LQ14's datum. The card copy does not tell it apart from the extractor's notes. Per MD-2 this may be intended.
+3. **A fresh store gates every memory surface behind onboarding.** Until IDENTITY.md and USER.md are populated, the main loop has `update_persona` only (`handlers.rs:260`). A runbook for GUI acceptance on a fresh root should say so.
+4. **The first answer's "51. Also, …" is rendered as an ordered list starting at 51.** That is markdown-correct, but it reads oddly.
+5. **The idle trigger fired while the session had a turn in flight.** The turn was waiting on the `memory_confirm` approval, 04:37:40–04:38:14. The previous turn had ended at 04:36:02, so the sweeper marked the session due on idle. The flush then waited for 20 s of quiet and ran at 04:38:34–43. No harm was seen, but "idle" is measured from the last *finished* turn.
+6. **Episode notes.** A's close wrote "Conversation on 2026-10-03: Identity setup and tea preference update" (origin extracted_other, "Inferred from the conversation"). The extractor also wrote a kind-`episode` note of origin extracted_user ("Visiting sister Lena…"). That second note is not a conversation summary under `is_conversation_summary` (`memory_files/mod.rs:131`), so automatic recall still delivers it. That is correct.
+
+## Concerns
+
+1. **I printed one secret by mistake.** While reading `discovery.json` I printed the dict with a filter that only dropped top-level keys containing "token", and the nested `auth.token` of this scratch daemon appeared in my tool output (not in any file or this report). It was the store-model daemon's own token. That daemon is now stopped, and the token was due to expire at 04:27Z on 2026-10-04 anyway. Every later read went through `d4-api.sh`, which keeps the token in a shell variable.
+2. **One turn was not typed in the GUI.** To capture `done.memory_used` directly, I sent one `POST /v1/chat` by curl: "Which tea is my favourite? One short line." It landed on the GUI lane, in conversation A (04:35:01). The SSE capture then failed with 401, because `/v1/chat/stream/{id}` takes the token only as a URL query parameter, and I did not put a secret in a URL. Defect 1 therefore rests on the recently-used ring, the burst captures, the code and the scratch repro, not on a captured `done` frame.
+3. **Screenshots are in `evidence/gui-model/`, as the step names**, not `evidence/gui/` as the general rule says. Burst frames (JPEG) were trimmed to the frames around `done`. `04-…` is one of those frames, converted to PNG.
+4. **WebKit storage is shared with the owner's real app** (same bundle id). No project was set. The conversations column was toggled and left collapsed, as it started.
+5. **The store-model root is left in place:** 3 conversations (A, B, C), 5 active notes, the superseded jasmine note kept as history, 2 withdrawals and a populated USER.md and IDENTITY.md. Its daemon is stopped. D3's daemon (pid 70283 on `track-d/store`) was not touched and is still running.
+6. **D4 reached the real Ollama** on `qwen3.8:27b-mlx` only, under the standing authorization. The daemon and the app ran unsandboxed, as the step requires. No cargo test was run, and neither the offline harness nor `OPENALPACA_LIVE_EVAL` was used.
+7. The spec and the map are missing, as they were for D1–D3. The surfaces, names and order follow the task text.

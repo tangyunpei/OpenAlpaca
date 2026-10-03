@@ -1,0 +1,7 @@
+$ ls -la state/cache/
+total 736
+drwxr-xr-x@  5 owner  wheel     160 Oct  2 21:03 .
+drwx------@ 11 owner  wheel     352 Oct  2 21:03 ..
+-rw-r--r--@  1 owner  wheel  143360 Oct  2 21:03 memory-index-v1.sqlite
+-rw-r--r--@  1 owner  wheel   32768 Oct  2 21:03 memory-index-v1.sqlite-shm
+-rw-r--r--@  1 owner  wheel  164832 Oct  2 21:03 memory-index-v1.sqlite-wal

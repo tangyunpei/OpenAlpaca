@@ -1,0 +1,6 @@
+$ POST /v1/memories/f085d45c-cfc6-46ac-b167-b46cb36af0d8  If-Match: "bd541d4db3095a48d9128fa1558d13314d2008f0b7a4c576de764fa93d011726" (stale)  {action: edit, patch: {body: ...}}
+http=409
+exit=0
+{"error":{"code":"MEMORY_REVISION_CONFLICT","message":"note f085d45c-cfc6-46ac-b167-b46cb36af0d8 changed since it was read: current revision is 69d5921b3d0b7574539c5e65116173058dd7cf056491c926aeaf37dd042578e6"}}
+--- note body after:
+Grind size 11 on the burr grinder gives a 28-second espresso shot (changed in the app).

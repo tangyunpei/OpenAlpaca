@@ -1,0 +1,7 @@
+$ sandbox-exec -f no-network-loopback.sb curl 127.0.0.1:51021/v1/status (no token, 401 expected)
+401
+exit=0
+$ sandbox-exec -f no-network-loopback.sb curl http://192.0.2.1/ (TEST-NET-1, must be refused at once)
+curl: (7) Failed to connect to 192.0.2.1 port 80 after 1 ms: Couldn't connect to server
+000
+exit=7

@@ -1,0 +1,187 @@
+2026-10-03T04:27:22.735725Z  INFO openalpacad: OpenAlpaca Daemon starting...
+2026-10-03T04:27:22.740917Z  INFO openalpacad: Acquired singleton lock
+2026-10-03T04:27:22.740932Z  INFO openalpacad: Config base dir: <scratch>/program/track-d/store-model/config
+2026-10-03T04:27:22.741019Z  INFO openalpacad::bootstrap::config: Seeded default config: <scratch>/program/track-d/store-model/config/daemon.toml
+2026-10-03T04:27:22.741082Z  INFO openalpacad::bootstrap::config: Seeded default config: <scratch>/program/track-d/store-model/config/mcp.toml
+2026-10-03T04:27:22.741601Z  INFO openalpacad::bootstrap::content: Seeded 9 default agent template file(s): <scratch>/program/track-d/store-model/config/agents
+2026-10-03T04:27:22.742253Z  INFO openalpacad::bootstrap::content: Seeded 8 default skill file(s): <scratch>/program/track-d/store-model/config/skills
+2026-10-03T04:27:22.742336Z  INFO openalpacad::bootstrap::content: Seeded 1 default tool config file(s): <scratch>/program/track-d/store-model/config/tools
+2026-10-03T04:27:22.746821Z  INFO openalpacad: Master key loaded from <scratch>/program/track-d/store-model/state/.master_key
+2026-10-03T04:27:22.746843Z  INFO openalpacad: Signal handlers installed (SIGINT + SIGTERM)
+2026-10-03T04:27:22.747104Z  INFO openalpacad: Listening on http://127.0.0.1:51748
+2026-10-03T04:27:22.750746Z  INFO openalpacad: Discovery written to: <scratch>/program/track-d/store-model/state/discovery.json
+2026-10-03T04:27:22.751883Z  INFO openalpaca_storage::database: Running migration 1: baseline
+2026-10-03T04:27:22.753088Z  INFO openalpaca_storage::database: Running migration 2: working_state
+2026-10-03T04:27:22.754341Z  INFO openalpaca_storage::database: Migrations complete, schema version: 2
+2026-10-03T04:27:22.754345Z  INFO openalpaca_storage::database: Database initialized: <scratch>/program/track-d/store-model/state/openalpaca.db
+2026-10-03T04:27:22.754349Z  INFO openalpacad: Database initialized: <scratch>/program/track-d/store-model/state/openalpaca.db
+2026-10-03T04:27:22.754510Z  INFO openalpacad: Local user ID: beac92c6-1ee1-405a-b1c2-0125f374f5cc, default lane: beac92c6-1ee1-405a-b1c2-0125f374f5cc:gui
+2026-10-03T04:27:22.754638Z  INFO openalpacad::bootstrap::persona: Soul bootstrap created template: <scratch>/program/track-d/store-model/config/orchestrator/templates/SOUL_temp.md
+2026-10-03T04:27:22.754739Z  INFO openalpacad::bootstrap::persona: Soul bootstrap created active file: <scratch>/program/track-d/store-model/config/orchestrator/SOUL.md
+2026-10-03T04:27:22.754852Z  INFO openalpacad::bootstrap::persona: Soul loaded: <scratch>/program/track-d/store-model/config/orchestrator/SOUL.md
+2026-10-03T04:27:22.754910Z  INFO openalpacad::bootstrap::persona: User bootstrap created template: <scratch>/program/track-d/store-model/config/orchestrator/templates/USER_temp.md
+2026-10-03T04:27:22.754992Z  INFO openalpacad::bootstrap::persona: User bootstrap created active file: <scratch>/program/track-d/store-model/config/orchestrator/USER.md
+2026-10-03T04:27:22.755053Z  INFO openalpacad::bootstrap::persona: User profile loaded: <scratch>/program/track-d/store-model/config/orchestrator/USER.md
+2026-10-03T04:27:22.755109Z  INFO openalpacad::bootstrap::persona: Identity bootstrap created template: <scratch>/program/track-d/store-model/config/orchestrator/templates/IDENTITY_temp.md
+2026-10-03T04:27:22.755191Z  INFO openalpacad::bootstrap::persona: Identity bootstrap created active file: <scratch>/program/track-d/store-model/config/orchestrator/IDENTITY.md
+2026-10-03T04:27:22.755244Z  INFO openalpacad::bootstrap::persona: Identity loaded: <scratch>/program/track-d/store-model/config/orchestrator/IDENTITY.md
+2026-10-03T04:27:22.755296Z  INFO openalpacad::bootstrap::persona: Bootstrap created template: <scratch>/program/track-d/store-model/config/orchestrator/templates/BOOTSTRAP_temp.md
+2026-10-03T04:27:22.755375Z  INFO openalpacad::bootstrap::persona: Bootstrap created active file: <scratch>/program/track-d/store-model/config/orchestrator/BOOTSTRAP.md
+2026-10-03T04:27:22.755431Z  INFO openalpacad::bootstrap::persona: Bootstrap loaded: <scratch>/program/track-d/store-model/config/orchestrator/BOOTSTRAP.md
+2026-10-03T04:27:22.755521Z  INFO openalpaca_core::daemon_config: Daemon config loaded from <scratch>/program/track-d/store-model/config/daemon.toml
+2026-10-03T04:27:22.755526Z  INFO openalpacad: Daemon config loaded from <scratch>/program/track-d/store-model/config/daemon.toml
+2026-10-03T04:27:22.755659Z  INFO openalpacad: Wake: watching paths: ["<scratch>/program/track-d/store-model/config/agents", "<scratch>/program/track-d/store-model/config/llm.toml", "<scratch>/program/track-d/store-model/config/daemon.toml", "<scratch>/program/track-d/store-model/config/mcp.toml", "<scratch>/program/track-d/store-model/config/orchestrator/SOUL.md", "<scratch>/program/track-d/store-model/config/orchestrator/USER.md", "<scratch>/program/track-d/store-model/config/orchestrator/IDENTITY.md", "<scratch>/program/track-d/store-model/config/orchestrator/BOOTSTRAP.md", "<scratch>/program/track-d/store-model/config/skills"]
+2026-10-03T04:27:22.755674Z  INFO openalpaca_wake::manager: Starting WakeManager...
+2026-10-03T04:27:22.755692Z  INFO openalpaca_wake::scheduler: WakeScheduler started
+2026-10-03T04:27:22.755782Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store-model/config/agents"
+2026-10-03T04:27:22.755852Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store-model/config/llm.toml"
+2026-10-03T04:27:22.755861Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store-model/config/daemon.toml"
+2026-10-03T04:27:22.755868Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store-model/config/mcp.toml"
+2026-10-03T04:27:22.755877Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store-model/config/orchestrator/SOUL.md"
+2026-10-03T04:27:22.755885Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store-model/config/orchestrator/USER.md"
+2026-10-03T04:27:22.755893Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store-model/config/orchestrator/IDENTITY.md"
+2026-10-03T04:27:22.755905Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store-model/config/orchestrator/BOOTSTRAP.md"
+2026-10-03T04:27:22.756040Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store-model/config/skills"
+2026-10-03T04:27:22.756044Z  INFO openalpaca_wake::manager: WakeManager running with 1 watchers
+2026-10-03T04:27:22.756226Z  INFO openalpacad::services::llm: OS keychain disabled (default). Using local encrypted storage.
+2026-10-03T04:27:22.756347Z  INFO openalpacad::services::llm: LLM router loaded (default model: qwen3.8:27b-mlx)
+2026-10-03T04:27:22.756357Z  INFO openalpacad::services::llm: LLM settings service initialized
+2026-10-03T04:27:22.756361Z  INFO openalpacad::services::llm: Refreshing available models from providers...
+2026-10-03T04:27:22.981895Z  INFO openalpaca_llm::routing::router::capacity: Refreshed 2 models from Ollama
+2026-10-03T04:27:22.982430Z  INFO openalpacad::services: Skill catalog: loaded 4 skill(s) from <scratch>/program/track-d/store-model/config/skills
+2026-10-03T04:27:22.984382Z  INFO openalpaca_core::tools::registry: registered capability provider handle=ProviderHandle(0) total_providers=1
+2026-10-03T04:27:22.984714Z  INFO openalpacad::services::tools: Tool registry: 15 tools loaded
+2026-10-03T04:27:22.984892Z  INFO openalpacad::services::mcp: MCP server bootstrap complete connected=0 total=0
+2026-10-03T04:27:22.985147Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store-model/config/agents/explore_agent.md (singleton=false)
+2026-10-03T04:27:22.985314Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store-model/config/agents/review_agent.md (singleton=false)
+2026-10-03T04:27:22.985465Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store-model/config/agents/system_agent.md (singleton=false)
+2026-10-03T04:27:22.985586Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store-model/config/agents/research_agent.md (singleton=false)
+2026-10-03T04:27:22.985737Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store-model/config/agents/planning_agent.md (singleton=false)
+2026-10-03T04:27:22.985878Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store-model/config/agents/code_agent.md (singleton=false)
+2026-10-03T04:27:22.986008Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store-model/config/agents/general_agent.md (singleton=false)
+2026-10-03T04:27:22.986129Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store-model/config/agents/writing_agent.md (singleton=false)
+2026-10-03T04:27:22.986226Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store-model/config/agents/lead_agent.md (singleton=true)
+2026-10-03T04:27:22.986372Z  INFO openalpaca_plugins::manager: scanning plugin directory dir=<scratch>/program/track-d/store-model/plugins
+2026-10-03T04:27:22.986521Z  INFO openalpaca_plugins::manager: plugin scan complete count=0
+2026-10-03T04:27:22.986609Z  INFO openalpacad::managers::connector: Starting enabled connectors...
+2026-10-03T04:27:22.986656Z  INFO openalpacad::managers::connector: Started 0 connectors
+2026-10-03T04:27:22.986705Z  INFO openalpacad::notification: NotificationDispatcher started
+2026-10-03T04:27:22.987058Z  INFO openalpacad: Daemon ready (instance: ceb71552-0a94-42cf-8042-82e441eaf928)
+2026-10-03T04:27:22.989106Z  INFO openalpacad::background: memory index rebuilt elapsed_ms=2
+2026-10-03T04:27:57.405938Z  INFO openalpacad::routes::events: WebSocket client connected
+2026-10-03T04:29:19.006685Z  INFO openalpaca_core::orchestrator::query_handler::simple_query_handler: Simple query upgraded with 1 tools: ["update_persona"]
+2026-10-03T04:29:19.008302Z  INFO openalpaca_core::runner::agentic_loop: Agentic loop started agent_id="orchestrator" tools_count=1 max_rounds=4 max_cost=1.0 backend="router" context_management=true
+2026-10-03T04:29:28.779229Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=1}: openalpaca_core::runner::agentic_loop: Agentic loop completed successfully agent_id="orchestrator" rounds=1 total_input_tokens=2278 total_output_tokens=99 tool_calls=0 content_len=120
+2026-10-03T04:29:28.779588Z  INFO openalpacad::event_bridge: LLM call: agent=orchestrator, model=qwen3.8:27b-mlx, tokens=2278/99, cost=$0.000000
+2026-10-03T04:29:28.781068Z  INFO openalpaca_core::chat::service: Chat stream 94c318d3-f139-4bca-a690-8a7999943769 completed in 9775ms
+2026-10-03T04:30:19.104680Z  INFO openalpaca_core::orchestrator::query_handler::simple_query_handler: Simple query upgraded with 1 tools: ["update_persona"]
+2026-10-03T04:30:19.105128Z  INFO openalpaca_core::runner::agentic_loop: Agentic loop started agent_id="orchestrator" tools_count=1 max_rounds=4 max_cost=1.0 backend="router" context_management=true
+2026-10-03T04:30:23.259009Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=1}: openalpaca_core::security::sandbox: Tool requires confirmation — awaiting user response (timeout: 300s) agent_id="orchestrator" tool=update_persona
+2026-10-03T04:30:23.259027Z  INFO openalpacad::event_bridge: Tool confirmation requested: tool=update_persona, agent=orchestrator, request=08f1ca10-841f-48aa-9880-4d61b5b38331
+2026-10-03T04:30:23.259127Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=1}: openalpaca_core::security::sandbox: Tool requires confirmation — awaiting user response (timeout: 300s) agent_id="orchestrator" tool=update_persona
+2026-10-03T04:30:23.259250Z  INFO openalpacad::event_bridge: Tool confirmation requested: tool=update_persona, agent=orchestrator, request=f430d271-28d3-41bf-95a2-cadd0b62733e
+2026-10-03T04:30:53.049372Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=1}: openalpaca_core::security::sandbox: Tool approved by user agent_id="orchestrator" tool=update_persona
+2026-10-03T04:30:53.049463Z  INFO openalpacad::event_bridge: Tool confirmation resolved: tool=update_persona, agent=orchestrator, request=08f1ca10-841f-48aa-9880-4d61b5b38331, outcome=approved
+2026-10-03T04:30:53.054308Z  INFO openalpacad::hot_reload: IdentityUpdated via EventBus (actor=agent, sha256=dc3ed685ece91c39), reloading identity
+2026-10-03T04:30:53.054344Z  INFO identity_audit: IDENTITY.md updated actor=agent mode=sections content_sha256=dc3ed685ece91c395f8041761bb81fc491d59098fccd74501e1edb3e65b22cc2
+2026-10-03T04:30:53.054375Z  INFO openalpacad::hot_reload: Identity hot-reloaded via EventBus: <scratch>/program/track-d/store-model/config/orchestrator/IDENTITY.md
+2026-10-03T04:30:53.195340Z  INFO openalpacad::hot_reload: Received WakeEvent: FileChanged { path: "<scratch>/program/track-d/store-model/config/orchestrator/IDENTITY.md", change_type: "Modify(Metadata(WriteTime))" }
+2026-10-03T04:30:53.195493Z  INFO openalpacad::hot_reload: Watcher dedup: skipping IDENTITY reload for hash dc3ed685ece91c39 (already applied via EventBus)
+2026-10-03T04:30:56.682892Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=1}: openalpaca_core::security::sandbox: Tool approved by user agent_id="orchestrator" tool=update_persona
+2026-10-03T04:30:56.682960Z  INFO openalpacad::event_bridge: Tool confirmation resolved: tool=update_persona, agent=orchestrator, request=f430d271-28d3-41bf-95a2-cadd0b62733e, outcome=approved
+2026-10-03T04:30:56.688702Z  INFO openalpacad::hot_reload: UserProfileUpdated via EventBus (actor=agent, sha256=3296ebba5f250836), reloading profile
+2026-10-03T04:30:56.688707Z  INFO user_audit: USER.md updated actor=agent mode=sections content_sha256=3296ebba5f250836a1bd84ee5f6d6955ad512c419826064068cab41409fdad54 modified_sections=["identity", "communication_style"]
+2026-10-03T04:30:56.688832Z  INFO openalpacad::hot_reload: User profile hot-reloaded via EventBus: <scratch>/program/track-d/store-model/config/orchestrator/USER.md
+2026-10-03T04:30:56.869210Z  INFO openalpacad::hot_reload: Received WakeEvent: FileChanged { path: "<scratch>/program/track-d/store-model/config/orchestrator/USER.md", change_type: "Modify(Metadata(WriteTime))" }
+2026-10-03T04:30:56.869339Z  INFO openalpacad::hot_reload: Watcher dedup: skipping USER reload for hash 3296ebba5f250836 (already applied via EventBus)
+2026-10-03T04:30:58.972636Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=2}: openalpaca_core::runner::agentic_loop: Agentic loop completed successfully agent_id="orchestrator" rounds=2 total_input_tokens=5452 total_output_tokens=333 tool_calls=2 content_len=46
+2026-10-03T04:30:58.972871Z  INFO openalpacad::event_bridge: LLM call: agent=orchestrator, model=qwen3.8:27b-mlx, tokens=5452/333, cost=$0.000000
+2026-10-03T04:30:58.972915Z  INFO openalpaca_core::orchestrator::bootstrap: Bootstrap onboarding complete! Identity and user profile populated.
+2026-10-03T04:30:58.972924Z  INFO openalpaca_wake::watcher::filesystem: Unwatched path: "<scratch>/program/track-d/store-model/config/orchestrator/BOOTSTRAP.md"
+2026-10-03T04:30:58.973063Z  INFO openalpaca_core::orchestrator::bootstrap: Deleted BOOTSTRAP.md: <scratch>/program/track-d/store-model/config/orchestrator/BOOTSTRAP.md
+2026-10-03T04:30:58.973187Z  INFO openalpaca_core::chat::service: Chat stream bc0221d2-cc48-4e5a-9165-9988e2e48786 completed in 39869ms
+2026-10-03T04:30:58.973195Z  INFO bootstrap_audit: Bootstrap onboarding completed identity_populated=true user_populated=true
+2026-10-03T04:31:28.676542Z  INFO openalpaca_core::chat::service: Chat stream 1eaf46d4-889d-43ed-84ab-7bb89877f9e2 completed in 58ms
+2026-10-03T04:31:41.072487Z  INFO openalpaca_core::orchestrator::query_handler::simple_query_handler: Simple query upgraded with 12 tools: ["start_workflow", "task_status", "memory_store", "memory_update", "memory_forget", "memory_confirm", "memory_search", "memory_read", "memory_list", "memory_timeline", "read_result", "invoke_skill"]
+2026-10-03T04:31:41.073535Z  INFO openalpaca_core::runner::agentic_loop: Agentic loop started agent_id="orchestrator" tools_count=12 max_rounds=8 max_cost=1.0 backend="router" context_management=true
+2026-10-03T04:31:51.459706Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=1}: openalpaca_core::runner::agentic_loop: Agentic loop completed successfully agent_id="orchestrator" rounds=1 total_input_tokens=7646 total_output_tokens=34 tool_calls=0 content_len=23
+2026-10-03T04:31:51.459965Z  INFO openalpacad::event_bridge: LLM call: agent=orchestrator, model=qwen3.8:27b-mlx, tokens=7646/34, cost=$0.000000
+2026-10-03T04:31:51.460294Z  INFO openalpaca_core::chat::service: Chat stream a14ee8a3-73b2-4f8f-83f1-bbe9acf3b5e4 completed in 10388ms
+2026-10-03T04:33:10.633451Z  INFO openalpaca_core::orchestrator::query_handler::simple_query_handler: Simple query upgraded with 12 tools: ["start_workflow", "task_status", "memory_store", "memory_update", "memory_forget", "memory_confirm", "memory_search", "memory_read", "memory_list", "memory_timeline", "read_result", "invoke_skill"]
+2026-10-03T04:33:10.634672Z  INFO openalpaca_core::runner::agentic_loop: Agentic loop started agent_id="orchestrator" tools_count=12 max_rounds=8 max_cost=1.0 backend="router" context_management=true
+2026-10-03T04:33:20.754875Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=1}: openalpaca_core::runner::agentic_loop: Agentic loop completed successfully agent_id="orchestrator" rounds=1 total_input_tokens=7679 total_output_tokens=59 tool_calls=0 content_len=41
+2026-10-03T04:33:20.755125Z  INFO openalpacad::event_bridge: LLM call: agent=orchestrator, model=qwen3.8:27b-mlx, tokens=7679/59, cost=$0.000000
+2026-10-03T04:33:20.755424Z  INFO openalpaca_core::chat::service: Chat stream b3dfb811-6e0f-464e-8aa6-c90f291f3d37 completed in 10122ms
+2026-10-03T04:35:01.159144Z  INFO openalpaca_core::orchestrator::query_handler::simple_query_handler: Simple query upgraded with 12 tools: ["start_workflow", "task_status", "memory_store", "memory_update", "memory_forget", "memory_confirm", "memory_search", "memory_read", "memory_list", "memory_timeline", "read_result", "invoke_skill"]
+2026-10-03T04:35:01.160067Z  INFO openalpaca_core::runner::agentic_loop: Agentic loop started agent_id="orchestrator" tools_count=12 max_rounds=8 max_cost=1.0 backend="router" context_management=true
+2026-10-03T04:35:03.099749Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=1}: openalpaca_core::runner::agentic_loop: Agentic loop completed successfully agent_id="orchestrator" rounds=1 total_input_tokens=7721 total_output_tokens=67 tool_calls=0 content_len=41
+2026-10-03T04:35:03.100115Z  INFO openalpacad::event_bridge: LLM call: agent=orchestrator, model=qwen3.8:27b-mlx, tokens=7721/67, cost=$0.000000
+2026-10-03T04:35:03.105177Z  INFO openalpaca_core::chat::service: Chat stream 13ba5605-7b6d-4205-8666-8f7c0303392e completed in 1946ms
+2026-10-03T04:35:49.667619Z  INFO openalpaca_core::orchestrator::query_handler::simple_query_handler: Simple query upgraded with 12 tools: ["start_workflow", "task_status", "memory_store", "memory_update", "memory_forget", "memory_confirm", "memory_search", "memory_read", "memory_list", "memory_timeline", "read_result", "invoke_skill"]
+2026-10-03T04:35:49.669178Z  INFO openalpaca_core::runner::agentic_loop: Agentic loop started agent_id="orchestrator" tools_count=12 max_rounds=8 max_cost=1.0 backend="router" context_management=true
+2026-10-03T04:36:02.706667Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=2}: openalpaca_core::runner::agentic_loop: Agentic loop completed successfully agent_id="orchestrator" rounds=2 total_input_tokens=16150 total_output_tokens=658 tool_calls=1 content_len=381
+2026-10-03T04:36:02.707015Z  INFO openalpacad::event_bridge: LLM call: agent=orchestrator, model=qwen3.8:27b-mlx, tokens=16150/658, cost=$0.000000
+2026-10-03T04:36:02.708035Z  INFO openalpaca_core::chat::service: Chat stream ff88aa34-b5b6-40b3-98d0-eec88ac0df04 completed in 13040ms
+2026-10-03T04:37:40.900184Z  INFO openalpaca_core::orchestrator::query_handler::simple_query_handler: Simple query upgraded with 12 tools: ["start_workflow", "task_status", "memory_store", "memory_update", "memory_forget", "memory_confirm", "memory_search", "memory_read", "memory_list", "memory_timeline", "read_result", "invoke_skill"]
+2026-10-03T04:37:40.901140Z  INFO openalpaca_core::runner::agentic_loop: Agentic loop started agent_id="orchestrator" tools_count=12 max_rounds=8 max_cost=1.0 backend="router" context_management=true
+2026-10-03T04:37:47.111722Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=1}: openalpaca_core::security::sandbox: Tool requires confirmation — awaiting user response (timeout: 300s) agent_id="orchestrator" tool=memory_confirm
+2026-10-03T04:37:47.111735Z  INFO openalpacad::event_bridge: Tool confirmation requested: tool=memory_confirm, agent=orchestrator, request=9cfe24ec-75a0-4b67-a39e-00d39f7d9dd6
+2026-10-03T04:38:13.211800Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=1}: openalpaca_core::security::sandbox: Tool approved by user agent_id="orchestrator" tool=memory_confirm
+2026-10-03T04:38:13.211907Z  INFO openalpacad::event_bridge: Tool confirmation resolved: tool=memory_confirm, agent=orchestrator, request=9cfe24ec-75a0-4b67-a39e-00d39f7d9dd6, outcome=approved
+2026-10-03T04:38:13.212270Z  INFO openalpaca_core::memory::service::in_chat: memory: a suggestion confirmed on its approval card note=9a46c9ce-47b3-47f5-ab97-dc91d5dad67b confirmation="9cfe24ec-75a0-4b67-a39e-00d39f7d9dd6"
+2026-10-03T04:38:14.886253Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=2}: openalpaca_core::runner::agentic_loop: Agentic loop completed successfully agent_id="orchestrator" rounds=2 total_input_tokens=16673 total_output_tokens=386 tool_calls=1 content_len=127
+2026-10-03T04:38:14.890353Z  INFO openalpacad::event_bridge: LLM call: agent=orchestrator, model=qwen3.8:27b-mlx, tokens=16673/386, cost=$0.000000
+2026-10-03T04:38:14.890865Z  INFO openalpaca_core::chat::service: Chat stream 3e9ca64d-1edc-41fb-8214-d768b4018ddb completed in 33991ms
+2026-10-03T04:38:43.646389Z  INFO openalpaca_core::memory::learning::queue: memory learning finished session_id="d9101e0d-69f9-41f1-83ad-919119d73dba" calls=1 chunks=1 stored=2 active=2 candidates=0 replaced=0 suggestions=0 deduplicated=0 dropped_over_cap=0 dropped_below_threshold=0 dropped_invalid=0 dropped_suppressed=0 dropped_duplicate_key=0 dropped_already_learned=0 dropped_unchanged=0 dropped_conflict=0 replaces_unknown=0 failed=0 skipped_short=0 skipped_no_owner=0 skipped_unusable=0 skipped_root_gone=0 input_tokens=1656 output_tokens=295 stopped=None
+2026-10-03T04:38:48.166726Z  INFO openalpaca_core::orchestrator::query_handler::simple_query_handler: Simple query upgraded with 12 tools: ["start_workflow", "task_status", "memory_store", "memory_update", "memory_forget", "memory_confirm", "memory_search", "memory_read", "memory_list", "memory_timeline", "read_result", "invoke_skill"]
+2026-10-03T04:38:48.168102Z  INFO openalpaca_core::runner::agentic_loop: Agentic loop started agent_id="orchestrator" tools_count=12 max_rounds=8 max_cost=1.0 backend="router" context_management=true
+2026-10-03T04:38:53.778599Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=2}: openalpaca_core::runner::agentic_loop: Agentic loop completed successfully agent_id="orchestrator" rounds=2 total_input_tokens=15689 total_output_tokens=242 tool_calls=1 content_len=273
+2026-10-03T04:38:53.778929Z  INFO openalpacad::event_bridge: LLM call: agent=orchestrator, model=qwen3.8:27b-mlx, tokens=15689/242, cost=$0.000000
+2026-10-03T04:38:53.779202Z  INFO openalpaca_core::chat::service: Chat stream 7e944785-62de-42d3-9874-db7e5ea8bb18 completed in 5613ms
+2026-10-03T04:40:09.751972Z  INFO openalpacad::event_bridge: Session changed session_id=1cd65ed2-3c04-479f-a70c-77cfc96d51da lane_key=beac92c6-1ee1-405a-b1c2-0125f374f5cc:gui status=active
+2026-10-03T04:40:24.774738Z  INFO openalpaca_core::memory::learning::queue: memory learning finished session_id="d9101e0d-69f9-41f1-83ad-919119d73dba" calls=1 chunks=1 stored=0 active=0 candidates=0 replaced=0 suggestions=0 deduplicated=0 dropped_over_cap=0 dropped_below_threshold=0 dropped_invalid=0 dropped_suppressed=0 dropped_duplicate_key=0 dropped_already_learned=0 dropped_unchanged=0 dropped_conflict=0 replaces_unknown=0 failed=0 skipped_short=0 skipped_no_owner=0 skipped_unusable=0 skipped_root_gone=0 input_tokens=1194 output_tokens=1 stopped=None
+2026-10-03T04:40:36.421242Z  INFO openalpaca_core::memory::learning::queue: memory learning: conversation closed session_id="d9101e0d-69f9-41f1-83ad-919119d73dba" calls=2 episodes=1 refused=0 skipped_short=0 skipped_no_owner=0 skipped_root_gone=0 skipped_unusable=0 skipped_summarized=0 skipped_forgotten=0 input_tokens=2410 output_tokens=616 stopped=None
+2026-10-03T04:42:03.035564Z  INFO openalpaca_core::orchestrator::query_handler::simple_query_handler: Simple query upgraded with 12 tools: ["start_workflow", "task_status", "memory_store", "memory_update", "memory_forget", "memory_confirm", "memory_search", "memory_read", "memory_list", "memory_timeline", "read_result", "invoke_skill"]
+2026-10-03T04:42:03.036677Z  INFO openalpaca_core::runner::agentic_loop: Agentic loop started agent_id="orchestrator" tools_count=12 max_rounds=8 max_cost=1.0 backend="router" context_management=true
+2026-10-03T04:42:16.889598Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=2}: openalpaca_core::runner::agentic_loop: Agentic loop completed successfully agent_id="orchestrator" rounds=2 total_input_tokens=16226 total_output_tokens=218 tool_calls=1 content_len=341
+2026-10-03T04:42:16.890071Z  INFO openalpacad::event_bridge: LLM call: agent=orchestrator, model=qwen3.8:27b-mlx, tokens=16226/218, cost=$0.000000
+2026-10-03T04:42:16.890781Z  INFO openalpaca_core::chat::service: Chat stream feb87292-9a6c-45c2-8f35-09bc63208789 completed in 13856ms
+2026-10-03T04:43:02.302063Z  INFO openalpaca_core::orchestrator::query_handler::simple_query_handler: Simple query upgraded with 12 tools: ["start_workflow", "task_status", "memory_store", "memory_update", "memory_forget", "memory_confirm", "memory_search", "memory_read", "memory_list", "memory_timeline", "read_result", "invoke_skill"]
+2026-10-03T04:43:02.303245Z  INFO openalpaca_core::runner::agentic_loop: Agentic loop started agent_id="orchestrator" tools_count=12 max_rounds=8 max_cost=1.0 backend="router" context_management=true
+2026-10-03T04:43:07.716500Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=1}: openalpaca_core::runner::agentic_loop: Agentic loop completed successfully agent_id="orchestrator" rounds=1 total_input_tokens=7967 total_output_tokens=183 tool_calls=0 content_len=132
+2026-10-03T04:43:07.716851Z  INFO openalpacad::event_bridge: LLM call: agent=orchestrator, model=qwen3.8:27b-mlx, tokens=7967/183, cost=$0.000000
+2026-10-03T04:43:07.721049Z  INFO openalpaca_core::chat::service: Chat stream 4c7ffcf9-3117-4ce4-b054-a4071e2ce76d completed in 5419ms
+2026-10-03T04:43:45.748752Z  INFO openalpacad::event_bridge: Session changed session_id=1cd65ed2-3c04-479f-a70c-77cfc96d51da lane_key=beac92c6-1ee1-405a-b1c2-0125f374f5cc:gui status=archived
+2026-10-03T04:43:45.748853Z  INFO openalpacad::event_bridge: Session changed session_id=d9101e0d-69f9-41f1-83ad-919119d73dba lane_key=beac92c6-1ee1-405a-b1c2-0125f374f5cc:gui status=active
+2026-10-03T04:43:58.812509Z  INFO openalpaca_core::memory::learning::queue: memory learning finished session_id="1cd65ed2-3c04-479f-a70c-77cfc96d51da" calls=1 chunks=1 stored=2 active=2 candidates=0 replaced=0 suggestions=0 deduplicated=0 dropped_over_cap=0 dropped_below_threshold=0 dropped_invalid=0 dropped_suppressed=0 dropped_duplicate_key=0 dropped_already_learned=0 dropped_unchanged=0 dropped_conflict=0 replaces_unknown=0 failed=0 skipped_short=0 skipped_no_owner=0 skipped_unusable=0 skipped_root_gone=0 input_tokens=1193 output_tokens=339 stopped=None
+2026-10-03T04:44:05.127747Z  INFO openalpaca_core::memory::learning::queue: memory learning: conversation closed session_id="1cd65ed2-3c04-479f-a70c-77cfc96d51da" calls=1 episodes=0 refused=0 skipped_short=0 skipped_no_owner=0 skipped_root_gone=0 skipped_unusable=0 skipped_summarized=0 skipped_forgotten=0 input_tokens=749 output_tokens=387 stopped=None
+2026-10-03T04:45:36.375389Z  INFO openalpacad::event_bridge: Session changed session_id=1776ea75-7342-48c8-a00c-07d1dd43d3ff lane_key=beac92c6-1ee1-405a-b1c2-0125f374f5cc:gui status=active
+2026-10-03T04:45:59.533197Z  INFO openalpaca_core::orchestrator::query_handler::simple_query_handler: Simple query upgraded with 12 tools: ["start_workflow", "task_status", "memory_store", "memory_update", "memory_forget", "memory_confirm", "memory_search", "memory_read", "memory_list", "memory_timeline", "read_result", "invoke_skill"]
+2026-10-03T04:45:59.534920Z  INFO openalpaca_core::runner::agentic_loop: Agentic loop started agent_id="orchestrator" tools_count=12 max_rounds=8 max_cost=1.0 backend="router" context_management=true
+2026-10-03T04:46:08.388864Z  INFO loop.step.persist_or_tools{agent_id="orchestrator" round=3}: openalpaca_core::runner::agentic_loop: Agentic loop completed successfully agent_id="orchestrator" rounds=3 total_input_tokens=23249 total_output_tokens=390 tool_calls=3 content_len=383
+2026-10-03T04:46:08.389154Z  INFO openalpacad::event_bridge: LLM call: agent=orchestrator, model=qwen3.8:27b-mlx, tokens=23249/390, cost=$0.000000
+2026-10-03T04:46:08.389674Z  INFO openalpaca_core::chat::service: Chat stream 048fadc2-4948-4137-b12a-b729d142f66b completed in 8856ms
+2026-10-03T04:47:26.004727Z  INFO openalpacad::routes::events: WebSocket client disconnected
+2026-10-03T04:47:26.013080Z  INFO openalpacad::routes::command: Command received request_id=18132fff-fc26-47a8-90f6-03accbd3b538 command=shutdown
+2026-10-03T04:47:26.013119Z  INFO openalpacad::routes::command: Shutdown command received via API
+2026-10-03T04:47:26.115329Z  INFO openalpacad: Shutdown signal received (API)
+2026-10-03T04:47:26.115421Z  INFO openalpacad::background: Asset cleanup task shutting down
+2026-10-03T04:47:26.115441Z  INFO openalpacad::notification: NotificationDispatcher: cancelled, shutting down
+2026-10-03T04:47:26.115449Z  INFO openalpacad::background: Heartbeat task shutting down
+2026-10-03T04:47:26.115455Z  INFO openalpacad::background: Chat cleanup task shutting down
+2026-10-03T04:47:26.115449Z  INFO openalpacad::background: Telemetry cleanup task shutting down
+2026-10-03T04:47:26.115462Z  INFO openalpacad::background: File processing worker shutting down
+2026-10-03T04:47:26.115466Z  INFO openalpacad::background: Memory reconciliation task shutting down
+2026-10-03T04:47:27.683210Z  INFO openalpaca_core::memory::learning::queue: memory learning finished session_id="1776ea75-7342-48c8-a00c-07d1dd43d3ff" calls=1 chunks=1 stored=0 active=0 candidates=0 replaced=0 suggestions=0 deduplicated=0 dropped_over_cap=0 dropped_below_threshold=0 dropped_invalid=0 dropped_suppressed=0 dropped_duplicate_key=0 dropped_already_learned=0 dropped_unchanged=0 dropped_conflict=0 replaces_unknown=0 failed=0 skipped_short=0 skipped_no_owner=0 skipped_unusable=0 skipped_root_gone=0 input_tokens=1057 output_tokens=1 stopped=None
+2026-10-03T04:47:29.117670Z  INFO openalpacad: Learning drain stopped at its budget; the boot catch-up learns the rest
+2026-10-03T04:47:29.117969Z  INFO openalpacad::services::llm: Flushed CostTracker to DB: 4 row(s)
+2026-10-03T04:47:29.117980Z  INFO openalpacad: Flushing session logs...
+2026-10-03T04:47:29.126071Z  INFO openalpacad: Shutting down extensions...
+2026-10-03T04:47:29.126136Z  INFO openalpacad::managers::mcp: MCP servers shut down servers=0 readers_running=0
+2026-10-03T04:47:29.126145Z  INFO openalpaca_plugins::manager: plugins shut down plugins=0
+2026-10-03T04:47:29.126159Z  INFO openalpacad: Shutting down connectors...
+2026-10-03T04:47:29.126163Z  INFO openalpaca_wake::manager: Stopping WakeManager...
+2026-10-03T04:47:29.126173Z  INFO openalpaca_wake::watcher::filesystem: FilesystemWatcher stopped
+2026-10-03T04:47:29.126180Z  INFO openalpaca_wake::scheduler: WakeScheduler shut down
+2026-10-03T04:47:29.126185Z  INFO openalpacad: Cleaning up...
+2026-10-03T04:47:29.126358Z  INFO openalpacad: Daemon stopped

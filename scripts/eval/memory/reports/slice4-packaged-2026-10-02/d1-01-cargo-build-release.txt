@@ -1,0 +1,8 @@
+   Compiling openalpaca_storage v0.1.0 (<repo>/crates/openalpaca_storage)
+   Compiling openalpaca_core v0.1.0 (<repo>/crates/openalpaca_core)
+   Compiling openalpaca_connectors v0.1.0 (<repo>/crates/openalpaca_connectors)
+   Compiling openalpaca_plugins v0.1.0 (<repo>/crates/openalpaca_plugins)
+   Compiling openalpaca v0.1.0 (<repo>/apps/openalpaca)
+   Compiling openalpacad v0.1.0 (<repo>/apps/openalpacad)
+    Finished `release` profile [optimized] target(s) in 53.11s
+# exit=exit=0
