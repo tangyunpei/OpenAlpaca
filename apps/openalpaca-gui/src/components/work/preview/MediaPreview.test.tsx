@@ -22,7 +22,7 @@ describe("ImagePreview (§3.25f) — load failure", () => {
     expect(screen.getByText("shot.png")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "The image could not be loaded — Export or Reveal opens it in its own app.",
+        "The image could not be loaded — Export or Open opens it in its own app.",
       ),
     ).toBeInTheDocument();
   });

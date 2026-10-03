@@ -8,9 +8,14 @@
  * an `artifact_written` frame carries the name, kind and version and *no
  * content*, so this card links to the file rather than previewing lines it does
  * not have. Everything it shows came off the frame.
+ *
+ * Beside `Open in Library`: `Open` (the file in its default app, through the
+ * daemon) and `Reveal in Finder` (the file in its folder, through the Tauri
+ * shell — drawn only inside the app's window, `canReveal`).
  */
 
-import { FileBadge, type FileKind } from "@/components/ui";
+import { Button, FileBadge, type FileKind } from "@/components/ui";
+import { canReveal, revealLabel } from "@/lib/reveal";
 
 export interface WrittenArtifactCardProps {
   name: string;
@@ -19,8 +24,12 @@ export interface WrittenArtifactCardProps {
   version: number;
   /** `13:41`, or `null` when the frame's stamp is unreadable. */
   time: string | null;
-  /** Opens the file in the Library. */
+  /** Opens the file in its default app. */
   onOpen: () => void;
+  /** Shows the file in its folder; drawn only when `canReveal()`. */
+  onReveal: () => void;
+  /** Opens the file in the Library. */
+  onOpenInLibrary: () => void;
 }
 
 export function WrittenArtifactCard({
@@ -30,6 +39,8 @@ export function WrittenArtifactCard({
   version,
   time,
   onOpen,
+  onReveal,
+  onOpenInLibrary,
 }: WrittenArtifactCardProps) {
   return (
     <section className="mb-[26px] overflow-hidden rounded-3xl border border-line bg-raised">
@@ -50,9 +61,17 @@ export function WrittenArtifactCard({
         <span className="min-w-0 flex-1 truncate text-md font-medium">
           {name}
         </span>
+        <Button variant="ghostXs" onClick={onOpen} className="shrink-0">
+          Open
+        </Button>
+        {canReveal() && (
+          <Button variant="ghostXs" onClick={onReveal} className="shrink-0">
+            {revealLabel()}
+          </Button>
+        )}
         <button
           type="button"
-          onClick={onOpen}
+          onClick={onOpenInLibrary}
           className="shrink-0 cursor-pointer rounded-md border border-line bg-transparent px-[9px] py-[4px] font-sans text-sm-plus leading-[normal] font-medium text-secondary hover:bg-muted-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue"
         >
           Open in Library

@@ -6,11 +6,13 @@
 //! - Waiting until a daemon the webview asked to stop is really gone
 //! - Reading the end of the daemon log, so a daemon that would not start can
 //!   say why
+//! - Showing an artifact in its folder (Finder, Explorer, the file manager)
 
 use openalpaca_storage::daemon_lifecycle::{self, StopOutcome};
 use openalpaca_storage::discovery::{self, ConnectionInfo};
 use openalpaca_storage::store;
 use serde::Serialize;
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
 use std::time::Duration;
 
@@ -170,6 +172,77 @@ async fn await_daemon_stopped() -> Result<DaemonStopReport, String> {
     .await
     .map(DaemonStopReport::from)
     .map_err(|e| format!("Could not wait for the daemon to stop: {e}"))
+}
+
+/// Show a file in its folder: Finder with the file selected on macOS
+/// (`open -R`), Explorer with it selected on Windows (`explorer /select,`),
+/// and the folder holding it in the file manager elsewhere (`xdg-open`).
+///
+/// The path comes from the webview — an artifact's `path` as the daemon served
+/// it — so the shell does not take it on trust: `store::revealable_path`
+/// resolves it, symlinks included, and admits only a regular file in an
+/// OpenAlpaca store. The platform program gets that resolved path as an
+/// argument of its own, never through a shell. This shows the file; opening it
+/// stays the daemon's route (`POST /v1/files/{id}/open`). An error is one
+/// sentence, which the webview shows as it is.
+///
+/// The program runs on the blocking pool, so a slow file manager never stalls
+/// another `invoke`.
+#[tauri::command]
+async fn reveal_path(path: String) -> Result<(), String> {
+    let path = store::revealable_path(Path::new(&path)).map_err(|refusal| refusal.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || reveal_in_folder(&path))
+        .await
+        .map_err(|e| format!("Could not show the file in its folder: {e}."))?
+}
+
+/// Run the platform's reveal for an already admitted path and wait for it.
+fn reveal_in_folder(path: &Path) -> Result<(), String> {
+    let (program, args) = if cfg!(target_os = "macos") {
+        ("open", vec!["-R".into(), path.as_os_str().to_owned()])
+    } else if cfg!(windows) {
+        // `/select,` and the path as two arguments, so a path with a space is
+        // quoted on its own: `explorer /select, "C:\a b\c.md"`.
+        (
+            "explorer",
+            vec![
+                "/select,".into(),
+                without_verbatim_prefix(path).into_os_string(),
+            ],
+        )
+    } else {
+        let folder = path.parent().unwrap_or(path);
+        ("xdg-open", vec![folder.as_os_str().to_owned()])
+    };
+    let status = Command::new(program)
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("Could not show {} in its folder: {e}.", path.display()))?;
+    // Explorer exits 1 even when it opened the window, so on Windows only a
+    // failure to start it counts.
+    if status.success() || cfg!(windows) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{program} could not show {} in its folder ({status}).",
+            path.display()
+        ))
+    }
+}
+
+/// `C:\…` for a canonical `\\?\C:\…`, which Explorer does not understand;
+/// any other path as it is.
+fn without_verbatim_prefix(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    if let Some(Component::Prefix(prefix)) = components.next()
+        && let Prefix::VerbatimDisk(drive) = prefix.kind()
+    {
+        let mut plain = PathBuf::from(format!("{}:\\", char::from(drive)));
+        plain.extend(components.filter(|c| !matches!(c, Component::RootDir)));
+        return plain;
+    }
+    path.to_path_buf()
 }
 
 /// Liveness probe: can we open a TCP connection to the daemon's listen address?
@@ -342,7 +415,8 @@ pub fn run() {
             get_connection_info,
             ensure_daemon_running,
             await_daemon_stopped,
-            read_daemon_log_tail
+            read_daemon_log_tail,
+            reveal_path
         ])
         .run(tauri::generate_context!())
         .expect("Error while running Tauri application");

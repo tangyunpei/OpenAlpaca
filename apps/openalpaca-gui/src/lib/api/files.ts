@@ -76,9 +76,9 @@ export async function downloadFile(
 }
 
 /**
- * `POST /v1/files/{id}/open` — opens with the daemon host's default app. Note
- * this *opens*, it does not reveal in Finder; revealing needs a Tauri command
- * that does not exist yet.
+ * `POST /v1/files/{id}/open` — opens with the daemon host's default app: the
+ * `Open` button. Showing the file in Finder is the Tauri shell's
+ * `reveal_path` command (`lib/reveal.ts`), not this route.
  */
 export async function openFileWithSystemDefault(
   id: string,

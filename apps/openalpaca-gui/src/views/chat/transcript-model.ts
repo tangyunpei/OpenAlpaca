@@ -81,6 +81,8 @@ export interface WrittenArtifact {
   /** The daemon's snake_case `ArtifactKind` spelling. */
   kind: string;
   version: number;
+  /** The head file's absolute path, off the frame — what `Reveal in Finder` shows. */
+  path: string;
   /** `null` for a loose artifact — a chat turn that ran no workflow. */
   taskId: string | null;
   at: string;

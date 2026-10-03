@@ -5,10 +5,11 @@
  * as one column. Presentational: every action is a callback, so the view keeps
  * the daemon calls and this keeps the layout.
  *
- * `Reveal` is deliberately labelled as the design labels it, but the only route
- * behind it (`POST /v1/files/{id}/open`) *opens* the file with the host's
- * default app rather than revealing it in Finder (API_MAP §2.3); the view says
- * so in its toast.
+ * `Open` opens the file in its default app, through the daemon
+ * (`POST /v1/files/{id}/open`, API_MAP §2.3) — on the daemon's host. `Reveal in
+ * Finder` ("Show in folder" off macOS) shows the file in its folder through the
+ * Tauri shell's `reveal_path` command, so it is drawn only inside the app's own
+ * window (`canReveal`); the Vite preview has no shell to ask.
  */
 
 import {
@@ -20,6 +21,7 @@ import {
   toFileKind,
 } from "@/components/ui";
 import type { Artifact } from "@/lib/api/artifacts";
+import { canReveal, revealLabel } from "@/lib/reveal";
 import type { ArtifactTab } from "@/stores/ui";
 
 import { relativeTime } from "./format";
@@ -37,6 +39,9 @@ export interface LibraryDetailHeaderProps {
   onTabChange: (tab: ArtifactTab) => void;
   onTogglePin: () => void;
   onExport: () => void;
+  /** Opens the file in its default app. */
+  onOpen: () => void;
+  /** Shows the file in its folder; drawn only when `canReveal()`. */
   onReveal: () => void;
   /** Absent when the artifact is not attributed to a run. */
   onJumpRun?: () => void;
@@ -49,6 +54,7 @@ export function LibraryDetailHeader({
   onTabChange,
   onTogglePin,
   onExport,
+  onOpen,
   onReveal,
   onJumpRun,
 }: LibraryDetailHeaderProps) {
@@ -96,9 +102,14 @@ export function LibraryDetailHeader({
           <Button variant="ghostSm" onClick={onExport}>
             Export
           </Button>
-          <Button variant="ghostSm" onClick={onReveal}>
-            Reveal
+          <Button variant="ghostSm" onClick={onOpen}>
+            Open
           </Button>
+          {canReveal() && (
+            <Button variant="ghostSm" onClick={onReveal}>
+              {revealLabel()}
+            </Button>
+          )}
         </div>
       </div>
 

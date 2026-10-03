@@ -11,7 +11,7 @@
  *     in the webview is a security review (`frame-src`/sandbox), deliberately
  *     deferred; showing the characters is not;
  *   * **binary** bytes are not characters, so nothing is drawn — the row says
- *     what it is and Export/Reveal open it;
+ *     what it is and Export/Open open it;
  *   * **too large** is refused before the fetch: pulling a multi-megabyte file
  *     into the webview to render six lines of it helps nobody;
  *   * a **missing** row (its bytes deleted under the daemon) says so. That
@@ -54,14 +54,14 @@ export function previewPlan(artifact: Artifact): PreviewPlan {
   if (artifact.kind === "binary") {
     return {
       mode: "none",
-      note: `Binary file, ${formatFileSize(artifact.size_bytes)} — Export or Reveal opens it in its own app.`,
+      note: `Binary file, ${formatFileSize(artifact.size_bytes)} — Export or Open opens it in its own app.`,
     };
   }
 
   if (artifact.size_bytes > MAX_PREVIEW_BYTES) {
     return {
       mode: "none",
-      note: `Too large to preview here (${formatFileSize(artifact.size_bytes)}) — Export or Reveal opens the whole file.`,
+      note: `Too large to preview here (${formatFileSize(artifact.size_bytes)}) — Export or Open opens the whole file.`,
     };
   }
 

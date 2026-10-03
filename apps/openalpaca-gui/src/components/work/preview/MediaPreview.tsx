@@ -71,7 +71,7 @@ export function ImagePreview({
   // token, a CSP the webview doesn't admit) — so it overrides whatever note
   // the caller passed for the "no src at all" case.
   const placeholderNote = loadFailed
-    ? "The image could not be loaded — Export or Reveal opens it in its own app."
+    ? "The image could not be loaded — Export or Open opens it in its own app."
     : note;
 
   return (

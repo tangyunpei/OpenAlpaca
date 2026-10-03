@@ -23,7 +23,7 @@ import {
   useArtifactVersions,
   useTogglePin,
 } from "@/hooks/useArtifacts";
-import { useDownloadFile, useOpenFile } from "@/hooks/useFiles";
+import { useArtifactFileActions, useDownloadFile } from "@/hooks/useFiles";
 import { artifactContentUrl, type Artifact } from "@/lib/api/artifacts";
 import { ApiError } from "@/lib/http";
 import { useUiStore } from "@/stores/ui";
@@ -60,7 +60,7 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
   const diff = useArtifactDiff(artifactId, pair?.from ?? 0, pair?.to ?? 0);
 
   const download = useDownloadFile();
-  const open = useOpenFile();
+  const fileActions = useArtifactFileActions();
 
   if (artifactId === null) {
     return (
@@ -109,15 +109,6 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
     });
   };
 
-  // The route opens the file with the daemon host's default app; there is no
-  // reveal-in-Finder command, so the toast says what actually happened.
-  const onReveal = () => {
-    open.mutate(model.id, {
-      onSuccess: () => showToast(`${model.name} opened in its default app`),
-      onError: (error) => showToast(`Could not open — ${error.message}`),
-    });
-  };
-
   return (
     <DetailShell
       head={
@@ -140,7 +131,8 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
             );
           }}
           onExport={onExport}
-          onReveal={onReveal}
+          onOpen={() => fileActions.open(model)}
+          onReveal={() => fileActions.reveal(model.path)}
           onJumpRun={taskId === null ? undefined : () => focusRun(taskId)}
         />
       }

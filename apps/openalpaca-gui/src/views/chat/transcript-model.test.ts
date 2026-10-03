@@ -387,6 +387,7 @@ describe("buildTranscript — written artifacts", () => {
     name: "findings.md",
     kind: "markdown",
     version: 2,
+    path: "/home/.openalpaca/artifacts/2026-08-31-run/01-findings.md",
     taskId: "task-1",
     at: "2026-08-31T14:22:30Z",
   };

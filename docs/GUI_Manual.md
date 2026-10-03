@@ -122,6 +122,14 @@ whole bridge (`src-tauri/src/lib.rs`):
   nothing.
 - `read_daemon_log_tail` — the end of `state/logs/daemon.log`, read straight
   from the file, so it answers when no daemon is serving anything.
+- `reveal_path` — shows an artifact's file in its folder: Finder with the file
+  selected on macOS (`open -R`), Explorer with it selected on Windows, the
+  folder in the file manager on Linux (`xdg-open`). It takes no path on trust:
+  the path is resolved, symlinks included, and only a regular file inside an
+  OpenAlpaca store — a `.openalpaca` directory above it, or the home root
+  `OPENALPACA_HOME_STORE` names — is shown. The program gets the path as an
+  argument of its own, never through a shell, and a refusal is one sentence,
+  shown as a toast. Behind `Reveal in Finder` (Library, below).
 
 The first two return `{ baseUrl, token, instanceId }`. `instanceId` is the identity
 guard: if it changes, the daemon restarted, so every `task_id`, `stream_id` and
@@ -297,8 +305,10 @@ Besides messages, the transcript carries:
 - a row for each steer or queued follow-up you sent (neither is a chat turn,
   so the daemon stores neither);
 - the tool confirmation banner, and the row that replaces it once it settles;
-- a card for each file a run wrote, and chips for the files a finished run
-  produced;
+- a `File written` card for each file an agent wrote — `Open` opens it in its
+  default app, `Reveal in Finder` shows it in its folder (inside the app's own
+  window only), `Open in Library` shows it in the Library — and chips for the
+  files a finished run produced;
 - a card under your own message for each file **you** attached, live and after
   a reload. The daemon also writes a text rendering into the message
   (`[Attachments: notes.txt]`) for clients that can only print a string; this
@@ -614,7 +624,8 @@ routable model" message rather than a guess.
 
 **The aside** is one slot with two modes, never both: the Work pane (run cards
 for every run that is not `done`) or the file panel (one artifact, with the
-same Preview / Diff / History renderers the Library uses, at compact size).
+same Preview / Diff / History renderers the Library uses, at compact size, and
+the Library header's `Open` and `Reveal in Finder` beside its pin).
 `‹ Work` restores the pane, `›` collapses the aside, and with the aside closed
 the header grows a "running now" pill as the way back in.
 
@@ -714,16 +725,16 @@ Pins are server state (`PUT /v1/artifacts/{id}/pin`). The client keeps a
 overwrites it, so the mirror cannot drift into claiming a pin the daemon does
 not have.
 
-The right column has a pinned header — `☆ Pin`, `Export`, `Reveal` — over
-three tabs:
+The right column has a pinned header — `☆ Pin`, `Export`, `Open`, `Reveal in
+Finder` — over three tabs:
 
 - **Preview.** An image is loaded straight by the browser from
   `…/content?token=`. HTML and SVG are shown as **source** by choice:
   rendering agent-authored markup inside the webview is a security review, not
   a missing route. Binary bytes are not characters, so nothing is drawn and the
-  row points at Export. Anything over 512 KiB is refused before the fetch. A
-  row whose bytes were deleted under the daemon says so — a blank pane would
-  claim "nothing here", which is a different statement.
+  row points at Export and Open. Anything over 512 KiB is refused before the
+  fetch. A row whose bytes were deleted under the daemon says so — a blank pane
+  would claim "nothing here", which is a different statement.
 - **Diff.** `GET …/diff` for the newest pair. The `+ / −` counters are counted
   from the patch rather than read off the response, so they cannot disagree with
   the lines under them. A refusal is stated in its own words: `NOT_DIFFABLE`
@@ -735,9 +746,16 @@ three tabs:
   hashes an artifact's head on every read and records bytes that do not match
   its row as a version nobody in OpenAlpaca wrote. The row says so.
 
-`Reveal` is labelled as the design labels it, but the only route behind it
-(`POST /v1/files/{id}/open`) opens the file with the host's default
-application rather than revealing it in Finder; the toast says so.
+`Open` opens the file in its default application through the daemon
+(`POST /v1/files/{id}/open`), on the machine the daemon runs on; the toast says
+so. (The design labelled this button `Reveal`; it always opened the file.)
+`Reveal in Finder` — `Show in folder` on Windows and Linux — shows the file in
+its folder instead, through the app's own shell (`reveal_path`, above): Finder
+comes forward with the file selected. It is drawn only inside the app's window,
+never in the Vite preview, which has no shell to ask. A file that is gone, is
+not a regular file or is not inside an OpenAlpaca store is refused, and the
+toast is the shell's own sentence. The `File written` card in the chat and the
+file panel in the chat's aside carry the same two buttons.
 
 ## Memory
 

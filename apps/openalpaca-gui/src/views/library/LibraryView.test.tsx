@@ -8,12 +8,14 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Artifact } from "@/lib/api/artifacts";
 import { resetConnection } from "@/lib/connection";
+import { revealLabel } from "@/lib/reveal";
 import { useUiStore } from "@/stores/ui";
 
 import LibraryView from "./LibraryView";
@@ -410,5 +412,76 @@ describe("LibraryDetail", () => {
       name: /connector-audit-findings\.md/,
     });
     expect(within(row).getByLabelText("Pinned")).toBeInTheDocument();
+  });
+});
+
+describe("LibraryDetail — Open and Reveal", () => {
+  /** What the mocked discovery command answers, as the factory above does. */
+  const connection = {
+    baseUrl: "http://127.0.0.1:9999",
+    token: "test-token",
+    instanceId: "7f3a1122",
+  };
+
+  beforeEach(() => {
+    listing([findings], 1);
+    route("/v1/artifacts/art-1/content", () => text("# Findings\n"));
+    route("/v1/artifacts/art-1", () => json(findings));
+    useUiStore.setState({ openArtifactId: "art-1" });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.mocked(invoke).mockImplementation(async () => connection);
+  });
+
+  it("opens the file through the daemon's open route, as `Reveal` used to", async () => {
+    route("/v1/files/art-1/open", () =>
+      json({ id: "art-1", status: "opened" }),
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "Open" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        "connector-audit-findings.md opened in its default app",
+      ),
+    );
+    const open = requests.find((r) => r.url.includes("/v1/files/art-1/open"));
+    expect(open?.method).toBe("POST");
+  });
+
+  it("draws no Reveal in the Vite preview, where there is no shell", async () => {
+    renderView();
+
+    expect(
+      await screen.findByRole("button", { name: "Open" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: revealLabel() }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("asks the shell to reveal the artifact's path, and toasts its refusal", async () => {
+    vi.stubGlobal("isTauri", true);
+    const refusal = `${findings.path} is not there any more, so it cannot be shown in its folder.`;
+    vi.mocked(invoke).mockImplementation(async (command: string) =>
+      command === "reveal_path" ? Promise.reject(refusal) : connection,
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(
+      await screen.findByRole("button", { name: revealLabel() }),
+    );
+
+    expect(invoke).toHaveBeenCalledWith("reveal_path", {
+      path: findings.path,
+    });
+    await waitFor(() => expect(useUiStore.getState().toast).toBe(refusal));
+    // Revealing is the shell's; nothing went to the daemon's open route.
+    expect(requests.some((r) => r.url.includes("/open"))).toBe(false);
   });
 });

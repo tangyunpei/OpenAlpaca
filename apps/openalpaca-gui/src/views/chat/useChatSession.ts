@@ -641,6 +641,7 @@ export function useChatSession(): ChatSession {
               name: event.name,
               kind: event.kind,
               version: event.version,
+              path: event.path,
               taskId: event.task_id,
               at: event.ts,
             },

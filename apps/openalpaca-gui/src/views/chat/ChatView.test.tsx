@@ -8,6 +8,7 @@
  */
 
 import { QueryClient } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 import {
   act,
   cleanup,
@@ -25,6 +26,7 @@ import { resetConnection } from "@/lib/connection";
 import { daemonEvents, type ServerEvent } from "@/lib/events";
 import { qk } from "@/lib/query-keys";
 import { QueryProvider } from "@/lib/query-provider";
+import { revealLabel } from "@/lib/reveal";
 import { useConfirmationStore } from "@/stores/confirmation";
 import { useProjectStore } from "@/stores/project";
 import { useSessionSelection } from "@/stores/session";
@@ -4828,6 +4830,38 @@ describe("ChatView — the conversation's continuity (design 11 §5, CQ-7)", () 
           (r) => r.method === "POST" && r.url.endsWith("/v1/sessions"),
         )?.body,
       ).toEqual({ source: "gui", inherit: false }),
+    );
+  });
+});
+
+describe("ChatView — a written file's Reveal in Finder (Round G, G4)", () => {
+  afterEach(() => {
+    // `isTauri` is this block's own; `beforeEach` stubs the rest again.
+    vi.unstubAllGlobals();
+  });
+
+  it("asks the shell for the path the artifact_written frame carried", async () => {
+    vi.stubGlobal("isTauri", true);
+    const path =
+      "/Users/dev/.openalpaca/artifacts/loose/2026-10-02/01-pasta-night.md";
+    renderChat();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "artifact_written",
+        artifact_id: "art-9",
+        task_id: null,
+        agent_id: null,
+        name: "01-pasta-night.md",
+        kind: "markdown",
+        version: 1,
+        path,
+      });
+    });
+    fireEvent.click(await screen.findByRole("button", { name: revealLabel() }));
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("reveal_path", { path }),
     );
   });
 });

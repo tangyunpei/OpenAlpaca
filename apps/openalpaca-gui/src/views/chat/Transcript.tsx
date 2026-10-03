@@ -20,6 +20,7 @@ import {
   shortRunId,
 } from "@/components/chat";
 import { languageFromName, toFileKind } from "@/components/ui";
+import { useArtifactFileActions } from "@/hooks/useFiles";
 import type { ArtifactKind } from "@/lib/api/artifacts";
 import { useUiStore } from "@/stores/ui";
 
@@ -35,6 +36,7 @@ export interface TranscriptProps {
 export function Transcript({ items, dense }: TranscriptProps) {
   const openArtifact = useUiStore((s) => s.openArtifact);
   const focusRun = useUiStore((s) => s.focusRun);
+  const fileActions = useArtifactFileActions();
   return (
     <>
       {items.map((item) => {
@@ -127,7 +129,14 @@ export function Transcript({ items, dense }: TranscriptProps) {
                 language={languageFromName(item.entry.name)}
                 version={item.entry.version}
                 time={formatClock(item.entry.at)}
-                onOpen={() => openArtifact(item.entry.artifactId)}
+                onOpen={() =>
+                  fileActions.open({
+                    id: item.entry.artifactId,
+                    name: item.entry.name,
+                  })
+                }
+                onReveal={() => fileActions.reveal(item.entry.path)}
+                onOpenInLibrary={() => openArtifact(item.entry.artifactId)}
               />
             );
 

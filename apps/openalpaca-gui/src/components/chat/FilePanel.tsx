@@ -10,10 +10,16 @@
  * and the Library detail show one artifact the same way. A slot left empty
  * falls back to its note — which says what could not be read, never what the
  * daemon cannot serve.
+ *
+ * Beside the pin: `Open` (the file in its default app, through the daemon) and
+ * `Reveal in Finder` (the file in its folder, through the Tauri shell — drawn
+ * only inside the app's window, `canReveal`), each only when the caller gives
+ * it a handler.
  */
 
-import { FileBadge, Tab, type FileKind } from "@/components/ui";
+import { Button, FileBadge, Tab, type FileKind } from "@/components/ui";
 import { cn } from "@/lib/cn";
+import { canReveal, revealLabel } from "@/lib/reveal";
 import type { ArtifactTab } from "@/stores/ui";
 
 export interface PanelArtifact {
@@ -57,6 +63,10 @@ export interface FilePanelProps {
   onClose: () => void;
   onOpenInLibrary: () => void;
   onJumpRun?: () => void;
+  /** Opens the file in its default app; absent while no artifact is read. */
+  onOpen?: () => void;
+  /** Shows the file in its folder; drawn only when `canReveal()` as well. */
+  onReveal?: () => void;
 
   pinned: boolean;
   onTogglePin: () => void;
@@ -102,6 +112,8 @@ export function FilePanel({
   onClose,
   onOpenInLibrary,
   onJumpRun,
+  onOpen,
+  onReveal,
   pinned,
   onTogglePin,
   preview,
@@ -256,19 +268,31 @@ export function FilePanel({
               {artifact.runId}
             </button>
           )}
-          <button
-            type="button"
-            aria-pressed={pinned}
-            onClick={onTogglePin}
-            className={cn(
-              "ml-auto cursor-pointer rounded-[5px] px-[8px] py-[2px] text-xs-plus leading-[normal] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
-              pinned
-                ? "border border-gold-line bg-gold-tint text-gold-ink"
-                : "border border-line bg-transparent text-secondary",
+          <span className="ml-auto flex items-center gap-[6px]">
+            {onOpen !== undefined && (
+              <Button variant="ghostXs" onClick={onOpen}>
+                Open
+              </Button>
             )}
-          >
-            {pinned ? "★ Pinned" : "☆ Pin"}
-          </button>
+            {onReveal !== undefined && canReveal() && (
+              <Button variant="ghostXs" onClick={onReveal}>
+                {revealLabel()}
+              </Button>
+            )}
+            <button
+              type="button"
+              aria-pressed={pinned}
+              onClick={onTogglePin}
+              className={cn(
+                "cursor-pointer rounded-[5px] px-[8px] py-[2px] text-xs-plus leading-[normal] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
+                pinned
+                  ? "border border-gold-line bg-gold-tint text-gold-ink"
+                  : "border border-line bg-transparent text-secondary",
+              )}
+            >
+              {pinned ? "★ Pinned" : "☆ Pin"}
+            </button>
+          </span>
         </div>
 
         {artifact === null && artifactNote !== null ? (

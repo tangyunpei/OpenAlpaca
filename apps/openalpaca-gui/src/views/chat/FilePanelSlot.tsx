@@ -23,6 +23,7 @@ import {
   useArtifacts,
   useTogglePin,
 } from "@/hooks/useArtifacts";
+import { useArtifactFileActions } from "@/hooks/useFiles";
 import { artifactContentUrl } from "@/lib/api/artifacts";
 import { ApiError } from "@/lib/http";
 import { useUiStore } from "@/stores/ui";
@@ -64,6 +65,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
   const openInLibrary = useUiStore((s) => s.openInLibrary);
   const focusRun = useUiStore((s) => s.focusRun);
   const togglePin = useTogglePin();
+  const fileActions = useArtifactFileActions();
   const pins = useUiStore((s) => s.pins);
   const pinned =
     model === null
@@ -128,6 +130,10 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
         model?.task_id == null
           ? undefined
           : () => focusRun(model.task_id as string)
+      }
+      onOpen={model === null ? undefined : () => fileActions.open(model)}
+      onReveal={
+        model === null ? undefined : () => fileActions.reveal(model.path)
       }
       pinned={pinned}
       onTogglePin={() => togglePin.mutate({ id: artifactId, pinned: !pinned })}
