@@ -95,7 +95,9 @@ struct MeResponse {
     default_lane_key: String,
 }
 
-/// `""` is what an unrenamed conversation carries; never print a blank cell.
+/// `""` is what a conversation nothing has named yet carries — the daemon
+/// names one from its first sentence (G5), or a rename does; never print a
+/// blank cell.
 fn display_title(title: &str) -> &str {
     if title.trim().is_empty() {
         "(untitled)"

@@ -92,7 +92,10 @@ describe("SessionSidebar — the rows", () => {
     expect(screen.getByText(/6 Sep/)).toBeInTheDocument();
   });
 
-  /** `title` is `""` until the conversation is renamed — never render a blank row. */
+  /**
+   * `title` is `""` until something names the conversation — the daemon, from
+   * its first sentence (G5), or a rename — never render a blank row.
+   */
   it("falls back to a name for an untitled conversation", () => {
     renderSidebar({ sessions: [session({ title: "" })] });
     expect(

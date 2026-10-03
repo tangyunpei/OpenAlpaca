@@ -577,7 +577,7 @@ Deleting a conversation also forgets its **episode notes** — the memory notes
 that summarise it (see `memory` below).
 
 Notes:
-- The table is `ID`, `STATUS` (`active` / `archived`), `TITLE`, `WORKSPACE` and `UPDATED`, newest first. A conversation that has never been renamed prints `(untitled)`; one bound to no project prints `-`, which is the normal state for a connector lane.
+- The table is `ID`, `STATUS` (`active` / `archived`), `TITLE`, `WORKSPACE` and `UPDATED`, newest first. A conversation nothing has named yet — neither the daemon, which names one from its first sentence, nor a rename — prints `(untitled)`; one bound to no project prints `-`, which is the normal state for a connector lane.
 - With no flags the list is the lane the CLI and the GUI share (`{user}:gui`) — the lane a `openalpaca chat` turn lands on, read from `GET /v1/me`. `--all` widens to every lane the daemon holds.
 - `--workspace <path>` narrows to one project. The path is resolved the same way a turn's project is — up to the nearest `.openalpaca`/`.git` — so `--workspace .` works from anywhere inside a repository. A directory under no such marker is an error, not a filter that matches nothing.
 - An empty result says which kind of empty it is: no conversations at all, or none in the project that was filtered for.

@@ -181,8 +181,9 @@ fn a_row_prints_the_id_status_title_workspace_and_stamp() {
     assert!(row(|_| {}).table_row().contains("2026-09-06 10:00"));
 }
 
-/// `title` is `""` until a conversation is renamed. A blank cell would read as
-/// a missing field rather than an unnamed conversation.
+/// `title` is `""` until something names a conversation — the daemon, from
+/// its first sentence (G5), or a rename. A blank cell would read as a missing
+/// field rather than an unnamed conversation.
 #[test]
 fn an_unrenamed_conversation_prints_a_name() {
     plain();

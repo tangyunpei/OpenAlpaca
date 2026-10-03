@@ -249,8 +249,9 @@ working state (below); `New chat` opens one that is.
 Clicking a row resumes it. A row whose runs were cut short by a daemon restart
 carries an `N interrupted` badge. A conversation is named after the first
 thing you typed in it — its first line, cut to 60 characters with `…` — once
-that turn is done; a slash command or a message of attachments alone does not
-name it, and until something does the row reads `Untitled conversation`. A
+that turn is done; a message that starts with `/` (a slash command) or one of
+attachments alone does not name it, and until something does the row reads
+`Untitled conversation`. A
 rename is yours: nothing renames the conversation after it.
 
 Two rules the sidebar displays rather than enforces:
