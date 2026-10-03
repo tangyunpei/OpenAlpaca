@@ -4373,7 +4373,10 @@ fn a_delegating_row_that_already_ends_with_its_provenance_line_replays_as_stored
             "9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b"
         )
     );
-    for (content, task_id) in [(&echoed, task), (&other, task)] {
+    // Its own line with more text after it does not end with the line: the
+    // rule is "ends with", so the line is appended (the spec's letter).
+    let quoted = format!("{line}\nAnd then I kept going.");
+    for (content, task_id) in [(&echoed, task), (&other, task), (&quoted, task)] {
         repo.insert(&openalpaca_storage::ConversationMessage {
             lane_key: "user1:cli".to_string(),
             role: "assistant".to_string(),
@@ -4385,7 +4388,7 @@ fn a_delegating_row_that_already_ends_with_its_provenance_line_replays_as_stored
     }
 
     let ctx = orch.build_context("user1:cli", "go");
-    assert_eq!(ctx.recent_messages.len(), 2);
+    assert_eq!(ctx.recent_messages.len(), 3);
     assert_eq!(
         ctx.recent_messages[0].content, echoed,
         "a row that already ends with its line must replay as stored"
@@ -4396,6 +4399,11 @@ fn a_delegating_row_that_already_ends_with_its_provenance_line_replays_as_stored
         format!("{other}\n{line}"),
         "a row ending with another run's line still gets its own"
     );
+    assert_eq!(
+        ctx.recent_messages[2].content,
+        format!("{quoted}\n{line}"),
+        "a row that holds its line but does not end with it still gets it"
+    );
 
     let stored = repo.list_recent_by_lane("user1:cli", 10).unwrap();
     assert_eq!(
@@ -4404,6 +4412,10 @@ fn a_delegating_row_that_already_ends_with_its_provenance_line_replays_as_stored
     );
     assert_eq!(
         stored[1].content, other,
+        "the stored row is never rewritten"
+    );
+    assert_eq!(
+        stored[2].content, quoted,
         "the stored row is never rewritten"
     );
 }
