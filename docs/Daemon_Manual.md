@@ -309,7 +309,7 @@ otherwise the conservative cloud fallback still applies.
 | One workflow's lead agent | $5 | `[execution.lead_agent_defaults] max_cost` |
 | Learning from conversations, per UTC day | $0.25 | `[orchestrator.costs] extract_max_daily_cost_usd` |
 | Learning from conversations, calls per UTC day | 200 (`0` = no cap) | `[orchestrator.costs] extract_max_calls_per_day` |
-| The conversation's working state — compaction, turn end and close — per day | $0.50 | `[orchestrator.costs] summary_max_daily_cost_usd` |
+| The conversation's working state — compaction, turn end and close — and its episode notes, per day | $0.50 | `[orchestrator.costs] summary_max_daily_cost_usd` |
 | Task-output extraction, per UTC day | $0.50 | `[orchestrator.costs] task_extract_max_daily_cost_usd` |
 
 An agent template's `max_cost_per_task` replaces the default for that agent.
@@ -734,15 +734,21 @@ conversation has been quiet for **30 minutes**, when you switch to another
 conversation, and before the daemon stops (its durable half, as for
 learning, is the boot catch-up), and only once **at least 4 of your turns**
 have accumulated since that conversation's last episode note; a
-conversation's facts are learned first. No model call writes the note: it
-is projected from the conversation's working state, which the queue brings
-up to date first — one call on `[orchestrator.costs] summary_model`,
-only when a turn of yours lies past what the state covers, under
-`summary_max_daily_cost_usd` and learning's quiet start and yielding to chat.
-The note does not cite a message you forgot a note from, nor its answer.
+conversation's facts are learned first. The queue first brings the
+conversation's working state up to date (see [Conversation
+continuity](#conversation-continuity)), then writes the note with a model
+call of its own over the conversation's messages since its last episode note
+— on `[orchestrator.costs] summary_model`, recorded under the label
+`orchestrator_episode`, under `summary_max_daily_cost_usd` (the ceiling the
+working state's calls count under too) and learning's quiet start and
+yielding to chat. The call never sees a message you forgot a note from, nor
+the rest of its turn, and the note does not cite them. An answer that is not
+a summary is asked again later, and after three such answers that stretch of
+conversation gets no note; an answer cut at its output limit is never pieced
+together from a part.
 
 The note is titled `Conversation on <YYYY-MM-DD>: <topic>`, the date its last
-turn's; its `## Knowledge` holds at most 1 KiB of prose — `Discussed: …`,
+turn's; its `## Knowledge` holds at most 2 KiB of prose — `Discussed: …`,
 `Decided: …`, `Left open: …` — in the conversation's language; `observed_at`
 is its last turn's time, and it cites the conversation's messages (all of
 them up to eight, else eight spread from the first to the last). It is
@@ -1091,15 +1097,17 @@ three moments:
 - **Close.** When a conversation has been quiet for 30 minutes, when you
   switch conversations, and in the stop drain and the boot catch-up, the
   learning queue refreshes the state — only when a turn of yours lies past
-  what it covers — and then projects the conversation's episode note from it
-  (see [Memory](#memory)). `[orchestrator.learning] enabled = false` turns the
+  what it covers — and then writes the conversation's episode note with a
+  call of its own (see [Memory](#memory)). `[orchestrator.learning] enabled = false` turns the
   close off with the rest of learning.
 
 Every call is made on `[orchestrator.costs] summary_model` (unset: the
 router's default model), asks for no reasoning, answers at most 1,536 tokens,
 is recorded under the label `orchestrator_summary` and is checked first
 against `summary_max_daily_cost_usd` — the compaction's call included, so it
-no longer counts against the turn's $1 or the workflow's cap. An answer that
+no longer counts against the turn's $1 or the workflow's cap. The ceiling
+also counts the episode note's own call at the close (label
+`orchestrator_episode`): every check of it reads the spend of both labels. An answer that
 is not a state leaves the row as it was; at a compaction the turn goes on over
 the heuristic summary. A history clear (`DELETE /v1/chat/history`) empties the
 state. The writer never reads a message a forget took back — one a
@@ -1121,7 +1129,7 @@ objective.
 
 `[execution.context] compaction_model` and `[orchestrator.learning]
 episode_max_per_day` are gone (the compactor uses `summary_model`; an episode
-note costs no call). A hand-edited `daemon.toml` still carrying either is
+note's call counts under `summary_max_daily_cost_usd`). A hand-edited `daemon.toml` still carrying either is
 read as if it did not.
 
 ### Scheduled skills

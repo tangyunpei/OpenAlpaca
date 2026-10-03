@@ -837,8 +837,9 @@ Notes:
   — what was discussed, decided and left open, written by the assistant (origin
   `extracted_other`) and active. `list --kind episode`, `search`, `timeline` and
   the model's memory search find it; it is never recalled into a chat on its
-  own. It is projected from the conversation's working state, so it costs no
-  model call of its own.
+  own. It is written by a model call of its own on `[orchestrator.costs]
+  summary_model`, under `summary_max_daily_cost_usd`, after the conversation's
+  working state is brought up to date.
 - `sync` runs one reconciliation scan now: the daemon re-hashes the note files,
   records any edited, added or removed behind its back as `external`, and prints
   what changed. The daemon also scans every 30 s on its own, and before every read,
