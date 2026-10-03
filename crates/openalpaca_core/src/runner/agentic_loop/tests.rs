@@ -607,6 +607,143 @@ async fn test_cancellation_during_tool_execution() {
     assert_eq!(result.rounds_used, 1); // LLM call completed, then cancelled during tools
 }
 
+/// A run cancelled while one of its tool calls waits on a person's approval
+/// (Round G, the daemon-side neighbour of G1). The cancellation arm above
+/// drops the waiting future, and nothing else ended the wait: the broker kept
+/// the entry, so `GET /v1/chat/confirmations` listed the prompt for as long as
+/// the daemon lived, its card came back on every reload, and a click on it
+/// was refused `receiver dropped`. T1's contract is that every exit from the
+/// wait is a resolution — a withdrawn prompt is `cancelled`.
+#[tokio::test]
+async fn a_run_cancelled_while_a_prompt_waits_withdraws_the_prompt_and_says_so() {
+    use crate::bus::EventBus;
+    use crate::events::{ConfirmationOutcome, SystemEvent};
+    use crate::security::confirmation::ConfirmationBroker;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+
+    struct Search;
+
+    #[async_trait]
+    impl BuiltInTool for Search {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Ok("never approved, never run".to_string())
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "search".to_string(),
+                description: "Search".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(Search)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let bus = EventBus::default();
+    let mut events = bus.subscribe();
+    let broker = Arc::new(ConfirmationBroker::new());
+    let mut sandbox = SandboxManager::with_defaults(Arc::new(registry), bus);
+    sandbox.set_confirmation_broker(broker.clone());
+    let policy = SandboxPolicy {
+        agent_id: "test_agent".to_string(),
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec!["search".to_string()],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        // Far longer than the test: only the cancellation can end this wait.
+        confirmation_timeout_secs: Some(300),
+        auto_approve: false,
+        unattended: false,
+    };
+
+    // Cancel the run once the prompt is up — the way `/cancel` or a stop
+    // lands while the card waits on a person.
+    let token = CancellationToken::new();
+    let canceller = {
+        let token = token.clone();
+        let broker = broker.clone();
+        tokio::spawn(async move {
+            while broker.pending_count() == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            token.cancel();
+        })
+    };
+
+    let provider = MockProvider::new(vec![
+        Ok(MockProvider::tool_use_response()),
+        Ok(MockProvider::simple_response("Never reached")),
+    ]);
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("test")],
+        vec![],
+        &LoopConfig::default(),
+        Some(&sandbox),
+        "test_agent",
+        Some(&policy),
+        None, // context_budget
+        Some(token),
+        None, // tool_context
+    )
+    .await;
+    canceller.await.unwrap();
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Cancelled);
+    assert_eq!(
+        broker.pending_keys(),
+        Vec::<String>::new(),
+        "the cancelled run's prompt is still listed as pending"
+    );
+    let mut announced = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        match event {
+            SystemEvent::ToolConfirmationRequested { request_id, .. } => {
+                announced.push(("requested", request_id, None));
+            }
+            SystemEvent::ToolConfirmationResolved {
+                request_id,
+                outcome,
+                tool_name,
+                ..
+            } => {
+                assert_eq!(tool_name, "search");
+                announced.push(("resolved", request_id, Some(outcome)));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        announced.len(),
+        2,
+        "expected the prompt and its end: {announced:?}"
+    );
+    assert_eq!(announced[0].0, "requested");
+    assert_eq!(
+        (announced[1].0, &announced[1].1, announced[1].2),
+        (
+            "resolved",
+            &announced[0].1,
+            Some(ConfirmationOutcome::Cancelled)
+        )
+    );
+}
+
 // ─── context_threshold tests ──────────────────────────────────────────
 
 #[test]

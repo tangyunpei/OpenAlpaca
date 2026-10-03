@@ -10,7 +10,7 @@ use crate::events::SystemEvent;
 use crate::security::capabilities::{Allowlist, CapabilityManager};
 use crate::security::circuit_breaker::{ToolCircuitBreaker, is_transient_tool_error};
 use crate::security::confirmation::{
-    ConfirmationBroker, ConfirmationRequest, ConfirmationResolution,
+    ConfirmationBroker, ConfirmationOutcome, ConfirmationRequest, ConfirmationResolution,
 };
 use crate::security::sanitizer::InputSanitizer;
 use crate::tools::extensions::is_withheld_refusal;
@@ -407,23 +407,25 @@ impl SandboxManager {
                     "Tool requires confirmation — awaiting user response (timeout: {timeout_secs}s)"
                 );
 
-                let resolution = broker.wait(&request_id, rx, timeout).await;
-
                 // T1: every exit from the wait is announced, not just an
                 // answer. A timeout used to produce nothing at all, so a GUI
                 // that settles a card only on a resolution kept the approval
-                // bar up and the composer paused until the window reloaded.
-                let outcome = resolution.outcome();
-                self.bus.publish(SystemEvent::ToolConfirmationResolved {
+                // bar up and the composer paused until the window reloaded —
+                // and a wait that is dropped instead of returning (its run was
+                // cancelled) is an exit too, which the guard announces.
+                let prompt = OpenPrompt {
+                    broker,
+                    bus: &self.bus,
                     request_id: request_id.clone(),
                     agent_id: agent_id.to_string(),
                     tool_name: tool_call.name.clone(),
-                    outcome,
                     stream_id: policy.stream_id.clone(),
                     lane_key: policy.lane_key.clone(),
                     task_id: ctx.task_id.clone(),
-                    timestamp: Utc::now(),
-                });
+                    open: true,
+                };
+                let resolution = broker.wait(&request_id, rx, timeout).await;
+                prompt.close(resolution.outcome());
 
                 match resolution {
                     ConfirmationResolution::Answered(resp) if resp.approved => {
@@ -674,6 +676,61 @@ impl SandboxManager {
     #[cfg(test)]
     pub(crate) fn approval_cache(&self) -> &crate::security::confirmation::ApprovalCache {
         &self.approval_cache
+    }
+}
+
+/// A prompt the sandbox has raised and not yet seen end — and the promise that
+/// its end is announced, however it comes (T1).
+///
+/// The wait can end without returning: a run cancelled while a card waits on a
+/// person — `/cancel`, a stop, a lead's cancellation — drops its tool futures
+/// from the agentic loop's cancellation arm, and this one with them. Nothing
+/// then removed the broker's entry or published a resolution, so
+/// `GET /v1/chat/confirmations` listed the prompt for as long as the daemon
+/// lived, a client drew its card again on every reload, and the answer was
+/// refused `receiver dropped` (Round G). Dropped while still open, the prompt
+/// is withdrawn from the broker and announced `cancelled`.
+struct OpenPrompt<'a> {
+    broker: &'a ConfirmationBroker,
+    bus: &'a EventBus,
+    request_id: String,
+    agent_id: String,
+    tool_name: String,
+    stream_id: Option<String>,
+    lane_key: Option<String>,
+    task_id: Option<String>,
+    open: bool,
+}
+
+impl OpenPrompt<'_> {
+    /// The wait returned: announce how it ended.
+    fn close(mut self, outcome: ConfirmationOutcome) {
+        self.open = false;
+        self.announce(outcome);
+    }
+
+    /// The resolved frame, routable to every place the prompt went.
+    fn announce(&self, outcome: ConfirmationOutcome) {
+        self.bus.publish(SystemEvent::ToolConfirmationResolved {
+            request_id: self.request_id.clone(),
+            agent_id: self.agent_id.clone(),
+            tool_name: self.tool_name.clone(),
+            outcome,
+            stream_id: self.stream_id.clone(),
+            lane_key: self.lane_key.clone(),
+            task_id: self.task_id.clone(),
+            timestamp: Utc::now(),
+        });
+    }
+}
+
+impl Drop for OpenPrompt<'_> {
+    fn drop(&mut self) {
+        if !self.open {
+            return;
+        }
+        self.broker.cancel(&self.request_id);
+        self.announce(ConfirmationOutcome::Cancelled);
     }
 }
 

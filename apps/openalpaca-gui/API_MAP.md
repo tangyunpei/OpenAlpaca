@@ -1693,7 +1693,9 @@ Keep-alive comments every `server.sse_keep_alive_secs` (default **15 s**).
    `tool_confirmation_resolved` on the WS, with `{ request_id, agent_id, tool_name,
 outcome, stream_id, lane_key, task_id }`. `outcome` is `approved` | `denied` |
    `timed_out` | `cancelled`, and only `approved` ran the tool: a timeout is a denial
-   with a different reason. Before it existed a prompt that ran out its
+   with a different reason. `cancelled` is a prompt withdrawn unanswered — its run was
+   cancelled while it waited, for one; until Round G such a prompt stayed in the
+   pending list below for as long as the daemon lived, and its answer was refused. Before it existed a prompt that ran out its
    `confirmation_timeout_secs` produced nothing at all, so a client that settles a
    card only on an answer it posted itself kept the card — and its paused composer —
    until it was reloaded. Settle on **any** outcome, and do not settle on this frame
@@ -1726,8 +1728,8 @@ lane_key, preview, per_call, raised_at }] }`, oldest first (a restored card show
    **The answer's `404` is a resolution, not an error** —
    `{ "error": { "code": "NOT_FOUND", "message": "No pending confirmation: <id>" } }`
    (no such id: answered already, timed out, withdrawn, or the daemon restarted), or
-   `"receiver dropped"` (the id was still listed but nothing was waiting on it; the
-   entry goes with that answer). Retire the card, re-read the list, and say what
+   `"receiver dropped"` (the id was still listed but nothing was waiting on it any
+   more — a race with its run ending; the entry goes with that answer). Retire the card, re-read the list, and say what
    happened in the user's terms, as the CLI's `tasks confirmations` refusal does for
    an id. This window writes a `Not waiting` row:
    `<tool> was answered already or is no longer waiting, so nothing was changed.`

@@ -1317,7 +1317,7 @@ A tool on the confirm list pauses until somebody answers.
 | `approved` | Somebody said yes. | yes |
 | `denied` | Somebody said no. | no |
 | `timed_out` | Nobody answered within the timeout. | no |
-| `cancelled` | The request was withdrawn without an answer. | no |
+| `cancelled` | The request was withdrawn without an answer — its run was cancelled while it waited, for one. It leaves the pending list at once. | no |
 
 Every way a prompt stops being pending is announced — a timeout included — so
 a client can always take its prompt down. The timeout defaults to 300 s
