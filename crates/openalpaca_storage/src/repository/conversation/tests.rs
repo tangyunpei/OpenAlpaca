@@ -1590,8 +1590,9 @@ fn set_title_if_empty_names_only_an_untitled_session() {
 }
 
 /// G5: the title is read from the first of the session's own user rows that
-/// names one — never an assistant row, never another session's, and never
-/// the `display_text` an attachment turn carries.
+/// names one — never an assistant row, never another session's, never a
+/// follow-up the daemon re-entered (source `internal`), and never the
+/// `display_text` an attachment turn carries.
 #[test]
 fn title_from_user_rows_reads_the_first_user_row_that_names_one() {
     let db = test_db();
@@ -1609,6 +1610,15 @@ fn title_from_user_rows_reads_the_first_user_row_that_names_one() {
     );
     learning_row(&repo, &session.id, "user", "/status", None, None);
     learning_row(&repo, &session.id, "user", "", None, None);
+    repo.insert(&ConversationMessage {
+        lane_key: "user:gui".to_string(),
+        role: "user".to_string(),
+        content: "Check the build again tomorrow and report back".to_string(),
+        source: Some("internal".to_string()),
+        session_id: Some(session.id.clone()),
+        ..Default::default()
+    })
+    .unwrap();
     learning_row(&repo, &session.id, "user", "Plan pasta night", None, None);
     learning_row(&repo, &session.id, "user", "And dessert?", None, None);
 

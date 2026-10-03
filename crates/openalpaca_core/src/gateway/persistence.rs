@@ -4,6 +4,7 @@
 //! (GUI, Telegram, CLI, etc.) get automatic conversation persistence.
 
 use crate::gateway::router::ResolvedAttachment;
+use crate::memory::learning::is_slash_turn;
 use crate::utils::text::one_line;
 use anyhow::Result;
 use openalpaca_storage::{
@@ -49,16 +50,19 @@ const TITLE_MAX_CHARS: usize = 60;
 /// A conversation's title from one of its user messages (G5, Round G): the
 /// first line with anything to read on it, as [`one_line`] leaves it (hidden
 /// and control characters dropped, whitespace collapsed), cut to at most
-/// [`TITLE_MAX_CHARS`] characters — at the last space that fits, or at the
-/// limit itself when none does (CJK text has no spaces) — and followed by `…`
-/// when cut. Characters, never bytes: a cut cannot land inside one.
+/// [`TITLE_MAX_CHARS`] characters — at the last space that fits when the words
+/// before it keep at least half the limit, else at the limit itself (CJK text
+/// has no spaces, and a first word followed by a URL or a run of Chinese would
+/// otherwise leave the title one word long) — and followed by `…` when cut.
+/// Characters, never bytes: a cut cannot land inside one.
 ///
-/// `None` for a slash command (`/remember …`, `/status` — the intent parser's
-/// own test, the trimmed message starting with `/`) and for a message with no
-/// text (a turn of attachments alone): neither says what the conversation is
-/// about, and the next user message is tried at its own turn.
+/// `None` for a message that starts with `/` — a slash command (`/remember …`,
+/// `/status`), by [`is_slash_turn`], the test learning leaves such a turn out
+/// by — and for a message with no text (a turn of attachments alone): neither
+/// says what the conversation is about, and the next user message is tried at
+/// its own turn.
 fn derive_title(message: &str) -> Option<String> {
-    if message.trim_start().starts_with('/') {
+    if is_slash_turn(message) {
         return None;
     }
     let line = message
@@ -72,8 +76,11 @@ fn derive_title(message: &str) -> Option<String> {
     // `one_line` leaves single spaces only, so a space is the word boundary;
     // the kept text already ends on one when the next character is a space.
     let at_word_end = line.chars().nth(TITLE_MAX_CHARS) == Some(' ');
-    let cut = match kept.rfind(' ') {
-        Some(space) if !at_word_end && space > 0 => &kept[..space],
+    // The words before the last space that fits, kept only when they hold at
+    // least half the limit.
+    let words = kept.rfind(' ').map(|space| &kept[..space]);
+    let cut = match words {
+        Some(words) if !at_word_end && words.chars().count() >= TITLE_MAX_CHARS / 2 => words,
         _ => kept.as_str(),
     };
     Some(format!("{cut}…"))
@@ -728,22 +735,73 @@ mod tests {
         assert_eq!(title_of(&db, &session), "Plan pasta night for six");
     }
 
-    /// Characters, never bytes: 60 three-byte characters with no space in
-    /// them are cut at the limit, and the cut cannot panic.
+    /// Characters, never bytes: a 200-character message with no space in it
+    /// is cut at its 60th character. The leading ASCII letter puts byte 60
+    /// inside a three-byte character, so a cut by bytes would panic there
+    /// (and one at a boundary would keep 20 characters, not 60).
     #[test]
     fn a_long_chinese_message_is_cut_at_60_characters() {
         let (_tmp, db) = make_db();
         let persistence = GatewayPersistence::new(db.clone());
-        let message: String = "我想为六个人计划一个意大利面之夜"
-            .chars()
-            .cycle()
+        let message: String = std::iter::once('A')
+            .chain("我想为六个人计划一个意大利面之夜".chars().cycle())
             .take(200)
             .collect();
+        assert!(!message.is_char_boundary(60), "byte 60 is mid-character");
 
         let session = user_turn(&persistence, "user10:gui", &message);
 
         let expected: String = message.chars().take(60).chain(['…']).collect();
         assert_eq!(title_of(&db, &session), expected);
+    }
+
+    /// A turn of a file and a sentence is named by the sentence: the
+    /// attachment writer runs the same title step as the plain one.
+    #[test]
+    fn a_turn_with_a_file_and_a_sentence_is_named_by_the_sentence() {
+        let (_tmp, db) = make_db();
+        let persistence = GatewayPersistence::new(db.clone());
+
+        let turn = persistence
+            .persist_user_message_with_attachments(
+                "user12:gui",
+                "Summarize this resume for me",
+                "gui",
+                None,
+                &[sample_attachment_with_text("Jane Doe, engineer")],
+                None,
+            )
+            .expect("persist a turn with a file");
+
+        assert_eq!(
+            title_of(&db, &turn.session_id),
+            "Summarize this resume for me"
+        );
+    }
+
+    /// A follow-up the daemon re-enters on the user's behalf is stored as a
+    /// `user` row of source `internal` — the assistant's own words — and
+    /// names nothing; the user's next sentence does.
+    #[test]
+    fn a_follow_ups_re_entered_turn_names_nothing() {
+        let (_tmp, db) = make_db();
+        let persistence = GatewayPersistence::new(db.clone());
+
+        let session = user_turn(&persistence, "user13:gui", "/status");
+        let followup = persistence
+            .persist_user_message(
+                "user13:gui",
+                "Check the build again tomorrow and report back",
+                crate::memory::learning::INTERNAL_SOURCE,
+                None,
+                None,
+            )
+            .expect("persist the follow-up's turn");
+        assert_eq!(followup.session_id, session);
+        assert_eq!(title_of(&db, &session), "", "not the user's words");
+
+        user_turn(&persistence, "user13:gui", "Plan pasta night for six");
+        assert_eq!(title_of(&db, &session), "Plan pasta night for six");
     }
 
     /// A conversation an older build left untitled is named from its first
@@ -798,9 +856,61 @@ mod tests {
         // A cut that lands on a word's end keeps the whole word.
         let exact = format!("{} tail", "a".repeat(60));
         assert_eq!(derive_title(&exact), Some(format!("{}…", "a".repeat(60))));
-        // Nothing to read, or a command: no title.
+        // The last space is used only when the words before it keep at least
+        // half the limit (30 characters); otherwise the cut is at the limit.
+        let thirty = format!("{} {}", "a".repeat(30), "b".repeat(40));
+        assert_eq!(derive_title(&thirty), Some(format!("{}…", "a".repeat(30))));
+        let twenty_nine = format!("{} {}", "a".repeat(29), "b".repeat(41));
+        assert_eq!(
+            derive_title(&twenty_nine),
+            Some(format!("{} {}…", "a".repeat(29), "b".repeat(30)))
+        );
+        // So one space near the start leaves more than its first word: in
+        // Chinese around an English word, after a full-width space (U+3000,
+        // which `one_line` makes a space), and before a URL.
+        assert_eq!(
+            derive_title(
+                "帮我用 Rust写一个能够解析命令行参数的小工具，支持子命令、默认值、\
+                 环境变量覆盖和自动生成的帮助信息，并且附上完整的单元测试"
+            )
+            .as_deref(),
+            Some(
+                "帮我用 Rust写一个能够解析命令行参数的小工具，支持子命令、默认值、\
+                 环境变量覆盖和自动生成的帮助信息，并且附上完整的单…"
+            )
+        );
+        assert_eq!(
+            derive_title(
+                "你好\u{3000}我想为六个人计划一个意大利面之夜，需要一份购物清单、\
+                 每道菜的做法和时间安排，还要考虑一位素食者和一位对坚果过敏的朋友"
+            )
+            .as_deref(),
+            Some(
+                "你好 我想为六个人计划一个意大利面之夜，需要一份购物清单、\
+                 每道菜的做法和时间安排，还要考虑一位素食者和一位对坚果过敏的朋…"
+            )
+        );
+        assert_eq!(
+            derive_title(
+                "Summarize https://example.com/a/very/long/path/to/a/report/that/\
+                 keeps/going/and/going.html for me"
+            )
+            .as_deref(),
+            Some("Summarize https://example.com/a/very/long/path/to/a/report/t…")
+        );
+        // Characters, not bytes: 27 three-byte characters are 81 bytes, under
+        // the limit all the same, and are not cut.
+        let short_chinese = "我想为六个人计划一个意大利面之夜还要一份购物清单和做法";
+        assert_eq!(
+            (short_chinese.chars().count(), short_chinese.len()),
+            (27, 81)
+        );
+        assert_eq!(derive_title(short_chinese).as_deref(), Some(short_chinese));
+        // Nothing to read, or a message that starts with `/` (a command, or
+        // a path): no title.
         assert_eq!(derive_title(""), None);
         assert_eq!(derive_title(" \n\u{200B}\n "), None);
         assert_eq!(derive_title("  /status"), None);
+        assert_eq!(derive_title("/usr/local/bin is not on my PATH"), None);
     }
 }

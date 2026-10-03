@@ -702,7 +702,11 @@ impl<'a> ConversationRepository<'a> {
     /// first message was a slash command or a file alone is named by its
     /// first sentence, and one an older build left untitled by its first
     /// stored user row. Reads `content` — the text as typed — never
-    /// `display_text`, whose `[Attachments: …]` suffix nobody typed.
+    /// `display_text`, whose `[Attachments: …]` suffix nobody typed; and
+    /// skips a row of source `internal`, a follow-up the daemon re-entered
+    /// on the user's behalf (the assistant's own `queue_followup` text, as
+    /// learning reads it — `source <> 'internal'` in `learning_cursor.rs`).
+    /// A row with no source is an older build's and is read.
     pub fn title_from_user_rows(
         &self,
         session_id: &str,
@@ -711,7 +715,9 @@ impl<'a> ConversationRepository<'a> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT content FROM conversation_messages
-                 WHERE session_id = ?1 AND role = 'user' ORDER BY id",
+                 WHERE session_id = ?1 AND role = 'user'
+                   AND COALESCE(source, '') <> 'internal'
+                 ORDER BY id",
             )?;
             let mut rows = stmt.query([session_id])?;
             while let Some(row) = rows.next()? {

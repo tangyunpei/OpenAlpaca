@@ -503,12 +503,14 @@ A lane holds many sessions with exactly one `active`. A session's `title` is
 is still `""`: the first of that session's user messages with a sentence in it,
 which for a new conversation is the message just sent. The title is that
 message's first non-empty line, hidden and control characters dropped and
-whitespace collapsed, cut to at most 60 characters at a word boundary (at the
-60th character for text with no spaces, such as Chinese) and followed by `…`
-when cut. A slash command (`/remember …`, `/status`) or a turn of attachments
-alone names nothing; the next message is tried at its own turn. The write
-happens only while the title is still `""`, so a rename through `PATCH` is never
-overwritten. Each is served with its
+whitespace collapsed, cut to at most 60 characters — at the last space that
+fits when the words before it keep at least 30 of them, otherwise at the 60th
+character (as for text with no spaces, such as Chinese) — and followed by `…`
+when cut. A message that starts with `/` (a slash command such as
+`/remember …` or `/status`), a turn of attachments alone, and a follow-up the
+daemon re-enters on the user's behalf (source `internal`) name nothing; the
+next message is tried at its own turn. The write happens only while the title
+is still `""`, so a rename through `PATCH` is never overwritten. Each is served with its
 **working state** — `working_state`, the JSON object
 [Conversation continuity](#conversation-continuity) describes, or `null` while
 it has none, and `working_state_updated_at` — and without the writer's own
