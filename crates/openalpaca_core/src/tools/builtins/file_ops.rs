@@ -278,10 +278,10 @@ impl FileWriteTool {
 
         // Security: reject absolute paths and .. components
         validate_workspace_path(path)?;
-        // A path with no file name at its end ('', '.', 'reports/') names a
-        // directory, not a file: the plain write could not write it, and an
-        // artifact would be named for nothing (`artifact.bin`).
-        let last = path.rsplit(['/', '\\']).next().unwrap_or_default();
+        // A path with no file name at its end ('', '.', 'reports/', a blank
+        // one) names a directory, not a file: the plain write could not write
+        // it, and an artifact would be named for nothing (`artifact.bin`).
+        let last = path.rsplit(['/', '\\']).next().unwrap_or_default().trim();
         if last.is_empty() || last == "." {
             return Err(format!(
                 "Path '{path}' names no file. Give a file name, e.g. 'reports/summary.md'."
@@ -419,17 +419,27 @@ impl FileWriteTool {
 
 /// The artifact name `file_write` saves `path` under (G2): the path itself,
 /// which the grammar slugifies (`reports/pasta-night.md` →
-/// `01-reports-pasta-night.md`) — unless the path holds a character outside
-/// ASCII. The slug keeps ASCII letters and digits only, so `文档.md` and
-/// `笔记.md` would both be `01-artifact.md`, one artifact's two versions; such
-/// a path's title is its slug, shortened to leave room, plus the first eight
-/// hex digits of the path's SHA-256 (`artifact-1a2b3c4d.md`). The same path
-/// always gets the same name, so writing it again is still its next version.
+/// `01-reports-pasta-night.md`) — when the grammar carries the path whole.
+/// A name keeps ASCII letters and digits only, at most
+/// `FILE_NAME_SLUG_BYTES` (60) of them, and an extension only when a kind
+/// admits it (R21; any other, or none, is stored as `.bin`). So `文档.md` and
+/// `笔记.md`, two files of one deep directory, or `go.mod` and `go.sum` would
+/// each be one artifact's two versions — and past the version cap the first
+/// file's bytes are deleted. A path the grammar cannot carry whole gets as
+/// its title its slug, shortened to leave room, plus the first eight hex
+/// digits of the whole path's SHA-256 (`artifact-1a2b3c4d.md`,
+/// `go-1a2b3c4d.mod`, stored as `.bin`). The same path always gets the same
+/// name, so writing it again is still its next version. Two carried paths
+/// that differ only in letter case or in the punctuation between words still
+/// reach one name.
 fn artifact_name(path: &str) -> String {
-    if path.is_ascii() {
+    let (title, _) = split_name(path);
+    let carried = path.is_ascii()
+        && slugify(title, usize::MAX).len() <= FILE_NAME_SLUG_BYTES
+        && kind_for_file_name(path).is_some();
+    if carried {
         return path.to_string();
     }
-    let (title, _) = split_name(path);
     let extension = &path[title.len()..];
     let hash: String = Sha256::digest(path.as_bytes())[..4]
         .iter()
@@ -452,13 +462,14 @@ pub(super) fn file_write_tool(
                 project, the path is relative to the daemon's workspace directory — \
                 unless that directory is OpenAlpaca's own store, in which case the file \
                 is saved as an artifact of the project instead. An artifact is named \
-                after the path (a path with a character outside ASCII also gets a short \
-                hash of itself), its extension picks its kind, and writing the same path \
+                after the path (plus a short hash of the path when the name cannot carry \
+                it whole: a character outside ASCII, a long path, or an extension no kind \
+                keeps, or none), its extension picks its kind, and writing the same path \
                 again in one run saves its next version. The result says which happened \
                 and, for an artifact, its version and absolute path; file_read cannot \
                 open an artifact by the path you gave. Creates parent directories \
-                automatically if they don't exist. Content is limited to 10MB. Writing \
-                to persona files (SOUL.md, USER.md, IDENTITY.md) is blocked — use \
+                automatically if they don't exist. Content is limited to 10MB. Writing to \
+                persona files (SOUL.md, USER.md, IDENTITY.md) is blocked — use \
                 update_persona instead."
                 .to_string(),
             parameters: serde_json::json!({
@@ -1540,6 +1551,21 @@ mod tests {
             .unwrap_or_else(|| panic!("no artifact for {path}: {rows:?}"))
     }
 
+    /// The eight hex digits `artifact_name` appended to the slug of `name`, a
+    /// stored head whose extension is `ext` (`.md`, `.bin`).
+    fn path_hash<'a>(name: &'a str, ext: &str) -> &'a str {
+        let hash = name
+            .strip_suffix(ext)
+            .and_then(|stem| stem.rsplit_once('-'))
+            .map(|(_, hash)| hash)
+            .unwrap_or_else(|| panic!("{name}"));
+        assert!(
+            hash.len() == 8 && hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "{name}"
+        );
+        hash
+    }
+
     /// F1: the slug keeps ASCII letters and digits only, so two paths outside
     /// ASCII would both be `01-artifact.md` — one artifact, the first file
     /// only in its history. Each gets a hash of itself instead: two paths, two
@@ -1571,17 +1597,7 @@ mod tests {
         let note = row_for(&rows, "笔记.md");
         assert_ne!(doc.name, note.name);
         for row in [doc, note] {
-            let hash = row
-                .name
-                .strip_suffix(".md")
-                .and_then(|stem| stem.rsplit_once('-'))
-                .map(|(_, hash)| hash)
-                .unwrap_or_else(|| panic!("{}", row.name));
-            assert!(
-                hash.len() == 8 && hash.chars().all(|c| c.is_ascii_hexdigit()),
-                "{}",
-                row.name
-            );
+            path_hash(&row.name, ".md");
             assert_eq!(row.kind, Some(openalpaca_storage::ArtifactKind::Markdown));
         }
         assert_eq!(doc.version, 2, "the same path again is its next version");
@@ -1592,27 +1608,136 @@ mod tests {
     }
 
     /// The hash survives the grammar: it is appended after the slug's budget
-    /// was shortened for it, so a long path keeps it; a path inside ASCII is
-    /// left as it is.
+    /// was shortened for it, so a long path keeps it; a path the grammar
+    /// carries whole is left as it is; and the hash is the whole path's, so
+    /// two paths that differ only in an extension the name drops stay apart.
     #[test]
     fn artifact_name_keeps_its_hash_inside_the_slug_budget() {
         assert_eq!(artifact_name(PASTA), PASTA);
+        assert_eq!(artifact_name("src/main.rs"), "src/main.rs");
         assert_eq!(artifact_name("文档.md"), artifact_name("文档.md"));
         assert_ne!(artifact_name("文档.md"), artifact_name("笔记.md"));
         assert!(artifact_name("文档.md").starts_with("artifact-"));
         assert!(artifact_name("报告/plan.md").starts_with("plan-"));
-
-        let long = format!("{}文档.md", "a".repeat(100));
-        let name = artifact_name(&long);
-        let (title, _) = split_name(&name);
-        assert!(name.ends_with(".md"), "{name}");
-        assert_eq!(
-            slugify(title, FILE_NAME_SLUG_BYTES),
-            title,
-            "the grammar would cut the hash"
+        // The store drops both extensions (`.bin`), so only the titles can
+        // keep these two apart: the hash covers the extension too.
+        assert_ne!(
+            split_name(&artifact_name("文档.sh")).0,
+            split_name(&artifact_name("文档.bat")).0,
         );
-        let short = format!("{}文档.md", "a".repeat(101));
-        assert_ne!(name, artifact_name(&short), "the hash is the path's");
+
+        for long in [
+            format!("{}文档.md", "a".repeat(100)),
+            format!("{}/notes.md", "a".repeat(100)),
+        ] {
+            let name = artifact_name(&long);
+            let (title, _) = split_name(&name);
+            assert!(name.ends_with(".md"), "{name}");
+            assert_eq!(
+                slugify(title, FILE_NAME_SLUG_BYTES),
+                title,
+                "the grammar would cut the hash"
+            );
+            let longer = format!("a{long}");
+            assert_ne!(name, artifact_name(&longer), "the hash is the path's");
+        }
+    }
+
+    /// R1-1 (a): the slug is cut at 60 bytes, so every file under a directory
+    /// whose own slug fills them would be one artifact — 22 such files one row
+    /// at version 22, the first two files' bytes deleted by the version cap.
+    /// Each gets a hash of its path instead, keeps its extension and kind, and
+    /// the first written again is its own version 2.
+    #[tokio::test]
+    async fn two_files_of_one_deep_directory_are_two_artifacts() {
+        const DIR: &str = "packages/frontend/src/components/dashboard/analytics/charts";
+        let bar = format!("{DIR}/BarChart.tsx");
+        let line = format!("{DIR}/LineChart.tsx");
+        assert_eq!(
+            slugify(split_name(&bar).0, FILE_NAME_SLUG_BYTES),
+            slugify(split_name(&line).0, FILE_NAME_SLUG_BYTES),
+            "the grammar alone gives both one name"
+        );
+        let st = Store::new();
+        let task = "9d41c2e7-0000-4000-8000-000000000000";
+        st.task(task, "Dashboard charts");
+        let ctx = st.ctx(None, Some(task));
+        let tool = st.tool_at(st.work.path());
+
+        for (path, content) in [(&bar, "bar v1\n"), (&line, "line v1\n"), (&bar, "bar v2\n")] {
+            tool.write(&serde_json::json!({"path": path, "content": content}), &ctx)
+                .await
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+        }
+
+        let rows = st.artifacts();
+        assert_eq!(rows.len(), 2, "two files, two artifacts: {rows:?}");
+        let bar_row = row_for(&rows, &bar);
+        let line_row = row_for(&rows, &line);
+        for row in [bar_row, line_row] {
+            assert!(
+                row.name.contains("-packages-frontend-src-"),
+                "the slug is still read: {}",
+                row.name
+            );
+            path_hash(&row.name, ".tsx");
+            assert_eq!(row.kind, Some(openalpaca_storage::ArtifactKind::Code));
+        }
+        assert_eq!(
+            bar_row.version, 2,
+            "the same path again is its next version"
+        );
+        assert_eq!(
+            fs::read_to_string(&bar_row.storage_path).unwrap(),
+            "bar v2\n"
+        );
+        assert_eq!(line_row.version, 1);
+        assert_eq!(
+            fs::read_to_string(&line_row.storage_path).unwrap(),
+            "line v1\n"
+        );
+    }
+
+    /// R1-1 (b): an extension no kind admits — or none — is stored as `.bin`
+    /// and is not part of the name, so `go.mod` and `go.sum` would be one
+    /// artifact's two versions. Each pair below is two artifacts, and
+    /// `go.mod` written again is its own version 2.
+    #[tokio::test]
+    async fn two_paths_whose_extension_no_kind_keeps_are_two_artifacts() {
+        const PAIRS: [(&str, &str); 4] = [
+            ("go.mod", "go.sum"),
+            (".env", ".env.example"),
+            ("Dockerfile", "Dockerfile.dev"),
+            ("scripts/build.sh", "scripts/build.bat"),
+        ];
+        for (a, b) in PAIRS {
+            assert_eq!(
+                slugify(split_name(a).0, FILE_NAME_SLUG_BYTES),
+                slugify(split_name(b).0, FILE_NAME_SLUG_BYTES),
+                "{a} and {b}: one title"
+            );
+            assert!(kind_for_file_name(a).is_none() && kind_for_file_name(b).is_none());
+        }
+        let st = Store::new();
+        let ctx = st.ctx(None, None);
+        let tool = st.tool_at(st.work.path());
+        let paths = PAIRS.iter().flat_map(|(a, b)| [*a, *b]);
+
+        for path in paths.clone().chain(["go.mod"]) {
+            tool.write(&serde_json::json!({"path": path, "content": path}), &ctx)
+                .await
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+        }
+
+        let rows = st.artifacts();
+        assert_eq!(rows.len(), 8, "eight paths, eight artifacts: {rows:?}");
+        for path in paths {
+            let row = row_for(&rows, path);
+            path_hash(&row.name, ".bin");
+            assert_eq!(fs::read_to_string(&row.storage_path).unwrap(), path);
+            let expected = if path == "go.mod" { 2 } else { 1 };
+            assert_eq!(row.version, expected, "{path}");
+        }
     }
 
     /// F3, F7: the extension picks the kind through R21's sets, and text whose
@@ -1637,7 +1762,8 @@ mod tests {
         let script = row_for(&rows, "build.sh");
         assert_eq!(script.kind, Some(openalpaca_storage::ArtifactKind::Code));
         assert_eq!(script.mime_type, "text/plain");
-        assert!(script.name.ends_with("-build.bin"), "{}", script.name);
+        assert!(script.name.contains("-build-"), "{}", script.name);
+        path_hash(&script.name, ".bin");
     }
 
     /// F8: a path whose end names no file is refused before the routing — no
@@ -1651,7 +1777,7 @@ mod tests {
             (st.work.path().to_path_buf(), st.ctx(None, None)),
             (project.clone(), st.ctx(Some(&project), None)),
         ] {
-            for path in ["", ".", "reports/", "reports/."] {
+            for path in ["", ".", "reports/", "reports/.", " ", "reports/ "] {
                 let err = st
                     .tool_at(&root)
                     .write(&serde_json::json!({"path": path, "content": "x"}), &ctx)

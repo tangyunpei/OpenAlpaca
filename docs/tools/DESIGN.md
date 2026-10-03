@@ -428,8 +428,9 @@ without losing it.
   `file_write` writes a plain file into the daemon's workspace only on a
   turn that carries a project (and a workspace that is not the home store),
   and otherwise saves an artifact named after its path (plus a short hash
-  of it when the path holds a character outside ASCII), with the path as
-  its summary and no note.
+  of it when the name cannot carry the path whole: a character outside
+  ASCII, more than 60 bytes of name, an extension no kind keeps, or none),
+  with the path as its summary and no note.
 - **Spill, don't truncate.**  When a tool result exceeds
   `[orchestrator.sessions] tool_result_inline_bytes` (default 32 KB) and
   the loop has a session log, the whole result is written to the session's
