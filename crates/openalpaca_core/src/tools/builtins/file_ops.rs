@@ -4,13 +4,16 @@ use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolConte
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
-use openalpaca_storage::store::{StoreScope, kind_for_file_name};
+use openalpaca_storage::store::{
+    FILE_NAME_SLUG_BYTES, StoreScope, is_the_home_root, kind_for_file_name, slugify,
+};
 use openalpaca_storage::{ArtifactKind, Database};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::annotations_for_builtin;
-use super::artifact_write::{ToolArtifact, put_tool_artifact, scope_from_context};
+use super::artifact_write::{ToolArtifact, put_tool_artifact, scope_from_context, split_name};
 use super::helpers::{
     MAX_FILE_READ_SIZE, StoreAccess, is_identity_path, is_soul_path, is_store_owned_path,
     is_store_owned_resolved, is_user_path, resolve_workspace_path,
@@ -275,6 +278,15 @@ impl FileWriteTool {
 
         // Security: reject absolute paths and .. components
         validate_workspace_path(path)?;
+        // A path with no file name at its end ('', '.', 'reports/') names a
+        // directory, not a file: the plain write could not write it, and an
+        // artifact would be named for nothing (`artifact.bin`).
+        let last = path.rsplit(['/', '\\']).next().unwrap_or_default();
+        if last.is_empty() || last == "." {
+            return Err(format!(
+                "Path '{path}' names no file. Give a file name, e.g. 'reports/summary.md'."
+            ));
+        }
 
         // Safety: block writes to SOUL.md — use update_persona tool instead
         if is_soul_path(path) {
@@ -320,7 +332,7 @@ impl FileWriteTool {
         // would land owned by no content kind. Every other write is an
         // artifact, on `artifact_write`'s own store path.
         let scope = scope_from_context(ctx);
-        if !matches!(scope, StoreScope::Project(_)) || is_home_store(&self.workspace_root) {
+        if !matches!(scope, StoreScope::Project(_)) || is_the_home_root(&self.workspace_root) {
             return self.save_as_artifact(path, content, ctx, &scope);
         }
 
@@ -361,10 +373,13 @@ impl FileWriteTool {
     }
 
     /// G2: the write is an artifact — in the project's store when the turn
-    /// carries one, else in the home store — named for `path`, whose
-    /// extension picks the kind (R21's sets, `kind_for_file_name`; one no
-    /// kind admits is `binary`, the kind that promises the least). The same
-    /// path written again in the same run is the same artifact's next version.
+    /// carries one, else in the home store — named for `path`
+    /// ([`artifact_name`]), with the path as written for its summary, and
+    /// the kind its extension picks (R21's sets, `kind_for_file_name`). The
+    /// content is a UTF-8 string by construction, so an extension no kind
+    /// admits — `build.sh`, `Makefile`, `logo.svg` — is `code`, text the
+    /// Library can show; R21 still stores it as `.bin`. The same path written
+    /// again in the same run is the same artifact's next version.
     fn save_as_artifact(
         &self,
         path: &str,
@@ -382,11 +397,11 @@ impl FileWriteTool {
             self.daemon_config.as_ref(),
             ToolArtifact {
                 tool: "file_write",
-                name: path,
-                kind: kind_for_file_name(path).unwrap_or(ArtifactKind::Binary),
+                name: &artifact_name(path),
+                kind: kind_for_file_name(path).unwrap_or(ArtifactKind::Code),
                 content,
                 note: None,
-                summary: None,
+                summary: Some(path),
                 metadata: None,
             },
         )?;
@@ -395,17 +410,33 @@ impl FileWriteTool {
             StoreScope::Home => "because this conversation has no project folder",
         };
         Ok(format!(
-            "Saved {path} as an artifact {why}: {}, version {}, at {}. It is listed in the Library.",
+            "Saved {path} as an artifact {why}: {}, version {}, at {}. It is listed in the \
+             Library. file_read cannot open it by the path you gave.",
             record.name, record.version, record.storage_path
         ))
     }
 }
 
-/// Whether `root` is the home store (G2) — compared resolved, as
-/// [`store_root`] hands the store over. An unresolvable home is no root's.
-fn is_home_store(root: &Path) -> bool {
-    store_root()
-        .is_some_and(|home| root.canonicalize().unwrap_or_else(|_| root.to_path_buf()) == home)
+/// The artifact name `file_write` saves `path` under (G2): the path itself,
+/// which the grammar slugifies (`reports/pasta-night.md` →
+/// `01-reports-pasta-night.md`) — unless the path holds a character outside
+/// ASCII. The slug keeps ASCII letters and digits only, so `文档.md` and
+/// `笔记.md` would both be `01-artifact.md`, one artifact's two versions; such
+/// a path's title is its slug, shortened to leave room, plus the first eight
+/// hex digits of the path's SHA-256 (`artifact-1a2b3c4d.md`). The same path
+/// always gets the same name, so writing it again is still its next version.
+fn artifact_name(path: &str) -> String {
+    if path.is_ascii() {
+        return path.to_string();
+    }
+    let (title, _) = split_name(path);
+    let extension = &path[title.len()..];
+    let hash: String = Sha256::digest(path.as_bytes())[..4]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let slug = slugify(title, FILE_NAME_SLUG_BYTES - hash.len() - 1);
+    format!("{slug}-{hash}{extension}")
 }
 
 pub(super) fn file_write_tool(
@@ -421,12 +452,14 @@ pub(super) fn file_write_tool(
                 project, the path is relative to the daemon's workspace directory — \
                 unless that directory is OpenAlpaca's own store, in which case the file \
                 is saved as an artifact of the project instead. An artifact is named \
-                after the path, its extension picks its kind, and writing the same path \
+                after the path (a path with a character outside ASCII also gets a short \
+                hash of itself), its extension picks its kind, and writing the same path \
                 again in one run saves its next version. The result says which happened \
-                and, for an artifact, its version and absolute path. Creates parent \
-                directories automatically if they don't exist. Content is limited to \
-                10MB. Writing to persona files (SOUL.md, USER.md, IDENTITY.md) is \
-                blocked — use update_persona instead."
+                and, for an artifact, its version and absolute path; file_read cannot \
+                open an artifact by the path you gave. Creates parent directories \
+                automatically if they don't exist. Content is limited to 10MB. Writing \
+                to persona files (SOUL.md, USER.md, IDENTITY.md) is blocked — use \
+                update_persona instead."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1310,6 +1343,7 @@ mod tests {
         );
         assert_eq!(row.kind, Some(openalpaca_storage::ArtifactKind::Markdown));
         assert_eq!(row.name, "01-reports-pasta-night.md");
+        assert_eq!(row.summary.as_deref(), Some(PASTA), "the path as written");
         assert_eq!(row.agent_id.as_deref(), Some("general_agent"));
         assert_eq!(
             fs::read_to_string(&row.storage_path).unwrap(),
@@ -1351,6 +1385,34 @@ mod tests {
         );
         assert!(out.contains(&rows[0].storage_path), "{out}");
         assert!(out.contains("Library"), "{out}");
+        assert!(out.contains("in this project's store"), "{out}");
+        assert!(
+            !out.contains("no project folder"),
+            "the turn carries a project: {out}"
+        );
+    }
+
+    /// The root is compared resolved: a workspace root that is a link to the
+    /// home store is the home store, and the file is still an artifact.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_workspace_root_that_links_to_the_home_store_counts_as_the_home_store() {
+        let st = Store::new();
+        let home = st.home.root();
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("home-link");
+        std::os::unix::fs::symlink(&home, &link).unwrap();
+        let project = st.project_root();
+
+        st.tool_at(&link)
+            .write(&pasta("# Pasta night\n"), &st.ctx(Some(&project), None))
+            .await
+            .unwrap();
+
+        assert!(!home.join(PASTA).exists(), "written through the link");
+        let rows = st.artifacts();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].project_root.as_deref(), project.to_str());
     }
 
     /// The case G2 leaves as it was: a project on the turn and a workspace
@@ -1428,6 +1490,10 @@ mod tests {
         assert!(Path::new(&row.storage_path).is_absolute());
         assert!(out.contains(&row.storage_path), "{out}");
         assert!(out.contains("Library"), "{out}");
+        assert!(
+            out.contains("file_read cannot open it by the path you gave"),
+            "{out}"
+        );
     }
 
     /// The refusals come before the routing: a store-owned path and an
@@ -1462,5 +1528,180 @@ mod tests {
             st.artifacts().is_empty(),
             "a refused write saved an artifact"
         );
+    }
+
+    /// The row with `summary` = `path`, among a store's artifacts.
+    fn row_for<'a>(
+        rows: &'a [openalpaca_storage::ArtifactRecord],
+        path: &str,
+    ) -> &'a openalpaca_storage::ArtifactRecord {
+        rows.iter()
+            .find(|row| row.summary.as_deref() == Some(path))
+            .unwrap_or_else(|| panic!("no artifact for {path}: {rows:?}"))
+    }
+
+    /// F1: the slug keeps ASCII letters and digits only, so two paths outside
+    /// ASCII would both be `01-artifact.md` — one artifact, the first file
+    /// only in its history. Each gets a hash of itself instead: two paths, two
+    /// artifacts, and the same path again is still its own next version.
+    #[tokio::test]
+    async fn two_paths_outside_ascii_in_one_run_are_two_artifacts() {
+        let st = Store::new();
+        let task = "5b0e9a3c-0000-4000-8000-000000000000";
+        st.task(task, "Notes in Chinese");
+        let ctx = st.ctx(None, Some(task));
+        let tool = st.tool_at(st.work.path());
+        let write = |path: &'static str, content: &'static str| {
+            let tool = &tool;
+            let ctx = &ctx;
+            async move {
+                tool.write(&serde_json::json!({"path": path, "content": content}), ctx)
+                    .await
+                    .unwrap_or_else(|e| panic!("{path}: {e}"))
+            }
+        };
+
+        write("文档.md", "doc v1\n").await;
+        write("笔记.md", "note v1\n").await;
+        let again = write("文档.md", "doc v2\n").await;
+
+        let rows = st.artifacts();
+        assert_eq!(rows.len(), 2, "two paths, two artifacts: {rows:?}");
+        let doc = row_for(&rows, "文档.md");
+        let note = row_for(&rows, "笔记.md");
+        assert_ne!(doc.name, note.name);
+        for row in [doc, note] {
+            let hash = row
+                .name
+                .strip_suffix(".md")
+                .and_then(|stem| stem.rsplit_once('-'))
+                .map(|(_, hash)| hash)
+                .unwrap_or_else(|| panic!("{}", row.name));
+            assert!(
+                hash.len() == 8 && hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "{}",
+                row.name
+            );
+            assert_eq!(row.kind, Some(openalpaca_storage::ArtifactKind::Markdown));
+        }
+        assert_eq!(doc.version, 2, "the same path again is its next version");
+        assert!(again.contains("version 2"), "{again}");
+        assert_eq!(fs::read_to_string(&doc.storage_path).unwrap(), "doc v2\n");
+        assert_eq!(note.version, 1);
+        assert_eq!(fs::read_to_string(&note.storage_path).unwrap(), "note v1\n");
+    }
+
+    /// The hash survives the grammar: it is appended after the slug's budget
+    /// was shortened for it, so a long path keeps it; a path inside ASCII is
+    /// left as it is.
+    #[test]
+    fn artifact_name_keeps_its_hash_inside_the_slug_budget() {
+        assert_eq!(artifact_name(PASTA), PASTA);
+        assert_eq!(artifact_name("文档.md"), artifact_name("文档.md"));
+        assert_ne!(artifact_name("文档.md"), artifact_name("笔记.md"));
+        assert!(artifact_name("文档.md").starts_with("artifact-"));
+        assert!(artifact_name("报告/plan.md").starts_with("plan-"));
+
+        let long = format!("{}文档.md", "a".repeat(100));
+        let name = artifact_name(&long);
+        let (title, _) = split_name(&name);
+        assert!(name.ends_with(".md"), "{name}");
+        assert_eq!(
+            slugify(title, FILE_NAME_SLUG_BYTES),
+            title,
+            "the grammar would cut the hash"
+        );
+        let short = format!("{}文档.md", "a".repeat(101));
+        assert_ne!(name, artifact_name(&short), "the hash is the path's");
+    }
+
+    /// F3, F7: the extension picks the kind through R21's sets, and text whose
+    /// extension no kind admits is `code` — text the Library can show — still
+    /// stored as `.bin`, R21's refusal of active content.
+    #[tokio::test]
+    async fn the_extension_picks_the_kind_and_text_no_kind_admits_is_code() {
+        let st = Store::new();
+        let tool = st.tool_at(st.work.path());
+        let ctx = st.ctx(None, None);
+
+        for (path, content) in [("src/main.rs", "fn main() {}\n"), ("build.sh", "echo hi\n")] {
+            tool.write(&serde_json::json!({"path": path, "content": content}), &ctx)
+                .await
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+        }
+
+        let rows = st.artifacts();
+        let code = row_for(&rows, "src/main.rs");
+        assert_eq!(code.kind, Some(openalpaca_storage::ArtifactKind::Code));
+        assert!(code.name.ends_with("-src-main.rs"), "{}", code.name);
+        let script = row_for(&rows, "build.sh");
+        assert_eq!(script.kind, Some(openalpaca_storage::ArtifactKind::Code));
+        assert_eq!(script.mime_type, "text/plain");
+        assert!(script.name.ends_with("-build.bin"), "{}", script.name);
+    }
+
+    /// F8: a path whose end names no file is refused before the routing — no
+    /// artifact named for nothing, and no plain write either.
+    #[tokio::test]
+    async fn a_path_that_names_no_file_is_refused() {
+        let st = Store::new();
+        let project = st.project_root();
+
+        for (root, ctx) in [
+            (st.work.path().to_path_buf(), st.ctx(None, None)),
+            (project.clone(), st.ctx(Some(&project), None)),
+        ] {
+            for path in ["", ".", "reports/", "reports/."] {
+                let err = st
+                    .tool_at(&root)
+                    .write(&serde_json::json!({"path": path, "content": "x"}), &ctx)
+                    .await
+                    .expect_err(path);
+                assert!(err.contains("names no file"), "{path:?}: {err}");
+            }
+            assert!(!root.join("reports").exists(), "{}", root.display());
+        }
+        assert!(st.artifacts().is_empty(), "{:?}", st.artifacts());
+    }
+
+    /// F9: a turn with no owner — `POST /v1/command {"command":"process"}`,
+    /// which runs as the system — cannot save an artifact, and is told why;
+    /// its plain write, which needs no owner, is unchanged.
+    #[tokio::test]
+    async fn a_turn_with_no_owner_cannot_save_an_artifact() {
+        let st = Store::new();
+        let home = st.home.root();
+        let work = st.work.path().to_path_buf();
+        let project = st.project_root();
+        let ownerless = |project: Option<&Path>| ToolContext {
+            request_workspace_root: project.map(|p| p.to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+
+        for (root, ctx) in [(&work, ownerless(None)), (&home, ownerless(Some(&project)))] {
+            let err = st
+                .tool_at(root)
+                .write(&pasta("# Pasta night\n"), &ctx)
+                .await
+                .expect_err("no owner");
+            assert!(
+                err.contains("file_write cannot save an artifact")
+                    && err.contains("no owner context"),
+                "{err}"
+            );
+            assert!(!root.join(PASTA).exists());
+        }
+        assert!(!home.join("artifacts").exists(), "an artifact was saved");
+        assert!(
+            !project.join(".openalpaca").exists(),
+            "an artifact was saved"
+        );
+
+        let out = st
+            .tool_at(&project)
+            .write(&pasta("# Pasta night\n"), &ownerless(Some(&project)))
+            .await
+            .unwrap();
+        assert!(out.starts_with("Successfully wrote"), "{out}");
     }
 }

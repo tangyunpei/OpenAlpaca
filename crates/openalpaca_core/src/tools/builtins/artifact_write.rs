@@ -62,7 +62,7 @@ pub(super) fn scope_from_context(ctx: &ToolContext) -> StoreScope {
             } else {
                 tracing::warn!(
                     request_workspace_root = %root.display(),
-                    "artifact_write: the request workspace root is not an absolute path — using the home store"
+                    "the request workspace root is not an absolute path — saving the artifact in the home store"
                 );
                 StoreScope::Home
             }
@@ -115,7 +115,7 @@ fn announce_artifact_written(ctx: &ToolContext, record: &ArtifactRecord) {
 /// slugify the dot into a hyphen and produce `01-quarterly-report-md.md`.
 /// A trailing segment that is not extension-shaped (`ext := [a-z0-9]{1,8}`)
 /// is part of the title — `"v1.2 plan"` keeps its dot.
-fn split_name(name: &str) -> (&str, Option<&str>) {
+pub(super) fn split_name(name: &str) -> (&str, Option<&str>) {
     match name.rsplit_once('.') {
         Some((stem, ext))
             if !stem.is_empty()
@@ -213,7 +213,12 @@ pub(super) fn put_tool_artifact(
         .owner_id
         .as_deref()
         .or(task.as_ref().map(|t| t.created_by.as_str()))
-        .ok_or_else(|| format!("{tool} requires an owner context"))?;
+        .ok_or_else(|| {
+            format!(
+                "{tool} cannot save an artifact on this turn: it has no owner context (it was \
+                 not sent on a person's behalf), and every artifact belongs to an owner."
+            )
+        })?;
 
     let (title, name_hint) = split_name(name);
 
@@ -389,9 +394,9 @@ pub(super) fn artifact_write_tool_definition() -> ToolDefinition {
         description: "Save a deliverable — a document, plan, table, snippet or report — \
             to the artifact store, where it is versioned, listed in the Library and \
             attached to the task that produced it. Prefer this over file_write for \
-            anything the user is meant to keep or receive: file_write writes a plain \
-            file into the project when the conversation has one (and otherwise saves \
-            an artifact with no summary or note), artifact_write records an owned, \
+            anything the user is meant to keep or receive: file_write may write a \
+            plain file, or save an artifact named after its path with no kind, summary \
+            or note of your choosing; artifact_write records an owned, \
             versioned artifact of the kind you name under the project's \
             .openalpaca/artifacts directory. Writing the \
             same name again supersedes the previous version instead of overwriting it \

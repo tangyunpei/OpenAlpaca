@@ -476,7 +476,8 @@ pub enum SystemEvent {
         followup_id: i64,
         timestamp: DateTime<Utc>,
     },
-    /// An agent wrote a **produced** artifact — `artifact_write`, or the
+    /// An agent wrote a **produced** artifact — `artifact_write`, a
+    /// `file_write` saved as an artifact (G2), or the
     /// `workspace_write(entry_type = "artifact")` spill (plan §4.9).
     ///
     /// Published by the builtin itself, after a successful

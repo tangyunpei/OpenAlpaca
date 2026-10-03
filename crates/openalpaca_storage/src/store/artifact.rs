@@ -73,8 +73,10 @@ use crate::models::ArtifactKind;
 const RUN_DIR_TITLE_SLUG_BYTES: usize = 48;
 
 /// `slug(name, 60)` — leaves room for `NN-` (3 bytes) + `.` + `ext` (≤ 9 bytes)
-/// so `file` never exceeds 72 bytes for a two-digit sequence number.
-const FILE_NAME_SLUG_BYTES: usize = 60;
+/// so `file` never exceeds 72 bytes for a two-digit sequence number. Public so
+/// a caller that appends to a slug of its own (`file_write`'s path hash, G2)
+/// can keep its suffix inside the budget.
+pub const FILE_NAME_SLUG_BYTES: usize = 60;
 
 /// `taskid[0..8]` — task ids are UUIDv4 (`Uuid::new_v4().to_string()`), so the
 /// first 8 characters are the first hyphen-delimited group, e.g. `3f2a1b7c`.

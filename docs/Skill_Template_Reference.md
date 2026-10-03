@@ -986,7 +986,7 @@ These are the tool names usable in `tools.allow` / `tools.deny`. Names must matc
 | Tool Name | Capability | Description | Availability |
 |-----------|-----------|-------------|--------------|
 | `file_read` | `file_read` | Read file contents from the workspace | Always registered |
-| `file_write` | `file_write` | Write/create files in the workspace | Always registered |
+| `file_write` | `file_write` | Write/create files in the workspace on a turn that carries a project (from a daemon not started in the home store); otherwise save the file as an artifact named after its path (shown in the GUI Library) | Always registered; saving an artifact requires a database at execution time |
 | `artifact_write` | `artifact_write` | Save a versioned deliverable to the artifact store (shown in the GUI Library) | Always registered; requires a database at execution time |
 | `shell_execute` | `shell_execute` | Execute shell commands | Always registered |
 | `web_search` | `web_access` | Search the web | Always registered; needs the `[web_search]` section (API key) in `config/llm.toml` |

@@ -357,7 +357,8 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
-    /// An agent wrote a **produced** artifact — `artifact_write`, or the
+    /// An agent wrote a **produced** artifact — `artifact_write`, a
+    /// `file_write` saved as an artifact (G2), or the
     /// `workspace_write(entry_type = "artifact")` spill (plan §4.9).
     ///
     /// Never fired for uploads: an upload has no agent and no version to

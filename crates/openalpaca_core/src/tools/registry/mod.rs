@@ -78,10 +78,12 @@ pub struct ToolContext {
     /// `None` for connector lanes, scheduled skills and every turn that carried
     /// none — never CWD-derived (ruling R22).
     ///
-    /// The only field that may place content on disk: `artifact_write`, the
-    /// `workspace_write` spill and `file_write` (G2) read this and nothing
-    /// else, so a chat turn's deliverable lands in the home store rather than
-    /// in whatever repository the daemon happened to start in.
+    /// The only field that may place content on disk: `artifact_write` and the
+    /// `workspace_write` spill read this and nothing else, so a chat turn's
+    /// deliverable lands in the home store rather than in whatever repository
+    /// the daemon happened to start in. `file_write` (G2) reads it too, to
+    /// choose: on a turn that carries a project, from a daemon not started in
+    /// the home store, its plain write still lands in that startup root.
     pub request_workspace_root: Option<String>,
     /// Skill invocation chain, oldest first. Empty at top level.
     pub skill_stack: Vec<String>,

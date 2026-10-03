@@ -569,13 +569,28 @@ otherwise. `file_write` writes a plain file into the daemon's workspace
 directory (the directory it was started in) only when the turn carries a
 project **and** that directory is not the home store. Every other
 `file_write` is saved the same way as an artifact: named after its path
-(`reports/pasta-night.md` becomes `01-reports-pasta-night.md`), its kind
-taken from the extension, the same path written again in the same run its
-next version, announced as `artifact_written` and listed in the Library;
-the tool's result tells the model so, with the version and the absolute
-path. Both launchers start the daemon in the home store, so from the app or
+(`reports/pasta-night.md` becomes `01-reports-pasta-night.md`; a path with a
+character outside ASCII, which a name cannot spell, also gets the first
+eight hex digits of its SHA-256, so `文档.md` becomes
+`01-artifact-<hash>.md` and `笔记.md` another artifact), with the path as
+written for its summary (which `GET /v1/artifacts?q=` searches), its kind
+taken from the extension (text whose extension no kind takes — `build.sh`,
+`Makefile` — is `code`, stored as `.bin`), the same path written again in
+the same run — or, outside a run, on the same UTC day — its next version,
+announced as `artifact_written` and listed in the Library. Two ASCII paths
+that differ only in letter case or in the punctuation between words
+(`Notes.md` and `notes.md`, `a/b.md` and `a-b.md`) reach the same name, so
+they are one artifact's versions. The tool's result tells the model so,
+with the version and the absolute path, and that `file_read` cannot open
+it by the path it gave. A path that names no file (`''`, `.`, `reports/`)
+is refused, and a turn with no owner — `POST /v1/command
+{"command":"process"}` runs as the system — cannot save an artifact, so
+there `file_write` is refused unless it makes the plain write. Both
+launchers start the daemon in the home store, so from the app or
 `openalpaca daemon start` a `file_write` is always an artifact. `file_read`
-is unchanged: it reads relative to the workspace directory.
+is unchanged: it reads relative to the workspace directory, so an agent
+that writes a file and then reads it back by the same path — or runs it
+with `shell_execute` — no longer finds it there.
 
 An upload is refused with the reason in the error code: `NO_FILE`,
 `FILE_TOO_LARGE`, `STORAGE_QUOTA_EXCEEDED`, `UNSUPPORTED_MIME`,

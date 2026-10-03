@@ -27,8 +27,9 @@ mod artifact;
 pub mod project_move;
 
 pub use artifact::{
-    artifact_extension, artifact_file_name, confine_to_root, kind_for_file_name, leading_sequence,
-    loose_dir, run_dir, slugify, upload_dir, upload_file_name, version_file_path,
+    FILE_NAME_SLUG_BYTES, artifact_extension, artifact_file_name, confine_to_root,
+    kind_for_file_name, leading_sequence, loose_dir, run_dir, slugify, upload_dir,
+    upload_file_name, version_file_path,
 };
 
 use anyhow::{Context, Result, bail};
@@ -481,7 +482,8 @@ pub fn ensure_store(scope: &StoreScope) -> Result<PathBuf> {
 /// [`project_root_at`] addresses rows by. Paths that cannot be canonicalized
 /// (nothing there yet) are compared as written; with no home directory to
 /// compare against the answer is `false`, which leaves the root alone.
-fn is_the_home_root(root: &Path) -> bool {
+/// `file_write` asks the same question of its workspace root (G2).
+pub fn is_the_home_root(root: &Path) -> bool {
     let Ok(home) = home_root() else {
         return false;
     };
