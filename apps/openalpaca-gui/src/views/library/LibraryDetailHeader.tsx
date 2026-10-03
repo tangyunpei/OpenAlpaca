@@ -10,6 +10,10 @@
  * Finder` ("Show in folder" off macOS) shows the file in its folder through the
  * Tauri shell's `reveal_path` command, so it is drawn only inside the app's own
  * window (`canReveal`); the Vite preview has no shell to ask.
+ *
+ * The artifact's `summary`, when it has one, is a muted line under the name:
+ * for a `file_write` artifact it is the path the file was written as
+ * (`notes/tea.md`, `Makefile`), which the stored name may no longer show.
  */
 
 import {
@@ -59,6 +63,10 @@ export function LibraryDetailHeader({
   onJumpRun,
 }: LibraryDetailHeaderProps) {
   const agent = artifact.agent_template_id ?? artifact.agent_id;
+  const summary =
+    artifact.summary !== null && artifact.summary.trim() !== ""
+      ? artifact.summary
+      : null;
   return (
     <div>
       <div className="flex items-start gap-[12px]">
@@ -72,6 +80,14 @@ export function LibraryDetailHeader({
           <h2 className="m-0 text-2xl font-semibold tracking-tighter text-ink">
             {artifact.name}
           </h2>
+          {summary !== null && (
+            <p
+              title={summary}
+              className="m-0 mt-[4px] truncate text-base text-muted-fg"
+            >
+              {summary}
+            </p>
+          )}
           <div className="mt-[6px] flex flex-wrap items-center gap-[10px] font-mono text-xs text-muted-fg">
             <span>
               v{artifact.version} of {artifact.version_count}

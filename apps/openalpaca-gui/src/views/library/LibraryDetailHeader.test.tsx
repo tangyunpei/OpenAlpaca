@@ -1,6 +1,6 @@
 /**
- * The Library header's file actions: `Open` always, `Reveal in Finder` only
- * where a Tauri shell can answer it.
+ * The Library header's file actions — `Open` always, `Reveal in Finder` only
+ * where a Tauri shell can answer it — and the summary line under the name.
  */
 
 import { render, screen } from "@testing-library/react";
@@ -36,7 +36,7 @@ const artifact: Artifact = {
   rel_path: "loose/2026-09-05/01-connector-audit-findings.md",
 };
 
-function renderHeader() {
+function renderHeader(summary: string | null = null) {
   const handlers = {
     onTabChange: vi.fn(),
     onTogglePin: vi.fn(),
@@ -46,7 +46,7 @@ function renderHeader() {
   };
   render(
     <LibraryDetailHeader
-      artifact={artifact}
+      artifact={{ ...artifact, summary }}
       pinned={false}
       tab="preview"
       {...handlers}
@@ -83,5 +83,28 @@ describe("LibraryDetailHeader — Open and Reveal", () => {
     expect(handlers.onReveal).toHaveBeenCalledTimes(1);
     expect(handlers.onOpen).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Open" })).toBeInTheDocument();
+  });
+});
+
+describe("LibraryDetailHeader — the summary line", () => {
+  it("draws the summary on one line under the name, whole on its tooltip", () => {
+    renderHeader("notes/tea.md");
+
+    const line = screen.getByText("notes/tea.md");
+    expect(line).toHaveAttribute("title", "notes/tea.md");
+    expect(line).toHaveClass("truncate");
+    expect(screen.getByRole("heading", { level: 2 }).nextElementSibling).toBe(
+      line,
+    );
+  });
+
+  it.each([
+    ["null", null],
+    ["blank", "  "],
+  ])("draws no line for a %s summary", (_label, summary) => {
+    renderHeader(summary);
+
+    const next = screen.getByRole("heading", { level: 2 }).nextElementSibling;
+    expect(next).toHaveTextContent("v1 of 1");
   });
 });

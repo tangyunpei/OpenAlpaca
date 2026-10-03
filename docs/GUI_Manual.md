@@ -748,6 +748,11 @@ Finder` — over three tabs:
   hashes an artifact's head on every read and records bytes that do not match
   its row as a version nobody in OpenAlpaca wrote. The row says so.
 
+Under the name, the header draws the artifact's `summary`, when it is not
+blank, on one muted line — cut with an ellipsis, whole on its tooltip — which
+for a file an agent saved with `file_write` is the path it was written as
+(`notes/tea.md`, `Makefile`), a path the stored name may not show.
+
 `Open` opens the file in its default application through the daemon
 (`POST /v1/files/{id}/open`), on the machine the daemon runs on, and the toast
 reads `<name> opened in its default app`. (The design labelled this button
