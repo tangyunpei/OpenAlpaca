@@ -281,11 +281,13 @@ export function useChatStream(
     if (state.result?.delegation) {
       void client.invalidateQueries({ queryKey: qk.tasks.all() });
     }
-    // Design 11 §5: the turn compacted, and its working state is on the
-    // session row — the aside's card reads it from the session list.
-    if (state.result?.working_state_updated === true) {
-      void client.invalidateQueries({ queryKey: qk.sessions.all() });
-    }
+    // The session row moved with the turn, and the sidebar and the aside read
+    // it from the session list: its title, which the daemon writes from an
+    // untitled conversation's first sentence as it stores it (G5, Round G),
+    // and its working state when the turn compacted (design 11 §5). Not left
+    // to the socket's `chat_stream_ended`: a window whose socket is down
+    // would keep showing "Untitled conversation".
+    void client.invalidateQueries({ queryKey: qk.sessions.all() });
   }, [state.phase, state.result, client]);
 
   // The same re-read for the *other* terminal frame (T1). A failed turn

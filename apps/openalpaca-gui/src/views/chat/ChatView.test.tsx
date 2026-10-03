@@ -2818,6 +2818,52 @@ describe("ChatView — the conversation sidebar (§5.7)", () => {
     ).toBeNull();
   });
 
+  /**
+   * G5 (Round G): the daemon names an untitled conversation from the user's
+   * first message as it stores it. The turn's own `done` re-reads the list,
+   * so the name replaces "Untitled conversation" with no reload — and with no
+   * socket, which this harness never connects.
+   */
+  it("draws the conversation's name once its first turn is done", async () => {
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-live",
+      });
+    seedSessions([
+      sessionRow({ id: "sess-live", title: "", message_count: 0 }),
+    ]);
+    renderChat();
+
+    await screen.findByRole("button", { name: /Untitled conversation/ });
+    const source = await sendMessage("Plan pasta night for six");
+    // What the daemon did when it stored the message.
+    const live = sessionRows[0];
+    if (live === undefined) throw new Error("no session row");
+    live.title = "Plan pasta night for six";
+
+    await act(async () => {
+      source.emit("done", {
+        content: "Happy to help.",
+        model: "claude-sonnet-4-6",
+        tokens_in: 10,
+        tokens_out: 5,
+        duration_ms: 100,
+        working_state_updated: false,
+        continued_from: null,
+      });
+    });
+
+    expect(
+      await screen.findByRole("button", { name: /Plan pasta night for six/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Untitled conversation/ }),
+    ).toBeNull();
+  });
+
   it("highlights the conversation the daemon says the lane is on", async () => {
     historyReply = () =>
       json({
