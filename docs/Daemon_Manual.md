@@ -593,9 +593,10 @@ extension (text whose extension no kind takes — `build.sh`, `Makefile` — is
 `code`, stored as `.bin`), the same path written again in the same run —
 or, outside a run, on the same UTC day — its next version, announced as
 `artifact_written` and listed in the Library. Two paths the name carries
-whole that differ only in letter case or in the punctuation between words
-(`Notes.md` and `notes.md`, `a/b.md` and `a-b.md`) reach the same name, so
-they are one artifact's versions. The tool's result tells the model the
+whole that differ only in letter case or in characters that are not ASCII
+letters or digits (`Notes.md` and `notes.md`, `a/b.md` and `a-b.md`,
+`__main__.py` and `main.py`) still reach one name, so they are one
+artifact's versions. The tool's result tells the model the
 write is complete: which artifact and version, its absolute path — the path
 to give the user — that the Library lists it, that the file is the
 deliverable and is not to be copied elsewhere with the shell or any other

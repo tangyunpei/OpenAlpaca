@@ -463,8 +463,9 @@ fn read_back_path(storage_path: &str, workspace_root: &Path) -> Option<String> {
 /// digits of the whole path's SHA-256 (`artifact-1a2b3c4d.md`,
 /// `go-1a2b3c4d.mod`, stored as `.bin`). The same path always gets the same
 /// name, so writing it again is still its next version. Two carried paths
-/// that differ only in letter case or in the punctuation between words still
-/// reach one name.
+/// that differ only in letter case or in characters that are not ASCII
+/// letters or digits (`Notes.md` and `notes.md`, `a/b.md` and `a-b.md`,
+/// `__main__.py` and `main.py`) still reach one name.
 fn artifact_name(path: &str) -> String {
     let (title, _) = split_name(path);
     let carried = path.is_ascii()
