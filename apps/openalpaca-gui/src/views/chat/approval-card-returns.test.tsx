@@ -3,13 +3,14 @@
  * request for approval jumps out again … and after click it returns no
  * pending approvals".
  *
- * The cause (`tasks`' diagnosis of 2026-10-03): the chat view's record of the
- * prompts it had seen was component state, the views are swapped, not
- * stacked, and the pending-confirmations snapshot lives in the app-wide Query
- * cache — so a list read *before* an answer was handed to the remount *after*
- * a trip to another view, the answered prompts were drawn again over their
- * own `Approved` rows, and the click went to an id the daemon no longer held
- * (`404 No pending confirmation`), which left the card up.
+ * The cause (the Round G diagnosis — a session scratchpad, not tracked): the
+ * chat view's record of the prompts it had seen was component state, the
+ * views are swapped, not stacked, and the pending-confirmations snapshot lives
+ * in the app-wide Query cache — so a list read *before* an answer was handed
+ * to the remount *after* a trip to another view, the answered prompts were
+ * drawn again over their own `Approved` rows, and the click went to an id the
+ * daemon no longer held (`404 No pending confirmation`), which left the card
+ * up.
  *
  * Only the edges are doubled, as in `ChatView.test.tsx`: the Tauri discovery
  * command, `fetch`, `EventSource` and the socket's `onEvent`. The hook
@@ -508,6 +509,69 @@ async function tripToTheLibraryAndBack(awayMs: number): Promise<void> {
   await settle();
 }
 
+/**
+ * A main-loop prompt drawn by the turn's SSE frame alone — its WebSocket twin
+ * never arrives, so `confirmationMeta` has no entry for it — and a snapshot
+ * read that leaves while it is pending and is held. `deliverTheRead` lands
+ * that read, listing the prompt, whenever the test is ready.
+ */
+async function anSseOnlyCardWithAReadInFlight(client: QueryClient): Promise<{
+  source: FakeEventSource;
+  deliverTheRead: () => Promise<void>;
+}> {
+  fireEvent.change(await screen.findByLabelText("Message"), {
+    target: { value: "update my persona" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+  const source = FakeEventSource.instances[0];
+  if (source === undefined) throw new Error("no stream opened");
+
+  broker.set("req-sse-only", {
+    request_id: "req-sse-only",
+    tool_name: "update_persona",
+    tool_arguments: { section: "USER.md" },
+    task_id: null,
+    agent_id: "orchestrator",
+    lane_key: "user:gui",
+    preview: null,
+    per_call: false,
+    raised_at: new Date().toISOString(),
+  });
+  await act(async () => {
+    source.emit("confirmation_requested", {
+      request_id: "req-sse-only",
+      tool_name: "update_persona",
+      tool_arguments: { section: "USER.md" },
+    });
+  });
+  expect(
+    await screen.findByText(eyebrow("update_persona")),
+  ).toBeInTheDocument();
+
+  let deliver: () => void = () => undefined;
+  snapshotReply = () => {
+    const readWhilePending = snapshotOfBroker();
+    return new Promise<Response>((resolve) => {
+      deliver = () => resolve(readWhilePending);
+    });
+  };
+  const poll = client.refetchQueries({ queryKey: qk.chat.confirmations() });
+  await settle();
+
+  return {
+    source,
+    deliverTheRead: async () => {
+      snapshotReply = snapshotOfBroker;
+      await act(async () => {
+        deliver();
+        await poll;
+      });
+      await settle();
+    },
+  };
+}
+
 const initialUi = useUiStore.getState();
 
 beforeEach(() => {
@@ -709,6 +773,47 @@ describe("an answered approval card does not come back (G1, Round G)", () => {
   });
 
   /**
+   * V9 — the read on return can fail, and then the cache still holds the list
+   * read before the trip. A failed read says so and seeds nothing: the filter
+   * is the read's own timestamp against the mount, not "fetched since mount",
+   * which a failed read also is.
+   */
+  it("a failed read on return says so and draws nothing from the cache it inherited", async () => {
+    const client = openWindow();
+    await delegateARun();
+    await act(async () => {
+      raise("req-slow", "artifact_write", "lead_agent");
+    });
+    expect(
+      await screen.findByText(eyebrow("artifact_write")),
+    ).toBeInTheDocument();
+    await advance(CONFIRMATIONS_POLL_BLOCKED_MS + 100);
+    expect(cachedSnapshotIds(client)).toEqual(["req-slow"]);
+
+    await act(async () => {
+      useUiStore.getState().setView("work");
+    });
+    expect(await screen.findByText("the work view")).toBeInTheDocument();
+    // Over while chat is away, and no frame this window keeps says so.
+    await act(async () => {
+      broker.delete("req-slow");
+    });
+    await advance(3_000);
+    snapshotReply = () =>
+      json({ error: { code: "BAD_REQUEST", message: "nope" } }, 400);
+    await act(async () => {
+      useUiStore.getState().setView("chat");
+    });
+    await settle();
+
+    expect(cachedSnapshotIds(client)).toEqual(["req-slow"]);
+    expect(cards("artifact_write")).toHaveLength(0);
+    expect(
+      screen.getByText(/Could not check for pending approvals/),
+    ).toBeInTheDocument();
+  });
+
+  /**
    * The same fault with no trip at all, in its narrow form: the card was drawn by the SSE frame and its WebSocket twin never
    * arrived (so `confirmationMeta` has no entry), and a snapshot read that
    * left before the answer lands after it.
@@ -778,6 +883,48 @@ describe("an answered approval card does not come back (G1, Round G)", () => {
     await settle();
 
     expect(cards("update_persona")).toHaveLength(0);
+  });
+
+  /**
+   * The test above gets both of the daemon's words — the answer's `200` and
+   * the stream's resolved frame — and either one alone keeps it green. Each is
+   * pinned alone here: the `200` with no frame after it…
+   */
+  it("the answer's 200 alone keeps a read in flight across it from drawing the card again", async () => {
+    const client = openWindow();
+    const { deliverTheRead } = await anSseOnlyCardWithAReadInFlight(client);
+
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+    await waitFor(() => expect(answersTo("req-sse-only")).toHaveLength(1));
+    expect(answersTo("req-sse-only")[0]?.status).toBe(200);
+    await settle();
+    expect(cards("update_persona")).toHaveLength(0);
+
+    await deliverTheRead();
+
+    expect(cards("update_persona")).toHaveLength(0);
+  });
+
+  /** …and the stream's frame for a prompt answered somewhere else, no click. */
+  it("the stream's resolved frame alone keeps a read in flight across it from drawing the card again", async () => {
+    const client = openWindow();
+    const { source, deliverTheRead } =
+      await anSseOnlyCardWithAReadInFlight(client);
+
+    await act(async () => {
+      broker.delete("req-sse-only");
+      source.emit("confirmation_resolved", {
+        request_id: "req-sse-only",
+        outcome: "approved",
+      });
+    });
+    await settle();
+    expect(cards("update_persona")).toHaveLength(0);
+
+    await deliverTheRead();
+
+    expect(cards("update_persona")).toHaveLength(0);
+    expect(answersTo("req-sse-only")).toHaveLength(0);
   });
 
   /**
