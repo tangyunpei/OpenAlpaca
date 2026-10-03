@@ -348,6 +348,12 @@ export interface WorkingState {
   goal: string;
   /** Established or finished, with files, artifacts and task ids. */
   done: string[];
+  /**
+   * The questions the user asked and had answered, one line each — the topic
+   * and the answer's gist (design 11 rev 1.7, F3). `[]` for a state stored
+   * before the field existed: the daemon reads that as one that asked nothing.
+   */
+  asked: string[];
   /** What the user chose, turned down or changed. */
   decisions: string[];
   /** Asked and unanswered; pending. */

@@ -4664,6 +4664,7 @@ describe("ChatView — the conversation's continuity (design 11 §5, CQ-7)", () 
     topic: "Lisbon \u{202E}trip",
     goal: "Book the October trip",
     done: ["Flight booked"],
+    asked: [],
     decisions: [],
     open: [],
     next: "Compare the hotels",

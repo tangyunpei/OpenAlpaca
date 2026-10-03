@@ -605,7 +605,8 @@ the header grows a "running now" pill as the way back in.
 **The working state.** Above the Work pane, a collapsible **Working state**
 card shows where the conversation's work stands — the same record the model
 reads in place of the turns that no longer fit its window: the topic, the
-goal, what is done, what was decided, what is still open, the next step, and
+goal, what is done, what you asked and had answered, what was decided, what is
+still open, the next step, and
 the runs and files the work refers to (a `task …` entry opens that run in Work
 — the Work view when the id is a short one — and an `artifact …` entry the
 Library), with when it was last updated. The daemon's summariser writes it

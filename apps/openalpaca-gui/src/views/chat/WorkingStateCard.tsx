@@ -7,8 +7,9 @@
  * older turns scroll out of the model's window, and when the conversation
  * closes — and it is what the model reads in place of the turns it no longer
  * sees. This card shows the person the same thing: topic, goal, what is done,
- * decided and open, the next step, and the runs and files it refers to (a
- * task id opens the run in Work, an artifact path the Library).
+ * what they asked and had answered, what is decided and open, the next step,
+ * and the runs and files it refers to (a task id opens the run in Work, an
+ * artifact path the Library).
  *
  * Every string is the summariser's text, so each one goes through
  * `EscapedText`: a hidden character is drawn as `<U+XXXX>`, never acted on.
@@ -131,6 +132,7 @@ export function WorkingStateCard({
               </p>
               <Field label="Goal" text={state.goal} />
               <List label="Done" items={state.done} />
+              <List label="Asked" items={state.asked} />
               <List label="Decided" items={state.decisions} />
               <List label="Open" items={state.open} />
               <Field label="Next" text={state.next} />

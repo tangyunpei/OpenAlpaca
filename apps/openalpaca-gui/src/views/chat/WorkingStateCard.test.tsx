@@ -17,6 +17,7 @@ function lisbon(overrides: Partial<WorkingState> = {}): WorkingState {
     topic: "Lisbon \u{202E}trip",
     goal: "Book flights and a hotel for 2–5 October",
     done: ["Friday flight booked"],
+    asked: [],
     decisions: ["A hotel in Alfama, not Baixa\u{200B}"],
     open: ["Which museum pass to buy"],
     next: "Compare the three Alfama hotels",
@@ -79,6 +80,40 @@ describe("WorkingStateCard (design 11 §5, CQ-7)", () => {
     ).toBeInTheDocument();
     expect(card).toHaveTextContent("Next: Compare the three Alfama hotels");
     expect(card).toHaveTextContent("updated 3h ago");
+  });
+
+  /**
+   * Design 11 rev 1.7 (F3): the state keeps what the user asked and had
+   * answered, and the card draws it as the daemon renders it — after Done,
+   * before Decided — escaped like every other string.
+   */
+  it("draws what the user asked, between Done and Decided, escaped", () => {
+    renderCard(
+      lisbon({
+        asked: [
+          "Whether Lisbon needs a visa: not for an EU citizen",
+          "Which airport \u{202E}terminal: T1",
+        ],
+      }),
+    );
+    const card = screen.getByRole("region", { name: "Working state" });
+
+    expect(
+      within(card).getByText(
+        "Whether Lisbon needs a visa: not for an EU citizen",
+      ),
+    ).toBeInTheDocument();
+    expect(card).toHaveTextContent("Which airport <U+202E>terminal: T1");
+    expect(card.textContent).not.toContain("\u{202E}");
+    const text = card.textContent ?? "";
+    expect(text.indexOf("Done")).toBeLessThan(text.indexOf("Asked"));
+    expect(text.indexOf("Asked")).toBeLessThan(text.indexOf("Decided"));
+  });
+
+  it("draws no Asked list when nothing was asked", () => {
+    renderCard(lisbon());
+    const card = screen.getByRole("region", { name: "Working state" });
+    expect(within(card).queryByText("Asked")).toBeNull();
   });
 
   it("says nothing is summarised yet while the conversation has no state", () => {
