@@ -421,7 +421,12 @@ export function Composer(props: ComposerProps) {
             T2's composer rule: while the row can hold the textarea's floor and
             the cluster it looks exactly as the design draws it, and when it
             cannot the cluster takes a line of its own rather than squeezing
-            the message box to nothing. */}
+            the message box to nothing. On that line the cluster may shrink
+            (`min-w-0`, not `shrink-0`): a column re-opened by hand can leave
+            the line narrower than Attach, the model label and Send, and then
+            the label elides further instead of Send being drawn outside the
+            card (Track D, D4). Line breaking reads the cluster's full width,
+            so it still wraps exactly where it did. */}
         <div className="relative flex flex-wrap items-end gap-[9px] rounded-3xl border border-line bg-raised py-[7px] pr-[7px] pl-[11px] focus-within:border-line-hover">
           <textarea
             ref={textarea}
@@ -447,7 +452,7 @@ export function Composer(props: ComposerProps) {
             className="min-h-[24px] flex-1 resize-none border-none bg-transparent py-[8px] font-sans text-lg leading-[1.5] text-ink outline-none placeholder:text-faint"
           />
 
-          <div className="ml-auto flex shrink-0 items-end gap-[9px]">
+          <div className="ml-auto flex min-w-0 items-end gap-[9px]">
             {onAttachFiles !== undefined && (
               <>
                 {/* Hidden, not absent: the button is the control, and this is

@@ -199,7 +199,9 @@ one for you either.
 The composer keeps pace. When the row cannot hold both the message box and
 `Attach` / the model button / `Send`, the three controls move to a line of
 their own below the box. A long model id (a local `hf.co/…:Q8_0` tag) is shown
-elided, with the full id on its tooltip.
+elided, with the full id on its tooltip — and when a column re-opened by hand
+leaves even that line too narrow, the model button gives up more of its label so
+`Send` stays inside the composer.
 
 **Resizable panes.** Four columns are draggable and their widths persist
 per-machine in `localStorage` (`oa-pane-widths`): the chat aside (300–600,
