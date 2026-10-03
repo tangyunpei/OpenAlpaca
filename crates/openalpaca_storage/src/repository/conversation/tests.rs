@@ -1547,3 +1547,83 @@ fn message_ids_lists_every_row_of_one_session() {
     assert_eq!(repo.message_ids(&session.id).unwrap(), vec![a, b, c]);
     assert!(repo.message_ids("no-such-session").unwrap().is_empty());
 }
+
+fn session_title(repo: &ConversationRepository<'_>, id: &str) -> String {
+    repo.get_session(id).unwrap().unwrap().title
+}
+
+/// G5 (Round G): a turn names only an untitled conversation. The guard is
+/// the statement's own, so a rename that lands between a turn's read of the
+/// session and its write survives, and a second title never replaces the
+/// first.
+#[test]
+fn set_title_if_empty_names_only_an_untitled_session() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let untitled = repo.create_session("user:gui", "gui", None, None).unwrap();
+    assert!(
+        repo.set_title_if_empty(&untitled.id, "Plan pasta night")
+            .unwrap()
+    );
+    assert_eq!(session_title(&repo, &untitled.id), "Plan pasta night");
+    assert!(
+        !repo
+            .set_title_if_empty(&untitled.id, "Something else")
+            .unwrap()
+    );
+    assert_eq!(session_title(&repo, &untitled.id), "Plan pasta night");
+
+    let renamed = repo.create_session("user:cli", "cli", None, None).unwrap();
+    assert!(
+        repo.update_session(&renamed.id, Some("My own name"), None)
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .set_title_if_empty(&renamed.id, "Plan pasta night")
+            .unwrap()
+    );
+    assert_eq!(session_title(&repo, &renamed.id), "My own name");
+
+    assert!(!repo.set_title_if_empty("no-such-session", "x").unwrap());
+}
+
+/// G5: the title is read from the first of the session's own user rows that
+/// names one — never an assistant row, never another session's, and never
+/// the `display_text` an attachment turn carries.
+#[test]
+fn title_from_user_rows_reads_the_first_user_row_that_names_one() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.create_session("user:gui", "gui", None, None).unwrap();
+    let other = repo.create_session("user:cli", "cli", None, None).unwrap();
+    learning_row(&repo, &other.id, "user", "Elsewhere entirely", None, None);
+    learning_row(
+        &repo,
+        &session.id,
+        "assistant",
+        "Hello, how can I help?",
+        None,
+        None,
+    );
+    learning_row(&repo, &session.id, "user", "/status", None, None);
+    learning_row(&repo, &session.id, "user", "", None, None);
+    learning_row(&repo, &session.id, "user", "Plan pasta night", None, None);
+    learning_row(&repo, &session.id, "user", "And dessert?", None, None);
+
+    let sentence = |content: &str| {
+        (!content.is_empty() && !content.starts_with('/')).then(|| content.to_string())
+    };
+    assert_eq!(
+        repo.title_from_user_rows(&session.id, sentence)
+            .unwrap()
+            .as_deref(),
+        Some("Plan pasta night")
+    );
+    assert_eq!(
+        repo.title_from_user_rows("no-such-session", sentence)
+            .unwrap(),
+        None
+    );
+}

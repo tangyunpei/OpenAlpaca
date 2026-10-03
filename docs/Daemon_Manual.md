@@ -497,7 +497,18 @@ Confirmations are covered under
 | `POST /v1/sessions/{id}/activate` | Make it the lane's active conversation. |
 | `POST /v1/sessions/{id}/archive` | Archive it. |
 
-A lane holds many sessions with exactly one `active`. Each is served with its
+A lane holds many sessions with exactly one `active`. A session's `title` is
+`""` until something names it. The daemon names it from the user's own words
+— no model is called — when it stores a user message in a session whose title
+is still `""`: the first of that session's user messages with a sentence in it,
+which for a new conversation is the message just sent. The title is that
+message's first non-empty line, hidden and control characters dropped and
+whitespace collapsed, cut to at most 60 characters at a word boundary (at the
+60th character for text with no spaces, such as Chinese) and followed by `…`
+when cut. A slash command (`/remember …`, `/status`) or a turn of attachments
+alone names nothing; the next message is tried at its own turn. The write
+happens only while the title is still `""`, so a rename through `PATCH` is never
+overwritten. Each is served with its
 **working state** — `working_state`, the JSON object
 [Conversation continuity](#conversation-continuity) describes, or `null` while
 it has none, and `working_state_updated_at` — and without the writer's own

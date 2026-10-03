@@ -677,6 +677,53 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
+    /// Name a session that has no title yet (G5, Round G) — `false` when it
+    /// has one, or is unknown.
+    ///
+    /// Guarded in the statement itself (`AND title = ''`), not by a read
+    /// before it: a rename that lands between a turn's read of the session and
+    /// this write is never overwritten, and of two turns racing to name the
+    /// same conversation exactly one writes.
+    pub fn set_title_if_empty(&self, session_id: &str, title: &str) -> Result<bool> {
+        self.db.with_connection(|conn| {
+            let changed = conn.execute(
+                "UPDATE session SET title = ?1, updated_at = datetime('now')
+                 WHERE id = ?2 AND title = ''",
+                rusqlite::params![title, session_id],
+            )?;
+            Ok(changed > 0)
+        })
+    }
+
+    /// What an untitled session is named from (G5, Round G): `title` of the
+    /// first of its user rows, oldest first, that `title` answers for.
+    ///
+    /// One `SELECT`, stepped only as far as that row. A conversation whose
+    /// first message was a slash command or a file alone is named by its
+    /// first sentence, and one an older build left untitled by its first
+    /// stored user row. Reads `content` — the text as typed — never
+    /// `display_text`, whose `[Attachments: …]` suffix nobody typed.
+    pub fn title_from_user_rows(
+        &self,
+        session_id: &str,
+        title: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<String>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT content FROM conversation_messages
+                 WHERE session_id = ?1 AND role = 'user' ORDER BY id",
+            )?;
+            let mut rows = stmt.query([session_id])?;
+            while let Some(row) = rows.next()? {
+                let content: String = row.get(0)?;
+                if let Some(found) = title(&content) {
+                    return Ok(Some(found));
+                }
+            }
+            Ok(None)
+        })
+    }
+
     /// Delete a session, its messages, and the run links that pointed at it.
     ///
     /// One transaction, not three statements: a half-deleted session leaves
