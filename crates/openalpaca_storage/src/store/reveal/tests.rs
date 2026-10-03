@@ -104,3 +104,72 @@ fn a_symlink_in_a_store_that_leads_outside_it_is_refused() {
         RevealRefusal::OutsideStore(outside.canonicalize().unwrap())
     );
 }
+
+// The shell always has a home root (`home_root()` is `Some` on any machine with
+// a home directory), so the refusals are pinned with one supplied too: the
+// home clause must admit what is under the home root and nothing beside it.
+
+#[test]
+fn a_file_outside_the_home_root_is_refused_when_a_home_root_is_known() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("isolated-store");
+    fs::create_dir_all(&home).unwrap();
+    let outside = file_at(tmp.path(), "Documents/notes.md");
+    // A sibling whose name only starts like the home root is outside it too.
+    let sibling = file_at(tmp.path(), "isolated-store-evil/notes.md");
+
+    for file in [outside, sibling] {
+        assert_eq!(
+            revealable_path_with_home(&file, Some(&home)),
+            Err(RevealRefusal::OutsideStore(file.canonicalize().unwrap()))
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_under_the_home_root_that_leads_outside_it_is_refused() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("isolated-store");
+    let outside = file_at(tmp.path(), "Documents/secret.md");
+    let link = home.join("artifacts/01-link.md");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+    assert_eq!(
+        revealable_path_with_home(&link, Some(&home)),
+        Err(RevealRefusal::OutsideStore(outside.canonicalize().unwrap()))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_home_root_that_is_a_symlink_admits_its_files() {
+    // Pins the home root's canonicalisation on every platform, not only where
+    // the temp directory happens to be a symlink.
+    let tmp = tempdir().unwrap();
+    let file = file_at(&tmp.path().join("volume/store"), "artifacts/01-notes.md");
+    let home = tmp.path().join("home-link");
+    std::os::unix::fs::symlink(tmp.path().join("volume/store"), &home).unwrap();
+
+    assert_eq!(
+        revealable_path_with_home(&home.join("artifacts/01-notes.md"), Some(&home)),
+        Ok(file.canonicalize().unwrap())
+    );
+}
+
+#[test]
+fn only_a_directory_named_openalpaca_above_the_file_makes_a_store() {
+    let tmp = tempdir().unwrap();
+    // The file itself named like the store is not inside one …
+    let named = file_at(tmp.path(), "Documents/.openalpaca");
+    // … and neither is a directory whose name only starts like it.
+    let lookalike = file_at(tmp.path(), ".openalpaca-backup/notes.md");
+
+    for file in [named, lookalike] {
+        assert_eq!(
+            revealable_path_with_home(&file, None),
+            Err(RevealRefusal::OutsideStore(file.canonicalize().unwrap()))
+        );
+    }
+}
