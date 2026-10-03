@@ -42,9 +42,10 @@ pub use capabilities::{
 ///   daemon's CWD never selects a partition (design MD-5) — so that forwarded
 ///   copy is all that is left of it, and the collapse below removes it.
 /// - `request_workspace_root` — the same resolution, but only on the
-///   client-sent branch and never the home store (R22). Read by `artifact_write`
-///   and its `workspace_write` spill, and by nothing else: it is the only one of
-///   the three that may place bytes on disk.
+///   client-sent branch and never the home store (R22). Read by `artifact_write`,
+///   its `workspace_write` spill and `file_write` (which writes into its own
+///   workspace root only on a turn that carries one, G2), and by nothing else:
+///   it is the only one of the three that may place bytes on disk.
 /// - `workspace_path` — the path **as sent**, unresolved, threaded only on the
 ///   tool-mode main loop. Read by `steer_workflow` and `queue_followup`
 ///   (`runner/lead_agent/tools.rs`), which persist it on the row so the re-entry
@@ -77,10 +78,10 @@ pub struct ToolContext {
     /// `None` for connector lanes, scheduled skills and every turn that carried
     /// none — never CWD-derived (ruling R22).
     ///
-    /// The only field that may place content on disk: `artifact_write` and the
-    /// `workspace_write` spill read this and nothing else, so a chat turn's
-    /// deliverable lands in the home store rather than in whatever repository
-    /// the daemon happened to start in.
+    /// The only field that may place content on disk: `artifact_write`, the
+    /// `workspace_write` spill and `file_write` (G2) read this and nothing
+    /// else, so a chat turn's deliverable lands in the home store rather than
+    /// in whatever repository the daemon happened to start in.
     pub request_workspace_root: Option<String>,
     /// Skill invocation chain, oldest first. Empty at top level.
     pub skill_stack: Vec<String>,

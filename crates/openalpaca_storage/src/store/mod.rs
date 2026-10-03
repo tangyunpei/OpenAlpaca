@@ -27,8 +27,8 @@ mod artifact;
 pub mod project_move;
 
 pub use artifact::{
-    artifact_extension, artifact_file_name, confine_to_root, leading_sequence, loose_dir, run_dir,
-    slugify, upload_dir, upload_file_name, version_file_path,
+    artifact_extension, artifact_file_name, confine_to_root, kind_for_file_name, leading_sequence,
+    loose_dir, run_dir, slugify, upload_dir, upload_file_name, version_file_path,
 };
 
 use anyhow::{Context, Result, bail};

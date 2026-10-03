@@ -4,10 +4,13 @@ use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolConte
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
+use openalpaca_storage::store::{StoreScope, kind_for_file_name};
+use openalpaca_storage::{ArtifactKind, Database};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::annotations_for_builtin;
+use super::artifact_write::{ToolArtifact, put_tool_artifact, scope_from_context};
 use super::helpers::{
     MAX_FILE_READ_SIZE, StoreAccess, is_identity_path, is_soul_path, is_store_owned_path,
     is_store_owned_resolved, is_user_path, resolve_workspace_path,
@@ -108,9 +111,13 @@ pub(super) fn file_read_tool(workspace_root: PathBuf) -> RegisteredTool {
 
 struct FileWriteTool {
     workspace_root: PathBuf,
-    /// Only `[orchestrator.sessions] snapshot_max_bytes` is read from it — the
-    /// bound on a pre-edit image (§5.7). Absent (tests, the CLI) means the
-    /// documented default.
+    /// The artifact store a file not written into a project folder is saved
+    /// to (G2). Absent (tests, the CLI) refuses such a write at call time,
+    /// as `artifact_write` does.
+    db: Option<Database>,
+    /// `[orchestrator.sessions] snapshot_max_bytes` — the bound on a pre-edit
+    /// image (§5.7) — and `[execution.artifacts]`, the caps on a file saved as
+    /// an artifact. Absent (tests, the CLI) means the documented defaults.
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
 }
 
@@ -306,6 +313,17 @@ impl FileWriteTool {
             return Err(refuse(what));
         }
 
+        // G2 (FW-1): the workspace root is the daemon's starting directory,
+        // never the turn's, so the plain write below is taken only on a turn
+        // that carries a project and from a root that is not the home store —
+        // where both launchers start the daemon, and where a relative path
+        // would land owned by no content kind. Every other write is an
+        // artifact, on `artifact_write`'s own store path.
+        let scope = scope_from_context(ctx);
+        if !matches!(scope, StoreScope::Project(_)) || is_home_store(&self.workspace_root) {
+            return self.save_as_artifact(path, content, ctx, &scope);
+        }
+
         // Security: resolve path, reject symlink escapes BEFORE creating directories.
         // This prevents out-of-workspace directory creation via symlinked intermediates.
         let full_path = resolve_workspace_path_for_write(path, &self.workspace_root)?;
@@ -341,27 +359,81 @@ impl FileWriteTool {
             path
         ))
     }
+
+    /// G2: the write is an artifact — in the project's store when the turn
+    /// carries one, else in the home store — named for `path`, whose
+    /// extension picks the kind (R21's sets, `kind_for_file_name`; one no
+    /// kind admits is `binary`, the kind that promises the least). The same
+    /// path written again in the same run is the same artifact's next version.
+    fn save_as_artifact(
+        &self,
+        path: &str,
+        content: &str,
+        ctx: &ToolContext,
+        scope: &StoreScope,
+    ) -> Result<String, String> {
+        let db = self.db.as_ref().ok_or_else(|| {
+            "file_write requires database context to save an artifact".to_string()
+        })?;
+        let record = put_tool_artifact(
+            db,
+            ctx,
+            scope,
+            self.daemon_config.as_ref(),
+            ToolArtifact {
+                tool: "file_write",
+                name: path,
+                kind: kind_for_file_name(path).unwrap_or(ArtifactKind::Binary),
+                content,
+                note: None,
+                summary: None,
+                metadata: None,
+            },
+        )?;
+        let why = match scope {
+            StoreScope::Project(_) => "in this project's store",
+            StoreScope::Home => "because this conversation has no project folder",
+        };
+        Ok(format!(
+            "Saved {path} as an artifact {why}: {}, version {}, at {}. It is listed in the Library.",
+            record.name, record.version, record.storage_path
+        ))
+    }
+}
+
+/// Whether `root` is the home store (G2) — compared resolved, as
+/// [`store_root`] hands the store over. An unresolvable home is no root's.
+fn is_home_store(root: &Path) -> bool {
+    store_root()
+        .is_some_and(|home| root.canonicalize().unwrap_or_else(|_| root.to_path_buf()) == home)
 }
 
 pub(super) fn file_write_tool(
     workspace_root: PathBuf,
+    db: Option<Database>,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
 ) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "file_write".to_string(),
-            description: "Write or overwrite a file in the workspace directory. Creates \
-                parent directories automatically if they don't exist. Content is limited \
-                to 10MB. Writing to persona files (SOUL.md, USER.md, IDENTITY.md) is \
-                blocked — use update_persona instead. Returns a confirmation with the \
-                byte count written."
+            description: "Writes a file in the project when the conversation has one; \
+                otherwise saves it as an artifact (it appears in the Library). With a \
+                project, the path is relative to the daemon's workspace directory — \
+                unless that directory is OpenAlpaca's own store, in which case the file \
+                is saved as an artifact of the project instead. An artifact is named \
+                after the path, its extension picks its kind, and writing the same path \
+                again in one run saves its next version. The result says which happened \
+                and, for an artifact, its version and absolute path. Creates parent \
+                directories automatically if they don't exist. Content is limited to \
+                10MB. Writing to persona files (SOUL.md, USER.md, IDENTITY.md) is \
+                blocked — use update_persona instead."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path to the file within the workspace (e.g., 'src/main.rs', 'output/report.txt'). Absolute paths and '..' traversal are rejected."
+                        "description": "Relative path to the file within the workspace (e.g., 'src/main.rs', 'output/report.txt'); for an artifact, its name. Absolute paths and '..' traversal are rejected."
                     },
                     "content": {
                         "type": "string",
@@ -377,6 +449,7 @@ pub(super) fn file_write_tool(
         },
         backend: ToolBackend::BuiltIn(Arc::new(FileWriteTool {
             workspace_root,
+            db,
             daemon_config,
         })),
         provides_capabilities: vec!["file_write".into()],
@@ -408,6 +481,36 @@ mod tests {
         work: tempfile::TempDir,
         sessions: tempfile::TempDir,
         service: Arc<SessionLogService>,
+        _home: SandboxedHome,
+    }
+
+    /// A home store of its own. G2's routing asks whether the workspace root
+    /// *is* the home store, and no test may resolve the real one to answer.
+    struct SandboxedHome {
+        dir: tempfile::TempDir,
+        _env: crate::test_util::HomeStoreGuard,
+    }
+
+    impl SandboxedHome {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let env = crate::test_util::HomeStoreGuard::set(&dir.path().canonicalize().unwrap());
+            Self { dir, _env: env }
+        }
+
+        fn root(&self) -> PathBuf {
+            self.dir.path().canonicalize().unwrap()
+        }
+    }
+
+    /// A turn that carries a project — the only kind on which `file_write`
+    /// writes into its workspace root (G2). Every pre-G2 test of the plain
+    /// write runs on one.
+    fn project_ctx(project: &Path) -> ToolContext {
+        ToolContext {
+            request_workspace_root: Some(project.to_str().unwrap().to_string()),
+            ..Default::default()
+        }
     }
 
     fn bench() -> Bench {
@@ -424,6 +527,7 @@ mod tests {
             work,
             sessions,
             service,
+            _home: SandboxedHome::new(),
         }
     }
 
@@ -436,6 +540,7 @@ mod tests {
             });
             FileWriteTool {
                 workspace_root: self.work.path().to_path_buf(),
+                db: None,
                 daemon_config,
             }
         }
@@ -445,8 +550,13 @@ mod tests {
                 session_id: Some(session.to_string()),
                 session_log: Some(self.service.handle_for(session)),
                 agent_instance_id: Some("lead_agent::a1".to_string()),
-                ..Default::default()
+                ..self.project_ctx()
             }
+        }
+
+        /// A turn with this workspace as its project and no session.
+        fn project_ctx(&self) -> ToolContext {
+            project_ctx(self.work.path())
         }
 
         fn session_dir(&self, session: &str) -> PathBuf {
@@ -547,7 +657,10 @@ mod tests {
         fs::write(bench.work.path().join("notes.txt"), "old").unwrap();
 
         let result = tool
-            .execute(&serde_json::json!({"path": "notes.txt", "content": "new"}))
+            .execute_with_context(
+                &serde_json::json!({"path": "notes.txt", "content": "new"}),
+                &bench.project_ctx(),
+            )
             .await;
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(
@@ -797,6 +910,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tool = FileWriteTool {
             workspace_root: dir.path().to_path_buf(),
+            db: None,
             daemon_config: None,
         };
         let result = tool
@@ -811,16 +925,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_write_creates_subdirs_within_workspace() {
+        let _home = SandboxedHome::new();
         let dir = tempfile::tempdir().unwrap();
         let tool = FileWriteTool {
             workspace_root: dir.path().to_path_buf(),
+            db: None,
             daemon_config: None,
         };
         let result = tool
-            .execute(&serde_json::json!({
-                "path": "subdir/nested/test.txt",
-                "content": "hello"
-            }))
+            .execute_with_context(
+                &serde_json::json!({
+                    "path": "subdir/nested/test.txt",
+                    "content": "hello"
+                }),
+                &project_ctx(dir.path()),
+            )
             .await;
         assert!(result.is_ok());
         assert!(dir.path().join("subdir/nested/test.txt").exists());
@@ -841,15 +960,20 @@ mod tests {
             return;
         }
 
+        let _home = SandboxedHome::new();
         let tool = FileWriteTool {
             workspace_root: dir.path().to_path_buf(),
+            db: None,
             daemon_config: None,
         };
         let result = tool
-            .execute(&serde_json::json!({
-                "path": "escape_link/evil.txt",
-                "content": "should not be written"
-            }))
+            .execute_with_context(
+                &serde_json::json!({
+                    "path": "escape_link/evil.txt",
+                    "content": "should not be written"
+                }),
+                &project_ctx(dir.path()),
+            )
             .await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err();
@@ -867,6 +991,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tool = FileWriteTool {
             workspace_root: dir.path().to_path_buf(),
+            db: None,
             daemon_config: None,
         };
         let result = tool
@@ -890,7 +1015,7 @@ mod tests {
     async fn file_write_refuses_the_store_state_and_the_partition_control_files() {
         let b = bench();
         let tool = b.tool(None);
-        let ctx = ToolContext::default();
+        let ctx = b.project_ctx();
         for path in [
             "state/memory-control/home-32acea7eb739b08afd959db91e46d450.json",
             "state/openalpaca.db",
@@ -986,7 +1111,7 @@ mod tests {
         let err = write
             .write(
                 &serde_json::json!({"path": "link/memory-control/x.json", "content": "{}"}),
-                &ToolContext::default(),
+                &b.project_ctx(),
             )
             .await
             .expect_err("a symlink into state/ is refused on write");
@@ -1016,7 +1141,7 @@ mod tests {
             .tool(None)
             .write(
                 &serde_json::json!({"path": "link/newdir/x.json", "content": "{}"}),
-                &ToolContext::default(),
+                &b.project_ctx(),
             )
             .await
             .expect_err("a link into state/ before a new directory is refused");
@@ -1042,7 +1167,7 @@ mod tests {
             .tool(None)
             .write(
                 &serde_json::json!({"path": "link/newdir/x.json", "content": "escaped"}),
-                &ToolContext::default(),
+                &b.project_ctx(),
             )
             .await
             .expect_err("a link out of the workspace before a new directory is refused");
@@ -1050,6 +1175,292 @@ mod tests {
         assert!(
             !outside.path().join("newdir").exists(),
             "a directory was created outside the workspace"
+        );
+    }
+
+    // ── G2 (FW-1): a file not written into a project folder is an artifact ──
+
+    const OWNER: &str = "owner-g2";
+    const PASTA: &str = "reports/pasta-night.md";
+
+    /// A sandboxed home store, a database, a workspace that is not the home
+    /// store and a project — every placement G2 chooses between.
+    struct Store {
+        home: SandboxedHome,
+        work: tempfile::TempDir,
+        project: tempfile::TempDir,
+        _db_dir: tempfile::TempDir,
+        db: Database,
+    }
+
+    impl Store {
+        fn new() -> Self {
+            let home = SandboxedHome::new();
+            let db_dir = tempfile::tempdir().unwrap();
+            let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+            Self {
+                home,
+                work: tempfile::tempdir().unwrap(),
+                project: tempfile::tempdir().unwrap(),
+                _db_dir: db_dir,
+                db,
+            }
+        }
+
+        /// `file_write` with `root` as its workspace root, as the daemon
+        /// builds it from its starting directory.
+        fn tool_at(&self, root: &Path) -> FileWriteTool {
+            FileWriteTool {
+                workspace_root: root.to_path_buf(),
+                db: Some(self.db.clone()),
+                daemon_config: None,
+            }
+        }
+
+        fn project_root(&self) -> PathBuf {
+            self.project.path().canonicalize().unwrap()
+        }
+
+        /// A turn's context: its owner and agent, and a project or none.
+        fn ctx(&self, project: Option<&Path>, task_id: Option<&str>) -> ToolContext {
+            ToolContext {
+                agent_id: Some("general_agent".to_string()),
+                owner_id: Some(OWNER.to_string()),
+                task_id: task_id.map(str::to_string),
+                request_workspace_root: project.map(|p| p.to_str().unwrap().to_string()),
+                ..Default::default()
+            }
+        }
+
+        fn artifacts(&self) -> Vec<openalpaca_storage::ArtifactRecord> {
+            openalpaca_storage::ArtifactStore::new(&self.db)
+                .list(&openalpaca_storage::ArtifactQuery::new(OWNER))
+                .unwrap()
+                .0
+        }
+
+        /// A `task` row — `file_assets.task_id` is a foreign key.
+        fn task(&self, id: &str, title: &str) {
+            let now = chrono::Utc::now();
+            openalpaca_storage::repository::TaskRepository::new(&self.db)
+                .create(&openalpaca_storage::Task {
+                    id: id.to_string(),
+                    title: title.to_string(),
+                    description: None,
+                    status: openalpaca_storage::TaskStatus::Queued,
+                    priority: 0,
+                    progress_current: None,
+                    progress_total: None,
+                    result_summary: None,
+                    created_by: OWNER.to_string(),
+                    source_lane: "gui".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                    completed_at: None,
+                    state_json: None,
+                    state_version: 0,
+                    outcome_json: None,
+                    outcome_kind: None,
+                    artifact_count: 0,
+                    workspace_id: None,
+                    source_task_id: None,
+                    session_id: None,
+                    unattended: false,
+                })
+                .unwrap();
+        }
+    }
+
+    fn pasta(content: &str) -> serde_json::Value {
+        serde_json::json!({"path": PASTA, "content": content})
+    }
+
+    /// The re-test's defect 1: with no project on the turn the file is an
+    /// artifact in the home store — whatever directory the daemon started in,
+    /// the home store itself included — and nothing lands at `<root>/<path>`.
+    #[tokio::test]
+    async fn without_a_project_the_file_is_saved_as_an_artifact_in_the_home_store() {
+        let st = Store::new();
+        let home = st.home.root();
+        let work = st.work.path().to_path_buf();
+
+        for (root, content) in [
+            (&work, "# Pasta night\n"),
+            (&home, "# Pasta night, again\n"),
+        ] {
+            st.tool_at(root)
+                .write(&pasta(content), &st.ctx(None, None))
+                .await
+                .unwrap_or_else(|e| panic!("{}: {e}", root.display()));
+            assert!(
+                !root.join(PASTA).exists(),
+                "the file landed at {}",
+                root.join(PASTA).display()
+            );
+        }
+
+        let rows = st.artifacts();
+        assert_eq!(rows.len(), 1, "one path, one artifact: {rows:?}");
+        let row = &rows[0];
+        assert_eq!(row.project_root, None, "the home store");
+        assert!(
+            Path::new(&row.storage_path).starts_with(home.join("artifacts")),
+            "{}",
+            row.storage_path
+        );
+        assert_eq!(row.kind, Some(openalpaca_storage::ArtifactKind::Markdown));
+        assert_eq!(row.name, "01-reports-pasta-night.md");
+        assert_eq!(row.agent_id.as_deref(), Some("general_agent"));
+        assert_eq!(
+            fs::read_to_string(&row.storage_path).unwrap(),
+            "# Pasta night, again\n"
+        );
+    }
+
+    /// The packaged app: the daemon runs in the home store, so a turn that
+    /// carries a project still cannot write into its workspace root — the
+    /// file goes to the project's own store instead.
+    #[tokio::test]
+    async fn a_project_turn_whose_root_is_the_home_store_saves_into_the_projects_store() {
+        let st = Store::new();
+        let home = st.home.root();
+        let project = st.project_root();
+
+        let out = st
+            .tool_at(&home)
+            .write(&pasta("# Pasta night\n"), &st.ctx(Some(&project), None))
+            .await
+            .unwrap();
+
+        assert!(
+            !home.join(PASTA).exists(),
+            "written into the home store's root"
+        );
+        assert!(
+            !project.join(PASTA).exists(),
+            "written into the project folder"
+        );
+        let rows = st.artifacts();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].project_root.as_deref(), project.to_str());
+        assert!(
+            Path::new(&rows[0].storage_path)
+                .starts_with(project.join(".openalpaca").join("artifacts")),
+            "{}",
+            rows[0].storage_path
+        );
+        assert!(out.contains(&rows[0].storage_path), "{out}");
+        assert!(out.contains("Library"), "{out}");
+    }
+
+    /// The case G2 leaves as it was: a project on the turn and a workspace
+    /// root that is not the home store is the plain write, and no artifact.
+    #[tokio::test]
+    async fn a_project_turn_with_a_workspace_root_writes_the_plain_file() {
+        let st = Store::new();
+        let project = st.project_root();
+
+        let out = st
+            .tool_at(&project)
+            .write(&pasta("# Pasta night\n"), &st.ctx(Some(&project), None))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(project.join(PASTA)).unwrap(),
+            "# Pasta night\n"
+        );
+        assert!(out.starts_with("Successfully wrote"), "{out}");
+        assert!(
+            st.artifacts().is_empty(),
+            "the plain write records no artifact"
+        );
+        assert!(
+            !project.join(".openalpaca").exists(),
+            "the plain write seeds no project store"
+        );
+    }
+
+    /// One path written twice in one run is one artifact at version 2, the
+    /// first kept as version 1.
+    #[tokio::test]
+    async fn a_second_write_of_the_same_path_in_one_run_is_version_2() {
+        let st = Store::new();
+        let task = "7c87c6fc-0000-4000-8000-000000000000";
+        st.task(task, "Pasta night shopping list");
+        let ctx = st.ctx(None, Some(task));
+        let tool = st.tool_at(st.work.path());
+
+        let first = tool.write(&pasta("v1\n"), &ctx).await.unwrap();
+        let second = tool.write(&pasta("v2\n"), &ctx).await.unwrap();
+
+        assert!(first.contains("version 1"), "{first}");
+        assert!(second.contains("version 2"), "{second}");
+        let rows = st.artifacts();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].version, 2);
+        assert_eq!(rows[0].task_id.as_deref(), Some(task));
+        assert_eq!(fs::read_to_string(&rows[0].storage_path).unwrap(), "v2\n");
+        let versions = openalpaca_storage::ArtifactStore::new(&st.db)
+            .versions(&rows[0].id)
+            .unwrap();
+        assert_eq!(versions.len(), 2, "{versions:?}");
+    }
+
+    /// What the model reads back, and can repeat: an artifact, why, its name
+    /// and version, where it is, and that the Library lists it.
+    #[tokio::test]
+    async fn the_artifact_result_names_the_path_and_the_library() {
+        let st = Store::new();
+
+        let out = st
+            .tool_at(st.work.path())
+            .write(&pasta("# Pasta night\n"), &st.ctx(None, None))
+            .await
+            .unwrap();
+
+        let row = &st.artifacts()[0];
+        assert!(out.contains(PASTA), "{out}");
+        assert!(out.contains("as an artifact"), "{out}");
+        assert!(out.contains("no project folder"), "{out}");
+        assert!(out.contains(&row.name), "{out}");
+        assert!(out.contains("version 1"), "{out}");
+        assert!(Path::new(&row.storage_path).is_absolute());
+        assert!(out.contains(&row.storage_path), "{out}");
+        assert!(out.contains("Library"), "{out}");
+    }
+
+    /// The refusals come before the routing: a store-owned path and an
+    /// oversized body are refused on a turn with no project exactly as on one
+    /// with a project, and no artifact is saved.
+    #[tokio::test]
+    async fn a_store_owned_path_and_the_size_cap_are_refused_before_routing() {
+        let st = Store::new();
+        let tool = st.tool_at(st.work.path());
+        let ctx = st.ctx(None, None);
+
+        for path in [
+            "state/memory-control/home.json",
+            "memory/.gitignore",
+            "notes/MEMORY.md",
+        ] {
+            let err = tool
+                .write(&serde_json::json!({"path": path, "content": "{}"}), &ctx)
+                .await
+                .expect_err(path);
+            assert!(err.contains("which the daemon owns"), "{path}: {err}");
+        }
+        let err = tool
+            .write(
+                &serde_json::json!({"path": "big.md", "content": "x".repeat(10 * 1024 * 1024 + 1)}),
+                &ctx,
+            )
+            .await
+            .expect_err("over the write limit");
+        assert!(err.contains("byte write limit"), "{err}");
+        assert!(
+            st.artifacts().is_empty(),
+            "a refused write saved an artifact"
         );
     }
 }

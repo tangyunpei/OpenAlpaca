@@ -8,6 +8,10 @@
 //! *that* project's store, and one produced for a turn that carried no
 //! workspace — every connector lane, every scheduled skill — lands in the home
 //! store, never in the daemon's current directory (ruling R22).
+//!
+//! Since G2 (FW-1) `file_write` writes into that startup root only on a turn
+//! that carries a project, and only when the root is not the home store;
+//! every other `file_write` takes this file's store path, [`put_tool_artifact`].
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +21,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::store::StoreScope;
-use openalpaca_storage::{ArtifactKind, ArtifactStore, Database, NewArtifact};
+use openalpaca_storage::{ArtifactKind, ArtifactRecord, ArtifactStore, Database, NewArtifact};
 
 use super::annotations_for_builtin;
 use crate::daemon_config::{ArtifactsConfig, DaemonConfig};
@@ -49,7 +53,7 @@ const KINDS: &[&str] = &[
 /// artifact belongs to the home store. A non-absolute value is not a project
 /// root: `store_root` would reject it, so it degrades to the home store with a
 /// warning rather than failing a write.
-fn scope_from_context(ctx: &ToolContext) -> StoreScope {
+pub(super) fn scope_from_context(ctx: &ToolContext) -> StoreScope {
     match ctx.request_workspace_root.as_deref() {
         Some(root) if !root.trim().is_empty() => {
             let root = PathBuf::from(root);
@@ -79,7 +83,7 @@ fn scope_from_context(ctx: &ToolContext) -> StoreScope {
 /// A context with no bus is the ordinary case in unit tests and on any path
 /// that never threaded one: log at `debug` and carry on. Announcing is not
 /// part of writing, and must never fail a write.
-fn announce_artifact_written(ctx: &ToolContext, record: &openalpaca_storage::ArtifactRecord) {
+fn announce_artifact_written(ctx: &ToolContext, record: &ArtifactRecord) {
     let Some(bus) = ctx.event_bus.as_ref() else {
         tracing::debug!(
             artifact_id = %record.id,
@@ -144,15 +148,98 @@ fn metadata_json(value: Option<&serde_json::Value>) -> Result<Option<String>, St
     }
 }
 
+/// One tool call's artifact, as the two tools that save one hand it over:
+/// `artifact_write` with the model's own kind, note, summary and metadata, and
+/// `file_write` — when its file is not written into a project folder (G2) —
+/// with the path it was given and the kind that path's extension maps to.
+pub(super) struct ToolArtifact<'a> {
+    /// The calling tool's name, for the refusals this path words.
+    pub(super) tool: &'static str,
+    /// The title plus the extension hint, split by [`split_name`].
+    pub(super) name: &'a str,
+    pub(super) kind: ArtifactKind,
+    pub(super) content: &'a str,
+    pub(super) note: Option<&'a str>,
+    pub(super) summary: Option<&'a str>,
+    /// The raw `metadata` argument; [`metadata_json`] reads it.
+    pub(super) metadata: Option<&'a serde_json::Value>,
+}
+
+/// The store path a tool's artifact takes — `artifact_write`'s, and since G2
+/// `file_write`'s whenever its file is not written into a project folder: the
+/// size cap, the attribution (the task row, the owner), the placement in
+/// `scope`, [`ArtifactStore::put`] and the announcement. One function both
+/// tools call, so neither can drift from the other.
+///
+/// `scope` is the caller's [`scope_from_context`] — `file_write` reads it to
+/// route as well, and passing it keeps a relative request root to one warning.
+pub(super) fn put_tool_artifact(
+    db: &Database,
+    ctx: &ToolContext,
+    scope: &StoreScope,
+    daemon_config: Option<&Arc<ArcSwap<DaemonConfig>>>,
+    artifact: ToolArtifact<'_>,
+) -> Result<ArtifactRecord, String> {
+    let ToolArtifact {
+        tool,
+        name,
+        kind,
+        content,
+        note,
+        summary,
+        metadata,
+    } = artifact;
+
+    let caps = artifact_caps(daemon_config);
+    if content.len() as u64 > caps.max_artifact_bytes {
+        return Err(format!(
+            "Artifact '{name}' is {} bytes, exceeding the {} byte limit. \
+             Write a shorter artifact, or split it into parts.",
+            content.len(),
+            caps.max_artifact_bytes
+        ));
+    }
+    let metadata = metadata_json(metadata)?;
+
+    // Attribution. The task row also carries the title `run_dir` is named
+    // for, and the owner when the context did not thread one.
+    let task = match ctx.task_id.as_deref() {
+        Some(task_id) => openalpaca_storage::repository::TaskRepository::new(db)
+            .get(task_id)
+            .map_err(|e| format!("Failed to load task: {e}"))?,
+        None => None,
+    };
+    let owner_id = ctx
+        .owner_id
+        .as_deref()
+        .or(task.as_ref().map(|t| t.created_by.as_str()))
+        .ok_or_else(|| format!("{tool} requires an owner context"))?;
+
+    let (title, name_hint) = split_name(name);
+
+    let mut new = NewArtifact::new(owner_id, scope, kind, title, content.as_bytes());
+    new.name_hint = name_hint;
+    new.note = note;
+    new.summary = summary;
+    new.metadata_json = metadata.as_deref();
+    new.task_id = ctx.task_id.as_deref();
+    new.task_title = task.as_ref().map(|t| t.title.as_str());
+    new.agent_id = ctx.agent_id.as_deref();
+    new.created = Utc::now();
+    new.max_versions = Some(caps.max_versions_per_artifact);
+
+    // `created` is deliberately unread: a supersede is a write too, and the
+    // Library wants to hear about the new version.
+    let (record, _created) = ArtifactStore::new(db)
+        .put(new)
+        .map_err(|e| format!("Failed to write artifact '{name}': {e}"))?;
+    announce_artifact_written(ctx, &record);
+    Ok(record)
+}
+
 struct ArtifactWriteTool {
     db: Option<Database>,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
-}
-
-impl ArtifactWriteTool {
-    fn caps(&self) -> ArtifactsConfig {
-        artifact_caps(self.daemon_config.as_ref())
-    }
 }
 
 #[async_trait]
@@ -192,54 +279,21 @@ impl BuiltInTool for ArtifactWriteTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: content".to_string())?;
 
-        let caps = self.caps();
-        if content.len() as u64 > caps.max_artifact_bytes {
-            return Err(format!(
-                "Artifact '{name}' is {} bytes, exceeding the {} byte limit. \
-                 Write a shorter artifact, or split it into parts.",
-                content.len(),
-                caps.max_artifact_bytes
-            ));
-        }
-
-        let note = arguments.get("note").and_then(|v| v.as_str());
-        let summary = arguments.get("summary").and_then(|v| v.as_str());
-        let metadata = metadata_json(arguments.get("metadata"))?;
-
-        // Attribution. The task row also carries the title `run_dir` is named
-        // for, and the owner when the context did not thread one.
-        let task = match ctx.task_id.as_deref() {
-            Some(task_id) => openalpaca_storage::repository::TaskRepository::new(db)
-                .get(task_id)
-                .map_err(|e| format!("Failed to load task: {e}"))?,
-            None => None,
-        };
-        let owner_id = ctx
-            .owner_id
-            .as_deref()
-            .or(task.as_ref().map(|t| t.created_by.as_str()))
-            .ok_or_else(|| "artifact_write requires an owner context".to_string())?;
-
-        let scope = scope_from_context(ctx);
-        let (title, name_hint) = split_name(name);
-
-        let mut new = NewArtifact::new(owner_id, &scope, kind, title, content.as_bytes());
-        new.name_hint = name_hint;
-        new.note = note;
-        new.summary = summary;
-        new.metadata_json = metadata.as_deref();
-        new.task_id = ctx.task_id.as_deref();
-        new.task_title = task.as_ref().map(|t| t.title.as_str());
-        new.agent_id = ctx.agent_id.as_deref();
-        new.created = Utc::now();
-        new.max_versions = Some(caps.max_versions_per_artifact);
-
-        // `created` is deliberately unread: a supersede is a write too, and the
-        // Library wants to hear about the new version.
-        let (record, _created) = ArtifactStore::new(db)
-            .put(new)
-            .map_err(|e| format!("Failed to write artifact '{name}': {e}"))?;
-        announce_artifact_written(ctx, &record);
+        let record = put_tool_artifact(
+            db,
+            ctx,
+            &scope_from_context(ctx),
+            self.daemon_config.as_ref(),
+            ToolArtifact {
+                tool: "artifact_write",
+                name,
+                kind,
+                content,
+                note: arguments.get("note").and_then(|v| v.as_str()),
+                summary: arguments.get("summary").and_then(|v| v.as_str()),
+                metadata: arguments.get("metadata"),
+            },
+        )?;
 
         serde_json::to_string(&serde_json::json!({
             "artifact_id": record.id,
@@ -335,9 +389,11 @@ pub(super) fn artifact_write_tool_definition() -> ToolDefinition {
         description: "Save a deliverable — a document, plan, table, snippet or report — \
             to the artifact store, where it is versioned, listed in the Library and \
             attached to the task that produced it. Prefer this over file_write for \
-            anything the user is meant to keep or receive: file_write drops bytes in \
-            the daemon's workspace, artifact_write records an owned, versioned \
-            artifact under the project's .openalpaca/artifacts directory. Writing the \
+            anything the user is meant to keep or receive: file_write writes a plain \
+            file into the project when the conversation has one (and otherwise saves \
+            an artifact with no summary or note), artifact_write records an owned, \
+            versioned artifact of the kind you name under the project's \
+            .openalpaca/artifacts directory. Writing the \
             same name again supersedes the previous version instead of overwriting it \
             (the old version stays retrievable). Content is limited to 10MB. Returns \
             the artifact id, its path on disk, and the version number just written."

@@ -562,6 +562,21 @@ lane never posts its completion report or its confirmation prompts there.
 | `GET\|PATCH /v1/workspaces` | Describe a project root; re-base everything addressed under it after the project moved. |
 | `POST /v1/workspaces/purge` | Delete a project's conversations, runs and uploads, and answer the plan it followed. `dry_run` defaults to **true**. It removes the session-log directory of every session it purges. The project's memory notes stay, except the episode notes summarising the conversations it deletes. |
 
+**Where an agent's files land.** `artifact_write` saves a deliverable in
+the artifact store — the project's (`<project>/.openalpaca/artifacts/`)
+when the turn carried a project, the home store's (`~/.openalpaca/artifacts/`)
+otherwise. `file_write` writes a plain file into the daemon's workspace
+directory (the directory it was started in) only when the turn carries a
+project **and** that directory is not the home store. Every other
+`file_write` is saved the same way as an artifact: named after its path
+(`reports/pasta-night.md` becomes `01-reports-pasta-night.md`), its kind
+taken from the extension, the same path written again in the same run its
+next version, announced as `artifact_written` and listed in the Library;
+the tool's result tells the model so, with the version and the absolute
+path. Both launchers start the daemon in the home store, so from the app or
+`openalpaca daemon start` a `file_write` is always an artifact. `file_read`
+is unchanged: it reads relative to the workspace directory.
+
 An upload is refused with the reason in the error code: `NO_FILE`,
 `FILE_TOO_LARGE`, `STORAGE_QUOTA_EXCEEDED`, `UNSUPPORTED_MIME`,
 `MIME_MISMATCH`, `MIME_UNDETECTABLE`, `UPLOAD_VALIDATION_FAILED`. The limits are

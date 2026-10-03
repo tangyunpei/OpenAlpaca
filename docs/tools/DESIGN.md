@@ -425,7 +425,10 @@ without losing it.
   in the GUI Library, and attached to the task that produced it.  Bodies
   are capped by `[execution.artifacts] max_artifact_bytes` (default 10 MB).
   It is the right tool for anything the user is meant to keep;
-  `file_write` only drops bytes in the daemon's workspace.
+  `file_write` writes a plain file into the daemon's workspace only on a
+  turn that carries a project (and a workspace that is not the home store),
+  and otherwise saves an artifact named after its path, with no summary or
+  note.
 - **Spill, don't truncate.**  When a tool result exceeds
   `[orchestrator.sessions] tool_result_inline_bytes` (default 32 KB) and
   the loop has a session log, the whole result is written to the session's

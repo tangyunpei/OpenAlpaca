@@ -90,8 +90,8 @@ under `crates/openalpaca_core/src/`.
 | `tools/builtins/mod.rs` | Registration functions, `WorkspaceReadTool`/`WorkspaceWriteTool`, `ScriptToolBuiltIn`, built-in annotations |
 | `tools/builtins/web_search.rs` | `web_search` |
 | `tools/builtins/web_fetch.rs` | `web_fetch` |
-| `tools/builtins/file_ops.rs` | `file_read`, `file_write` (incl. the pre-edit snapshot) |
-| `tools/builtins/artifact_write.rs` | `artifact_write`, the `workspace_write` artifact spill |
+| `tools/builtins/file_ops.rs` | `file_read`, `file_write` (incl. the pre-edit snapshot, and the routing of a file not written into a project folder to the artifact store) |
+| `tools/builtins/artifact_write.rs` | `artifact_write`, the `workspace_write` artifact spill, and `put_tool_artifact` — the store path `artifact_write` and `file_write` share |
 | `tools/builtins/read_result.rs` | `read_result` |
 | `tools/builtins/shell_execute.rs` | `shell_execute` |
 | `tools/builtins/memory_tools.rs` | The eight memory tools — `memory_search`, `memory_read`, `memory_list`, `memory_timeline` (the read surface, `memory_read_tools()`) and `memory_store`, `memory_update`, `memory_forget`, `memory_confirm` (per request, main loop only; `memory_confirm` on attended `gui` turns only) — thin, strictly validated adapters over `memory::service::MemoryService` |
@@ -656,7 +656,7 @@ All of these are registered in the shared `ToolRegistry` at daemon startup.
 | `web_search` | `query` (required), `count` (default 5, max 20) | `web_access` | Brave Search API; requires `web_search.api_key` in `llm.toml` |
 | `web_fetch` | `url` (required) | `web_access` | SSRF-protected; response cap 1 MB |
 | `file_read` | `path` (required) | `file_read` | Workspace-scoped (relative paths only); max 10 MB; refuses any path whose first component is `state` — the store's machine state, memory control snapshots included — checked on the argument and again on the resolved path |
-| `file_write` | `path`, `content` (required) | `file_write` | Workspace-scoped; max 10 MB; blocks SOUL.md/USER.md/IDENTITY.md (use `update_persona`), `state/`, and a memory partition's own files — any `.history/` component, `MEMORY.md`, `memory/.gitignore` (`is_store_owned_path`, `helpers/mod.rs`); inside a session it snapshots a file before overwriting it and refuses the write if the snapshot cannot be kept |
+| `file_write` | `path`, `content` (required) | `file_write` | Writes into the workspace root only when the turn carries a project (`request_workspace_root` is an absolute path) **and** that root is not the home store; every other write is an artifact (G2): `artifact_write`'s own store path (`put_tool_artifact`) — the project's store when the turn carries one, else the home store — named after the path (`reports/pasta-night.md` → `01-reports-pasta-night.md`), its kind from the extension (`store::kind_for_file_name`, R21's per-kind sets; an extension no kind admits is `binary`), the same path again in the same run its next version, announced as `artifact_written`, and the result says so with the version, the absolute path and the Library. Before that choice, unchanged: relative paths only; max 10 MB; blocks SOUL.md/USER.md/IDENTITY.md (use `update_persona`), `state/`, and a memory partition's own files — any `.history/` component, `MEMORY.md`, `memory/.gitignore` (`is_store_owned_path`, `helpers/mod.rs`). The plain write is workspace-scoped, and inside a session it snapshots a file before overwriting it and refuses the write if the snapshot cannot be kept |
 | `artifact_write` | `name`, `kind`, `content` (required); `note`, `summary`, `metadata` | `artifact_write` | `kind` ∈ `markdown`, `code`, `terminal`, `table`, `plan`, `image`, `html`, `binary`; versioned; max `max_artifact_bytes` (10 MB); store chosen from `request_workspace_root`, else the home store; needs a database |
 | `read_result` | `result_ref` (required), `offset`, `limit` | `read_result` | Reads only inside the calling session's `results/`; page 8 KB default, 64 KB max; needs `ToolContext.session_id` |
 | `shell_execute` | `command` (required) | `shell_execute` | 300s internal safety timeout; output cap 512 KB; injection patterns blocked by sanitizer |
@@ -720,8 +720,11 @@ pub fn workspace_tool_definitions() -> Vec<ToolDefinition>
 ```
 
 `workspace_root` defaults to `std::env::current_dir()` when `None`.  The
-daemon captures the workspace root once at startup; `file_read`,
-`file_write` and nothing else use it.
+daemon captures the workspace root once at startup; `file_read` and
+`file_write` use it and nothing else does — `file_write` only on a turn that
+carries a project, and only when the root is not the home store (G2).  Both
+launchers start the daemon in the home store, so a `file_write` from the app
+or from `openalpaca daemon start` is always an artifact.
 
 ### 6.3 Skill Scripts (`ScriptToolBuiltIn`)
 

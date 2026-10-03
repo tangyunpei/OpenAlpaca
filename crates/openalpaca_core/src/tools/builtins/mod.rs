@@ -349,8 +349,10 @@ pub fn builtin_tools(
         web_fetch_tool(),
         file_read_tool(ws_root.clone()),
         // The config carries §5.7's `snapshot_max_bytes` — the bound on the
-        // pre-edit image `file_write` takes before it overwrites a file.
-        file_write_tool(ws_root, tool_cfg.clone()),
+        // pre-edit image `file_write` takes before it overwrites a file — and
+        // the artifact caps; the database is the store a file not written
+        // into a project folder is saved to (G2).
+        file_write_tool(ws_root, ws_db.clone(), tool_cfg.clone()),
         shell_execute_tool(),
         // §5.4's counterpart to the `results/` spill. Registered on every
         // surface because the stub the loop emits names it on every surface —

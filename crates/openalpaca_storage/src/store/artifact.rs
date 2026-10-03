@@ -431,6 +431,33 @@ fn kind_allowed_extensions(kind: ArtifactKind) -> &'static [&'static str] {
     }
 }
 
+/// The kind a file name's own extension maps to, read off
+/// [`kind_allowed_extensions`] — R21's per-kind sets, the one table that
+/// relates an extension to a kind — in the order the kinds are declared, so an
+/// extension two kinds share goes to the first: `txt` and `pdf` to `Markdown`,
+/// `json` to `Code`. The kind returned therefore always keeps the name's
+/// extension through [`artifact_extension`].
+///
+/// `None` for a name with no extension, or one no kind admits (`sh`, `svg`,
+/// `exe` — R21's active content); the caller picks the fallback. `file_write`
+/// saving an artifact is the caller (G2).
+pub fn kind_for_file_name(name: &str) -> Option<ArtifactKind> {
+    let raw = Path::new(name).extension()?.to_str()?;
+    let ext = normalize_ext(raw)?;
+    [
+        ArtifactKind::Markdown,
+        ArtifactKind::Code,
+        ArtifactKind::Terminal,
+        ArtifactKind::Table,
+        ArtifactKind::Plan,
+        ArtifactKind::Image,
+        ArtifactKind::Html,
+        ArtifactKind::Binary,
+    ]
+    .into_iter()
+    .find(|kind| kind_allowed_extensions(*kind).contains(&ext.as_str()))
+}
+
 fn mime_extension(mime: &str) -> Option<String> {
     let mime = mime
         .split(';')

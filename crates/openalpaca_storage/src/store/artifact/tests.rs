@@ -530,6 +530,47 @@ fn no_kind_grants_a_universally_blocked_active_content_extension() {
     }
 }
 
+/// G2: a `file_write` saved as an artifact takes its kind from its own
+/// extension, read off R21's sets in the kinds' declared order — so the
+/// extension always survives `artifact_extension`, and one no kind admits
+/// maps to nothing.
+#[test]
+fn kind_for_file_name_reads_the_r21_sets_in_declared_order() {
+    for (name, kind) in [
+        ("reports/pasta-night.md", ArtifactKind::Markdown),
+        ("NOTES.TXT", ArtifactKind::Markdown),
+        ("src/main.rs", ArtifactKind::Code),
+        ("data.json", ArtifactKind::Code),
+        ("run.log", ArtifactKind::Terminal),
+        ("table.csv", ArtifactKind::Table),
+        ("chart.png", ArtifactKind::Image),
+        ("index.html", ArtifactKind::Html),
+        ("bundle.zip", ArtifactKind::Binary),
+    ] {
+        assert_eq!(kind_for_file_name(name), Some(kind), "{name}");
+        let ext = Path::new(name)
+            .extension()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        assert_eq!(
+            artifact_extension(kind, None, Some(name)),
+            ext,
+            "{name} keeps its extension"
+        );
+    }
+    for name in [
+        "Makefile",
+        "build.sh",
+        "logo.svg",
+        "setup.exe",
+        "reports.d/notes",
+    ] {
+        assert_eq!(kind_for_file_name(name), None, "{name}");
+    }
+}
+
 // ============================================================================
 // D2 upload placement
 // ============================================================================
