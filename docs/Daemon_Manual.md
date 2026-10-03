@@ -595,9 +595,18 @@ or, outside a run, on the same UTC day — its next version, announced as
 `artifact_written` and listed in the Library. Two paths the name carries
 whole that differ only in letter case or in the punctuation between words
 (`Notes.md` and `notes.md`, `a/b.md` and `a-b.md`) reach the same name, so
-they are one artifact's versions. The tool's result tells the model so,
-with the version and the absolute path, and that `file_read` cannot open it
-by the path it gave. A path that names no file (`''`, `.`, `reports/`, a
+they are one artifact's versions. The tool's result tells the model the
+write is complete: which artifact and version, its absolute path — the path
+to give the user — that the Library lists it, that the file is the
+deliverable and is not to be copied elsewhere with the shell or any other
+tool, and that writing the same path again saves its next version. When the
+artifact's file lies under the daemon's workspace directory, the result also
+names the path, relative to that directory, that `file_read` opens it by
+(`artifacts/loose/<day>/01-notes-plan.md`) — the case for the app and
+`openalpaca daemon start` on a conversation with no project, since both
+start the daemon in the home store; otherwise (a project's store, or a daemon
+started elsewhere) it says that `file_read` cannot open it from that
+conversation. A path that names no file (`''`, `.`, `reports/`, a
 blank name) is refused, and a turn with no owner — `POST /v1/command
 {"command":"process"}` runs as the system — cannot save an artifact, so
 there `file_write` is refused unless it makes the plain write. Both
@@ -605,7 +614,8 @@ launchers start the daemon in the home store, so from the app or
 `openalpaca daemon start` a `file_write` is always an artifact. `file_read`
 is unchanged: it reads relative to the workspace directory, so an agent
 that writes a file and then reads it back by the same path — or runs it
-with `shell_execute` — no longer finds it there.
+with `shell_execute` — no longer finds it there; it reads it back by the
+path the result names, where there is one.
 
 An upload is refused with the reason in the error code: `NO_FILE`,
 `FILE_TOO_LARGE`, `STORAGE_QUOTA_EXCEEDED`, `UNSUPPORTED_MIME`,

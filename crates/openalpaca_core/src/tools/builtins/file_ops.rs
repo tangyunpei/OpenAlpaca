@@ -9,7 +9,7 @@ use openalpaca_storage::store::{
 };
 use openalpaca_storage::{ArtifactKind, Database};
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use super::annotations_for_builtin;
@@ -405,16 +405,49 @@ impl FileWriteTool {
                 metadata: None,
             },
         )?;
-        let why = match scope {
-            StoreScope::Project(_) => "in this project's store",
-            StoreScope::Home => "because this conversation has no project folder",
+        let kept = match scope {
+            StoreScope::Project(_) => {
+                "This conversation's files are kept in the project's artifact store."
+            }
+            StoreScope::Home => {
+                "This conversation has no project folder, so its files are kept in \
+                 OpenAlpaca's artifact store."
+            }
+        };
+        let read_back = match read_back_path(&record.storage_path, &self.workspace_root) {
+            Some(rel) => format!("To read it back, call file_read with \"{rel}\"."),
+            None => "file_read cannot open it from this conversation; what you passed is what \
+                     was saved, so there is nothing to check."
+                .to_string(),
         };
         Ok(format!(
-            "Saved {path} as an artifact {why}: {}, version {}, at {}. It is listed in the \
-             Library. file_read cannot open it by the path you gave.",
+            "Saved: {path} is the artifact \"{}\", version {}, at {}. {kept} It is listed in the \
+             Library. This file is the deliverable: give the user this path, and do not write \
+             another copy with the shell or any other tool. {read_back} To change it, call \
+             file_write with \"{path}\" again; that saves its next version.",
             record.name, record.version, record.storage_path
         ))
     }
+}
+
+/// The path `file_read` opens a saved artifact by: its file relative to the
+/// workspace root, `/`-separated, both resolved first. `None` when the file
+/// is not under the root — the case of a project's store beside the home
+/// store, and of the home store seen from a root that does not contain it.
+/// `file_read` joins the same root, so the path named is one it opens.
+fn read_back_path(storage_path: &str, workspace_root: &Path) -> Option<String> {
+    let file = Path::new(storage_path).canonicalize().ok()?;
+    let root = workspace_root.canonicalize().ok()?;
+    let parts = file
+        .strip_prefix(&root)
+        .ok()?
+        .components()
+        .map(|part| match part {
+            Component::Normal(part) => part.to_str(),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 /// The artifact name `file_write` saves `path` under (G2): the path itself,
@@ -465,9 +498,10 @@ pub(super) fn file_write_tool(
                 after the path (plus a short hash of the path when the name cannot carry \
                 it whole: a character outside ASCII, a long path, or an extension no kind \
                 keeps, or none), its extension picks its kind, and writing the same path \
-                again in one run saves its next version. The result says which happened \
-                and, for an artifact, its version and absolute path; file_read cannot \
-                open an artifact by the path you gave. Creates parent directories \
+                again in one run saves its next version. The result says which happened. \
+                An artifact is the saved file: its result gives the absolute path to \
+                report to the user and, where there is one, the path file_read opens it \
+                by; never copy it elsewhere with the shell. Creates parent directories \
                 automatically if they don't exist. Content is limited to 10MB. Writing to \
                 persona files (SOUL.md, USER.md, IDENTITY.md) is blocked — use \
                 update_persona instead."
@@ -1396,11 +1430,17 @@ mod tests {
         );
         assert!(out.contains(&rows[0].storage_path), "{out}");
         assert!(out.contains("Library"), "{out}");
-        assert!(out.contains("in this project's store"), "{out}");
+        assert!(out.contains("the project's artifact store"), "{out}");
         assert!(
             !out.contains("no project folder"),
             "the turn carries a project: {out}"
         );
+        // The project's store is outside the root `file_read` reads from.
+        assert!(
+            out.contains("file_read cannot open it from this conversation"),
+            "{out}"
+        );
+        assert!(!out.contains("To read it back"), "{out}");
     }
 
     /// The root is compared resolved: a workspace root that is a link to the
@@ -1480,8 +1520,9 @@ mod tests {
         assert_eq!(versions.len(), 2, "{versions:?}");
     }
 
-    /// What the model reads back, and can repeat: an artifact, why, its name
-    /// and version, where it is, and that the Library lists it.
+    /// What the model reads back, and can repeat: the write is done, as which
+    /// artifact and version, where it is, that the Library lists it, that it
+    /// is the deliverable — not a step to route around — and how to change it.
     #[tokio::test]
     async fn the_artifact_result_names_the_path_and_the_library() {
         let st = Store::new();
@@ -1494,17 +1535,102 @@ mod tests {
 
         let row = &st.artifacts()[0];
         assert!(out.contains(PASTA), "{out}");
-        assert!(out.contains("as an artifact"), "{out}");
+        assert!(out.contains("is the artifact"), "{out}");
         assert!(out.contains("no project folder"), "{out}");
         assert!(out.contains(&row.name), "{out}");
         assert!(out.contains("version 1"), "{out}");
         assert!(Path::new(&row.storage_path).is_absolute());
         assert!(out.contains(&row.storage_path), "{out}");
         assert!(out.contains("Library"), "{out}");
+        assert!(out.contains("deliverable"), "{out}");
+        assert!(out.contains("do not write another copy"), "{out}");
         assert!(
-            out.contains("file_read cannot open it by the path you gave"),
+            out.contains(&format!(
+                "To change it, call file_write with \"{PASTA}\" again"
+            )),
             "{out}"
         );
+    }
+
+    /// The path a result tells the model to read the artifact back by.
+    fn read_back_in(out: &str) -> &str {
+        let (_, rest) = out
+            .split_once("To read it back, call file_read with \"")
+            .unwrap_or_else(|| panic!("no read-back path: {out}"));
+        rest.split_once('"')
+            .unwrap_or_else(|| panic!("an unclosed read-back path: {out}"))
+            .0
+    }
+
+    /// Round G's live check, defect 2. From the home store — where both
+    /// launchers start the daemon — the result names the path `file_read`
+    /// opens the artifact by, and `file_read` on that path, from the same
+    /// root and turn, returns what was written; written again, the path its
+    /// result names returns the second content. The first result is pinned
+    /// whole: the five parts, in order.
+    #[tokio::test]
+    async fn from_the_home_store_the_result_names_a_path_file_read_opens() {
+        let st = Store::new();
+        let home = st.home.root();
+        let ctx = st.ctx(None, None);
+        let write = st.tool_at(&home);
+        let read = FileReadTool {
+            workspace_root: home.clone(),
+        };
+
+        for (i, content) in ["# Pasta night\n", "# Pasta night, again\n"]
+            .into_iter()
+            .enumerate()
+        {
+            let out = write.write(&pasta(content), &ctx).await.unwrap();
+            assert!(!out.contains("file_read cannot open"), "{out}");
+            let rel = read_back_in(&out);
+            let read_back = read
+                .execute_with_context(&serde_json::json!({ "path": rel }), &ctx)
+                .await
+                .unwrap_or_else(|e| panic!("file_read({rel}): {e}"));
+            assert_eq!(read_back, content, "{out}");
+
+            if i == 0 {
+                let row = &st.artifacts()[0];
+                assert_eq!(
+                    out,
+                    format!(
+                        "Saved: {PASTA} is the artifact \"{}\", version 1, at {}. This \
+                         conversation has no project folder, so its files are kept in \
+                         OpenAlpaca's artifact store. It is listed in the Library. This file \
+                         is the deliverable: give the user this path, and do not write \
+                         another copy with the shell or any other tool. To read it back, \
+                         call file_read with \"{rel}\". To change it, call file_write with \
+                         \"{PASTA}\" again; that saves its next version.",
+                        row.name, row.storage_path
+                    )
+                );
+            }
+        }
+        assert!(
+            !home.join(PASTA).exists(),
+            "written into the home store's root"
+        );
+    }
+
+    /// From a workspace root that is not the home store the artifact is out
+    /// of `file_read`'s reach, and the result says so rather than name a path.
+    #[tokio::test]
+    async fn from_a_root_that_is_not_the_home_store_the_result_says_file_read_cannot_open_it() {
+        let st = Store::new();
+
+        let out = st
+            .tool_at(st.work.path())
+            .write(&pasta("# Pasta night\n"), &st.ctx(None, None))
+            .await
+            .unwrap();
+
+        assert!(
+            out.contains("file_read cannot open it from this conversation"),
+            "{out}"
+        );
+        assert!(!out.contains("To read it back"), "{out}");
     }
 
     /// The refusals come before the routing: a store-owned path and an
