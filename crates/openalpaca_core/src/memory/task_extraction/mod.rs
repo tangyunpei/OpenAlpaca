@@ -595,8 +595,9 @@ pub fn read_json_answer(
 /// Its callers: chat learning's extraction, and — the continuity fix
 /// round's ruling F7 (design 11 rev 1.7) — the working-state writer
 /// (`WorkingState::parse`), which shares this read of a cut answer.
-/// Task-output extraction keeps the strict read, and a conversation summary
-/// is projected from the working state with no answer of its own to read.
+/// Task-output extraction and a conversation summary's own call (owner
+/// decision CQ-11, `memory::learning`'s `parse_cut_summary`) keep the
+/// strict read.
 pub fn read_cut_answer(
     content: &str,
     expected: impl Fn(&serde_json::Value) -> bool,

@@ -230,12 +230,7 @@ impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
             }
         };
 
-        let spent = router
-            .cost_tracker
-            .get_agent_usage(working_state::USAGE_LABEL)
-            .await
-            .map(|s| s.total_cost_usd)
-            .unwrap_or(0.0);
+        let spent = working_state::spent_today(router).await;
         if spent > writer.max_daily_cost_usd {
             return Err(format!(
                 "the summariser's daily ceiling is spent (${spent:.2})"

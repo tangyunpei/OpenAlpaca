@@ -20,12 +20,13 @@
 //! switch, the stop drain and its boot catch-up — never the two-minute idle
 //! nor the ten turns. It brings the conversation's working state up to date
 //! — one summariser call, only when a user turn lies past what the state
-//! covers, under the summariser's daily ceiling and learning's yielding to
-//! chat — and then, once four of the user's turns the state covers have
-//! accumulated since the session's last summary (its durable episode
-//! cursor), projects a **conversation summary** (design 09 §13.3, MD-16)
-//! from the state with no call (`episode.rs`). A session's facts are learned
-//! before it is closed.
+//! covers — and then, once four of the user's turns have accumulated since
+//! the session's last summary (its durable episode cursor), writes a
+//! **conversation summary** (design 09 §13.3, MD-16) with a call of its own
+//! over the rows past that cursor (owner decision CQ-11, `episode.rs`). Both
+//! calls are made on `summary_model` under the summariser's one daily
+//! ceiling and learning's yielding to chat, each under its own label. A
+//! session's facts are learned before it is closed.
 //!
 //! A **flush** learns a session's window chunk by chunk (§1.6): read the
 //! window, ask the model, then store the chunk's notes and advance the
@@ -36,13 +37,13 @@
 //! cancels the call (the GPU serves the reply alone), and on a keyed remote
 //! model a chunk starts only when half of the key's rate budget would remain.
 
-use super::episode::{self, EpisodeJob, EpisodeWrite};
+use super::episode::{self, EPISODE_LABEL, EpisodeJob, EpisodeWrite};
 use super::extractor::{self, AGENT_LABEL, PromptInput, StoreCounts, StoreEnd, StoreJob};
 use super::lookup;
 use super::window::{self, NextChunk};
 use super::{
-    BACKOFF_BASE, BACKOFF_CAP, Budget, EPISODE_MIN_USER_TURNS, EPISODE_QUIET, MAX_ATTEMPTS,
-    MAX_CHUNKS_PER_FLUSH, RESUME_QUIET, UNUSABLE_EXCERPT_CHARS, WINDOW_READ_ROWS,
+    BACKOFF_BASE, BACKOFF_CAP, Budget, EPISODE_MIN_USER_TURNS, EPISODE_OUT_TOKENS, EPISODE_QUIET,
+    MAX_ATTEMPTS, MAX_CHUNKS_PER_FLUSH, RESUME_QUIET, UNUSABLE_EXCERPT_CHARS, WINDOW_READ_ROWS,
 };
 use crate::daemon_config::DaemonConfig;
 use crate::memory::service::{
@@ -292,31 +293,34 @@ impl FlushReport {
 }
 
 /// What one close of a conversation did (design 11 §2): its working state's
-/// refresh, then the conversation summaries projected from it (design 09
-/// §13.3).
+/// refresh, then its conversation summaries, each written by a call of its
+/// own (design 09 §13.3, owner decision CQ-11).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EpisodeReport {
-    /// Summariser calls made: the working state's refresh, at most one.
+    /// Summariser calls made: the working state's refresh (at most one) and
+    /// the summaries' own calls.
     pub calls: usize,
     /// `episode` notes written.
     pub episodes: usize,
     pub input_tokens: u64,
     pub output_tokens: u64,
     /// Windows with less of the user's own text than
-    /// `extract_min_content_len`: passed with no note.
+    /// `extract_min_content_len`: passed with no call.
     pub skipped_short: usize,
     /// Windows of a lane whose owner is not a `global_user` row.
     pub skipped_no_owner: usize,
     /// Windows whose project directory no longer exists.
     pub skipped_root_gone: usize,
-    /// A refresh given up after `MAX_ATTEMPTS` unusable answers: the state
-    /// stays as it was, and the summaries project what it covers.
+    /// A refresh given up after `MAX_ATTEMPTS` unusable answers — the state
+    /// stays as it was, and the summary is written all the same — and
+    /// windows passed after `MAX_ATTEMPTS` unusable answers to a summary's
+    /// call.
     pub skipped_unusable: usize,
     /// Windows a summary already covers — a re-run after a crash between the
-    /// write and the cursor's advance: passed with no note.
+    /// write and the cursor's advance: passed with no call.
     pub skipped_summarized: usize,
     /// Windows left with none of the user's turns once the turns a forget
-    /// suppressed are taken out: passed with no note.
+    /// suppressed are taken out: passed with no call.
     pub skipped_forgotten: usize,
     /// Summaries the service refused (a cited row deleted meanwhile).
     pub refused: usize,
@@ -347,8 +351,8 @@ impl EpisodeReport {
 enum Job {
     /// Learn a session's window (design 09 §1).
     Learn(String),
-    /// Close a conversation: refresh its working state and project its
-    /// summary (design 11 §2).
+    /// Close a conversation: refresh its working state and write its
+    /// summary (design 11 §2, owner decision CQ-11).
     Close(String),
 }
 
@@ -463,6 +467,14 @@ struct SessionState {
     /// Unusable answers to the refresh past this working-state `through` —
     /// kept in memory: a restart retries a poisoned refresh at most three
     /// more times.
+    refresh_failures: Option<(i64, u32)>,
+    /// The newest row of the rows a refresh was given up on: a close held
+    /// after it — by its summary's call — does not ask about the same rows
+    /// again; a row past it does.
+    refresh_given_up: Option<i64>,
+    /// Unusable answers to the summary window past this episode cursor —
+    /// kept in memory: a restart retries a poisoned window at most three
+    /// more times.
     episode_failures: Option<(i64, u32)>,
 }
 
@@ -549,9 +561,8 @@ fn read_window(db: &Database, session_id: &str) -> anyhow::Result<WindowRead> {
     })
 }
 
-/// A close's window as one blocking read saw it: the session row — its
-/// working state, the state's version and `through` — the episode cursor,
-/// and the rows past it.
+/// A summary's window as one blocking read saw it: the session row, the
+/// episode cursor, and the rows past it.
 struct CloseRead {
     session: Option<Conversation>,
     /// The episode cursor.
@@ -1155,12 +1166,13 @@ impl LearningQueue {
     }
 
     /// Closes a session now (design 11 §2): refreshes its working state when
-    /// a user turn lies past what it covers, then projects one `episode` per
-    /// window of at least four of the user's turns past its episode cursor
-    /// that the state covers (design 09 §13.3), with no chunk cap and no
-    /// quiet rule — the harness's deterministic stand-in for the quiet
-    /// period, the switch and the drain. One flush per session: a call while
-    /// one runs returns at once with [`FlushStop::AlreadyRunning`].
+    /// a user turn lies past what it covers, then writes one `episode` per
+    /// window of at least four of the user's turns past its episode cursor,
+    /// each by a call of its own (design 09 §13.3, owner decision CQ-11),
+    /// with no chunk cap and no quiet rule — the harness's deterministic
+    /// stand-in for the quiet period, the switch and the drain. One flush per
+    /// session: a call while one runs returns at once with
+    /// [`FlushStop::AlreadyRunning`].
     pub async fn flush_episodes(&self, session_id: &str) -> EpisodeReport {
         self.run_episodes(session_id, FlushPolicy::EXPLICIT).await
     }
@@ -1823,15 +1835,16 @@ impl LearningQueue {
     }
 
     /// A session's close (design 11 §2): its working state brought up to
-    /// date ([`Self::refresh`]), then its summaries projected from the state
-    /// ([`Self::project`]).
+    /// date ([`Self::refresh`]), then its summaries written, each by a call
+    /// of its own ([`Self::summarize`], owner decision CQ-11). A refresh that
+    /// stops holds the close before any summary.
     async fn close(&self, session_id: &str, policy: FlushPolicy) -> EpisodeReport {
         let mut report = EpisodeReport::default();
         if let Err(stop) = self.refresh(session_id, policy, &mut report).await {
             report.stopped = Some(stop);
             return report;
         }
-        self.project(session_id, policy, report).await
+        self.summarize(session_id, policy, report).await
     }
 
     /// The close's refresh (design 11 §2, §3.1): **one** summariser call only
@@ -1844,7 +1857,8 @@ impl LearningQueue {
     /// (design 09 §1.7). The state is written under its optimistic version.
     /// An answer that is not a state leaves the row untouched and holds the
     /// close, as learning holds a window; the `MAX_ATTEMPTS`-th gives the
-    /// refresh up. `Err` stops the close.
+    /// refresh up, and a close held after that — by its summary's call —
+    /// does not ask about the same rows again. `Err` stops the close.
     async fn refresh(
         &self,
         session_id: &str,
@@ -1934,16 +1948,19 @@ impl LearningQueue {
         if window::user_turns(&rows, &in_flight) == 0 {
             return Ok(());
         }
+        // Given up on these very rows already, in a close still held.
+        if self
+            .lock()
+            .sessions
+            .get(session_id)
+            .is_some_and(|s| s.refresh_given_up == Some(through))
+        {
+            return Ok(());
+        }
 
-        // D12: the summariser's daily ceiling, before any call.
-        let spent = self
-            .deps
-            .router
-            .cost_tracker
-            .get_agent_usage(working_state::USAGE_LABEL)
-            .await
-            .map(|s| s.total_cost_usd)
-            .unwrap_or(0.0);
+        // D12: the summariser's daily ceiling — the state's and the
+        // summaries' calls together (CQ-11) — before any call.
+        let spent = working_state::spent_today(&self.deps.router).await;
         if spent > dcfg.orchestrator.costs.summary_max_daily_cost_usd {
             tracing::debug!(
                 session_id,
@@ -1977,7 +1994,7 @@ impl LearningQueue {
                 report.unusable.push(unusable);
                 return self.count_refresh_failure(
                     session_id,
-                    session.working_state_through,
+                    (session.working_state_through, through),
                     &why,
                     report,
                 );
@@ -2014,7 +2031,8 @@ impl LearningQueue {
                     tracing::warn!(session_id, "the working state's write: {e:#}");
                 }
                 if let Some(s) = self.lock().sessions.get_mut(session_id) {
-                    s.episode_failures = None;
+                    s.refresh_failures = None;
+                    s.refresh_given_up = None;
                 }
                 Ok(())
             }
@@ -2024,7 +2042,7 @@ impl LearningQueue {
                 report.unusable.push(unusable);
                 self.count_refresh_failure(
                     session_id,
-                    session.working_state_through,
+                    (session.working_state_through, through),
                     &why.0,
                     report,
                 )
@@ -2034,25 +2052,27 @@ impl LearningQueue {
 
     /// Counts one unusable answer against the close's refresh, in memory
     /// (ruling LR20's rule, without its durable count), keyed by the working
-    /// state's `through`. Before the `MAX_ATTEMPTS`-th the close holds
-    /// (`BadOutput`, with learning's backoff); that one gives the refresh up
-    /// with one WARN — the state stays as it was — and the close goes on to
-    /// project what the state covers.
+    /// state's `through` — the first of `(through, newest)`, the second the
+    /// newest row the refresh read. Before the `MAX_ATTEMPTS`-th the close
+    /// holds (`BadOutput`, with learning's backoff); that one gives the
+    /// refresh up with one WARN — the state stays as it was, and the close
+    /// goes on to the summaries — and marks the rows given up on, so a close
+    /// held after it does not ask about them again.
     fn count_refresh_failure(
         &self,
         session_id: &str,
-        through: i64,
+        (through, newest): (i64, i64),
         error: &str,
         report: &mut EpisodeReport,
     ) -> Result<(), FlushStop> {
         let attempts = {
             let mut state = self.lock();
             let session = state.sessions.entry(session_id.to_string()).or_default();
-            let attempts = match session.episode_failures {
+            let attempts = match session.refresh_failures {
                 Some((at, n)) if at == through => n + 1,
                 _ => 1,
             };
-            session.episode_failures = Some((through, attempts));
+            session.refresh_failures = Some((through, attempts));
             attempts
         };
         if attempts < MAX_ATTEMPTS {
@@ -2069,18 +2089,22 @@ impl LearningQueue {
             "memory learning gave up refreshing a conversation's working state after {attempts} unusable answers; it stays as it was: {error}"
         );
         if let Some(s) = self.lock().sessions.get_mut(session_id) {
-            s.episode_failures = None;
+            s.refresh_failures = None;
+            s.refresh_given_up = Some(newest);
         }
         report.skipped_unusable += 1;
         Ok(())
     }
 
-    /// The close's summaries (design 11 §3.4, design 09 §13.3): while at
-    /// least four of the user's turns that the working state covers lie
-    /// past the episode cursor, one `episode` note per window — the covered
-    /// rows, never mixing roots — projected from the state with no call, the
-    /// note written and the cursor moved in one blocking task.
-    async fn project(
+    /// The close's summaries (design 09 §13.3, owner decision CQ-11): while
+    /// at least four of the user's turns lie past the session's episode
+    /// cursor, one call per window — the next chunk that fits the byte
+    /// budget of the summariser's model and never mixes roots — on
+    /// `summary_model` under the summariser's daily ceiling (read before
+    /// each call, the refresh's spend counted), learning's quiet rule and its
+    /// yielding to chat, each summary written and the cursor moved in one
+    /// blocking task.
+    async fn summarize(
         &self,
         session_id: &str,
         policy: FlushPolicy,
@@ -2126,28 +2150,22 @@ impl LearningQueue {
                 report.stopped = Some(FlushStop::SessionGone);
                 return report;
             };
-            let Some(state) = stored_state(&session) else {
-                return report;
-            };
-            // Only the rows the state covers (design 11 §3.2).
-            let rows: Vec<LearningRow> = read
-                .rows
-                .into_iter()
-                .filter(|r| r.id <= session.working_state_through)
-                .collect();
             // "Only when at least 4 user turns have accumulated since the
             // session's last episode."
-            if window::user_turns(&rows, &in_flight) < EPISODE_MIN_USER_TURNS as usize {
+            if window::user_turns(&read.rows, &in_flight) < EPISODE_MIN_USER_TURNS as usize {
                 return report;
             }
 
             let dcfg = self.deps.daemon_config.load();
-            // No byte budget: no model reads the window.
+            let setup = self
+                .call_setup(&dcfg, dcfg.orchestrator.costs.summary_model.clone())
+                .await;
+            // No context rows: a summary covers its own window.
             let mut chunk = match window::next_chunk(
-                &rows,
+                &read.rows,
                 &[],
                 &in_flight,
-                usize::MAX,
+                setup.budget.transcript_bytes,
                 WINDOW_READ_ROWS as usize,
             ) {
                 NextChunk::Empty => return report,
@@ -2200,10 +2218,10 @@ impl LearningQueue {
 
             // A summary already covers the start of this window — a re-run
             // after a crash between its write and the cursor's advance: the
-            // cursor moves past what it covers, with no second summary, and
-            // the turns after it are summarised next. Then the turns a
-            // forget suppressed are taken out, so no summary cites what the
-            // user said to forget (design 03 §6).
+            // cursor moves past what it covers, with no call and no second
+            // summary, and the turns after it are summarised next. Then the
+            // turns a forget suppressed are taken out, so no summary restates
+            // what the user said to forget (design 03 §6's hard guarantee).
             let service = self.deps.memory_service.clone();
             let check_ctx = ctx.clone();
             let ids: Vec<i64> = chunk.rows.iter().map(|r| r.id).collect();
@@ -2264,16 +2282,83 @@ impl LearningQueue {
                     continue;
                 }
             }
-            drop(dcfg);
 
+            // D12, CQ-11: the summariser's daily ceiling — the refresh's
+            // spend and the summaries' together — before the call.
+            let spent = working_state::spent_today(&self.deps.router).await;
+            if spent > dcfg.orchestrator.costs.summary_max_daily_cost_usd {
+                tracing::debug!(
+                    session_id,
+                    "conversation summary not written: summary cost ${spent:.2} exceeds the cap"
+                );
+                report.stopped = Some(FlushStop::Cap);
+                return report;
+            }
+
+            let (transcript, _) = chunk.transcript();
             let today = chunk.today();
+            let out_tokens = EPISODE_OUT_TOKENS.min(setup.budget.out_tokens);
+            let request =
+                episode::build_request(&today, &transcript, out_tokens, setup.model.clone());
+            drop(dcfg);
+            let (response, latency_ms) =
+                match self.call_model(request, policy, &setup, &cancel).await {
+                    CallOutcome::Answered(response, latency_ms) => (response, latency_ms),
+                    CallOutcome::Empty(e) => {
+                        report.calls += 1;
+                        let why = e.to_string();
+                        let unusable = UnusableAnswer::empty(&why);
+                        unusable.log(session_id);
+                        report.unusable.push(unusable);
+                        if self
+                            .count_episode_failure(session_id, &chunk, expected, &why, &mut report)
+                            .await
+                        {
+                            windows += 1;
+                            continue;
+                        }
+                        return report;
+                    }
+                    CallOutcome::Stopped(stop) => {
+                        report.stopped = Some(stop);
+                        return report;
+                    }
+                };
+            report.calls += 1;
+            report.input_tokens += u64::from(response.usage.input_tokens);
+            report.output_tokens += u64::from(response.usage.output_tokens);
+            let parsed = if response.finish_reason == openalpaca_llm::FinishReason::MaxTokens {
+                episode::parse_cut_summary(&response.content)
+            } else {
+                episode::parse_summary(&response.content)
+            };
+            self.record_usage(EPISODE_LABEL, &response, latency_ms, parsed.is_err())
+                .await;
+            let summary = match parsed {
+                Ok(summary) => summary,
+                Err(why) => {
+                    let why = unusable_reason(&response, out_tokens, why);
+                    let unusable = UnusableAnswer::answered(&why, &response);
+                    unusable.log(session_id);
+                    report.unusable.push(unusable);
+                    if self
+                        .count_episode_failure(session_id, &chunk, expected, &why, &mut report)
+                        .await
+                    {
+                        windows += 1;
+                        continue;
+                    }
+                    return report;
+                }
+            };
+
             let job = EpisodeJob {
                 db: self.deps.db.clone(),
                 service: self.deps.memory_service.clone(),
                 ctx,
                 session_id: session_id.to_string(),
                 root,
-                input: episode::store_input(&state, &chunk.rows, &today),
+                input: episode::store_input(&summary, &chunk.rows, &today),
                 through: chunk.through,
                 expected,
                 hooks: self.hooks.lock().unwrap_or_else(|p| p.into_inner()).clone(),
@@ -2292,12 +2377,15 @@ impl LearningQueue {
                 EpisodeWrite::Refused => report.refused += 1,
             }
             if end == StoreEnd::RootGone {
-                // Deleted since it was checked: skipped as above.
+                // Deleted while the model wrote: skipped as above.
                 report.skipped_root_gone += 1;
             }
             match end {
                 StoreEnd::Advanced | StoreEnd::CursorMoved | StoreEnd::RootGone => {
                     windows += 1;
+                    if let Some(s) = self.lock().sessions.get_mut(session_id) {
+                        s.episode_failures = None;
+                    }
                 }
                 StoreEnd::SessionGone => {
                     self.forget_session(session_id);
@@ -2314,6 +2402,55 @@ impl LearningQueue {
                 }
             }
         }
+    }
+
+    /// Counts one unusable answer against a summary's window, in memory
+    /// (ruling LR20's rule, without its durable count). After `MAX_ATTEMPTS`
+    /// of them the episode cursor moves past the window with one WARN and
+    /// `true` lets the close go on; otherwise the window holds (`false`).
+    async fn count_episode_failure(
+        &self,
+        session_id: &str,
+        chunk: &window::Chunk,
+        expected: i64,
+        error: &str,
+        report: &mut EpisodeReport,
+    ) -> bool {
+        let attempts = {
+            let mut state = self.lock();
+            let session = state.sessions.entry(session_id.to_string()).or_default();
+            let attempts = match session.episode_failures {
+                Some((at, n)) if at == expected => n + 1,
+                _ => 1,
+            };
+            session.episode_failures = Some((expected, attempts));
+            attempts
+        };
+        if attempts < MAX_ATTEMPTS {
+            tracing::info!(
+                session_id,
+                attempts,
+                "memory learning: the model's episode note was unusable, retrying later: {error}"
+            );
+            report.stopped = Some(FlushStop::BadOutput);
+            return false;
+        }
+        let first = expected + 1;
+        tracing::warn!(
+            session_id,
+            first_row = first,
+            last_row = chunk.through,
+            attempts,
+            "memory learning skipped rows {first}..={} for an episode note after {attempts} unusable answers: {error}",
+            chunk.through
+        );
+        self.advance_episode(session_id, chunk.through, expected)
+            .await;
+        if let Some(s) = self.lock().sessions.get_mut(session_id) {
+            s.episode_failures = None;
+        }
+        report.skipped_unusable += 1;
+        true
     }
 
     /// Moves the episode cursor past a window that needs no summary.

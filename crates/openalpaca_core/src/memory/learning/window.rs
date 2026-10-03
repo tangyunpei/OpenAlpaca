@@ -451,9 +451,9 @@ pub(crate) fn next_chunk(
 /// contract): each row whose `message:<id>` a tombstone suppressed in the
 /// lane owner's home partition or in the partition of any project the rows
 /// ran in — [`MemoryService::suppressed_sources`], the predicate the
-/// extractor drops a cited row by and the projection leaves a summary's
-/// rows out by — and, as the projection leaves them out, the other rows of
-/// its turn. The working-state writer never reads them (design 11 rev 1.7,
+/// extractor drops a cited row by and a conversation summary's window
+/// leaves rows out by — and, as that window leaves them out, the other rows
+/// of its turn. The working-state writer never reads them (design 11 rev 1.7,
 /// F5). None for a lane whose owner has no memory; `Err` when a partition
 /// could not be read, and the caller then makes no call.
 pub(crate) fn forgotten_rows(

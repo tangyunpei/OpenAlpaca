@@ -989,9 +989,9 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
-    /// Records the conversation summary last projected from one session's
-    /// working state (design 11 §2, §3.4): the `episode` note's id, which a
-    /// close writes after the note lands. Addressed by the session's id, as
+    /// Records the conversation summary last written for one session (design
+    /// 11 §2, §3.4): the `episode` note's id, which a close writes after the
+    /// note lands. Addressed by the session's id, as
     /// the state is; an archived conversation is written too.
     pub fn set_episode_note_id(&self, session_id: &str, note_id: &str) -> Result<()> {
         self.db.with_connection(|conn| {
@@ -1004,8 +1004,8 @@ impl<'a> ConversationRepository<'a> {
     }
 
     /// Clear the working state and reset counters for the lane's active
-    /// session. The summary last projected from the state goes too: a history
-    /// clear forgets it (LQ4), so the session no longer names it.
+    /// session. The summary last written for it goes too: a history clear
+    /// forgets it (LQ4), so the session no longer names it.
     pub fn clear_summary(&self, lane_key: &str) -> Result<()> {
         self.db.with_connection(|conn| {
             conn.execute(

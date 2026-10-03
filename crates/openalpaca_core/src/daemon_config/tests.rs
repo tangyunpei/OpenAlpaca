@@ -744,8 +744,8 @@ fn the_shipped_daemon_toml_names_recall_mode_index() {
 // ── Conversation summaries (design 09 §13.3, MD-16) ─────────────────────
 
 /// `[orchestrator.learning] episode_max_per_day` is gone (design 11 §8,
-/// owner decision CQ-2): a summary is projected from the working state with
-/// no call, so no daily count bounds it. A hand-edited file that still names
+/// owner decision CQ-2; kept gone by CQ-11): a summary's own call counts
+/// under the summariser's daily ceiling, and no daily count bounds it. A hand-edited file that still names
 /// it is read as every stale key is — ignored — and the shipped
 /// `config/daemon.toml` no longer names it.
 #[test]

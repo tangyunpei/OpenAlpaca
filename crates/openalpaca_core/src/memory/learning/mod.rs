@@ -15,10 +15,11 @@
 //! CQ-2) after a quiet period of 30 minutes, on a switch and in the stop
 //! drain: it brings the conversation's working state up to date — one
 //! summariser call, only when a user turn lies past what the state covers —
-//! and projects a **conversation summary** from it (design 09 §13.3, owner
-//! decision MD-16): one `episode` note per stretch of at least four of the
-//! user's turns, found by search, the timeline and the Memory view, and never
-//! recalled on its own (`episode.rs`).
+//! and then writes its **conversation summary** (design 09 §13.3, owner
+//! decision MD-16) with a call of its own over the conversation's rows
+//! (owner decision CQ-11): one `episode` note per stretch of at least four of
+//! the user's turns, found by search, the timeline and the Memory view, and
+//! never recalled on its own (`episode.rs`).
 
 mod episode;
 mod extractor;
@@ -28,6 +29,9 @@ pub mod queue;
 mod tests;
 mod window;
 
+/// The usage label of a conversation summary's own call (owner decision
+/// CQ-11), counted under the summariser's daily ceiling.
+pub(crate) use episode::EPISODE_LABEL;
 /// A conversation summary's title (design 09 §13.3): what the previous
 /// conversation's block names its record by (design 11 §4 (b)).
 pub(crate) use episode::title as episode_title;
@@ -115,20 +119,24 @@ pub const BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(3600
 
 // Conversation summaries (design 09 §13.3, owner decision MD-16): the
 // quiet period and the four turns are the design's numbers, not keys. A
-// summary is projected from the working state with no call (design 11
-// §3.4), so no daily count of its own bounds it (CQ-2).
+// summary's call counts under the summariser's daily ceiling
+// (`summary_max_daily_cost_usd`) and no daily count of its own (owner
+// decisions CQ-2, CQ-11).
 
 /// A conversation whose last turn is this old is closed — its working state
-/// refreshed and its summary projected: MD-10's idle trigger stretched for a
+/// refreshed and its summary written: MD-10's idle trigger stretched for a
 /// summary, which two minutes would cut too often.
 pub const EPISODE_QUIET: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 /// A summary is written only once at least this many of the user's turns
 /// have accumulated since the session's last one.
 pub const EPISODE_MIN_USER_TURNS: u32 = 4;
-/// The most prose a summary's `## Knowledge` holds: 2 KiB, so a projection
-/// whose *Discussed* carries `asked` keeps its *Decided* and *Left open*
-/// lines (design 11 rev 1.8, C2; 12 rev 2 §6.5).
+/// The most prose a summary's `## Knowledge` holds: 2 KiB, so a long
+/// *Discussed* line keeps its *Decided* and *Left open* lines (design 11
+/// rev 1.8, C2; 12 rev 2 §6.5).
 pub const EPISODE_MAX_KNOWLEDGE_BYTES: usize = 2048;
+/// The most output tokens one summary call asks for (under the window's own
+/// `out_tok`, design 09 §1.6).
+pub const EPISODE_OUT_TOKENS: u32 = 1024;
 
 /// What one extraction call may spend (design §1.6), from the extraction
 /// model's context window:

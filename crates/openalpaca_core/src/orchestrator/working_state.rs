@@ -32,10 +32,29 @@ pub const VERSION: u32 = 1;
 /// The writer's output ceiling (design 11 §3.1; M2).
 pub const MAX_TOKENS: u32 = 1536;
 
-/// The one label every summariser call is made and recorded under — the
-/// agent its daily ceiling (`[orchestrator.costs] summary_max_daily_cost_usd`)
-/// is read for.
+/// The label every call of the working-state writer is made and recorded
+/// under — at compaction, at the turn end and at the close.
 pub const USAGE_LABEL: &str = "orchestrator_summary";
+
+/// The labels the summariser's one daily ceiling
+/// (`[orchestrator.costs] summary_max_daily_cost_usd`) counts: the
+/// working-state writer's, and a conversation summary's own call at the
+/// close (owner decision CQ-11).
+pub(crate) const CEILING_LABELS: [&str; 2] = [USAGE_LABEL, crate::memory::learning::EPISODE_LABEL];
+
+/// What the calls under the summariser's ceiling ([`CEILING_LABELS`]) spent
+/// today, as the router's cost tracker counts them: what every one of those
+/// calls reads before it is made (D12) — compaction's, the turn end's, the
+/// close's refresh and the conversation summary's.
+pub(crate) async fn spent_today(router: &LlmRouter) -> f64 {
+    let mut spent = 0.0;
+    for label in CEILING_LABELS {
+        if let Some(usage) = router.cost_tracker.get_agent_usage(label).await {
+            spent += usage.total_cost_usd;
+        }
+    }
+    spent
+}
 
 /// The block's type in [`super::wrap_untrusted_context`].
 pub(crate) const BLOCK_TYPE: &str = "working_state";
@@ -428,12 +447,7 @@ pub(super) async fn after_turn(
     };
 
     // D12: the summariser's daily ceiling, before any call.
-    let spent = router
-        .cost_tracker
-        .get_agent_usage(USAGE_LABEL)
-        .await
-        .map(|s| s.total_cost_usd)
-        .unwrap_or(0.0);
+    let spent = spent_today(&router).await;
     if spent > dcfg.orchestrator.costs.summary_max_daily_cost_usd {
         tracing::debug!("working state not refreshed: summary cost ${spent:.2} exceeds the cap");
         return;
@@ -609,7 +623,7 @@ pub(crate) fn stored(text: &str, session_id: &str) -> Option<Arc<WorkingState>> 
 
 /// The previous conversation on a lane and project (design 11 §4 (b), owner
 /// decision CQ-5), as a new conversation is given it: when it ended, the
-/// memory note that records it (once its close projected one) or the date the
+/// memory note that records it (once its close wrote one) or the date the
 /// timeline lists its summary under if one was written, its working state,
 /// and its last exchange after what that state covers.
 #[derive(Debug, Clone, PartialEq)]
@@ -621,7 +635,7 @@ pub(crate) struct PreviousConversation {
     /// The day of its last message: the date its conversation summary's
     /// title names.
     pub date: String,
-    /// `session.episode_note_id`, set by the close's projection.
+    /// `session.episode_note_id`, set when the close writes the summary.
     pub episode_note_id: Option<String>,
     pub state: Option<Arc<WorkingState>>,
     /// The last user row after `working_state_through` and the assistant row
@@ -646,7 +660,7 @@ impl PreviousConversation {
     /// The block's text, at most `max_chars` characters when it can be: the
     /// heading — the note that records the conversation, *"memory_read it for
     /// the full record; memory_timeline shows what surrounds it"*, or before
-    /// the close has projected one the timeline hint, conditional (rev 1.7,
+    /// the close has written one the timeline hint, conditional (rev 1.7,
     /// F6) — then the state's
     /// fields, cut as [`WorkingState::text`] cuts them, then the last
     /// exchange. The history layer wraps it as quoted data.

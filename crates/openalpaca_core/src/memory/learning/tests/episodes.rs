@@ -1,13 +1,14 @@
 //! A conversation's close (design 11 §2, owner decision CQ-2): its working
 //! state's refresh — one summariser call, only when a user turn lies past
-//! what the state covers — and the conversation summary projected from the
-//! state (design 09 §13.3, owner decision MD-16, slice L10c), with its
-//! triggers and its gates, over the learning tests' scene — a persisted
-//! window, a scripted model, a manual queue unless a test builds an
-//! automatic one.
+//! what the state covers — and the conversation summary written by a call
+//! of its own over the rows past the episode cursor (design 09 §13.3, owner
+//! decisions MD-16 and CQ-11, slice L10c), with its triggers and its gates,
+//! over the learning tests' scene — a persisted window, a scripted model, a
+//! manual queue unless a test builds an automatic one.
 
 use super::*;
 use crate::daemon_config::RecallMode;
+use crate::memory::learning::episode::EPISODE_LABEL;
 use crate::memory::service::{
     Patch, RecallBudget, SearchInput, TimelineAnchor, TimelineInput, UpdateAction, UpdateInput,
 };
@@ -31,6 +32,32 @@ fn trip() -> WorkingState {
 fn trip_state() -> Say {
     Say::Text(serde_json::to_string(&trip()).unwrap())
 }
+
+/// The scripted model's conversation summary.
+fn summary(topic: &str, discussed: &str, decided: &str, open: &str) -> Say {
+    Say::Text(
+        serde_json::json!({
+            "topic": topic,
+            "discussed": discussed,
+            "decided": decided,
+            "open": open,
+        })
+        .to_string(),
+    )
+}
+
+fn trip_summary() -> Say {
+    summary(
+        "Lisbon trip planning",
+        "Flights to Lisbon and a hotel near Alfama.",
+        "Fly out on Friday 2 October.",
+        "Which museum to visit.",
+    )
+}
+
+/// What only the summary's user message carries (`episode_prompt.txt`):
+/// the scripted model keeps the user messages of each call.
+const RECORDER: &str = "<summary_rules>";
 
 const TURNS: [&str; 4] = [
     "Let's plan my Lisbon trip.",
@@ -67,12 +94,37 @@ fn episodes(scene: &Scene) -> Vec<ListItem> {
         .collect()
 }
 
-/// The summariser's calls today, from `llm_usage_daily`.
+/// The working-state writer's calls today, from `llm_usage_daily`.
 fn summariser_calls_today(scene: &Scene) -> i64 {
     openalpaca_storage::LlmUsageRepository::new(&scene.db)
         .usage_today(USAGE_LABEL)
         .unwrap()
         .0
+}
+
+/// The conversation summaries' own calls today, from `llm_usage_daily`.
+fn episode_calls_today(scene: &Scene) -> i64 {
+    openalpaca_storage::LlmUsageRepository::new(&scene.db)
+        .usage_today(EPISODE_LABEL)
+        .unwrap()
+        .0
+}
+
+/// The working state on the row, covering every row the conversation has:
+/// a close then makes no refresh call.
+fn state_covers(scene: &Scene, s: &str, through: i64) {
+    let version = session_row(scene, s).working_state_version;
+    assert!(
+        scene
+            .repo()
+            .update_working_state(
+                s,
+                version,
+                &serde_json::to_string(&trip()).unwrap(),
+                through
+            )
+            .unwrap()
+    );
 }
 
 /// The session row: its working state, `through` and `episode_note_id`.
@@ -233,12 +285,18 @@ async fn the_close_reads_nothing_of_the_previous_conversation() {
 // ── The note (§13.3, *What*, *Authority and visibility*) ──────────────────
 
 /// "Only when at least 4 user turns have accumulated since the session's
-/// last episode": three turns get the state refreshed and no episode; the
-/// fourth gets the episode, and the episode cursor moves past it; three more
-/// get the state refreshed again and no second episode.
+/// last episode": three turns get the state refreshed and no summary call;
+/// the fourth gets the summary's own call and the episode, and the episode
+/// cursor moves past it; three more get the state refreshed again and no
+/// second summary call.
 #[tokio::test]
 async fn no_episode_before_four_user_turns() {
-    let scene = Scene::new(vec![trip_state(), trip_state(), trip_state()]);
+    let scene = Scene::new(vec![
+        trip_state(),
+        trip_state(),
+        trip_summary(),
+        trip_state(),
+    ]);
     let s = scene.session();
     for (i, text) in TURNS[..3].iter().enumerate() {
         scene.turn(&s, text, &format!("Answer {i}."));
@@ -246,14 +304,16 @@ async fn no_episode_before_four_user_turns() {
     let early = scene.queue.flush_episodes(&s).await;
     assert_eq!(early.stopped, None, "{early:?}");
     assert_eq!((early.calls, early.episodes), (1, 0), "{early:?}");
+    assert_eq!(episode_calls_today(&scene), 0, "no summary call");
     assert!(episodes(&scene).is_empty());
     assert_eq!(episode_cursor(&scene, &s), 0);
     assert_eq!(session_row(&scene, &s).episode_note_id, None);
 
     let (_, last) = scene.turn(&s, TURNS[3], "Answer 3.");
     let report = scene.queue.flush_episodes(&s).await;
-    assert_eq!((report.calls, report.episodes), (1, 1), "{report:?}");
+    assert_eq!((report.calls, report.episodes), (2, 1), "{report:?}");
     assert_eq!(report.stopped, None);
+    assert_eq!(episode_calls_today(&scene), 1);
     assert_eq!(episodes(&scene).len(), 1);
     assert_eq!(episode_cursor(&scene, &s), last);
 
@@ -269,25 +329,83 @@ async fn no_episode_before_four_user_turns() {
         (1, 0),
         "{three_more:?}"
     );
+    assert_eq!(episode_calls_today(&scene), 1, "no second summary call");
     assert_eq!(episodes(&scene).len(), 1);
     assert_eq!(episode_cursor(&scene, &s), last);
 }
 
+/// Owner decision CQ-11: when both are due a close makes two calls — the
+/// working state's refresh under `orchestrator_summary`, then the summary's
+/// own under `orchestrator_episode`, both on `summary_model` — and when only
+/// the state is stale, one. The summary's call is the episode prompt over
+/// the conversation's rows, with no reasoning, at temperature 0, within
+/// `EPISODE_OUT_TOKENS`.
+#[tokio::test]
+async fn a_close_makes_two_calls_with_two_labels_when_both_are_due() {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.costs.summary_model = Some("claude-haiku-4-5-20251001".into());
+    let scene = Scene::with(
+        Scripted::new(vec![trip_state(), trip_state(), trip_summary()]),
+        config,
+    );
+    let s = scene.session();
+    for (i, text) in TURNS[..3].iter().enumerate() {
+        scene.turn(&s, text, &format!("Answer {i}."));
+    }
+    let stale = scene.queue.flush_episodes(&s).await;
+    assert_eq!((stale.calls, stale.episodes), (1, 0), "{stale:?}");
+    assert_eq!(
+        (summariser_calls_today(&scene), episode_calls_today(&scene)),
+        (1, 0),
+        "only the state is stale: one call, the writer's"
+    );
+
+    scene.turn(&s, TURNS[3], "Answer 3.");
+    let both = scene.queue.flush_episodes(&s).await;
+    assert_eq!((both.calls, both.episodes), (2, 1), "{both:?}");
+    assert_eq!(
+        (summariser_calls_today(&scene), episode_calls_today(&scene)),
+        (2, 1),
+        "the refresh and the summary, each under its own label"
+    );
+    let prompts = scene.model.prompts();
+    assert!(!prompts[1].contains(RECORDER), "the refresh first");
+    let episode = &prompts[2];
+    assert!(episode.contains(RECORDER), "{episode}");
+    for text in TURNS {
+        assert!(episode.contains(text), "{episode}");
+    }
+    assert!(episode.contains("<today>2026-"), "{episode}");
+    let request = scene.model.seen.lock().unwrap()[2].clone();
+    assert_eq!(request.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+    assert!(
+        matches!(
+            request.thinking,
+            Some(openalpaca_llm::ThinkingConfig::Disabled)
+        ),
+        "{:?}",
+        request.thinking
+    );
+    assert_eq!(request.temperature, Some(0.0));
+    assert_eq!(request.max_tokens, Some(EPISODE_OUT_TOKENS));
+}
+
 /// §13.3's note, MD-16's frontmatter unchanged: `kind: episode`, the title
 /// `Conversation on <YYYY-MM-DD>: <topic>`, what was discussed, decided and
-/// left open in at most 2 KiB of prose — projected from the working state
-/// (design 11 §3.4) — `observed_at` the last turn's time, the window's rows
+/// left open in at most 2 KiB of prose — the model's own summary (owner
+/// decision CQ-11) — `observed_at` the last turn's time, the window's rows
 /// as sources, no `fact_key`, no aliases, no `supersedes`; origin
-/// `extracted_other`, status `active`; its id on the session row. The one
-/// call is the summariser's: no reasoning, temperature 0, 1 536 tokens,
-/// recorded under its label, reading the rows the state did not cover.
+/// `extracted_other`, status `active`; its id on the session row. The
+/// refresh's call is the writer's: no reasoning, temperature 0, 1 536
+/// tokens, recorded under its label; the summary's is recorded under its
+/// own.
 #[tokio::test]
 async fn an_episode_is_one_active_extracted_other_note_with_the_designs_fields() {
-    let scene = Scene::new(vec![trip_state()]);
+    let scene = Scene::new(vec![trip_state(), trip_summary()]);
     let s = scene.session();
     let rows = four_turns(&scene, &s);
     let report = scene.queue.flush_episodes(&s).await;
-    assert_eq!((report.calls, report.episodes), (1, 1), "{report:?}");
+    assert_eq!((report.calls, report.episodes), (2, 1), "{report:?}");
 
     let listed = episodes(&scene);
     assert_eq!(listed.len(), 1);
@@ -299,8 +417,8 @@ async fn an_episode_is_one_active_extracted_other_note_with_the_designs_fields()
         "Conversation on 2026-09-20: Lisbon trip planning"
     );
     // Every field but the id and the write times, as the episode writer
-    // before the projection wrote them (its note, on this window, compared
-    // field by field at the parent commit).
+    // before design 11's projection wrote them, and as the projection kept
+    // them (rev 1.3 item 6).
     let mut fm = note.frontmatter.clone();
     for volatile in ["id", "created_at", "updated_at"] {
         assert!(fm[volatile].is_string(), "{volatile}: {fm}");
@@ -359,7 +477,7 @@ async fn an_episode_is_one_active_extracted_other_note_with_the_designs_fields()
     assert_eq!(
         session_row(&scene, &s).episode_note_id,
         Some(listed[0].id.to_string()),
-        "the session names the summary projected from its state"
+        "the session names the summary written for it"
     );
 
     let request = scene.model.first_request();
@@ -378,13 +496,19 @@ async fn an_episode_is_one_active_extracted_other_note_with_the_designs_fields()
         assert!(prompt.contains(&format!("[user]: {text}")), "{prompt}");
     }
     assert_eq!(summariser_calls_today(&scene), 1);
+    let summary = &scene.model.prompts()[1];
+    assert!(
+        summary.contains("<today>2026-09-20</today>"),
+        "the summary's own prompt: {summary}"
+    );
+    assert_eq!(episode_calls_today(&scene), 1);
 }
 
 /// A long conversation's episode still cites at most eight rows (design 03
 /// §7a's cap on `sources`), spread from its first row to its last.
 #[tokio::test]
 async fn a_long_conversation_cites_eight_rows_first_to_last() {
-    let scene = Scene::new(vec![trip_state()]);
+    let scene = Scene::new(vec![trip_state(), trip_summary()]);
     let s = scene.session();
     let mut rows = Vec::new();
     for i in 0..10 {
@@ -403,7 +527,7 @@ async fn a_long_conversation_cites_eight_rows_first_to_last() {
 /// per-turn recall" — the writer's own note, in both recall modes.
 #[tokio::test]
 async fn an_episode_is_found_by_search_and_timeline_and_never_by_recall() {
-    let scene = Scene::new(vec![trip_state()]);
+    let scene = Scene::new(vec![trip_state(), trip_summary()]);
     let s = scene.session();
     four_turns(&scene, &s);
     scene.queue.flush_episodes(&s).await;
@@ -448,7 +572,7 @@ async fn an_episode_is_found_by_search_and_timeline_and_never_by_recall() {
 /// as the route reads them — forgets its episode.
 #[tokio::test]
 async fn deleting_the_conversation_forgets_its_episode() {
-    let scene = Scene::new(vec![trip_state()]);
+    let scene = Scene::new(vec![trip_state(), trip_summary()]);
     let s = scene.session();
     four_turns(&scene, &s);
     scene.queue.flush_episodes(&s).await;
@@ -465,13 +589,13 @@ async fn deleting_the_conversation_forgets_its_episode() {
 }
 
 /// A turn whose row a forget suppressed — the user said "forget that" —
-/// is left out of the summary's window: the note does not cite it, nor its
-/// answer. And (design 11 rev 1.7, F5; 03 §6) the close's refresh never
-/// reads it, nor its answer, so the state the note is projected from does
-/// not carry it either.
+/// is left out of the summary: its text never reaches the summary's call,
+/// nor its answer's, and the note does not cite them (design 03 §6's hard
+/// guarantee: no replay resurrects a forgotten record). And (design 11 rev
+/// 1.7, F5) the close's refresh never reads them either.
 #[tokio::test]
-async fn a_forgotten_turn_is_not_cited_by_the_episode() {
-    let scene = Scene::new(vec![items(&[vim_item(&[1])]), trip_state()]);
+async fn a_forgotten_turn_is_left_out_of_the_episode() {
+    let scene = Scene::new(vec![items(&[vim_item(&[1])]), trip_state(), trip_summary()]);
     let s = scene.session();
     let (secret, _) = scene.turn(&s, PREF, "Noted.");
     scene.queue.flush_session(&s).await;
@@ -496,6 +620,13 @@ async fn a_forgotten_turn_is_not_cited_by_the_episode() {
         !refresh.contains(PREF) && !refresh.contains("[assistant]: Noted."),
         "the refresh reads neither the forgotten row nor its answer: {refresh}"
     );
+    let summary = scene.model.prompts().remove(2);
+    assert!(summary.contains(RECORDER), "{summary}");
+    assert!(
+        !summary.contains(PREF) && !summary.contains("Noted."),
+        "the summary's call reads neither the forgotten row nor its answer: {summary}"
+    );
+    assert!(summary.contains(TURNS[0]), "{summary}");
     assert!(
         refresh.contains(&format!("[user]: {}", TURNS[0])),
         "{refresh}"
@@ -518,10 +649,10 @@ async fn a_forgotten_turn_is_not_cited_by_the_episode() {
 
 /// A re-run after a crash between the write and the episode cursor's
 /// advance writes no second episode — and makes no second call: the state
-/// is current.
+/// is current, and a summary covers the window.
 #[tokio::test]
 async fn a_rerun_after_a_crash_writes_no_second_episode() {
-    let scene = Scene::new(vec![trip_state(), trip_state()]);
+    let scene = Scene::new(vec![trip_state(), trip_summary(), trip_summary()]);
     let s = scene.session();
     let rows = four_turns(&scene, &s);
     scene.queue.set_store_hooks(StoreHooks {
@@ -537,22 +668,24 @@ async fn a_rerun_after_a_crash_writes_no_second_episode() {
     let rerun = scene.queue.flush_episodes(&s).await;
     assert_eq!((rerun.calls, rerun.episodes), (0, 0), "{rerun:?}");
     assert_eq!(rerun.stopped, None);
-    assert_eq!(scene.model.calls(), 1);
+    assert_eq!(rerun.skipped_summarized, 1);
+    assert_eq!(scene.model.calls(), 2);
     assert_eq!(episodes(&scene).len(), 1);
     assert_eq!(episode_cursor(&scene, &s), *rows.last().unwrap());
 }
 
 /// L1 re-review, as for learning: a project directory deleted while the
-/// summariser refreshes the state is not re-created by the summary's write:
-/// the window is skipped — no episode, the directory stays deleted,
-/// `skipped_root_gone`, the episode cursor past it.
+/// model writes the summary is not re-created by the summary's write. The
+/// store re-checks the root right before it writes; gone, the window is
+/// skipped as the check before the call skips it — no episode, the
+/// directory stays deleted, `skipped_root_gone`, the episode cursor past it.
 #[tokio::test]
-async fn a_project_deleted_during_the_close_is_not_recreated() {
+async fn a_project_deleted_during_the_summary_call_is_not_recreated() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
     let root = dir.path().canonicalize().unwrap();
     let root_str = root.to_string_lossy().into_owned();
-    let model = Scripted::new(vec![trip_state()]);
+    let model = Scripted::new(vec![trip_state(), trip_summary()]);
     let scene = Scene::with(model.clone(), DaemonConfig::default());
     let s = scene.session();
     let mut last = 0;
@@ -561,16 +694,19 @@ async fn a_project_deleted_during_the_close_is_not_recreated() {
             .turn_in(&s, text, &format!("Answer {i}."), Some(&root_str))
             .1;
     }
+    // The second call is the summary's: the refresh's comes first.
     let doomed = root.clone();
-    *model.on_call.lock().unwrap() = Some(Arc::new(move |_| {
-        std::fs::remove_dir_all(&doomed).unwrap();
+    *model.on_call.lock().unwrap() = Some(Arc::new(move |n| {
+        if n == 2 {
+            std::fs::remove_dir_all(&doomed).unwrap();
+        }
     }));
 
     let report = scene.queue.flush_episodes(&s).await;
     assert_eq!(
         model.calls(),
-        1,
-        "the root was there when the call went out"
+        2,
+        "the root was there when the summary's call went out"
     );
     assert!(!root.exists(), "the summary re-created the deleted project");
     assert_eq!(report.stopped, None, "{report:?}");
@@ -586,7 +722,12 @@ async fn a_project_deleted_during_the_close_is_not_recreated() {
 /// passing the whole chunk it reads now.
 #[tokio::test]
 async fn a_rerun_after_a_crash_still_summarises_the_turns_after_the_summary() {
-    let scene = Scene::new(vec![trip_state(), trip_state()]);
+    let scene = Scene::new(vec![
+        trip_state(),
+        trip_summary(),
+        trip_state(),
+        trip_summary(),
+    ]);
     let s = scene.session();
     four_turns(&scene, &s);
     scene.queue.set_store_hooks(StoreHooks {
@@ -605,7 +746,7 @@ async fn a_rerun_after_a_crash_still_summarises_the_turns_after_the_summary() {
     let rerun = scene.queue.flush_episodes(&s).await;
     assert_eq!(
         (rerun.skipped_summarized, rerun.calls, rerun.episodes),
-        (1, 1, 1),
+        (1, 2, 1),
         "{rerun:?}"
     );
     assert_eq!(episodes(&scene).len(), 2);
@@ -630,6 +771,7 @@ async fn a_learned_episode_candidate_does_not_hold_back_the_episode_note() {
             &[1, 2],
         )]),
         trip_state(),
+        trip_summary(),
     ]);
     let s = scene.session();
     let rows = four_turns(&scene, &s);
@@ -644,7 +786,7 @@ async fn a_learned_episode_candidate_does_not_hold_back_the_episode_note() {
     let report = scene.queue.flush_episodes(&s).await;
     assert_eq!(
         (report.skipped_summarized, report.calls, report.episodes),
-        (0, 1, 1),
+        (0, 2, 1),
         "{report:?}"
     );
     let note = scene.read(&scene.user_ctx(), episodes(&scene)[0].id);
@@ -665,6 +807,7 @@ async fn a_model_may_not_key_a_summary_and_the_fact_under_the_key_is_learned_act
     let scene = Scene::new(vec![
         items(&[]),
         trip_state(),
+        trip_summary(),
         items(&[full_item(serde_json::json!({
             "title": "Editor",
             "content": "The user edits code with vim.",
@@ -740,17 +883,19 @@ async fn a_model_may_not_key_a_summary_and_the_fact_under_the_key_is_learned_act
 
 /// An unusable answer leaves the row untouched (design 11 §3.1) and holds
 /// the close with a backoff, like learning's window (ruling LR20); the third
-/// in a row gives the refresh up, and the close projects what the state
-/// covers — here nothing, so no episode, and the episode cursor stays.
+/// in a row gives the refresh up — the row as it was — and the close goes on
+/// to the summary's own call over the rows (owner decision CQ-11), which
+/// does not need the state.
 #[tokio::test]
-async fn three_unusable_answers_give_the_refresh_up() {
+async fn three_unusable_answers_give_the_refresh_up_and_the_summary_is_written() {
     let scene = Scene::new(vec![
         Say::Text("not json".into()),
         Say::Text(r#"{"topic": ""}"#.into()),
         Say::Spent,
+        trip_summary(),
     ]);
     let s = scene.session();
-    four_turns(&scene, &s);
+    let rows = four_turns(&scene, &s);
     for attempt in 1..=2 {
         let held = scene.queue.flush_episodes(&s).await;
         assert_eq!(
@@ -759,10 +904,15 @@ async fn three_unusable_answers_give_the_refresh_up() {
             "{attempt}: {held:?}"
         );
         assert_eq!(state_on_row(&scene, &s), None);
+        assert!(episodes(&scene).is_empty(), "no summary while it holds");
     }
     let given_up = scene.queue.flush_episodes(&s).await;
     assert_eq!(given_up.stopped, None, "{given_up:?}");
-    assert_eq!(given_up.skipped_unusable, 1);
+    assert_eq!(
+        (given_up.skipped_unusable, given_up.calls, given_up.episodes),
+        (1, 2, 1),
+        "{given_up:?}"
+    );
     let row = session_row(&scene, &s);
     assert_eq!(
         (
@@ -773,50 +923,57 @@ async fn three_unusable_answers_give_the_refresh_up() {
         ("", 0, 0),
         "the row untouched"
     );
-    assert_eq!(episode_cursor(&scene, &s), 0);
-    assert!(episodes(&scene).is_empty());
-    assert_eq!(scene.model.calls(), 3);
+    assert_eq!(episode_cursor(&scene, &s), *rows.last().unwrap());
+    assert_eq!(episodes(&scene).len(), 1);
+    assert_eq!(scene.model.calls(), 4);
 }
 
-/// A refresh given up still projects what the state already covers: a
-/// state covering four turns, then a fifth whose refresh the model answers
-/// unusably three times — the episode covers the four.
+/// A refresh given up is not asked again about the same rows while its close
+/// is held by the summary's call: the next attempt makes the summary's call
+/// alone. A row past them is asked about again.
 #[tokio::test]
-async fn a_refresh_given_up_projects_what_the_state_covers() {
+async fn a_given_up_refresh_is_not_asked_again_while_the_summary_holds_the_close() {
     let scene = Scene::new(vec![
         Say::Text("not json".into()),
         Say::Text("not json".into()),
         Say::Text("not json".into()),
+        Say::Text("Here is the summary: none.".into()),
+        trip_summary(),
+        trip_state(),
     ]);
     let s = scene.session();
-    let rows = four_turns(&scene, &s);
-    let covered = *rows.last().unwrap();
-    assert!(
-        scene
-            .repo()
-            .update_working_state(&s, 0, &serde_json::to_string(&trip()).unwrap(), covered)
-            .unwrap()
-    );
-    scene.turn(&s, "And the return flight?", "On the 5th.");
+    four_turns(&scene, &s);
     for _ in 1..=2 {
         let held = scene.queue.flush_episodes(&s).await;
         assert_eq!(held.stopped, Some(FlushStop::BadOutput), "{held:?}");
-        assert!(episodes(&scene).is_empty());
     }
-    let given_up = scene.queue.flush_episodes(&s).await;
+    let summary_held = scene.queue.flush_episodes(&s).await;
     assert_eq!(
         (
-            given_up.skipped_unusable,
-            given_up.episodes,
-            given_up.stopped
+            summary_held.skipped_unusable,
+            summary_held.calls,
+            summary_held.stopped
         ),
-        (1, 1, None),
-        "{given_up:?}"
+        (1, 2, Some(FlushStop::BadOutput)),
+        "the refresh given up, the summary's answer unusable: {summary_held:?}"
     );
-    assert_eq!(episode_cursor(&scene, &s), covered);
-    let note = scene.read(&scene.user_ctx(), episodes(&scene)[0].id);
-    let cited: Vec<i64> = note.sources.iter().map(|s| s.id.parse().unwrap()).collect();
-    assert_eq!(cited, rows, "the four turns the state covers");
+
+    let written = scene.queue.flush_episodes(&s).await;
+    assert_eq!(
+        (written.calls, written.episodes, written.stopped),
+        (1, 1, None),
+        "{written:?}"
+    );
+    assert!(
+        scene.model.prompts()[4].contains(RECORDER),
+        "the one call is the summary's"
+    );
+    assert_eq!(state_on_row(&scene, &s), None);
+
+    scene.turn(&s, "And the return flight?", "On the 5th.");
+    let next = scene.queue.flush_episodes(&s).await;
+    assert_eq!((next.calls, next.stopped), (1, None), "{next:?}");
+    assert_eq!(state_on_row(&scene, &s), Some(trip()), "a new row: asked");
 }
 
 /// The L8 fix slice's P1, for the close's refresh: an answer stopped at the
@@ -897,6 +1054,128 @@ async fn an_unusable_refresh_is_kept_in_the_report() {
     assert_eq!((empty.chars, empty.finish_reason), (0, None));
 }
 
+/// An unusable summary answer holds its window with a backoff, like
+/// learning's (ruling LR20); the third in a row moves the episode cursor
+/// past the chunk with no episode. The state is current: no refresh call.
+#[tokio::test]
+async fn three_unusable_summary_answers_skip_the_window() {
+    let scene = Scene::new(vec![
+        Say::Text("not json".into()),
+        Say::Text(r#"{"topic": ""}"#.into()),
+        Say::Spent,
+    ]);
+    let s = scene.session();
+    let rows = four_turns(&scene, &s);
+    state_covers(&scene, &s, *rows.last().unwrap());
+    for attempt in 1..=2 {
+        let held = scene.queue.flush_episodes(&s).await;
+        assert_eq!(
+            held.stopped,
+            Some(FlushStop::BadOutput),
+            "{attempt}: {held:?}"
+        );
+        assert_eq!(episode_cursor(&scene, &s), 0);
+    }
+    let skipped = scene.queue.flush_episodes(&s).await;
+    assert_eq!(skipped.stopped, None, "{skipped:?}");
+    assert_eq!(skipped.skipped_unusable, 1);
+    assert_eq!(episode_cursor(&scene, &s), *rows.last().unwrap());
+    assert!(episodes(&scene).is_empty());
+    assert_eq!(scene.model.calls(), 3);
+    assert_eq!(
+        (summariser_calls_today(&scene), episode_calls_today(&scene)),
+        (0, 2),
+        "under the summary's own label — the two answers that came back: an \
+         empty completion leaves no usage row"
+    );
+}
+
+/// The L8 fix slice's P1, for a summary: an answer stopped at the output
+/// ceiling is reported as cut there, with the request's own ceiling, not as
+/// "the answer is not JSON"; it holds the window like any unusable answer.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_summary_cut_at_max_tokens_says_it_was_cut() {
+    let scene = Scene::new(vec![Say::Cut(r#"{"topic": "Lisbon trip plan"#.into())]);
+    let s = scene.session();
+    let rows = four_turns(&scene, &s);
+    state_covers(&scene, &s, *rows.last().unwrap());
+    let held = scene.queue.flush_episodes(&s).await;
+    assert_eq!(held.stopped, Some(FlushStop::BadOutput), "{held:?}");
+    assert_eq!(episode_cursor(&scene, &s), 0);
+    let ceiling = scene.model.first_request().max_tokens.expect("a ceiling");
+    let reason = format!("cut at max_tokens ({ceiling})");
+    logs_assert(|lines: &[&str]| {
+        match lines
+            .iter()
+            .filter(|l| l.contains("episode note was unusable"))
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            [one] if one.contains(&reason) && !one.contains("not JSON") => Ok(()),
+            other => Err(format!(
+                "expected one line naming {reason:?}, saw {other:?}"
+            )),
+        }
+    });
+}
+
+/// LQ13 keeps the L8 fix slice's P1 for a summary (repair round 1 of the L8
+/// product slice; owner decision CQ-11 keeps it for the summary's own call):
+/// an answer stopped at the output ceiling is held to the forms read before
+/// LQ13, so a complete summary followed by prose the model was still writing
+/// is reported cut, not read out of the prose, and nothing is written.
+#[tokio::test]
+async fn a_summary_cut_in_the_prose_after_it_is_not_rescued() {
+    let complete = r#"{"topic": "Lisbon trip planning", "discussed": "Flights and a hotel."}"#;
+    let scene = Scene::new(vec![Say::Cut(format!("{complete}\n\nNote: the conver"))]);
+    let s = scene.session();
+    let rows = four_turns(&scene, &s);
+    state_covers(&scene, &s, *rows.last().unwrap());
+    let held = scene.queue.flush_episodes(&s).await;
+    assert_eq!(held.stopped, Some(FlushStop::BadOutput), "{held:?}");
+    let ceiling = scene.model.first_request().max_tokens.expect("a ceiling");
+    let [cut] = &held.unusable[..] else {
+        panic!("one unusable answer: {held:?}");
+    };
+    assert_eq!(cut.reason, format!("cut at max_tokens ({ceiling})"));
+    assert_eq!(episode_cursor(&scene, &s), 0);
+    assert!(episodes(&scene).is_empty());
+    assert_eq!(session_row(&scene, &s).episode_note_id, None);
+    // Ended on its own, the same answer is read (LQ13).
+    assert!(
+        crate::memory::learning::episode::parse_summary(&format!(
+            "{complete}\n\nNote: the conversation ended."
+        ))
+        .is_ok()
+    );
+}
+
+/// The L8 fix slice's P2, for a summary: the report keeps each unusable
+/// answer — its reason, length, finish and excerpt — and nothing else does.
+#[tokio::test]
+async fn an_unusable_summary_is_kept_in_the_report() {
+    let scene = Scene::new(vec![
+        Say::Text("Here is what we talked about: Lisbon.".into()),
+        Say::Spent,
+    ]);
+    let s = scene.session();
+    let rows = four_turns(&scene, &s);
+    state_covers(&scene, &s, *rows.last().unwrap());
+    let first = scene.queue.flush_episodes(&s).await;
+    let [prose] = &first.unusable[..] else {
+        panic!("one unusable answer: {first:?}");
+    };
+    assert_eq!(prose.reason, "the answer is not JSON");
+    assert_eq!(prose.chars, 37);
+    assert_eq!(prose.finish_reason, Some("stop"));
+    let second = scene.queue.flush_episodes(&s).await;
+    let [empty] = &second.unusable[..] else {
+        panic!("one unusable answer: {second:?}");
+    };
+    assert_eq!((empty.chars, empty.finish_reason), (0, None));
+}
+
 // ── The gates (design 11 §3.1, §8; CQ-2) ──────────────────────────────────
 
 /// The summariser's daily ceiling (`summary_max_daily_cost_usd`) is read
@@ -924,15 +1203,70 @@ async fn the_summariser_daily_ceiling_holds_the_close() {
     assert!(scene.queue.is_episode_due(&s), "still queued");
 }
 
-/// The close's one call is the summariser's (design 11 §3.1, §8): it counts
-/// under the summariser's ceiling, not under the extraction's daily caps —
-/// with those spent, learning stops `Cap` and the close still refreshes and
-/// writes the summary.
+/// Owner decision CQ-11: a summary's call counts under the summariser's one
+/// daily ceiling, both ways. With the refresh's spend over it, the summary
+/// waits — no call, no note, the episode cursor where it was, the
+/// conversation still due; and with a summary's spend over it, a stale
+/// state is not refreshed.
+#[tokio::test]
+async fn a_summary_counts_under_the_summariser_ceiling() {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.costs.summary_max_daily_cost_usd = 0.0;
+
+    {
+        let scene = Scene::with(
+            Scripted::new(vec![trip_state(), trip_summary()]),
+            config.clone(),
+        );
+        let s = scene.session();
+        four_turns(&scene, &s);
+        let capped = scene.queue.flush_episodes(&s).await;
+        assert_eq!(
+            (capped.calls, capped.episodes, capped.stopped),
+            (1, 0, Some(FlushStop::Cap)),
+            "the refresh spent the ceiling: {capped:?}"
+        );
+        assert_eq!(
+            (summariser_calls_today(&scene), episode_calls_today(&scene)),
+            (1, 0)
+        );
+        assert_eq!(episode_cursor(&scene, &s), 0);
+        assert!(scene.queue.is_episode_due(&s), "still queued");
+    } // The scene's home-store guard is one lock: dropped before the next.
+
+    let scene = Scene::with(Scripted::new(vec![trip_summary(), trip_state()]), config);
+    let s = scene.session();
+    let rows = four_turns(&scene, &s);
+    state_covers(&scene, &s, *rows.last().unwrap());
+    let written = scene.queue.flush_episodes(&s).await;
+    assert_eq!(
+        (written.calls, written.episodes, written.stopped),
+        (1, 1, None),
+        "nothing spent before the summary's call: {written:?}"
+    );
+    scene.turn(&s, "And the return flight?", "On the 5th.");
+    let stale = scene.queue.flush_episodes(&s).await;
+    assert_eq!(
+        (stale.calls, stale.stopped),
+        (0, Some(FlushStop::Cap)),
+        "the summary spent the ceiling: {stale:?}"
+    );
+    assert_eq!(
+        session_row(&scene, &s).working_state_through,
+        *rows.last().unwrap()
+    );
+    assert_eq!(scene.model.calls(), 1);
+}
+
+/// The close's calls are the summariser's (design 11 §3.1, §8; owner
+/// decision CQ-11): they count under the summariser's ceiling, not under
+/// the extraction's daily caps — with those spent, learning stops `Cap` and
+/// the close still refreshes the state and writes the summary.
 #[tokio::test]
 async fn the_close_is_not_held_by_the_extraction_caps() {
     let mut config = DaemonConfig::default();
     config.orchestrator.costs.extract_max_calls_per_day = 1;
-    let scene = Scene::with(Scripted::new(vec![trip_state()]), config);
+    let scene = Scene::with(Scripted::new(vec![trip_state(), trip_summary()]), config);
     openalpaca_storage::LlmUsageRepository::new(&scene.db)
         .upsert_daily_usage(&usage(super::extractor::AGENT_LABEL, 1, 0.0))
         .unwrap();
@@ -942,46 +1276,57 @@ async fn the_close_is_not_held_by_the_extraction_caps() {
     assert_eq!(learning.stopped, Some(FlushStop::Cap), "{learning:?}");
 
     let closed = scene.queue.flush_episodes(&s).await;
-    assert_eq!((closed.calls, closed.episodes), (1, 1), "{closed:?}");
+    assert_eq!((closed.calls, closed.episodes), (2, 1), "{closed:?}");
     assert_eq!(closed.stopped, None);
 }
 
 // ── Sharing the model with chat (§1.7) ────────────────────────────────────
 
-/// On a local model a chat turn that starts cancels the close's call,
-/// exactly as it cancels a learning chunk's: nothing written, still due.
+/// On a local model a chat turn that starts cancels the close's call —
+/// the refresh's, and the summary's own — exactly as it cancels a learning
+/// chunk's: nothing written, still due.
 #[tokio::test]
 async fn a_local_model_episode_yields_to_a_chat_turn() {
-    let model = Arc::new(Scripted {
-        keyless: true,
-        ..Arc::into_inner(Scripted::new(vec![Say::Hang])).unwrap()
-    });
-    let router = router_for(model.clone(), ProviderType::Ollama, "local-model");
-    let scene = Scene::with_router(model, router, DaemonConfig::default());
-    scene.no_quiet_period();
-    let s = scene.session();
-    four_turns(&scene, &s);
-
-    let queue = scene.queue.clone();
-    let session = s.clone();
-    let flush = tokio::spawn(async move { queue.flush_episodes_automatic(&session).await });
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while scene.model.calls() == 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    for state_current in [false, true] {
+        let model = Arc::new(Scripted {
+            keyless: true,
+            ..Arc::into_inner(Scripted::new(vec![Say::Hang])).unwrap()
+        });
+        let router = router_for(model.clone(), ProviderType::Ollama, "local-model");
+        let scene = Scene::with_router(model, router, DaemonConfig::default());
+        scene.no_quiet_period();
+        let s = scene.session();
+        let rows = four_turns(&scene, &s);
+        if state_current {
+            state_covers(&scene, &s, *rows.last().unwrap());
         }
-    })
-    .await
-    .expect("the close's call never went out");
-    let _chat = scene.queue.turn_started(uuid::Uuid::new_v4(), LANE, true);
-    let report = tokio::time::timeout(std::time::Duration::from_secs(10), flush)
+
+        let queue = scene.queue.clone();
+        let session = s.clone();
+        let flush = tokio::spawn(async move { queue.flush_episodes_automatic(&session).await });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while scene.model.calls() == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
         .await
-        .expect("the close did not yield")
-        .unwrap();
-    assert_eq!(report.stopped, Some(FlushStop::Yielded), "{report:?}");
-    assert_eq!(state_on_row(&scene, &s), None);
-    assert!(episodes(&scene).is_empty());
-    assert_eq!(episode_cursor(&scene, &s), 0);
-    assert!(scene.queue.is_episode_due(&s));
+        .expect("the close's call never went out");
+        assert_eq!(
+            scene.model.prompts()[0].contains(RECORDER),
+            state_current,
+            "the summary's call when the state is current, else the refresh's"
+        );
+        let _chat = scene.queue.turn_started(uuid::Uuid::new_v4(), LANE, true);
+        let report = tokio::time::timeout(std::time::Duration::from_secs(10), flush)
+            .await
+            .expect("the close did not yield")
+            .unwrap();
+        assert_eq!(report.stopped, Some(FlushStop::Yielded), "{report:?}");
+        assert_eq!(state_on_row(&scene, &s).is_some(), state_current);
+        assert!(episodes(&scene).is_empty());
+        assert_eq!(episode_cursor(&scene, &s), 0);
+        assert!(scene.queue.is_episode_due(&s));
+    }
 }
 
 // ── The triggers (§13.3, *When*) ──────────────────────────────────────────
@@ -1051,7 +1396,7 @@ async fn ten_turns_make_learning_due_and_not_the_episode_note() {
 /// the conversation first, then writes its one episode.
 #[tokio::test(start_paused = true)]
 async fn the_sweeper_writes_one_episode_after_the_quiet_period() {
-    let model = Scripted::new(vec![items(&[]), trip_state()]);
+    let model = Scripted::new(vec![items(&[]), trip_state(), trip_summary()]);
     let router = Arc::new(LlmRouter::single_provider(
         model.clone(),
         ProviderType::Anthropic,
@@ -1066,7 +1411,11 @@ async fn the_sweeper_writes_one_episode_after_the_quiet_period() {
     tokio::time::advance(EPISODE_QUIET + std::time::Duration::from_secs(1)).await;
     scene.queue.sweep().await;
     scene.queue.wait_idle().await;
-    assert_eq!(scene.model.calls(), 2, "learning, then the close");
+    assert_eq!(
+        scene.model.calls(),
+        3,
+        "learning, then the close: the refresh and the summary"
+    );
     assert_eq!(episodes(&scene).len(), 1);
     assert!(!scene.queue.is_episode_due(&s));
 
@@ -1079,7 +1428,7 @@ async fn the_sweeper_writes_one_episode_after_the_quiet_period() {
 /// next sweep writes its episode — before any quiet period.
 #[tokio::test]
 async fn a_switch_writes_the_episode_of_the_conversation_left() {
-    let model = Scripted::new(vec![items(&[]), trip_state()]);
+    let model = Scripted::new(vec![items(&[]), trip_state(), trip_summary()]);
     let router = Arc::new(LlmRouter::single_provider(
         model.clone(),
         ProviderType::Anthropic,
@@ -1150,7 +1499,7 @@ async fn a_turn_in_another_session_makes_the_one_it_left_due_for_its_episode() {
 /// already stopped.
 #[tokio::test]
 async fn the_stop_drain_writes_the_episode() {
-    let scene = Scene::new(vec![items(&[]), trip_state()]);
+    let scene = Scene::new(vec![items(&[]), trip_state(), trip_summary()]);
     let s = scene.session();
     for text in TURNS {
         fed_turn(&scene, &s, text);
@@ -1159,7 +1508,7 @@ async fn the_stop_drain_writes_the_episode() {
         scene.queue.drain(SHUTDOWN_DRAIN).await,
         "the drain finished"
     );
-    assert_eq!(scene.model.calls(), 2);
+    assert_eq!(scene.model.calls(), 3);
     assert_eq!(episodes(&scene).len(), 1);
     assert!(!scene.queue.is_episode_due(&s));
 }
@@ -1185,7 +1534,7 @@ async fn boot_catchup_finds_conversations_to_summarize() {
 /// alone decides, through `flush_episodes`.
 #[tokio::test]
 async fn a_manual_queue_writes_no_episode_on_its_own() {
-    let scene = Scene::new(vec![trip_state()]);
+    let scene = Scene::new(vec![trip_state(), trip_summary()]);
     scene.no_quiet_period();
     let s = scene.session();
     for text in TURNS {
@@ -1199,4 +1548,62 @@ async fn a_manual_queue_writes_no_episode_on_its_own() {
     assert!(scene.queue.is_episode_due(&s));
     scene.queue.flush_episodes(&s).await;
     assert_eq!(episodes(&scene).len(), 1);
+}
+
+/// The prompt is the committed fixture: one fixed window renders byte for
+/// byte to the golden file beside it.
+#[test]
+fn the_episode_prompt_matches_its_fixture() {
+    let row = |id: i64, role: &str, content: &str, request: &str, at: &str| {
+        openalpaca_storage::LearningRow {
+            id,
+            role: role.to_string(),
+            content: content.to_string(),
+            source: Some("gui".to_string()),
+            created_at: at.to_string(),
+            request_id: Some(request.to_string()),
+            workspace_root: None,
+        }
+    };
+    let rows = [
+        row(
+            1,
+            "user",
+            "Let's plan my Lisbon trip.",
+            "a",
+            "2026-09-20 10:00:00",
+        ),
+        row(2, "assistant", "Happy to help.", "a", "2026-09-20 10:00:20"),
+        row(
+            3,
+            "user",
+            "Book the Friday flight.",
+            "b",
+            "2026-09-20 10:01:00",
+        ),
+        row(
+            4,
+            "assistant",
+            "Booked: Friday 2 October.",
+            "b",
+            "2026-09-20 10:01:30",
+        ),
+    ];
+    let window::NextChunk::Chunk(chunk) = window::next_chunk(
+        &rows,
+        &[],
+        &std::collections::HashSet::new(),
+        24 * 1024,
+        400,
+    ) else {
+        panic!("a chunk");
+    };
+    let (transcript, _) = chunk.transcript();
+    let (system, user) = super::episode::render_prompt(&chunk.today(), &transcript);
+    let rendered = format!("{system}\n=== rendered user message ===\n{user}\n");
+    assert!(
+        !rendered.contains("{{"),
+        "a placeholder was left: {rendered}"
+    );
+    assert_eq!(rendered, include_str!("../episode_prompt.golden.txt"));
 }
