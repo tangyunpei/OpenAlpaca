@@ -1,0 +1,15 @@
+;; Outbound networking denied except to this machine — for a live check that
+;; needs a local model (Ollama on localhost) or the app's webview reaching its
+;; daemon on 127.0.0.1, and nothing else. Use it from the daemon's FIRST launch:
+;; `web_fetch` raises no approval prompt and the shipped research agent has web
+;; access, so an unsandboxed daemon reaches the internet whenever a model
+;; delegates research (it happened in a live check on 2026-10-03).
+;; Usage (macOS; sandbox-exec is deprecated but functional):
+;;   sandbox-exec -f scripts/eval/memory/loopback-only.sb openalpacad
+;; Prove it before the first model turn: a request to localhost succeeds and a
+;; request to a public host fails. `no-network.sb` beside this file is the
+;; stricter profile, which also refuses localhost.
+(version 1)
+(allow default)
+(deny network-outbound)
+(allow network-outbound (remote ip "localhost:*"))
