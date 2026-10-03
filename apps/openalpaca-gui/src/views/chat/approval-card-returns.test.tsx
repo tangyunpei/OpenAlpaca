@@ -117,6 +117,8 @@ let broker = new Map<string, Record<string, unknown>>();
 let snapshotReply: () => Response | Promise<Response>;
 /** Set by a test to hold every answer open — a slow round trip. */
 let answersHeld: Promise<void> | null = null;
+/** Set by a test to hold `POST /v1/chat` open — the moment before `open`. */
+let sendHeld: Promise<void> | null = null;
 
 function json(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), { status });
@@ -179,6 +181,7 @@ function installFetch() {
         });
       }
       if (url.includes("/v1/chat")) {
+        if (sendHeld !== null) await sendHeld;
         return json({ stream_id: "stream-1", lane_key: "user:gui" });
       }
       if (url.includes("/followups")) return json([]);
@@ -513,6 +516,7 @@ beforeEach(() => {
   broker = new Map();
   snapshotReply = snapshotOfBroker;
   answersHeld = null;
+  sendHeld = null;
   // Module state outlives a test exactly as it outlives a view.
   clearConfirmationsOver();
   FakeEventSource.instances = [];
@@ -1069,5 +1073,42 @@ describe("an answered approval card does not come back (G1, Round G)", () => {
     expect(cards("artifact_write")).toHaveLength(0);
     expect(screen.queryByText("Not waiting")).toBeNull();
     expect(screen.getByText("Approved")).toBeInTheDocument();
+  });
+
+  /**
+   * The opposite direction (the diagnosis's last path): a background run's
+   * prompt lands between Send and the new stream's `open`. `open` used to
+   * clear every card, and the view's record of having seen this one kept the
+   * snapshot from drawing it again — the run sat on a prompt nobody could see
+   * until the chat view was reopened or it timed out.
+   */
+  it("a prompt that lands between Send and the stream's open keeps its card", async () => {
+    openWindow();
+    let release: () => void = () => undefined;
+    sendHeld = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fireEvent.change(await screen.findByLabelText("Message"), {
+      target: { value: "and one more thing" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await act(async () => {
+      raise("req-between", "artifact_write", "lead_agent");
+    });
+    expect(
+      await screen.findByText(eyebrow("artifact_write")),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      release();
+    });
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    await settle();
+    expect(cards("artifact_write")).toHaveLength(1);
+
+    // And it is the composer's to answer.
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+    await waitFor(() => expect(answersTo("req-between")).toHaveLength(1));
+    expect(answersTo("req-between")[0]?.status).toBe(200);
   });
 });

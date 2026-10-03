@@ -191,6 +191,31 @@ describe("chatStreamReducer", () => {
     expect(state.pendingConfirmations).toHaveLength(0);
   });
 
+  /**
+   * …and a new *turn* is not one (G1, Round G). A background run's prompt can
+   * land between Send and the new stream's `open`; clearing it there hid a
+   * card the daemon was still waiting on, and the chat view's record of having
+   * seen it kept the snapshot from drawing it again until the view remounted.
+   */
+  it("keeps a pending confirmation across a new turn's open", () => {
+    const state = run([
+      {
+        type: "confirmation",
+        request: {
+          request_id: "r-run",
+          tool_name: "artifact_write",
+          tool_arguments: null,
+        },
+      },
+      open,
+    ]);
+    expect(state.pendingConfirmations.map((c) => c.request_id)).toEqual([
+      "r-run",
+    ]);
+    expect(state.phase).toBe("opening");
+    expect(state.streamId).toBe("s1");
+  });
+
   it("clears a resolved confirmation even after the stream finished", () => {
     const state = run([
       open,

@@ -255,6 +255,12 @@ export function chatStreamReducer(
         phase: "opening",
         streamId: action.streamId,
         laneKey: action.laneKey,
+        // A new turn, not a new conversation: the cards are session-level. A
+        // background run's prompt can land between Send and this frame, and
+        // clearing it here hid a card the daemon was still waiting on — the
+        // chat view's record of having seen it then kept the snapshot from
+        // drawing it again (G1, Round G).
+        pendingConfirmations: state.pendingConfirmations,
       };
 
     case "confirmation_resolved": {

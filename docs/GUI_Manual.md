@@ -520,7 +520,8 @@ stores, so a reloaded transcript shows the answer alone.
 **A confirmation outlives the turn that started it.** A workflow asks for
 approval minutes after the chat turn that launched it has finished, so the
 prompt is held against the *conversation*, not against that turn's stream: the
-card appears whenever the daemon raises it, and the run card in the Work pane
+card appears whenever the daemon raises it — sending the next message does not
+clear it, even when it lands just as that message is sent — and the run card in the Work pane
 says `Waiting on you: <tool>` while it waits. A confirmation raised on another
 lane never blocks this composer, and the card names who is asking — the agent
 template for a workflow's prompt, and `Alpaca` for one the assistant raised in
