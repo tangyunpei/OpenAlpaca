@@ -1,4 +1,4 @@
-# Storage and project work — design (rev 0.4, for the owner's review)
+# Storage and project work — design (rev 0.5, for the owner's review)
 
 **Status:** for the owner's review. Owner decisions **ST-1…ST-13** (2026-10-04) and **ST-14…ST-21** (2026-10-05) are
 taken and are not reopened here. The lead's rulings are numbered **R1…R46** and are the lead's to change; the ones the
@@ -13,7 +13,8 @@ were then checked by four readers (`panel/fact-check-rev03.json`: 47 claims, 34 
 
 **How it is built:** three stages, each with its own plan and one gate pass.
 **Stage 0** — four fixes that need no design. **Stage 1 (Part I)** — everything under `~/.openalpaca/`; a project
-gets a folder, an id and a life cycle. **Stage 2 (Part II)** — agents work in the project's folder.
+gets a folder, an id and a life cycle. **Stage 2 (Part II)** — agents work in the project's folder. **Part IV** says
+what a beta waits for beyond the stages.
 
 ---
 
@@ -620,8 +621,47 @@ refuted outright, and 24 further findings (9 major).
   (no copy, no overwrite) are new. ST-17 states the tier's two refusals and its re-pointing. The lead does hold two
   by-product writers. A command tool's prompting is recorded with T35.
 
+---
+
+# Part IV — The beta
+
+## 21. What a beta waits for
+
+On 2026-10-05 the owner asked whether the app is ready for a beta. It is not. The gaps, and where each is fixed:
+
+| Gap | Fix | Stage |
+|---|---|---|
+| The shipped `system_agent` runs shell commands and writes files with no approval card | F1 | 0 |
+| Every program the daemon starts inherits the master key | F3 | 0 |
+| A workflow's report can name the wrong path for a file it wrote (the 500-character cut) | F2 | 0 |
+| A CLI chat inside any git repository creates `<repo>/.openalpaca/` in the tester's repository | Part I | 1 |
+| From the app, agents cannot read or edit the project's files, and the shell runs in the daemon's folder | Part II | 2 |
+
+Three things a beta needs that no stage covers:
+
+- **B1. The branch reaches `main`.** The Round G commits and the stages are pushed, PR #34 leaves draft and is merged,
+  and the beta build is made from `main`, never from a working tree. The owner pushes and merges.
+- **B2. A fresh-install check of the packaged app**, after the last stage the beta includes, the way 08 §4.1 did it
+  at `8fde2925`: the bundle from `scripts/release/package-macos.sh`, started on a clean home
+  (`OPENALPACA_HOME_STORE` and `OPENALPACA_CONFIG_DIR` on a scratch directory; the daemon under
+  `scripts/eval/memory/loopback-only.sb` from its first launch; the local model), walking the path a tester walks:
+  the first-run card; Ollama switched on, or a key added, from Settings; a streamed chat; an upload; a workflow that
+  writes a file, and the report naming its path; the memory round trip; an approval card answered; Stop daemon and
+  Start daemon; a second start on the same store. The evidence is archived beside 08's, and the result goes in the
+  PR. The Windows and Linux packages are not checked by this; the Windows scripts have their Pester tests only.
+- **B3. The manuals say what the beta can and cannot do.** One list in `docs/Installation_Manual.md`: the shell is
+  not confined to the project (ST-14); extension tools never ask (T35); learning is below its own targets
+  (`tasks/memory-redesign/10-learning-evaluation.md`); a store from before 2026-09-28 is refused and the way through
+  is the factory reset; and, until Stage 2 ships, that agents do not touch the project's files.
+
+Which stages the beta waits for is the owner's call. Stage 0 with B1–B3 is enough for a few testers who know the
+limits; Stage 1 is what keeps every tester's repository clean; Stage 2 is what a tester who expects help with their
+own project needs.
+
 ## Revision log
 
+- **rev 0.5 (2026-10-05).** Part IV, §21: what a beta waits for — the gaps mapped to F1–F3 and the stages, and
+  B1–B3 (the merge, the packaged fresh-install check, the limits in the manual), at the owner's request.
 - **rev 0.4 (2026-10-05).** Q2…Q8 taken as recommended: **ST-15…ST-21**. The told items are cited by their ruling
   numbers (T1–T5 collided with the plan's T-series). The fix list is mapped (§0.4). A fact check of rev 0.3's code
   facts: §20, and §0.5 for what the owner has not seen. Rulings R44–R46. §17–§20 were renumbered §16–§19.
