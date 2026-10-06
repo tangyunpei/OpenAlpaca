@@ -1,9 +1,10 @@
-# Storage and project work — design (rev 0.5, for the owner's review)
+# Storage and project work — design (rev 0.6, approved by the owner with ST-22)
 
-**Status:** for the owner's review. Owner decisions **ST-1…ST-13** (2026-10-04) and **ST-14…ST-21** (2026-10-05) are
-taken and are not reopened here. The lead's rulings are numbered **R1…R46** and are the lead's to change; the ones the
-owner was shown on 2026-10-05 are listed in §0.3. Nothing in this document is built, and nothing is built before the
-owner approves this file and the plan written from it.
+**Status:** approved. The owner read rev 0.5 on 2026-10-05 ("everything in the design file is good") and asked for one
+addition, an edit tool, taken as **ST-22**. Owner decisions **ST-1…ST-13** (2026-10-04) and **ST-14…ST-22** (2026-10-05)
+are taken and are not reopened here. The lead's rulings are numbered **R1…R49** and are the lead's to change; the ones
+the owner was shown on 2026-10-05 are listed in §0.3 and §0.5. Nothing in this document is built; the plan comes next,
+and nothing is built before the owner approves it.
 
 **Branch:** `feat/markdown-memory` at `032f6ae2` (26 Round G commits local). **Evidence:** two rounds of read-only
 maps (`maps/critic.md`, `maps/r2-critic.md` are the corrected pictures) and a four-critic panel on rev 0.1 with a
@@ -20,7 +21,7 @@ what a beta waits for beyond the stages.
 
 ## 0. Decisions, questions, and what the owner is told
 
-### 0.1 Taken (owner; ST-1…ST-13 on 2026-10-04, ST-14…ST-21 on 2026-10-05)
+### 0.1 Taken (owner; ST-1…ST-13 on 2026-10-04, ST-14…ST-22 on 2026-10-05)
 
 | # | Decision |
 |---|---|
@@ -45,6 +46,7 @@ what a beta waits for beyond the stages.
 | ST-19 | (Q6) "Delete its data" deletes everything OpenAlpaca holds for the project: conversations, runs, by-products, uploads, the notes of every owner, and its folder under `projects/`. It never touches the project's own folder, and a file another conversation still uses is kept. `store purge --all` is removed. |
 | ST-20 | (Q7) Re-pointing a project onto a path that is already a project of its own is refused, and the message names both ways out. Merging two projects is later work. |
 | ST-21 | (Q8; supersedes LQ5) A missing project's turns are still learned into its notes. Only a project whose data was deleted drops them. |
+| ST-22 | An edit tool, `file_edit`: in a project, an agent changes part of a file — the exact text to find and the text to put in its place — instead of writing the whole file back. Same confinement, approval card, pre-edit copy and pointer row as `file_write`. (§13) |
 
 ### 0.2 Questions
 
@@ -67,7 +69,7 @@ taken as recommended: ST-15…ST-21.
 |---|---|
 | The lead reads only 500 characters of a subagent's answer | F2, Stage 0 |
 | The `system_agent` approval bypass (T34) | F1, Stage 0 |
-| The file tools use the conversation's project (FW-2) | Stage 2, §10–§15 |
+| The file tools use the conversation's project (FW-2) | Stage 2, §10–§15; `file_edit` (ST-22) for a change inside a file |
 | Reading an artifact back from the main chat was not proven live | R41 and R42 give the main chat `artifact_read` on every turn (Stage 2); Stage 2's live check does the round trip |
 | A click on a stale approval card was not proven live | No design change. Stage 2's live check tries once more: a prompt is answered from the CLI while the app shows its card, then the card is clicked. If that cannot be provoked, it stays proven by the unit tests only, and the report says so. |
 
@@ -386,8 +388,8 @@ user to `mkdir .openalpaca`; memory fixtures 03, 04 and 17 are rewritten. `is_th
 
 # Part II — Agents work in the project (Stage 2)
 
-**What you will see after Stage 2.** In a project conversation an agent can list, read and edit the project's files
-and run commands there. Each write and each command asks first. A file it writes for you is in your project, with a
+**What you will see after Stage 2.** In a project conversation an agent can list, read, write and edit the project's
+files and run commands there. Each write and each command asks first. A file it writes for you is in your project, with a
 card in the chat and a row in the Library that point at it. Drafts and hand-offs stay under `~/.openalpaca`.
 
 ## 10. The working folder of a turn
@@ -521,6 +523,27 @@ asserts the user's bytes and modification time.
 | A user's edit of a result file records no version | `verify` or the read check ignores `in_project` |
 | A re-point rewrites a pointer row's path and leaves the file | step 2 misses the second prefix |
 
+**Editing (ST-22).** `file_edit` changes part of one file in the project.
+
+- **R47 (the tool).** Arguments `path`, `old_string`, `new_string` and `replace_all` (default false), named as Claude
+  Code names them. The path is resolved like `file_write`'s (relative, under the working folder, R31, R32). The file
+  must exist and be UTF-8 text; `old_string` must occur exactly once, or `replace_all` must be set; `old_string` and
+  `new_string` must differ. Each failure is a refusal naming the cause, and a missing file's names `file_write`,
+  which creates one. The rest of the file is kept byte for byte, line endings included. The write goes the way
+  `file_write`'s does: the pre-edit copy first (ST-17, its two refusals, and R46 where no copy can be kept), then the
+  file, then the pointer row through R35's method. The result names the file, the number of replacements and the
+  line of the first.
+- **R48 (where, and who).** In a project only; with no project it is refused with one sentence naming `file_write`.
+  It comes with the `file_write` capability, so the four shipped templates that write files hold it with no template
+  edit and a template that denies `file_write` denies it too. The main chat is offered it beside `file_write` on a
+  project turn, by the same keywords; the lead does not hold it (§15).
+- **R49 (the card).** It asks like `file_write` (destructive annotation). The preview names the folder, the file and
+  the line, and shows `old_string` and `new_string`, each cut to a budget with the cut notice, hidden characters
+  escaped as every approval surface escapes them (Gotchas).
+- **Tests (with R39).** `old_string` found twice without `replace_all` → refused and the file unchanged; a missing
+  file → refused, naming `file_write`; the copy exists before the change; a second edit updates the same pointer
+  row; a U+202E in either string is shown escaped on the card; a CRLF file keeps its line endings.
+
 ## 14. Reading
 
 - **R40 `file_list`** (new, read-only): lists a folder under the working folder. Today no tool lists a directory.
@@ -541,7 +564,7 @@ asserts the user's bytes and modification time.
   `tool_selection = "full"` it holds every tool on every turn). The relay rules and
   `start_workflow`'s description stop saying chat cannot write a file (`main_loop.rs:111-114`;
   `start_workflow.rs:178-181`).
-- **The lead** holds no file-writing tool and delegates result files. Its `workspace_write` and, under the shipped
+- **The lead** holds no file-writing or editing tool and delegates result files. Its `workspace_write` and, under the shipped
   template, `artifact_write` write by-products and stop asking (ST-15).
 - **Subagents** keep their templates' capabilities. `writing_agent` gains `file_read` in the shipped template; the
   switch-over note has the line for a seeded store.
@@ -572,7 +595,7 @@ first launch).
 
 **Stage 2.** Guards before the root moves: (1) confinement, the filter and the kill (R29–R33, R23, R45); (2) approvals (ST-15, R34);
 (3) the working folder (R26–R28, R44) — until (4) lands, `file_write` on a project turn stays a by-product; (4) pointer
-rows, migration `004`, R39, and the pre-edit copy (ST-17, R46); (5) `file_list`, `artifact_read`, R42; (6) surfaces and wording. One gate pass; a live
+rows, migration `004`, R39, the pre-edit copy (ST-17, R46) and `file_edit` (ST-22, R47–R49); (5) `file_list`, `artifact_read`, R42; (6) surfaces and wording. One gate pass; a live
 check in a project folder made for the test, which includes reading a by-product back from the main chat (R41) and
 one more try at a click on a stale approval card (§0.4).
 
@@ -635,7 +658,7 @@ On 2026-10-05 the owner asked whether the app is ready for a beta. It is not. Th
 | Every program the daemon starts inherits the master key | F3 | 0 |
 | A workflow's report can name the wrong path for a file it wrote (the 500-character cut) | F2 | 0 |
 | A CLI chat inside any git repository creates `<repo>/.openalpaca/` in the tester's repository | Part I | 1 |
-| From the app, agents cannot read or edit the project's files, and the shell runs in the daemon's folder | Part II | 2 |
+| From the app, agents cannot read, write or edit the project's files, and the shell runs in the daemon's folder | Part II, with `file_edit` (ST-22) | 2 |
 
 Three things a beta needs that no stage covers:
 
@@ -660,6 +683,8 @@ own project needs.
 
 ## Revision log
 
+- **rev 0.6 (2026-10-05).** The owner approved rev 0.5 with one addition: **ST-22**, the edit tool `file_edit`
+  (§13, R47–R49). Status: approved; the plan comes next.
 - **rev 0.5 (2026-10-05).** Part IV, §21: what a beta waits for — the gaps mapped to F1–F3 and the stages, and
   B1–B3 (the merge, the packaged fresh-install check, the limits in the manual), at the owner's request.
 - **rev 0.4 (2026-10-05).** Q2…Q8 taken as recommended: **ST-15…ST-21**. The told items are cited by their ruling
