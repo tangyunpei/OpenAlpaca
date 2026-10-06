@@ -2863,6 +2863,8 @@ No task of this stage changes a file under `apps/openalpaca-gui/`. If `git diff 
 
 **Files:** Create: `tasks/storage-design/stage0-live-report.md` (the report; whitelisted by `.gitignore`'s `!tasks/storage-design/*.md`).
 
+**The surface.** The spec's §16 says "a live check on the rebuilt app"; this stage's three assertions are daemon behaviour, and the approval card is read through `openalpaca tasks confirmations watch`, so the CLI against the rebuilt daemon is the surface here — the app runs the same daemon. Task R amends §16 to say so.
+
 **Standing rules for every live check (from `tasks/lessons.md` and the owner):**
 - `~/.openalpaca` is the owner's real store. Never read it, write it, list it, or point any command at it.
 - Both `OPENALPACA_HOME_STORE` and `OPENALPACA_CONFIG_DIR` point into a scratch directory, and the daemon's working directory is the scratch store root (where the packaged app's sidecar runs). The current directory is never the repository.
@@ -2886,10 +2888,10 @@ Expected: the build finishes; the three directories exist; `repo/.git` exists (t
 - [ ] **Step 2: Start the daemon sandboxed, from the store root, and prove the profile**
 
 ```bash
-cd "$OPENALPACA_HOME_STORE" && (sandbox-exec -f /Users/tangyunpei/dev/OpenAlpaca/scripts/eval/memory/loopback-only.sb /Users/tangyunpei/dev/OpenAlpaca/target/debug/openalpacad > "$OA_SCRATCH/daemon.out" 2>&1 &) ; sleep 5; cat "$OPENALPACA_HOME_STORE/state/discovery.json" | head -c 300
+cd "$OPENALPACA_HOME_STORE" && (OPENALPACA_MASTER_KEY=1111111111111111111111111111111111111111111111111111111111111111 sandbox-exec -f /Users/tangyunpei/dev/OpenAlpaca/scripts/eval/memory/loopback-only.sb /Users/tangyunpei/dev/OpenAlpaca/target/debug/openalpacad > "$OA_SCRATCH/daemon.out" 2>&1 &) ; sleep 5; cat "$OPENALPACA_HOME_STORE/state/discovery.json" | head -c 300
 ```
 
-Expected: `discovery.json` exists and names a port. Prove the profile with the same sandbox, before any model turn:
+The throwaway `OPENALPACA_MASTER_KEY` is set on the daemon's command line **only** — never `export`ed, because the CLI's `load_or_generate_at` reads the environment first and would encrypt with it — so the inherited-variable case F3 exists for (the fact check's finding 4) is the one checked: the daemon's own file key must win and the variable must not reach a child. Expected: `discovery.json` exists and names a port. Prove the profile with the same sandbox, before any model turn:
 
 ```bash
 sandbox-exec -f /Users/tangyunpei/dev/OpenAlpaca/scripts/eval/memory/loopback-only.sb curl -sS -m 5 http://localhost:11434/api/tags | head -c 80; echo; sandbox-exec -f /Users/tangyunpei/dev/OpenAlpaca/scripts/eval/memory/loopback-only.sb curl -sS -m 5 https://example.com; echo "exit $?"
@@ -2903,7 +2905,7 @@ Expected: the first prints Ollama's model list; the second fails (a non-zero exi
 cd "$OA_SCRATCH" && /Users/tangyunpei/dev/OpenAlpaca/target/debug/openalpaca config set ai.ollama.enabled true && /Users/tangyunpei/dev/OpenAlpaca/target/debug/openalpaca config set ai.default_model qwen3.8:27b-mlx
 ```
 
-Expected: both accepted (`ai.default_model` is the `[orchestrator] model` key; there is no per-provider model key). `openalpaca status` with the same environment shows `effective_default_model` = `qwen3.8:27b-mlx` once discovery has run (a few seconds).
+Expected: both accepted (`ai.default_model` is the `[orchestrator] model` key; there is no per-provider model key). `GET /v1/status` shows `llm.effective_default_model` = `qwen3.8:27b-mlx` once discovery has run (a few seconds): read it with the CLI's status verb if it has one, else `curl -sS -H "Authorization: Bearer $(python3 -c 'import json;print(json.load(open("'"$OPENALPACA_HOME_STORE"'/state/discovery.json"))["auth"]["token"])')" http://127.0.0.1:<port>/v1/status` with the port from `discovery.json` (the token is read into the command, never printed).
 
 - [ ] **Step 4: F3 — a shell command sees no master key**
 
@@ -2913,7 +2915,7 @@ From `$OA_SCRATCH` (not the repository), an attended CLI chat:
 /Users/tangyunpei/dev/OpenAlpaca/target/debug/openalpaca chat --message 'run command: env | grep -c OPENALPACA_MASTER_KEY || echo ABSENT'
 ```
 
-Approve the `shell_execute` card at the inline `[y/N]`. Expected: the answer reports `0` or `ABSENT`. Also check the daemon itself: `ps eww <daemon pid> | grep -c OPENALPACA_MASTER_KEY` → `0`. Write PASS/FAIL with the answer text.
+Approve the `shell_execute` card at the inline `[y/N]`. Expected: the answer reports `0` or `ABSENT`, although the daemon was started with the variable set (Step 2). The spawned command's environment is the proof and the only one: `ps -E`/`ps eww` and `/proc/<pid>/environ` show the environment block as it was at exec, so they would still show the inherited variable and prove nothing (F3.2 Step 1). Write PASS/FAIL with the answer text.
 
 - [ ] **Step 5: F1 — `system_agent`'s shell command raises a card**
 
@@ -2959,7 +2961,11 @@ git add tasks/storage-design/stage0-live-report.md && git commit -m "docs(storag
 
 ### Task R: Records
 
-**Files:** Modify: `CLAUDE.md` (the Round G paragraph; the *Owner decisions pending* bullet; the Gotchas bullet on `file_write`); `tasks/api-fix-plan.md` (§0: T34 to *Owner decisions taken* with its commit, a new T35 pending row, FW-2's row pointing at the design and Stage 2; a tenth *Owner decisions taken* subsection for ST-1…ST-22 pointing at `tasks/storage-design/design.md` §0.1; the rev line → 3.21); `tasks/todo.md` (the review section).
+The `<commit>` and `<range>` tokens below are filled in at execution time from `git log` — they are not placeholders, since the commits do not exist until the tasks land.
+
+**Files:** Modify: `tasks/storage-design/design.md` (§16, one clause); `CLAUDE.md` (the Round G paragraph; the *Owner decisions pending* bullet; the Gotchas bullet on `file_write`); `tasks/api-fix-plan.md` (§0: T34 to *Owner decisions taken* with its commit, a new T35 pending row, FW-2's row pointing at the design and Stage 2; a tenth *Owner decisions taken* subsection for ST-1…ST-22 pointing at `tasks/storage-design/design.md` §0.1; the rev line → 3.21); `tasks/todo.md` (the review section).
+
+- [ ] **Step 0: `tasks/storage-design/design.md` §16** — in the Stage 0 paragraph, "a live check on the rebuilt app" becomes "a live check on the rebuilt daemon through the CLI (the app runs the same daemon)", with a rev 0.7 entry in the revision log naming this plan.
 
 - [ ] **Step 1: `CLAUDE.md`** — in the Round G paragraph replace the two "recorded, not built" clauses: the 500-character cut (`wait_for_subagents hands the lead the first 500 characters … recorded, not built`) now reads "fixed by the storage design's Stage 0, F2, <commit>"; "**Found live and not built — owner decision T34:** …" now reads "**Found live; fixed by Stage 0, F1 (<commit>, owner decision T34 taken 2026-10-05 as part of the storage design):** …" keeping the description of what was wrong. Keep the FW-2 clause ("recorded, not built") but add "taken by the storage design (ST-10, `tasks/storage-design/design.md`), built in its Stage 2". In the *Owner decisions pending* bullet move T34 out of the pending list and add **T35** (an extension tool that does not declare itself harmless prompts; three options; not built) and the storage design's rows: "the storage design's **ST-1…ST-22** are taken (2026-10-04/05, `tasks/storage-design/design.md` §0.1); Stage 0 built <range>; Stages 1 and 2 pending". Add one sentence at the top of *Current Work*: "**The storage design is approved** (`tasks/storage-design/design.md` rev 0.6, ST-1…ST-22); Stage 0 landed as <range>; Stages 1 and 2 are next."
 
@@ -2968,5 +2974,5 @@ git add tasks/storage-design/stage0-live-report.md && git commit -m "docs(storag
 - [ ] **Step 3: Commit**
 
 ```bash
-git add CLAUDE.md tasks/api-fix-plan.md tasks/todo.md && git commit -m "docs: Stage 0 of the storage design recorded (T34 taken, F1–F4 built, T35 pending)"
+git add tasks/storage-design/design.md CLAUDE.md tasks/api-fix-plan.md tasks/todo.md && git commit -m "docs: Stage 0 of the storage design recorded (T34 taken, F1–F4 built, T35 pending)"
 ```
