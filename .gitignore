@@ -124,6 +124,7 @@ apps/openalpaca-gui/src-tauri/gen/
 !tasks/storage-design/*.md
 tasks/storage-design/maps/
 tasks/storage-design/panel/
+tasks/storage-design/plan-drafts/
 !tasks/approval-hidden-chars.md
 !config/agents/*.md
 !config/orchestrator/templates/

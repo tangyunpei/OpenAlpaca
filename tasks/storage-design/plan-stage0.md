@@ -1544,7 +1544,7 @@ Co-Authored-By: <the line the implementing session is given>"
 
 ---
 
-## Fix F3 — the master key leaves the daemon's environment (plan draft)
+## Fix F3 — the master key leaves the daemon's environment
 
 Stage 0 of `tasks/storage-design/design.md` (row F3, design.md:102; the gate at design.md:586: "a spawned shell shows no master key"). Facts: `facts-stage0.md` A4, A5, further findings 4 and 5. Line numbers below are as of commit `d569885b` (the facts file's `032f6ae2` numbers hold for every file named here; I re-read each one).
 
