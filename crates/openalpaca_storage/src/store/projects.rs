@@ -206,5 +206,148 @@ pub fn overlaps_home_store(root: &Path) -> bool {
     root.starts_with(&home) || home.starts_with(&root)
 }
 
+// ============================================================================
+// The file and the entry (R9)
+// ============================================================================
+
+/// `projects/<name>/project.json` exactly as R9 writes it: the authority for
+/// the project's identity (there is no project table, R14). Not
+/// `deny_unknown_fields`: "no readable project.json" (R11) means unparseable
+/// or another `version`, never "a newer build added a key".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectFile {
+    /// [`PROJECT_FILE_VERSION`]; any other reads as unreadable (R11).
+    pub version: u32,
+    pub id: ProjectId,
+    /// The canonical root — the string the rows hold (R4, R14).
+    pub root: String,
+    /// RFC 3339, UTC, whole seconds: `2026-10-07T09:30:00Z`.
+    pub created_at: String,
+    /// Set only while a re-point is in flight (§6, R24).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_name: Option<String>,
+}
+
+/// One project as its folder records it — what `lookup`, `list` and `by_id`
+/// return.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Project {
+    pub id: ProjectId,
+    /// [`ProjectFile::root`].
+    pub root: PathBuf,
+    /// The folder's name under `projects/`.
+    pub name: String,
+    /// The folder, canonical: what `store_root` answers for the project (S3)
+    /// and the prefix every stored `storage_path` under it starts with.
+    pub dir: PathBuf,
+    pub created_at: String,
+    /// The root is not a directory, read when this entry was read (ST-7).
+    pub missing: bool,
+    /// `Some` only mid re-point (§6).
+    pub previous_root: Option<PathBuf>,
+    pub previous_name: Option<String>,
+}
+
+impl Project {
+    /// The root as the five path columns hold it.
+    pub fn root_string(&self) -> String {
+        self.root.to_string_lossy().into_owned()
+    }
+
+    /// The file this entry was read from, for a rewrite (§6 steps 1 and 4).
+    pub fn file(&self) -> ProjectFile {
+        ProjectFile {
+            version: PROJECT_FILE_VERSION,
+            id: self.id,
+            root: self.root_string(),
+            created_at: self.created_at.clone(),
+            previous_root: self
+                .previous_root
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            previous_name: self.previous_name.clone(),
+        }
+    }
+}
+
+// ============================================================================
+// Refusals (R12, R13, ST-20)
+// ============================================================================
+
+/// Why a project operation was refused — returned **inside** `anyhow::Error`
+/// (the `ArtifactError` convention, `artifacts/mod.rs`), recovered with
+/// `downcast_ref`. `Display` is one sentence a person can act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectError {
+    /// R12: a root with no folder under `projects/`. `store_root` returns it (S3).
+    NotRegistered { root: String },
+    /// R13: the path is the home store, inside it, or contains it.
+    IsHome { path: String },
+    /// The path does not exist or is not a directory (register, choose,
+    /// re-point target).
+    NotADirectory { path: String },
+    /// ST-20: the re-point target is already a project, or one of the five
+    /// path columns names it.
+    Exists { path: String },
+    /// A re-point onto the path the project already has.
+    SamePath { path: String },
+}
+
+impl ProjectError {
+    /// The wire code the daemon answers with (S3, S5a).
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotRegistered { .. } => "WORKSPACE_NOT_FOUND",
+            Self::IsHome { .. } => "WORKSPACE_IS_HOME",
+            Self::NotADirectory { .. } => "WORKSPACE_NOT_A_DIRECTORY",
+            Self::Exists { .. } => "WORKSPACE_EXISTS",
+            Self::SamePath { .. } => "INVALID_PATH",
+        }
+    }
+}
+
+impl fmt::Display for ProjectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotRegistered { root } => write!(
+                f,
+                "{root} is not a project OpenAlpaca knows: no folder under projects/ records it"
+            ),
+            Self::IsHome { path } => write!(
+                f,
+                "{path} is, contains or lies inside the OpenAlpaca home store, so it cannot be a \
+                 project. Name the project directory itself"
+            ),
+            Self::NotADirectory { path } => write!(
+                f,
+                "{path} is not a directory. Create it first, or name the folder the project is in now"
+            ),
+            Self::Exists { path } => write!(
+                f,
+                "{path} is already a project of its own, or OpenAlpaca's records already name it. \
+                 Re-pointing onto it would merge two projects: delete that project's data first, \
+                 or re-point onto another path"
+            ),
+            Self::SamePath { path } => write!(f, "{path} is already where the project is"),
+        }
+    }
+}
+
+impl std::error::Error for ProjectError {}
+
+/// Whether `e`, anywhere in its chain, is [`ProjectError::NotRegistered`] —
+/// how a reader learns after the fact that a root is unregistered (R12).
+/// Chain-aware, so a `.context(..)` a caller adds never hides it.
+pub fn is_not_registered(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<ProjectError>(),
+            Some(ProjectError::NotRegistered { .. })
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests;

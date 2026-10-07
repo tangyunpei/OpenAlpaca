@@ -253,3 +253,128 @@ fn with_no_usable_home_store_nothing_overlaps_it() {
     let _env = HomeStoreGuard::set(Path::new("relative/store"));
     assert!(!overlaps_home_store(Path::new("/")));
 }
+
+// ── The file, the entry and the refusals (S1.4) ─────────────────────────────
+
+const ROOT: &str = "/Users/someone/dev/AlpacaLink";
+
+fn sample_file() -> ProjectFile {
+    ProjectFile {
+        version: 1,
+        id: ProjectId::parse(ID).unwrap(),
+        root: ROOT.to_string(),
+        created_at: "2026-10-07T09:30:00Z".to_string(),
+        previous_root: None,
+        previous_name: None,
+    }
+}
+
+#[test]
+fn a_project_file_serializes_in_r9s_order_with_no_re_point_keys() {
+    let text = String::from_utf8(serde_json::to_vec_pretty(&sample_file()).unwrap()).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "{{\n  \"version\": 1,\n  \"id\": \"{ID}\",\n  \"root\": \"{ROOT}\",\n  \"created_at\": \"2026-10-07T09:30:00Z\"\n}}"
+        )
+    );
+}
+
+#[test]
+fn a_re_point_in_flight_adds_its_two_keys_after_created_at() {
+    let mut file = sample_file();
+    file.previous_root = Some("/Users/someone/work/AlpacaLink".to_string());
+    file.previous_name = Some("-Users-someone-work-AlpacaLink".to_string());
+    let text = String::from_utf8(serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+    assert!(
+        text.ends_with(
+            "\"created_at\": \"2026-10-07T09:30:00Z\",\n  \"previous_root\": \"/Users/someone/work/AlpacaLink\",\n  \"previous_name\": \"-Users-someone-work-AlpacaLink\"\n}"
+        ),
+        "{text}"
+    );
+    assert_eq!(serde_json::from_str::<ProjectFile>(&text).unwrap(), file);
+}
+
+#[test]
+fn a_project_file_without_the_re_point_keys_reads_them_as_absent() {
+    let text = format!(
+        r#"{{"version": 1, "id": "{ID}", "root": "{ROOT}", "created_at": "2026-10-07T09:30:00Z"}}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<ProjectFile>(&text).unwrap(),
+        sample_file()
+    );
+}
+
+#[test]
+fn a_project_hands_back_the_file_it_was_read_from() {
+    let project = Project {
+        id: ProjectId::parse(ID).unwrap(),
+        root: PathBuf::from(ROOT),
+        name: "-Users-someone-dev-AlpacaLink".to_string(),
+        dir: PathBuf::from("/Users/someone/.openalpaca/projects/-Users-someone-dev-AlpacaLink"),
+        created_at: "2026-10-07T09:30:00Z".to_string(),
+        missing: false,
+        previous_root: None,
+        previous_name: None,
+    };
+    assert_eq!(project.root_string(), ROOT);
+    assert_eq!(project.file(), sample_file());
+}
+
+#[test]
+fn each_refusal_has_its_code_and_one_sentence() {
+    let p = "/work/app".to_string();
+    let cases = [
+        (
+            ProjectError::NotRegistered { root: p.clone() },
+            "WORKSPACE_NOT_FOUND",
+            "/work/app is not a project OpenAlpaca knows: no folder under projects/ records it",
+        ),
+        (
+            ProjectError::IsHome { path: p.clone() },
+            "WORKSPACE_IS_HOME",
+            "/work/app is, contains or lies inside the OpenAlpaca home store, so it cannot be a project. Name the project directory itself",
+        ),
+        (
+            ProjectError::NotADirectory { path: p.clone() },
+            "WORKSPACE_NOT_A_DIRECTORY",
+            "/work/app is not a directory. Create it first, or name the folder the project is in now",
+        ),
+        (
+            ProjectError::Exists { path: p.clone() },
+            "WORKSPACE_EXISTS",
+            "/work/app is already a project of its own, or OpenAlpaca's records already name it. Re-pointing onto it would merge two projects: delete that project's data first, or re-point onto another path",
+        ),
+        (
+            ProjectError::SamePath { path: p.clone() },
+            "INVALID_PATH",
+            "/work/app is already where the project is",
+        ),
+    ];
+    for (error, code, text) in cases {
+        assert_eq!(error.code(), code);
+        assert_eq!(error.to_string(), text);
+    }
+}
+
+#[test]
+fn not_registered_is_recognised_through_any_context() {
+    let refusal = || {
+        anyhow::Error::new(ProjectError::NotRegistered {
+            root: "/work/app".to_string(),
+        })
+    };
+    assert!(is_not_registered(&refusal()));
+    assert!(is_not_registered(
+        &refusal().context("opening the project's artifacts")
+    ));
+    assert!(!is_not_registered(&anyhow::Error::new(
+        ProjectError::IsHome {
+            path: "/".to_string()
+        }
+    )));
+    assert!(!is_not_registered(&anyhow::anyhow!(
+        "/work/app is not a project OpenAlpaca knows"
+    )));
+}
