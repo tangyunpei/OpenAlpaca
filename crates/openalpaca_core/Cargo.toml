@@ -51,6 +51,9 @@ openalpaca_storage.workspace = true
 [dev-dependencies]
 # test-utils exposes McpClient::disconnected_for_tests for the MCP bridge tests.
 openalpaca_mcp = { path = "../openalpaca_mcp", features = ["test-utils"] }
+# test-home-guard: store::projects::register refuses an unguarded home store in
+# this crate's test builds (storage design, Stage 1).
+openalpaca_storage = { workspace = true, features = ["test-home-guard"] }
 # The memory service's scale tests read the search index's cache file itself
 # (its FTS segments, a page to damage) beside the service that holds it.
 rusqlite.workspace = true

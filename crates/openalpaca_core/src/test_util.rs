@@ -228,3 +228,11 @@ pub(crate) fn router_recording(
 /// The model the recording router defaults to: a compiled-in Anthropic id, so
 /// `ModelRegistry::with_defaults()` resolves it to the registered provider.
 pub(crate) const RECORDED_MODEL: &str = "claude-sonnet-4-6";
+
+/// Storage's `store::projects::register` refuses an unguarded home store only
+/// in a build that carries its `test-home-guard` feature, which this crate
+/// turns on through `[dev-dependencies]` (storage design, Stage 1, S1.9).
+#[test]
+fn the_storage_test_home_guard_is_armed_in_this_test_build() {
+    assert!(openalpaca_storage::store::projects::test_home_guard_armed());
+}

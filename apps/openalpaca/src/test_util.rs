@@ -225,3 +225,11 @@ fn singleton_lock_holder_process() {
     let mut until_closed = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut until_closed);
 }
+
+/// Storage's `store::projects::register` refuses an unguarded home store only
+/// in a build that carries its `test-home-guard` feature, which this crate
+/// turns on through `[dev-dependencies]` (storage design, Stage 1, S1.9).
+#[test]
+fn the_storage_test_home_guard_is_armed_in_this_test_build() {
+    assert!(openalpaca_storage::store::projects::test_home_guard_armed());
+}

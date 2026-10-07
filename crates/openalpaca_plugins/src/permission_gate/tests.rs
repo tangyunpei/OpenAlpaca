@@ -287,3 +287,11 @@ fn an_entry_written_before_provenance_existed_still_parses() {
     assert_eq!(entry.installed_from, None);
     assert_eq!(entry.installed_at, None);
 }
+
+/// Storage's `store::projects::register` refuses an unguarded home store only
+/// in a build that carries its `test-home-guard` feature, which this crate
+/// turns on through `[dev-dependencies]` (storage design, Stage 1, S1.9).
+#[test]
+fn the_storage_test_home_guard_is_armed_in_this_test_build() {
+    assert!(openalpaca_storage::store::projects::test_home_guard_armed());
+}
