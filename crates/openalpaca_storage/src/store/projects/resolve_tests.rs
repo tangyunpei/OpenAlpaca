@@ -232,3 +232,129 @@ fn resolving_creates_nothing_under_the_home_store() {
         "a resolution creates nothing"
     );
 }
+
+#[test]
+fn resolve_and_register_records_an_unused_repository_once() {
+    let s = Scene::new();
+    let repo = s.repo("app");
+
+    let first = resolve_and_register(&s.dir("app/src"))
+        .unwrap()
+        .expect("a project");
+    assert_eq!(first.root, repo);
+    assert_eq!(lookup(&repo).unwrap().map(|p| p.id), Some(first.id));
+
+    let again = resolve_and_register(&repo).unwrap().expect("a project");
+    assert_eq!(
+        again.id, first.id,
+        "recorded once; the second call finds it"
+    );
+    assert_eq!(list().unwrap().len(), 1);
+}
+
+#[test]
+fn resolve_and_register_records_nothing_for_a_path_with_no_project() {
+    let s = Scene::new();
+    assert_eq!(resolve_and_register(&s.dir("loose")).unwrap(), None);
+    assert_eq!(resolve_and_register(&s.home()).unwrap(), None);
+    assert_eq!(resolve_and_register(Path::new("relative")).unwrap(), None);
+    assert!(!projects_dir().unwrap().exists());
+}
+
+#[test]
+fn resolve_and_register_returns_a_missing_registered_project_as_it_is() {
+    let s = Scene::new();
+    let repo = s.repo("gone");
+    let registered = register(&repo).unwrap();
+    fs::remove_dir_all(&repo).unwrap();
+
+    let found = resolve_and_register(&repo).unwrap().expect("ST-7");
+    assert_eq!(found.id, registered.id);
+    assert!(found.missing);
+    assert_eq!(list().unwrap().len(), 1, "nothing new recorded");
+}
+
+#[test]
+fn choosing_a_folder_inside_a_repository_chooses_the_repository() {
+    let s = Scene::new();
+    let repo = s.repo("app");
+    let chosen = choose(&s.dir("app/src")).unwrap();
+    assert_eq!(chosen.root, repo, "R10: inside git, that is the repository");
+    assert_eq!(list().unwrap().len(), 1);
+}
+
+#[test]
+fn choosing_a_folder_with_no_git_makes_that_folder_the_project() {
+    let s = Scene::new();
+    let notes = s.dir("notes");
+    let chosen = choose(&notes).unwrap();
+    assert_eq!(chosen.root, notes);
+    // §3's table: after `Use`, a folder below it resolves to it.
+    assert_eq!(
+        resolve(&s.dir("notes/2026")).unwrap().map(|r| r.root),
+        Some(notes)
+    );
+}
+
+#[test]
+fn choosing_inside_a_chosen_folder_chooses_that_folder() {
+    let s = Scene::new();
+    let first = choose(&s.dir("notes")).unwrap();
+    let again = choose(&s.dir("notes/2026")).unwrap();
+    assert_eq!(again.id, first.id);
+    assert_eq!(list().unwrap().len(), 1);
+}
+
+#[test]
+fn choosing_the_home_store_or_a_folder_around_or_inside_it_is_refused() {
+    let s = Scene::new();
+    let inside = s.home_store().join("artifacts");
+    fs::create_dir(&inside).unwrap();
+
+    for path in [s.home(), s.home_store(), inside, s.root()] {
+        let err = choose(&path).unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<ProjectError>(),
+                Some(ProjectError::IsHome { .. })
+            ),
+            "{}: {err:#}",
+            path.display()
+        );
+    }
+    assert!(list().unwrap().is_empty());
+}
+
+#[test]
+fn choosing_a_missing_path_or_a_file_is_refused_as_not_a_directory() {
+    let s = Scene::new();
+    let missing = s.root().join("work").join("not-yet");
+    let file = s.dir("files").join("notes.txt");
+    fs::write(&file, "text\n").unwrap();
+
+    for path in [missing, file] {
+        let err = choose(&path).unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<ProjectError>(),
+                Some(ProjectError::NotADirectory { .. })
+            ),
+            "{}: {err:#}",
+            path.display()
+        );
+    }
+    assert!(list().unwrap().is_empty());
+}
+
+#[test]
+fn choosing_a_relative_path_is_refused_and_records_nothing() {
+    let _s = Scene::new();
+    // `resolve` answers no project for it, and `register`'s `canonical_root`
+    // (S1.3) refuses it before anything is read (R22).
+    let err = choose(Path::new("src")).unwrap_err();
+    assert!(
+        err.to_string().contains("must be an absolute path"),
+        "{err:#}"
+    );
+    assert!(list().unwrap().is_empty());
+}

@@ -915,6 +915,40 @@ fn resolve_missing(path: &Path) -> anyhow::Result<Option<ResolvedProject>> {
     Ok(None)
 }
 
+/// [`resolve`], then [`register`] when the root it found has no folder yet —
+/// the one call every registration site makes (§3: only the daemon, only
+/// where it accepts work for a root). `Ok(None)`: no project, nothing
+/// recorded. A registered project, missing or not, is returned as it is.
+pub fn resolve_and_register(path: &Path) -> anyhow::Result<Option<Project>> {
+    match resolve(path)? {
+        None => Ok(None),
+        Some(ResolvedProject {
+            project: Some(project),
+            ..
+        }) => Ok(Some(project)),
+        Some(ResolvedProject {
+            root,
+            project: None,
+        }) => register(&root).map(Some),
+    }
+}
+
+/// R10 — choosing a folder (the app's `Use`, `openalpaca chat --project`):
+/// resolved like any path, so inside a git repository it is the repository
+/// and inside a chosen folder it is that folder. Only when nothing is found
+/// does the folder itself become a project, through [`register`]. Its own
+/// checks refuse a relative path before anything is read ([`canonical_root`],
+/// R22), then the home store, the folders inside it and the folders around
+/// it ([`ProjectError::IsHome`]), and anything that is not a directory
+/// ([`ProjectError::NotADirectory`]). `POST /v1/workspaces` (S5a) is its
+/// first caller.
+pub fn choose(path: &Path) -> anyhow::Result<Project> {
+    match resolve_and_register(path)? {
+        Some(project) => Ok(project),
+        None => register(path),
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
