@@ -206,7 +206,7 @@ holds no database handle.
 | `principal`, `scope` | `Option<…>` | The requesting principal and resource scope, where threaded |
 | `workspace_id` | `Option<String>` | The resolved workspace root, derived from the daemon's current directory when the request carried none. **No memory path reads it** — the memory tools and the per-turn recall take `request_workspace_root`, so the daemon's CWD never selects a memory partition (memory redesign MD-5); `start_workflow` still forwards it into the run it starts, where nothing reads it |
 | `request_workspace_root` | `Option<String>` | The project root the *request* supplied, resolved.  Never derived from the current directory.  The only field that may place content on disk (`artifact_write`, the workspace spill) |
-| `workspace_path` | `Option<String>` | The path as sent; persisted with steering and follow-up items |
+| `workspace_path` | `Option<String>` | The path as sent; threaded on the main loop and read by no tool since F4 — the steering and follow-up writers persist `request_workspace_root` |
 | `skill_stack` | `Vec<String>` | Skill invocation chain, oldest first |
 | `effective_constraints` | `Option<EffectiveToolSet>` | Tool limits inherited from a parent skill chain |
 | `lane_key`, `source`, `request_id` | `Option<…>` | The conversation lane, the channel (`cli`, `telegram`, …) and the originating request |

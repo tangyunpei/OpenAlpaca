@@ -153,7 +153,7 @@ struct built by the sandbox caller (never by the LLM).  It carries:
 |-------|--------|
 | Who | `agent_id`, `agent_instance_id`, `owner_id`, `principal` |
 | Which run | `task_id`, `request_id`, `session_id`, `lane_key`, `source` |
-| Which workspace | `workspace_id` (CWD-derived when the request sent none; no memory path reads it), `request_workspace_root` (the only field that may place files on disk, and the one the memory tools resolve a project partition from), `workspace_path` (as sent by the client) |
+| Which workspace | `workspace_id` (CWD-derived when the request sent none; no memory path reads it), `request_workspace_root` (the only field that may place files on disk, and the one the memory tools resolve a project partition from), `workspace_path` (as sent by the client; read by no tool since F4) |
 | Skill nesting | `skill_stack`, `effective_constraints` |
 | Side channels | `session_log` (for `file_write`'s pre-edit snapshot), `event_bus` (filled in by the sandbox so a tool can announce what it produced) |
 

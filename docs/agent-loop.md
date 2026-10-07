@@ -273,7 +273,10 @@ Lead-only and text-only — subagents never see an inbox.
   (`workflows_for_lane`) registers unconditionally — it also backs the
   per-lane cap and the workflow-context block.
 - **Producers**: the `/steer ` prefix (deterministic) and the
-  `steer_workflow` tool (model-routed). Push results: `Ok` reports queue
+  `steer_workflow` tool (model-routed). Both put the turn's resolved
+  project root on the `SteeringMsg` (`request_workspace_root`, never the
+  path as sent — F4), which a message left undelivered at exit keeps on
+  its `unprocessed_steering` row. Push results: `Ok` reports queue
   depth; `Full` directs the model to offer `queue_followup`; `Closed`
   means the workflow already detached.
 - **Two drain points** in the loop body (`runner/agentic_loop/mod.rs`):
@@ -335,7 +338,10 @@ and the task outcome record.
 
 `queue_followup` (lead-agent tool, plus a main-loop variant on
 workflow-attached lanes) writes `followup` rows into `lane_followups`
-with the originating principal/scope/workspace. When a
+with the originating principal and the turn's resolved project root
+(`ToolContext.request_workspace_root`, F4) as `workspace_path` — the
+lead's context carries the run's project, so a follow-up a workflow
+promised re-enters in that project; the main loop's carries the turn's. When a
 workflow finalizes and `followup_autostart = true` (default), the spawn
 claims the lane's next `followup` row (`FollowupRepository::claim_next`
 — which never claims `unprocessed_steering`; those rows are surfaced by
