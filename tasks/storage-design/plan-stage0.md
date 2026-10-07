@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- **Model policy (owner, 2026-10-05):** Opus 5.5 implements every task and reviews each task; Fable 5.1 does one review only, of the whole stage at the end.
+- **Model policy (owner, 2026-10-06):** Opus 5.5 does every job — implementing, each task's review and the final review of the whole stage. Fable 5.1 is used only as the advisor.
 - **One cargo process at a time**, always. Per task: `cargo test -p <crate> <filter>`. The workspace run happens **once**, at Task G: `cargo test --workspace --exclude openalpaca_gui`, then `pkill -f "sleep 3600"` (the MCP manager's hang tests leave orphaned children that hold a piped stdout open).
 - **Clippy baseline is 80** warnings (`CARGO_TERM_COLOR=never cargo clippy --workspace --exclude openalpaca_gui --all-targets`, counted as lines starting `warning` minus the `generated N warnings` lines). A task may not add one.
 - `python3 scripts/gen_api_docs.py --check` must stay clean (no route or migration changes here), and `cargo check -p openalpaca_gui` must compile (CI compiles nothing under `src-tauri`).
