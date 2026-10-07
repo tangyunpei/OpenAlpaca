@@ -599,3 +599,111 @@ fn lookup_refuses_a_relative_root() {
     let _w = World::new();
     assert!(lookup(Path::new("dev/app")).is_err());
 }
+
+// ── list and by_id (S1.6) ───────────────────────────────────────────────────
+
+#[test]
+fn list_is_empty_and_creates_nothing_without_a_projects_folder() {
+    let w = World::new();
+    assert_eq!(list().unwrap(), Vec::new());
+    assert!(!w.projects().exists());
+}
+
+#[test]
+fn list_reads_every_project_by_folder_name_and_marks_the_missing_one() {
+    let w = World::new();
+    let (b, a, gone) = (w.folder("b"), w.folder("a"), w.folder("gone"));
+    for root in [&b, &a, &gone] {
+        w.plant(&folder_name(root), &file_for(root));
+    }
+    fs::remove_dir(&gone).unwrap();
+
+    let listed = list().unwrap();
+    let names: Vec<String> = listed.iter().map(|p| p.name.clone()).collect();
+    let mut expected = vec![folder_name(&a), folder_name(&b), folder_name(&gone)];
+    expected.sort();
+    assert_eq!(names, expected);
+    let missing: Vec<PathBuf> = listed
+        .iter()
+        .filter(|p| p.missing)
+        .map(|p| p.root.clone())
+        .collect();
+    assert_eq!(missing, vec![gone]);
+}
+
+#[cfg(unix)]
+#[test]
+fn list_passes_over_hidden_folders_links_and_files() {
+    let w = World::new();
+    let root = w.folder("kept");
+    let kept = w.plant(&folder_name(&root), &file_for(&root));
+    // A folder `register` is still building, a link, and a stray file.
+    w.plant(".-half-built.1-0.tmp", &file_for(&w.folder("half")));
+    std::os::unix::fs::symlink(&kept, w.projects().join("a-link")).unwrap();
+    fs::write(w.projects().join("notes.txt"), "mine").unwrap();
+
+    let names: Vec<String> = list().unwrap().into_iter().map(|p| p.name).collect();
+    assert_eq!(names, vec![folder_name(&root)]);
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn two_folders_with_one_id_are_both_left_out_and_reported_once() {
+    let w = World::new();
+    let root = w.folder("copied");
+    let file = file_for(&root);
+    let original = w.plant(&folder_name(&root), &file);
+    let copy = w.plant("copy-of-it", &file);
+    let other_root = w.folder("other");
+    let other = file_for(&other_root);
+    w.plant(&folder_name(&other_root), &other);
+
+    for _ in 0..2 {
+        let ids: Vec<ProjectId> = list().unwrap().into_iter().map(|p| p.id).collect();
+        assert_eq!(ids, vec![other.id]);
+    }
+    assert_eq!(by_id(&file.id).unwrap(), None);
+    assert!(original.join(PROJECT_FILE).exists() && copy.join(PROJECT_FILE).exists());
+    let id = file.id.to_string();
+    logs_assert(move |lines: &[&str]| {
+        let n = lines
+            .iter()
+            .filter(|l| l.contains("WARN") && l.contains(&id))
+            .count();
+        if n == 1 {
+            Ok(())
+        } else {
+            Err(format!("one WARN for the shared id, got {n}"))
+        }
+    });
+}
+
+#[test]
+fn by_id_finds_a_project_and_nothing_for_an_id_no_folder_carries() {
+    let w = World::new();
+    let root = w.folder("app");
+    let file = file_for(&root);
+    w.plant(&folder_name(&root), &file);
+    assert_eq!(by_id(&file.id).unwrap().map(|p| p.root), Some(root));
+    assert_eq!(by_id(&ProjectId::new()).unwrap(), None);
+}
+
+#[test]
+fn an_entry_mid_re_point_is_listed_with_where_it_was() {
+    let w = World::new();
+    let (old, new) = (w.folder("old"), w.folder("new"));
+    let mut file = file_for(&new);
+    file.previous_root = Some(old.to_string_lossy().into_owned());
+    file.previous_name = Some(folder_name(&old));
+    w.plant(&folder_name(&old), &file);
+
+    let listed = list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].root, new);
+    assert_eq!(listed[0].previous_root.as_deref(), Some(old.as_path()));
+    assert_eq!(
+        listed[0].previous_name.as_deref(),
+        Some(folder_name(&old).as_str())
+    );
+    assert_eq!(listed[0].file(), file);
+}

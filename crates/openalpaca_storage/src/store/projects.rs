@@ -13,7 +13,7 @@
 //! decides whose folder it is, never the name (R6), and a name is never
 //! parsed back into a path (R8).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -481,6 +481,75 @@ static WARNED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 /// `true` the first time this process sees `key`.
 fn first_warning(key: String) -> bool {
     WARNED.lock().unwrap_or_else(|p| p.into_inner()).insert(key)
+}
+
+// ============================================================================
+// Listing (§3, R11)
+// ============================================================================
+
+/// §3 *list*: every project whose folder under `projects/` this build reads,
+/// sorted by folder name; entries mid re-point included (R24 reads them).
+/// Dot-prefixed names — a folder `register` is still building — links and
+/// files are passed over without a word. A missing `projects/` is an empty
+/// list, and nothing is created. Two folders carrying one id — a copied
+/// folder — are both left out with one WARN (R11): neither can be told from
+/// the other, so neither is opened, and neither is deleted.
+pub fn list() -> Result<Vec<Project>> {
+    let projects = projects_dir()?;
+    let entries = match fs::read_dir(&projects) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to read {}", projects.display()));
+        }
+    };
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("Failed to read {}", projects.display()))?;
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        // `DirEntry::file_type` does not follow a link, so a link is passed
+        // over here, like a file.
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        if let Some(project) = read_project_dir(&entry.path())? {
+            found.push(project);
+        }
+    }
+
+    let mut dirs_by_id: BTreeMap<ProjectId, Vec<String>> = BTreeMap::new();
+    for project in &found {
+        dirs_by_id
+            .entry(project.id)
+            .or_default()
+            .push(project.dir.display().to_string());
+    }
+    let mut shared = BTreeSet::new();
+    for (id, mut dirs) in dirs_by_id {
+        if dirs.len() < 2 {
+            continue;
+        }
+        dirs.sort();
+        if first_warning(format!("shared id {id}")) {
+            tracing::warn!(
+                "{} carry the same project id {id}, as a copied folder does; none of them is \
+                 opened as a project, and none is deleted",
+                dirs.join(" and ")
+            );
+        }
+        shared.insert(id);
+    }
+    found.retain(|project| !shared.contains(&project.id));
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(found)
+}
+
+/// [`list`] narrowed to one id: `None` when no folder carries it, or when two
+/// do (R11).
+pub fn by_id(id: &ProjectId) -> Result<Option<Project>> {
+    Ok(list()?.into_iter().find(|project| project.id == *id))
 }
 
 #[cfg(test)]
