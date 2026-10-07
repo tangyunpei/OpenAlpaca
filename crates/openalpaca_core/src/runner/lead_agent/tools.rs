@@ -1498,15 +1498,15 @@ impl BuiltInTool for QueueFollowupTool {
         self.queue(arguments, self.constructed_principal(), None)
     }
 
-    /// Context-aware variant — the one a sandboxed call reaches
-    /// (`tools/registry/mod.rs:768` hands every builtin its context). The
-    /// identity is the invocation's threaded principal, else the
-    /// constructor's `created_by` (the lead's context threads none); the
-    /// project is `request_workspace_root`, the turn's resolved root — the
-    /// run's project on the lead's context, the turn's on the main loop's
-    /// (F4). Never `workspace_path`: that was the path as the client sent
-    /// it, which the lead's context never carried, so a follow-up a workflow
-    /// promised re-entered with no project.
+    /// Context-aware variant — the one a sandboxed call reaches (the
+    /// builtin arm of `ToolRegistry::execute_with_context` hands every
+    /// builtin its context). The identity is the invocation's threaded
+    /// principal, else the constructor's `created_by` (the lead's context
+    /// threads none); the project is `request_workspace_root`, the turn's
+    /// resolved root — the run's project on the lead's context, the turn's
+    /// on the main loop's (F4). Never `workspace_path`: that was the path as
+    /// the client sent it, which the lead's context never carried, so a
+    /// follow-up a workflow promised re-entered with no project.
     async fn execute_with_context(
         &self,
         arguments: &serde_json::Value,

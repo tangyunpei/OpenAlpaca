@@ -1176,8 +1176,8 @@ async fn a_queue_followup_from_the_main_loop_stores_the_turns_resolved_project_r
     );
 }
 
-/// F4 — the lead's context carries no `workspace_path`
-/// (`runner/lead_agent/mod.rs:278-292`) and does carry
+/// F4 — the lead's context carries no `workspace_path` (`run_lead_agent`'s
+/// `tool_ctx`, `runner/lead_agent/mod.rs`) and does carry
 /// `request_workspace_root`, the run's project. A follow-up a workflow queues
 /// must run in that project; until this fix the row held NULL and the
 /// follow-up turn ran with none.
@@ -1200,7 +1200,7 @@ async fn a_queue_followup_from_the_lead_stores_the_runs_project_root() {
             .to_string()
     );
 
-    // The lead-agent constructor (`runner/lead_agent/mod.rs:342-350`):
+    // The lead's `QueueFollowupTool::new` call (in `run_lead_agent`):
     // identity from the task's `created_by`, the run as `source_task_id`.
     let tool = QueueFollowupTool::new(
         Some(db.clone()),
@@ -1210,7 +1210,7 @@ async fn a_queue_followup_from_the_lead_stores_the_runs_project_root() {
         "junpei".to_string(),
         false,
     );
-    // The context exactly as `run_lead_agent` builds it (`mod.rs:278-292`):
+    // The context exactly as `run_lead_agent` builds it (its `tool_ctx`):
     // no principal, no scope, no workspace_path — and the run's root.
     let ctx = crate::tools::registry::ToolContext {
         agent_id: Some("lead_agent::abc".to_string()),
@@ -1251,10 +1251,12 @@ async fn a_queue_followup_from_the_lead_stores_the_runs_project_root() {
 }
 
 /// Review focus — a turn whose path no longer exists (a CLI started in a
-/// directory since deleted, a row from an older build): the resolver has
-/// nothing to canonicalise and yields no root, and the row holds NULL —
-/// the same as a path under no marker. Nothing panics, nothing is stored
-/// as sent.
+/// directory since deleted, a row from an older build): the path cannot
+/// be canonicalised, so the resolver falls back to it as sent and walks
+/// its lexical ancestors for a marker; none under the temporary directory
+/// carries one (the precondition below), so it yields no root and the row
+/// holds NULL — the same as a path under no marker. Nothing panics,
+/// nothing is stored as sent.
 #[tokio::test]
 async fn a_queue_followup_from_a_path_that_no_longer_exists_stores_no_project() {
     let dir = tempfile::tempdir().unwrap();

@@ -42,10 +42,14 @@ pub use capabilities::{
 ///   daemon's CWD never selects a partition (design MD-5) — so that forwarded
 ///   copy is all that is left of it, and the collapse below removes it.
 /// - `request_workspace_root` — the same resolution, but only on the
-///   client-sent branch and never the home store (R22). Read by `artifact_write`,
-///   its `workspace_write` spill and `file_write` (which writes into its own
-///   workspace root only on a turn that carries one, G2), and by nothing else:
-///   it is the only one of the three that may place bytes on disk.
+///   client-sent branch and never the home store (R22), and the only one of
+///   the three that may place bytes on disk. Read by `artifact_write`, its
+///   `workspace_write` spill and `file_write` (which writes into its own
+///   workspace root only on a turn that carries one, G2), by the memory
+///   tools, which pick their partition with it
+///   (`MemoryService::context_for_tool`), by `start_workflow`, which forwards
+///   it into the run, and by `steer_workflow` and `queue_followup`, which
+///   persist it (F4).
 /// - `workspace_path` — the path **as sent**, unresolved, threaded only on the
 ///   tool-mode main loop and read by **no tool** since F4: `steer_workflow`
 ///   (`tools/builtins/steer_workflow.rs`) and `queue_followup`
