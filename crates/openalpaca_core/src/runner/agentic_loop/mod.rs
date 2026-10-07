@@ -14,9 +14,8 @@ pub use config::{LoopConfig, LoopFinishReason, LoopResult, StreamCallback};
 // Internal re-exports so the core loop and tests can access submodule items
 use backend::LlmBackend;
 pub(crate) use context::{compress_context, estimate_messages_tokens, estimate_tools_tokens};
-use tool_helpers::{
-    format_tool_error, format_tool_error_with_hint, head_tail_tool_result, truncate_tool_result_to,
-};
+use crate::utils::text::head_tail;
+use tool_helpers::{format_tool_error, format_tool_error_with_hint, truncate_tool_result_to};
 #[cfg(test)]
 use tool_helpers::{MAX_TOOL_RESULT_SIZE, truncate_tool_result};
 
@@ -284,7 +283,7 @@ fn model_visible_result(
     // is a rule about the *model's* copy, and it holds whether or not the log
     // spilled the full bytes behind it.
     if !ok {
-        return head_tail_tool_result(result_text.to_string(), config.tool_result_inline_bytes);
+        return head_tail(result_text, config.tool_result_inline_bytes);
     }
     match spill_ref {
         Some(rel) => spill_stub(result_text.len(), &spill_preview(result_text), rel),

@@ -3773,7 +3773,7 @@ fn an_error_result_keeps_its_head_and_its_tail() {
         "m".repeat(8 * 1024),
         "TAIL-ASSERTION-FAILED"
     );
-    let cut = head_tail_tool_result(text.clone(), limit);
+    let cut = head_tail(&text, limit);
 
     assert!(cut.len() < text.len());
     assert!(cut.starts_with("HEAD-MARKER"), "the head survives: {}", &cut[..40]);
@@ -3784,7 +3784,7 @@ fn an_error_result_keeps_its_head_and_its_tail() {
     assert!(cut.contains("the tail follows"), "the elision is named");
 
     // Under the bound nothing is touched.
-    assert_eq!(head_tail_tool_result("small".to_string(), limit), "small");
+    assert_eq!(head_tail("small", limit), "small");
 }
 
 /// A loop with no session log writes nothing and behaves identically — the

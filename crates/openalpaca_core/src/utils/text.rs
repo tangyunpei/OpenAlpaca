@@ -63,6 +63,33 @@ pub(crate) fn byte_prefix(s: &str, max_bytes: usize) -> &str {
     &s[..s.floor_char_boundary(max_bytes)]
 }
 
+/// A text too long for `limit` bytes, shown as its **head and its tail** with
+/// one notice naming the bytes between them — the shape the agentic loop
+/// gives an oversized `Err` result (§5.4: a compiler or test failure sits at
+/// the tail) and, since Stage 0's F2, the shape `wait_for_subagents` gives
+/// each subagent's answer.
+///
+/// Bytes, on character boundaries: the head is `limit / 2` bytes rounded
+/// down to a boundary, the tail `limit / 2` bytes rounded up to one, so
+/// neither exceeds its half and no character is split. A text within the
+/// limit comes back whole. The notice (about 66 bytes) is added on top of
+/// `limit`; a caller that must stay under a bound budgets for it.
+pub(crate) fn head_tail(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let half = limit / 2;
+    let head = byte_prefix(text, half);
+    let tail_start = text.ceil_char_boundary(text.len() - half);
+    format!(
+        "{}\n\n[... {} of {} bytes elided; the tail follows ...]\n\n{}",
+        head,
+        tail_start - head.len(),
+        text.len(),
+        &text[tail_start..]
+    )
+}
+
 /// `text` on one line for a person to read and act on: runs of whitespace —
 /// newlines, the line and paragraph separators (U+2028, U+2029) and every
 /// other blank Unicode calls white space among them — as one space, and none
@@ -451,8 +478,8 @@ pub fn escape_controls(text: &str) -> String {
 mod tests {
     use super::{
         Escaped, byte_prefix, cut_notice, escape_controls, escape_hidden, escape_hidden_line,
-        escape_hidden_within, hidden_notice, is_default_ignorable, is_hidden, is_private_use,
-        is_unassigned, needs_escape, needs_escape_in_line, one_line,
+        escape_hidden_within, head_tail, hidden_notice, is_default_ignorable, is_hidden,
+        is_private_use, is_unassigned, needs_escape, needs_escape_in_line, one_line,
     };
 
     /// A model's prose reaches a terminal with every control character but
@@ -1133,5 +1160,50 @@ mod tests {
                 "byte_prefix({input:?}, {budget}) overspent its byte budget"
             );
         }
+    }
+
+    /// The cut is in bytes and lands on character boundaries at both ends:
+    /// the head rounds down, the tail rounds up, so neither is ever longer
+    /// than half the limit and no character is split. Every row but the
+    /// ASCII one panicked under `&s[..n]`.
+    #[test]
+    fn head_tail_keeps_whole_characters_at_both_cuts() {
+        // 2,000 three-byte characters = 6,000 bytes under a 3,200-byte limit:
+        // half is 1,600, which is not a multiple of 3. The head rounds down
+        // to 1,599 bytes (533 characters); the tail starts at 4,400, rounded
+        // up to 4,401, so it is 1,599 bytes (533 characters) too.
+        let cjk = "日".repeat(2000);
+        assert_eq!(
+            head_tail(&cjk, 3200),
+            format!(
+                "{}\n\n[... 2802 of 6000 bytes elided; the tail follows ...]\n\n{}",
+                "日".repeat(533),
+                "日".repeat(533)
+            )
+        );
+
+        // Four-byte characters under a 10-byte limit: half is 5, inside the
+        // second emoji at both ends — one whole emoji each side.
+        let emoji = "🙂".repeat(100);
+        assert_eq!(
+            head_tail(&emoji, 10),
+            "🙂\n\n[... 392 of 400 bytes elided; the tail follows ...]\n\n🙂"
+        );
+
+        // ASCII: an exact byte cut, the behaviour the loop's `Err` path had.
+        let ascii = format!("HEAD{}TAIL", "m".repeat(1000));
+        assert_eq!(
+            head_tail(&ascii, 8),
+            "HEAD\n\n[... 1000 of 1008 bytes elided; the tail follows ...]\n\nTAIL"
+        );
+    }
+
+    /// Under the limit nothing is touched — the whole text comes back,
+    /// whatever its script, and an empty text under a zero limit is empty.
+    #[test]
+    fn head_tail_leaves_a_text_within_the_limit_alone() {
+        assert_eq!(head_tail("small", 1024), "small");
+        assert_eq!(head_tail("日本語", 9), "日本語");
+        assert_eq!(head_tail("", 0), "");
     }
 }

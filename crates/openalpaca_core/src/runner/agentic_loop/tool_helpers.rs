@@ -9,36 +9,6 @@ pub(super) fn truncate_tool_result(text: String) -> String {
     truncate_tool_result_to(text, MAX_TOOL_RESULT_SIZE)
 }
 
-/// Keep an oversized result's **head and tail**, with a marker naming what
-/// went (§5.4: "`Err` results stay inline but switch to head+tail — compiler
-/// and test errors sit at the tail").
-///
-/// A head-only cut on a `cargo test` failure throws away the very lines the
-/// model needs; half the budget at each end keeps both the command that ran
-/// and the assertion that failed.
-pub(super) fn head_tail_tool_result(text: String, limit: usize) -> String {
-    if text.len() <= limit {
-        return text;
-    }
-    let half = limit / 2;
-    let mut head_end = half;
-    while head_end > 0 && !text.is_char_boundary(head_end) {
-        head_end -= 1;
-    }
-    let mut tail_start = text.len().saturating_sub(half).max(head_end);
-    while tail_start < text.len() && !text.is_char_boundary(tail_start) {
-        tail_start += 1;
-    }
-    let dropped = tail_start - head_end;
-    format!(
-        "{}\n\n[... {} of {} bytes elided; the tail follows ...]\n\n{}",
-        &text[..head_end],
-        dropped,
-        text.len(),
-        &text[tail_start..]
-    )
-}
-
 /// Truncate tool result text if it exceeds `limit` to prevent blowing up the
 /// LLM context window. Uses byte-aware truncation at char boundaries.
 pub(super) fn truncate_tool_result_to(text: String, limit: usize) -> String {
