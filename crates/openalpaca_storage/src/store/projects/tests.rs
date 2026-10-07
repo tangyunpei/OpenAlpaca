@@ -796,3 +796,256 @@ fn an_unguarded_home_store_stops_a_test_build_and_nothing_is_written() {
     assert_eq!(panic_of(refuse_unguarded_test_home), None);
     assert!(!real_store.exists(), "the guard writes nothing");
 }
+
+// ── register (S1.8) ─────────────────────────────────────────────────────────
+
+/// The names in `dir`, sorted.
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn register_builds_a_folder_holding_project_json_and_nothing_else() {
+    let w = World::new();
+    let root = w.folder("dev/AlpacaLink");
+
+    let project = register(&root).unwrap();
+
+    let name = folder_name(&root);
+    assert_eq!(project.name, name);
+    assert_eq!(project.root, root);
+    assert_eq!(
+        project.dir,
+        w.projects().canonicalize().unwrap().join(&name)
+    );
+    assert!(!project.missing);
+    assert_eq!(project.previous_root, None);
+    assert_eq!(project.previous_name, None);
+    assert_eq!(project.id.as_uuid().get_version_num(), 4);
+    assert!(chrono::DateTime::parse_from_rfc3339(&project.created_at).is_ok());
+    assert!(
+        project.created_at.len() == 20 && project.created_at.ends_with('Z'),
+        "whole seconds, UTC: {}",
+        project.created_at
+    );
+    // R3: project.json and nothing else — and no build folder left beside it.
+    assert_eq!(names_in(&project.dir), vec![PROJECT_FILE.to_string()]);
+    assert_eq!(names_in(&w.projects()), vec![name.clone()]);
+    #[cfg(unix)]
+    {
+        use crate::memory_files::fsx::mode_of;
+        assert_eq!(mode_of(&w.projects()), Some(0o700));
+        assert_eq!(mode_of(&project.dir), Some(0o700));
+        assert_eq!(mode_of(&project.dir.join(PROJECT_FILE)), Some(0o600));
+    }
+    // The bytes R9 writes: pretty JSON in field order, one final newline.
+    assert_eq!(
+        fs::read_to_string(project.dir.join(PROJECT_FILE)).unwrap(),
+        format!(
+            "{{\n  \"version\": 1,\n  \"id\": \"{}\",\n  \"root\": \"{}\",\n  \"created_at\": \"{}\"\n}}\n",
+            project.id,
+            root.display(),
+            project.created_at
+        )
+    );
+    assert_eq!(lookup(&root).unwrap(), Some(project));
+}
+
+#[test]
+fn register_answers_with_the_project_already_recorded() {
+    let w = World::new();
+    let root = w.folder("app");
+    let first = register(&root).unwrap();
+    assert_eq!(register(&root).unwrap(), first);
+    #[cfg(unix)]
+    {
+        let link = w.tmp.path().join("app-link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        assert_eq!(
+            register(&link).unwrap(),
+            first,
+            "a link is the root it reaches"
+        );
+    }
+    assert_eq!(names_in(&w.projects()).len(), 1);
+}
+
+#[test]
+fn a_missing_project_is_answered_as_it_is_and_never_refused() {
+    let w = World::new();
+    let root = w.folder("gone");
+    let first = register(&root).unwrap();
+    fs::remove_dir(&root).unwrap();
+    let again = register(&root).unwrap();
+    assert_eq!(again.id, first.id);
+    assert!(again.missing);
+}
+
+#[test]
+fn the_home_store_what_lies_inside_it_and_what_contains_it_are_refused() {
+    let w = World::new();
+    fs::create_dir_all(w.home().join("inside")).unwrap();
+    for path in [
+        w.home(),
+        w.home().join("inside"),
+        w.tmp.path().to_path_buf(),
+    ] {
+        let err = register(&path).unwrap_err();
+        let refusal = err.downcast_ref::<ProjectError>().expect("a ProjectError");
+        assert!(
+            matches!(refusal, ProjectError::IsHome { .. }),
+            "{path:?}: {refusal}"
+        );
+        assert_eq!(refusal.code(), "WORKSPACE_IS_HOME");
+    }
+    assert!(!w.projects().exists(), "a refusal creates nothing");
+}
+
+#[test]
+fn a_path_that_is_not_a_directory_is_refused_and_so_is_a_relative_one() {
+    let w = World::new();
+    let file = w.folder("parent").join("notes.txt");
+    fs::write(&file, "x").unwrap();
+    for path in [w.tmp.path().join("work").join("never-made"), file] {
+        let err = register(&path).unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<ProjectError>(),
+                Some(ProjectError::NotADirectory { .. })
+            ),
+            "{path:?}: {err}"
+        );
+    }
+    let relative = register(Path::new("relative/project")).unwrap_err();
+    assert!(relative.downcast_ref::<ProjectError>().is_none());
+    assert!(relative.to_string().contains("absolute"), "{relative}");
+    assert!(!w.projects().exists());
+}
+
+#[test]
+fn a_root_whose_plain_name_another_root_holds_takes_the_hashed_name() {
+    let w = World::new();
+    let (underscore, dash) = (w.folder("b_c"), w.folder("b-c"));
+    let first = register(&underscore).unwrap();
+    let second = register(&dash).unwrap();
+    assert_eq!(first.name, folder_name(&underscore));
+    assert_eq!(second.name, hashed_folder_name(&dash));
+    assert_ne!(first.id, second.id);
+    assert_eq!(lookup(&underscore).unwrap(), Some(first));
+    assert_eq!(lookup(&dash).unwrap(), Some(second));
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn a_hand_made_folder_at_the_plain_name_is_left_alone() {
+    let w = World::new();
+    let root = w.folder("handmade");
+    let squatter = w.projects().join(folder_name(&root));
+    fs::create_dir_all(&squatter).unwrap();
+    fs::write(squatter.join("notes.txt"), "mine").unwrap();
+
+    let project = register(&root).unwrap();
+    assert_eq!(project.name, hashed_folder_name(&root));
+    assert_eq!(register(&root).unwrap(), project);
+    // R11: never opened, never deleted — and reported once.
+    assert_eq!(names_in(&squatter), vec!["notes.txt".to_string()]);
+    assert_eq!(
+        fs::read_to_string(squatter.join("notes.txt")).unwrap(),
+        "mine"
+    );
+    let shown = squatter.display().to_string();
+    logs_assert(move |lines: &[&str]| {
+        let n = lines
+            .iter()
+            .filter(|l| {
+                l.contains("WARN") && l.contains(&shown) && l.contains("has no project.json")
+            })
+            .count();
+        if n == 1 {
+            Ok(())
+        } else {
+            Err(format!("one WARN for the hand-made folder, got {n}"))
+        }
+    });
+}
+
+#[test]
+fn when_both_names_are_taken_register_says_so_and_creates_nothing() {
+    let w = World::new();
+    let root = w.folder("crowded");
+    let elsewhere = w.folder("elsewhere");
+    w.plant(&folder_name(&root), &file_for(&elsewhere));
+    w.plant(&hashed_folder_name(&root), &file_for(&elsewhere));
+
+    let err = register(&root).unwrap_err().to_string();
+    assert!(err.contains(&folder_name(&root)), "{err}");
+    assert!(err.contains(&hashed_folder_name(&root)), "{err}");
+    assert_eq!(names_in(&w.projects()).len(), 2);
+}
+
+#[test]
+fn a_re_point_keeps_its_own_folder_when_the_new_plain_name_is_the_same() {
+    let w = World::new();
+    let (old, new) = (w.folder("x_y"), w.folder("x-y"));
+    let project = register(&old).unwrap();
+    let held = lock();
+    assert_eq!(
+        name_for(&new, Some(&project.id), &held).unwrap(),
+        project.name
+    );
+    assert_eq!(
+        name_for(&new, None, &held).unwrap(),
+        hashed_folder_name(&new)
+    );
+}
+
+#[test]
+fn concurrent_registrations_of_one_root_make_one_folder() {
+    let w = World::new();
+    let root = w.folder("busy");
+    let ids: Vec<ProjectId> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| s.spawn(|| register(&root).unwrap().id))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(ids.iter().all(|id| *id == ids[0]), "{ids:?}");
+    assert_eq!(names_in(&w.projects()).len(), 1);
+}
+
+#[test]
+fn the_projects_lock_is_taken_again_after_a_holder_panicked() {
+    let _ = std::thread::spawn(|| {
+        let _held = lock();
+        panic!("a holder that panics");
+    })
+    .join();
+    let _again = lock();
+}
+
+#[test]
+fn register_refuses_an_unguarded_home_store_and_writes_nothing() {
+    let user_home = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let real_store = user_home.path().join(".openalpaca");
+    for store in [None, Some(real_store.clone())] {
+        let _env = HomeStoreGuard::for_user_home(user_home.path(), store.as_deref());
+        let message = panic_of(|| {
+            let _ = register(project.path());
+        })
+        .expect("register must refuse");
+        assert!(
+            message.contains("take the crate's home-store guard"),
+            "{message}"
+        );
+    }
+    assert!(
+        !real_store.exists(),
+        "nothing was written under the user's home"
+    );
+}

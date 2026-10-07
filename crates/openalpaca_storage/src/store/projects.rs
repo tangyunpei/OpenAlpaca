@@ -18,7 +18,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
 use unicode_normalization::UnicodeNormalization;
@@ -601,6 +601,154 @@ fn refuse_unguarded_test_home() {
             super::HOME_STORE_ENV,
         );
     }
+}
+
+/// Release and `cargo run` builds: no check.
+#[cfg(not(any(test, feature = "test-home-guard")))]
+fn refuse_unguarded_test_home() {}
+
+// ============================================================================
+// Registering (§3, R6, R10, R13)
+// ============================================================================
+
+/// The one process-wide lock over the folders under `projects/`.
+static PROJECTS_LOCK: Mutex<()> = Mutex::new(());
+
+/// Holding it is the right to create, rename or remove a folder under
+/// `projects/`: `register`, the re-point (S3) and the delete's folder
+/// removal (S5a) take it. **Lock order: this lock, then the database mutex —
+/// never the reverse.** The re-point holds it across one database
+/// transaction, so nothing may take it, or call `register`, inside a
+/// `with_connection` closure. Not `Send`: it is held on one thread.
+pub struct ProjectsLock {
+    _held: MutexGuard<'static, ()>,
+}
+
+/// Takes [`ProjectsLock`]. A poisoned lock is recovered: the folders on disk
+/// are the state, not anything the mutex holds.
+pub fn lock() -> ProjectsLock {
+    ProjectsLock {
+        _held: PROJECTS_LOCK.lock().unwrap_or_else(|p| p.into_inner()),
+    }
+}
+
+/// §3 *register*: the project at `root`, its folder created when there is
+/// none — create-if-absent under [`lock`]. In order: the test-build guard;
+/// [`canonical_root`]; an entry [`lookup`] finds is returned as it is, a
+/// missing project's included (ST-7); a root that overlaps the home store is
+/// [`ProjectError::IsHome`] (R13), one that is not a directory
+/// [`ProjectError::NotADirectory`]; then the folder is built as
+/// `projects/.<name>.<pid>-<n>.tmp/` holding `project.json` (0700 / 0600,
+/// fsynced) and renamed to `projects/<name>`, so a crash never leaves a
+/// folder without its file; a build that fails is removed. The lock makes it
+/// create-if-absent within the process; the rename refuses a non-empty
+/// target, though POSIX lets it replace an empty directory another process
+/// made in between — and only the daemon registers, only where it accepts
+/// work for a root (§3), so no other process does.
+pub fn register(root: &Path) -> Result<Project> {
+    refuse_unguarded_test_home();
+    let root = canonical_root(root)?;
+    let held = lock();
+    if let Some(existing) = lookup(&root)? {
+        return Ok(existing);
+    }
+    let path = root.to_string_lossy().into_owned();
+    if overlaps_home_store(&root) {
+        return Err(ProjectError::IsHome { path }.into());
+    }
+    if !root.is_dir() {
+        return Err(ProjectError::NotADirectory { path }.into());
+    }
+    let name = name_for(&root, None, &held)?;
+    let projects = projects_dir()?;
+    fsx::create_private_dir(&projects)?;
+    let target = projects.join(&name);
+    let building = fsx::temp_path_for(&target)?;
+    let file = ProjectFile {
+        version: PROJECT_FILE_VERSION,
+        id: ProjectId::new(),
+        root: path,
+        created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        previous_root: None,
+        previous_name: None,
+    };
+    if let Err(e) = build_project_folder(&building, &target, &file) {
+        let _ = fsx::remove_dir_all_if_exists(&building);
+        return Err(e);
+    }
+    read_project_dir(&target)?
+        .with_context(|| format!("{} was created but cannot be read back", target.display()))
+}
+
+/// The folder name `root` (canonical) takes (R6): the plain name unless
+/// `projects/<plain>` exists and is not this project's — its file records
+/// another root and, when `this` is `Some`, carries another id; or it holds
+/// no readable file — then the hashed name under the same test; neither free
+/// is an error naming both. `this` is `Some` only on a re-point (S3), so a
+/// project whose new plain name is its own folder's keeps it.
+pub(crate) fn name_for(
+    root: &Path,
+    this: Option<&ProjectId>,
+    _held: &ProjectsLock,
+) -> Result<String> {
+    let projects = projects_dir()?;
+    let want = root.to_string_lossy();
+    let usable = |name: &str| -> Result<bool> {
+        let dir = projects.join(name);
+        if let Err(e) = fs::symlink_metadata(&dir)
+            && e.kind() == std::io::ErrorKind::NotFound
+        {
+            return Ok(true);
+        }
+        Ok(read_project_dir(&dir)?
+            .is_some_and(|p| p.root_string() == want.as_ref() || this == Some(&p.id)))
+    };
+    let plain = folder_name(root);
+    if usable(&plain)? {
+        return Ok(plain);
+    }
+    let hashed = hashed_folder_name(root);
+    if hashed != plain && usable(&hashed)? {
+        return Ok(hashed);
+    }
+    let names = if hashed == plain {
+        plain
+    } else {
+        format!("{plain} and {hashed}")
+    };
+    bail!(
+        "no folder name is free for the project {}: {names} under {} belong to other projects \
+         or hold no readable {PROJECT_FILE}",
+        root.display(),
+        projects.display()
+    )
+}
+
+/// Writes `dir/project.json` (R9): pretty JSON in field order and one final
+/// newline, mode 0600, through `fsx`'s atomic write (no-follow, temp file,
+/// fsync, rename, directory fsync).
+pub(crate) fn write_project_file(dir: &Path, file: &ProjectFile) -> Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(file).context("Failed to serialize project.json")?;
+    bytes.push(b'\n');
+    fsx::write_atomic_private(&dir.join(PROJECT_FILE), &bytes)
+}
+
+/// `building` (0700) with `file` in it, renamed onto `target`, `projects/`
+/// fsynced after.
+fn build_project_folder(building: &Path, target: &Path, file: &ProjectFile) -> Result<()> {
+    fsx::create_private_dir(building)?;
+    write_project_file(building, file)?;
+    fs::rename(building, target).with_context(|| {
+        format!(
+            "Failed to move {} into place as {}",
+            building.display(),
+            target.display()
+        )
+    })?;
+    if let Some(projects) = target.parent() {
+        fsx::fsync_dir(projects)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
