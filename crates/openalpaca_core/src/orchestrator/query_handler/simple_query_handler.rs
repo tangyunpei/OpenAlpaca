@@ -153,9 +153,9 @@ impl Orchestrator {
             request_id: Some(request_id),
             principal: Some(principal.clone()),
             scope: Some(scope.clone()),
-            // Threaded only on the tool-mode main loop, where steer/followup
-            // items persist it for re-entry scope; None elsewhere (other
-            // paths carry no tools that read it).
+            // Threaded only on the tool-mode main loop; read by no tool since
+            // F4 (steer/followup items persist `request_workspace_root`), and
+            // None elsewhere.
             workspace_path: match &loop_overrides {
                 Some(super::LoopOverrides::MainLoop { workspace_path, .. }) => {
                     workspace_path.clone()

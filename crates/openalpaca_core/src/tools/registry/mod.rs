@@ -47,9 +47,10 @@ pub use capabilities::{
 ///   workspace root only on a turn that carries one, G2), and by nothing else:
 ///   it is the only one of the three that may place bytes on disk.
 /// - `workspace_path` — the path **as sent**, unresolved, threaded only on the
-///   tool-mode main loop. Read by `steer_workflow` and `queue_followup`
-///   (`runner/lead_agent/tools.rs`), which persist it on the row so the re-entry
-///   turn resolves the same workspace again.
+///   tool-mode main loop and read by **no tool** since F4: `steer_workflow`
+///   (`tools/builtins/steer_workflow.rs`) and `queue_followup`
+///   (`runner/lead_agent/tools.rs`) persist `request_workspace_root`, which
+///   the lead's context — which never carried the as-sent path — has too.
 ///
 /// Collapsing them means one resolved root plus the two bits that actually
 /// differ (did a client send it; is it CWD-derived), so a new consumer cannot
@@ -105,8 +106,8 @@ pub struct ToolContext {
     /// The resource scope of the originating request. None where not threaded.
     pub scope: Option<crate::security::policy::Scope>,
     /// Filesystem workspace path of the originating request (from GUI/CLI),
-    /// when one was provided. Persisted with steering/follow-up items so
-    /// re-entry turns can restore the workspace scope (Routing V2).
+    /// when one was provided — as sent, unresolved. Read by no tool since F4:
+    /// the steering and follow-up writers persist `request_workspace_root`.
     pub workspace_path: Option<String>,
     /// The session whose event log carries this call's `tool_call` /
     /// `tool_result` records — and therefore its `tool_execution_log` index

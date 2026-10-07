@@ -114,7 +114,13 @@ impl BuiltInTool for SteerWorkflowTool {
             request_id: ctx.request_id.unwrap_or_else(Uuid::nil),
             principal,
             scope,
-            workspace_path: ctx.workspace_path.clone(),
+            // F4 — the turn's resolved project root, so a message left
+            // undelivered at the workflow's exit is filed
+            // (`unprocessed_steering`) under the project the steer was aimed
+            // at, as the HTTP steer route's row already is
+            // (`apps/openalpacad/src/routes/tasks.rs:1012-1020`). Never
+            // `workspace_path`, the path as sent.
+            workspace_path: ctx.request_workspace_root.clone(),
             received_at: Utc::now(),
             origin: SteeringOrigin::User,
         };
@@ -199,7 +205,10 @@ mod tests {
                 global_id: "user1".to_string(),
             }),
             scope: Some(Scope::Global),
-            workspace_path: Some("/ws/project".to_string()),
+            // The resolved root beside the path as sent, as the main loop
+            // builds them (`simple_query_handler.rs:150-163`).
+            request_workspace_root: Some("/ws/project".to_string()),
+            workspace_path: Some("/ws/project/src".to_string()),
             ..Default::default()
         }
     }
@@ -213,8 +222,12 @@ mod tests {
         (ctx, bus, inbox)
     }
 
+    /// F4 — the message carries the turn's resolved project root, never the
+    /// path as sent. Literals, not a tempdir: this tool copies the field the
+    /// context builder resolved; the resolution itself is tested against the
+    /// filesystem in `runner/lead_agent/tests.rs` and `orchestrator/tests.rs`.
     #[tokio::test]
-    async fn test_steer_ok_queues_message_with_ctx_identity() {
+    async fn a_model_steer_carries_the_turns_resolved_project_root() {
         let (shared, bus, inbox) = setup_with_workflow(16);
         let mut rx = bus.subscribe();
         let tool = SteerWorkflowTool::new(shared, bus.clone(), None);
@@ -228,7 +241,7 @@ mod tests {
             .expect("push should succeed");
         assert!(result.contains("task-1"), "missing task id: {result}");
 
-        // Message landed with the ctx identity + workspace path.
+        // Message landed with the ctx identity and the resolved root.
         let drained = inbox.drain_all();
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].text, "focus on tests");
@@ -238,7 +251,11 @@ mod tests {
                 global_id: "user1".to_string()
             }
         );
-        assert_eq!(drained[0].workspace_path.as_deref(), Some("/ws/project"));
+        assert_eq!(
+            drained[0].workspace_path.as_deref(),
+            Some("/ws/project"),
+            "the steering message must carry the resolved root, not the path as sent"
+        );
 
         // WorkflowSteered published by the shared push helper.
         let mut found = false;

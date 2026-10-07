@@ -55,15 +55,23 @@ pub enum SteeringOrigin {
 
 /// A single interjection targeted at a running workflow.
 ///
-/// Carries the originating principal/scope/workspace so leftover messages
-/// can re-enter the front door as a fresh turn (follow-up conversion) — and
-/// [`SteeringOrigin`], which says whether that is allowed at all.
+/// Carries the originating principal, scope and project root so leftover
+/// messages can re-enter the front door as a fresh turn (follow-up
+/// conversion) — and [`SteeringOrigin`], which says whether that is allowed
+/// at all.
 #[derive(Debug, Clone)]
 pub struct SteeringMsg {
     pub text: String,
     pub request_id: Uuid,
     pub principal: Principal,
     pub scope: Scope,
+    /// The turn's resolved project root — `ToolContext.request_workspace_root`
+    /// on the `steer_workflow` tool, the turn's `MemoryScopeContext` on the
+    /// `/steer` prefix, the header's root else the run's own on the HTTP
+    /// route — never the path as the client sent it (F4); `None` when the
+    /// turn carried no project. Written as `workspace_path` to the `steering`
+    /// session-log record and to the `unprocessed_steering` row a message
+    /// left undelivered becomes.
     pub workspace_path: Option<String>,
     pub received_at: DateTime<Utc>,
     /// Who wrote it — see [`SteeringOrigin`].

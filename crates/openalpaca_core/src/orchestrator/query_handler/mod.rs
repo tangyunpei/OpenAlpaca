@@ -9,8 +9,8 @@ pub(super) enum LoopOverrides {
     /// active workflows — `steer_workflow`/`queue_followup`).
     MainLoop {
         /// Filesystem workspace path from the originating request, threaded
-        /// into `ToolContext` so steer/followup items can restore scope on
-        /// re-entry.
+        /// into `ToolContext.workspace_path`, which no tool reads since F4
+        /// (the steer/followup items persist `request_workspace_root`).
         workspace_path: Option<String>,
         /// GAP-13 — the model this one turn runs on (`HandleRequest`'s field,
         /// already validated against the registry by the route that accepted
