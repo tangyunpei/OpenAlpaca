@@ -13,11 +13,14 @@
 //! decides whose folder it is, never the name (R6), and a name is never
 //! parsed back into a path (R8).
 
+use std::collections::BTreeSet;
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Mutex;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
 use uuid::Uuid;
@@ -347,6 +350,137 @@ pub fn is_not_registered(e: &anyhow::Error) -> bool {
             Some(ProjectError::NotRegistered { .. })
         )
     })
+}
+
+// ============================================================================
+// Reading (§3, R9, R11)
+// ============================================================================
+
+/// `home_root()/projects`. A path query: creates nothing.
+pub fn projects_dir() -> Result<PathBuf> {
+    Ok(super::home_root()?.join(PROJECTS_DIR))
+}
+
+/// §3 *lookup*: the project registered at `root`, or `None`. Two small
+/// reads, no scan and no lock: `projects/<folder_name>/project.json` and,
+/// when that is absent, unreadable or records another root,
+/// `projects/<hashed_folder_name>/project.json`. Creates nothing. A folder
+/// with no readable file is passed over with one WARN per folder per process
+/// (R11). An error is a relative `root`, no home root, or a folder that
+/// cannot be resolved.
+pub fn lookup(root: &Path) -> Result<Option<Project>> {
+    let root = canonical_root(root)?;
+    let want = root.to_string_lossy();
+    let projects = projects_dir()?;
+    let plain = folder_name(&root);
+    let hashed = hashed_folder_name(&root);
+    let names = if hashed == plain {
+        vec![plain]
+    } else {
+        vec![plain, hashed]
+    };
+    for name in names {
+        if let Some(project) = read_project_dir(&projects.join(name))?
+            && project.root_string() == want.as_ref()
+        {
+            return Ok(Some(project));
+        }
+    }
+    Ok(None)
+}
+
+/// The project a folder under `projects/` records, or `None`: no folder
+/// there, or one OpenAlpaca does not open (R11) — a link, a file, no
+/// `project.json`, a `project.json` that is a link, has another hard link, is
+/// not one this build parses, has another `version`, or records a root that is
+/// not absolute. Each of those is one WARN per folder per process, and
+/// nothing is deleted.
+pub(crate) fn read_project_dir(dir: &Path) -> Result<Option<Project>> {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Ok(unreadable(dir, "it is a symbolic link"));
+        }
+        Ok(meta) if !meta.is_dir() => return Ok(unreadable(dir, "it is not a directory")),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Ok(unreadable(dir, &format!("it cannot be read ({e})"))),
+    }
+    let bytes = match fsx::read_if_exists(&dir.join(PROJECT_FILE)) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Ok(unreadable(dir, "it has no project.json")),
+        Err(e) => {
+            return Ok(unreadable(
+                dir,
+                &format!("its project.json cannot be read ({e:#})"),
+            ));
+        }
+    };
+    let file: ProjectFile = match serde_json::from_slice(&bytes) {
+        Ok(file) => file,
+        Err(e) => {
+            return Ok(unreadable(
+                dir,
+                &format!("its project.json is not one this build reads ({e})"),
+            ));
+        }
+    };
+    if file.version != PROJECT_FILE_VERSION {
+        return Ok(unreadable(
+            dir,
+            &format!(
+                "its project.json has version {}, and this build reads version {PROJECT_FILE_VERSION}",
+                file.version
+            ),
+        ));
+    }
+    if !Path::new(&file.root).is_absolute() {
+        return Ok(unreadable(
+            dir,
+            &format!(
+                "its project.json records a root that is not an absolute path ({:?})",
+                file.root
+            ),
+        ));
+    }
+    let name = dir
+        .file_name()
+        .with_context(|| format!("{} names no folder", dir.display()))?
+        .to_string_lossy()
+        .into_owned();
+    let dir = dir
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve {}", dir.display()))?;
+    let root = PathBuf::from(&file.root);
+    Ok(Some(Project {
+        id: file.id,
+        missing: !root.is_dir(),
+        root,
+        name,
+        dir,
+        created_at: file.created_at,
+        previous_root: file.previous_root.map(PathBuf::from),
+        previous_name: file.previous_name,
+    }))
+}
+
+/// R11's report for `dir`, the first time this process meets it; always
+/// `None`, so a reader can return it.
+fn unreadable(dir: &Path, why: &str) -> Option<Project> {
+    if first_warning(format!("unreadable {}", dir.display())) {
+        tracing::warn!(
+            "{} is not opened as a project: {why}. OpenAlpaca leaves the folder as it is and never deletes it",
+            dir.display()
+        );
+    }
+    None
+}
+
+/// What this process has already reported (R11: "reported once at WARN").
+static WARNED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// `true` the first time this process sees `key`.
+fn first_warning(key: String) -> bool {
+    WARNED.lock().unwrap_or_else(|p| p.into_inner()).insert(key)
 }
 
 #[cfg(test)]

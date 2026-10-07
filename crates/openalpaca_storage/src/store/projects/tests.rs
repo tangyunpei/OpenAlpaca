@@ -378,3 +378,224 @@ fn not_registered_is_recognised_through_any_context() {
         "/work/app is not a project OpenAlpaca knows"
     )));
 }
+
+// ── Reading and lookup (S1.5) ───────────────────────────────────────────────
+
+/// A `project.json` naming `root`, with a fresh id, as R9 writes one.
+fn file_for(root: &Path) -> ProjectFile {
+    ProjectFile {
+        version: PROJECT_FILE_VERSION,
+        id: ProjectId::new(),
+        root: root.to_string_lossy().into_owned(),
+        created_at: "2026-10-07T09:30:00Z".to_string(),
+        previous_root: None,
+        previous_name: None,
+    }
+}
+
+impl World {
+    fn projects(&self) -> PathBuf {
+        self.home().join(PROJECTS_DIR)
+    }
+
+    /// `projects/<name>/project.json` holding `file`, written by hand — as
+    /// another build, a copy or a person leaves one.
+    fn plant(&self, name: &str, file: &ProjectFile) -> PathBuf {
+        let dir = self.projects().join(name);
+        fs::create_dir_all(&dir).unwrap();
+        let mut bytes = serde_json::to_vec_pretty(file).unwrap();
+        bytes.push(b'\n');
+        fs::write(dir.join(PROJECT_FILE), bytes).unwrap();
+        dir
+    }
+}
+
+#[test]
+fn a_fresh_home_has_no_projects_and_lookup_creates_nothing() {
+    let w = World::new();
+    assert_eq!(projects_dir().unwrap(), w.projects());
+    assert_eq!(lookup(&w.folder("app")).unwrap(), None);
+    assert!(!w.projects().exists());
+}
+
+#[test]
+fn lookup_finds_a_project_at_its_plain_name() {
+    let w = World::new();
+    let root = w.folder("dev/my_app");
+    let file = file_for(&root);
+    w.plant(&folder_name(&root), &file);
+
+    let project = lookup(&root).unwrap().expect("registered");
+    assert_eq!(project.id, file.id);
+    assert_eq!(project.root, root);
+    assert_eq!(project.name, folder_name(&root));
+    assert_eq!(
+        project.dir,
+        w.projects().canonicalize().unwrap().join(&project.name)
+    );
+    assert!(!project.missing);
+    assert_eq!(project.file(), file);
+}
+
+#[cfg(unix)]
+#[test]
+fn lookup_through_a_link_finds_the_root_it_reaches() {
+    let w = World::new();
+    let root = w.folder("real");
+    let file = file_for(&root);
+    w.plant(&folder_name(&root), &file);
+    let link = w.tmp.path().join("work").join("link");
+    std::os::unix::fs::symlink(&root, &link).unwrap();
+    assert_eq!(lookup(&link).unwrap().map(|p| p.id), Some(file.id));
+}
+
+#[test]
+fn lookup_reads_the_hashed_folder_when_the_plain_one_records_another_root() {
+    let w = World::new();
+    let (underscore, dash) = (w.folder("b_c"), w.folder("b-c"));
+    assert_eq!(folder_name(&underscore), folder_name(&dash));
+    let first = file_for(&underscore);
+    let second = file_for(&dash);
+    w.plant(&folder_name(&underscore), &first);
+    w.plant(&hashed_folder_name(&dash), &second);
+    assert_eq!(lookup(&underscore).unwrap().map(|p| p.id), Some(first.id));
+    assert_eq!(
+        lookup(&dash).unwrap().map(|p| (p.id, p.name)),
+        Some((second.id, hashed_folder_name(&dash)))
+    );
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn a_folder_with_no_project_json_is_skipped_and_warned_about_once() {
+    let w = World::new();
+    let root = w.folder("skipped");
+    let plain = w.projects().join(folder_name(&root));
+    fs::create_dir_all(&plain).unwrap();
+    let file = file_for(&root);
+    w.plant(&hashed_folder_name(&root), &file);
+
+    assert_eq!(lookup(&root).unwrap().map(|p| p.id), Some(file.id));
+    assert_eq!(lookup(&root).unwrap().map(|p| p.id), Some(file.id));
+    assert!(plain.is_dir(), "never deleted (R11)");
+    let shown = plain.display().to_string();
+    logs_assert(|lines: &[&str]| {
+        let n = lines
+            .iter()
+            .filter(|l| {
+                l.contains("WARN") && l.contains(&shown) && l.contains("has no project.json")
+            })
+            .count();
+        if n == 1 {
+            Ok(())
+        } else {
+            Err(format!("one WARN for {shown}, got {n}"))
+        }
+    });
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn a_project_json_this_build_cannot_read_is_never_opened() {
+    let w = World::new();
+    let root = w.folder("app");
+    let good = file_for(&root);
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("not-json", b"{ this is not json".to_vec()),
+        (
+            "version-two",
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2, "id": good.id, "root": good.root, "created_at": good.created_at
+            }))
+            .unwrap(),
+        ),
+        (
+            "relative-root",
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1, "id": good.id, "root": "dev/app", "created_at": good.created_at
+            }))
+            .unwrap(),
+        ),
+        (
+            "loose-id",
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1, "id": good.id.to_string().to_uppercase(),
+                "root": good.root, "created_at": good.created_at
+            }))
+            .unwrap(),
+        ),
+    ];
+    for (name, bytes) in &cases {
+        let dir = w.projects().join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(PROJECT_FILE), bytes).unwrap();
+        assert_eq!(read_project_dir(&dir).unwrap(), None, "{name}");
+        assert_eq!(read_project_dir(&dir).unwrap(), None, "{name}");
+        assert!(dir.join(PROJECT_FILE).exists(), "{name}: never deleted");
+    }
+    let names: Vec<String> = cases.iter().map(|(name, _)| name.to_string()).collect();
+    logs_assert(move |lines: &[&str]| {
+        for name in &names {
+            let marker = format!("/{name} is not opened as a project");
+            let n = lines
+                .iter()
+                .filter(|l| l.contains("WARN") && l.contains(&marker))
+                .count();
+            if n != 1 {
+                return Err(format!("one WARN for {name}, got {n}"));
+            }
+        }
+        Ok(())
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_folder_or_a_linked_project_json_is_never_opened() {
+    let w = World::new();
+    let root = w.folder("app");
+    let real = w.plant("real", &file_for(&root));
+    let linked_dir = w.projects().join("linked-dir");
+    std::os::unix::fs::symlink(&real, &linked_dir).unwrap();
+    assert_eq!(read_project_dir(&linked_dir).unwrap(), None);
+    let linked_file = w.projects().join("linked-file");
+    fs::create_dir_all(&linked_file).unwrap();
+    std::os::unix::fs::symlink(real.join(PROJECT_FILE), linked_file.join(PROJECT_FILE)).unwrap();
+    assert_eq!(read_project_dir(&linked_file).unwrap(), None);
+    assert!(read_project_dir(&real).unwrap().is_some());
+}
+
+#[test]
+fn a_project_json_with_a_key_this_build_does_not_know_still_reads() {
+    let w = World::new();
+    let root = w.folder("app");
+    let file = file_for(&root);
+    let dir = w.projects().join(folder_name(&root));
+    fs::create_dir_all(&dir).unwrap();
+    let mut value = serde_json::to_value(&file).unwrap();
+    value["written_by"] = serde_json::json!("a newer build");
+    fs::write(
+        dir.join(PROJECT_FILE),
+        serde_json::to_vec_pretty(&value).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lookup(&root).unwrap().map(|p| p.id), Some(file.id));
+}
+
+#[test]
+fn a_missing_project_is_found_at_the_path_it_was_registered_at() {
+    let w = World::new();
+    let root = w.folder("moved-away");
+    let file = file_for(&root);
+    w.plant(&folder_name(&root), &file);
+    fs::remove_dir(&root).unwrap();
+    let project = lookup(&root).unwrap().expect("still registered (ST-7)");
+    assert_eq!(project.id, file.id);
+    assert!(project.missing);
+}
+
+#[test]
+fn lookup_refuses_a_relative_root() {
+    let _w = World::new();
+    assert!(lookup(Path::new("dev/app")).is_err());
+}
