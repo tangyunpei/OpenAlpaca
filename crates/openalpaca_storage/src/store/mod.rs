@@ -25,6 +25,7 @@
 
 mod artifact;
 pub mod project_move;
+pub mod projects;
 mod reveal;
 
 pub use artifact::{
