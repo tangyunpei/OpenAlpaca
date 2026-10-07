@@ -212,6 +212,29 @@ using with an older build is the second case it names. To switch over:
    Settings → Persona, keep the lines you want as standing instructions, and
    delete the rest. Nothing moves them into memory notes for you.
 
+7. **Check `agents/system_agent.md`.** `~/.openalpaca/config/agents/` survives
+   the reset too, and the daemon writes that directory only when it is absent,
+   so a store an earlier build set up keeps the `system_agent.md` that build
+   wrote. As earlier builds shipped it, that file ends its frontmatter with two
+   lines that switched the agent's approval prompts off: `file_delete` is not
+   the name of any tool, and a template's own `require_confirmation_for` list
+   replaces the default — every tool marked destructive asks first — instead
+   of adding to it, so with those two lines the agent's `shell_execute`,
+   `file_write`, `artifact_write` and `workspace_write` ran with no approval
+   card. Open the file and delete exactly these two lines:
+
+   ```yaml
+   require_confirmation_for:
+     - "file_delete"
+   ```
+
+   A running daemon reads the change on its own (`state/logs/daemon.log` says
+   `Agent template hot-reloaded`); `openalpaca daemon restart`, or `Stop
+   daemon…` then `Start daemon` in the app's Settings → Connection, does the
+   same. A file that does not have the two lines needs nothing. A template of
+   your own that names real tools in `require_confirmation_for` is unaffected:
+   an explicit list still wins.
+
 The reset leaves `~/.openalpaca/README.md` as it is, and an older build's text
 there is out of date: delete it, and the next start seeds the current one.
 `.layout`, beside it and in each project's `.openalpaca/`, keeps whatever it
