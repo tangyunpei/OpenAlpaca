@@ -55,9 +55,11 @@ fn a_child_spawned_after_the_install_sees_no_master_key_and_the_installed_key_st
 
     // Review focus — a malformed key is refused before anything is installed,
     // and the environment fallback still answers afterwards.
+    let refused = KeyEncryptor::install_process_key("not-hex")
+        .expect_err("a key that is not 64 hex characters is refused");
     assert!(
-        KeyEncryptor::install_process_key("not-hex").is_err(),
-        "a key that is not 64 hex characters is refused"
+        refused.starts_with("Invalid master key hex: "),
+        "the refusal names what was refused: {refused}"
     );
     KeyEncryptor::from_env().expect("a refused install leaves the fallback in place");
 
@@ -92,8 +94,11 @@ fn a_child_spawned_after_the_install_sees_no_master_key_and_the_installed_key_st
         "the inherited key must not be the one installed"
     );
 
-    // The same key again is a no-op; a different one is refused.
+    // The same key again is a no-op — in either hex case, since the same 32
+    // bytes are the same key; a different one is refused.
     KeyEncryptor::install_process_key(FILE_KEY).expect("re-installing the same key is fine");
+    KeyEncryptor::install_process_key(&FILE_KEY.to_ascii_uppercase())
+        .expect("the same key in upper case is the same key");
     assert!(
         KeyEncryptor::install_process_key(INHERITED_KEY).is_err(),
         "a second, different master key in one process is refused"

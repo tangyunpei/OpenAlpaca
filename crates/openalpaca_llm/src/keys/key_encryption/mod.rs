@@ -18,8 +18,8 @@ const PREFIX: &str = "aes256:";
 pub const MASTER_KEY_ENV: &str = "OPENALPACA_MASTER_KEY";
 
 /// The master key this process was handed, as the 64 hex characters
-/// [`KeyEncryptor::ensure_at`] returns — validated before it is stored, so a
-/// read of it cannot fail. Filled once, by
+/// [`KeyEncryptor::ensure_at`] returns, trimmed and in lower case — validated
+/// before it is stored, so a read of it cannot fail. Filled once, by
 /// [`KeyEncryptor::install_process_key`]; never by a unit test, since every
 /// test in a binary shares it.
 static PROCESS_KEY: OnceLock<String> = OnceLock::new();
@@ -56,12 +56,14 @@ impl KeyEncryptor {
     /// reader built on it use from now on, before any environment variable.
     ///
     /// `hex_key` is validated first (64 hex characters, 32 bytes), so a later
-    /// read cannot fail. Installing the **same** key again is a no-op; a
-    /// **different** one is refused — one process with two master keys would
-    /// silently split what it encrypts from what it can decrypt.
+    /// read cannot fail, and stored trimmed and in lower case, so the same 32
+    /// bytes in either hex case are the same key. Installing the **same** key
+    /// again is a no-op; a **different** one is refused — one process with two
+    /// master keys would silently split what it encrypts from what it can
+    /// decrypt.
     pub fn install_process_key(hex_key: &str) -> Result<(), String> {
-        Self::from_hex(hex_key, "the master key to install")?;
-        match PROCESS_KEY.set(hex_key.trim().to_string()) {
+        Self::from_hex(hex_key, "master key")?;
+        match PROCESS_KEY.set(hex_key.trim().to_ascii_lowercase()) {
             Ok(()) => Ok(()),
             Err(rejected) if PROCESS_KEY.get() == Some(&rejected) => Ok(()),
             Err(_) => {
