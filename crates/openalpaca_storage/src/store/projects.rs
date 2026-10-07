@@ -200,10 +200,19 @@ pub fn canonical_root(path: &Path) -> Result<PathBuf> {
 /// there is no usable home root or `root` is relative: a question, never a
 /// reason to fail.
 pub fn overlaps_home_store(root: &Path) -> bool {
+    let Ok(home) = super::home_root() else {
+        return false;
+    };
+    overlaps_home_store_in(&home, root)
+}
+
+/// [`overlaps_home_store`] against the home store `home`, as [`register`]
+/// resolved it once.
+fn overlaps_home_store_in(home: &Path, root: &Path) -> bool {
     let Ok(root) = canonical_root(root) else {
         return false;
     };
-    let Ok(home) = super::home_root().and_then(|home| canonical_root(&home)) else {
+    let Ok(home) = canonical_root(home) else {
         return false;
     };
     root.starts_with(&home) || home.starts_with(&root)
@@ -358,7 +367,13 @@ pub fn is_not_registered(e: &anyhow::Error) -> bool {
 
 /// `home_root()/projects`. A path query: creates nothing.
 pub fn projects_dir() -> Result<PathBuf> {
-    Ok(super::home_root()?.join(PROJECTS_DIR))
+    Ok(projects_dir_in(&super::home_root()?))
+}
+
+/// `home/projects`, for the home store `home` as [`register`] resolved it
+/// once.
+fn projects_dir_in(home: &Path) -> PathBuf {
+    home.join(PROJECTS_DIR)
 }
 
 /// §3 *lookup*: the project registered at `root`, or `None`. Two small
@@ -370,10 +385,16 @@ pub fn projects_dir() -> Result<PathBuf> {
 /// cannot be resolved.
 pub fn lookup(root: &Path) -> Result<Option<Project>> {
     let root = canonical_root(root)?;
+    lookup_in(&super::home_root()?, &root)
+}
+
+/// [`lookup`] of the **canonical** `root` under the home store `home`, as
+/// [`register`] resolved it once.
+fn lookup_in(home: &Path, root: &Path) -> Result<Option<Project>> {
     let want = root.to_string_lossy();
-    let projects = projects_dir()?;
-    let plain = folder_name(&root);
-    let hashed = hashed_folder_name(&root);
+    let projects = projects_dir_in(home);
+    let plain = folder_name(root);
+    let hashed = hashed_folder_name(root);
     let names = if hashed == plain {
         vec![plain]
     } else {
@@ -568,7 +589,9 @@ pub fn test_home_guard_armed() -> bool {
 /// Why a test build may not write under the home store it would use, or
 /// `None`: the store must have been set through `OPENALPACA_HOME_STORE`, and
 /// not into the developer's own store. `set` is the variable;
-/// `default_store` is `<user home>/.openalpaca`, `home_root`'s fallback.
+/// `default_store` is `<user home>/.openalpaca`, `home_root`'s fallback. Pure:
+/// it compares the paths it is given, and [`refuse_unguarded_test_home`] asks
+/// it twice, of both as written and of both resolved.
 #[cfg(any(test, feature = "test-home-guard"))]
 fn unguarded_home(
     set: Option<&std::ffi::OsStr>,
@@ -583,16 +606,38 @@ fn unguarded_home(
     }
 }
 
+/// The home store one [`register`] call works under, resolved **once**: the
+/// variable and the user's home are read one time, the test-build guard
+/// judges that reading, and every read and write the call makes is under the
+/// store this returns. A later `home_root()` would read the environment again,
+/// and under parallel tests another test's guard may have dropped or moved
+/// the variable in between — so a check that passed would no longer describe
+/// the store written to (the S1 review's I1).
+fn register_home() -> Result<PathBuf> {
+    let set = std::env::var_os(super::HOME_STORE_ENV);
+    let user_home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
+    refuse_unguarded_test_home(set.as_deref(), user_home.as_deref());
+    super::resolve_home_root(set.map(PathBuf::from), user_home)
+}
+
 /// The owner's rule that no test writes into a developer's real store:
 /// panics, before anything is read or written, in a test build whose home
 /// store was not set through `OPENALPACA_HOME_STORE` or was set into the real
-/// one.
+/// one — as written, or where it leads: a link, a `..` or another case that
+/// reaches `<user home>/.openalpaca` is the real store too. Only the
+/// variable's side is resolved through the store; the real store's side is
+/// the user's home resolved, with `.openalpaca` appended, so a test whose
+/// variable names a temp directory never reads the developer's store, not
+/// even its metadata. A path that cannot be resolved is judged as written.
 #[cfg(any(test, feature = "test-home-guard"))]
-fn refuse_unguarded_test_home() {
-    let set = std::env::var_os(super::HOME_STORE_ENV);
-    let default_store =
-        directories::BaseDirs::new().map(|b| b.home_dir().join(super::STORE_DIR_NAME));
-    if let Some(why) = unguarded_home(set.as_deref(), default_store.as_deref()) {
+fn refuse_unguarded_test_home(set: Option<&std::ffi::OsStr>, user_home: Option<&Path>) {
+    let real = user_home.map(|home| home.join(super::STORE_DIR_NAME));
+    let why = unguarded_home(set, real.as_deref()).or_else(|| {
+        let set = set.map(|value| resolved_or_as_written(Path::new(value)));
+        let real = user_home.map(|home| resolved_or_as_written(home).join(super::STORE_DIR_NAME));
+        unguarded_home(set.as_deref().map(Path::as_os_str), real.as_deref())
+    });
+    if let Some(why) = why {
         panic!(
             "store::projects::register in a test build with {} {why}: take the crate's \
              home-store guard (HomeStoreGuard; EnvSandbox in the CLI) first, so no test writes \
@@ -603,9 +648,25 @@ fn refuse_unguarded_test_home() {
     }
 }
 
+/// [`canonical_root`] of `path`, or `path` as written when it has none.
+#[cfg(any(test, feature = "test-home-guard"))]
+fn resolved_or_as_written(path: &Path) -> PathBuf {
+    canonical_root(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Release and `cargo run` builds: no check.
 #[cfg(not(any(test, feature = "test-home-guard")))]
-fn refuse_unguarded_test_home() {}
+fn refuse_unguarded_test_home(_set: Option<&std::ffi::OsStr>, _user_home: Option<&Path>) {}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: a step [`register`] runs once on this thread, right after
+    /// it has read the environment, checked it and resolved the home store —
+    /// where, under parallel tests, another test's guard can drop or move
+    /// `OPENALPACA_HOME_STORE`, which no call boundary lets a test reach.
+    static AFTER_HOME_RESOLVED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 // ============================================================================
 // Registering (§3, R6, R10, R13)
@@ -633,8 +694,10 @@ pub fn lock() -> ProjectsLock {
 }
 
 /// §3 *register*: the project at `root`, its folder created when there is
-/// none — create-if-absent under [`lock`]. In order: the test-build guard;
-/// [`canonical_root`]; an entry [`lookup`] finds is returned as it is, a
+/// none — create-if-absent under [`lock`]. In order: the home store,
+/// resolved once and judged by the test-build guard — every step after reads
+/// and writes under that one store ([`register_home`]); [`canonical_root`];
+/// an entry [`lookup`] finds is returned as it is, a
 /// missing project's included (ST-7); a root that overlaps the home store is
 /// [`ProjectError::IsHome`] (R13), one that is not a directory
 /// [`ProjectError::NotADirectory`]; then the folder is built as
@@ -646,21 +709,25 @@ pub fn lock() -> ProjectsLock {
 /// made in between — and only the daemon registers, only where it accepts
 /// work for a root (§3), so no other process does.
 pub fn register(root: &Path) -> Result<Project> {
-    refuse_unguarded_test_home();
+    let home = register_home()?;
+    #[cfg(test)]
+    if let Some(step) = AFTER_HOME_RESOLVED.with(|hook| hook.borrow_mut().take()) {
+        step();
+    }
     let root = canonical_root(root)?;
     let held = lock();
-    if let Some(existing) = lookup(&root)? {
+    if let Some(existing) = lookup_in(&home, &root)? {
         return Ok(existing);
     }
     let path = root.to_string_lossy().into_owned();
-    if overlaps_home_store(&root) {
+    if overlaps_home_store_in(&home, &root) {
         return Err(ProjectError::IsHome { path }.into());
     }
     if !root.is_dir() {
         return Err(ProjectError::NotADirectory { path }.into());
     }
-    let name = name_for(&root, None, &held)?;
-    let projects = projects_dir()?;
+    let name = name_for_in(&home, &root, None, &held)?;
+    let projects = projects_dir_in(&home);
     fsx::create_private_dir(&projects)?;
     let target = projects.join(&name);
     let building = fsx::temp_path_for(&target)?;
@@ -686,12 +753,25 @@ pub fn register(root: &Path) -> Result<Project> {
 /// no readable file — then the hashed name under the same test; neither free
 /// is an error naming both. `this` is `Some` only on a re-point (S3), so a
 /// project whose new plain name is its own folder's keeps it.
+// Its first caller outside the tests is S3's re-point; `register` calls
+// `name_for_in` with the home store it resolved once.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn name_for(
+    root: &Path,
+    this: Option<&ProjectId>,
+    held: &ProjectsLock,
+) -> Result<String> {
+    name_for_in(&super::home_root()?, root, this, held)
+}
+
+/// [`name_for`] under the home store `home`, as [`register`] resolved it once.
+fn name_for_in(
+    home: &Path,
     root: &Path,
     this: Option<&ProjectId>,
     _held: &ProjectsLock,
 ) -> Result<String> {
-    let projects = projects_dir()?;
+    let projects = projects_dir_in(home);
     let want = root.to_string_lossy();
     let usable = |name: &str| -> Result<bool> {
         let dir = projects.join(name);

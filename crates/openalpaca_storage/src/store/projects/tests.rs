@@ -776,7 +776,10 @@ fn an_unguarded_home_store_stops_a_test_build_and_nothing_is_written() {
         let _env = HomeStoreGuard::for_user_home(user_home.path(), store.as_deref());
         // With HOME moved, the store `home_root` falls back to is a temp dir.
         assert_eq!(crate::store::home_root().unwrap(), real_store);
-        let message = panic_of(refuse_unguarded_test_home).expect("the guard must refuse");
+        let message = panic_of(|| {
+            let _ = register_home();
+        })
+        .expect("the guard must refuse");
         assert!(
             message.contains(&format!("{} {why}", crate::store::HOME_STORE_ENV)),
             "{message}"
@@ -793,7 +796,9 @@ fn an_unguarded_home_store_stops_a_test_build_and_nothing_is_written() {
         );
     }
     let _env = HomeStoreGuard::set(&user_home.path().join("scratch-store"));
-    assert_eq!(panic_of(refuse_unguarded_test_home), None);
+    let mut resolved = None;
+    assert_eq!(panic_of(|| resolved = Some(register_home().unwrap())), None);
+    assert_eq!(resolved, Some(user_home.path().join("scratch-store")));
     assert!(!real_store.exists(), "the guard writes nothing");
 }
 
@@ -1047,5 +1052,92 @@ fn register_refuses_an_unguarded_home_store_and_writes_nothing() {
     assert!(
         !real_store.exists(),
         "nothing was written under the user's home"
+    );
+}
+
+// ── The guard and the writes name one home store (S1 review, I1) ────────────
+
+#[test]
+fn register_writes_only_under_the_home_store_it_checked_when_the_variable_changes_after() {
+    // Under parallel tests another test's guard can drop — the variable
+    // unset — or another be taken — the variable moved — between the check
+    // and the first read. Neither may move a read or a write.
+    for unset in [true, false] {
+        let user_home = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let _env = HomeStoreGuard::for_user_home(user_home.path(), Some(store.path()));
+        let other_store = other.path().to_path_buf();
+        AFTER_HOME_RESOLVED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                // SAFETY: this test's guard holds ENV_LOCK on this thread for
+                // the whole `register` call, and every test that reads or
+                // writes the variable takes the same lock.
+                unsafe {
+                    if unset {
+                        std::env::remove_var(crate::store::HOME_STORE_ENV);
+                    } else {
+                        std::env::set_var(crate::store::HOME_STORE_ENV, &other_store);
+                    }
+                }
+            }));
+        });
+
+        let project = register(root.path()).unwrap();
+
+        assert!(
+            AFTER_HOME_RESOLVED.with(|hook| hook.borrow().is_none()),
+            "register ran the step"
+        );
+        let checked = store.path().canonicalize().unwrap().join(PROJECTS_DIR);
+        assert!(project.dir.starts_with(&checked), "{project:?}");
+        assert!(
+            !user_home.path().join(".openalpaca").exists(),
+            "nothing under the user's home store (unset: {unset})"
+        );
+        assert!(
+            !other.path().join(PROJECTS_DIR).exists(),
+            "nothing under the store set after the check (unset: {unset})"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_store_that_reaches_the_real_one_by_a_link_a_dot_dot_or_another_case_is_refused() {
+    let user_home = tempdir().unwrap();
+    let real_store = user_home.path().join(".openalpaca");
+    fs::create_dir(&real_store).unwrap();
+    fs::create_dir(user_home.path().join("sub")).unwrap();
+    let link = user_home.path().join("store-link");
+    std::os::unix::fs::symlink(&real_store, &link).unwrap();
+    let mut stores = vec![
+        link.clone(),
+        link.join("scratch"),
+        user_home.path().join("sub").join("..").join(".openalpaca"),
+    ];
+    // Another case reaches the same folder only on a case-insensitive volume
+    // (macOS's default); there the volume's own spelling decides.
+    let other_case = user_home.path().join(".OpenAlpaca");
+    if other_case.exists() {
+        stores.push(other_case);
+    }
+    let project = tempdir().unwrap();
+    for store in &stores {
+        let _env = HomeStoreGuard::for_user_home(user_home.path(), Some(store));
+        let message = panic_of(|| {
+            let _ = register(project.path());
+        })
+        .unwrap_or_else(|| panic!("{store:?} must be refused"));
+        assert!(
+            message.contains("pointing into the real home store"),
+            "{store:?}: {message}"
+        );
+    }
+    assert_eq!(
+        names_in(&real_store),
+        Vec::<String>::new(),
+        "nothing was written into the real store"
     );
 }
