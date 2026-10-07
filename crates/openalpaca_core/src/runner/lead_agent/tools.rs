@@ -1112,8 +1112,18 @@ impl BuiltInTool for CheckSubagentStatusTool {
                 },
                 content,
             )),
-            Some(SubagentStatus::Failed { error, .. }) => {
-                Err(format!("Subagent '{}' failed: {}", run_id, error))
+            Some(SubagentStatus::Failed { error, output }) => {
+                // F2: the kept answer, whole. An `Err` reaches the model as
+                // head and tail at the loop's inline bound; the tool itself
+                // cuts nothing.
+                if output.is_empty() {
+                    Err(format!("Subagent '{}' failed: {}", run_id, error))
+                } else {
+                    Err(format!(
+                        "Subagent '{}' failed: {}\nIts last output follows, whole:\n{}",
+                        run_id, error, output
+                    ))
+                }
             }
             None => Err(format!(
                 "Unknown subagent_run_id: '{}'. Valid run IDs are shown when calling spawn_subagent.",

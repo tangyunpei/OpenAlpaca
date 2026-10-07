@@ -471,6 +471,60 @@ fn a_failed_entry_with_no_output_shows_its_error_alone_and_a_long_error_is_cut()
     assert!(!summary.contains("Last output:"));
 }
 
+// ── F2: check_subagent_status returns a failed subagent's whole answer ──
+
+/// The tool returns the kept output whole — 3,015 characters, 9,015 bytes
+/// here — after the error; the loop, not the tool, bounds what the model
+/// sees.
+#[tokio::test]
+async fn check_subagent_status_returns_a_failed_subagents_whole_answer() {
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-f");
+    let output = format!("{}\n/tmp/report.md", "結果".repeat(1500));
+    tracker.fail_with_output(
+        "run-f",
+        "Agent 'writer' failed: MaxRounds.".to_string(),
+        output.clone(),
+    );
+    let tool = CheckSubagentStatusTool {
+        tracker: tracker.clone(),
+    };
+
+    let err = tool
+        .execute(&serde_json::json!({"subagent_run_id": "run-f"}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "Subagent 'run-f' failed: Agent 'writer' failed: MaxRounds.\nIts last output follows, whole:\n{output}"
+        )
+    );
+}
+
+/// A failure that carries no answer names the error alone, as before.
+#[tokio::test]
+async fn check_subagent_status_on_a_failure_with_no_output_names_the_error_alone() {
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-g");
+    tracker.fail(
+        "run-g",
+        "Cancelled before starting (parent task was cancelled)".to_string(),
+    );
+    let tool = CheckSubagentStatusTool {
+        tracker: tracker.clone(),
+    };
+
+    let err = tool
+        .execute(&serde_json::json!({"subagent_run_id": "run-g"}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "Subagent 'run-g' failed: Cancelled before starting (parent task was cancelled)"
+    );
+}
+
 #[tokio::test]
 async fn test_check_subagent_status_tool() {
     let tracker = Arc::new(SubagentTracker::new());
