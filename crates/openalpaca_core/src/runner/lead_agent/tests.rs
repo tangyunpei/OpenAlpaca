@@ -343,7 +343,10 @@ fn an_answer_within_its_budget_is_shown_whole_in_the_summary() {
     let answer = format!("Report: {}", "r".repeat(2992));
     tracker.complete("run-1", answer.clone(), true);
 
-    assert_eq!(tracker.summary(), format!("- **run-1**: completed — {answer}"));
+    assert_eq!(
+        tracker.summary(),
+        format!("- **run-1**: completed — {answer}")
+    );
 }
 
 /// The bound is the tracker's, set at construction: an 8 KiB bound gives
@@ -375,17 +378,28 @@ fn a_batch_past_the_bound_still_lists_every_entry() {
     for i in 1..=60 {
         let run_id = format!("run-{i}");
         tracker.register(&run_id);
-        tracker.complete(&run_id, format!("BEGIN-{i} {} END-{i}", "z".repeat(4000)), true);
+        tracker.complete(
+            &run_id,
+            format!("BEGIN-{i} {} END-{i}.", "z".repeat(4000)),
+            true,
+        );
     }
     assert_eq!(super::tracker::answer_budget(32 * 1024, 60), 512);
     let summary = tracker.summary();
     // Each entry is about 595 bytes (prefix, 256-byte head, notice, 256-byte
     // tail, newline): 60 of them are about 35,700 bytes, past the bound.
     for i in 1..=60 {
-        assert!(summary.contains(&format!("- **run-{i}**: completed — BEGIN-{i} ")), "entry {i} missing");
-        assert!(summary.contains(&format!(" END-{i}")), "tail {i} missing");
+        assert!(
+            summary.contains(&format!("- **run-{i}**: completed — BEGIN-{i} ")),
+            "entry {i} missing"
+        );
+        assert!(summary.contains(&format!(" END-{i}.")), "tail {i} missing");
     }
-    assert!(summary.len() > 32 * 1024, "past the floor the summary may exceed the bound: {} bytes", summary.len());
+    assert!(
+        summary.len() > 32 * 1024,
+        "past the floor the summary may exceed the bound: {} bytes",
+        summary.len()
+    );
 }
 
 // ── F2: a failed subagent's answer is kept whole ──
@@ -497,7 +511,7 @@ async fn check_subagent_status_returns_a_failed_subagents_whole_answer() {
     assert_eq!(
         err,
         format!(
-            "Subagent 'run-f' failed: Agent 'writer' failed: MaxRounds.\nIts last output follows, whole:\n{output}"
+            "Subagent 'run-f' failed: Agent 'writer' failed: MaxRounds.\nIts last output follows:\n{output}"
         )
     );
 }
@@ -561,8 +575,9 @@ fn the_lead_prompt_says_check_subagent_status_returns_the_whole_answer() {
     assert!(
         prompt.contains(
             "check_subagent_status: Poll a single subagent by run_id. Shows whether the subagent is \
-             queued, running, completed, or failed, and returns a finished subagent's whole answer \
-             — a long one arrives as a stub to page with read_result."
+             queued, running, completed, or failed. Completed: returns the whole answer — a long one \
+             arrives as a stub to page with read_result. Failed: returns the error and the last \
+             output, as head and tail when long."
         ),
         "{prompt}"
     );

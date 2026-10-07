@@ -928,7 +928,10 @@ impl BuiltInTool for SpawnSubagentTool {
                 // `check_subagent_status` and the summary can show its tail.
                 tracker.fail_with_output(
                     &run_id_clone,
-                    format!("Agent '{}' failed: {:?}.", agent_id_owned, result.finish_reason),
+                    format!(
+                        "Agent '{}' failed: {:?}.",
+                        agent_id_owned, result.finish_reason
+                    ),
                     result.final_content,
                 );
             }
@@ -1120,7 +1123,7 @@ impl BuiltInTool for CheckSubagentStatusTool {
                     Err(format!("Subagent '{}' failed: {}", run_id, error))
                 } else {
                     Err(format!(
-                        "Subagent '{}' failed: {}\nIts last output follows, whole:\n{}",
+                        "Subagent '{}' failed: {}\nIts last output follows:\n{}",
                         run_id, error, output
                     ))
                 }

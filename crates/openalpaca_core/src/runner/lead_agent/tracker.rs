@@ -8,12 +8,18 @@ use std::sync::Mutex;
 pub enum SubagentStatus {
     Queued,
     Running,
-    Completed { content: String, success: bool },
+    Completed {
+        content: String,
+        success: bool,
+    },
     /// `error` says why; `output` is the subagent's whole final content when
     /// its loop produced one (empty for a plugin loop's failure and for a run
     /// cancelled before it started). Kept whole, as a completed answer is:
     /// the lead reads it with `check_subagent_status`.
-    Failed { error: String, output: String },
+    Failed {
+        error: String,
+        output: String,
+    },
 }
 
 /// What `wait_for_subagents` prepends to the summary (the interrupted return
