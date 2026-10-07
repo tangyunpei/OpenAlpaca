@@ -126,8 +126,9 @@ fn test_tracker_fail() {
     tracker.fail("run-1", "Some error".to_string());
 
     match tracker.get("run-1") {
-        Some(SubagentStatus::Failed { error }) => {
+        Some(SubagentStatus::Failed { error, output }) => {
             assert_eq!(error, "Some error");
+            assert!(output.is_empty(), "fail() keeps no output: {output:?}");
         }
         other => panic!("Expected Failed, got {:?}", other),
     }
@@ -385,6 +386,89 @@ fn a_batch_past_the_bound_still_lists_every_entry() {
         assert!(summary.contains(&format!(" END-{i}")), "tail {i} missing");
     }
     assert!(summary.len() > 32 * 1024, "past the floor the summary may exceed the bound: {} bytes", summary.len());
+}
+
+// ── F2: a failed subagent's answer is kept whole ──
+
+/// The tracker keeps a failed subagent's whole final content beside its
+/// error — 1,221 characters here, past the 500 the old error string held,
+/// in a script where 500 chars were 1,500 bytes.
+#[test]
+fn a_failed_subagents_whole_answer_is_kept() {
+    let tracker = SubagentTracker::new();
+    tracker.register("run-1");
+    let answer = format!("{}\n最後の行: /tmp/report.md", "見出し".repeat(400));
+    assert!(answer.chars().count() > 500);
+
+    tracker.fail_with_output(
+        "run-1",
+        "Agent 'writer' failed: MaxRounds.".to_string(),
+        answer.clone(),
+    );
+
+    match tracker.get("run-1") {
+        Some(SubagentStatus::Failed { error, output }) => {
+            assert_eq!(error, "Agent 'writer' failed: MaxRounds.");
+            assert_eq!(output, answer);
+        }
+        other => panic!("Expected Failed, got {:?}", other),
+    }
+    assert!(tracker.all_done());
+}
+
+/// The summary shows a failed entry's error, then the answer's head and tail
+/// under the same budget a completed answer gets: one entry, the 8,192-byte
+/// cap, head 4,096 and a tail of 4,096 that ends on the path.
+#[test]
+fn the_summary_shows_a_failed_answers_error_and_its_head_and_tail() {
+    let tracker = SubagentTracker::new();
+    tracker.register("run-1");
+    let output = format!("{}/tmp/report.md", "A".repeat(10_000));
+    tracker.fail_with_output(
+        "run-1",
+        "Agent 'writer' failed: MaxRounds.".to_string(),
+        output,
+    );
+
+    assert_eq!(
+        tracker.summary(),
+        format!(
+            "- **run-1**: failed — Agent 'writer' failed: MaxRounds. Last output: {}\n\n[... 1822 of 10014 bytes elided; the tail follows ...]\n\n{}/tmp/report.md",
+            "A".repeat(4096),
+            "A".repeat(4082)
+        )
+    );
+}
+
+/// A failure with no output reads as it did before, and a long error text
+/// is cut to 512 bytes — 256 head, 256 tail — so a provider's or a plugin's
+/// message cannot eat the batch's budget.
+#[test]
+fn a_failed_entry_with_no_output_shows_its_error_alone_and_a_long_error_is_cut() {
+    let tracker = SubagentTracker::new();
+    tracker.register("run-1");
+    tracker.fail(
+        "run-1",
+        "Cancelled before starting (parent task was cancelled)".to_string(),
+    );
+    assert_eq!(
+        tracker.summary(),
+        "- **run-1**: failed — Cancelled before starting (parent task was cancelled)"
+    );
+
+    let tracker = SubagentTracker::new();
+    tracker.register("run-2");
+    tracker.fail("run-2", "E".repeat(2000));
+    let summary = tracker.summary();
+    assert_eq!(
+        summary,
+        format!(
+            "- **run-2**: failed — {}\n\n[... 1488 of 2000 bytes elided; the tail follows ...]\n\n{}",
+            "E".repeat(256),
+            "E".repeat(256)
+        )
+    );
+    assert!(!summary.contains("Last output:"));
 }
 
 #[tokio::test]

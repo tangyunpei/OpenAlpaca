@@ -9,7 +9,11 @@ pub enum SubagentStatus {
     Queued,
     Running,
     Completed { content: String, success: bool },
-    Failed { error: String },
+    /// `error` says why; `output` is the subagent's whole final content when
+    /// its loop produced one (empty for a plugin loop's failure and for a run
+    /// cancelled before it started). Kept whole, as a completed answer is:
+    /// the lead reads it with `check_subagent_status`.
+    Failed { error: String, output: String },
 }
 
 /// What `wait_for_subagents` prepends to the summary (the interrupted return
@@ -25,6 +29,9 @@ const SUMMARY_ANSWER_CAP_BYTES: usize = 8 * 1024;
 /// Below this an entry says nothing useful; from about 25 entries on the
 /// summary may exceed the bound and the loop's own spill or cut takes over.
 const SUMMARY_ANSWER_FLOOR_BYTES: usize = 512;
+/// A failed entry's error text, which `LoopFinishReason::Error(String)` and a
+/// plugin's error make unbounded.
+const SUMMARY_ERROR_MAX_BYTES: usize = 512;
 
 /// How many bytes of each answer `summary` shows: the loop's inline bound,
 /// less the header, shared by every tracked entry, less each entry's fixed
@@ -88,9 +95,16 @@ impl SubagentTracker {
         self.notify.notify_waiters();
     }
 
+    /// A failure that carries no answer — cancelled before it started, or a
+    /// plugin loop's error.
     pub fn fail(&self, run_id: &str, error: String) {
+        self.fail_with_output(run_id, error, String::new());
+    }
+
+    /// A failure with the subagent's whole final content beside it.
+    pub fn fail_with_output(&self, run_id: &str, error: String, output: String) {
         let mut map = self.statuses.lock().unwrap_or_else(|p| p.into_inner());
-        map.insert(run_id.to_string(), SubagentStatus::Failed { error });
+        map.insert(run_id.to_string(), SubagentStatus::Failed { error, output });
         drop(map);
         self.notify.notify_waiters();
     }
@@ -158,8 +172,17 @@ impl SubagentTracker {
                         head_tail(content, budget)
                     ));
                 }
-                SubagentStatus::Failed { error } => {
-                    parts.push(format!("- **{}**: failed — {}", id, error));
+                SubagentStatus::Failed { error, output } => {
+                    let mut line = format!(
+                        "- **{}**: failed — {}",
+                        id,
+                        head_tail(error, SUMMARY_ERROR_MAX_BYTES)
+                    );
+                    if !output.is_empty() {
+                        line.push_str(" Last output: ");
+                        line.push_str(&head_tail(output, budget));
+                    }
+                    parts.push(line);
                 }
             }
         }

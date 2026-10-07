@@ -923,14 +923,13 @@ impl BuiltInTool for SpawnSubagentTool {
                 };
                 tracker.complete(&run_id_clone, content, true);
             } else {
-                tracker.fail(
+                // F2: the error says why; the answer travels whole beside it,
+                // as a completed one does, so the lead can read it with
+                // `check_subagent_status` and the summary can show its tail.
+                tracker.fail_with_output(
                     &run_id_clone,
-                    format!(
-                        "Agent '{}' failed: {:?}. Last output: {}",
-                        agent_id_owned,
-                        result.finish_reason,
-                        result.final_content.chars().take(500).collect::<String>()
-                    ),
+                    format!("Agent '{}' failed: {:?}.", agent_id_owned, result.finish_reason),
+                    result.final_content,
                 );
             }
         });
@@ -1113,7 +1112,7 @@ impl BuiltInTool for CheckSubagentStatusTool {
                 },
                 content,
             )),
-            Some(SubagentStatus::Failed { error }) => {
+            Some(SubagentStatus::Failed { error, .. }) => {
                 Err(format!("Subagent '{}' failed: {}", run_id, error))
             }
             None => Err(format!(
