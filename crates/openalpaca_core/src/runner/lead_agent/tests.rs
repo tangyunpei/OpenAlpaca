@@ -1420,6 +1420,55 @@ async fn test_wait_for_subagents_closed_empty_inbox_does_not_interrupt() {
     assert!(result.contains("All subagents finished"));
 }
 
+#[tokio::test(start_paused = true)]
+async fn wait_for_subagents_returns_when_the_last_subagent_finishes_just_after_its_check() {
+    // The lost wakeup: the last completion lands after `all_done()` read
+    // the map and before the wait listens for a change. `notify_waiters`
+    // keeps no permit, so a waiter that registers only afterwards sleeps
+    // until the 600 s cap. The hook puts the completion in that window;
+    // under a paused clock a lost wakeup reaches the 5 s timeout at once.
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-1");
+    tracker.after_next_unfinished_check(|t| t.complete("run-1", "done".to_string(), true));
+    let tool = WaitForSubagentsTool {
+        tracker,
+        steering: None,
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tool.execute(&serde_json::json!({})),
+    )
+    .await
+    .expect("a completion just after the check must end the wait, not the 600 s cap")
+    .unwrap();
+    assert!(result.contains("All subagents finished"), "got: {result}");
+    assert!(result.contains("1 completed"), "got: {result}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn wait_for_subagents_returns_when_the_last_subagent_finishes_while_it_waits() {
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-1");
+    let tool = Arc::new(WaitForSubagentsTool {
+        tracker: tracker.clone(),
+        steering: None,
+    });
+    let waiter = {
+        let tool = tool.clone();
+        tokio::spawn(async move { tool.execute(&serde_json::json!({})).await })
+    };
+    tokio::task::yield_now().await;
+    tracker.complete("run-1", "done".to_string(), true);
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("a completion while the wait listens must end it")
+        .unwrap()
+        .unwrap();
+    assert!(result.contains("All subagents finished"), "got: {result}");
+}
+
 // ── Plugin-backed subagent spawning ─────────────────────────────────
 
 /// Stub plugin executor: accepts the spawn, records the instructions,

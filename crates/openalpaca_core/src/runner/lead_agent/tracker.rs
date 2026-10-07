@@ -61,7 +61,15 @@ pub struct SubagentTracker {
     /// `[orchestrator.sessions] tool_result_inline_bytes` of the loop that
     /// reads `summary()` — the bound the whole summary is sized to stay under.
     inline_bytes: usize,
+    /// Test-only: run once, right after an `all_done()` that answered
+    /// `false` has released the lock — a status change landing just after
+    /// the waiter's check, which no await point lets a test reach otherwise.
+    #[cfg(test)]
+    after_unfinished_check: Mutex<Option<AfterCheckHook>>,
 }
+
+#[cfg(test)]
+type AfterCheckHook = Box<dyn FnOnce(&SubagentTracker) + Send>;
 
 impl Default for SubagentTracker {
     fn default() -> Self {
@@ -83,7 +91,22 @@ impl SubagentTracker {
             statuses: Mutex::new(HashMap::new()),
             notify: tokio::sync::Notify::new(),
             inline_bytes,
+            #[cfg(test)]
+            after_unfinished_check: Mutex::new(None),
         }
+    }
+
+    /// Test-only: `hook` runs once, after the next `all_done()` that answers
+    /// `false`, with the lock released and before that answer is returned.
+    #[cfg(test)]
+    pub(super) fn after_next_unfinished_check(
+        &self,
+        hook: impl FnOnce(&SubagentTracker) + Send + 'static,
+    ) {
+        *self
+            .after_unfinished_check
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(Box::new(hook));
     }
 
     pub fn register(&self, run_id: &str) {
@@ -128,13 +151,27 @@ impl SubagentTracker {
     }
 
     pub fn all_done(&self) -> bool {
-        let map = self.statuses.lock().unwrap_or_else(|p| p.into_inner());
-        map.values().all(|s| {
-            matches!(
-                s,
-                SubagentStatus::Completed { .. } | SubagentStatus::Failed { .. }
-            )
-        })
+        let done = {
+            let map = self.statuses.lock().unwrap_or_else(|p| p.into_inner());
+            map.values().all(|s| {
+                matches!(
+                    s,
+                    SubagentStatus::Completed { .. } | SubagentStatus::Failed { .. }
+                )
+            })
+        };
+        #[cfg(test)]
+        if !done {
+            let hook = self
+                .after_unfinished_check
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+            if let Some(hook) = hook {
+                hook(self);
+            }
+        }
+        done
     }
 
     pub fn status_counts(&self) -> (usize, usize, usize, usize) {

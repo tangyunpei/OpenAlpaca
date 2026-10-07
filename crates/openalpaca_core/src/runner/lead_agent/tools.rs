@@ -1202,6 +1202,13 @@ impl BuiltInTool for WaitForSubagentsTool {
                     self.tracker.summary()
                 ));
             }
+            // Listen for a status change BEFORE checking `all_done()`: the
+            // tracker wakes with `notify_waiters`, which keeps no permit, so
+            // a completion landing between the check and a later
+            // registration would be lost and the wait would run to the cap.
+            let subagent_change = self.tracker.notify.notified();
+            tokio::pin!(subagent_change);
+            subagent_change.as_mut().enable();
             if self.tracker.all_done() {
                 break;
             }
@@ -1229,7 +1236,7 @@ impl BuiltInTool for WaitForSubagentsTool {
                 }
             };
             tokio::select! {
-                _ = self.tracker.notify.notified() => { /* re-check all_done */ }
+                _ = &mut subagent_change => { /* re-check all_done */ }
                 _ = steering_wakeup => { /* re-check inbox */ }
                 _ = tokio::time::sleep(remaining) => { /* timeout */ }
             }
