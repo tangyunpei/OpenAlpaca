@@ -1373,7 +1373,11 @@ pub fn post_update_tool_definition() -> ToolDefinition {
 /// - **Lead agent** (`new`): identity from the task's `created_by`, the
 ///   running task recorded as `source_task_id`.
 /// - **Main loop** (`for_main_loop`): per-request, no source task — identity
-///   and workspace path come from the invocation's `ToolContext`.
+///   comes from the invocation's `ToolContext`.
+///
+/// In both modes the row's `workspace_path` is the context's
+/// `request_workspace_root`, the turn's resolved project root (F4), so the
+/// turn the item later runs as re-enters in that project.
 pub struct QueueFollowupTool {
     db: Option<Database>,
     bus: EventBus,
@@ -1491,9 +1495,15 @@ impl BuiltInTool for QueueFollowupTool {
         self.queue(arguments, self.constructed_principal(), None)
     }
 
-    /// Context-aware variant: prefer the invocation's threaded identity and
-    /// workspace path (main-loop path) over the constructor fallback, so
-    /// re-entry scope survives (Routing V2 Phase-1 gap fix).
+    /// Context-aware variant — the one a sandboxed call reaches
+    /// (`tools/registry/mod.rs:768` hands every builtin its context). The
+    /// identity is the invocation's threaded principal, else the
+    /// constructor's `created_by` (the lead's context threads none); the
+    /// project is `request_workspace_root`, the turn's resolved root — the
+    /// run's project on the lead's context, the turn's on the main loop's
+    /// (F4). Never `workspace_path`: that was the path as the client sent
+    /// it, which the lead's context never carried, so a follow-up a workflow
+    /// promised re-entered with no project.
     async fn execute_with_context(
         &self,
         arguments: &serde_json::Value,
@@ -1503,7 +1513,7 @@ impl BuiltInTool for QueueFollowupTool {
             .principal
             .clone()
             .unwrap_or_else(|| self.constructed_principal());
-        self.queue(arguments, principal, ctx.workspace_path.as_deref())
+        self.queue(arguments, principal, ctx.request_workspace_root.as_deref())
     }
 }
 

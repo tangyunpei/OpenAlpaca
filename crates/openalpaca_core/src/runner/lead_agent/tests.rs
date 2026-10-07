@@ -1094,12 +1094,29 @@ async fn test_queue_followup_system_owner_maps_to_system_principal() {
     assert_eq!(principal, crate::security::policy::Principal::System);
 }
 
+/// F4 — the row records the turn's project root, which is what the follow-up
+/// runner hands back to the gateway (`apps/openalpacad/src/followup.rs:44`),
+/// never the path the client sent. The turn sent a directory two levels
+/// below the `.git` marker; the row holds the canonical root.
 #[tokio::test]
-async fn test_queue_followup_main_loop_uses_ctx_identity_and_workspace_path() {
-    // Main-loop variant (Routing V2 Phase 2): identity + workspace path come
-    // from the invocation's ToolContext, no source task recorded.
+async fn a_queue_followup_from_the_main_loop_stores_the_turns_resolved_project_root() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join(".git")).unwrap();
+    let sent = project.path().join("src").join("lib");
+    std::fs::create_dir_all(&sent).unwrap();
+    let sent = sent.to_string_lossy().to_string();
+    // The root as the resolver spells it (`memory/workspace.rs:81-86`):
+    // canonical, which on macOS turns `/var/folders/…` into
+    // `/private/var/folders/…`.
+    let root = project
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
     let tool = QueueFollowupTool::for_main_loop(
         Some(db.clone()),
         EventBus::default(),
@@ -1107,12 +1124,18 @@ async fn test_queue_followup_main_loop_uses_ctx_identity_and_workspace_path() {
         "fallback-owner".to_string(),
         false,
     );
+    // The context the main loop builds (`simple_query_handler.rs:150-163`):
+    // the turn's scope context resolves the root; the path as sent rides
+    // beside it.
+    let scope = MemoryScopeContext::for_request(Some(sent.as_str()));
+    assert_eq!(scope.request_workspace_root.as_deref(), Some(root.as_str()));
     let ctx = crate::tools::registry::ToolContext {
         owner_id: Some("junpei".to_string()),
         principal: Some(crate::security::policy::Principal::User {
             global_id: "junpei".to_string(),
         }),
-        workspace_path: Some("/ws/project".to_string()),
+        request_workspace_root: scope.request_workspace_root.clone(),
+        workspace_path: Some(sent.clone()),
         ..Default::default()
     };
     tool.execute_with_context(&serde_json::json!({"description": "Do it later"}), &ctx)
@@ -1123,7 +1146,11 @@ async fn test_queue_followup_main_loop_uses_ctx_identity_and_workspace_path() {
     let rows = repo.list_queued_by_lane("junpei:cli").unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].source_task_id, None);
-    assert_eq!(rows[0].workspace_path.as_deref(), Some("/ws/project"));
+    assert_eq!(
+        rows[0].workspace_path.as_deref(),
+        Some(root.as_str()),
+        "the row must hold the resolved root, not the path as sent ({sent})"
+    );
     let principal: crate::security::policy::Principal =
         serde_json::from_str(&rows[0].principal_json).unwrap();
     assert_eq!(
@@ -1131,6 +1158,123 @@ async fn test_queue_followup_main_loop_uses_ctx_identity_and_workspace_path() {
         crate::security::policy::Principal::User {
             global_id: "junpei".to_string()
         }
+    );
+}
+
+/// F4 — the lead's context carries no `workspace_path`
+/// (`runner/lead_agent/mod.rs:278-292`) and does carry
+/// `request_workspace_root`, the run's project. A follow-up a workflow queues
+/// must run in that project; until this fix the row held NULL and the
+/// follow-up turn ran with none.
+#[tokio::test]
+async fn a_queue_followup_from_the_lead_stores_the_runs_project_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join(".git")).unwrap();
+    let root = MemoryScopeContext::for_request(project.path().to_str())
+        .request_workspace_root
+        .expect("a directory carrying .git resolves to itself");
+    assert_eq!(
+        root,
+        project
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    );
+
+    // The lead-agent constructor (`runner/lead_agent/mod.rs:342-350`):
+    // identity from the task's `created_by`, the run as `source_task_id`.
+    let tool = QueueFollowupTool::new(
+        Some(db.clone()),
+        EventBus::default(),
+        "task-1".to_string(),
+        "junpei:cli".to_string(),
+        "junpei".to_string(),
+        false,
+    );
+    // The context exactly as `run_lead_agent` builds it (`mod.rs:278-292`):
+    // no principal, no scope, no workspace_path — and the run's root.
+    let ctx = crate::tools::registry::ToolContext {
+        agent_id: Some("lead_agent::abc".to_string()),
+        agent_instance_id: Some("lead_agent::abc".to_string()),
+        task_id: Some("task-1".to_string()),
+        owner_id: Some("junpei".to_string()),
+        workspace_id: Some(root.clone()),
+        request_workspace_root: Some(root.clone()),
+        lane_key: Some("junpei:cli".to_string()),
+        source: Some("cli".to_string()),
+        ..Default::default()
+    };
+    tool.execute_with_context(
+        &serde_json::json!({"description": "Also update the docs"}),
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("junpei:cli").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].source_task_id.as_deref(), Some("task-1"));
+    assert_eq!(
+        rows[0].workspace_path.as_deref(),
+        Some(root.as_str()),
+        "a follow-up promised by a workflow must re-enter in the run's project"
+    );
+    // No principal on the lead's context: the constructor's `created_by` stands in.
+    let principal: crate::security::policy::Principal =
+        serde_json::from_str(&rows[0].principal_json).unwrap();
+    assert_eq!(
+        principal,
+        crate::security::policy::Principal::User {
+            global_id: "junpei".to_string()
+        }
+    );
+}
+
+/// Review focus — a turn whose path no longer exists (a CLI started in a
+/// directory since deleted, a row from an older build): the resolver has
+/// nothing to canonicalise and yields no root, and the row holds NULL —
+/// the same as a path under no marker. Nothing panics, nothing is stored
+/// as sent.
+#[tokio::test]
+async fn a_queue_followup_from_a_path_that_no_longer_exists_stores_no_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let gone = tempfile::tempdir().unwrap();
+    let sent = gone.path().join("deleted").join("project");
+    let sent = sent.to_string_lossy().to_string();
+    drop(gone);
+    assert!(!std::path::Path::new(&sent).exists());
+
+    let tool = QueueFollowupTool::for_main_loop(
+        Some(db.clone()),
+        EventBus::default(),
+        "junpei:cli".to_string(),
+        "junpei".to_string(),
+        false,
+    );
+    let scope = MemoryScopeContext::for_request(Some(sent.as_str()));
+    assert_eq!(scope.request_workspace_root, None);
+    let ctx = crate::tools::registry::ToolContext {
+        owner_id: Some("junpei".to_string()),
+        request_workspace_root: scope.request_workspace_root.clone(),
+        workspace_path: Some(sent.clone()),
+        ..Default::default()
+    };
+    tool.execute_with_context(&serde_json::json!({"description": "Later"}), &ctx)
+        .await
+        .unwrap();
+
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("junpei:cli").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].workspace_path, None,
+        "a vanished path is no project, not a stored string"
     );
 }
 

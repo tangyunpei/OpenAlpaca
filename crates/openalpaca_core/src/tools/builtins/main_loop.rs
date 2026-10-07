@@ -301,9 +301,9 @@ pub fn main_loop_tool_set(
         definitions.push(steer_def.clone());
         instances.push((steer_def, steer.clone() as Arc<dyn BuiltInTool>));
 
-        // Main-loop queue_followup: identity + workspace path come from the
-        // invocation's ToolContext (Phase-1 gap fix); the constructor value
-        // is only the fallback.
+        // Main-loop queue_followup: identity and the turn's resolved project
+        // root (`request_workspace_root`, F4) come from the invocation's
+        // ToolContext; the constructor value is only the identity fallback.
         let created_by = ctx
             .owner_id
             .clone()
