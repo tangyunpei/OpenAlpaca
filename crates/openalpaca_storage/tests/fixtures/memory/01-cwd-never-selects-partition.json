@@ -12,7 +12,7 @@
   ],
   "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
   "workspaces": [
-    { "name": "project_a", "marker": ".openalpaca" }
+    { "name": "project_a", "marker": ".git" }
   ],
   "daemon": { "cwd": "ws:project_a", "llm": "configured" },
   "partitions": [

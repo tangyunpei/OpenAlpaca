@@ -63,9 +63,10 @@ pre-squash database now meets row 06's refusal.
    **directories**, the **partitions** with their notes and control snapshots, and
    the **daemon** facts (its CWD, its LLM configuration).
 3. Build each named **context** (`MemoryAccessContext`, design §7a) exactly as the
-   file says. The loader resolves the project root by the marker walk of design
-   §3 rule 1 from the request workspace path; the fixture never writes a resolved
-   root.
+   file says. The loader resolves the project root from the request workspace
+   path with the store's own resolver (`store::projects::resolve`, storage design
+   §3): the nearest registered project or folder holding `.git`, never the home
+   store; `.openalpaca` is no marker. The fixture never writes a resolved root.
 4. Run the **operations** in order. Each carries its own `expect`; the run stops at
    the first failed expectation and reports the step.
 5. Check **`final_state`**.
@@ -85,7 +86,7 @@ library.
 | `notes_for_implementer` | no | prose: readings the file had to pin, and why |
 | `owners` | yes | `[{ "id", "owner_key" }]` — every owner id the file mentions, with its derived key (below) |
 | `database` | no | `{ "global_users": [ids], "local_user_id": id, "messages": [rowid strings], "tasks": [uuids] }` — the rows the identity check and source verification see; absent means the same as empty |
-| `workspaces` | no | `[{ "name", "marker": ".openalpaca" \| ".git" \| null, "subdirs": [..], "symlinks": [{ "path", "target" }], "files": [{ "path", "content" }] }]` — `subdirs`, `symlinks` and `files` are relative to the workspace and are created in that order, after the marker |
+| `workspaces` | no | `[{ "name", "marker": ".git" \| null, "subdirs": [..], "symlinks": [{ "path", "target" }], "files": [{ "path", "content" }] }]` — `subdirs`, `symlinks` and `files` are relative to the workspace and are created in that order, after the marker — any other marker fails the load |
 | `directories` | no | extra plain directories, by name (symlink targets, a moved-to location) |
 | `daemon` | no | `{ "cwd": <fixture path>, "llm": "configured" \| "none", "network": "allowed" \| "denied" }` — `network: denied` means the harness runs under plan §6's no-network mechanism |
 | `partitions` | no | see *Partitions* |
@@ -223,7 +224,7 @@ A named `MemoryAccessContext` (design §7a), in fixture terms:
 | Field | Values |
 |---|---|
 | `owner_id` | a string, or `null` for "no principal" |
-| `workspace` | a fixture path the request names as its workspace (the `x-workspace-path` header / `request_workspace_root`), or `null` = global only. The loader resolves the project root from it by the marker walk; `daemon.cwd` is **never** consulted |
+| `workspace` | a fixture path the request names as its workspace (the `x-workspace-path` header / `request_workspace_root`), or `null` = global only. The loader resolves the project root from it with `store::projects::resolve`; `daemon.cwd` is **never** consulted |
 | `surface` | `user_surface`, `model_tool`, `extraction` |
 | `origin` | `extraction` only: the origin the extractor records — `extracted_user` (the default, the user's own words) or `extracted_other` (assistant or tool output) |
 | `capabilities` | `{ "read", "write", "forget" }` booleans |

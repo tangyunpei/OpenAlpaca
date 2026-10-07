@@ -13,7 +13,7 @@
   ],
   "database": { "global_users": ["u_example_alice", "u_example_bob"], "local_user_id": "u_example_alice" },
   "workspaces": [
-    { "name": "bobs_project", "marker": ".openalpaca" }
+    { "name": "bobs_project", "marker": ".git" }
   ],
   "daemon": { "cwd": "home", "llm": "configured" },
   "partitions": [

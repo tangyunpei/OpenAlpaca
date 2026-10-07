@@ -14,7 +14,7 @@
   ],
   "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice", "messages": ["4901"], "tasks": ["00000008-0000-4000-8000-0000000000aa"] },
   "workspaces": [
-    { "name": "project_a", "marker": ".openalpaca" }
+    { "name": "project_a", "marker": ".git" }
   ],
   "daemon": { "cwd": "home", "llm": "configured" },
   "partitions": [

@@ -13,8 +13,8 @@
   ],
   "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
   "workspaces": [
-    { "name": "project_a", "marker": ".openalpaca" },
-    { "name": "project_c", "marker": ".openalpaca" }
+    { "name": "project_a", "marker": ".git" },
+    { "name": "project_c", "marker": ".git" }
   ],
   "directories": ["moved", "moved_two", "moved_three"],
   "daemon": { "cwd": "home", "llm": "configured" },

@@ -157,17 +157,14 @@ fn parse_time(v: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(v).unwrap().with_timezone(&Utc)
 }
 
-/// The marker walk of design §3 rule 1: `.openalpaca`, else `.git`, from the
-/// request workspace upward; a directory with no marker above it is global.
+/// The project root a request workspace resolves to: the store's own
+/// resolver (`store::projects::resolve`, storage design §3) — the nearest
+/// registered project or folder holding `.git`, never the home store. A
+/// directory under neither is global.
 fn find_project_root(from: &Path) -> Option<PathBuf> {
-    let mut cur = Some(from.to_path_buf());
-    while let Some(dir) = cur {
-        if dir.join(".openalpaca").exists() || dir.join(".git").exists() {
-            return Some(dir);
-        }
-        cur = dir.parent().map(Path::to_path_buf);
-    }
-    None
+    crate::store::projects::resolve(from)
+        .unwrap_or_else(|e| panic!("resolve {}: {e:#}", from.display()))
+        .map(|found| found.root)
 }
 
 impl Harness {
@@ -218,8 +215,12 @@ impl Harness {
             std::fs::create_dir_all(&dir).unwrap();
             match ws["marker"].as_str() {
                 Some(".git") => std::fs::create_dir_all(dir.join(".git")).unwrap(),
-                Some(".openalpaca") => std::fs::create_dir_all(dir.join(".openalpaca")).unwrap(),
-                _ => {}
+                None => {}
+                Some(other) => panic!(
+                    "workspace {}: marker {other:?} — a fixture's marker is \".git\" or null \
+                     (`.openalpaca` is no project marker, storage design §3)",
+                    s(&ws["name"])
+                ),
             }
             for sub in ws["subdirs"].as_array().into_iter().flatten() {
                 std::fs::create_dir_all(dir.join(s(sub))).unwrap();
@@ -2110,4 +2111,24 @@ fn every_file_level_fixture_is_satisfied() {
         eprintln!("=== {file}");
         run_fixture(file);
     }
+}
+
+/// The loader finds a context's project the way the daemon does (storage
+/// design §3): a folder holding `.git` is a root, and `.openalpaca` marks
+/// nothing any more (ST-9).
+#[test]
+fn the_loader_resolves_a_workspace_as_the_store_does() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _env = HomeStoreGuard::set(&home);
+    let repo = root.join("ws").join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    let old = root.join("ws").join("old");
+    std::fs::create_dir_all(old.join(".openalpaca")).unwrap();
+
+    assert_eq!(find_project_root(&repo.join("src")), Some(repo));
+    assert_eq!(find_project_root(&old), None, "`.openalpaca` is no marker");
 }
