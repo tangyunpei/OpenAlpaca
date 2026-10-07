@@ -552,5 +552,56 @@ pub fn by_id(id: &ProjectId) -> Result<Option<Project>> {
     Ok(list()?.into_iter().find(|project| project.id == *id))
 }
 
+// ============================================================================
+// The test-build guard (§3, last bullet)
+// ============================================================================
+
+/// Whether this build refuses to register under an unguarded home store:
+/// storage's own tests, and the test builds of the crates that enable
+/// `test-home-guard` through their `[dev-dependencies]`. Never a release or
+/// `cargo run` build.
+#[doc(hidden)]
+pub fn test_home_guard_armed() -> bool {
+    cfg!(any(test, feature = "test-home-guard"))
+}
+
+/// Why a test build may not write under the home store it would use, or
+/// `None`: the store must have been set through `OPENALPACA_HOME_STORE`, and
+/// not into the developer's own store. `set` is the variable;
+/// `default_store` is `<user home>/.openalpaca`, `home_root`'s fallback.
+#[cfg(any(test, feature = "test-home-guard"))]
+fn unguarded_home(
+    set: Option<&std::ffi::OsStr>,
+    default_store: Option<&Path>,
+) -> Option<&'static str> {
+    match set {
+        None => Some("unset"),
+        Some(value) if default_store.is_some_and(|real| Path::new(value).starts_with(real)) => {
+            Some("pointing into the real home store")
+        }
+        Some(_) => None,
+    }
+}
+
+/// The owner's rule that no test writes into a developer's real store:
+/// panics, before anything is read or written, in a test build whose home
+/// store was not set through `OPENALPACA_HOME_STORE` or was set into the real
+/// one.
+#[cfg(any(test, feature = "test-home-guard"))]
+fn refuse_unguarded_test_home() {
+    let set = std::env::var_os(super::HOME_STORE_ENV);
+    let default_store =
+        directories::BaseDirs::new().map(|b| b.home_dir().join(super::STORE_DIR_NAME));
+    if let Some(why) = unguarded_home(set.as_deref(), default_store.as_deref()) {
+        panic!(
+            "store::projects::register in a test build with {} {why}: take the crate's \
+             home-store guard (HomeStoreGuard; EnvSandbox in the CLI) first, so no test writes \
+             into the developer's ~/.openalpaca. A daemon binary `cargo test` built carries this \
+             check too: rebuild it with `cargo build -p openalpacad` before running it by hand",
+            super::HOME_STORE_ENV,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests;

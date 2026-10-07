@@ -707,3 +707,92 @@ fn an_entry_mid_re_point_is_listed_with_where_it_was() {
     );
     assert_eq!(listed[0].file(), file);
 }
+
+// ── The test-build guard (S1.7) ─────────────────────────────────────────────
+
+/// The message a call panicked with, or `None` when it returned.
+fn panic_of(f: impl FnOnce()) -> Option<String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .err()
+        .map(|payload| {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_default()
+        })
+}
+
+#[test]
+fn the_guard_names_an_unset_or_real_home_store_and_passes_any_other() {
+    use std::ffi::OsStr;
+    let real = Path::new("/Users/someone/.openalpaca");
+    assert_eq!(unguarded_home(None, Some(real)), Some("unset"));
+    assert_eq!(unguarded_home(None, None), Some("unset"));
+    assert_eq!(
+        unguarded_home(Some(OsStr::new("/Users/someone/.openalpaca")), Some(real)),
+        Some("pointing into the real home store")
+    );
+    assert_eq!(
+        unguarded_home(
+            Some(OsStr::new("/Users/someone/.openalpaca/scratch")),
+            Some(real)
+        ),
+        Some("pointing into the real home store")
+    );
+    assert_eq!(
+        unguarded_home(
+            Some(OsStr::new("/Users/someone/.openalpaca-test")),
+            Some(real)
+        ),
+        None
+    );
+    assert_eq!(
+        unguarded_home(Some(OsStr::new("/tmp/oa-test/home")), Some(real)),
+        None
+    );
+    assert_eq!(
+        unguarded_home(Some(OsStr::new("/tmp/oa-test/home")), None),
+        None
+    );
+}
+
+#[test]
+fn the_guard_is_armed_in_this_crates_test_build() {
+    assert!(test_home_guard_armed());
+}
+
+#[test]
+fn an_unguarded_home_store_stops_a_test_build_and_nothing_is_written() {
+    let user_home = tempdir().unwrap();
+    let real_store = user_home.path().join(".openalpaca");
+    for (store, why) in [
+        (None, "unset"),
+        (
+            Some(real_store.clone()),
+            "pointing into the real home store",
+        ),
+    ] {
+        let _env = HomeStoreGuard::for_user_home(user_home.path(), store.as_deref());
+        // With HOME moved, the store `home_root` falls back to is a temp dir.
+        assert_eq!(crate::store::home_root().unwrap(), real_store);
+        let message = panic_of(refuse_unguarded_test_home).expect("the guard must refuse");
+        assert!(
+            message.contains(&format!("{} {why}", crate::store::HOME_STORE_ENV)),
+            "{message}"
+        );
+        assert!(
+            message.contains("take the crate's home-store guard"),
+            "{message}"
+        );
+        // The lead's R-S5: a daemon binary `cargo test` built carries the
+        // check, so the message names the rebuild.
+        assert!(
+            message.contains("rebuild it with `cargo build -p openalpacad`"),
+            "{message}"
+        );
+    }
+    let _env = HomeStoreGuard::set(&user_home.path().join("scratch-store"));
+    assert_eq!(panic_of(refuse_unguarded_test_home), None);
+    assert!(!real_store.exists(), "the guard writes nothing");
+}

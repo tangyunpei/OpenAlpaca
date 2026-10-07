@@ -16,6 +16,8 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 pub(crate) struct HomeStoreGuard {
     _lock: MutexGuard<'static, ()>,
     prev: Option<OsString>,
+    /// `HOME` as it was, when [`HomeStoreGuard::for_user_home`] moved it.
+    prev_home: Option<Option<OsString>>,
 }
 
 impl HomeStoreGuard {
@@ -25,13 +27,56 @@ impl HomeStoreGuard {
         // SAFETY: serialized by ENV_LOCK; every test that reads the variable
         // holds the same guard.
         unsafe { std::env::set_var(HOME_STORE_ENV, path) };
-        Self { _lock: lock, prev }
+        Self {
+            _lock: lock,
+            prev,
+            prev_home: None,
+        }
+    }
+
+    /// Moves the user's home directory — `HOME`, which `directories::BaseDirs`
+    /// reads, so `home_root()`'s fallback becomes `<home>/.openalpaca` — and
+    /// sets `OPENALPACA_HOME_STORE` to `store`, or removes it for `None`. For
+    /// the test-build guard of `store::projects::register`: its "unset" and
+    /// "the real store" cases then name a temp directory, so even a guard that
+    /// failed to fire could write nothing into the developer's store. Same
+    /// lock, no second one. Panics, restoring both variables, if `BaseDirs`
+    /// does not answer with `home`.
+    pub(crate) fn for_user_home(home: &Path, store: Option<&Path>) -> Self {
+        let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = Self {
+            _lock: lock,
+            prev: std::env::var_os(HOME_STORE_ENV),
+            prev_home: Some(std::env::var_os("HOME")),
+        };
+        // SAFETY: serialized by ENV_LOCK, which `guard` holds until it drops
+        // and restores both variables.
+        unsafe {
+            std::env::set_var("HOME", home);
+            match store {
+                Some(store) => std::env::set_var(HOME_STORE_ENV, store),
+                None => std::env::remove_var(HOME_STORE_ENV),
+            }
+        }
+        let resolved = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
+        assert_eq!(
+            resolved.as_deref(),
+            Some(home),
+            "HOME did not move the user's home directory; refusing to run"
+        );
+        guard
     }
 }
 
 impl Drop for HomeStoreGuard {
     fn drop(&mut self) {
         // SAFETY: as above — still holding ENV_LOCK.
+        if let Some(prev_home) = self.prev_home.take() {
+            match prev_home {
+                Some(v) => unsafe { std::env::set_var("HOME", v) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
         match self.prev.take() {
             Some(v) => unsafe { std::env::set_var(HOME_STORE_ENV, v) },
             None => unsafe { std::env::remove_var(HOME_STORE_ENV) },
