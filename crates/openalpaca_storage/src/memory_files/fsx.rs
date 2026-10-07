@@ -5,6 +5,8 @@
 //! `store::write_atomic` and `store::create_private_dir` are private to the
 //! store module and lack the no-follow open, the 0600 mode and the directory
 //! fsync, so this module carries its own copies rather than widening theirs.
+//! These are `pub(crate)`: `store::projects` builds a project's folder and
+//! writes its `project.json` with them (storage design, Stage 1).
 
 use anyhow::{Context, Result, bail};
 use std::fs::{self, OpenOptions};
@@ -15,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Creates `dir` and every missing parent, then sets it to 0700 on Unix
 /// (best effort, like the store's own helper: a file system that refuses the
 /// mode change must not refuse the write).
-pub(super) fn create_private_dir(dir: &Path) -> Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir)
         .with_context(|| format!("Failed to create directory: {}", dir.display()))?;
     #[cfg(unix)]
@@ -98,7 +100,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The hidden sibling a write goes through: `.<name>.<pid>-<n>.tmp`. Hidden,
 /// so no scanner lists it; unique, so a stranded one never blocks a retry.
-fn temp_path_for(path: &Path) -> Result<PathBuf> {
+pub(crate) fn temp_path_for(path: &Path) -> Result<PathBuf> {
     let name = path
         .file_name()
         .with_context(|| format!("Not a file path: {}", path.display()))?
@@ -111,7 +113,7 @@ fn temp_path_for(path: &Path) -> Result<PathBuf> {
 /// `create_new` (never through a link), mode 0600, `fsync`, `rename` onto the
 /// target, then an `fsync` of the directory where the platform supports it.
 /// The temp file is removed on every failure path.
-pub(super) fn write_atomic_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = temp_path_for(path)?;
     let outcome = write_atomic_steps(path, &tmp, bytes);
     if outcome.is_err() {
@@ -145,7 +147,7 @@ fn write_atomic_steps(path: &Path, tmp: &Path, bytes: &[u8]) -> Result<()> {
 
 /// Flushes a directory's entries to disk so a completed rename survives a
 /// power loss. A no-op where directories cannot be opened for sync.
-pub(super) fn fsync_dir(dir: &Path) -> Result<()> {
+pub(crate) fn fsync_dir(dir: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         let file = fs::File::open(dir)
@@ -171,7 +173,7 @@ pub(super) fn remove_file_if_exists(path: &Path) -> Result<bool> {
 
 /// Removes a directory tree; absent is fine. Returns whether something was
 /// removed.
-pub(super) fn remove_dir_all_if_exists(path: &Path) -> Result<bool> {
+pub(crate) fn remove_dir_all_if_exists(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => {
             // Never descend through a link: remove the link itself.
@@ -190,7 +192,7 @@ pub(super) fn remove_dir_all_if_exists(path: &Path) -> Result<bool> {
 }
 
 /// Reads a file if it exists, refusing to follow a symlink at the leaf.
-pub(super) fn read_if_exists(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(crate) fn read_if_exists(path: &Path) -> Result<Option<Vec<u8>>> {
     match fs::symlink_metadata(path) {
         Ok(_) => read_regular_nofollow(path).map(Some),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -198,11 +200,13 @@ pub(super) fn read_if_exists(path: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
-/// The canonical string of a directory that may not exist yet: the deepest
+/// The canonical path of a directory that may not exist yet: the deepest
 /// existing ancestor is canonicalized and the missing tail is appended as
 /// written. A lazy partition therefore derives the same key before and after
 /// it is created, and the caller has already refused any link on the way.
-pub(super) fn canonical_string_lenient(path: &Path) -> Result<String> {
+/// A missing tail that ends in `..` has no file name, so the walk refuses it
+/// rather than leave a `..` in the answer.
+pub(crate) fn canonical_path_lenient(path: &Path) -> Result<PathBuf> {
     let mut existing: &Path = path;
     let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
     while !existing.exists() {
@@ -220,12 +224,18 @@ pub(super) fn canonical_string_lenient(path: &Path) -> Result<String> {
     for component in tail.into_iter().rev() {
         result.push(component);
     }
-    Ok(result.to_string_lossy().into_owned())
+    Ok(result)
+}
+
+/// [`canonical_path_lenient`] as the string a partition key and a snapshot's
+/// `root` are derived from.
+pub(crate) fn canonical_string_lenient(path: &Path) -> Result<String> {
+    Ok(canonical_path_lenient(path)?.to_string_lossy().into_owned())
 }
 
 /// A file's mode bits on Unix (`None` elsewhere), for the mode assertions.
 #[cfg(test)]
-pub(super) fn mode_of(path: &Path) -> Option<u32> {
+pub(crate) fn mode_of(path: &Path) -> Option<u32> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

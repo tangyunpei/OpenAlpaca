@@ -37,7 +37,7 @@ mod authority;
 mod cache;
 mod dirstat;
 mod doctor;
-mod fsx;
+pub(crate) mod fsx;
 mod note;
 mod partition;
 mod snapshot;

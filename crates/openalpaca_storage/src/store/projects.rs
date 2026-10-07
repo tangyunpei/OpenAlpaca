@@ -14,12 +14,15 @@
 //! parsed back into a path (R8).
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use anyhow::{Result, bail};
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
 use uuid::Uuid;
+
+use crate::memory_files::fsx;
 
 /// `<home>/projects` — one folder per project (ST-1). Not a
 /// [`super::ContentKind`]: it exists only at the home root, and
@@ -164,6 +167,43 @@ fn path_hash(root: &Path) -> String {
     let mut hash = crate::memory_files::sha256_hex(root.to_string_lossy().as_bytes());
     hash.truncate(NAME_HASH_HEX);
     hash
+}
+
+// ============================================================================
+// Roots (R4, R13)
+// ============================================================================
+
+/// The canonical form of a project root that may not exist: the deepest
+/// existing ancestor canonicalized — links resolved, the volume's own
+/// spelling — and the missing tail appended as written
+/// (`fsx::canonical_path_lenient`). A relative path is refused before
+/// anything is read: `Path::exists` and `canonicalize` would resolve it
+/// against the process's working directory, which would make the daemon's
+/// CWD a project (R22).
+pub fn canonical_root(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        bail!(
+            "a project root must be an absolute path, got {}",
+            path.display()
+        );
+    }
+    fsx::canonical_path_lenient(path)
+}
+
+/// R13, which replaces `resolves_to_the_home_store` in S2: whether `root` is
+/// the home store, lies inside it, or contains it — never a project, so
+/// `$HOME` stays "no project" even with a `~/.git`. Both sides canonical, so a
+/// link to the home store answers for the store it reaches. `false` when
+/// there is no usable home root or `root` is relative: a question, never a
+/// reason to fail.
+pub fn overlaps_home_store(root: &Path) -> bool {
+    let Ok(root) = canonical_root(root) else {
+        return false;
+    };
+    let Ok(home) = super::home_root().and_then(|home| canonical_root(&home)) else {
+        return false;
+    };
+    root.starts_with(&home) || home.starts_with(&root)
 }
 
 #[cfg(test)]

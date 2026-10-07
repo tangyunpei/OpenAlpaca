@@ -4,6 +4,9 @@
 //! `~/.openalpaca`.
 
 use super::*;
+use crate::store::tests::HomeStoreGuard;
+use std::fs;
+use tempfile::{TempDir, tempdir};
 
 /// A v4 UUID in its canonical spelling (third group starts with 4, fourth
 /// with 9).
@@ -136,4 +139,117 @@ fn a_cut_never_splits_a_character() {
     let name = folder_name(Path::new(&root));
     assert_eq!(name, format!("-{}-479c5867", "文".repeat(66)));
     assert_eq!(name.len(), 199 + 1 + NAME_HASH_HEX);
+}
+
+// ── Roots (S1.3) ────────────────────────────────────────────────────────────
+
+/// A temp directory holding the home store (`<tmp>/home`, set through
+/// `OPENALPACA_HOME_STORE` for the world's life) and, beside it, the folders a
+/// test makes projects of (`<tmp>/work/…`) — beside, never above: a folder
+/// that contains the home store is never a project (R13).
+struct World {
+    _env: HomeStoreGuard,
+    tmp: TempDir,
+}
+
+impl World {
+    fn new() -> Self {
+        let tmp = tempdir().unwrap();
+        let env = HomeStoreGuard::set(&tmp.path().join("home"));
+        Self { _env: env, tmp }
+    }
+
+    fn home(&self) -> PathBuf {
+        self.tmp.path().join("home")
+    }
+
+    /// `<tmp>/work/<rel>`, created, as the volume spells it.
+    fn folder(&self, rel: &str) -> PathBuf {
+        let dir = self.tmp.path().join("work").join(rel);
+        fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_canonical_root_resolves_links_and_the_volumes_own_spelling() {
+    let tmp = tempdir().unwrap();
+    let real = tmp.path().join("real");
+    fs::create_dir(&real).unwrap();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    // On macOS a temp dir is `/var/…`, and the volume spells it `/private/var/…`.
+    let canonical = real.canonicalize().unwrap();
+    assert_eq!(canonical_root(&real).unwrap(), canonical);
+    assert_eq!(canonical_root(&link).unwrap(), canonical);
+    assert_eq!(
+        canonical_root(&link.join("missing")).unwrap(),
+        canonical.join("missing")
+    );
+}
+
+#[test]
+fn a_canonical_root_keeps_a_missing_tail_as_written() {
+    let tmp = tempdir().unwrap();
+    let gone = tmp.path().join("gone").join("deeper");
+    assert_eq!(
+        canonical_root(&gone).unwrap(),
+        tmp.path()
+            .canonicalize()
+            .unwrap()
+            .join("gone")
+            .join("deeper")
+    );
+}
+
+#[test]
+fn a_relative_path_has_no_canonical_root_even_when_it_exists_here() {
+    // `src` exists under the test's working directory (the crate root).
+    // Resolving it there would make the daemon's CWD a project (R22).
+    assert!(Path::new("src").is_dir());
+    let err = canonical_root(Path::new("src")).unwrap_err();
+    assert!(err.to_string().contains("absolute"), "{err}");
+}
+
+#[test]
+fn dot_dot_through_a_missing_folder_has_no_canonical_root() {
+    let tmp = tempdir().unwrap();
+    assert!(canonical_root(&tmp.path().join("gone").join("..").join("other")).is_err());
+    // Through a folder that exists, `..` resolves like any link.
+    fs::create_dir(tmp.path().join("here")).unwrap();
+    assert_eq!(
+        canonical_root(&tmp.path().join("here").join("..").join("other")).unwrap(),
+        tmp.path().canonicalize().unwrap().join("other")
+    );
+}
+
+#[test]
+fn the_home_store_what_lies_inside_it_and_what_contains_it_overlap_it() {
+    let w = World::new();
+    assert!(overlaps_home_store(&w.home()));
+    assert!(overlaps_home_store(&w.home().join("projects").join("app")));
+    assert!(overlaps_home_store(w.tmp.path()));
+    assert!(overlaps_home_store(Path::new("/")));
+    assert!(!overlaps_home_store(&w.folder("project")));
+    assert!(!overlaps_home_store(&w.tmp.path().join("home-sibling")));
+    assert!(!overlaps_home_store(Path::new("relative/home")));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_home_store_reached_through_a_link_still_overlaps() {
+    let w = World::new();
+    fs::create_dir_all(w.home()).unwrap();
+    let link = w.tmp.path().join("store-link");
+    std::os::unix::fs::symlink(w.home(), &link).unwrap();
+    assert!(overlaps_home_store(&link));
+    assert!(overlaps_home_store(&link.join("artifacts")));
+}
+
+#[test]
+fn with_no_usable_home_store_nothing_overlaps_it() {
+    // `home_root()` refuses a relative override.
+    let _env = HomeStoreGuard::set(Path::new("relative/store"));
+    assert!(!overlaps_home_store(Path::new("/")));
 }
