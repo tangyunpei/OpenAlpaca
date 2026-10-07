@@ -233,7 +233,9 @@ using with an older build is the second case it names. To switch over:
    daemon…` then `Start daemon` in the app's Settings → Connection, does the
    same. A file that does not have the two lines needs nothing. A template of
    your own that names real tools in `require_confirmation_for` is unaffected:
-   an explicit list still wins.
+   an explicit list still wins. A store you already switched over with an
+   earlier build — one this build opens without the message above — keeps
+   that build's `system_agent.md` too: do this step on it as well.
 
 The reset leaves `~/.openalpaca/README.md` as it is, and an older build's text
 there is out of date: delete it, and the next start seeds the current one.

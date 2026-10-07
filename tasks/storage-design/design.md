@@ -1,10 +1,12 @@
-# Storage and project work — design (rev 0.6, approved by the owner with ST-22)
+# Storage and project work — design (rev 0.7, approved by the owner with ST-22; Stage 0 built)
 
 **Status:** approved. The owner read rev 0.5 on 2026-10-05 ("everything in the design file is good") and asked for one
 addition, an edit tool, taken as **ST-22**. Owner decisions **ST-1…ST-13** (2026-10-04) and **ST-14…ST-22** (2026-10-05)
 are taken and are not reopened here. The lead's rulings are numbered **R1…R49** and are the lead's to change; the ones
-the owner was shown on 2026-10-05 are listed in §0.3 and §0.5. Nothing in this document is built; the plan comes next,
-and nothing is built before the owner approves it.
+the owner was shown on 2026-10-05 are listed in §0.3 and §0.5. **Stage 0 is built** (2026-10-06…07, `931460a4..a9dbed4e`,
+from `tasks/storage-design/plan-stage0.md`, which the owner approved on 2026-10-06; one gate pass at `09b40624`; the
+live check `stage0-live-report.md`, all four fixes PASS). Stages 1 and 2 are not built, and neither is built before
+the owner approves its plan.
 
 **Branch:** `feat/markdown-memory` at `032f6ae2` (26 Round G commits local). **Evidence:** two rounds of read-only
 maps (`maps/critic.md`, `maps/r2-critic.md` are the corrected pictures) and a four-critic panel on rev 0.1 with a
@@ -94,6 +96,15 @@ already taken; none is built.
 ---
 
 # Stage 0 — four fixes that need no design
+
+**Built** 2026-10-06…07 as `931460a4..a9dbed4e` (plan `tasks/storage-design/plan-stage0.md`): F1 `b79adc26`,
+`9196d69a` (the switch-over note's step 7); F2 `bbfc676e..7f16eba6` — `head_tail` moved from `tool_helpers.rs` to
+`crate::utils::text`, so the table's `tool_helpers.rs:19` is where it was; F3 `0047cf90..f3980cba`; F4
+`0d9a9293..85c9cacc`; the final review's fix wave `fe7df469` (F2), `33feb142` (F3), `09b40624` (F4). Gate at
+`09b40624`: `cargo test --workspace --exclude openalpaca_gui` 4,517 passed, 0 failed, 16 ignored; clippy 80, the
+baseline; `gen_api_docs.py --check` clean; `cargo check -p openalpaca_gui` clean; the bun gates not run (no file under
+`apps/openalpaca-gui` changed). The live check (`stage0-live-report.md`, `a9dbed4e`) proved F4 as well as the three
+checks §16 names.
 
 | # | Fix | Where |
 |---|---|---|
@@ -581,7 +592,8 @@ asserts the user's bytes and modification time.
 commit. Every slice that changes a type the evaluation harness uses runs
 `cargo check -p openalpaca_core --features live-eval --tests` — compile only; the harness is never run as a gate.
 
-**Stage 0.** F1–F4. One gate pass; a live check on the rebuilt app, isolated and sandboxed as below: a delegated
+**Stage 0.** F1–F4. One gate pass; a live check on the rebuilt daemon through its HTTP API (the app runs the same
+daemon), isolated and sandboxed as below: a delegated
 `file_write`'s report names the artifact's path (F2), `system_agent`'s shell command raises a card (F1), and a spawned
 shell shows no master key (F3).
 
@@ -601,7 +613,7 @@ one more try at a click on a stale approval card (§0.4).
 
 ## 17. Records
 
-`tasks/api-fix-plan.md` §0 (ST-1…ST-21, T34 and FW-2 moved to taken, T35 added as pending),
+`tasks/api-fix-plan.md` §0 (ST-1…ST-22, T34 and FW-2 moved to taken, T35 added as pending),
 `CLAUDE.md`, `tasks/memory-redesign/03-design.md` (MD-5's marker half and MD-7 are superseded),
 `tasks/memory-redesign/09-learning-design.md` §10 (LQ5 is superseded by ST-21), the vault (ADR-047),
 the manuals and the switch-over note. `.gitignore` whitelists `tasks/storage-design/*.md`; `maps/` and `panel/` stay
@@ -613,6 +625,25 @@ Research on sandbox methods for shell commands, for a later version (ST-14): wha
 project on each platform, and what it costs. Merging two projects on a re-point (ST-20). **T35**: an extension
 tool that does not declare itself harmless prompts — three options (no change; MCP only; MCP and plugins), with the
 consequence that an unattended turn using such a tool is refused. A run-wide "Always allow" (R43).
+
+From Stage 0, each found by its review or its live check and left as it is:
+
+- A lead run with no session log cuts a long completed subagent answer head-only, although the lead's prompt and
+  `check_subagent_status`'s description promise a stub to page with `read_result`. Rare: every run started from a
+  chat or a follow-up has a session log; the gap is a run parked by `POST /v1/tasks` on a lane with no session. For
+  Stage 2's wording pass.
+- `request_workspace_root`'s list of readers in `ToolContext`'s doc omits the per-turn memory path
+  (`prompt_ctx/sources/memory.rs`). The collapse of the three workspace fields recorded at
+  `tools/registry/mod.rs:27-28` owns the reader lists.
+- Since F4 a follow-up the lead queues carries the run's project root, and the row is pinned to the lane's active
+  session when it is queued (`repository/followup/mod.rs:111-118`): when it runs, a session bound to another project
+  is archived and a new one opened (R48), and an unbound one becomes bound to the run's project. Before F4 (NULL) it
+  joined the pinned session as it was. The remedy, for later: pin a lead-queued follow-up to `task.session_id`, as
+  `recover_unprocessed_steering` already does (`:265-268`). Recorded beside T18.
+- `wait_for_subagents` can lose a wakeup: the loop checks `all_done()` (`runner/lead_agent/tools.rs:1205`) before it
+  creates the `notified()` future it waits on (`:1232`), and `notify_waiters` keeps no permit, so a last completion
+  between the two leaves the lead idle until a steering message or the 600 s cap. Older than Stage 0; offered to the
+  owner as its own task.
 
 ## 19. What the panel changed (rev 0.1 → 0.2)
 
@@ -683,6 +714,13 @@ own project needs.
 
 ## Revision log
 
+- **rev 0.7 (2026-10-07).** **Stage 0 built**, from `tasks/storage-design/plan-stage0.md` (approved by the owner on
+  2026-10-06), as `931460a4..a9dbed4e`: the commits per fix above the Stage 0 table, one gate pass at `09b40624`, and
+  the live check `stage0-live-report.md` (F1–F4 PASS; the daemon under `loopback-only.sb` from its first launch, driven
+  through its HTTP API). The status line, the Stage 0 table's lead-in and §16's clause ("the rebuilt app" → "the
+  rebuilt daemon through its HTTP API") say so; §17's ST range reads ST-22; §18 gains Stage 0's four recorded
+  residuals. T34 is recorded as taken and FW-2's row as taken by ST-10…ST-12 in `tasks/api-fix-plan.md` rev 3.21,
+  with T35 pending.
 - **rev 0.6 (2026-10-05).** The owner approved rev 0.5 with one addition: **ST-22**, the edit tool `file_edit`
   (§13, R47–R49). Status: approved; the plan comes next.
 - **rev 0.5 (2026-10-05).** Part IV, §21: what a beta waits for — the gaps mapped to F1–F3 and the stages, and

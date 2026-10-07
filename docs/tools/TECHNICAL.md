@@ -120,7 +120,7 @@ under `crates/openalpaca_core/src/`.
 | File | Purpose |
 |------|---------|
 | `runner/agentic_loop/mod.rs` | `run_agentic_loop()`, `run_agentic_loop_routed()`, the tool phase, spill planning |
-| `runner/agentic_loop/tool_helpers.rs` | `truncate_tool_result_to()`, `head_tail_tool_result()`, `format_tool_error()`, `format_tool_error_with_hint()` |
+| `runner/agentic_loop/tool_helpers.rs` | `truncate_tool_result_to()`, `format_tool_error()`, `format_tool_error_with_hint()` (the head-and-tail cut is `head_tail()` in `utils/text.rs`) |
 | `runner/agentic_loop/config.rs` | `LoopConfig`, `LoopResult` |
 | `runner/agentic_loop/answer_guard.rs` | `AnswerGuard` — a last look at the finished answer (used by the chat loop) |
 | `runner/agentic_loop/backend.rs`, `context.rs`, `cost.rs` | LLM backend abstraction, loop state, `LoopCostAccumulator` |
@@ -1521,7 +1521,7 @@ The threshold is `LoopConfig.tool_result_inline_bytes`, set from
 |--------|------------------------|---------------|
 | `Ok`, within the threshold | As is | As is |
 | `Ok`, over the threshold | **Spilled**: the full text goes to `sessions/<id>/results/`; the model gets the stub below | Cut at the threshold by `truncate_tool_result_to()` |
-| `Err`, over the threshold | Head **and** tail inline (`head_tail_tool_result()`); the full text is still spilled for the log | Head and tail inline |
+| `Err`, over the threshold | Head **and** tail inline (`utils::text::head_tail()`); the full text is still spilled for the log | Head and tail inline |
 
 The chat loop, the lead agent and its subagents run with a session log.  A
 skill invocation does not.
@@ -1554,8 +1554,9 @@ boundary, but a boundary is only used if it keeps at least 75% of the
 limit (avoids discarding most of the content for a distant sentence end).
 Appends `[... truncated: showing first X of Y bytes]`.
 
-`head_tail_tool_result()` keeps half the budget at each end, with a marker
-saying how many bytes were elided.
+`head_tail()` (`crate::utils::text`, `crates/openalpaca_core/src/utils/text.rs`)
+keeps half the budget at each end, with a marker saying how many bytes were
+elided.
 
 ### Error Formatting
 
