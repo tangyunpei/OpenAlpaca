@@ -14,8 +14,11 @@
 //! parsed back into a path (R8).
 
 use std::fmt;
+use std::path::Path;
 use std::str::FromStr;
 
+use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::is_combining_mark;
 use uuid::Uuid;
 
 /// `<home>/projects` — one folder per project (ST-1). Not a
@@ -100,6 +103,67 @@ impl<'de> serde::Deserialize<'de> for ProjectId {
         let s = String::deserialize(deserializer)?;
         ProjectId::parse(&s).map_err(serde::de::Error::custom)
     }
+}
+
+// ============================================================================
+// Folder names (R4…R8)
+// ============================================================================
+
+/// The folder name of a project root (R4, R5, R7). Pure; the caller passes
+/// the **canonical** root (R4), and nothing ever parses a name back into a
+/// path (R8).
+///
+/// The path is normalized to NFC; a character that is a Unicode letter,
+/// digit or combining mark is kept — marks because a Thai or Devanagari word
+/// is not whole without them — and every other character becomes one `-`,
+/// runs not collapsed (R5): `/Users/me/dev/my_app` is `-Users-me-dev-my-app`.
+/// A name longer than [`NAME_MAX_BYTES`] is cut at the last character
+/// boundary at or below it and always given [`hashed_folder_name`]'s suffix
+/// (R7).
+pub fn folder_name(root: &Path) -> String {
+    name_parts(root).0
+}
+
+/// The name a project takes when its plain name belongs to another folder
+/// (R6): `<folder_name>-<the first NAME_HASH_HEX hex of sha256(root)>`, the
+/// hash over the canonical path as the volume spells it, not its NFC form. A
+/// name R7 already cut carries the suffix and is returned as it is.
+pub fn hashed_folder_name(root: &Path) -> String {
+    match name_parts(root) {
+        (name, true) => name,
+        (name, false) => format!("{name}-{}", path_hash(root)),
+    }
+}
+
+/// The folder name, and whether R7 already gave it the hash suffix.
+fn name_parts(root: &Path) -> (String, bool) {
+    let written = root.to_string_lossy();
+    let mut name: String = written
+        .nfc()
+        .map(|c| {
+            if c.is_alphanumeric() || is_combining_mark(c) {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if name.len() <= NAME_MAX_BYTES {
+        return (name, false);
+    }
+    let end = name.floor_char_boundary(NAME_MAX_BYTES);
+    name.truncate(end);
+    name.push('-');
+    name.push_str(&path_hash(root));
+    (name, true)
+}
+
+/// The first [`NAME_HASH_HEX`] hex characters of SHA-256 over the root as
+/// written — truncated, never cut with a byte range.
+fn path_hash(root: &Path) -> String {
+    let mut hash = crate::memory_files::sha256_hex(root.to_string_lossy().as_bytes());
+    hash.truncate(NAME_HASH_HEX);
+    hash
 }
 
 #[cfg(test)]
