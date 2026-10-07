@@ -1,4 +1,4 @@
-# Storage and project work — design (rev 0.7, approved by the owner with ST-22; Stage 0 built)
+# Storage and project work — design (rev 0.8, approved by the owner with ST-22; Stage 0 built)
 
 **Status:** approved. The owner read rev 0.5 on 2026-10-05 ("everything in the design file is good") and asked for one
 addition, an edit tool, taken as **ST-22**. Owner decisions **ST-1…ST-13** (2026-10-04) and **ST-14…ST-22** (2026-10-05)
@@ -8,7 +8,8 @@ from `tasks/storage-design/plan-stage0.md`, which the owner approved on 2026-10-
 live check `stage0-live-report.md`, all four fixes PASS). Stages 1 and 2 are not built, and neither is built before
 the owner approves its plan.
 
-**Branch:** `feat/markdown-memory` at `032f6ae2` (26 Round G commits local). **Evidence:** two rounds of read-only
+**Branch:** `feat/markdown-memory` at approval (2026-10-05), its code that of `032f6ae2`, the last commit before
+the design's own. **Evidence:** two rounds of read-only
 maps (`maps/critic.md`, `maps/r2-critic.md` are the corrected pictures) and a four-critic panel on rev 0.1 with a
 sceptic behind each critic (`panel/`; 68 findings, 3 blocking, all answered in rev 0.2 — §19). Rev 0.3's code facts
 were then checked by four readers (`panel/fact-check-rev03.json`: 47 claims, 34 confirmed, 13 corrected, 24 further findings —
@@ -98,13 +99,13 @@ already taken; none is built.
 # Stage 0 — four fixes that need no design
 
 **Built** 2026-10-06…07 as `931460a4..a9dbed4e` (plan `tasks/storage-design/plan-stage0.md`): F1 `b79adc26`,
-`9196d69a` (the switch-over note's step 7); F2 `bbfc676e..7f16eba6` — `head_tail` moved from `tool_helpers.rs` to
-`crate::utils::text`, so the table's `tool_helpers.rs:19` is where it was; F3 `0047cf90..f3980cba`; F4
-`0d9a9293..85c9cacc`; the final review's fix wave `fe7df469` (F2), `33feb142` (F3), `09b40624` (F4). Gate at
-`09b40624`: `cargo test --workspace --exclude openalpaca_gui` 4,517 passed, 0 failed, 16 ignored; clippy 80, the
+`9196d69a` (the switch-over note's step 7); F2 `bbfc676e^..7f16eba6` — `head_tail` moved from `tool_helpers.rs` to
+`crate::utils::text`; F3 `0047cf90^..f3980cba`; F4 `0d9a9293^..85c9cacc`; the final review's fix wave `fe7df469`
+(F2), `33feb142` (F3), `09b40624` (F4). Gate at `09b40624`: `cargo test --workspace --exclude openalpaca_gui` 4,517 passed, 0 failed, 16 ignored; clippy 80, the
 baseline; `gen_api_docs.py --check` clean; `cargo check -p openalpaca_gui` clean; the bun gates not run (no file under
 `apps/openalpaca-gui` changed). The live check (`stage0-live-report.md`, `a9dbed4e`) proved F4 as well as the three
-checks §16 names.
+checks §16 names. The table's Where column records the code as it was before Stage 0 (the helper at
+`tool_helpers.rs:19`, for one, is `utils::text::head_tail` now).
 
 | # | Fix | Where |
 |---|---|---|
@@ -681,13 +682,15 @@ refuted outright, and 24 further findings (9 major).
 
 ## 21. What a beta waits for
 
-On 2026-10-05 the owner asked whether the app is ready for a beta. It is not. The gaps, and where each is fixed:
+On 2026-10-05 the owner asked whether the app is ready for a beta. It is not. Stage 0's fixes are built
+(`931460a4..a9dbed4e`, 2026-10-06…07); the folder in every repository (Stage 1), agents not in the project
+(Stage 2) and B1–B3 below remain. The gaps, and where each is fixed:
 
 | Gap | Fix | Stage |
 |---|---|---|
-| The shipped `system_agent` runs shell commands and writes files with no approval card | F1 | 0 |
-| Every program the daemon starts inherits the master key | F3 | 0 |
-| A workflow's report can name the wrong path for a file it wrote (the 500-character cut) | F2 | 0 |
+| The shipped `system_agent` ran shell commands and wrote files with no approval card | F1, built | 0 |
+| Every program the daemon started inherited the master key | F3, built | 0 |
+| A workflow's report could name the wrong path for a file it wrote (the 500-character cut) | F2, built | 0 |
 | A CLI chat inside any git repository creates `<repo>/.openalpaca/` in the tester's repository | Part I | 1 |
 | From the app, agents cannot read, write or edit the project's files, and the shell runs in the daemon's folder | Part II, with `file_edit` (ST-22) | 2 |
 
@@ -714,6 +717,10 @@ own project needs.
 
 ## Revision log
 
+- **rev 0.8 (2026-10-07).** Records corrected after the Stage 0 records check. The Stage 0 lead-in writes each
+  fix's range with its first commit (`bbfc676e^..7f16eba6`, `0047cf90^..f3980cba`, `0d9a9293^..85c9cacc` — in
+  git `A..B` leaves `A` out) and says once that the table's Where column is the code before Stage 0; the branch line
+  is dated at approval; §21 says Stage 0's fixes are built and that Stage 1, Stage 2 and B1–B3 remain.
 - **rev 0.7 (2026-10-07).** **Stage 0 built**, from `tasks/storage-design/plan-stage0.md` (approved by the owner on
   2026-10-06), as `931460a4..a9dbed4e`: the commits per fix above the Stage 0 table, one gate pass at `09b40624`, and
   the live check `stage0-live-report.md` (F1–F4 PASS; the daemon under `loopback-only.sb` from its first launch, driven

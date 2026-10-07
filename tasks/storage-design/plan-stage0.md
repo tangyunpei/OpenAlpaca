@@ -2971,8 +2971,8 @@ The `<commit>` and `<range>` tokens below are filled in at execution time from `
 
 - [ ] **Step 2: `tasks/api-fix-plan.md`** — rev 3.21 changelog line; T34 row removed from the pending table and added under a new "### Owner decisions taken — `feat/markdown-memory`, 2026-10-05 (the storage design: ST-1…ST-22; T34 taken; Stage 0 built)" subsection with the commits of F1–F4; a **T35** pending row (text from the design §18); FW-2's pending row rewritten: "Taken as ST-10/ST-11/ST-12 of the storage design; built in its Stage 2"; the status line's list of pending rows updated.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Commit** — `tasks/todo.md` is git-ignored, so it is not staged and stays a working-tree record.
 
 ```bash
-git add tasks/storage-design/design.md CLAUDE.md tasks/api-fix-plan.md tasks/todo.md && git commit -m "docs: Stage 0 of the storage design recorded (T34 taken, F1–F4 built, T35 pending)"
+git add tasks/storage-design/design.md CLAUDE.md tasks/api-fix-plan.md && git commit -m "docs: Stage 0 of the storage design recorded (T34 taken, F1–F4 built, T35 pending)"
 ```
