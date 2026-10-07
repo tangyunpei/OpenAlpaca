@@ -337,6 +337,58 @@ fn every_shipped_template_grants_read_result() {
     assert!(seen >= 9, "every shipped template was checked, not {seen}");
 }
 
+/// Owner decision T34 (`tasks/api-fix-plan.md` §0; storage design §12 R30,
+/// Stage 0 fix F1). The shipped `system_agent` template used to end its
+/// frontmatter with `require_confirmation_for: ["file_delete"]`. An explicit,
+/// non-empty list is returned verbatim by `effective_confirmation_set`
+/// (`security/sandbox/mod.rs`) instead of the set derived from the tools'
+/// `destructive_hint` annotations, and no tool is named `file_delete`, so
+/// that agent's `shell_execute` and `file_write` never prompted — live, the
+/// lead delegated to it a shell write the person had just denied another
+/// agent. The template is read from the checkout and walked exactly as the
+/// subagent spawn walks it: `to_subagent`, then `SandboxPolicy::from_constraints`,
+/// then the effective set over a registry holding the builtins.
+///
+/// Only `shell_execute` and `file_write` are pinned, plus one read that must
+/// not prompt: the design's ST-15 later takes `artifact_write` and
+/// `workspace_write` out of the derived set, so the whole set is not asserted.
+#[test]
+fn the_shipped_system_agent_template_prompts_for_its_shell_and_file_writes() {
+    use crate::security::sandbox::{SandboxPolicy, effective_confirmation_set};
+    use crate::tools::ToolRegistry;
+    use crate::tools::builtins::builtin_tools;
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../config/agents/system_agent.md");
+    let body = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let doc = parse_agent_markdown(&body)
+        .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+    assert_eq!(doc.frontmatter.id, "system_agent");
+
+    // The registry the spawn checks against: the builtins, with the
+    // annotations `builtin_tools` registers them with.
+    let registry = ToolRegistry::default();
+    for tool in builtin_tools(None, None, None, None) {
+        registry.register(tool).unwrap();
+    }
+
+    let agent = doc.to_subagent("system_agent::t34", "task-1");
+    let policy = SandboxPolicy::from_constraints(&agent.id, &agent.constraints);
+    let set = effective_confirmation_set(&policy, &registry);
+
+    for name in ["shell_execute", "file_write"] {
+        assert!(
+            set.contains(&name.to_string()),
+            "{name} must prompt for system_agent; the effective set is {set:?}"
+        );
+    }
+    assert!(
+        !set.contains(&"file_read".to_string()),
+        "a read never prompts; the effective set is {set:?}"
+    );
+}
+
 // ── Design 09 §5 (LQ3): memory search for every built-in agent ──────────
 
 /// Whether the gate admits `memory_read` for `agent`, from the resolved
