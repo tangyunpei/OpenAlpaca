@@ -141,7 +141,7 @@ pub fn resolve_project_root(hint: WorkspaceHint<'_>) -> Option<PathBuf> {
             crate::memory::workspace::detect_workspace_root_uncached(path)?
         }
     };
-    if crate::memory::scope_context::resolves_to_the_home_store(&root) {
+    if openalpaca_storage::store::projects::overlaps_home_store(&root) {
         return None;
     }
     Some(root)

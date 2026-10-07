@@ -18,50 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use openalpaca_storage::store::{self, StoreScope};
-
-/// Whether a resolved workspace root is really the home store wearing a
-/// project's clothes.
-///
-/// `walk_up_for_marker` counts `.openalpaca` as a project marker, so a client
-/// path anywhere under `$HOME` with no closer `.git`/`.openalpaca` resolves to
-/// `$HOME` — and `$HOME`'s "project store" is `~/.openalpaca`, the home store
-/// itself. Treating that as `StoreScope::Project` makes `ensure_store` seed a
-/// project `.gitignore` into the home root, and would let a stray header claim
-/// the whole home directory as a project. Two shapes fold:
-///
-/// - the root's project store *is* the home root (the `$HOME` case), and
-/// - the root *is* the home root (a path pointing straight at `~/.openalpaca`).
-///
-/// A real project under the home directory — anything with its own marker —
-/// is untouched.
-///
-/// Public because the fold is a *rule*, not a detail of this struct: a re-base
-/// (`PATCH /v1/workspaces`) refuses either root that answers `true` here, for
-/// the same reason placement folds it — the home store's artifacts directory
-/// belongs to one identity space, and a project pointed at it would share it.
-pub fn resolves_to_the_home_store(root: &Path) -> bool {
-    let Ok(home) = store::home_root() else {
-        // No home directory to compare against: leave the root alone rather
-        // than silently demoting every request to the home store.
-        return false;
-    };
-    let home = canonical(&home);
-    if canonical(root) == home {
-        return true;
-    }
-    match store::store_root(&StoreScope::Project(root.to_path_buf())) {
-        Ok(project_store) => canonical(&project_store) == home,
-        // A relative root is not a project root; placement rejects it anyway.
-        Err(_) => false,
-    }
-}
-
-/// Canonicalise where the path exists, otherwise compare it as written — the
-/// home root need not exist yet on a first run.
-fn canonical(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
+use openalpaca_storage::store::projects;
 
 /// Carries workspace scope context for a request.
 #[derive(Debug, Clone, Default)]
@@ -77,7 +34,7 @@ pub struct MemoryScopeContext {
     /// `/v1/chat`, `workspace_path` on `/v1/command` — resolved to its root.
     /// `None` whenever no client sent one; never CWD-derived (R22), and never
     /// a root whose store *is* the home store — `$HOME` is not a project (see
-    /// [`resolves_to_the_home_store`]).
+    /// `projects::overlaps_home_store`, R13).
     ///
     /// This is the only field that may place a file on disk, and it is what a
     /// dispatched run records as its `task.workspace_id`.
@@ -112,7 +69,7 @@ impl MemoryScopeContext {
     /// scheduled skill — scoped its memory to `Workspace($HOME)`: a scope no
     /// project turn's cascade ever reads again. R22 chose the CWD fallback for
     /// a *project* turn; `$HOME` is not one (see
-    /// [`resolves_to_the_home_store`]). Nothing that writes a file reads this
+    /// `projects::overlaps_home_store`, R13). Nothing that writes a file reads this
     /// field: the task-output extraction at `dispatcher/lead_agent.rs` takes
     /// `request_workspace_root`, like `task.workspace_id`.
     pub fn for_request(workspace_path: Option<&str>) -> Self {
@@ -159,7 +116,7 @@ impl MemoryScopeContext {
         match workspace_path {
             Some(path) => {
                 let root = resolve(Path::new(path))
-                    .filter(|r| !resolves_to_the_home_store(Path::new(r)));
+                    .filter(|r| !projects::overlaps_home_store(Path::new(r)));
                 Self {
                     workspace_id: root.clone(),
                     request_workspace_root: root,
@@ -169,7 +126,7 @@ impl MemoryScopeContext {
                 tracing::debug!("No workspace_path in request, falling back to daemon CWD");
                 let workspace_id = cwd()
                     .and_then(|d| resolve(&d))
-                    .filter(|r| !resolves_to_the_home_store(Path::new(r)));
+                    .filter(|r| !projects::overlaps_home_store(Path::new(r)));
                 Self {
                     workspace_id,
                     request_workspace_root: None,
@@ -324,6 +281,29 @@ mod tests {
 
         let ctx = MemoryScopeContext::for_request(project.to_str());
         assert_eq!(ctx.request_workspace_root.as_deref(), project.to_str());
+    }
+
+    /// R13 (storage design §3): a root that contains the home store is never
+    /// a project. Before, only a root whose own store *was* the home store
+    /// folded, so a repository the home store sat inside answered for every
+    /// folder beside it.
+    #[test]
+    fn a_git_repository_that_contains_the_home_store_is_no_project() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outer = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir(outer.join(".git")).unwrap();
+        let home_store = outer.join("home").join(".openalpaca");
+        std::fs::create_dir_all(&home_store).unwrap();
+        let _guard = crate::test_util::HomeStoreGuard::set(&home_store);
+        let beside = outer.join("notes");
+        std::fs::create_dir(&beside).unwrap();
+
+        let ctx = MemoryScopeContext::for_request(beside.to_str());
+        assert_eq!(
+            ctx.request_workspace_root, None,
+            "the repository holds the home store"
+        );
+        assert_eq!(ctx.workspace_id, None);
     }
 
     #[test]

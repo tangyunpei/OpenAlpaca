@@ -636,6 +636,24 @@ async fn re_basing_to_or_from_the_home_store_is_a_409() {
     assert_eq!(old_body["rows"]["artifacts"], 1, "nothing moved");
 }
 
+/// R13: a folder inside the home store is no project either. A re-base
+/// onto `~/.openalpaca/artifacts` would hand a project the home store's own
+/// identity space, as the store itself would.
+#[tokio::test]
+async fn re_basing_onto_a_folder_inside_the_home_store_is_a_409() {
+    let f = Fixture::new();
+    let old = f.project("old-project");
+    f.artifact(&old, "Notes");
+    let inside = std::path::Path::new(&f.home_store()).join("artifacts");
+    std::fs::create_dir_all(&inside).expect("a folder inside the home store");
+
+    let (status, body) = f.patch(&old, &inside.to_string_lossy()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_IS_HOME");
+    let (_, old_body) = f.get(Some(&old)).await;
+    assert_eq!(old_body["rows"]["artifacts"], 1, "nothing moved");
+}
+
 #[tokio::test]
 async fn re_basing_rows_another_owner_holds_is_a_404() {
     let f = Fixture::new();

@@ -39,7 +39,7 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use colored::Colorize;
-use openalpaca_core::memory::scope_context::resolves_to_the_home_store;
+use openalpaca_storage::store::projects::overlaps_home_store;
 use serde::{Deserialize, Serialize};
 
 use crate::client::DaemonClient;
@@ -480,12 +480,13 @@ fn render_plan(requested_new: &str, from: &WorkspaceView, to: &WorkspaceView) ->
     // Advisory: this reads *this* process's home root, which is the daemon's on
     // the machine they share. The daemon is what actually refuses.
     for (label, view) in [("the old path", from), ("the new path", to)] {
-        if resolves_to_the_home_store(std::path::Path::new(&view.path)) {
+        if overlaps_home_store(std::path::Path::new(&view.path)) {
             let _ = writeln!(
                 out,
                 "  {}",
                 format!(
-                    "{label} resolves to {}, which is the home store rather than a project; \
+                    "{label} resolves to {}, which is the home store, lies inside it or contains \
+                     it, so it is not a project; \
                      the re-base would be refused",
                     view.path
                 )

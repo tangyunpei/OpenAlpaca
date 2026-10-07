@@ -76,7 +76,6 @@ use openalpaca_storage::{ArtifactStore, Database, PurgePlan, RebaseCounts, Works
 use serde::Deserialize;
 
 use openalpaca_core::context::SharedContext;
-use openalpaca_core::memory::scope_context::resolves_to_the_home_store;
 use openalpaca_core::memory::service::MemoryService;
 
 use super::{api_error, request_project_root_uncached};
@@ -282,8 +281,9 @@ fn owner_mismatch(root: &str, other_owners: usize) -> Response {
     )
 }
 
-/// The home store is not a project and never becomes one (R24, and the fold in
-/// `memory::scope_context`): its artifacts directory is one identity space, and
+/// The home store is not a project and never becomes one (R24, and R13's
+/// `store::projects::overlaps_home_store`, which also refuses a folder inside
+/// it or around it): its artifacts directory is one identity space, and
 /// a project re-based onto it would share that directory with the home scope —
 /// where a later home-scope `put` sees those rows as belonging to no address of
 /// its own and removes the files (§4.2).
@@ -292,15 +292,15 @@ fn owner_mismatch(root: &str, other_owners: usize) -> Response {
 /// home store as a project just as surely.
 #[allow(clippy::result_large_err)]
 fn refuse_the_home_root(field: &str, root: &str) -> Result<(), Response> {
-    if !resolves_to_the_home_store(Path::new(root)) {
+    if !store::projects::overlaps_home_store(Path::new(root)) {
         return Ok(());
     }
     Err(api_error(
         StatusCode::CONFLICT,
         "WORKSPACE_IS_HOME",
         format!(
-            "{field} resolves to {root}, which is the home store — that is not a project and \
-             cannot be one. Name the project directory itself"
+            "{field} resolves to {root}, which is the home store, lies inside it or contains \
+             it — that is not a project and cannot be one. Name the project directory itself"
         ),
     ))
 }

@@ -456,7 +456,7 @@ pub fn store_root(scope: &StoreScope) -> Result<PathBuf> {
 /// variant: `Project($HOME)`'s store root *is* `~/.openalpaca`, and so is a
 /// project whose `.openalpaca` is a symlink to it. Seeding those from the
 /// project branch put a `.gitignore` in the home root and a README describing a
-/// project store — the same fold `resolves_to_the_home_store` applies upstream.
+/// project store — the rule `projects::overlaps_home_store` applies upstream (R13).
 pub fn ensure_store(scope: &StoreScope) -> Result<PathBuf> {
     let root = store_root(scope)?;
     fs::create_dir_all(&root)
