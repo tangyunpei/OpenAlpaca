@@ -14,10 +14,11 @@ pub use config::{LoopConfig, LoopFinishReason, LoopResult, StreamCallback};
 // Internal re-exports so the core loop and tests can access submodule items
 use backend::LlmBackend;
 pub(crate) use context::{compress_context, estimate_messages_tokens, estimate_tools_tokens};
+pub(crate) use tool_helpers::MAX_TOOL_RESULT_SIZE;
 use crate::utils::text::head_tail;
 use tool_helpers::{format_tool_error, format_tool_error_with_hint, truncate_tool_result_to};
 #[cfg(test)]
-use tool_helpers::{MAX_TOOL_RESULT_SIZE, truncate_tool_result};
+use tool_helpers::truncate_tool_result;
 
 use chrono::Utc;
 use crate::runner::steering::SteeringMsg;

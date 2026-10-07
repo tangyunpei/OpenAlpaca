@@ -9,7 +9,9 @@ pub use agentic_loop::{
     AnswerGuard, Correction, LoopConfig, LoopCostAccumulator, LoopFinishReason, LoopResult,
     StreamCallback, run_agentic_loop, run_agentic_loop_routed,
 };
-pub(crate) use agentic_loop::{compress_context, estimate_messages_tokens, estimate_tools_tokens};
+pub(crate) use agentic_loop::{
+    MAX_TOOL_RESULT_SIZE, compress_context, estimate_messages_tokens, estimate_tools_tokens,
+};
 pub use lead_agent::{LeadAgentResult, run_lead_agent};
 pub use model_window::{routed_context_window, routed_model};
 pub use span::{close_span, open_span, span_detail_for, span_state_for};

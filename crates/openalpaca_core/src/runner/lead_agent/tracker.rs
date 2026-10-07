@@ -1,3 +1,5 @@
+use crate::runner::MAX_TOOL_RESULT_SIZE;
+use crate::utils::text::head_tail;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -10,6 +12,32 @@ pub enum SubagentStatus {
     Failed { error: String },
 }
 
+/// What `wait_for_subagents` prepends to the summary (the interrupted return
+/// is the longest, about 180 bytes).
+const SUMMARY_HEADER_RESERVE_BYTES: usize = 1024;
+/// One entry's fixed cost: `- **<run_id>**: completed — `, up to two
+/// head/tail notices, ` Last output: `, the join, and a failed entry's error
+/// cut to 512 bytes.
+const SUMMARY_ENTRY_OVERHEAD_BYTES: usize = 768;
+/// One answer never takes more of the lead's context than this, however few
+/// subagents ran — `check_subagent_status` returns the whole answer.
+const SUMMARY_ANSWER_CAP_BYTES: usize = 8 * 1024;
+/// Below this an entry says nothing useful; from about 25 entries on the
+/// summary may exceed the bound and the loop's own spill or cut takes over.
+const SUMMARY_ANSWER_FLOOR_BYTES: usize = 512;
+
+/// How many bytes of each answer `summary` shows: the loop's inline bound,
+/// less the header, shared by every tracked entry, less each entry's fixed
+/// cost — floored and capped. For the default 32 KiB bound and a batch of
+/// 8: 3,200 bytes an answer, 1,600 head and 1,600 tail, so the worst case
+/// `8 × (3,200 + 768) + 1,024` is exactly the bound.
+pub(super) fn answer_budget(inline_bytes: usize, entries: usize) -> usize {
+    let per_entry = inline_bytes.saturating_sub(SUMMARY_HEADER_RESERVE_BYTES) / entries.max(1);
+    per_entry
+        .saturating_sub(SUMMARY_ENTRY_OVERHEAD_BYTES)
+        .clamp(SUMMARY_ANSWER_FLOOR_BYTES, SUMMARY_ANSWER_CAP_BYTES)
+}
+
 /// Shared tracker for background subagent tasks.
 /// Allows the lead agent to spawn multiple subagents concurrently
 /// and check/wait for their results.
@@ -17,6 +45,9 @@ pub struct SubagentTracker {
     pub statuses: Mutex<HashMap<String, SubagentStatus>>,
     /// Notifies waiters when a subagent completes or fails.
     pub notify: tokio::sync::Notify,
+    /// `[orchestrator.sessions] tool_result_inline_bytes` of the loop that
+    /// reads `summary()` — the bound the whole summary is sized to stay under.
+    inline_bytes: usize,
 }
 
 impl Default for SubagentTracker {
@@ -26,10 +57,19 @@ impl Default for SubagentTracker {
 }
 
 impl SubagentTracker {
+    /// A tracker sized to the loop's default inline bound (32 KiB) — tests
+    /// and any caller with no `LoopConfig` of its own.
     pub fn new() -> Self {
+        Self::with_inline_bytes(MAX_TOOL_RESULT_SIZE)
+    }
+
+    /// A tracker whose `summary()` stays under `inline_bytes` for a batch of
+    /// eight: the lead passes its own `tool_result_inline_bytes`.
+    pub fn with_inline_bytes(inline_bytes: usize) -> Self {
         Self {
             statuses: Mutex::new(HashMap::new()),
             notify: tokio::sync::Notify::new(),
+            inline_bytes,
         }
     }
 
@@ -96,6 +136,7 @@ impl SubagentTracker {
         if map.is_empty() {
             return "No subagents have been spawned yet.".to_string();
         }
+        let budget = answer_budget(self.inline_bytes, map.len());
         let mut parts = Vec::new();
         for (id, status) in map.iter() {
             match status {
@@ -106,7 +147,6 @@ impl SubagentTracker {
                     parts.push(format!("- **{}**: still running", id));
                 }
                 SubagentStatus::Completed { content, success } => {
-                    let preview: String = content.chars().take(500).collect();
                     parts.push(format!(
                         "- **{}**: {} — {}",
                         id,
@@ -115,7 +155,7 @@ impl SubagentTracker {
                         } else {
                             "completed (partial)"
                         },
-                        preview
+                        head_tail(content, budget)
                     ));
                 }
                 SubagentStatus::Failed { error } => {

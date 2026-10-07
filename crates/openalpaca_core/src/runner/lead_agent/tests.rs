@@ -255,6 +255,138 @@ fn test_tracker_summary_with_queued() {
     assert!(summary.contains("waiting for execution slot"));
 }
 
+// ── F2: the summary shows each answer's head and tail within the bound ──
+
+/// The per-answer budget is a function of the loop's inline bound and the
+/// number of tracked entries: `(bound − 1 KiB) / entries − 768`, floored
+/// at 512 and capped at 8 KiB. The default bound and a batch of 8 give
+/// 3,200 bytes an answer; one answer alone gets the cap; at the clamp
+/// minimum 4,096 a batch of 8 sits on the floor.
+#[test]
+fn the_summarys_per_answer_budget_follows_the_bound_and_the_entry_count() {
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 8), 3_200);
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 1), 8_192);
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 2), 8_192);
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 4), 7_168);
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 16), 1_216);
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 25), 512);
+    assert_eq!(super::tracker::answer_budget(4_096, 8), 512);
+    // Zero entries never divide by zero (the empty summary returns earlier).
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 0), 8_192);
+}
+
+/// Eight 20 KB answers through the tool itself — header included — stay
+/// under the default 32 KiB bound, and every answer's opening and closing
+/// words reach the lead.
+#[tokio::test]
+async fn wait_for_subagents_keeps_eight_twenty_kilobyte_answers_under_the_inline_bound() {
+    let tracker = Arc::new(SubagentTracker::new());
+    for i in 1..=8 {
+        let run_id = format!("run-{i}");
+        tracker.register(&run_id);
+        tracker.complete(
+            &run_id,
+            format!("HEAD-{i} {} TAIL-{i}", "x".repeat(20 * 1024)),
+            true,
+        );
+    }
+    let tool = WaitForSubagentsTool {
+        tracker,
+        steering: None,
+    };
+    let result = tool.execute(&serde_json::json!({})).await.unwrap();
+
+    assert!(
+        result.len() <= 32 * 1024,
+        "the whole summary must fit the inline bound, got {} bytes",
+        result.len()
+    );
+    assert!(
+        result.starts_with("All subagents finished. 8 completed, 0 failed.\n\n"),
+        "got: {}",
+        crate::utils::text::byte_prefix(&result, 80)
+    );
+    for i in 1..=8 {
+        assert!(result.contains(&format!("HEAD-{i} ")), "head {i} missing");
+        assert!(result.contains(&format!(" TAIL-{i}")), "tail {i} missing");
+    }
+    assert_eq!(result.matches("the tail follows").count(), 8);
+}
+
+/// A CJK answer is cut on character boundaries: with one entry the budget
+/// is the 8,192-byte cap, half is 4,096, not a multiple of 3, so the head
+/// rounds down to 4,095 bytes (1,365 characters) and the tail rounds up to
+/// start at 10,905, 4,095 bytes too. The whole line is pinned.
+#[test]
+fn a_cjk_answer_is_cut_on_character_boundaries_in_the_summary() {
+    let tracker = SubagentTracker::new();
+    tracker.register("run-1");
+    tracker.complete("run-1", "語".repeat(5000), true);
+
+    assert_eq!(
+        tracker.summary(),
+        format!(
+            "- **run-1**: completed — {}\n\n[... 6810 of 15000 bytes elided; the tail follows ...]\n\n{}",
+            "語".repeat(1365),
+            "語".repeat(1365)
+        )
+    );
+}
+
+/// An answer within its budget is shown whole — 3,000 bytes under the
+/// 8,192-byte cap one entry gets.
+#[test]
+fn an_answer_within_its_budget_is_shown_whole_in_the_summary() {
+    let tracker = SubagentTracker::new();
+    tracker.register("run-1");
+    let answer = format!("Report: {}", "r".repeat(2992));
+    tracker.complete("run-1", answer.clone(), true);
+
+    assert_eq!(tracker.summary(), format!("- **run-1**: completed — {answer}"));
+}
+
+/// The bound is the tracker's, set at construction: an 8 KiB bound gives
+/// one entry (8192 − 1024) − 768 = 6,400 bytes, head 3,200 and tail 3,200.
+#[test]
+fn a_tracker_built_with_a_smaller_bound_cuts_to_it() {
+    let tracker = SubagentTracker::with_inline_bytes(8 * 1024);
+    tracker.register("run-1");
+    tracker.complete("run-1", "y".repeat(10_000), true);
+
+    assert_eq!(
+        tracker.summary(),
+        format!(
+            "- **run-1**: completed — {}\n\n[... 3600 of 10000 bytes elided; the tail follows ...]\n\n{}",
+            "y".repeat(3200),
+            "y".repeat(3200)
+        )
+    );
+}
+
+/// Review focus — more entries than the bound can hold (60 here, past the
+/// 25 where the budget floors at 512 bytes): the summary is still produced,
+/// still names every entry and shows each answer's opening and end, and is
+/// longer than the bound, which the loop's own cut or spill then handles as
+/// for any oversized tool result. Nothing is dropped silently.
+#[test]
+fn a_batch_past_the_bound_still_lists_every_entry() {
+    let tracker = SubagentTracker::new();
+    for i in 1..=60 {
+        let run_id = format!("run-{i}");
+        tracker.register(&run_id);
+        tracker.complete(&run_id, format!("BEGIN-{i} {} END-{i}", "z".repeat(4000)), true);
+    }
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 60), 512);
+    let summary = tracker.summary();
+    // Each entry is about 595 bytes (prefix, 256-byte head, notice, 256-byte
+    // tail, newline): 60 of them are about 35,700 bytes, past the bound.
+    for i in 1..=60 {
+        assert!(summary.contains(&format!("- **run-{i}**: completed — BEGIN-{i} ")), "entry {i} missing");
+        assert!(summary.contains(&format!(" END-{i}")), "tail {i} missing");
+    }
+    assert!(summary.len() > 32 * 1024, "past the floor the summary may exceed the bound: {} bytes", summary.len());
+}
+
 #[tokio::test]
 async fn test_check_subagent_status_tool() {
     let tracker = Arc::new(SubagentTracker::new());
