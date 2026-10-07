@@ -6,8 +6,23 @@ use aes_gcm::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use std::path::Path;
+use std::sync::OnceLock;
 
 const PREFIX: &str = "aes256:";
+
+/// The environment variable a process may carry its master key in — the
+/// fallback [`KeyEncryptor::from_env`] reads when no key was installed with
+/// [`KeyEncryptor::install_process_key`]. The CLI and the test harnesses use
+/// it; the daemon does not (F3: it installs the key and removes the variable,
+/// so no process it spawns receives the key).
+pub const MASTER_KEY_ENV: &str = "OPENALPACA_MASTER_KEY";
+
+/// The master key this process was handed, as the 64 hex characters
+/// [`KeyEncryptor::ensure_at`] returns — validated before it is stored, so a
+/// read of it cannot fail. Filled once, by
+/// [`KeyEncryptor::install_process_key`]; never by a unit test, since every
+/// test in a binary shares it.
+static PROCESS_KEY: OnceLock<String> = OnceLock::new();
 
 /// Encrypts and decrypts API key secrets using AES-256-GCM.
 pub struct KeyEncryptor {
@@ -15,26 +30,70 @@ pub struct KeyEncryptor {
 }
 
 impl KeyEncryptor {
-    /// The encryptor for the master key in `OPENALPACA_MASTER_KEY`.
+    /// The encryptor for this process's master key: the one installed with
+    /// [`Self::install_process_key`], else the one in [`MASTER_KEY_ENV`].
     ///
     /// This crate sits below `openalpaca_storage` in the dependency graph, so it
     /// never resolves a path of its own: a process that wants a key file says
     /// which directory holds it ([`Self::load_or_generate_at`], with
     /// `store::master_key_dir()`). The daemon does that once in its boot
-    /// preamble and exports the key here, so everything downstream of it —
-    /// router construction, keychain migration, the settings service — reads the
-    /// same key without knowing where it lives.
+    /// preamble and installs the key here — in process memory, never in its
+    /// environment, so no program it spawns receives it (F3) — and everything
+    /// downstream of it — router construction, keychain migration, the settings
+    /// service — reads the same key without knowing where it lives. The
+    /// environment read is the fallback the CLI and the test harnesses use.
     pub fn from_env() -> Result<Self, String> {
         Self::from_env_opt()?.ok_or_else(|| {
-            "OPENALPACA_MASTER_KEY is not set: the process must load the master key first \
-             (KeyEncryptor::load_or_generate_at(store::master_key_dir()?))"
-                .to_string()
+            format!(
+                "no master key: the process must install one first \
+                 (KeyEncryptor::install_process_key, as the daemon's boot preamble does) \
+                 or carry it in {MASTER_KEY_ENV}"
+            )
         })
     }
 
+    /// Hands this process its master key: what [`Self::from_env`] and every
+    /// reader built on it use from now on, before any environment variable.
+    ///
+    /// `hex_key` is validated first (64 hex characters, 32 bytes), so a later
+    /// read cannot fail. Installing the **same** key again is a no-op; a
+    /// **different** one is refused — one process with two master keys would
+    /// silently split what it encrypts from what it can decrypt.
+    pub fn install_process_key(hex_key: &str) -> Result<(), String> {
+        Self::from_hex(hex_key, "the master key to install")?;
+        match PROCESS_KEY.set(hex_key.trim().to_string()) {
+            Ok(()) => Ok(()),
+            Err(rejected) if PROCESS_KEY.get() == Some(&rejected) => Ok(()),
+            Err(_) => {
+                Err("a different master key is already installed in this process".to_string())
+            }
+        }
+    }
+
+    /// [`Self::install_process_key`], then [`MASTER_KEY_ENV`] removed from the
+    /// process environment — inherited from the launching shell or not — so no
+    /// child this process spawns receives the key (F3). The daemon's boot
+    /// preamble calls this once; so does the integration test that proves it
+    /// (`tests/master_key_leaves_the_environment.rs`).
+    ///
+    /// # Safety
+    ///
+    /// Calls [`std::env::remove_var`]: the caller must be the only thread that
+    /// can be reading or writing the environment — in the daemon, the
+    /// single-threaded preamble before the tokio runtime starts.
+    pub unsafe fn install_process_key_and_clear_env(hex_key: &str) -> Result<(), String> {
+        Self::install_process_key(hex_key)?;
+        // SAFETY: the caller guarantees no other thread touches the environment
+        // (this function's contract, above).
+        unsafe { std::env::remove_var(MASTER_KEY_ENV) };
+        Ok(())
+    }
+
     /// The encryptor for the master key kept in `dir`, generating one if `dir`
-    /// has none. `OPENALPACA_MASTER_KEY` still wins when it is set, so a daemon
-    /// and a CLI in the same environment agree.
+    /// has none. A key this process installed, or one in [`MASTER_KEY_ENV`],
+    /// still wins when there is one (`Self::from_env_opt`'s order). The daemon
+    /// and the CLI agree because both name the same file, `state/.master_key`
+    /// — the daemon no longer exports it (F3).
     pub fn load_or_generate_at(dir: &Path) -> Result<Self, String> {
         if let Some(encryptor) = Self::from_env_opt()? {
             return Ok(encryptor);
@@ -49,8 +108,9 @@ impl KeyEncryptor {
     /// A decrypt path must not mint one: a freshly generated key cannot decrypt
     /// anything that was encrypted with the old one, so the caller's outcome is
     /// the same either way — and the key file is durable state in `state/`,
-    /// which a read has no business creating. `OPENALPACA_MASTER_KEY` still wins
-    /// when it is set, so a daemon and a CLI in the same environment agree.
+    /// which a read has no business creating. A key this process installed, or
+    /// one in [`MASTER_KEY_ENV`], still wins when there is one, as in
+    /// [`Self::load_or_generate_at`].
     pub fn load_at(dir: &Path) -> Result<Option<Self>, String> {
         if let Some(encryptor) = Self::from_env_opt()? {
             return Ok(Some(encryptor));
@@ -63,9 +123,14 @@ impl KeyEncryptor {
         }
     }
 
+    /// The installed key first, then the environment; `Ok(None)` when the
+    /// process has neither.
     fn from_env_opt() -> Result<Option<Self>, String> {
-        match std::env::var("OPENALPACA_MASTER_KEY") {
-            Ok(hex_key) => Self::from_hex(&hex_key, "OPENALPACA_MASTER_KEY").map(Some),
+        if let Some(hex_key) = PROCESS_KEY.get() {
+            return Self::from_hex(hex_key, "the installed master key").map(Some);
+        }
+        match std::env::var(MASTER_KEY_ENV) {
+            Ok(hex_key) => Self::from_hex(&hex_key, MASTER_KEY_ENV).map(Some),
             Err(_) => Ok(None),
         }
     }
