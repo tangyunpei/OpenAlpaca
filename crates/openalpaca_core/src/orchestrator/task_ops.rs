@@ -362,6 +362,10 @@ impl Orchestrator {
     /// guaranteed injection into the lane's sole running workflow, bypassing
     /// the model. Replies are deterministic; the reply is always `Ok` — a
     /// missing or ambiguous target is an answer, not a handler failure.
+    ///
+    /// `request_workspace_root` is the turn's resolved project root
+    /// (`MemoryScopeContext::for_request`, `handlers.rs`), `None` when the
+    /// turn carried no project; it is what the message records (F4).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn handle_steer_prefix(
         &self,
@@ -370,7 +374,7 @@ impl Orchestrator {
         principal: &crate::security::policy::Principal,
         scope: &crate::security::policy::Scope,
         lane_key: &str,
-        workspace_path: Option<String>,
+        request_workspace_root: Option<String>,
     ) -> Result<String, String> {
         use crate::runner::steering::{SteeringMsg, SteeringOrigin, SteeringPushError, push_steering};
 
@@ -394,7 +398,7 @@ impl Orchestrator {
                     request_id,
                     principal: principal.clone(),
                     scope: scope.clone(),
-                    workspace_path,
+                    workspace_path: request_workspace_root,
                     received_at: Utc::now(),
                     origin: SteeringOrigin::User,
                 };

@@ -208,7 +208,10 @@ impl Orchestrator {
                 &principal,
                 &scope,
                 &lane_key,
-                workspace_path.clone(),
+                // F4 — the turn's resolved root, the same value every tool
+                // on this turn reads as `request_workspace_root`; never the
+                // path as sent.
+                scope_ctx.request_workspace_root.clone(),
             )
         } else if let Intent::SkillInvocation {
             ref skill_name,

@@ -2537,6 +2537,62 @@ async fn test_steer_prefix_single_workflow_pushes_and_confirms() {
     assert_eq!(orchestration_modes(&mut rx), vec!["steered".to_string()]);
 }
 
+/// F4 — the deterministic `/steer` carries the turn's resolved project root,
+/// the value `handlers.rs` resolves for the turn, not the path the client
+/// sent: a subdirectory is sent, the directory carrying `.git` is what the
+/// message holds. That root is what a message left undelivered at the
+/// workflow's exit is filed under (`dispatcher/lead_agent.rs:761-768`).
+/// The orchestrator here has no database and no session log, so the drained
+/// inbox is the whole observable.
+#[tokio::test]
+async fn a_steer_command_carries_the_turns_resolved_project_root() {
+    let project = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(project.path().join(".git")).unwrap();
+    let sent = project.path().join("src");
+    std::fs::create_dir(&sent).unwrap();
+    let root = project.path().canonicalize().unwrap();
+
+    let orch = make_steering_orchestrator();
+    orch.shared_context
+        .task_registry
+        .register("task-1".to_string(), "Build the report".to_string());
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::default());
+    orch.shared_context
+        .register_steering_inbox("task-1", inbox.clone());
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "task-1");
+
+    let reply = orch
+        .handle_message(HandleRequest {
+            request_id: Uuid::new_v4(),
+            source: "cli".to_string(),
+            content: "/steer switch to staging".to_string(),
+            principal: Principal::User {
+                global_id: "user1".to_string(),
+            },
+            scope: Scope::Global,
+            lane_key: "user1:cli".to_string(),
+            workspace_path: Some(sent.to_string_lossy().to_string()),
+            stream_id: None,
+            model_override: None,
+            unattended: false,
+            turn_sink: None,
+        })
+        .await
+        .unwrap();
+    assert!(reply.contains("task-1"), "unexpected reply: {reply}");
+
+    let queued = inbox.drain_all();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].text, "switch to staging");
+    assert_eq!(
+        queued[0].workspace_path.as_deref(),
+        root.to_str(),
+        "the steering message must carry the resolved root, not the path as sent ({})",
+        sent.display()
+    );
+}
+
 #[tokio::test]
 async fn test_steer_prefix_full_inbox_explains_backlog() {
     let orch = make_steering_orchestrator();
