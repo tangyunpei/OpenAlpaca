@@ -831,5 +831,92 @@ fn build_project_folder(building: &Path, target: &Path, file: &ProjectFile) -> R
     Ok(())
 }
 
+// ── Resolution (storage design §3 *Resolve*; Stage 1 S2) ──────────────────
+
+/// What a client path resolves to (§3). `project: None` is a root with no
+/// folder under `projects/` yet — a git repository nobody has used (R12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedProject {
+    /// The canonical root: the registered project's `root`, or the folder
+    /// that holds `.git`.
+    pub root: PathBuf,
+    /// The project's entry, when the root is registered.
+    pub project: Option<Project>,
+}
+
+impl ResolvedProject {
+    /// Whether the root has a folder under `projects/` — R12: one that does
+    /// not has no store.
+    pub fn is_registered(&self) -> bool {
+        self.project.is_some()
+    }
+
+    /// `root.to_string_lossy().into_owned()` — the value the path columns hold.
+    pub fn root_string(&self) -> String {
+        self.root.to_string_lossy().into_owned()
+    }
+
+    fn registered(project: Project) -> Self {
+        Self {
+            root: project.root.clone(),
+            project: Some(project),
+        }
+    }
+}
+
+/// What makes a folder a project root without anyone choosing it (ST-6): a
+/// `.git` directory, or a `.git` file — a worktree is its own project.
+const GIT_MARKER: &str = ".git";
+
+/// §3 *Resolve* — pure: no cache, creates nothing. `Ok(None)` is no project.
+///
+/// A relative path is no project (R22: it would be read against the daemon's
+/// working directory). An existing path is canonicalised and walked up; at
+/// each folder, in this order: a folder that is, lies inside or contains the
+/// home store ends the walk with no project (R13 — every folder above it
+/// contains the home store too); a registered project's root is that project;
+/// a folder holding `.git` is an unregistered root. The nearest match wins. A
+/// path that cannot be canonicalised — its folder is gone — is walked as
+/// written ([`canonical_root`]) against registered roots only, so a missing
+/// project still resolves to itself (ST-7). `.openalpaca` is no marker (ST-9).
+pub fn resolve(path: &Path) -> anyhow::Result<Option<ResolvedProject>> {
+    if !path.is_absolute() {
+        return Ok(None);
+    }
+    let Ok(canonical) = path.canonicalize() else {
+        return resolve_missing(path);
+    };
+    for folder in canonical.ancestors() {
+        if overlaps_home_store(folder) {
+            return Ok(None);
+        }
+        if let Some(project) = lookup(folder)? {
+            return Ok(Some(ResolvedProject::registered(project)));
+        }
+        if folder.join(GIT_MARKER).exists() {
+            return Ok(Some(ResolvedProject {
+                root: folder.to_path_buf(),
+                project: None,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// [`resolve`] for a path that cannot be canonicalised: its ancestors as
+/// written, deepest first, against registered roots only.
+fn resolve_missing(path: &Path) -> anyhow::Result<Option<ResolvedProject>> {
+    let written = canonical_root(path)?;
+    for folder in written.ancestors() {
+        if let Some(project) = lookup(folder)? {
+            return Ok(Some(ResolvedProject::registered(project)));
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod resolve_tests;
