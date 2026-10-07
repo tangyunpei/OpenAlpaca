@@ -48,6 +48,7 @@ use openalpaca_core::{
     orchestrator::Orchestrator,
     runner::LoopConfig,
 };
+use openalpaca_llm::keys::key_encryption::KeyEncryptor;
 use openalpaca_storage::{Database, discovery, store};
 use openalpaca_wake::manager::WakeManager;
 use std::path::PathBuf;
@@ -125,9 +126,10 @@ fn main() -> Result<()> {
         }
     };
 
-    // Resolve config dir and set master key BEFORE spawning any threads.
-    // std::env::set_var is unsafe in multi-threaded contexts (Rust 2024 edition),
-    // so we do it here in the single-threaded preamble.
+    // Resolve config dir and take the master key BEFORE spawning any threads.
+    // The key step removes OPENALPACA_MASTER_KEY from the environment (F3), and
+    // std::env::remove_var is unsafe in multi-threaded contexts (Rust 2024
+    // edition), so it happens here in the single-threaded preamble.
     let config_base_dir = bootstrap::resolve_config_base_dir();
     info!("Config base dir: {}", config_base_dir.display());
     bootstrap::seed_default_configs(&config_base_dir);
@@ -143,14 +145,24 @@ fn main() -> Result<()> {
     let master_key_dir = store::master_key_dir().context("Failed to resolve the state dir")?;
 
     // D6+D7: ensure_at is race-safe; on failure, fail fast.
-    match openalpaca_llm::keys::key_encryption::KeyEncryptor::ensure_at(&master_key_dir) {
+    // F3: the key stays in this process. It is installed as openalpaca_llm's
+    // process-local master key — what `KeyEncryptor::from_env` reads first —
+    // and `OPENALPACA_MASTER_KEY` is removed from the environment, inherited
+    // or not, so no child this daemon spawns (a shell command, a skill script,
+    // an MCP server, a plugin, a CLI model backend) receives it. The file wins
+    // over an inherited variable, as it always has: `ensure_at` never reads
+    // the environment.
+    match KeyEncryptor::ensure_at(&master_key_dir) {
         Ok(hex_key) => {
-            // SAFETY: No other threads exist yet — tokio runtime has not started.
-            unsafe {
-                std::env::set_var("OPENALPACA_MASTER_KEY", &hex_key);
+            // SAFETY: No other threads exist yet — the tokio runtime has not
+            // started and no signal handler is installed — so nothing else can
+            // be reading or writing the environment.
+            if let Err(e) = unsafe { KeyEncryptor::install_process_key_and_clear_env(&hex_key) } {
+                error!("FATAL: Cannot install the master key: {e}");
+                std::process::exit(1);
             }
             info!(
-                "Master key loaded from {}",
+                "Master key loaded from {} and kept in process memory (not exported)",
                 master_key_dir.join(".master_key").display()
             );
         }
@@ -170,7 +182,8 @@ fn main() -> Result<()> {
     let shutdown_flag = shutdown::install_signal_handlers();
     info!("Signal handlers installed (SIGINT + SIGTERM)");
 
-    // Start the tokio runtime AFTER env vars and signal handlers are set.
+    // Start the tokio runtime AFTER the master key is installed (and the
+    // environment cleaned of it) and the signal handlers are set.
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

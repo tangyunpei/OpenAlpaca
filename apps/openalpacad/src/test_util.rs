@@ -41,7 +41,11 @@ impl HomeStoreGuard {
     }
 
     /// As [`Self::set`], plus a throwaway `OPENALPACA_MASTER_KEY` for the tests
-    /// that build an `LlmSettingsService`.
+    /// that build an `LlmSettingsService`. The variable is what
+    /// `KeyEncryptor::from_env` falls back to: nothing in this binary calls
+    /// `KeyEncryptor::install_process_key` (the daemon's preamble does, in
+    /// `main`), and nothing may — the installed key is process-wide and would
+    /// change the key under every service another test already built (F3).
     pub(crate) fn set_with_master_key(path: &Path) -> Self {
         let mut guard = Self::set(path);
         guard.prev_master_key = Some(std::env::var_os("OPENALPACA_MASTER_KEY"));
