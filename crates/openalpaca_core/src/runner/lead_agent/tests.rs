@@ -525,6 +525,58 @@ async fn check_subagent_status_on_a_failure_with_no_output_names_the_error_alone
     );
 }
 
+// ── F2: the descriptions and the prompt say what the tools return ──
+
+#[test]
+fn check_subagent_status_description_says_it_returns_the_whole_answer() {
+    assert_eq!(
+        check_subagent_status_tool_definition().description,
+        "Check one spawned subagent by its run_id. Queued or running: says so. \
+         Completed: returns the subagent's whole answer — a long one arrives as a stub \
+         naming a result_ref; page it with read_result. Failed: returns the error and the \
+         subagent's whole last output, as its head and tail when long. wait_for_subagents \
+         shows only the head and the tail of each answer; call this for the one you need \
+         in full."
+    );
+}
+
+#[test]
+fn wait_for_subagents_description_says_it_shows_each_answers_head_and_tail() {
+    assert_eq!(
+        wait_for_subagents_tool_definition().description,
+        "Wait for ALL previously spawned subagents to complete, including any that are \
+         queued for execution. Returns a summary of all results: each subagent's answer as \
+         its head and its tail, with a notice naming the bytes between them, sized so that \
+         a batch of eight fits one tool result. Read one answer in full with \
+         check_subagent_status. Use this after spawning all subagents to collect all \
+         outputs before synthesizing a response."
+    );
+}
+
+#[test]
+fn the_lead_prompt_says_check_subagent_status_returns_the_whole_answer() {
+    let engine = crate::compose::ComposeEngine::new(16);
+    let prompt =
+        build_lead_agent_prompt_from_templates(&engine, "Test persona", &[], 200_000, None, None);
+    assert!(
+        prompt.contains(
+            "check_subagent_status: Poll a single subagent by run_id. Shows whether the subagent is \
+             queued, running, completed, or failed, and returns a finished subagent's whole answer \
+             — a long one arrives as a stub to page with read_result."
+        ),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(
+            "wait_for_subagents: Block until ALL spawned subagents finish, including any that are \
+             queued for execution. Returns a summary of all results: each answer's head and tail, \
+             with a notice of what lies between — read one in full with check_subagent_status. \
+             Call this after spawning all subagents."
+        ),
+        "{prompt}"
+    );
+}
+
 #[tokio::test]
 async fn test_check_subagent_status_tool() {
     let tracker = Arc::new(SubagentTracker::new());

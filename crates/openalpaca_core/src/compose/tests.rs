@@ -2799,10 +2799,12 @@ fn test_golden_lead_agent_byte_identical() {
          for parallel spawning instead of individual spawn_subagent calls. This is more efficient \
          and reduces round-trips.\n\
          check_subagent_status: Poll a single subagent by run_id. Shows whether the subagent is \
-         queued, running, completed, or failed.\n\
+         queued, running, completed, or failed, and returns a finished subagent's whole answer \
+         — a long one arrives as a stub to page with read_result.\n\
          wait_for_subagents: Block until ALL spawned subagents finish, including any that are \
-         queued for execution. Returns a summary of all results. Call this after spawning all \
-         subagents.\n\
+         queued for execution. Returns a summary of all results: each answer's head and tail, \
+         with a notice of what lies between — read one in full with check_subagent_status. \
+         Call this after spawning all subagents.\n\
          workspace_read / workspace_write: Share context between subagents. Write setup data before spawning; \
          read results after completion.\n\
          </tools>";

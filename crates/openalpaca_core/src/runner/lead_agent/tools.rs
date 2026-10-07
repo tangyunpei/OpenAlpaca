@@ -1137,9 +1137,12 @@ impl BuiltInTool for CheckSubagentStatusTool {
 pub fn check_subagent_status_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "check_subagent_status".to_string(),
-        description: "Check the status of a previously spawned subagent. Returns whether the \
-                       subagent is queued (waiting for an execution slot), running, completed, \
-                       or failed."
+        description: "Check one spawned subagent by its run_id. Queued or running: says so. \
+                      Completed: returns the subagent's whole answer — a long one arrives as a stub \
+                      naming a result_ref; page it with read_result. Failed: returns the error and the \
+                      subagent's whole last output, as its head and tail when long. wait_for_subagents \
+                      shows only the head and the tail of each answer; call this for the one you need \
+                      in full."
             .to_string(),
         parameters: serde_json::json!({
             "type": "object",
@@ -1251,9 +1254,12 @@ impl BuiltInTool for WaitForSubagentsTool {
 pub fn wait_for_subagents_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "wait_for_subagents".to_string(),
-        description: "Wait for ALL previously spawned subagents to complete, including any that \
-                       are queued for execution. Returns a summary of all results. Use this after \
-                       spawning all subagents to collect all outputs before synthesizing a response."
+        description: "Wait for ALL previously spawned subagents to complete, including any that are \
+                      queued for execution. Returns a summary of all results: each subagent's answer as \
+                      its head and its tail, with a notice naming the bytes between them, sized so that \
+                      a batch of eight fits one tool result. Read one answer in full with \
+                      check_subagent_status. Use this after spawning all subagents to collect all \
+                      outputs before synthesizing a response."
             .to_string(),
         parameters: serde_json::json!({
             "type": "object",
