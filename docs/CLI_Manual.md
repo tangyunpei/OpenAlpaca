@@ -691,9 +691,11 @@ holds `.git`; a write records the project, a read never does — so `openalpaca
 memory list` inside a repository shows
 that project's notes beside your global ones, and outside any project shows the
 global ones alone. `--global` sends no project (the global partition only);
-`--project <path>` names one instead of the working directory — an absolute
-path whose folder is gone still names its project, so a missing project's
-notes stay reachable; a relative one must exist.
+`--project <path>` names one instead of the working directory — the root a
+project records, as `store list` prints it, still names that project when its
+folder is gone, so a missing project's notes stay reachable; any other path
+must exist, so a mistyped one is refused rather than sending a note meant for a
+project to the global partition.
 
 **Ids.** A note's id is a UUID; every verb that takes one accepts a unique
 prefix (at least four hex characters). `show`, `list` and `search` print the

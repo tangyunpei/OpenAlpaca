@@ -616,6 +616,32 @@ fn project_names_a_missing_project_by_its_root() {
     );
 }
 
+/// An absolute `--project` that is not there and that no project records —
+/// a typo — is refused here (residual X9): sent as written, the daemon would
+/// resolve no project and file a note meant for the project in the global
+/// partition, and `list` would show the global notes alone.
+#[test]
+fn project_refuses_an_absolute_path_that_is_not_there_and_no_project_records() {
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let root = tmp.path().canonicalize().unwrap().join("MyApp");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    store::projects::register(&root).unwrap();
+    let typo = root.with_file_name("MyAp");
+
+    let at = ScopeArgs {
+        project: Some(typo.clone()),
+        ..Default::default()
+    };
+
+    let err = at.directory().unwrap_err();
+    assert!(
+        format!("{err:#}").contains("not a directory I can read"),
+        "{err:#}"
+    );
+    assert!(at.headers().is_err(), "nothing is sent for it");
+}
+
 /// A relative `--project` that is not there is still refused here: read
 /// against the daemon's directory it would name another folder (R22).
 #[test]

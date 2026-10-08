@@ -102,8 +102,11 @@ impl ScopeArgs {
     /// path for `--project`, else the CLI's working directory. Canonical and
     /// absolute, because the daemon resolves it against *its* directory
     /// otherwise (R22) — except an absolute `--project` that is not there any
-    /// more, which is sent as written (R23): the daemon, and the local verbs'
-    /// `resolve_project_root`, still resolve a missing project's root to it.
+    /// more and is a root a project records, which is sent as written (R23):
+    /// the daemon, and the local verbs' `resolve_project_root`, still resolve
+    /// a missing project's root to it. Any other path that is not there — a
+    /// typo — is refused: sent, it would name no project, and a note meant
+    /// for one would be filed in the global partition (residual X9).
     fn directory(&self) -> Result<Option<PathBuf>> {
         if self.global {
             return Ok(None);
@@ -111,7 +114,7 @@ impl ScopeArgs {
         let dir = match &self.project {
             Some(p) => match std::fs::canonicalize(p) {
                 Ok(canonical) => canonical,
-                Err(_) if p.is_absolute() => p.clone(),
+                Err(_) if p.is_absolute() && is_recorded_root(p) => p.clone(),
                 Err(e) => {
                     return Err(e).with_context(|| {
                         format!("--project {}: not a directory I can read", p.display())
@@ -144,6 +147,14 @@ impl ScopeArgs {
             .directory()?
             .and_then(|dir| resolve_project_root(WorkspaceHint::Path(&dir))))
     }
+}
+
+/// Whether a project's `project.json` records `path` as its root, as
+/// written (`store::projects::by_recorded_root` — the home store's registry,
+/// which this machine's daemon reads too). A registry that cannot be read is
+/// no: the path is then refused, never sent to name no project.
+fn is_recorded_root(path: &Path) -> bool {
+    matches!(store::projects::by_recorded_root(path), Ok(Some(_)))
 }
 
 #[derive(Subcommand, Debug)]
