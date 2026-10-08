@@ -1749,3 +1749,97 @@ async fn a_real_deletes_entries_say_what_its_counts_say() {
         "{holds}"
     );
 }
+
+/// S5a M3: a missing project — its folder deleted by hand (ST-7) — has its
+/// data deleted end to end, by its root as the list prints it.
+#[tokio::test]
+async fn a_missing_projects_data_is_deleted_end_to_end() {
+    let w = World::new();
+    let s = w.scene();
+    std::fs::remove_dir_all(&s.p.root).expect("the user deletes the folder");
+
+    let (status, plan) = w.delete(&s.p.root, true).await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
+    assert_eq!(plan["project"]["missing"], true);
+    assert_eq!(plan["counts"]["sessions"], 1);
+
+    let (status, body) = w.delete(&s.p.root, false).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["applied"], true);
+    assert_eq!(
+        body["removed"],
+        serde_json::json!({"session_dirs": 1, "memory_partitions": 2, "project_folder": true})
+    );
+    assert_eq!(w.count("SELECT COUNT(*) FROM session"), 2);
+    assert!(!s.p.dir.exists());
+    assert!(!s.session_dir.exists());
+    assert_eq!(projects::lookup(&s.p.root).expect("lookup"), None);
+    assert_eq!(project_snapshots(&s.p.id), 0);
+    let shared = FileAssetRepository::new(&w.db)
+        .get_by_id(&s.u_shared)
+        .expect("read")
+        .expect("kept");
+    assert_eq!(
+        std::fs::read(&shared.storage_path).expect("bytes"),
+        b"shared.txt"
+    );
+    assert!(s.q.dir.is_dir(), "the bystander is untouched");
+}
+
+/// S5a M3: a project whose root is not ASCII — CJK and a combining mark —
+/// is deleted by its root as written, and a file another conversation
+/// still shows is kept at `kept/<folder>-<id>/`, its folder name keeping
+/// those letters.
+#[tokio::test]
+async fn a_non_ascii_projects_data_is_deleted_and_its_kept_file_addressed_by_its_folder() {
+    let w = World::new();
+    let p = w.project("项目-cafe\u{301}");
+    assert!(p.name.contains("项目"), "{}", p.name);
+    assert!(
+        p.name.contains("caf\u{e9}"),
+        "the folder name composes the mark (NFC): {}",
+        p.name
+    );
+    let root = text(&p.root);
+    w.session("s-p", &root);
+    let m_p = w.message("s-p", &root);
+    w.home_session("s-h");
+    let m_h = w.home_message("s-h");
+    let shared = w.upload(&p, "共有.txt");
+    w.link(m_p, &shared);
+    w.link(m_h, &shared);
+    w.note(OWNER, Some(p.root.as_path()), "Release on Fridays");
+
+    let (status, body) = w.delete(&p.root, false).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["project"]["root"], root);
+    assert_eq!(
+        body["kept"],
+        serde_json::json!({"uploads": 1, "artifacts": 0})
+    );
+    assert_eq!(body["removed"]["project_folder"], true);
+    let kept = FileAssetRepository::new(&w.db)
+        .get_by_id(&shared)
+        .expect("read")
+        .expect("kept");
+    let folder = w
+        .home
+        .join("uploads")
+        .join(project_life::KEPT_DIR)
+        .join(format!("{}-{}", p.name, p.id));
+    assert!(
+        std::path::Path::new(&kept.storage_path).starts_with(&folder),
+        "{} is not under {}",
+        kept.storage_path,
+        folder.display()
+    );
+    assert_eq!(
+        std::fs::read(&kept.storage_path).expect("bytes"),
+        "共有.txt".as_bytes()
+    );
+    assert!(!p.dir.exists());
+    assert_eq!(projects::lookup(&p.root).expect("lookup"), None);
+    assert_eq!(project_snapshots(&p.id), 0);
+}

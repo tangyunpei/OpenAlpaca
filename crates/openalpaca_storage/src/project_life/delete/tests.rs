@@ -1025,3 +1025,79 @@ fn a_kept_address_a_committed_row_already_names_is_never_overwritten() {
     assert!(message.contains("nothing was deleted"), "{message}");
     assert_eq!(w.count("SELECT COUNT(*) FROM session"), 3);
 }
+
+/// S5a M3: a kept file whose bytes are gone from the project's folder (a
+/// hand edit of the store) is still re-addressed with no project, at its
+/// kept address, marked missing — no bytes are invented and the delete
+/// goes through.
+#[test]
+fn a_kept_file_whose_bytes_are_gone_is_re_addressed_and_marked_missing() {
+    let w = World::new();
+    let s = seed(&w);
+    let column = |sql: &str, id: &str| -> Option<String> {
+        w.db.with_connection(|conn| Ok(conn.query_row(sql, [id], |row| row.get(0))?))
+            .unwrap()
+    };
+    let source = column(
+        "SELECT storage_path FROM file_assets WHERE id = ?1",
+        &s.u_shared,
+    )
+    .expect("a storage path");
+    std::fs::remove_file(&source).unwrap();
+
+    let outcome = delete_project_data(&w.db, &s.p).unwrap();
+
+    assert_eq!(
+        outcome.kept,
+        KeptFiles {
+            uploads: 1,
+            artifacts: 1
+        }
+    );
+    let rel = column(
+        "SELECT rel_path FROM file_assets WHERE id = ?1",
+        &s.u_shared,
+    )
+    .expect("a rel_path");
+    assert!(
+        rel.starts_with(&format!("{KEPT_DIR}/{}-{}/", s.p.name, s.p.id)),
+        "{rel}"
+    );
+    let target = w.home.join("uploads").join(&rel);
+    assert_eq!(
+        column(
+            "SELECT storage_path FROM file_assets WHERE id = ?1",
+            &s.u_shared
+        ),
+        Some(target.to_string_lossy().into_owned())
+    );
+    assert!(!target.exists(), "no bytes were invented");
+    assert_eq!(
+        column(
+            "SELECT project_root FROM file_assets WHERE id = ?1",
+            &s.u_shared
+        ),
+        None
+    );
+    assert!(
+        column(
+            "SELECT missing_since FROM file_assets WHERE id = ?1",
+            &s.u_shared
+        )
+        .is_some(),
+        "the row says its bytes are gone"
+    );
+    assert!(
+        column(
+            "SELECT missing_since FROM file_assets WHERE id = ?1",
+            &s.a_shared
+        )
+        .is_none(),
+        "the kept by-product whose bytes were copied is not marked"
+    );
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM session"),
+        2,
+        "the delete went through"
+    );
+}
