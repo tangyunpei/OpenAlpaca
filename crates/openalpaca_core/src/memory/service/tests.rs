@@ -6231,3 +6231,147 @@ fn a_note_the_budget_cannot_excerpt_is_listed_instead() {
     assert_eq!(recalled.render().len(), recalled.bytes);
     assert!(recalled.render().contains(INDEX_BLOCK_HEADER));
 }
+
+// ============================================================================
+// A re-point and the memory partition (storage design R18; fixture 17)
+// ============================================================================
+
+/// R18 after S3's re-point: a whole rebuild finds a project partition by
+/// the id in its control snapshot, not by the folder its recorded `root`
+/// names — after a re-point that folder is gone — so the partition is
+/// re-indexed under the same key, at its new folder, before any read
+/// touches it.
+#[test]
+fn a_rebuild_finds_a_repointed_project_partition_by_its_id() {
+    let h = Harness::new();
+    let old = h.workspace("old", Some(".git"));
+    openalpaca_storage::store::projects::register(&old).unwrap();
+    let note = h.store(
+        &h.user(ALICE, Some(&old)),
+        "Release step",
+        "# Release step\n\nTag, then run the release script.\n",
+        NoteKind::Procedure,
+    );
+    let key = h
+        .snapshot(&StoreScope::Project(old.clone()), ALICE)
+        .unwrap()
+        .partition_key;
+    let new = h.root.path().join("ws").join("new");
+    fs::create_dir_all(&new).unwrap();
+    let new = new.canonicalize().unwrap();
+    openalpaca_storage::project_life::repoint(&h.db, &old, &new).unwrap();
+
+    h.service.rebuild_index().unwrap();
+
+    assert!(
+        h.service
+            .index()
+            .get(&key, &note.id.to_string())
+            .unwrap()
+            .is_some(),
+        "the rebuild re-indexed the partition under its key"
+    );
+    let found = search(&h, &h.user(ALICE, Some(&new)), "release script");
+    assert_eq!(search_ids(&found), [note.id]);
+    assert_eq!(found.results[0].revision, note.revision);
+}
+
+/// R18, fixture 17 steps 4–5: with no rebuild at all, a re-pointed
+/// project's note is found at the new path at the same revision: its
+/// partition key, and so its index rows, did not change, and the context at
+/// the new path reaches that key.
+#[test]
+fn a_repointed_projects_notes_keep_their_key_revision_and_index_rows() {
+    let h = Harness::new();
+    let old = h.workspace("old", Some(".git"));
+    openalpaca_storage::store::projects::register(&old).unwrap();
+    let note = h.store(
+        &h.user(ALICE, Some(&old)),
+        "Release step",
+        "# Release step\n\nTag, then run the release script.\n",
+        NoteKind::Procedure,
+    );
+    let key = h
+        .snapshot(&StoreScope::Project(old.clone()), ALICE)
+        .unwrap()
+        .partition_key;
+    let new = h.root.path().join("ws").join("new");
+    fs::create_dir_all(&new).unwrap();
+    let new = new.canonicalize().unwrap();
+    openalpaca_storage::project_life::repoint(&h.db, &old, &new).unwrap();
+
+    let at_new = h.user(ALICE, Some(&new));
+    assert!(h.service.partition_keys(&at_new).contains(&key));
+    assert!(
+        h.service
+            .index()
+            .get(&key, &note.id.to_string())
+            .unwrap()
+            .is_some()
+    );
+    let found = search(&h, &at_new, "release script");
+    assert_eq!(search_ids(&found), [note.id]);
+    assert_eq!(found.results[0].revision, note.revision);
+}
+
+/// The lead's S3 review M2: a `projects/` that cannot be listed does not
+/// fail the whole rebuild. The failure is logged and the rebuild goes on
+/// with no project — the home partition is indexed, and each project
+/// partition is left to its first read, as one that cannot be opened is.
+#[cfg(unix)]
+#[test]
+fn a_rebuild_that_cannot_list_the_projects_still_indexes_the_home_partition() {
+    use std::os::unix::fs::PermissionsExt;
+    struct RestorePerms(PathBuf);
+    impl Drop for RestorePerms {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    let h = Harness::new();
+    let ws = h.workspace("old", Some(".git"));
+    let at_home = h.store(
+        &h.user(ALICE, None),
+        "Editor",
+        "# Editor\n\nvim.\n",
+        NoteKind::Preference,
+    );
+    let in_project = h.store(
+        &h.user(ALICE, Some(&ws)),
+        "Release step",
+        "# Release step\n\nTag, then run the release script.\n",
+        NoteKind::Procedure,
+    );
+    let project_key = h
+        .snapshot(&StoreScope::Project(ws.clone()), ALICE)
+        .unwrap()
+        .partition_key;
+    let projects = h.home().join("projects");
+    fs::set_permissions(&projects, fs::Permissions::from_mode(0o000)).unwrap();
+    let _restore = RestorePerms(projects);
+    if openalpaca_storage::store::projects::list().is_ok() {
+        // A user the mode bits do not bind (root) lists them anyway: there
+        // is no failure to degrade from.
+        return;
+    }
+
+    h.service.rebuild_index().unwrap();
+
+    assert!(
+        h.service
+            .index()
+            .get(&format!("home-{ALICE_KEY}"), &at_home.id.to_string())
+            .unwrap()
+            .is_some(),
+        "the home partition is indexed"
+    );
+    assert!(
+        h.service
+            .index()
+            .get(&project_key, &in_project.id.to_string())
+            .unwrap()
+            .is_none(),
+        "the project partition is left to its first read"
+    );
+}

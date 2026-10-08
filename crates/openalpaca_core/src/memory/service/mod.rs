@@ -1190,18 +1190,20 @@ impl MemoryService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        // Interfaces §4.3, by folder: a project partition belongs to the
-        // listed project whose folder holds its recorded `root` (S4 matches by
-        // id). `store_root` names that folder on either side of the flip.
-        let project_dirs: Vec<(PathBuf, PathBuf)> = openalpaca_storage::store::projects::list()?
-            .into_iter()
-            .filter_map(|p| {
-                let dir =
-                    openalpaca_storage::store::store_root(&StoreScope::Project(p.root.clone()))
-                        .ok()?;
-                Some((p.root, dir))
-            })
-            .collect();
+        // R18: a project partition is found by the id in its snapshot — a
+        // re-point renames the folder its recorded `root` names. A listing
+        // that fails is logged and the rebuild goes on with no project (as
+        // `known_project_roots` does): the home partition is still indexed,
+        // and each project partition is left to its first read.
+        let listed = match openalpaca_storage::store::projects::list() {
+            Ok(listed) => listed,
+            Err(e) => {
+                tracing::warn!(
+                    "memory: the projects under projects/ could not be listed, so the rebuild leaves every project partition to its first read: {e:#}"
+                );
+                Vec::new()
+            }
+        };
         let mut partitions: Vec<(StoreScope, String, String)> = Vec::new();
         for (path, parsed) in files::list_snapshots()? {
             let snapshot = match parsed {
@@ -1214,17 +1216,24 @@ impl MemoryService {
             let scope = match snapshot.scope {
                 files::SnapshotScope::Home => StoreScope::Home,
                 files::SnapshotScope::Project => {
-                    let Some((root, _)) = project_dirs
-                        .iter()
-                        .find(|(_, dir)| Path::new(&snapshot.root).starts_with(dir))
-                    else {
+                    // R22: an earlier build's snapshot carries no id and is
+                    // never opened.
+                    let Some(id) = snapshot.project_id else {
                         tracing::debug!(
-                            partition = %snapshot.partition_key,
-                            "memory: a project snapshot no registered project's folder holds is left out of the rebuild"
+                            path = %path.display(),
+                            "memory: a project snapshot with no project id (an earlier build's) is left out of the rebuild"
                         );
                         continue;
                     };
-                    StoreScope::Project(root.clone())
+                    let Some(project) = listed.iter().find(|p| p.id == id) else {
+                        tracing::debug!(
+                            path = %path.display(),
+                            project_id = %id,
+                            "memory: a project snapshot whose project no folder under projects/ records is left out of the rebuild"
+                        );
+                        continue;
+                    };
+                    StoreScope::Project(project.root.clone())
                 }
             };
             partitions.push((scope, snapshot.owner_id, snapshot.partition_key));
