@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::Database;
 use crate::artifacts::{PurgeCounts, PurgeSession};
@@ -98,6 +98,8 @@ struct KeptRow {
     id: String,
     upload: bool,
     rel_path: Option<String>,
+    /// The row's version when it was read: the copy is of this one's bytes.
+    version: i64,
 }
 
 /// Where step 1 put it.
@@ -109,6 +111,10 @@ struct Placed {
     storage_path: String,
     /// The copy this call wrote; `None` when the project held no bytes for it.
     written: Option<PathBuf>,
+    /// The row's version and address the copy was taken at: a row that no
+    /// longer has both changed after its copy (R18).
+    copied_version: i64,
+    copied_from: Option<String>,
 }
 
 /// What deleting a project's data would do, read without changing anything.
@@ -231,7 +237,7 @@ fn note_files(dir: &Path) -> usize {
 
 fn kept_rows(conn: &Connection, root: &str) -> Result<Vec<KeptRow>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT id, origin, rel_path FROM file_assets
+        "SELECT id, origin, rel_path, version FROM file_assets
           WHERE project_root = ?1 AND id IN ({}) ORDER BY id",
         kept_ids()
     ))?;
@@ -242,6 +248,7 @@ fn kept_rows(conn: &Connection, root: &str) -> Result<Vec<KeptRow>> {
                 id: row.get(0)?,
                 upload: origin == "upload",
                 rel_path: row.get(2)?,
+                version: row.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<KeptRow>>>()?;
@@ -293,6 +300,8 @@ fn place_one(project: &Project, row: &KeptRow) -> Result<Placed> {
         rel_path,
         storage_path: target.to_string_lossy().into_owned(),
         written,
+        copied_version: row.version,
+        copied_from: row.rel_path.clone(),
     })
 }
 
@@ -429,6 +438,25 @@ fn delete_within(tx: &Connection, root: &str, placed: &[Placed]) -> Result<Delet
              deleted; nothing was deleted — try again",
             row.id
         );
+    }
+    // A copied file whose row changed since its copy — a by-product
+    // superseded by a turn in the project, an upload re-addressed — would
+    // keep the old bytes under the new row's version and hash (R18): refuse.
+    for p in placed {
+        let now: Option<(i64, Option<String>)> = tx
+            .query_row(
+                "SELECT version, rel_path FROM file_assets WHERE id = ?1 AND project_root = ?2",
+                rusqlite::params![p.id, root],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if now.is_some_and(|(version, rel)| version != p.copied_version || rel != p.copied_from) {
+            bail!(
+                "file {} of {root} changed while its data was being deleted; nothing was deleted \
+                 — try again",
+                p.id
+            );
+        }
     }
     let session_ids = strings(tx, &format!("{DOOMED_SESSIONS} ORDER BY id"), root)?;
     let message_ids: Vec<i64> = {

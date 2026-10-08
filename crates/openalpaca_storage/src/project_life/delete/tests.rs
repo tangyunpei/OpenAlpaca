@@ -941,3 +941,45 @@ fn a_folder_removal_that_fails_part_way_keeps_project_json_and_a_second_one_fini
         assert_eq!(projects::lookup(&p.root).unwrap(), None, "{kind}");
     }
 }
+
+/// R18: a kept by-product is copied before the transaction. A chat turn
+/// that supersedes it between the copy and the transaction would leave the
+/// kept file holding the old version's bytes under the new version's row,
+/// which the next verify pass records as a user edit; the transaction
+/// refuses instead, as it refuses a file linked meanwhile.
+#[test]
+fn a_kept_by_product_superseded_after_its_copy_refuses_the_transaction() {
+    let w = World::new();
+    let s = seed(&w);
+    let root = s.p.root_string();
+    let placed: Vec<Placed> =
+        w.db.with_connection(|conn| kept_rows(conn, &root))
+            .unwrap()
+            .iter()
+            .map(|row| place_one(&s.p, row).unwrap())
+            .collect();
+    assert_eq!(
+        w.by_product(&s.p, "Shared", b"v3\n"),
+        s.a_shared,
+        "a turn writes the same title again"
+    );
+
+    let err =
+        w.db.with_connection(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            delete_within(&tx, &root, &placed)
+        })
+        .unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(&format!("file {} of {root} changed", s.a_shared)),
+        "{message}"
+    );
+    assert!(message.contains("nothing was deleted"), "{message}");
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM session"),
+        3,
+        "the dropped transaction rolled back"
+    );
+}
