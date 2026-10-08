@@ -171,8 +171,9 @@ Data always lives under `~/.openalpaca/`, on every platform:
 | `config/`, `plugins/` | Runtime config and installed plugins |
 | `artifacts/`, `uploads/`, `sessions/` | What agents wrote, what you attached, and conversation logs |
 | `memory/` | Memory notes, one Markdown file each, per owner |
+| `projects/` | One folder per project — a git repository you chat in, or a folder you chose — with its `project.json`, artifacts, uploads and memory notes |
 
-Set `OPENALPACA_HOME_STORE=/absolute/path` to move the whole root, for example to try things in a sandbox. A project can also hold its own `<project>/.openalpaca/` for artifacts, uploads and its own memory notes (git-ignored, so they never travel with the repository).
+Set `OPENALPACA_HOME_STORE=/absolute/path` to move the whole root, for example to try things in a sandbox. Nothing is written inside a project's own folder: a project's files and notes live in its folder under `projects/`, named after its path.
 
 ## Documentation
 
@@ -209,7 +210,7 @@ bun run check && bun run test && bun run format:check && bun run build
 
 ## Status and limitations
 
-- **Moving target.** Config keys, API routes and the database schema change between commits. `001_baseline.sql` initializes schema version 1 and `002_working_state.sql` upgrades it to 2, so a fresh database opens at 2, and the next migration will be `003`. A database from before that re-baseline (2026-09-28) — 42, the last schema with memory inside the database, or 43 to 45 — is refused rather than upgraded; see [Switching to the Markdown Memory Build](docs/Installation_Manual.md#switching-to-the-markdown-memory-build).
+- **Moving target.** Config keys, API routes and the database schema change between commits. `001_baseline.sql` initializes schema version 1, `002_working_state.sql` upgrades it to 2 and `003_no_project_store_rows.sql` to 3, so a fresh database opens at 3, and the next migration will be `004`. A database from before that re-baseline (2026-09-28) — 42, the last schema with memory inside the database, or 43 to 45 — is refused rather than upgraded; see [Switching to the Markdown Memory Build](docs/Installation_Manual.md#switching-to-the-markdown-memory-build).
 - **Platforms.** Developed on macOS. CI builds and tests on Linux. Windows has packaging scripts, but CI does not build the Rust workspace there.
 - **Plugins** can add tools, skills and agent templates. Plugin connectors and plugin LLM providers are declared in the manifest format but not wired. They do not work.
 - **MCP** is client-side and tools only. MCP resources and prompts are not implemented: the client has no resource or prompt methods. Serving MCP is not a goal.

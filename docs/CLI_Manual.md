@@ -105,7 +105,7 @@ openalpaca llm status                        # shows which model will answer
 | [`ext`](#ext) | MCP servers and plugins |
 | [`plugin`](#plugin) | Plugin-only shortcut over `ext` |
 | [`sessions`](#sessions) | Stored conversations |
-| [`store`](#store) | Project history: re-base or purge |
+| [`store`](#store) | Projects: list them, re-point a moved one, delete one's data |
 | [`memory`](#memory) | Memory notes: list, search, add, edit, confirm, undo, forget, sync, doctor, adopt |
 | [`persona`](#persona) | `USER.md`: show it, edit it |
 | [`chat`](#chat) | Talk to the orchestrator |
@@ -179,8 +179,8 @@ Which file is edited: the one in `OPENALPACA_CONFIG_DIR` when that names a direc
 - It prints the absolute store root it is about to wipe — `OPENALPACA_HOME_STORE` may point anywhere — and the absolute paths of the `llm.toml` and `daemon.toml` it will clear, found the way `config set` finds them (above), so a run from a repository checkout names the checkout's own `./config/` files when that is where they resolve; a file that does not exist is named as none. It then requires you to type `factory-reset`. `y` is not enough, there is no `--yes` flag, and the prompt cannot be answered by a pipe: run it at a terminal.
 - **No backup is taken and there is no undo.**
 - **Not touched:** `state/memory-control/` (each memory partition's control snapshot — revisions, origins and the tombstones of forgotten notes), `state/cache/` (the memory search index, `memory-index-v1.sqlite`, which the next start opens as it is — a disposable cache, rebuilt in the background when it is missing, damaged, of another version or grown past twice its size after its last rebuild), `state/.master_key`, `state/logs/`, `state/backups/`, `config/mcp.toml`, `config/agents/`, `config/skills/`, `config/orchestrator/` (so `USER.md` stays as it is), and `~/.openalpaca/plugins/`.
-- **Left on disk, orphaned until adopted:** your memory notes under `memory/` (and each project's `.openalpaca/memory/`). The next start mints a new owner id, so `openalpaca memory doctor` lists the old partitions as orphaned; nothing reassigns them for you — `openalpaca memory adopt <owner-key>` re-binds them.
-- **Left on disk, now unreferenced:** everything under `artifacts/`, `uploads/` and `sessions/`. The rows that indexed those files are gone; the bytes are not. Delete the directories yourself if you want the space back.
+- **Left on disk, orphaned until adopted:** your memory notes under `memory/` and in each project's folder under `projects/`. The next start mints a new owner id, so `openalpaca memory doctor` lists the old partitions as orphaned; nothing reassigns them for you — `openalpaca memory adopt <owner-key>` re-binds them, finding each project's by the project's id.
+- **Left on disk, now unreferenced:** everything under `artifacts/`, `uploads/` and `sessions/`, and each project's folder under `projects/`. The rows that indexed those files are gone; the bytes are not. A project's `project.json` — its id and path — stays with its folder, so the next turn in that project uses the same folder. Delete the directories yourself if you want the space back.
 
 ### `gui`
 
@@ -579,7 +579,7 @@ that summarise it (see `memory` below).
 Notes:
 - The table is `ID`, `STATUS` (`active` / `archived`), `TITLE`, `WORKSPACE` and `UPDATED`, newest first. A conversation nothing has named yet — neither the daemon, which names one from its first sentence, nor a rename — prints `(untitled)`; one bound to no project prints `-`, which is the normal state for a connector lane.
 - With no flags the list is the lane the CLI and the GUI share (`{user}:gui`) — the lane a `openalpaca chat` turn lands on, read from `GET /v1/me`. `--all` widens to every lane the daemon holds.
-- `--workspace <path>` narrows to one project. The path is resolved the same way a turn's project is — up to the nearest `.openalpaca`/`.git` — so `--workspace .` works from anywhere inside a repository. A directory under no such marker is an error, not a filter that matches nothing.
+- `--workspace <path>` narrows to one project. The path is resolved the same way a turn's project is — to the nearest folder at or above it that is a recorded project's root or holds `.git` — so `--workspace .` works from anywhere inside a repository. A directory in no project is an error, not a filter that matches nothing.
 - An empty result says which kind of empty it is: no conversations at all, or none in the project that was filtered for.
 - `delete <id>` deletes one conversation through `DELETE /v1/sessions/{id}`: its messages and the conversation itself, then its log directory under `~/.openalpaca/sessions/` — the transcript goes with the rows, which is what deleting a conversation means. What the conversation only *pointed at* survives, unpinned from it: its runs stay in `openalpaca tasks`, a queued follow-up stays on the lane, and the tool-call audit rows keep their history with only the session index cleared. It prints what went — title, id, message count and project. This is the counterpart to the GUI sidebar's delete, and the way to remove a conversation with no project, which `store purge` deliberately never touches.
 - There is no `-y` on it: the one thing a confirmation could protect — the transcript a run is still writing into — the daemon already refuses (`409 SESSION_HAS_ACTIVE_WORKFLOWS`, cancel the run first), and another owner's conversation answers `404`.
@@ -587,62 +587,78 @@ Notes:
 
 ### `store`
 
-Manage the content store: re-base a project you moved on disk, or purge one you
-are done with.
+Your projects: list them, re-point one whose folder you moved, or delete
+everything OpenAlpaca holds for one.
 
 ```bash
+openalpaca store list
 openalpaca store rebase /old/path/my-project /new/path/my-project --dry-run
 openalpaca store rebase /old/path/my-project /new/path/my-project
 
 openalpaca store purge /path/my-project          # prints the plan, deletes nothing
 openalpaca store purge /path/my-project -y       # prints the same plan, then carries it out
-openalpaca store purge --all --dry-run           # every project root on record
 ```
 
-Notes:
-- A project's path is its identity in three places — its artifacts, its conversations and its runs — so moving the directory strands all three at once. `rebase` moves them together in one database transaction: either every member lands on the new path or none does. The project's memory notes are files inside `<project>/.openalpaca/memory/`, so they move with the directory; what `rebase` re-keys is their control snapshot, written under the new path before the transaction and the old one deleted after it. A re-base is refused while a memory write for the project is in flight, and a crash part-way leaves a state `openalpaca memory doctor` names (`stale`, `abandoned` or `orphaned`). A project known only by its memory notes — no rows at all — is re-based the same way.
-- `--dry-run` changes nothing and reports what is recorded under each root, whether a store directory stands at either, and which refusal the real call would hit. It names runs that are *queued* under the old root separately from those still running or paused: a re-base takes a queued run's row with it, while a `purge` of that same root would be refused until it finishes, so the two numbers are not interchangeable.
-- The daemon refuses rather than guesses: nothing of yours recorded under the old path is a `404`, and so is a root holding rows that belong to another owner (a re-base rewrites only rows you can see); a run under it that is still running or paused is refused until it finishes (rewriting the row would not move the process); a new path that already has a store recorded against it is refused rather than merged with the old one; two store directories — one at each root — are refused rather than chosen between; either path resolving to the home store (`~/.openalpaca`, or `$HOME` itself) is a `409` `WORKSPACE_IS_HOME`, because the home store is not a project and cannot become one; and a new path that sits *inside* another project's root is a `422` `WORKSPACE_NOT_A_ROOT` naming that root, rather than a silent re-base onto it.
-- If `<old>/.openalpaca` still exists, the directory is moved too, after the transaction. In the usual case you moved the whole project with `mv` already, so only the rows are behind and nothing on disk is touched.
-- The old path is resolved the way a chat turn's project is (up to the nearest `.openalpaca`/`.git`), falling back to the path itself when the old directory is gone. The new path is taken literally after canonicalization — a destination is where you say it is, or the call is refused. Absolute paths only.
-- The GUI offers the same re-base from Settings → Connection when the project you choose has a store that records a different path.
+A project is the git repository a conversation runs in — its top folder,
+wherever inside it you are — or a folder you chose (`openalpaca chat --project
+<dir>`, or `Use` in the app); a path belongs to the nearest of the two at or
+above it. Each has a folder in the home store, `~/.openalpaca/projects/<name>/`,
+named after its path: `project.json` (the project's permanent id and its path)
+and the project's artifacts, uploads and memory notes. Nothing is written
+inside the project's own folder. A project is recorded the first time the
+daemon accepts work for it, and is listed from then on.
+
+`list` notes:
+- Each project prints its path, then its folder under `projects/` and its id. A project whose path is no longer a directory is marked `missing — its folder is gone: re-point it, or delete its data`; its data is kept and its conversations still open. With no projects yet, it says how one is made.
+
+`rebase` notes:
+- Moving or renaming a project's folder on disk leaves it `missing` at its old path; nothing follows it on its own. `rebase <old> <new>` re-points it: the project's folder under `projects/` is renamed for the new path, and every row that names the old path — conversations, messages, runs, follow-ups and file records — is rewritten in one database transaction. The project's id does not change, so its memory notes come with it untouched. A re-point a crash interrupted is finished at the next daemon start.
+- `<old>` is resolved the way a turn's path is, so a path inside the project names the whole project, and an old folder that is gone is matched as written against the recorded projects. `<new>` must be an existing directory. A relative path is taken from the shell's directory.
+- `--dry-run` changes nothing. It reads both paths and prints what is recorded under the old one (artifacts, conversations, runs, messages, follow-ups), the folder that would be renamed, and the refusals it can foresee. It names runs queued there apart from those running or paused: a re-point takes a queued run's rows with it, while deleting that project's data would be refused until it finishes.
+- The daemon refuses rather than guesses, changing nothing: an old path that is no project of yours is a `404` `WORKSPACE_NOT_FOUND`; a run there that is running or paused, or a memory write that holds the project for more than a few seconds, is a `409` `WORKSPACE_BUSY` (retry once it finishes); a new path that is not a directory is a `422` `WORKSPACE_NOT_A_DIRECTORY` (move the folder first); a new path that is already a project of its own, or that rows still name, is a `409` `WORKSPACE_EXISTS` — delete that project's data first, or re-point onto another path, because two projects are never merged; a new path that is the home store, lies inside it or contains it is a `409` `WORKSPACE_IS_HOME` (an old path there is no project of yours: the `404` above); and the path the project already has is a `400` `INVALID_PATH`.
+- The app's Settings → Connection → Projects → `Re-point…` does the same.
 
 `purge` notes:
-- **`--dry-run` is what happens anyway.** Without `-y` the command prints the plan and deletes nothing; `-y` prints the same plan and then carries it out. `<project>` and `--all` are mutually exclusive, and one of them is required — a destructive verb never guesses which project you meant. The daemon defaults the same way, so a direct `POST /v1/workspaces/purge` with no `dry_run` field is also a dry run.
-- **`<project>` is taken almost literally.** Rows are the proof of a root: it is canonicalized, and if any of your conversations, runs or uploads still name that exact path, or your memory has a partition there, it is purgeable outright — no further check, even when the path sits under another project's `.git`/`.openalpaca` (a project moved out from under a monorepo, its own marker gone with it, purges by the root its rows still name). Only a path nothing names is checked against the same `.openalpaca`/`.git` walk `rebase`'s *old* path takes — but unlike `rebase`, purge never silently follows that walk. If it resolves to an **ancestor** different from what you typed, the whole call is refused with a `422` `WORKSPACE_NOT_A_ROOT` naming that root: `openalpaca store purge /repo/src` deletes nothing and tells you to name `/repo` (or give `/repo/src` a project marker of its own first), rather than purging the whole project for a path that named one file of it. A path that resolves to itself, or to no marker at all, is taken as given — and from there the ordinary `404` follows if nothing turns out to be recorded under it.
-- **What goes:** this project's conversations (`session` rows, their messages, tool-call index rows and queued follow-ups) together with each conversation's log directory under `~/.openalpaca/sessions/`; its runs (`task` rows with their subagent spans, run events, dispatch decisions and LLM call log); and the uploads copied into `<project>/.openalpaca/uploads/`, rows and bytes. Rows go in one transaction per project, then the files.
-- **What stays, and is named in the plan rather than left out of it:** `artifacts/` and every produced file record (never garbage-collected), the project's memory notes under `memory/` (files, not rows, so the purge cannot reach them — except the episode notes summarising the conversations it deletes, which go with them), `skills/` and `config/`, the store's own `.layout` / `README.md` / `.gitignore`, and any directory inside `<project>/.openalpaca/` that OpenAlpaca did not create. Conversations with no project belong to the home store and are never touched — `--all` says how many there are, names the home store's `state/` as kept too (a factory reset is a separate, deliberate act), and leaves the conversations to `openalpaca sessions delete`.
-- The plan is printed in the retention classes of the README seeded into every store root, so the reason for each verdict is on the line beside it:
+- **Without `-y` nothing is deleted.** The command prints the plan; `-y` prints the same plan and then carries it out. A direct `POST /v1/workspaces/purge` with no `dry_run` field is a dry run too.
+- **`<project>` is a project's root, exactly as `store list` prints it** — or its folder as `store list` prints it, `projects/<name>` (`openalpaca store purge projects/-Users-me-code-my-project`). A path inside a project — `openalpaca store purge /repo/src` — is refused, and the answer names the project's root: one mistyped path never deletes a whole project's conversations and notes. A relative path is taken from the shell's directory. A project whose folder is missing, or that has nothing recorded yet, is deleted the same way.
+- **What goes:** the project's conversations — messages, tool-call rows, queued follow-ups, and each one's log directory under `~/.openalpaca/sessions/` — and any message another conversation recorded while it ran in the project; its runs with their subagent spans and run events; its uploads and its by-products with every version; the memory notes of **every** owner in the project, with their control snapshots in `state/memory-control/`; the summaries of the deleted conversations in your global memory; and its folder under `projects/`. A follow-up queued from another project to run in this one goes too. The rows go in one transaction, then the files.
+- **What is kept:** a file of the project that a message in a surviving conversation still shows — an upload, or a by-product as its newest version — is moved into the home store, under `uploads/kept/` or `artifacts/kept/`, and stays readable there; the plan counts them. The project's own folder is never touched: OpenAlpaca deletes only what it holds for the project.
+- The plan names each entry with its retention class, the way the home store's `README.md` does:
 
 ```text
-Would purge /Users/me/code/my-project
-  delete  sessions/                       3 conversations, 41 messages, 12 tool calls, 0 follow-ups — their logs live in the home store's sessions/
-                                          (size-capped, optional age sweep)
-  delete  runs (database)                 2 runs, 5 subagent spans, 18 run events
-                                          (never swept — removed only when you ask)
-  delete  uploads/                        4 uploads copied into this project
-                                          (swept: an upload attached to no message is deleted once past the grace period)
-    keep  artifacts/                      9 files produced by runs in this project
-                                          (never garbage-collected)
-    keep  memory/                         this project's memory notes — files, not rows, so a purge of the database cannot reach them
-                                          (yours — never swept)
-    keep  skills/, config/                reserved; not created until used
-                                          (yours — never swept)
-    keep  .layout, README.md, .gitignore  this store's own markers
-                                          (store metadata — never swept)
-    keep  notes-of-my-own                 not created by OpenAlpaca
-                                          (the store never deletes what it did not create)
+Would delete the data of /Users/me/code/my-project
+  projects/-Users-me-code-my-project · id 3f6c2a1e-8b4d-4c7a-9e2f-5d1b0a9c8e7f
+  delete  sessions/                                      3 conversations, 41 messages, 12 tool calls, 0 follow-ups — their logs live in the home store's sessions/
+                                                         (size-capped, optional age sweep)
+  delete  runs (database)                                2 runs, 5 subagent spans, 18 run events
+                                                         (never swept — removed only when you ask)
+  delete  projects/-Users-me-code-my-project/uploads/    4 uploads handed to this project's conversations
+                                                         (swept: an upload attached to no message is deleted once past the grace period)
+  delete  projects/-Users-me-code-my-project/artifacts/  9 by-products of this project's runs, with every version
+                                                         (never garbage-collected — removed only when you ask)
+  delete  projects/-Users-me-code-my-project/memory/     6 memory notes of every owner, in 1 partitions, with their history
+                                                         (yours — never swept)
+  delete  projects/-Users-me-code-my-project/            project.json — the project's id and path; OpenAlpaca forgets the project
+                                                         (store metadata)
+    keep  uploads/ (root store)                          1 uploads another conversation still shows, moved here under kept/
+                                                         (swept: an upload attached to no message is deleted once past the grace period)
+    keep  artifacts/ (root store)                        0 by-products another conversation still shows, moved here under kept/ as their newest version
+                                                         (never garbage-collected)
+    keep  /Users/me/code/my-project                      the project's own folder — OpenAlpaca never touches it
+                                                         (yours)
+  kept: 1 uploads and 0 by-products another conversation still uses, moved to the root store
 
 Nothing was deleted. Re-run with -y to carry this out.
 ```
 
-- The daemon refuses rather than guesses, the same way the re-base does: nothing of yours recorded under the path is a `404`, and so is a root holding rows that belong to another owner; a run there that is queued, running or paused — or a conversation with a run in flight — is a `409` `WORKSPACE_BUSY` (a queued run has not started yet, but it already named this root and is about to resolve the store the moment it does), and with `--all` one busy root refuses the whole call rather than purging the others; a path resolving to the home store is a `409` `WORKSPACE_IS_HOME` (the home store is not a project, and a factory reset is `openalpaca config reset --factory`, a separate deliberate act); a relative path is a `400`.
-- A purge is not reversible and there is no undo. Back up `<project>/.openalpaca` first if you might want the transcripts again.
+- With `-y` the same plan is followed by what was done — `deleted:` with every count, zeroes included, and `removed:` with the session-log directories, the memory partitions and the folder under `projects/`. If not every memory partition could be dropped, the rows are deleted all the same but the folder under `projects/` stays — `removed:` says it was not removed — and the project is still listed; run the same `store purge … -y` again: it finds no row left, drops the rest and removes the folder.
+- The daemon refuses rather than guesses, deleting nothing: a path where no project of yours is recorded — one in no project, in the home store, or a git repository no conversation has used yet — is a `404` `WORKSPACE_NOT_FOUND`; a path inside a project is a `422` `WORKSPACE_NOT_A_ROOT` that names the project's root; a run there that is queued, running or paused — or a conversation with a run in flight — is a `409` `WORKSPACE_BUSY` (a queued run has not started yet, but it already named this project), and so, with `-y`, is a memory write that holds the project for more than a few seconds, or a run that started while the delete waited for it. A conversation with no project is never touched: `openalpaca sessions delete` is the verb for one.
+- A purge is not reversible and there is no undo.
 
 ### `memory`
 
 The memory notes — the Markdown files under `~/.openalpaca/memory/owners/<owner-key>/notes/`
-and, for a project, `<project>/.openalpaca/memory/owners/<owner-key>/notes/` — from
+and, for a project, `~/.openalpaca/projects/<name>/memory/owners/<owner-key>/notes/` — from
 the command line. Every verb but the two local ones goes through the daemon's
 `/v1/memories*` routes, so it sees exactly what the app and the model see.
 
@@ -664,8 +680,10 @@ openalpaca memory adopt   <owner-key>
 ```
 
 **Which project.** Every daemon-backed verb sends the CLI's working directory as
-the project, exactly as `chat` does, and the daemon resolves it to the nearest
-`.openalpaca`/`.git` root — so `openalpaca memory list` inside a repository shows
+the project, exactly as `chat` does, and the daemon resolves it as it resolves a
+turn's — the nearest folder at or above it that is a recorded project's root or
+holds `.git`; a write records the project, a read never does — so `openalpaca
+memory list` inside a repository shows
 that project's notes beside your global ones, and outside any project shows the
 global ones alone. `--global` sends no project (the global partition only);
 `--project <path>` names one instead of the working directory.
@@ -848,8 +866,9 @@ Notes:
   project), every other owner key's as an **orphan**, health (`ready`, `absent`, or
   `quarantined` with why), note, unverified and tombstone counts, malformed files,
   duplicate ids, conflicts (two active notes with the same fact key, or a
-  replacement link the replacing note lacks the authority for), and move snapshots
-  left by an unfinished project move (`stale`, `abandoned`, `orphaned`). With a
+  replacement link the replacing note lacks the authority for), and each record an
+  earlier build kept for a project with no project id — never opened, adopted or
+  deleted, and harmless (see the Installation Manual's switch-over note). With a
   daemon running it asks the daemon; with none it reads the store directly (and
   opens the database for your owner id). Either way it changes nothing.
 - `doctor --repair` is **local and takes the store lock**: it refuses while a daemon
@@ -857,7 +876,7 @@ Notes:
   snapshot from the note files of your global partition and the current project's,
   lifting the quarantine — every note is recorded at its current bytes as
   `external`, tombstones are empty, and a duplicate id refuses the repair naming
-  both files — and deletes stale and abandoned move snapshots. It never rewrites,
+  both files. It never rewrites,
   moves or deletes a note file. Another owner key's partition is an orphan and not
   repaired; `adopt` is the verb for that.
 - `adopt <owner-key>` is likewise local and takes the lock. After a factory reset
@@ -867,8 +886,9 @@ Notes:
   owner in one command, renaming each `owners/<old-key>` directory and its control
   snapshot; if the current owner already has a partition where one would land, the
   whole command is refused naming the collision, and nothing is partially adopted
-  (merging two owners' notes is not an operation). A stale or abandoned move
-  snapshot of the old key must be settled by `doctor --repair` first. The daemon
+  (merging two owners' notes is not an operation). A project's partition is found
+  by the project's id, so one re-pointed since is adopted at its new folder; a
+  record an earlier build kept with no project id is left as it is. The daemon
   rebuilds its search index for the adopted partitions at its next start.
 
 Refusals come from the daemon in its own words: `404 MEMORY_NOT_FOUND`,
@@ -917,6 +937,9 @@ openalpaca chat --message "hello"
 openalpaca chat --message "summarize these" --file a.txt --file b.png
 echo "hello" | openalpaca chat
 
+# Work in a folder with no git, or name the project explicitly
+openalpaca chat --project ~/notes
+
 # Continue a stored conversation
 openalpaca chat --resume
 openalpaca chat --session 0f2c9a41-3b7d-4e58-9a10-6c1f2d3e4b55
@@ -950,13 +973,14 @@ Attachment <file id> did not reach the model: the answering model does not suppo
 
 #### Project and conversation
 
-- Every turn carries the CLI's working directory as its project (`x-workspace-path`), the same way the GUI sends the project chosen in its window. The daemon resolves it up to the nearest `.openalpaca`/`.git` marker; that root is what a run records as its `workspace_id` and where the files it writes land. A directory the CLI cannot canonicalize sends no project at all rather than a path the daemon would resolve against its own directory.
+- Every turn carries the CLI's working directory as its project (`x-workspace-path`), the same way the GUI sends the project chosen in its window. The daemon resolves it — to the nearest folder at or above it that is a recorded project's root or holds `.git` — and records the project on that turn; that root is what a run records as its `workspace_id`, and the files the turn writes land in the project's folder under `~/.openalpaca/projects/`, never in the project itself. A directory the CLI cannot canonicalize sends no project at all rather than a path the daemon would resolve against its own directory.
+- `--project <dir>` chooses the project instead of the working directory: the CLI first asks the daemon to record `<dir>` (`POST /v1/workspaces`) — the nearest recorded project or git repository at or above it, else the folder itself, which is how a folder with no git becomes a project — and every turn of the chat carries the root the daemon answered. A refusal (the home store, a path that is not a directory) is printed and nothing is sent.
 - `--resume` continues a stored conversation instead of the lane's current one. `--session <id>` names one directly; `openalpaca sessions` lists the ids. The two are mutually exclusive.
-- `--resume` is scoped to **this project**: the conversations bound to the working directory's own root, newest first. The lane is shared with the GUI and with every other checkout, so a lane-wide list would offer another project's conversations.
+- `--resume` is scoped to **this project**: the conversations bound to the working directory's own root (or `--project`'s), newest first. The lane is shared with the GUI and with every other checkout, so a lane-wide list would offer another project's conversations.
   - With a terminal it opens a picker over them.
   - With stdin piped it takes the most recent — the row the picker would have opened on — because a prompt written into a pipe is a hang, not a question.
   - A project with no conversations yet says so and names itself, rather than reaching for another project's.
-  - From a directory under no project marker the list stays lane-wide, which is the same scope such a turn itself has.
+  - From a directory in no project the list stays lane-wide, which is the same scope such a turn itself has.
 - `--session <id>` only continues a conversation on the lane the CLI talks on. One on another lane (a connector's) is refused here, before anything is sent, naming both lanes: activating it would archive that lane's own live conversation and the turn would still be refused (`409 SESSION_LANE_MISMATCH`). `openalpaca sessions --all` is what lists those.
 - Resuming **re-opens** the conversation (`POST /v1/sessions/{id}/activate`) before anything is sent. A lane holds exactly one live conversation, so resuming an archived one archives whatever was live. The CLI prints the conversation it resumed, and its project, so that is visible rather than discovered later. The last 8 messages are printed before the prompt opens.
 - A resumed conversation's own project governs the turn, overriding the working directory: one conversation belongs to one project. A conversation that has no project yet takes the working directory's and is bound by it.

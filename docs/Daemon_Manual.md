@@ -74,14 +74,13 @@ root is the human's:
 - rotated copies of hand-edited config: `~/.openalpaca/state/backups/`
 - plugins: `~/.openalpaca/plugins/` — one directory per plugin, plus `.permissions.toml` (approvals and the ENABLE bit for all plugins), `.config/<name>.toml` (per-plugin config), `.data/<name>/` (per-plugin durable state, kept across an update) and `.trash/` (where an uninstalled plugin's directory is moved)
 - self-description: `~/.openalpaca/README.md` (what every entry is, with a retention class) and `.layout` (layout version and this install's id), both seeded when the store is created. `README.md` is written only when absent: an existing one, edited or not, is never rewritten — delete it and the next start seeds the current text
-- content, home scope: one directory per content kind under the root, created on first use — `artifacts/`, `uploads/`, `sessions/`, `memory/`, `skills/`, `scratch/`, `cache/`
+- content, home scope: one directory per content kind under the root, created on first use — `artifacts/`, `uploads/`, `sessions/`, `memory/`, and `scratch/` (reserved: nothing creates it yet). A deleted project's files that another conversation still shows are kept under `artifacts/kept/` and `uploads/kept/`
 - memory notes: `~/.openalpaca/memory/owners/<owner-key>/notes/<id>--<slug>.md`,
   one Markdown file per note, with `.history/` (the last five revisions the
   daemon wrote) and a rebuildable `MEMORY.md` index beside them; a project's
-  are under `<project>/.openalpaca/memory/owners/<owner-key>/`, where
-  `memory/.gitignore` (`*`, re-asserted on every open) keeps them out of the
-  repository. `<owner-key>` is the first 32 hex characters of the SHA-256 of
-  the owner id. Directories are created `0700` and files `0600`
+  are under `~/.openalpaca/projects/<name>/memory/owners/<owner-key>/`,
+  outside the project. `<owner-key>` is the first 32 hex characters of the
+  SHA-256 of the owner id. Directories are created `0700` and files `0600`
 - memory control snapshots: `~/.openalpaca/state/memory-control/<partition-key>.json`,
   one per partition — the revision the daemon last wrote for each note, each
   note's origin, and the tombstones of forgotten notes. Never swept: losing one
@@ -90,7 +89,7 @@ root is the human's:
   disposable SQLite full-text index over the notes. Deleting it costs one
   rebuild from the notes at the next start; nothing in it is authoritative.
   Nothing downloads a model: there is no embedding cache any more
-- a project's own store: `<project>/.openalpaca/` — the same content shape, so an artifact of a project lives beside the project
+- projects: `~/.openalpaca/projects/<name>/`, one folder per project, created the first time the daemon accepts work for it — a chat turn, a run, an upload, a memory write, or choosing the folder (`POST /v1/workspaces`); a request that only reads (the status poll, the Memory view) creates none. `<name>` is the project's canonical path, in Unicode NFC, with every character that is not a letter, digit or combining mark turned into `-` (`/Users/me/dev/app` → `-Users-me-dev-app`); a name another project's folder already holds gains `-` and eight hex digits of the path's SHA-256, and a name longer than 200 bytes is cut to at most 200 bytes and gains the same. The folder holds `project.json` — `{version, id, root, created_at}`, the project's permanent id and its path, written `0600` — and the project's `artifacts/`, `uploads/` and `memory/` (its conversations' logs stay in the home store's `sessions/`). A request's path belongs to the nearest folder at or above it that is a recorded project's root or holds `.git` — a git repository's top folder, or a worktree's — and a folder with no git becomes a project only when it is chosen; the home store, a folder inside it and a folder that contains it never are. Nothing is written inside the project's own folder, and an `.openalpaca/` an earlier build left there is never read
 - daemon log (launcher-managed startup): `~/.openalpaca/state/logs/daemon.log` —
   the daemon's stdout and stderr, appended across restarts and rotated by
   whichever launcher starts it when it is past 16 MB (`daemon.log.1` … `.3`,
@@ -112,7 +111,10 @@ root is the human's:
 5. Install signal handlers.
 6. Bind to `127.0.0.1:0` (OS-selected port).
 7. Write discovery metadata (`discovery.json`).
-8. Open SQLite database and apply migrations. Still in this step, before
+8. Open SQLite database and apply migrations, then finish any re-point a
+   previous process left half done — a `project.json` that still records the
+   path it moved from; each of its steps can run again, and one that fails is
+   logged and tried at the next start. Still in this step, before
    anything can create new work: every run the previous process left in flight
    is marked `interrupted` (a terminal state), and any steering message it never
    delivered is recovered from the session log and filed for the lane's next
@@ -572,13 +574,17 @@ lane never posts its completion report or its confirmation prompts there.
 | `PUT /v1/artifacts/{id}/pin` | Pin or unpin it. |
 | `GET /v1/artifacts/{id}/content` | The head version's bytes. Query token or bearer header. |
 | `GET /v1/artifacts/{id}/versions/{n}/content` | One version's bytes. Query token or bearer header. |
-| `GET\|PATCH /v1/workspaces` | Describe a project root; re-base everything addressed under it after the project moved. |
-| `POST /v1/workspaces/purge` | Delete a project's conversations, runs and uploads, and answer the plan it followed. `dry_run` defaults to **true**. It removes the session-log directory of every session it purges. The project's memory notes stay, except the episode notes summarising the conversations it deletes. |
+| `GET /v1/workspaces` | Every project: `[{id, root, name, missing}]`, by folder name — `name` is its folder under `projects/`, `missing` that its root is no longer a directory (its data is kept). |
+| `GET /v1/workspaces?path=` | What a path resolves to: `{path, root, id, name, missing, rows, active_tasks, queued_tasks}` — `root` `null` when it is in no project, `id` and `name` `null` for a git repository no folder under `projects/` records yet; `rows` counts the artifacts, conversations, runs, messages and follow-ups recorded under the root, `active_tasks` its runs running or paused and `queued_tasks` its queued ones. Reading records nothing. A relative path is `400 INVALID_PATH`. |
+| `POST /v1/workspaces` | Choose a folder: `{path}` → the project it resolves to — the nearest recorded project or git repository at or above it, else the folder itself — recorded, as `{id, root, name, missing}`. `409 WORKSPACE_IS_HOME` for the home store, a folder inside it or one containing it, and `500 WORKSPACE_REGISTER_FAILED` for an I/O failure — as on every route that records a project; `422 WORKSPACE_NOT_A_DIRECTORY`; `400 INVALID_PATH` for a relative path. |
+| `PATCH /v1/workspaces` | Re-point a project whose folder moved: `{old_path, new_path}` → `{old_path, new_path, moved, project}`. `old_path` resolves as a turn's path does, so a path inside the project names it; `new_path` must be an existing directory. Its folder under `projects/` is renamed for the new path and every row naming the old path is rewritten in one transaction; its memory notes are keyed by its id and stay as they are. Refused, changing nothing: `404 WORKSPACE_NOT_FOUND` (no project of yours there); `409 WORKSPACE_BUSY` (a run there running or paused, or a memory write that holds the project for more than a few seconds — a queued run's rows move with it); `422 WORKSPACE_NOT_A_DIRECTORY`; `409 WORKSPACE_EXISTS` (the new path is already a project, or rows name it — two projects are never merged); `409 WORKSPACE_IS_HOME` (the new path is the home store, lies inside it or contains it — an old path there is no project of yours, the `404`); `400 INVALID_PATH` (a relative path, or the path the project already has). |
+| `POST /v1/workspaces/purge` | Delete everything held for one project: `{path, dry_run}` (`dry_run` defaults to **true**) → the plan or what was done, `{dry_run, applied, project, entries, counts, kept, removed}`, `removed` `null` on a dry run. `path` is a project's root exactly; a project whose folder is missing, or that has nothing recorded, is deleted the same way. It deletes the project's conversations (with their session-log directories) and any message another conversation recorded while it ran there, its runs, uploads and by-products with every version, the memory notes of every owner with their control snapshots, the summaries of the deleted conversations in your global memory, and its folder under `projects/`; a file a surviving conversation still shows is moved to `uploads/kept/` or `artifacts/kept/` and kept. Never touches the project's own folder. A real delete that could not drop every memory partition still answers `200`, with `removed.project_folder: false`: the rows are gone, but its folder under `projects/` stays, so the project stays listed, and the same call again — which finds no row left — drops the rest and the folder. Refused, changing nothing (a dry run included): `404 WORKSPACE_NOT_FOUND` (no project of yours there — a path in no project, in the home store, or a root no folder under `projects/` records); `422 WORKSPACE_NOT_A_ROOT` for a path inside a project, the answer naming the project's root; `409 WORKSPACE_BUSY` while a run there is queued, running or paused or a conversation of it has a run in flight, and — on a real run — while a memory write holds the project for more than a few seconds, or when a run started while the delete waited for it; `400 INVALID_PATH`. |
 
 **Where an agent's files land.** `artifact_write` saves a deliverable in
-the artifact store — the project's (`<project>/.openalpaca/artifacts/`)
-when the turn carried a project, the home store's (`~/.openalpaca/artifacts/`)
-otherwise. `file_write` writes a plain file into the daemon's workspace
+the artifact store — the project's folder in the home store
+(`~/.openalpaca/projects/<name>/artifacts/`) when the turn carried a project,
+the home store's own (`~/.openalpaca/artifacts/`) otherwise. `file_write`
+writes a plain file into the daemon's workspace
 directory (the directory it was started in) only when the turn carries a
 project **and** that directory is not the home store. Every other
 `file_write` is saved the same way as an artifact: named after its path
@@ -603,11 +609,11 @@ deliverable and is not to be copied elsewhere with the shell or any other
 tool, and that writing the same path again saves its next version. When the
 artifact's file lies under the daemon's workspace directory, the result also
 names the path, relative to that directory, that `file_read` opens it by
-(`artifacts/loose/<day>/01-notes-plan.md`) — the case for the app and
-`openalpaca daemon start` on a conversation with no project, since both
-start the daemon in the home store; otherwise (a project's store, or a daemon
-started elsewhere) it says that `file_read` cannot open it from that
-conversation. A path that names no file (`''`, `.`, `reports/`, a
+(`artifacts/loose/<day>/01-notes-plan.md`, or `projects/<name>/artifacts/…`
+in a project) — the case for the app and `openalpaca daemon start`, which
+both start the daemon in the home store; otherwise (a daemon started
+elsewhere) it says that `file_read` cannot open it from that conversation.
+A path that names no file (`''`, `.`, `reports/`, a
 blank name) is refused, and a turn with no owner — `POST /v1/command
 {"command":"process"}` runs as the system — cannot save an artifact, so
 there `file_write` is refused unless it makes the plain write. Both
@@ -674,9 +680,12 @@ An upload is refused with the reason in the error code: `NO_FILE`,
 `reference` or `episode` — `status`, timestamps, and optional `aliases`, `tags`,
 `fact_key`, `sources`, validity bounds and `supersedes`). Notes live in
 **partitions**: one global partition per owner in the home store, and one per
-owner in each project, the project being the nearest `.openalpaca`/`.git` root
-above the request's workspace (`x-workspace-path`) — never the daemon's own
-working directory. A turn with no project reads and writes the global partition
+owner in each project, the project being the one the request's workspace
+(`x-workspace-path`) resolves to — the nearest folder at or above it that is a
+recorded project's root or holds `.git` — never the daemon's own working
+directory. A project's notes are keyed by its permanent id, so a project
+re-pointed to a new path keeps them as they were. A turn with no project
+reads and writes the global partition
 alone; a turn in a project reads both, and a `preference` defaults to global
 while the other kinds default to the project. Only a real user owns memory: a
 `/v1/command process` turn (owner `system`), the workflows it starts and an
@@ -777,10 +786,14 @@ reasoning, or a list or object in the prose that is not the items (no entry
 with a `content`), is not taken, and `[]` means nothing to keep; an answer
 whose `<think>` never closes, or cut at its output ceiling, is not read — the
 latter counts as cut. Deleting or clearing a
-conversation drops its turns not yet learned, and so does deleting the project
-directory a turn named — even while the model is answering: learning, and an
-episode note, skip those turns rather than re-create the directory and its
-`.openalpaca/` store. `[orchestrator.learning] enabled
+conversation drops its turns not yet learned, and so does deleting the data of
+the project a turn named (`openalpaca store purge`, or `Delete data…` in the
+app) — even while the model is answering: learning, and an episode note, skip
+the turns of a project that has no folder under `projects/` — never recorded,
+or its data deleted — rather than create one. The turns of a project being
+re-pointed wait until the re-point finishes and are learned at its new path,
+and a project whose own folder was moved or deleted keeps its folder at
+home, so its turns are still learned there. `[orchestrator.learning] enabled
 = false` switches learning off.
 
 **Episode notes** record conversations the way learning records facts: one
@@ -1002,12 +1015,13 @@ reported skipped. Learning never reads these turns: it leaves out every
 `/`-line and its answer.
 
 The routes below reach the memory notes (Markdown files under the home store's
-`memory/` and a project's `.openalpaca/memory/`) through the one memory service
+`memory/` and each project's `projects/<name>/memory/`) through the one memory service
 the model's tools and the automatic per-turn recall also use. These are the **user-directed**
 surface: a write here records origin `user`, the highest authority, which a
 model's tool call can never edit, archive or replace. `x-workspace-path` selects
-the project partition exactly as on `POST /v1/chat` (the nearest
-`.openalpaca`/`.git` root above it); absent, the global partition alone is
+the project partition exactly as on `POST /v1/chat` (the nearest folder at
+or above it that is a recorded project's root or holds `.git`; a write here
+records the project, a read never does); absent, the global partition alone is
 addressed. Bodies and queries are closed objects — an unknown key is a `400`.
 
 | Method and path | Purpose |
@@ -1018,7 +1032,7 @@ addressed. Bodies and queries are closed objects — an unknown key is a `400`.
 | `GET /v1/memories/recently-learned` | The extractor's `extracted_user` notes that recall would use, newest first, each with `supersedes` (what it replaced) — `since` (RFC 3339, or a window like `7d`, `24h`, `30m`; default 7 days) and `limit`. A note that is not in force, loses its `fact_key` to another note, or cites a message a forget suppressed is not listed. An edit through this surface re-records a note as `user` and it leaves the list. |
 | `GET /v1/memories/suggestions` | The pending suggestions, newest first — `limit` (1–100, default 20). Each item: `id`, `revision`, `title`, `knowledge` (the suggested text, cut at 4 KiB), `knowledge_left_out` (how many characters that cut left out, 0 when whole), `reason` (none for a suggestion the assistant saved in chat, whose text may copy the note it names), `changes` (what else it changes of that note: `[{field, from, to}]` for each of `fact_key`, `aliases`, `tags`, `valid_from` and `valid_to` whose values differ, the values as lists, empty for none), `created_at`, `observed_at` (the newest cited message's time, as learning records it; `null` for a suggestion the assistant saved in chat, which is how the app and the CLI tell it apart), `origin`, `scope`, `sources`, `older_count`, and `target: {id, revision, title, excerpt, excerpt_left_out, origin, scope}` — the note it would replace, as read now, its text cut at 600 bytes. Where several name one note only the newest is listed, and `older_count` counts the rest. A suggestion whose note is gone or no longer in force is not listed (undo still dismisses it). Records nothing. |
 | `GET /v1/memories/recently-used` | The in-memory ring of notes delivered to a model since the daemon started (`limit`, default 50, max 200): `{id, revision, reason, delivered_at, lane_key, task_id}`, `reason` as in `memory_used` — a note the recall only listed is recorded `index`, not as delivered. Cleared at restart. |
-| `GET /v1/memories/doctor` | The read-only report: every partition with its health, counts, malformed files, duplicate ids and conflicts, other owners' partitions as orphans, and stale/abandoned/orphaned move snapshots. Changes nothing. |
+| `GET /v1/memories/doctor` | The read-only report: every partition with its health, counts, malformed files, duplicate ids and conflicts, other owners' partitions as orphans, and `idless_project_snapshots` — each record an earlier build kept for a project with no project id, which is never opened, adopted or deleted. Changes nothing. |
 | `POST /v1/memories` | Save a note: `title`, `body`, `kind`, and optionally `scope`, `aliases`, `tags`, `fact_key`, `sources` (`[{type: message\|task, id}]`, verified against the database), `valid_from`, `valid_to`, and `supersedes: {id, expected_revision}` to replace a note. `201` with the `memory_store` result and `ETag`; an exact duplicate is `200` with the existing id and `dedup: existing`; a moved `supersedes` target is `409`. |
 | `POST /v1/memories/forget` | Forget several: `{targets: [{id, expected_revision}], reason?}` (1–20), per-id status in the order given, plus what is retained. The pending suggestions it names are forgotten first — every one of them, even after one of them fails — then the other targets in the order given. A forgotten note's pending suggestions are withdrawn once every target has had its turn, so a suggestion named with its note is forgotten as asked, in either order; a target that fails ends the request with its refusal, once every suggestion it names has had its turn and after the withdrawals the forgets that landed owe. `openalpaca memory forget` sends its ids here in requests of up to 20, the pending suggestions first. |
 | `POST /v1/memories/sync` | One reconciliation scan now: `{scanned, changed, index_state, changes}`. |
@@ -1530,12 +1544,12 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 ## Storage Model
 
 - SQLite location is resolved by `openalpaca_storage::store::database_path()` — `~/.openalpaca/state/openalpaca.db`. Every path in the layout comes from that module; no crate joins a literal directory name onto a store root.
-- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`, and a migration's file number is its schema version. The unreleased development chain was re-baselined on 2026-09-28 into one file, `crates/openalpaca_storage/src/migrations/001_baseline.sql`, which initializes schema version **1** directly and needs nothing beyond SQLite itself — no extension is loaded. It carries the whole schema, the turn's id and project root on each stored message (`conversation_messages.request_id`, `workspace_root`) and the `learning_cursor` table included — how far learning, and episode notes, have read each conversation; no cursor row is written in advance — a conversation without one reads as read by neither yet. A second migration, `002_working_state.sql`, registers version 2: it rebuilds the `session` table with each conversation's working state in place of the old summary columns, and whether a new conversation is given the previous one's ([Conversation continuity](#conversation-continuity)). Those are the two registered migrations: a fresh database runs both and opens at 2, a database at 1 is upgraded to 2 in place, and the next migration will be `003_<name>.sql`, registering version 3. A build from before a migration refuses a database that has it, so keep a copy of `state/openalpaca.db` before the first start of a build that migrates it if you may go back. `GET /v1/status` reports the version the open database is actually at.
+- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`, and a migration's file number is its schema version. The unreleased development chain was re-baselined on 2026-09-28 into one file, `crates/openalpaca_storage/src/migrations/001_baseline.sql`, which initializes schema version **1** directly and needs nothing beyond SQLite itself — no extension is loaded. It carries the whole schema, the turn's id and project root on each stored message (`conversation_messages.request_id`, `workspace_root`) and the `learning_cursor` table included — how far learning, and episode notes, have read each conversation; no cursor row is written in advance — a conversation without one reads as read by neither yet. A second migration, `002_working_state.sql`, registers version 2: it rebuilds the `session` table with each conversation's working state in place of the old summary columns, and whether a new conversation is given the previous one's ([Conversation continuity](#conversation-continuity)). A third, `003_no_project_store_rows.sql`, registers version 3: it deletes the rows of files whose bytes lie inside a project's own folder — the in-project store earlier builds wrote and this build never reads — with their versions and every message's link to them. Those are the three registered migrations: a fresh database runs all three and opens at 3, a database at 1 or 2 runs the ones it is missing in place, and the next migration will be `004_<name>.sql`, registering version 4. A build from before a migration refuses a database that has it, so keep a copy of `state/openalpaca.db` before the first start of a build that migrates it if you may go back. `GET /v1/status` reports the version the open database is actually at.
 - Memory is **not** in the database. The notes are Markdown files under `memory/` (see the runtime paths at the top of this manual), each partition's revisions, origins and tombstones are one JSON control snapshot under `state/memory-control/`, and the search index is a separate, disposable SQLite file, `state/cache/memory-index-v1.sqlite`. A backup of your memory is the `memory/` directories **and** `state/memory-control/`; the index can always be rebuilt. A memory write whose index update fails still succeeds — the note is written and announced, the daemon logs a warning, and the next search or the next reconciliation (within 30 s) re-indexes what changed. See [Memory](#memory).
 - **If your database is refused.** No migration runs — the schema and its rows are left exactly as they were — and the message names the absolute path of the file. There is one refusal, for a database at a schema version above the newest this build knows:
-  - ``Database `<path>` is at schema version <n>, which this build does not know (it creates schema version 1 and knows versions up to 2). Nothing was changed.`` The message goes on to name both builds that could have written the file, because it cannot tell them apart. **A newer OpenAlpaca:** that database is fine and this build is the wrong one — use the build that created it, and do not reset. **A build from before the schema was re-baselined at version 1** (2026-09-28): 42, the complete, working database of the build before memory moved to files, or 43 to 45 from an earlier build of the Markdown memory. Such a database cannot be read or upgraded, and it is not converted: the message names `openalpaca config reset --factory`, which deletes it and `llm.toml`'s keys. The whole procedure — keeping a copy first, reconnecting a model, reviewing `USER.md` — is [Installation Manual → Switching to the Markdown Memory Build](Installation_Manual.md#switching-to-the-markdown-memory-build).
+  - ``Database `<path>` is at schema version <n>, which this build does not know (it creates schema version 1 and knows versions up to 3). Nothing was changed.`` The message goes on to name both builds that could have written the file, because it cannot tell them apart. **A newer OpenAlpaca:** that database is fine and this build is the wrong one — use the build that created it, and do not reset. **A build from before the schema was re-baselined at version 1** (2026-09-28): 42, the complete, working database of the build before memory moved to files, or 43 to 45 from an earlier build of the Markdown memory. Such a database cannot be read or upgraded, and it is not converted: the message names `openalpaca config reset --factory`, which deletes it and `llm.toml`'s keys. The whole procedure — keeping a copy first, reconnecting a model, reviewing `USER.md` — is [Installation Manual → Switching to the Markdown Memory Build](Installation_Manual.md#switching-to-the-markdown-memory-build).
 
-  `openalpaca config reset --factory` deletes that file together with its `-wal` and `-shm` siblings and clears `llm.toml` and `daemon.toml`, after which the next start builds a fresh database at version 2, the newest this build knows; the artifact, upload and session *files* stay on disk unreferenced, and the memory notes and `state/memory-control/` are not touched (the new owner id leaves them orphaned until `openalpaca memory adopt`). The verb reaches a database in this state precisely because it opens none — it deletes files and asks the schema nothing — and it is the only form of `openalpaca config` that clears one (`set`, `get` and a keyed `reset` on an `ai.*` or `daemon.*` key open no database either, and work meanwhile, but leave it refused); it refuses while a daemon is running, prints the absolute store root, and requires you to type `factory-reset` at a terminal.
+  `openalpaca config reset --factory` deletes that file together with its `-wal` and `-shm` siblings and clears `llm.toml` and `daemon.toml`, after which the next start builds a fresh database at version 3, the newest this build knows; the artifact, upload and session *files*, and each project's folder under `projects/`, stay on disk unreferenced, and the memory notes and `state/memory-control/` are not touched (the new owner id leaves them orphaned until `openalpaca memory adopt`). The verb reaches a database in this state precisely because it opens none — it deletes files and asks the schema nothing — and it is the only form of `openalpaca config` that clears one (`set`, `get` and a keyed `reset` on an `ai.*` or `daemon.*` key open no database either, and work meanwhile, but leave it refused); it refuses while a daemon is running, prints the absolute store root, and requires you to type `factory-reset` at a terminal.
 - Session logs live at `~/.openalpaca/sessions/<id>/` and are bounded by **size only**:
   - `[orchestrator.sessions] log_max_session_bytes` (default 256 MiB) per session. On exceed the writer drops whole oldest segments, never the live one, and records the `seq` range that went.
   - `log_max_total_bytes` (default 2 GiB) across all of them, swept once at boot, oldest-touched archived session first, never an active one.
