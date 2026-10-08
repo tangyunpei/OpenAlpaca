@@ -89,6 +89,8 @@ does not choose this layout — it asks the storage crate for it
   plugins/    plugin directories, plus .permissions.toml, .config/<name>.toml,
               .data/<name>/ and .trash/ — all invisible to the plugin scan
   memory/     your memory notes: owners/<owner-key>/notes/*.md
+  projects/   one folder per project: project.json (its id and path),
+              artifacts/, uploads/, memory/
   artifacts/ uploads/ sessions/ …   content, home scope
 ```
 
@@ -96,9 +98,10 @@ When the GUI spawns the daemon it sets the child's working directory to that
 root and `OPENALPACA_CONFIG_DIR` to `<root>/config`, and appends the daemon's
 output to `<root>/state/logs/daemon.log` — the same file, under the same
 rotation (16 MB, three older generations kept), that `openalpaca daemon start`
-writes (`src-tauri/src/lib.rs`, `spawn_daemon`). A project you point the GUI at keeps
-its own store at `<project>/.openalpaca/`, with that project's memory notes under
-`memory/` (git-ignored by a `.gitignore` of its own).
+writes (`src-tauri/src/lib.rs`, `spawn_daemon`). A project you choose keeps its
+data in the home store, in its folder under `projects/` — its artifacts, uploads
+and memory notes beside a `project.json` with its id and path; nothing is
+written inside the project's own folder.
 
 ## Connection lifecycle
 
@@ -127,11 +130,11 @@ whole bridge (`src-tauri/src/lib.rs`):
 - `reveal_path` — shows an artifact's file in its folder: Finder with the file
   selected on macOS (`open -R`), Explorer with it selected on Windows, the
   folder in the file manager on Linux (`xdg-open`). It takes no path on trust:
-  the path is resolved, symlinks included, and only a regular file inside an
-  OpenAlpaca store — a `.openalpaca` directory above it, or the home root
-  `OPENALPACA_HOME_STORE` names — is shown. The program gets the path as an
-  argument of its own, never through a shell, and a refusal is one sentence,
-  shown as a toast. Behind `Reveal in Finder` (Library, below).
+  the path is resolved, symlinks included, and only a regular file under the
+  home root (`OPENALPACA_HOME_STORE` moves it) is shown — every store file
+  lives there, a project's in its folder under `projects/`. The program gets
+  the path as an argument of its own, never through a shell, and a refusal is
+  one sentence, shown as a toast. Behind `Reveal in Finder` (Library, below).
 
 The first two return `{ baseUrl, token, instanceId }`. `instanceId` is the identity
 guard: if it changes, the daemon restarted, so every `task_id`, `stream_id` and
@@ -781,9 +784,10 @@ Two columns, in the Library's shape. The left one, top to bottom:
 
 - **Global / This project.** Which partition the list shows. `This project` is
   the project Settings → Connection points at, as the daemon resolved it (the
-  nearest `.git` or `.openalpaca` above it); with no project, or a path inside
-  none, the button is off and says why, and a request for it shows Global with
-  a line saying so rather than switching silently.
+  git repository the path lies in, or a folder chosen with `Use`); with no
+  project, or a path inside none, the button is off and says why, and a
+  request for it shows Global with a line saying so rather than switching
+  silently.
 - **Search notes…** A keyword search of that partition. It matches whole words
   and the beginnings of words (`prefer` finds `prefers`) — part of a word only
   in a note's title, aliases and tags, or in Chinese, Japanese, Korean, Thai,
@@ -984,24 +988,59 @@ and `openalpaca daemon start` — write `daemon.log` and claim it, so the path i
 merely found an older daemon's leftover log; the button is inert there, because
 a path to a file this daemon did not write is worse than no path.
 
-**The project.** One absolute path, typed, kept on this machine. The daemon
-reads it as `x-workspace-path` on `POST /v1/chat`; runs started from here record
-that project and the files they produce land in `<project>/.openalpaca/`. With
-no project chosen the GUI sends no header and everything goes to the home
-store. There is no project list and no browse dialog, because the daemon has no
-project concept to enumerate.
+**The project.** The Project card holds this window's project. Type a folder
+and press `Use`: the daemon resolves it (`POST /v1/workspaces`) — the git
+repository it lies in, else the folder itself, which is how a folder with no
+git becomes a project — and records it, and the window keeps the root the
+daemon answered, not the text you typed. The card names the root this window's
+turns go to (`GET /v1/status`), and says so when the stored path lies in no
+project (a path an earlier build stored as you typed it, say). The window sends
+that root as `x-workspace-path` on `POST /v1/chat`; runs started here record
+the project, and what they produce is kept in its folder under `projects/` in
+the home store — nothing is written into the project's own folder. `Clear`
+drops the window's project; with none, the GUI sends no header and everything
+goes to the home store's own folders. A relative path is refused before
+anything is sent. A refusal — the home store, or a path that is not a
+directory — is the daemon's sentence under the field, and the window keeps its
+project.
 
-**If the project directory moved**, the panel offers a re-base. A project store
-records the root it was seeded at, so a store standing at a path it does not
-name is a project that moved; the offer names the old path and counts the
-three things still addressed under it — artifacts, conversations and runs — and
-`Re-base` moves all three in one transaction (`PATCH /v1/workspaces`). The
-project's memory notes are files inside its directory, so they moved with it;
-the re-base re-keys their record to the new path. Nothing re-bases on its own. A re-base does not wait
-for runs: while a run under the old root is still in flight the daemon refuses
-the call outright (`409 WORKSPACE_BUSY`) and changes nothing, so the panel says
-how many are in flight and holds the button until they finish — retry once they
-do.
+**Projects.** Under the card, every project the daemon knows
+(`GET /v1/workspaces`): its path, its folder under `projects/`, a `this window`
+tag on this window's own, and a `missing` tag on one whose folder is no longer
+at its path — its data is kept until you re-point it or delete its data. The
+list is read when the panel opens and after each change made here; a project a
+chat turn records elsewhere appears the next time it is read.
+
+**`Re-point…`** tells the daemon where a moved project's folder is now. The
+dialog counts what is recorded at the old path (`GET /v1/workspaces?path=`) —
+conversations, messages, runs, files, queued follow-ups — and says when runs
+there are still in flight; type the new folder or press `Choose…`, then
+`Re-point` (`PATCH /v1/workspaces`), which stays off while a run there is in
+flight. The project's folder under `projects/` is renamed for the new path and
+every record of the old path is rewritten in one transaction; its memory notes
+are keyed by the project's id and come with it untouched. Nothing re-points on
+its own. The daemon refuses rather than merges: while a run there is running
+or paused (`WORKSPACE_BUSY` — retry once it finishes), onto a path that is not
+a directory, onto the home store, and onto a path that is already a project or
+that records name (`WORKSPACE_EXISTS`, which names both ways out); the dialog
+stays open with the daemon's sentence. A window on that project follows it to
+the new path.
+
+**`Delete data…`** deletes everything OpenAlpaca holds for a project. On open
+the dialog asks for the plan (`POST /v1/workspaces/purge` with
+`dry_run: true`) and draws it as served: each entry marked `delete` or `keep`,
+with what it holds and its retention class, the counts, and what another
+conversation keeps. `Delete data` — there is no word to type — then deletes the
+project's conversations, runs, uploads and by-products, the memory notes of
+every owner, and its folder under `projects/`; a file a surviving conversation
+still shows is moved to `uploads/kept/` or `artifacts/kept/` in the home store
+and stays readable. The project's own folder is never touched. While a run
+there is queued, running or paused the daemon refuses even the plan
+(`WORKSPACE_BUSY`), and the dialog says why with `Delete data` off. There is no
+undo. A window on that project is left with none. If not every memory
+partition could be dropped, the rest is still deleted but the project's folder
+under `projects/` is kept: the project stays listed, the window keeps it, and
+the toast asks you to delete its data again, which finishes it.
 
 ### Models & keys
 
