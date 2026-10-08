@@ -151,7 +151,7 @@ beforeEach(() => {
   api.repoint.mockReset();
   api.remove.mockReset();
   picker.pick.mockReset();
-  useProjectStore.setState({ path: null });
+  useProjectStore.setState({ path: null, id: null });
   useUiStore.setState({ toast: null });
 });
 
@@ -234,6 +234,9 @@ describe("Re-point… (storage design §6, ST-20)", () => {
     await waitFor(() =>
       expect(useProjectStore.getState().path).toBe(MOVED.root),
     );
+    // R22: with the project's id, so a later re-point from elsewhere can be
+    // followed too.
+    expect(useProjectStore.getState().id).toBe(MOVED.id);
     // The store is written synchronously in `onSuccess`; React's re-render
     // that unmounts the dialog may land a tick later.
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());

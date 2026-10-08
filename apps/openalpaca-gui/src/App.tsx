@@ -20,6 +20,10 @@
  *   `useCommandShortcuts` the palette's own shortcuts — ⌘N, ⌘⇧S, ⌘1–4, ⌘⇧D,
  *                        ⌘, — bound off the same catalogue the palette draws.
  *
+ * It also keeps the window on its project when that project is re-pointed
+ * from somewhere else (`useProjectFollow`, R22): every view's turns and reads
+ * send the window's root, so the follow cannot live in any one view.
+ *
  * The confirmation itself lives in the chat session, behind a lazy boundary, so
  * it reaches the rail, the palette and the key ladder through the one-slot
  * registry in `stores/confirmation` rather than through four levels of props.
@@ -39,6 +43,7 @@ import {
   useGlobalKeys,
   ViewBoundary,
 } from "@/components/shell";
+import { useProjectFollow } from "@/hooks/useProjectFollow";
 import { QueryProvider } from "@/lib/query-provider";
 import { useConfirmationStore } from "@/stores/confirmation";
 import { useUiStore, type View } from "@/stores/ui";
@@ -75,6 +80,7 @@ export function AppFrame() {
     onDeny: pending?.deny,
   });
   useCommandShortcuts(useCommandCatalog());
+  useProjectFollow();
 
   return (
     <AppShell view={view}>

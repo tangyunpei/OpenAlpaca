@@ -211,7 +211,7 @@ afterEach(() => {
   projects.plan = undefined;
   projects.repoint.mockReset();
   projects.remove.mockReset();
-  useProjectStore.setState({ path: null });
+  useProjectStore.setState({ path: null, id: null });
 });
 
 vi.mock("@/hooks/useTasks", () => ({
@@ -672,7 +672,7 @@ describe("while the daemon is stopped", () => {
 
 describe("Use (storage design §9)", () => {
   beforeEach(() => {
-    useProjectStore.setState({ path: null });
+    useProjectStore.setState({ path: null, id: null });
     useUiStore.setState({ toast: null });
   });
 
@@ -695,6 +695,11 @@ describe("Use (storage design §9)", () => {
     expect(choose.mutate).toHaveBeenCalledTimes(1);
     expect(choose.mutate.mock.calls[0]?.[0]).toBe("/Users/dev/repo/src");
     expect(useProjectStore.getState().path).toBe("/Users/dev/repo");
+    // R22: and the project's id, which is what survives a re-point made from
+    // anywhere else.
+    expect(useProjectStore.getState().id).toBe(
+      "0b5c1d2e-3f40-4a5b-8c6d-7e8f9a0b1c2d",
+    );
     expect(screen.getByLabelText("Project path")).toHaveValue(
       "/Users/dev/repo",
     );
@@ -738,8 +743,12 @@ describe("Use (storage design §9)", () => {
     daemon.data = status({ project_root: null });
     render(<ConnectionSection />);
 
+    // R22: the folder may have moved (a re-point from the CLI, or by hand),
+    // where `Use` on the old path would only be refused.
     expect(
-      screen.getByText(/^\/Users\/dev\/notes is in no project/),
+      screen.getByText(
+        "/Users/dev/notes is in no project: no git repository holds it and it was not chosen with Use. Its folder may have moved: Use its new folder, or Re-point… its project in the list below. If the folder is still there, press Use to make it one.",
+      ),
     ).toBeInTheDocument();
     // Its turns are filed with no project, so the card promises no folder
     // under projects/.

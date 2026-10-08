@@ -346,6 +346,13 @@ async fn rebase(client: &DaemonClient, old: &str, new: &str, dry_run: bool) -> R
     );
     let _ = writeln!(out, "  {}", result.moved.describe());
     let _ = writeln!(out, "  its folder is now projects/{}", result.project.name);
+    // R22: an app window keeps the root it was given. One that holds the
+    // project's id follows on its own; one an earlier build set does not.
+    let _ = writeln!(
+        out,
+        "  if an app window still names {} in Settings → Connection, choose {} there with Use",
+        result.old_path, result.project.root
+    );
     Ok(out)
 }
 
@@ -1015,7 +1022,9 @@ mod tests {
             text,
             "Re-pointed /work/app → /work/new\n  \
              2 artifacts, 1 conversations, 0 runs, 3 messages, 0 follow-ups\n  \
-             its folder is now projects/-work-new\n"
+             its folder is now projects/-work-new\n  \
+             if an app window still names /work/app in Settings → Connection, choose \
+             /work/new there with Use\n"
         );
     }
 

@@ -228,7 +228,7 @@ function RepointFlow({ project, current, onClose }: FlowProps) {
     void repoint.mutateAsync({ from: project.root, to: target }).then(
       (result) => {
         if (windowFollows(project, current, pathAtPress)) {
-          setPath(result.project.root);
+          setPath(result.project.root, result.project.id);
         }
         showToast(
           `Re-pointed to ${result.project.root}: ${rowsLine(result.moved)}.`,

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   isAbsolutePath,
@@ -57,13 +57,25 @@ describe("workspaceOption", () => {
 describe("useProjectStore", () => {
   beforeEach(() => {
     localStorage.clear();
-    useProjectStore.setState({ path: null });
+    useProjectStore.setState({ path: null, id: null });
   });
 
-  it("persists the choice so it survives a restart", () => {
-    useProjectStore.getState().setPath("/Users/dev/app");
+  it("keeps the root and the id the daemon answered, so a re-point made elsewhere can be followed", () => {
+    useProjectStore.getState().setPath("/Users/dev/app", "6f1c2a3b-4d5e");
     expect(useProjectStore.getState().path).toBe("/Users/dev/app");
-    expect(localStorage.getItem(PROJECT_STORAGE_KEY)).toBe("/Users/dev/app");
+    expect(useProjectStore.getState().id).toBe("6f1c2a3b-4d5e");
+    expect(
+      JSON.parse(localStorage.getItem(PROJECT_STORAGE_KEY) ?? "null"),
+    ).toEqual({ root: "/Users/dev/app", id: "6f1c2a3b-4d5e" });
+  });
+
+  it("holds no id for a path set without one, and none once cleared", () => {
+    useProjectStore.getState().setPath("/Users/dev/app", "6f1c2a3b-4d5e");
+    useProjectStore.getState().setPath("/Users/dev/other");
+    expect(useProjectStore.getState().id).toBeNull();
+    useProjectStore.getState().setPath("/Users/dev/app", "6f1c2a3b-4d5e");
+    useProjectStore.getState().setPath(null);
+    expect(useProjectStore.getState().id).toBeNull();
   });
 
   it("clearing removes the stored value rather than storing an empty one", () => {
@@ -71,6 +83,39 @@ describe("useProjectStore", () => {
     useProjectStore.getState().setPath(null);
     expect(useProjectStore.getState().path).toBeNull();
     expect(localStorage.getItem(PROJECT_STORAGE_KEY)).toBeNull();
+  });
+
+  it("reads back the root and the id it stored, after a restart", async () => {
+    localStorage.setItem(
+      PROJECT_STORAGE_KEY,
+      JSON.stringify({ root: "/Users/dev/app", id: "6f1c2a3b-4d5e" }),
+    );
+    vi.resetModules();
+    const restarted = (await import("./project")).useProjectStore.getState();
+    expect(restarted.path).toBe("/Users/dev/app");
+    expect(restarted.id).toBe("6f1c2a3b-4d5e");
+  });
+
+  it("reads a root an earlier build stored alone as that root, with no id", async () => {
+    localStorage.setItem(PROJECT_STORAGE_KEY, "/Users/dev/app");
+    vi.resetModules();
+    const restarted = (await import("./project")).useProjectStore.getState();
+    expect(restarted.path).toBe("/Users/dev/app");
+    expect(restarted.id).toBeNull();
+  });
+
+  it("reads a stored value it cannot use as no project", async () => {
+    for (const raw of [
+      JSON.stringify({ id: "6f1c2a3b-4d5e" }),
+      JSON.stringify({ root: "code/app", id: "6f1c2a3b-4d5e" }),
+      "code/app",
+    ]) {
+      localStorage.setItem(PROJECT_STORAGE_KEY, raw);
+      vi.resetModules();
+      const restarted = (await import("./project")).useProjectStore.getState();
+      expect(restarted.path).toBeNull();
+      expect(restarted.id).toBeNull();
+    }
   });
 
   it("refuses a path the daemon could not resolve", () => {

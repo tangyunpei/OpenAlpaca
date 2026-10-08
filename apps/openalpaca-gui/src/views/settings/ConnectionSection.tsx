@@ -495,7 +495,9 @@ export function homeStoreLabel(homeRoot: string | null): string {
  * stored path while the daemon has not answered; and the stored path,
  * flagged, when the daemon answered that it is in no project — a value an
  * earlier build kept as typed, such as a folder an `.openalpaca` directory
- * used to mark.
+ * used to mark, or a root whose project was re-pointed from elsewhere and
+ * which the window could not follow (it held no id, or the project is not
+ * listed any more; `hooks/useProjectFollow`, R22).
  */
 export function projectCardRoot(
   path: string | null,
@@ -565,7 +567,7 @@ function ProjectCard({
     setRefusal(null);
     choose.mutate(trimmed, {
       onSuccess: (project) => {
-        setPath(project.root);
+        setPath(project.root, project.id);
         setDraft(project.root);
         showToast(`Project set to ${project.root} — new runs will use it`);
       },
@@ -630,7 +632,7 @@ function ProjectCard({
 
       {shown.unresolved && (
         <GapNote>
-          {`${path} is in no project: no git repository holds it and it was not chosen with Use. Press Use to make it one.`}
+          {`${path} is in no project: no git repository holds it and it was not chosen with Use. Its folder may have moved: Use its new folder, or Re-point… its project in the list below. If the folder is still there, press Use to make it one.`}
         </GapNote>
       )}
 

@@ -9,12 +9,19 @@
  */
 
 import { QueryClient } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetConnection } from "@/lib/connection";
 import { QueryProvider } from "@/lib/query-provider";
 import { useConfirmationStore } from "@/stores/confirmation";
+import { useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
 import { AppFrame } from "./App";
@@ -290,5 +297,117 @@ describe("AppFrame", () => {
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(deny).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * R22 (and R14): a project re-pointed from somewhere else — `openalpaca
+ * store rebase`, another window — leaves this window holding a root nothing
+ * records any more, and its turns would be filed under no project. The id is
+ * what survives the move (ST-13), so the window looks it up and follows,
+ * whatever view is open.
+ */
+describe("The window's project (R22)", () => {
+  const OLD_ROOT = "/Users/dev/AlpacaLink";
+  const NEW_ROOT = "/Users/dev/work/AlpacaLink";
+  const PROJECT_ID = "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b";
+
+  /** The daemon after the re-point: the old root resolves to nothing. */
+  function rePointedElsewhere(listed: unknown[]): void {
+    const base = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/v1/workspaces") && !url.includes("path=")) {
+          return json(listed);
+        }
+        const answer = await base(input as RequestInfo, init);
+        if (!url.includes("/v1/status")) return answer;
+        const held = new Headers(init?.headers).get("x-workspace-path");
+        const body = (await answer.json()) as Record<string, unknown>;
+        return json({
+          ...body,
+          project_root: held === NEW_ROOT ? NEW_ROOT : null,
+        });
+      }),
+    );
+  }
+
+  afterEach(() => {
+    useProjectStore.setState({ path: null, id: null });
+  });
+
+  it("follows its project to the root it was re-pointed to, and says so once", async () => {
+    rePointedElsewhere([
+      {
+        id: PROJECT_ID,
+        root: NEW_ROOT,
+        name: "-Users-dev-work-AlpacaLink",
+        missing: false,
+      },
+    ]);
+    useProjectStore.setState({ path: OLD_ROOT, id: PROJECT_ID });
+    renderFrame();
+
+    await waitFor(() => expect(useProjectStore.getState().path).toBe(NEW_ROOT));
+    expect(useProjectStore.getState().id).toBe(PROJECT_ID);
+    expect(useUiStore.getState().toast).toBe(
+      `This window's project was re-pointed to ${NEW_ROOT}: its turns go there now.`,
+    );
+  });
+
+  it("leaves a root an earlier build stored alone where it is: it has no id to follow", async () => {
+    rePointedElsewhere([
+      {
+        id: PROJECT_ID,
+        root: NEW_ROOT,
+        name: "-Users-dev-work-AlpacaLink",
+        missing: false,
+      },
+    ]);
+    useProjectStore.setState({ path: OLD_ROOT, id: null });
+    renderFrame();
+    await screen.findByRole("heading", { name: "Chat", level: 1 });
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(globalThis.fetch)
+          .mock.calls.some(([input]) => String(input).includes("/v1/status")),
+      ).toBe(true),
+    );
+
+    expect(useProjectStore.getState().path).toBe(OLD_ROOT);
+    expect(useUiStore.getState().toast).toBeNull();
+    expect(
+      vi
+        .mocked(globalThis.fetch)
+        .mock.calls.some(
+          ([input]) =>
+            String(input).includes("/v1/workspaces") &&
+            !String(input).includes("path="),
+        ),
+    ).toBe(false);
+  });
+
+  it("keeps a root whose project is listed nowhere, and moves nothing", async () => {
+    rePointedElsewhere([]);
+    useProjectStore.setState({ path: OLD_ROOT, id: PROJECT_ID });
+    renderFrame();
+    await screen.findByRole("heading", { name: "Chat", level: 1 });
+
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(globalThis.fetch)
+          .mock.calls.some(
+            ([input]) =>
+              String(input).includes("/v1/workspaces") &&
+              !String(input).includes("path="),
+          ),
+      ).toBe(true),
+    );
+    expect(useProjectStore.getState().path).toBe(OLD_ROOT);
+    expect(useUiStore.getState().toast).toBeNull();
   });
 });
