@@ -260,7 +260,8 @@ hand.
 **Keep the builds apart.** Once you have switched over, do not start an older
 build against the store. A build from before projects moved into the home
 store knows schema versions up to 1 or 2: it refuses this store, at version 3,
-with the message above, and of the two cases it names the first is yours —
+with the same refusal, naming its own newest version, and of the two cases it
+names the first is yours —
 use this build; the factory reset it offers for the second would delete this
 store. Every build from 2026-09-21 until the re-baseline of 2026-09-28 — the
 pre-redesign builds at schema 42 and the earlier Markdown-memory builds at 43
