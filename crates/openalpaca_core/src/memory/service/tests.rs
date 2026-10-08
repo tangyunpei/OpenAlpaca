@@ -1074,15 +1074,73 @@ fn quiesce_refuses_while_a_write_is_in_flight_and_holds_new_writes() {
     assert!(!slots.is_busy(key));
 }
 
+/// R18: the hold a re-point and a delete take is named by the project's id,
+/// and every write of the project takes the same slot whatever path names
+/// it — so one hold covers the old path and the new, and a write at the new
+/// path waits for it. Another root never shares this project's slot.
 #[test]
-fn the_service_quiesce_is_keyed_by_project_root() {
+fn the_service_quiesce_is_keyed_by_the_project_id() {
     let h = Harness::new();
     let repo = h.workspace("repo", Some(".git"));
-    let guard = h.service.quiesce(&repo).unwrap();
-    let err = h.service.quiesce(&repo).unwrap_err();
+    let project = openalpaca_storage::store::projects::register(&repo).unwrap();
+    let slot = format!("proj:{}", project.id);
+    assert_eq!(
+        MemoryService::slot_key(&StoreScope::Project(repo.clone()), ALICE_KEY),
+        slot
+    );
+    let guard = h.service.quiesce(&project.id).unwrap();
+    let err = h.service.quiesce(&project.id).unwrap_err();
     assert_eq!(err.class(), "fixture:write_pending");
+    assert!(err.to_string().contains(&project.id.to_string()), "{err}");
     drop(guard);
-    h.service.quiesce(&repo).unwrap();
+
+    let new = h.root.path().join("ws").join("moved");
+    fs::create_dir_all(&new).unwrap();
+    let new = new.canonicalize().unwrap();
+    openalpaca_storage::project_life::repoint(&h.db, &repo, &new).unwrap();
+    assert_eq!(
+        MemoryService::slot_key(&StoreScope::Project(new.clone()), ALICE_KEY),
+        slot,
+        "the same slot at the new path"
+    );
+
+    // The writer thread borrows the service and a context, as
+    // `two_concurrent_stores_on_one_partition_both_land` does.
+    let service = &h.service;
+    let at_new = h.user(ALICE, Some(&new));
+    let held = service.quiesce(&project.id).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            service
+                .store(
+                    &at_new,
+                    StoreInput {
+                        title: "Release step".into(),
+                        body: "# Release step\n\nTag first.\n".into(),
+                        kind: Some(NoteKind::Procedure),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            tx.send(()).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(150))
+                .is_err(),
+            "a write at the new path waits while the hold stands"
+        );
+        drop(held);
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the write lands once the hold is released");
+    });
+
+    let other = h.workspace("other", Some(".git"));
+    assert_ne!(
+        MemoryService::slot_key(&StoreScope::Project(other), ALICE_KEY),
+        slot,
+        "another root never shares this project's slot"
+    );
 }
 
 // ============================================================================

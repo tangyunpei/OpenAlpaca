@@ -10,10 +10,13 @@ use super::*;
 
 use axum::body::to_bytes;
 use openalpaca_core::memory::service::{
-    Attribution, Capabilities, MemoryAccessContext, StoreInput, StoreOutput, Surface, WorkspaceHint,
+    Attribution, Capabilities, MemoryAccessContext, ReadInput, StoreInput, StoreOutput, Surface,
+    WorkspaceHint,
 };
 use openalpaca_storage::IdentityRepository;
-use openalpaca_storage::memory_files::{ControlSnapshot, NoteKind, Partition, list_snapshots};
+use openalpaca_storage::memory_files::{
+    ControlSnapshot, NoteKind, Partition, PartitionHealth, list_snapshots,
+};
 use openalpaca_storage::memory_index::MemoryIndex;
 use openalpaca_storage::store::StoreScope;
 use openalpaca_storage::store::projects;
@@ -149,6 +152,11 @@ impl Fixture {
     fn partition(&self, root: &str) -> Partition {
         Partition::open(&StoreScope::Project(std::path::PathBuf::from(root)), OWNER)
             .expect("open the partition")
+    }
+
+    /// The owner's partition snapshot at `root`, if the partition has one.
+    fn project_snapshot(&self, root: &str) -> Option<ControlSnapshot> {
+        self.partition(root).snapshot()
     }
 
     /// The note files under `root`'s partition, sorted.
@@ -787,7 +795,12 @@ async fn a_re_point_while_a_memory_write_is_pending_is_refused() {
 
     let pending = f
         .memory
-        .quiesce(std::path::Path::new(&old))
+        .quiesce(
+            &store::projects::lookup(std::path::Path::new(&old))
+                .unwrap()
+                .expect("a registered project")
+                .id,
+        )
         .expect("nothing is writing yet");
     let (status, body) = f.patch(&old, &new).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -806,6 +819,59 @@ async fn a_re_point_while_a_memory_write_is_pending_is_refused() {
     drop(pending);
     let (status, body) = f.patch(&old, &new).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// R18 through the route (fixture 17 steps 1–5): a re-point is refused
+/// while a memory write of the project holds its slot — the hold named by
+/// the project's id — and once it lands the partition keeps its key, its
+/// snapshot file byte for byte and its note, read at the same revision
+/// from the new root.
+#[tokio::test]
+async fn a_repoint_keeps_the_projects_memory_under_its_key() {
+    let f = Fixture::new();
+    let old = f.project("old-project");
+    let new = f.bare_dir("new-project");
+    let project = store::projects::register(std::path::Path::new(&old)).expect("register");
+    let note = f.note(&old, "Release step");
+    let key = f.project_snapshot(&old).expect("a snapshot").partition_key;
+    let snapshot_file = openalpaca_storage::memory_files::snapshot_path_for(&key).unwrap();
+    let before = std::fs::read(&snapshot_file).unwrap();
+
+    let pending = f
+        .memory
+        .quiesce(&project.id)
+        .expect("nothing is writing yet");
+    let (status, body) = f.patch(&old, &new).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_BUSY");
+    drop(pending);
+
+    let (status, body) = f.patch(&old, &new).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        f.project_snapshot(&new)
+            .expect("bound by the project id")
+            .partition_key,
+        key
+    );
+    assert_eq!(
+        std::fs::read(&snapshot_file).unwrap(),
+        before,
+        "a re-point touches no snapshot"
+    );
+    assert_eq!(f.partition(&new).health(), PartitionHealth::Ready);
+    let read = f
+        .memory
+        .read(
+            &f.memory_ctx_as(OWNER, &new),
+            ReadInput {
+                id: note.id,
+                expected_revision: None,
+                section: None,
+            },
+        )
+        .expect("the note reads from the new root");
+    assert_eq!(read.revision, note.revision);
 }
 
 /// A registered project no row names yet is a project: it re-points.

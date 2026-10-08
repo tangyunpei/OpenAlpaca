@@ -810,15 +810,34 @@ impl MemoryService {
     fn slot_key(scope: &StoreScope, owner_key: &str) -> String {
         match scope {
             StoreScope::Home => format!("home:{owner_key}"),
-            StoreScope::Project(root) => format!("proj:{}", canonical_lenient(root)),
+            StoreScope::Project(root) => {
+                match openalpaca_storage::store::projects::lookup(root) {
+                    Ok(Some(project)) => Self::project_slot_key(&project.id),
+                    // Not a registered project (R12): its writes are refused
+                    // where the partition opens; this slot only keeps two of
+                    // them apart, and never meets a project's.
+                    Ok(None) | Err(_) => format!("unregistered:{}", canonical_lenient(root)),
+                }
+            }
         }
     }
 
-    /// Refuses while a memory write for that project is pending; otherwise
-    /// holds new writes until the guard drops. The re-point and (Stage 1
-    /// step (5)) the delete hold it.
-    pub fn quiesce(&self, project_root: &Path) -> Result<QuiesceGuard, MemoryError> {
-        let key = Self::slot_key(&StoreScope::Project(project_root.to_path_buf()), "");
+    /// The write slot of a project (storage design R18): one per project,
+    /// shared by every owner's partition of it, whatever path names it.
+    fn project_slot_key(project_id: &openalpaca_storage::store::projects::ProjectId) -> String {
+        format!("proj:{project_id}")
+    }
+
+    /// The hold a re-point and a delete take on a project's memory (storage
+    /// design §6): refused while a memory write of the project is in
+    /// flight, otherwise every new write of it waits until the guard drops.
+    /// Named by the project's id (R18), so it holds under the old path and
+    /// the new. It refuses rather than waits; the route retries (S5a).
+    pub fn quiesce(
+        &self,
+        project_id: &openalpaca_storage::store::projects::ProjectId,
+    ) -> Result<QuiesceGuard, MemoryError> {
+        let key = Self::project_slot_key(project_id);
         self.slots
             .quiesce(&key)
             .map_err(|()| MemoryError::WritePending { key })

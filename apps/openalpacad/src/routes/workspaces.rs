@@ -348,9 +348,9 @@ pub(crate) fn project_error_response(e: &anyhow::Error) -> Option<Response> {
 ///
 /// Owner-scoped like every injecting write (R40): a path no project owns and
 /// a project holding another owner's rows answer the same `404`, in the same
-/// words. Until Stage 1 step (4) keys memory by the project's id, a
-/// re-pointed project's notes stay keyed by its old folder (unreleased
-/// commits only).
+/// words. The project's memory is keyed by its id (R18), so a re-point
+/// touches no control snapshot and no index row: the hold below and the
+/// notes it guards are the same under the old path and the new.
 pub(crate) fn rebase_workspace(
     db: &Database,
     memory: &MemoryService,
@@ -408,8 +408,9 @@ pub(crate) fn rebase_workspace(
     }
 
     // Held until this function returns: every memory write for the project
-    // waits, and one already in flight refuses the re-point.
-    let _quiesced = match memory.quiesce(Path::new(&old_root)) {
+    // waits, and one already in flight refuses the re-point. Named by the
+    // project's id (R18), so it covers the old path and the new alike.
+    let _quiesced = match memory.quiesce(&project.id) {
         Ok(guard) => guard,
         Err(e) => {
             return api_error(
