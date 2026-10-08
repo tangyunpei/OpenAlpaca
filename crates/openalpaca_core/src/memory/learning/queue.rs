@@ -1871,7 +1871,8 @@ impl LearningQueue {
     /// A session's close (design 11 §2): its working state brought up to
     /// date ([`Self::refresh`]), then its summaries written, each by a call
     /// of its own ([`Self::summarize`], owner decision CQ-11). A refresh that
-    /// stops holds the close before any summary.
+    /// stops holds the close before any summary — among others, one whose
+    /// rows name a project in the middle of a re-point (R20).
     async fn close(&self, session_id: &str, policy: FlushPolicy) -> EpisodeReport {
         let mut report = EpisodeReport::default();
         if let Err(stop) = self.refresh(session_id, policy, &mut report).await {
@@ -1952,6 +1953,29 @@ impl LearningQueue {
         let Some(through) = rows.last().map(|r| r.id) else {
             return Ok(());
         };
+        // R20 (the final fix wave): a project of these rows whose re-point
+        // has not finished — a rename that failed after the rows were
+        // rewritten, until the next boot finishes it — is recorded by no
+        // folder, so its partition, and the forgets it holds, cannot be
+        // read. The close holds here, before any read of the forgets or any
+        // call, as the summaries' own check holds a window.
+        let mut roots: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.workspace_root.as_deref())
+            .collect();
+        roots.sort_unstable();
+        roots.dedup();
+        for root in roots {
+            let root = PathBuf::from(root);
+            if check_project_now(Some(root.clone())).await == ProjectCheck::Hold {
+                tracing::info!(
+                    session_id,
+                    "memory learning holds a conversation's close: {}",
+                    extractor::hold_reason(Some(root.as_path()))
+                );
+                return Err(FlushStop::StoreError);
+            }
+        }
         // Rev 1.7 (F5; design 03 §6): a row a forget took back is never
         // read, nor the rest of its turn — `through` still passes them.
         let service = self.deps.memory_service.clone();

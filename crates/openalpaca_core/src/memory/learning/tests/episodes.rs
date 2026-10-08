@@ -807,10 +807,10 @@ async fn a_project_repointed_during_the_summary_call_is_held_and_summarised_at_i
 
 /// A re-point left marked after its rows were rewritten — as after a rename
 /// that failed, until the next boot finishes it — leaves no folder recording
-/// either root; the close holds the summary's window before its call, with
-/// the episode cursor where it was (the S4 review's I1), and once the
-/// re-point is finished the next close writes the summary into the project
-/// at its new root.
+/// either root; the close holds before the refresh's call and the summary's
+/// (R20; the S4 review's I1), with the episode cursor where it was, and once
+/// the re-point is finished the next close writes the summary into the
+/// project at its new root.
 #[tokio::test]
 async fn a_project_left_marked_mid_repoint_holds_its_summary_until_the_repoint_finishes() {
     use openalpaca_storage::project_life::{RepointStep, recover_repoints, repoint_with};
@@ -831,7 +831,11 @@ async fn a_project_left_marked_mid_repoint_holds_its_summary_until_the_repoint_f
     .unwrap_err();
 
     let held = scene.queue.flush_episodes(&s).await;
-    assert_eq!(scene.model.calls(), 1, "the refresh's call alone: {held:?}");
+    assert_eq!(
+        scene.model.calls(),
+        0,
+        "the refresh holds before its call too (R20): {held:?}"
+    );
     assert_eq!(held.episodes, 0, "{held:?}");
     assert_eq!(held.skipped_root_gone, 0, "{held:?}");
     assert_eq!(held.stopped, Some(FlushStop::StoreError), "{held:?}");
@@ -843,6 +847,100 @@ async fn a_project_left_marked_mid_repoint_holds_its_summary_until_the_repoint_f
     assert_eq!(written.stopped, None, "{written:?}");
     assert_eq!(written.episodes, 1, "{written:?}");
     assert_eq!(episode_cursor(&scene, &s), last);
+    assert_eq!(project_episodes(&scene, &new).len(), 1);
+}
+
+/// R20 (the final fix wave): the person forgot a note learned from a row
+/// of this project's conversation — the forget's record lives in the
+/// project's partition — and then a re-point stopped after its rows were
+/// rewritten, as after a rename that failed, until the next boot finishes
+/// it. No folder records either root, so the project's partition cannot be
+/// read, and the close's refresh used to read the forgets of the home
+/// partition alone and hand the forgotten row's text to the working state's
+/// call. The close now holds before any call, with the state untouched;
+/// once the re-point is finished, the next close finds the forget under the
+/// project's id and never reads the row.
+#[tokio::test]
+async fn a_close_left_mid_repoint_holds_before_reading_a_row_the_project_forgot() {
+    use openalpaca_storage::project_life::{RepointStep, recover_repoints, repoint_with};
+    const SECRET: &str = "The launch code word is PELICAN.";
+    let scene = Scene::new(vec![
+        items(&[item(
+            "Launch code word",
+            "The project's launch code word is PELICAN.",
+            "fact",
+            "user",
+            &[1],
+        )]),
+        trip_state(),
+        trip_summary(),
+    ]);
+    let (_old_dir, old) = project();
+    let (_new_dir, new) = project();
+    let old_str = old.to_string_lossy().into_owned();
+    let s = scene.session();
+    scene.turn_in(&s, SECRET, "Noted.", Some(&old_str));
+    scene.queue.flush_session(&s).await;
+    let in_project = scene.list(&scene.ctx_in(Some(&old)), None);
+    let learned = in_project
+        .iter()
+        .find(|i| i.title == "Launch code word" && i.scope == NoteScope::Project)
+        .expect("learned into the project");
+    scene
+        .service
+        .forget(
+            &scene.ctx_in(Some(&old)),
+            ForgetInput {
+                targets: vec![(learned.id, learned.revision.clone())],
+                reason: None,
+            },
+        )
+        .unwrap();
+    for (i, text) in TURNS.iter().enumerate() {
+        scene.turn_in(&s, text, &format!("Answer {i}."), Some(&old_str));
+    }
+    repoint_with(&scene.db, &old, &new, &mut |at| {
+        at != RepointStep::RowsRewritten
+    })
+    .unwrap_err();
+    let after_learning = scene.model.calls();
+
+    let held = scene.queue.flush_episodes(&s).await;
+    assert_eq!(held.stopped, Some(FlushStop::StoreError), "{held:?}");
+    assert_eq!(
+        scene.model.calls(),
+        after_learning,
+        "no call while the re-point is unfinished: {held:?}"
+    );
+    assert!(
+        scene
+            .model
+            .prompts()
+            .iter()
+            .skip(after_learning)
+            .all(|p| !p.contains(SECRET)),
+        "the forgotten row reached a call"
+    );
+    assert_eq!(
+        session_row(&scene, &s).working_state_through,
+        0,
+        "the working state is untouched"
+    );
+
+    assert_eq!(recover_repoints(&scene.db).finished, vec![new.clone()]);
+    let closed = scene.queue.flush_episodes(&s).await;
+    assert_eq!(closed.stopped, None, "{closed:?}");
+    assert_eq!(closed.episodes, 1, "{closed:?}");
+    assert_eq!(scene.model.calls(), after_learning + 2, "{closed:?}");
+    assert!(
+        scene
+            .model
+            .prompts()
+            .iter()
+            .skip(after_learning)
+            .all(|p| !p.contains(SECRET)),
+        "the forgotten row reached a call after the re-point finished"
+    );
     assert_eq!(project_episodes(&scene, &new).len(), 1);
 }
 
