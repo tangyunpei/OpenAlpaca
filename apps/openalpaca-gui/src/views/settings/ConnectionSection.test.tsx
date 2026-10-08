@@ -5,7 +5,13 @@
  * a plain `DaemonStatus | undefined` prop, so no daemon-connection or
  * usage/tasks hooks need mocking to exercise its rendering.
  */
-import { fireEvent, render, screen } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -76,22 +82,43 @@ const choose = vi.hoisted(() => {
   return Object.assign(state, { mutate });
 });
 
+/**
+ * The Projects list under the card has its own tests (ProjectsCard.test.tsx).
+ * Here `projects.list` is empty unless a test fills it, so the flows behind
+ * its buttons mount only where a test opens one: `repoint` and `remove` are
+ * the writes' answers (`mutateAsync`), and `plan` is the delete's dry run.
+ */
+const projects = vi.hoisted(() => ({
+  list: [] as Array<{
+    id: string;
+    root: string;
+    name: string;
+    missing: boolean;
+  }>,
+  plan: undefined as unknown,
+  repoint: vi.fn(),
+  remove: vi.fn(),
+}));
+
 vi.mock("@/hooks/useWorkspaces", () => ({
   useChooseProject: () => ({ mutate: choose.mutate, isPending: false }),
-  // The Projects list has its own tests (ProjectsCard.test.tsx). Here it is
-  // empty, so the flows behind its buttons never mount.
-  useProjects: () => ({ data: [], isPending: false, error: null }),
+  useProjects: () => ({ data: projects.list, isPending: false, error: null }),
   useWorkspace: () => ({
     data: undefined,
     isPending: true,
     error: null,
     refetch: vi.fn(),
   }),
-  useRepointProject: () => ({ mutate: vi.fn(), isPending: false }),
+  useRepointProject: () => ({
+    mutate: vi.fn(),
+    mutateAsync: projects.repoint,
+    isPending: false,
+  }),
   useDeleteProjectData: () => ({
     mutate: vi.fn(),
+    mutateAsync: projects.remove,
     isPending: false,
-    data: undefined,
+    data: projects.plan,
     error: null,
   }),
 }));
@@ -180,6 +207,10 @@ afterEach(() => {
   choose.answer = null;
   choose.refusal = null;
   choose.mutate.mockClear();
+  projects.list = [];
+  projects.plan = undefined;
+  projects.repoint.mockReset();
+  projects.remove.mockReset();
   useProjectStore.setState({ path: null });
 });
 
@@ -749,5 +780,122 @@ describe("projectCardRoot", () => {
       text: "/notes",
       unresolved: true,
     });
+  });
+});
+
+/**
+ * The Project card and the Projects list sit side by side, and a re-point or
+ * a delete from the list moves the window's project. The card's field must
+ * follow: left on the old root, `Use` would post it again — after a delete,
+ * the project's own folder is still there, so that press would register the
+ * deleted project again, empty.
+ */
+describe("the Project card follows a re-point or a delete from the list (storage design §6)", () => {
+  const REPO = {
+    id: "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b",
+    root: "/Users/dev/repo",
+    name: "-Users-dev-repo",
+    missing: false,
+  };
+  const MOVED = {
+    ...REPO,
+    root: "/Users/dev/work/repo",
+    name: "-Users-dev-work-repo",
+  };
+
+  function deletion(dryRun: boolean) {
+    return {
+      dry_run: dryRun,
+      applied: !dryRun,
+      project: REPO,
+      entries: [],
+      counts: {
+        sessions: 1,
+        messages: 2,
+        tool_calls: 0,
+        followups: 0,
+        tasks: 0,
+        spans: 0,
+        run_events: 0,
+        uploads: 0,
+        artifacts: 0,
+        memory_notes: 0,
+      },
+      kept: { uploads: 0, artifacts: 0 },
+      removed: dryRun
+        ? null
+        : { session_dirs: 1, memory_partitions: 1, project_folder: true },
+    };
+  }
+
+  beforeEach(() => {
+    useProjectStore.setState({ path: REPO.root });
+    useUiStore.setState({ toast: null });
+    daemon.data = status({ project_root: REPO.root });
+    projects.list = [REPO];
+  });
+
+  it("empties the field, drops the refusal and turns Use off once the window's project's data is deleted", async () => {
+    const user = userEvent.setup();
+    choose.refusal = new Error("no such directory: /Users/dev/rep");
+    projects.plan = deletion(true);
+    projects.remove.mockResolvedValue(deletion(false));
+    render(<ConnectionSection />);
+
+    const field = screen.getByLabelText("Project path");
+    expect(field).toHaveValue(REPO.root);
+    await user.clear(field);
+    await user.type(field, "/Users/dev/rep");
+    await user.click(screen.getByRole("button", { name: "Use" }));
+    expect(
+      screen.getByText("no such directory: /Users/dev/rep"),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Delete data…" }));
+    await user.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Delete data",
+      }),
+    );
+
+    await waitFor(() => expect(useProjectStore.getState().path).toBeNull());
+    expect(projects.remove).toHaveBeenCalledWith({
+      path: REPO.root,
+      dryRun: false,
+    });
+    expect(screen.getByLabelText("Project path")).toHaveValue("");
+    expect(screen.queryByText("no such directory: /Users/dev/rep")).toBeNull();
+    expect(screen.getByRole("button", { name: "Use" })).toBeDisabled();
+  });
+
+  it("puts the new root in the field once the window's project is re-pointed", async () => {
+    const user = userEvent.setup();
+    projects.repoint.mockResolvedValue({
+      old_path: REPO.root,
+      new_path: MOVED.root,
+      moved: { artifacts: 0, sessions: 1, tasks: 0, messages: 2, followups: 0 },
+      project: MOVED,
+    });
+    render(<ConnectionSection />);
+    expect(screen.getByLabelText("Project path")).toHaveValue(REPO.root);
+
+    await user.click(screen.getByRole("button", { name: "Re-point…" }));
+    const dialog = screen.getByRole("dialog");
+    await user.type(
+      within(dialog).getByLabelText("New project folder"),
+      MOVED.root,
+    );
+    const press = within(dialog).getByRole("button", { name: "Re-point" });
+    await waitFor(() => expect(press).toBeEnabled());
+    await user.click(press);
+
+    await waitFor(() =>
+      expect(useProjectStore.getState().path).toBe(MOVED.root),
+    );
+    expect(projects.repoint).toHaveBeenCalledWith({
+      from: REPO.root,
+      to: MOVED.root,
+    });
+    expect(screen.getByLabelText("Project path")).toHaveValue(MOVED.root);
   });
 });

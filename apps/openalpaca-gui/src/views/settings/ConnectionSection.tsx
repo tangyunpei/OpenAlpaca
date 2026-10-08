@@ -541,6 +541,19 @@ function ProjectCard({
   const [draft, setDraft] = useState(path ?? "");
   const [refusal, setRefusal] = useState<string | null>(null);
 
+  // The field follows the window's project when something else moves it — a
+  // re-point or a delete from the Projects list below. Left on the old root,
+  // `Use` would post it again, and after a delete that registers the deleted
+  // project again, empty. Adjusted during render when the stored path changes
+  // rather than remounted by `key`: a remount would drop the callbacks of a
+  // `Use` still in flight.
+  const [seenPath, setSeenPath] = useState(path);
+  if (path !== seenPath) {
+    setSeenPath(path);
+    setDraft(path ?? "");
+    setRefusal(null);
+  }
+
   const trimmed = draft.trim();
   // Only a genuine typo is an error: an empty box is "no project", not a
   // mistake, and Use is simply inert there.
