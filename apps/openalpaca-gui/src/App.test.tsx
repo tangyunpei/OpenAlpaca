@@ -19,6 +19,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetConnection } from "@/lib/connection";
+import { createQueryClient } from "@/lib/query-client";
+import { qk } from "@/lib/query-keys";
 import { QueryProvider } from "@/lib/query-provider";
 import { useConfirmationStore } from "@/stores/confirmation";
 import { useProjectStore } from "@/stores/project";
@@ -105,10 +107,11 @@ function installFetch() {
 
 const initialUi = useUiStore.getState();
 
-function renderFrame() {
-  const client = new QueryClient({
+function renderFrame(
+  client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
-  });
+  }),
+) {
   return render(
     <QueryProvider client={client} connectEvents={false}>
       <AppFrame />
@@ -349,6 +352,38 @@ describe("The window's project (R22)", () => {
     ]);
     useProjectStore.setState({ path: OLD_ROOT, id: PROJECT_ID });
     renderFrame();
+
+    await waitFor(() => expect(useProjectStore.getState().path).toBe(NEW_ROOT));
+    expect(useProjectStore.getState().id).toBe(PROJECT_ID);
+    expect(useUiStore.getState().toast).toBe(
+      `This window's project was re-pointed to ${NEW_ROOT}: its turns go there now.`,
+    );
+  });
+
+  it("follows even when a list read before the re-point is still cached", async () => {
+    // The Projects card read the list moments before `openalpaca store
+    // rebase` ran elsewhere: with the app's own 30 s staleTime that list is
+    // still fresh, and it records the project at the old root. Only a list
+    // read since the root stopped resolving may be believed (residual X8).
+    rePointedElsewhere([
+      {
+        id: PROJECT_ID,
+        root: NEW_ROOT,
+        name: "-Users-dev-work-AlpacaLink",
+        missing: false,
+      },
+    ]);
+    useProjectStore.setState({ path: OLD_ROOT, id: PROJECT_ID });
+    const client = createQueryClient();
+    client.setQueryData(qk.workspaces.list(), [
+      {
+        id: PROJECT_ID,
+        root: OLD_ROOT,
+        name: "-Users-dev-AlpacaLink",
+        missing: false,
+      },
+    ]);
+    renderFrame(client);
 
     await waitFor(() => expect(useProjectStore.getState().path).toBe(NEW_ROOT));
     expect(useProjectStore.getState().id).toBe(PROJECT_ID);

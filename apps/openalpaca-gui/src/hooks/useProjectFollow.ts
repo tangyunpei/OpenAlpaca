@@ -64,15 +64,21 @@ export function useProjectFollow(): void {
     status.data !== undefined &&
     status.data.project_root === null;
 
+  // Always stale for this hook (`staleTime: 0`): the list the Projects card
+  // read a moment ago is fresh by the app's 30 s default, and may record the
+  // project at the root it was just re-pointed away from — believed, it would
+  // keep the window there for good (residual X8). Turning `lost` on therefore
+  // always reads the list again.
   const projects = useQuery({
     queryKey: qk.workspaces.list(),
     queryFn: ({ signal }) => listProjects(signal),
     enabled: lost,
+    staleTime: 0,
   });
 
   // Only a list read since the root stopped resolving is believed: a cached
   // one may predate the re-point, and following it would move the window
-  // twice.
+  // twice. While that read is out the cached one is ignored.
   const listed = lost && !projects.isFetching ? projects.data : undefined;
 
   useEffect(() => {
