@@ -1220,6 +1220,10 @@ async fn a_partition_that_cannot_be_dropped_keeps_the_folder_and_a_second_delete
         body["removed"],
         serde_json::json!({"session_dirs": 1, "memory_partitions": 0, "project_folder": false})
     );
+    assert_eq!(
+        body["counts"]["memory_notes"], 0,
+        "the notes are still on disk in the kept folder: none is reported deleted"
+    );
     assert_eq!(w.count("SELECT COUNT(*) FROM session"), 2, "the rows went");
     assert!(s.p.dir.is_dir(), "the folder is kept");
     assert_eq!(
@@ -1238,6 +1242,10 @@ async fn a_partition_that_cannot_be_dropped_keeps_the_folder_and_a_second_delete
     assert_eq!(
         body["removed"],
         serde_json::json!({"session_dirs": 0, "memory_partitions": 2, "project_folder": true})
+    );
+    assert_eq!(
+        body["counts"]["memory_notes"], 2,
+        "the notes went with the folder"
     );
     assert!(!s.p.dir.exists());
     assert_eq!(projects::lookup(&s.p.root).expect("lookup"), None);

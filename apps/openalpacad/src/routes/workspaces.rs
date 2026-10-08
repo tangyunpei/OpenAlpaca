@@ -193,7 +193,10 @@ pub struct DeleteCountsView {
     /// By-products the delete removes: one `file_assets` row per artifact,
     /// however many versions it has.
     pub artifacts: usize,
-    /// Note files of every owner under `projects/<name>/memory/`.
+    /// Note files of every owner under `projects/<name>/memory/`. On a real
+    /// delete, those that went: they go with the folder, so a delete that
+    /// kept it (`removed.project_folder: false`) counts only what a fresh
+    /// count no longer finds there.
     pub memory_notes: usize,
 }
 
@@ -789,6 +792,7 @@ fn delete_view(
     plan: &DeletePlan,
     counts: &PurgeCounts,
     kept: KeptFiles,
+    memory_notes: usize,
     removed: Option<RemovedView>,
 ) -> DeleteDataView {
     let dry_run = removed.is_none();
@@ -807,7 +811,7 @@ fn delete_view(
             run_events: counts.run_events,
             uploads: counts.uploads,
             artifacts: counts.artifacts,
-            memory_notes: plan.memory_notes,
+            memory_notes,
         },
         kept: KeptView {
             uploads: kept.uploads,
@@ -979,7 +983,14 @@ pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRe
         }
     }
     if request.dry_run {
-        return Json(delete_view(&plan, &plan.counts, plan.kept, None)).into_response();
+        return Json(delete_view(
+            &plan,
+            &plan.counts,
+            plan.kept,
+            plan.memory_notes,
+            None,
+        ))
+        .into_response();
     }
 
     let _quiesced = match quiesce_project(deps.memory, &project.id).await {
@@ -1029,6 +1040,7 @@ pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRe
     // now, it would strand the snapshots left: nothing lists one whose
     // project no folder records (R-S11), and a delete of that root answers
     // `404`.
+    let mut fresh_plan = None;
     let (memory_partitions, partitions_left) = match deps.memory.remove_project(&project.id) {
         Ok(dropped) => (dropped, false),
         Err(e) => {
@@ -1043,7 +1055,9 @@ pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRe
             // count still finds — none claimed when it cannot be read, and one
             // short if an owner's first note there landed while this waited
             // for the slot.
-            let left = project_life::delete_plan(deps.db, &project)
+            fresh_plan = project_life::delete_plan(deps.db, &project).ok();
+            let left = fresh_plan
+                .as_ref()
                 .map_or(plan.memory_partitions, |after| after.memory_partitions);
             (plan.memory_partitions.saturating_sub(left), true)
         }
@@ -1060,6 +1074,19 @@ pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRe
                 false
             }
         }
+    };
+    // The notes went with the folder. When it stayed — a partition left, or
+    // a removal that stopped part-way — what went is the plan's count less
+    // what a fresh count still finds under it: none claimed when it cannot
+    // be read.
+    let memory_notes = if project_folder {
+        plan.memory_notes
+    } else {
+        fresh_plan
+            .or_else(|| project_life::delete_plan(deps.db, &project).ok())
+            .map_or(0, |after| {
+                plan.memory_notes.saturating_sub(after.memory_notes)
+            })
     };
     let session_dirs = remove_session_dirs(deps, &outcome.session_ids).await;
     if let Some(queue) = deps.learning.as_deref() {
@@ -1084,6 +1111,7 @@ pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRe
         &plan,
         &outcome.counts,
         outcome.kept,
+        memory_notes,
         Some(RemovedView {
             session_dirs,
             memory_partitions,
