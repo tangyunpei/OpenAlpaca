@@ -68,6 +68,22 @@ const chosen = vi.hoisted(() => {
 
 vi.mock("@/hooks/useWorkspaces", () => ({
   useChooseProject: () => ({ mutate: chosen.mutate, isPending: false }),
+  // The Projects list has its own tests (ProjectsCard.test.tsx). Here it is
+  // empty, so the flows behind its buttons never mount.
+  useProjects: () => ({ data: [], isPending: false, error: null }),
+  useWorkspace: () => ({
+    data: undefined,
+    isPending: true,
+    error: null,
+    refetch: vi.fn(),
+  }),
+  useRepointProject: () => ({ mutate: vi.fn(), isPending: false }),
+  useDeleteProjectData: () => ({
+    mutate: vi.fn(),
+    isPending: false,
+    data: undefined,
+    error: null,
+  }),
 }));
 
 vi.mock("@/hooks/useConnection", () => ({

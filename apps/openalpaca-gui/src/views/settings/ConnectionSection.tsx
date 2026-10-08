@@ -8,14 +8,14 @@
  * daemon's UTC date rather than the browser's local one, so the runs filter
  * and the spend figure are the same day.
  *
- * Also real: **the project** (plan §4.7 item 2). The daemon reads
- * `x-workspace-path` on `POST /v1/chat`; until this field existed no client
- * sent it, so every GUI run was project-less. It lives here rather than in a
- * section of its own because the eight sections are the design's (§5.4) and a
- * single machine-local path is Connection's kind of fact — where this daemon
- * is pointed. There is no project *list* and no browse dialog: the daemon has
- * no project concept to enumerate (plan §10), so the honest control is the one
- * path the owner types.
+ * Also real: **the project** (plan §4.7 item 2; storage design §6, §9). The
+ * daemon reads `x-workspace-path` on `POST /v1/chat`; the Project card is
+ * where this window chooses the one it sends (`Use` → `POST /v1/workspaces`),
+ * and the Projects list under it (`ProjectsCard.tsx`) is every project the
+ * home store records (`GET /v1/workspaces`) with its life-cycle actions. Both
+ * live here rather than in a section of their own because the eight sections
+ * are the design's (§5.4) and where this daemon files its work is
+ * Connection's kind of fact.
  *
  * Also real since Phase 8: **uptime, `Schema vNN` and `Copy log path`** —
  * GAP-14, closed. `GET /v1/status` carries `started_at`/`uptime_secs`, the open
@@ -74,6 +74,7 @@ import { relativeTime } from "@/views/library/format";
 import { isEnabled as connectorIsOn } from "./ConnectorsSection";
 import { Card, GapNote, StatCard, StatusCard } from "./primitives";
 import { compactCount, formatUptime } from "./format";
+import { ProjectsCard } from "./ProjectsCard";
 
 export function ConnectionSection() {
   const connection = useConnectionStatus();
@@ -239,6 +240,8 @@ export function ConnectionSection() {
           status.data === undefined ? undefined : status.data.project_root
         }
       />
+
+      <ProjectsCard currentRoot={status.data?.project_root ?? null} />
     </div>
   );
 }
