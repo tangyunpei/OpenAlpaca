@@ -1,8 +1,9 @@
 //! Chat command — delegates to REPL (interactive) or chat_stream (single/pipe)
 //!
 //! Every turn now carries the project it belongs to (the CLI's working
-//! directory, as `x-workspace-path`) and, when the caller resumed one, the
-//! conversation it belongs to (`session_id`). See `chat_stream::ChatTarget`.
+//! directory, or the root `--project` chose, as `x-workspace-path`) and, when
+//! the caller resumed one, the conversation it belongs to (`session_id`). See
+//! `chat_stream::ChatTarget`.
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -35,6 +36,11 @@ pub struct ChatArgs {
     /// Continue the conversation with this id (`openalpaca sessions` lists them)
     #[arg(long, value_name = "ID")]
     pub session: Option<String>,
+
+    /// Work in this folder's project: the git repository it lies in, or the
+    /// folder itself when it lies in none — OpenAlpaca remembers the choice
+    #[arg(long, value_name = "DIR")]
+    pub project: Option<std::path::PathBuf>,
 }
 
 pub async fn run(args: ChatArgs) -> Result<()> {
@@ -44,14 +50,25 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 
     let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
     let stdout_is_terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let mut target = ChatTarget::for_cwd();
+    let mut target = match args.project.as_deref() {
+        Some(dir) => {
+            let client = DaemonClient::connect()?;
+            let project = choose_project(&client, dir).await?;
+            eprintln!(
+                "{}",
+                format!("Project {} · projects/{}", project.root, project.name).dimmed()
+            );
+            ChatTarget::for_workspace(Some(project.root))
+        }
+        None => ChatTarget::for_cwd(),
+    };
 
     if args.resume || args.session.is_some() {
         let client = DaemonClient::connect()?;
         let lane_key = sessions::default_lane_key(&client).await?;
         let session_id = match args.session.as_deref() {
             Some(id) => named_session(&client, id, &lane_key).await?,
-            None => pick_session(&client, &lane_key, interactive).await?,
+            None => pick_session(&client, &lane_key, interactive, &target).await?,
         };
         let resumed = resume(&client, &session_id).await?;
         print_transcript_tail(&client, &resumed.id).await?;
@@ -110,19 +127,14 @@ fn refuse_foreign_lane(session: &SessionItem, lane_key: &str) -> Result<()> {
     )
 }
 
-/// The project a `--resume` is scoped to (plan §5.7): the working directory's
-/// own project root, resolved exactly as the daemon resolves a turn's
-/// `x-workspace-path`, so the value filtered on is the one `workspace_id`
-/// holds.
+/// The project a `--resume` is scoped to (plan §5.7): the root of the path
+/// this chat's turns carry — the working directory, or `--project`'s answered
+/// root — resolved as the daemon resolves a turn's `x-workspace-path`.
 ///
-/// `None` — a directory under no project marker, or one inside the home store
-/// — leaves the listing lane-wide, because "conversations with no project" is
-/// not a filter `GET /v1/sessions` can express: its `workspace_id` is an
-/// equality on a column that is NULL for exactly those rows. A turn from such a
-/// directory carries no project either, so the two agree.
-fn resume_workspace() -> Option<String> {
-    let cwd = std::env::current_dir().ok()?;
-    sessions::resolve_workspace_filter(&cwd.to_string_lossy()).ok()
+/// `None` — no project there — leaves the listing lane-wide: "conversations
+/// with no project" is not a filter `GET /v1/sessions` can express.
+fn resume_workspace(target: &ChatTarget) -> Option<String> {
+    sessions::resolve_workspace_filter(target.workspace_path()?).ok()
 }
 
 /// Which conversation `--resume` continues.
@@ -136,8 +148,13 @@ fn resume_workspace() -> Option<String> {
 /// Interactively that is the user's choice from those, newest first. With no
 /// terminal to ask at, it is the most recent — the same row the picker would
 /// open on — because a prompt written to a pipe is a hang, not a question.
-async fn pick_session(client: &DaemonClient, lane_key: &str, interactive: bool) -> Result<String> {
-    let workspace_id = resume_workspace();
+async fn pick_session(
+    client: &DaemonClient,
+    lane_key: &str,
+    interactive: bool,
+    target: &ChatTarget,
+) -> Result<String> {
+    let workspace_id = resume_workspace(target);
     let rows = sessions::lane_sessions_on(client, lane_key, workspace_id.as_deref(), 25).await?;
     let newest = sessions::require_one(&rows, workspace_id.as_deref())?;
     if !interactive {
@@ -186,6 +203,29 @@ async fn resume(client: &DaemonClient, session_id: &str) -> Result<SessionItem> 
         format!("Resuming {title} ({}) · {project}", session.id).dimmed()
     );
     Ok(session)
+}
+
+/// A project as `POST /v1/workspaces` answers it — the two fields this
+/// command prints and sends.
+#[derive(Debug, serde::Deserialize)]
+struct ChosenProject {
+    root: String,
+    name: String,
+}
+
+/// `chat --project <dir>` (R10): the daemon resolves the folder — the git
+/// repository it lies in, else the folder itself — and remembers it; every
+/// turn then carries the answered root, never the typed text.
+async fn choose_project(client: &DaemonClient, dir: &std::path::Path) -> Result<ChosenProject> {
+    let path = std::path::absolute(dir)
+        .with_context(|| format!("Cannot make {} an absolute path", dir.display()))?;
+    client
+        .post(
+            "/v1/workspaces",
+            &serde_json::json!({ "path": path.to_string_lossy() }),
+        )
+        .await
+        .with_context(|| format!("Could not use {} as this chat's project", path.display()))
 }
 
 #[derive(serde::Deserialize)]
@@ -774,5 +814,59 @@ mod tests {
             "the upload carries the turn's project header:\n{}",
             requests[0]
         );
+    }
+
+    /// R10's CLI half: the folder is sent absolute, the daemon answers the
+    /// project it resolves to, and every turn carries that root.
+    #[tokio::test]
+    async fn chat_project_posts_the_folder_and_every_turn_carries_the_answered_root() {
+        use crate::test_util::{json_answer, serve};
+        let answer = serde_json::json!({
+            "id": "11111111-1111-4111-8111-111111111111",
+            "root": "/work/mono",
+            "name": "-work-mono",
+            "missing": false,
+        });
+        let (addr, server) = serve(vec![json_answer("200 OK", "e", &answer.to_string())]);
+        let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
+
+        let project = choose_project(&client, std::path::Path::new("/work/mono/packages/web"))
+            .await
+            .unwrap();
+
+        let seen = server.join().unwrap();
+        assert!(
+            seen[0].starts_with("POST /v1/workspaces HTTP/1.1"),
+            "{}",
+            seen[0]
+        );
+        assert!(
+            seen[0].ends_with(r#"{"path":"/work/mono/packages/web"}"#),
+            "{}",
+            seen[0]
+        );
+        assert_eq!(project.root, "/work/mono");
+        assert_eq!(project.name, "-work-mono");
+        let target = ChatTarget::for_workspace(Some(project.root.clone()));
+        assert_eq!(
+            target.headers(),
+            vec![("x-workspace-path", "/work/mono".to_string())]
+        );
+        assert_eq!(target.workspace_path(), Some("/work/mono"));
+    }
+
+    /// Uses the module's own `Harness` (`#[command(flatten)] args: ChatArgs`)
+    /// and `use clap::Parser;`, both already in `mod tests` at HEAD.
+    #[test]
+    fn chat_takes_a_project_folder() {
+        let parsed = Harness::try_parse_from(["chat", "--project", "../app"])
+            .unwrap()
+            .args;
+        assert_eq!(
+            parsed.project.as_deref(),
+            Some(std::path::Path::new("../app"))
+        );
+        let plain = Harness::try_parse_from(["chat"]).unwrap().args;
+        assert!(plain.project.is_none());
     }
 }

@@ -150,6 +150,11 @@ impl ChatTarget {
         }
     }
 
+    /// The project path this turn carries as `x-workspace-path`, if any.
+    pub fn workspace_path(&self) -> Option<&str> {
+        self.workspace_path.as_deref()
+    }
+
     /// Address a stored conversation from here on.
     pub fn resuming(mut self, session_id: String) -> Self {
         self.session_id = Some(session_id);
