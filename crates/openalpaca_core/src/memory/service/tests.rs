@@ -1143,6 +1143,24 @@ fn the_service_quiesce_is_keyed_by_the_project_id() {
     );
 }
 
+/// A project lookup that fails gives a write the `unregistered:` slot, which
+/// never meets a re-point's or a delete's hold on the project (S4 M1): the
+/// failure is reported, not folded in without a word.
+#[test]
+#[tracing_test::traced_test]
+fn a_write_slot_whose_project_lookup_fails_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    // `home_root()` refuses a relative override, so every lookup fails.
+    let _env = HomeStoreGuard::set(Path::new("relative/store"));
+
+    let key = MemoryService::slot_key(&StoreScope::Project(root.clone()), ALICE_KEY);
+
+    assert!(key.starts_with("unregistered:"), "{key}");
+    assert!(logs_contain("could not be looked up"));
+    assert!(logs_contain(&root.display().to_string()));
+}
+
 // ============================================================================
 // Extraction writes (design §7a, MD-2)
 // ============================================================================

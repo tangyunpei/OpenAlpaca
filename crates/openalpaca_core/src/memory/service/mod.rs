@@ -820,7 +820,20 @@ impl MemoryService {
                     // Not a registered project (R12): its writes are refused
                     // where the partition opens; this slot only keeps two of
                     // them apart, and never meets a project's.
-                    Ok(None) | Err(_) => format!("unregistered:{}", canonical_lenient(root)),
+                    Ok(None) => format!("unregistered:{}", canonical_lenient(root)),
+                    // The same slot, said aloud: should the partition then
+                    // open, this write does not wait for a re-point's or a
+                    // delete's hold on the project.
+                    Err(e) => {
+                        tracing::warn!(
+                            project_root = %root.display(),
+                            "memory: the project at {} could not be looked up, so this write \
+                             takes a slot of its own and does not wait for a re-point or a \
+                             delete of it: {e:#}",
+                            root.display()
+                        );
+                        format!("unregistered:{}", canonical_lenient(root))
+                    }
                 }
             }
         }
