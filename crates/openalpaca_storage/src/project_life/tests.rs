@@ -594,3 +594,84 @@ fn a_re_point_onto_either_path_of_a_re_point_that_has_not_finished_is_refused() 
         Some(p2.id)
     );
 }
+
+impl World {
+    /// A run under `root` in `status`, as a dispatch records it.
+    fn run(&self, id: &str, root: &Path, status: &str) {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO task (id, title, created_by, source_lane, workspace_id, status)
+                     VALUES (?1, ?1, 'u', 'u:gui', ?2, ?3)",
+                    rusqlite::params![id, root.to_string_lossy(), status],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+/// §6: refused while a run is in flight. The route counts the runs before it
+/// waits for the project's memory slot; a run dispatched meanwhile has
+/// already resolved the project by its old root, so step 2's transaction
+/// counts them again — `queued` included — and refuses: nothing moves and
+/// the marker is cleared, as for any failure of step 2.
+#[test]
+fn a_run_in_flight_refuses_the_re_point_inside_its_transaction_and_nothing_moves() {
+    for status in ["queued", "running", "paused"] {
+        let w = World::new();
+        let before = w.project("app");
+        w.rows_of(&before);
+        w.run("t-live", &before.root, status);
+        let new = w.dir("app-moved");
+
+        let err = repoint(&w.db, &before.root, &new).unwrap_err();
+
+        assert_eq!(
+            err.chain()
+                .find_map(|cause| cause.downcast_ref::<RunsInFlight>()),
+            Some(&RunsInFlight {
+                root: before.root_string(),
+                runs: 1,
+            }),
+            "{status}: {err:#}"
+        );
+        assert_eq!(
+            projects::lookup(&before.root).unwrap(),
+            Some(before.clone()),
+            "{status}: the file names the old root again, with no marker"
+        );
+        assert_eq!(projects::lookup(&new).unwrap(), None, "{status}");
+        assert_eq!(w.named(&before.root), 6, "{status}: no row moved");
+        assert!(before.dir.is_dir(), "{status}: the folder was not renamed");
+    }
+}
+
+/// R24's recovery runs before the boot sweeps the previous process's runs,
+/// which still read `running` then: they must not hold a re-point that
+/// already moved its rows (or is about to) back for ever.
+#[test]
+fn a_recovery_finishes_a_re_point_whose_old_root_still_reads_a_run_in_flight() {
+    let w = World::new();
+    let before = w.project("app");
+    w.rows_of(&before);
+    let new = w.dir("app-moved");
+    repoint_with(&w.db, &before.root, &new, &mut |at| {
+        at != RepointStep::Marked
+    })
+    .unwrap_err();
+    w.run("t-dead", &before.root, "running");
+
+    assert_eq!(
+        recover_repoints(&w.db),
+        RecoveryReport {
+            finished: vec![new.clone()],
+            failed: Vec::new(),
+        }
+    );
+    assert_eq!(
+        projects::lookup(&new).unwrap().map(|p| p.id),
+        Some(before.id)
+    );
+    assert_eq!(w.named(&new), 6, "the dead run's row moved with the rest");
+}

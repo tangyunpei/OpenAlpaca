@@ -1525,3 +1525,97 @@ async fn a_project_whose_re_point_has_not_finished_answers_busy_naming_the_resta
     assert_eq!(marked[0].dir, p.dir, "the folder was not touched");
     assert_eq!(marked[0].root, new);
 }
+
+/// The re-point on a thread of its own with its own runtime, as
+/// [`delete_on_its_own_thread`] runs the delete.
+fn repoint_on_its_own_thread(
+    w: &World,
+    old: &std::path::Path,
+    new: &std::path::Path,
+) -> std::sync::mpsc::Receiver<(StatusCode, serde_json::Value)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let db = w.db.clone();
+    let memory = w.memory.clone();
+    let request = RebaseRequest {
+        old_path: text(old),
+        new_path: text(new),
+    };
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let answer = runtime
+            .block_on(async { split(rebase_workspace(&db, &memory, OWNER, request).await).await });
+        let _ = tx.send(answer);
+    });
+    rx
+}
+
+/// Long enough for a route on its own thread to pass its checks and start
+/// waiting for the memory slot the test holds.
+const INTO_THE_WAIT: Duration = Duration::from_millis(400);
+
+/// §6: refused while a run is in flight — queued, running or paused — and
+/// counted before the wait as well as inside step 2's transaction.
+#[tokio::test]
+async fn a_queued_running_or_paused_run_refuses_the_re_point() {
+    for status in ["queued", "running", "paused"] {
+        let w = World::new();
+        let p = w.project("busy");
+        w.task("t-live", &text(&p.root), status);
+        let new = w.dir("later");
+
+        let (code, body) = w.repoint(&p.root, &new).await;
+
+        assert_eq!(code, StatusCode::CONFLICT, "{status}: {body}");
+        assert_eq!(error_code(&body), "WORKSPACE_BUSY", "{status}");
+        assert_eq!(
+            projects::lookup(&p.root)
+                .expect("lookup")
+                .map(|found| found.id),
+            Some(p.id),
+            "{status}: nothing moved"
+        );
+    }
+}
+
+/// A run dispatched while the re-point waits for the project's memory slot
+/// has resolved the project by its old root; the transaction counts it and
+/// refuses — `409`, nothing moved — rather than moving its row and not the
+/// process.
+#[tokio::test]
+async fn a_run_dispatched_while_the_re_point_waits_refuses_it_and_nothing_moves() {
+    let w = World::new();
+    let p = w.project("racing");
+    let root = text(&p.root);
+    w.session("s-1", &root);
+    let new = w.dir("racing-moved");
+    let held = w.memory.quiesce(&p.id).expect("the slot is idle");
+
+    let answer = repoint_on_its_own_thread(&w, &p.root, &new);
+    std::thread::sleep(INTO_THE_WAIT);
+    w.task("t-dispatched", &root, "running");
+    drop(held);
+    let (status, body) = answer
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the re-point answered");
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_BUSY");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains(&root), "{message}");
+    assert_eq!(
+        projects::lookup(&p.root).expect("lookup"),
+        Some(p.clone()),
+        "the project is where it was, with no marker"
+    );
+    assert_eq!(projects::lookup(&new).expect("lookup"), None);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT COUNT(*) FROM session WHERE workspace_id = '{root}'"
+        )),
+        1,
+        "no row moved"
+    );
+}

@@ -153,9 +153,10 @@ pub struct WorkspaceView {
     pub missing: bool,
     /// Under `root`; zeros when there is none.
     pub rows: RowCountsView,
-    /// `running` or `paused` — what a re-point waits for.
+    /// `running` or `paused`.
     pub active_tasks: usize,
-    /// `queued` — what the delete refuses on as well.
+    /// `queued`. The re-point and the delete refuse on these and on
+    /// `active_tasks` alike.
     pub queued_tasks: usize,
 }
 
@@ -525,8 +526,11 @@ pub(crate) fn project_error_response(e: &anyhow::Error) -> Option<Response> {
 /// project's folder under `projects/` renamed — `project_life::repoint`.
 ///
 /// Owner-scoped (R40): a project holding another owner's rows is the same
-/// `404` an unknown one is. Refused while a run is `running` or `paused`
-/// there, and while the project's memory slot stays held for
+/// `404` an unknown one is. Refused while a run is `queued`, `running` or
+/// `paused` there — counted here and again inside `repoint`'s transaction
+/// (`project_life::RunsInFlight`, the same `409`), since a run dispatched
+/// while this waits has already resolved the project by its old root — and
+/// while the project's memory slot stays held for
 /// [`QUIESCE_RETRY_FOR`]. The target's refusals are `repoint`'s: not a
 /// directory (422), the home store (409), already a project or named by the
 /// rows (409, ST-20), the same path (400).
@@ -558,13 +562,16 @@ pub(crate) async fn rebase_workspace(
     if rows.other_owners > 0 {
         return owner_mismatch(&root, rows.other_owners);
     }
-    if rows.active_tasks > 0 {
+    // `queued` too: its dispatch has already resolved the project by this
+    // root (`WorkspaceRows::queued_tasks`).
+    let in_flight = rows.active_tasks + rows.queued_tasks;
+    if in_flight > 0 {
         return api_error(
             StatusCode::CONFLICT,
             "WORKSPACE_BUSY",
             format!(
-                "{} run(s) under {root} are still in flight; re-point it once they finish",
-                rows.active_tasks
+                "{in_flight} run(s) under {root} are still in flight; re-point it once they \
+                 finish"
             ),
         );
     }
@@ -589,13 +596,31 @@ pub(crate) async fn rebase_workspace(
             project: ProjectView::from(&done.after),
         })
         .into_response(),
-        Err(e) => project_error_response(&e).unwrap_or_else(|| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "WORKSPACE_MOVE_FAILED",
-                format!("{root} could not be re-pointed onto {new}: {e:#}"),
-            )
-        }),
+        Err(e) => {
+            // A run dispatched while this waited for the memory slot: step
+            // 2's transaction counted it, moved nothing and cleared the marker.
+            if let Some(busy) = e
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<project_life::RunsInFlight>())
+            {
+                return api_error(
+                    StatusCode::CONFLICT,
+                    "WORKSPACE_BUSY",
+                    format!(
+                        "{} run(s) of {} are queued, running or paused; nothing was re-pointed \
+                         — re-point it once they finish",
+                        busy.runs, busy.root
+                    ),
+                );
+            }
+            project_error_response(&e).unwrap_or_else(|| {
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "WORKSPACE_MOVE_FAILED",
+                    format!("{root} could not be re-pointed onto {new}: {e:#}"),
+                )
+            })
+        }
     }
 }
 

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::Database;
-use crate::artifacts::{ArtifactStore, RebaseCounts};
+use crate::artifacts::{ArtifactStore, InFlightRuns, RebaseCounts};
 use crate::content_io::fsync_dir;
 use crate::store::projects::{self, Project, ProjectError, ProjectFile, ProjectsLock};
 
@@ -80,8 +80,10 @@ pub struct RecoveryReport {
 /// one — nor named by any of the five path columns ([`ProjectError::Exists`],
 /// ST-20).
 /// Then: 1 the file is marked; 2 one transaction moves the rows (a failure
-/// clears the marker and returns the error); 3 the folder is renamed (its new
-/// name is free or this project's own, R6); 4 the marker is cleared.
+/// clears the marker and returns the error — [`RunsInFlight`] when that
+/// transaction finds a run under the old root `queued`, `running` or
+/// `paused`); 3 the folder is renamed (its new name is free or this
+/// project's own, R6); 4 the marker is cleared.
 pub fn repoint(db: &Database, old_path: &Path, new_path: &Path) -> Result<Repointed> {
     repoint_with(db, old_path, new_path, &mut |_| true)
 }
@@ -114,6 +116,7 @@ pub fn repoint_with(
         &held,
         checkpoint,
         OnRowsFailure::ClearMarker,
+        InFlightRuns::Refuse,
     )?;
     Ok(Repointed {
         before,
@@ -145,6 +148,9 @@ pub fn recover_repoints(db: &Database) -> RecoveryReport {
             &held,
             &mut |_| true,
             OnRowsFailure::Leave,
+            // Before the boot sweeps the previous process's runs, which
+            // still read `running`.
+            InFlightRuns::Ignore,
         ) {
             Ok((after, _)) => report.finished.push(after.root),
             Err(e) => report.failed.push((entry.root.clone(), format!("{e:#}"))),
@@ -222,7 +228,9 @@ fn target_root(db: &Database, before: &Project, new_path: &Path) -> Result<PathB
 }
 
 /// Steps 2–4 for the marked `project.json` in `dir` (the folder it is in
-/// now). Each step is idempotent, so recovery runs this same function.
+/// now). Each step is idempotent, so recovery runs this same function. `runs`
+/// is step 2's run check: a live re-point refuses a run in flight under the
+/// old root inside that transaction ([`RunsInFlight`]); a recovery does not.
 fn finish(
     db: &Database,
     dir: &Path,
@@ -230,6 +238,7 @@ fn finish(
     held: &ProjectsLock,
     checkpoint: &mut dyn FnMut(RepointStep) -> bool,
     on_rows_failure: OnRowsFailure,
+    runs: InFlightRuns,
 ) -> Result<(Project, RebaseCounts)> {
     let (Some(old_root), Some(old_name)) = (
         marked.previous_root.as_deref(),
@@ -261,6 +270,7 @@ fn finish(
         &marked.root,
         &old_dir.to_string_lossy(),
         &new_dir.to_string_lossy(),
+        runs,
     ) {
         Ok(rows) => rows,
         Err(e) => {

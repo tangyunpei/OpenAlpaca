@@ -622,25 +622,33 @@ impl RebaseCounts {
     }
 }
 
+/// Whether [`ArtifactStore::repoint_rows`] refuses while a run of the old
+/// root is in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InFlightRuns {
+    /// A live re-point: a `queued`, `running` or `paused` run under the old
+    /// root refuses it ([`crate::project_life::RunsInFlight`]).
+    Refuse,
+    /// R24's boot recovery, before the previous process's runs are swept.
+    Ignore,
+}
+
 /// What [`ArtifactStore::workspace_rows`] found under one root.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkspaceRows {
     pub counts: RebaseCounts,
     /// Runs under this root that are `running` or `paused`. Both hold live
     /// in-process state — a loop, a steering inbox, a resolved store — that a
-    /// row rewrite cannot reach, so a rebase waits for them. A `queued` run
-    /// does not count here: it has not resolved anything yet, and its row
-    /// moves with the rest of a re-base. (A purge's own busy predicate is
-    /// stricter than this field — see [`ArtifactStore::busy_tasks`] — because
-    /// a purge *deletes* the row a queued run is about to resolve, rather than
-    /// rewriting it.)
+    /// row rewrite cannot reach.
     pub active_tasks: usize,
-    /// Runs under this root that are `queued` — dispatched, not started. They
-    /// do not block a re-base (the row moves with the rest of one) and they *do*
-    /// block a purge ([`ArtifactStore::busy_tasks`] counts them), so a caller
-    /// reading this number can tell a root that is merely busy-soon from one
-    /// that is running. Reported rather than folded into `active_tasks`: the two
-    /// answer different questions.
+    /// Runs under this root that are `queued` — dispatched, not started yet.
+    /// A dispatch registers the project and resolves its scope **before** it
+    /// inserts the `queued` row and spawns the run (`dispatcher::lead_agent`),
+    /// so a queued run has already resolved the project by this root: it
+    /// blocks a re-point (the route and `repoint_rows`' own transaction count
+    /// it) as it blocks a purge ([`ArtifactStore::busy_tasks`]). Reported
+    /// apart from `active_tasks` so a caller can tell a run about to start
+    /// from one that is running.
     pub queued_tasks: usize,
     /// Rows under this root that belong to **another** owner — `file_assets`,
     /// the one member that carries an `owner_id` at all. Always `0` for an
@@ -1451,15 +1459,42 @@ impl<'a> ArtifactStore<'a> {
     /// `task` carry no `owner_id`; the route refuses a root holding another
     /// owner's rows ([`WorkspaceRows::other_owners`]) before calling this.
     /// Idempotent: run again after it committed, it matches nothing.
+    ///
+    /// [`InFlightRuns::Refuse`] (a re-point someone asked for) first counts
+    /// the runs under `old_root` that are `queued`, `running` or `paused`
+    /// and, finding any, returns [`crate::project_life::RunsInFlight`]
+    /// inside the error, moving nothing: the route counts them before it
+    /// waits for the project's memory slot, and a run dispatched meanwhile
+    /// has already resolved the project by its old root — this moves its row,
+    /// not the process. Every write of the daemon goes through the one
+    /// connection this transaction holds, so none starts between the count
+    /// and the commit. [`InFlightRuns::Ignore`] is R24's boot recovery, which
+    /// runs before the previous process's dead runs are swept and still read
+    /// `running`.
     pub fn repoint_rows(
         &self,
         old_root: &str,
         new_root: &str,
         old_dir: &str,
         new_dir: &str,
+        runs: InFlightRuns,
     ) -> Result<RebaseCounts> {
         self.db.with_connection(|conn| {
             let tx = conn.unchecked_transaction()?;
+            if runs == InFlightRuns::Refuse {
+                let in_flight = tx.query_row(
+                    "SELECT COUNT(*) FROM task
+                      WHERE workspace_id = ?1 AND status IN ('queued', 'running', 'paused')",
+                    rusqlite::params![old_root],
+                    |row| row.get::<_, i64>(0),
+                )? as usize;
+                if in_flight > 0 {
+                    return Err(anyhow::Error::new(crate::project_life::RunsInFlight {
+                        root: old_root.to_string(),
+                        runs: in_flight,
+                    }));
+                }
+            }
             let roots = rusqlite::params![old_root, new_root];
             let sessions = tx.execute(
                 "UPDATE session SET workspace_id = ?2, updated_at = datetime('now')
@@ -1576,15 +1611,13 @@ impl<'a> ArtifactStore<'a> {
         })
     }
 
-    /// Runs under `root` that are `queued`, `running` or `paused` — the
-    /// purge's own busy predicate, stricter than
+    /// Runs under `root` that are `queued`, `running` or `paused` — what the
+    /// delete and the re-point both refuse on, stricter than
     /// [`WorkspaceRows::active_tasks`] on purpose: a `queued` run has not
-    /// reached `running` yet, but it already named this root when it was
-    /// dispatched and is about to resolve the project's store the moment it
-    /// starts, so purging out from under it would delete the transcript it is
-    /// about to write into. The re-base predicate stays `active_tasks` —
-    /// `running`/`paused` only — because a queued run's row moves with the
-    /// rest of the transaction and loses nothing by being rewritten.
+    /// reached `running` yet, but its dispatch already resolved the project
+    /// by this root, so purging out from under it would delete the transcript
+    /// it is about to write into, and re-pointing it would move its row and
+    /// not the process.
     pub fn busy_tasks(&self, root: &str) -> Result<usize> {
         self.db.with_connection(|conn| {
             Ok(conn.query_row(

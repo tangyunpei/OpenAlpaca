@@ -1542,7 +1542,12 @@ fn repoint_rows_rewrites_the_five_columns_and_both_storage_path_prefixes() {
     })
     .unwrap();
 
-    let counts = f.store().repoint_rows(old, new, old_dir, new_dir).unwrap();
+    // `t-1` reads the column's default, `queued`: the run check is the
+    // re-point's (`project_life`), this test is the rewrite's.
+    let counts = f
+        .store()
+        .repoint_rows(old, new, old_dir, new_dir, InFlightRuns::Ignore)
+        .unwrap();
     assert_eq!(
         counts,
         RebaseCounts {
@@ -1683,7 +1688,13 @@ fn repoint_rows_clears_the_missing_mark_it_re_addresses() {
         .to_string_lossy()
         .into_owned();
     f.store()
-        .repoint_rows(&old, "/tmp/moved-project", &store_dir, "/tmp/moved-dir")
+        .repoint_rows(
+            &old,
+            "/tmp/moved-project",
+            &store_dir,
+            "/tmp/moved-dir",
+            InFlightRuns::Refuse,
+        )
         .unwrap();
 
     let after = f.store().get(&record.id, OWNER).unwrap().unwrap();
@@ -1725,7 +1736,13 @@ fn a_failing_member_rolls_the_whole_repoint_back() {
         .into_owned();
     let err = f
         .store()
-        .repoint_rows(&old, new_root, &store_dir, "/tmp/elsewhere-dir")
+        .repoint_rows(
+            &old,
+            new_root,
+            &store_dir,
+            "/tmp/elsewhere-dir",
+            InFlightRuns::Refuse,
+        )
         .unwrap_err();
     assert!(
         err.to_string().to_lowercase().contains("unique"),
@@ -1787,7 +1804,7 @@ fn workspace_rows_counts_the_members_and_the_runs_in_flight() {
     );
     assert_eq!(
         rows.active_tasks, 0,
-        "a queued run has resolved nothing yet — its row moves with the rest"
+        "a queued run is counted apart from the running ones"
     );
 
     f.task_in("live", &root, "running");
