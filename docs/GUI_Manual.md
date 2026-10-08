@@ -1046,9 +1046,10 @@ waited, or its own re-point a crash interrupted has not finished (both
 `WORKSPACE_BUSY`; the second until the daemon's next start), onto a path that
 is not a directory, onto the home store, and onto a path that is already a
 project, that records name, or that another project's unfinished re-point
-holds (`WORKSPACE_EXISTS`, which names both ways out); the dialog stays open
-with the daemon's sentence. A window on that project follows it to the new
-path.
+holds (`WORKSPACE_EXISTS`, which names both ways out — or, for a path of an
+unfinished re-point, the daemon's next start, which finishes it); the dialog
+stays open with the daemon's sentence. A window on that project follows it to
+the new path.
 
 **`Delete data…`** deletes everything OpenAlpaca holds for a project. On open
 the dialog asks for the plan (`POST /v1/workspaces/purge` with

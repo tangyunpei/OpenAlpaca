@@ -559,15 +559,18 @@ pub(crate) fn choose_workspace(request: ChooseWorkspaceRequest) -> Response {
 
 /// A [`ProjectError`] anywhere in `e`'s chain, as the route answers it, or
 /// `None` for any other failure (interfaces §6.1): not registered `404`, the
-/// home store `409`, not a directory `422`, already a project `409`, the
-/// same path `400` — each with the error's own sentence.
+/// home store `409`, not a directory `422`, already a project — or a path
+/// of another project's unfinished re-point — `409`, the same path `400` —
+/// each with the error's own sentence.
 pub(crate) fn project_error_response(e: &anyhow::Error) -> Option<Response> {
     let error = e
         .chain()
         .find_map(|cause| cause.downcast_ref::<ProjectError>())?;
     let status = match error {
         ProjectError::NotRegistered { .. } => StatusCode::NOT_FOUND,
-        ProjectError::IsHome { .. } | ProjectError::Exists { .. } => StatusCode::CONFLICT,
+        ProjectError::IsHome { .. }
+        | ProjectError::Exists { .. }
+        | ProjectError::RepointUnfinished { .. } => StatusCode::CONFLICT,
         ProjectError::NotADirectory { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         ProjectError::SamePath { .. } => StatusCode::BAD_REQUEST,
     };

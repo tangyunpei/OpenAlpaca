@@ -347,6 +347,11 @@ fn each_refusal_has_its_code_and_one_sentence() {
             "/work/app is already a project of its own, or OpenAlpaca's records already name it. Re-pointing onto it would merge two projects: delete that project's data first, or re-point onto another path",
         ),
         (
+            ProjectError::RepointUnfinished { path: p.clone() },
+            "WORKSPACE_EXISTS",
+            "/work/app is either path of another project's re-point that has not finished; the next start of the daemon finishes that re-point. Re-pointing onto it would merge two projects: re-point onto another path",
+        ),
+        (
             ProjectError::SamePath { path: p.clone() },
             "INVALID_PATH",
             "/work/app is already where the project is",

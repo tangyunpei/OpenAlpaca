@@ -651,6 +651,45 @@ fn a_re_point_onto_either_path_of_a_re_point_that_has_not_finished_is_refused() 
     );
 }
 
+/// The same refusal says what ends it (residual X7): the next start of the
+/// daemon finishes that re-point. It does not send the caller to delete the
+/// other project's data, which is refused until then too (R11). P1 here has
+/// rows, which step 2 moved to its new root, so the rows name that path as
+/// well: the unfinished re-point is still the sentence given.
+#[test]
+fn a_re_point_onto_a_path_of_an_unfinished_re_point_names_the_restart() {
+    let w = World::new();
+    let p1 = w.project("notes");
+    w.rows_of(&p1);
+    let new = w.dir("notes-moved");
+    repoint_with(&w.db, &p1.root, &new, &mut |at| {
+        at != RepointStep::RowsRewritten
+    })
+    .unwrap_err();
+    let p2 = w.project("other");
+
+    for target in [&new, &p1.root] {
+        let err = repoint(&w.db, &p2.root, target).unwrap_err();
+        let message = format!("{err:#}");
+        assert_eq!(code(&err), Some("WORKSPACE_EXISTS"), "{message}");
+        assert!(
+            message.contains("the next start of the daemon finishes that re-point"),
+            "{}: {message}",
+            target.display()
+        );
+        assert!(
+            !message.contains("delete that project's data"),
+            "{}: {message}",
+            target.display()
+        );
+    }
+    assert_eq!(
+        projects::lookup(&p2.root).unwrap().map(|p| p.id),
+        Some(p2.id),
+        "the other project did not move"
+    );
+}
+
 impl World {
     /// A run under `root` in `status`, as a dispatch records it.
     fn run(&self, id: &str, root: &Path, status: &str) {

@@ -312,6 +312,11 @@ pub enum ProjectError {
     /// ST-20: the re-point target is already a project, or one of the five
     /// path columns names it.
     Exists { path: String },
+    /// ST-20 against a re-point that has not finished: the target is that
+    /// project's new root or its old one. The same code as [`Self::Exists`];
+    /// its sentence names the start of the daemon that finishes the re-point,
+    /// since deleting that project's data is refused until then (residual X7).
+    RepointUnfinished { path: String },
     /// A re-point onto the path the project already has.
     SamePath { path: String },
 }
@@ -323,7 +328,7 @@ impl ProjectError {
             Self::NotRegistered { .. } => "WORKSPACE_NOT_FOUND",
             Self::IsHome { .. } => "WORKSPACE_IS_HOME",
             Self::NotADirectory { .. } => "WORKSPACE_NOT_A_DIRECTORY",
-            Self::Exists { .. } => "WORKSPACE_EXISTS",
+            Self::Exists { .. } | Self::RepointUnfinished { .. } => "WORKSPACE_EXISTS",
             Self::SamePath { .. } => "INVALID_PATH",
         }
     }
@@ -350,6 +355,12 @@ impl fmt::Display for ProjectError {
                 "{path} is already a project of its own, or OpenAlpaca's records already name it. \
                  Re-pointing onto it would merge two projects: delete that project's data first, \
                  or re-point onto another path"
+            ),
+            Self::RepointUnfinished { path } => write!(
+                f,
+                "{path} is either path of another project's re-point that has not finished; the \
+                 next start of the daemon finishes that re-point. Re-pointing onto it would merge \
+                 two projects: re-point onto another path"
             ),
             Self::SamePath { path } => write!(f, "{path} is already where the project is"),
         }

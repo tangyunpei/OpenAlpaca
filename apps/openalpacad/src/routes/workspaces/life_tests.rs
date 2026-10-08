@@ -1617,6 +1617,21 @@ async fn a_project_whose_re_point_has_not_finished_answers_busy_naming_the_resta
     assert_eq!(marked[0].id, p.id);
     assert_eq!(marked[0].dir, p.dir, "the folder was not touched");
     assert_eq!(marked[0].root, new);
+
+    // Another project re-pointed onto either path is ST-20's 409, whose
+    // sentence names the same restart (residual X7).
+    let other = w.project("other");
+    for path in [&new, &p.root] {
+        let (status, body) = w.repoint(&other.root, path).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{}: {body}", text(path));
+        assert_eq!(error_code(&body), "WORKSPACE_EXISTS", "{body}");
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("the next start of the daemon finishes that re-point"),
+            "{}: {message}",
+            text(path)
+        );
+    }
 }
 
 /// The re-point on a thread of its own with its own runtime, as

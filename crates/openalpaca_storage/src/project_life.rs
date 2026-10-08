@@ -101,8 +101,8 @@ pub struct RecoveryReport {
 /// ([`ProjectError::IsHome`]), must differ from the project's root
 /// ([`ProjectError::SamePath`]), and must be neither a registered project —
 /// one whose re-point has not finished included, at its new root or its old
-/// one — nor named by any of the five path columns ([`ProjectError::Exists`],
-/// ST-20).
+/// one ([`ProjectError::RepointUnfinished`]) — nor named by any of the five
+/// path columns ([`ProjectError::Exists`], ST-20).
 /// Then: 1 the file is marked; 2 one transaction moves the rows (a failure
 /// clears the marker and returns the error — [`RunsInFlight`] when that
 /// transaction finds a run under the old root `queued`, `running` or
@@ -240,17 +240,21 @@ fn target_root(db: &Database, before: &Project, new_path: &Path) -> Result<PathB
     if root == before.root {
         return Err(anyhow::Error::new(ProjectError::SamePath { path: text }));
     }
+    // A project whose re-point has not finished records the target as its
+    // new root or its old one, and `lookup` finds it under neither until the
+    // next start: it is a project there all the same (ST-20). Asked first —
+    // its rows already name the new root — so the refusal names that start,
+    // not a delete that is refused until then too (residual X7).
+    if projects::unfinished_repoint_at(&root)?.is_some() {
+        return Err(anyhow::Error::new(ProjectError::RepointUnfinished {
+            path: text,
+        }));
+    }
     let named = !ArtifactStore::new(db)
         .workspace_rows(&text, None)?
         .counts
         .is_empty();
-    // A project whose re-point has not finished records the target as its
-    // new root or its old one, and `lookup` finds it under neither until the
-    // next start: it is a project there all the same (ST-20).
-    if named
-        || projects::lookup(&root)?.is_some()
-        || projects::unfinished_repoint_at(&root)?.is_some()
-    {
+    if named || projects::lookup(&root)?.is_some() {
         return Err(anyhow::Error::new(ProjectError::Exists { path: text }));
     }
     Ok(root)
