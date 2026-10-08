@@ -738,6 +738,10 @@ mod tests {
     /// purge they tried next.
     #[test]
     fn a_dry_run_names_the_queued_runs_a_purge_would_refuse_on() {
+        // `render_plan`'s home-store advisory reads the home root: a sandboxed
+        // one, never the developer's `~/.openalpaca`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::EnvSandbox::enter(tmp.path());
         let from = view("/repo/one", |v| v.queued_tasks = Some(2));
         let to = view("/repo/two", |v| {
             v.store_present = false;
@@ -765,6 +769,9 @@ mod tests {
     /// (`None`) is not a line either — never "0 run(s) there are queued".
     #[test]
     fn a_dry_run_stays_silent_about_queued_runs_it_has_no_number_for() {
+        // As above: `render_plan` reads a sandboxed home root.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::EnvSandbox::enter(tmp.path());
         for queued in [Some(0), None] {
             let from = view("/repo/one", |_| {});
             let from = WorkspaceView {
