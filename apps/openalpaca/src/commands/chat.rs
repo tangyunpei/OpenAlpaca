@@ -1,9 +1,9 @@
 //! Chat command — delegates to REPL (interactive) or chat_stream (single/pipe)
 //!
 //! Every turn now carries the project it belongs to (the CLI's working
-//! directory, or the root `--project` chose, as `x-workspace-path`) and, when
-//! the caller resumed one, the conversation it belongs to (`session_id`). See
-//! `chat_stream::ChatTarget`.
+//! directory, the root `--project` chose, or a resumed conversation's own
+//! project, as `x-workspace-path`) and, when the caller resumed one, the
+//! conversation it belongs to (`session_id`). See `chat_stream::ChatTarget`.
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -72,7 +72,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         };
         let resumed = resume(&client, &session_id).await?;
         print_transcript_tail(&client, &resumed.id).await?;
-        target = target.resuming(resumed.id);
+        target = resumed_target(target, &resumed);
     }
 
     // M6/S10: say so before the turn starts, not after a run has hung on a
@@ -172,6 +172,19 @@ async fn pick_session(
     rows.get(choice)
         .map(|row| row.id.clone())
         .context("The picker returned a row that is no longer in the list")
+}
+
+/// The target this chat's turns go out on once `resumed` is the
+/// conversation they address (R6): its id, and its project when it has one —
+/// R49 runs each turn there, so a `--file` must be filed there too, not under
+/// this shell's directory. A conversation no turn has bound keeps this chat's
+/// own path, which its first turn binds it to.
+fn resumed_target(target: ChatTarget, resumed: &SessionItem) -> ChatTarget {
+    let target = target.resuming(resumed.id.clone());
+    match &resumed.workspace_id {
+        Some(root) => target.in_project(root.clone()),
+        None => target,
+    }
 }
 
 /// Re-open a conversation, whatever state it is in.
@@ -393,7 +406,9 @@ fn refuse_failed_turn(
 }
 
 /// Uploads each `--file` into the turn's project: every upload carries the
-/// headers the turn itself sends ([`ChatTarget::headers`]).
+/// headers the turn itself sends ([`ChatTarget::headers`]) — this chat's
+/// directory or `--project`'s root, or, once a conversation is resumed, that
+/// conversation's own project when it has one ([`resumed_target`], R6).
 async fn upload_files(
     client: &DaemonClient,
     files: &[std::path::PathBuf],
@@ -813,6 +828,61 @@ mod tests {
             head.contains(&format!("{name}: {value}").to_ascii_lowercase()),
             "the upload carries the turn's project header:\n{}",
             requests[0]
+        );
+    }
+
+    /// R6: a turn that names a conversation runs in that conversation's
+    /// project (R49), so a `--file` uploaded for it must be filed there, not
+    /// under this shell's directory — where a delete of the conversation's
+    /// project would leave it behind, unattached.
+    #[tokio::test]
+    async fn a_file_upload_into_a_resumed_conversation_carries_that_conversations_project() {
+        let (addr, server) = crate::test_util::serve(vec![crate::test_util::json_answer(
+            "200 OK",
+            "unused",
+            r#"{"id":"file-1"}"#,
+        )]);
+        let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("report.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let resumed = session_on("alice:gui");
+        let target = resumed_target(
+            ChatTarget::for_workspace(Some("/Users/dev/elsewhere".to_string())),
+            &resumed,
+        );
+
+        upload_files(&client, &[file], &target).await.unwrap();
+
+        let requests = server.join().unwrap();
+        let head = requests[0].to_ascii_lowercase();
+        assert!(
+            head.contains("x-workspace-path: /users/dev/openalpaca\r\n"),
+            "the upload carries the resumed conversation's project:\n{}",
+            requests[0]
+        );
+        assert_eq!(target.workspace_path(), Some("/Users/dev/openalpaca"));
+        assert_eq!(
+            target.body("hi", &[])["session_id"],
+            serde_json::json!(resumed.id)
+        );
+    }
+
+    /// A conversation no turn has bound yet takes the turn's own project as
+    /// its first binding, so its uploads go there too.
+    #[test]
+    fn a_resumed_conversation_with_no_project_keeps_this_chats_own() {
+        let mut resumed = session_on("alice:gui");
+        resumed.workspace_id = None;
+        let target = resumed_target(
+            ChatTarget::for_workspace(Some("/Users/dev/elsewhere".to_string())),
+            &resumed,
+        );
+
+        assert_eq!(target.workspace_path(), Some("/Users/dev/elsewhere"));
+        assert_eq!(
+            target.body("hi", &[])["session_id"],
+            serde_json::json!(resumed.id)
         );
     }
 

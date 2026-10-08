@@ -588,7 +588,7 @@ beforeEach(() => {
   useUiStore.setState({ ...initialUi, model: null, view: "chat" });
   useResolutions.getState().clear();
   useProjectStore.setState({ path: null });
-  useSessionSelection.setState({ selectedId: null });
+  useSessionSelection.setState({ selectedId: null, selectedWorkspaceId: null });
   vi.stubGlobal("EventSource", FakeEventSource);
   installFetch();
   installEventBus();

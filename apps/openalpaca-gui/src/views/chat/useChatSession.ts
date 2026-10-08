@@ -372,6 +372,7 @@ export function useChatSession(): ChatSession {
   // asks the daemon for the lane's active session, which is the state R48
   // needs in order to open a new conversation when the project changes.
   const selectedSessionId = useSessionSelection((s) => s.selectedId);
+  const selectedWorkspaceId = useSessionSelection((s) => s.selectedWorkspaceId);
   const sessionArg =
     selectedSessionId === null ? {} : { sessionId: selectedSessionId };
 
@@ -477,9 +478,15 @@ export function useChatSession(): ChatSession {
   // `null` (no project chosen) sends no header at all.
   const projectPath = useProjectStore((s) => s.path);
 
-  // The picker's project governs where an upload's bytes land (D2), the same
-  // way it governs the turn that will carry them.
-  const attachments = useComposerAttachments(projectPath);
+  // An upload's bytes land in the project of the turn that will carry them
+  // (D2): the resumed conversation's own when it has one, since R49 runs the
+  // turn there (R6), else the window's — which is also where a resumed
+  // conversation no turn has bound yet will be bound.
+  const attachments = useComposerAttachments(
+    selectedSessionId !== null && selectedWorkspaceId !== null
+      ? selectedWorkspaceId
+      : projectPath,
+  );
   /** Stable (`useCallback(…, [])`), so the session reset can depend on it. */
   const clearAttachments = attachments.clear;
 

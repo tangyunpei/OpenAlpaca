@@ -161,6 +161,14 @@ impl ChatTarget {
         self
     }
 
+    /// Carry `root` — a project root the daemon recorded — from here on, in
+    /// place of the path this target was made with: a resumed conversation's
+    /// project, where R49 runs its turns (R6).
+    pub fn in_project(mut self, root: String) -> Self {
+        self.workspace_path = Some(root);
+        self
+    }
+
     /// Declare that nobody will be here to answer a tool-approval prompt (M6,
     /// scoped by S10).
     ///

@@ -114,6 +114,7 @@ export function useSessionSidebar(
 
   const projectPath = useProjectStore((s) => s.path);
   const selectedId = useSessionSelection((s) => s.selectedId);
+  const selectedWorkspaceId = useSessionSelection((s) => s.selectedWorkspaceId);
   const select = useSessionSelection((s) => s.select);
 
   /**
@@ -172,9 +173,24 @@ export function useSessionSidebar(
     const pinned = (list.data?.sessions ?? []).find(
       (row) => row.id === selectedId,
     );
-    if (pinned === undefined || pinned.status === "active") return;
-    select(null);
-  }, [selectedId, busyId, list.data, list.isFetching, select]);
+    if (pinned === undefined) return;
+    if (pinned.status !== "active") {
+      select(null);
+      return;
+    }
+    // R6: the pin's project follows the row — a first turn binds it, a
+    // re-point moves it — so an upload goes where the next turn runs.
+    if (pinned.workspace_id !== selectedWorkspaceId) {
+      select(pinned.id, pinned.workspace_id);
+    }
+  }, [
+    selectedId,
+    selectedWorkspaceId,
+    busyId,
+    list.data,
+    list.isFetching,
+    select,
+  ]);
 
   /**
    * A **deleted** conversation is the one case the rule above cannot see.
@@ -256,13 +272,13 @@ export function useSessionSidebar(
       // announce a transition that did not happen.
       if (row.status === "active") {
         setActionError(null);
-        select(id);
+        select(id, row.workspace_id);
         return;
       }
       runVerb(
         id,
         () => activate.mutateAsync(id),
-        () => select(id),
+        () => select(id, row.workspace_id),
       );
     },
     [sessions, select, runVerb, activate],

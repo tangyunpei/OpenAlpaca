@@ -13,6 +13,11 @@
  * directions, the sidebar clears the pointer whenever the window's project
  * changes — see `useSessionSidebar`.
  *
+ * The resumed conversation's project rides beside its id (R6): an upload made
+ * while it is addressed is filed under that project, where its turn will run,
+ * not under the window's. `null` is a conversation no turn has bound yet —
+ * its first turn binds it to the window's project — or no resumed one.
+ *
  * Deliberately not persisted. §5.6(d) is explicit that the last-session
  * pointer belongs on the server (`last_session:{workspace_id}` in the
  * preference KV, P-23) precisely because a client-side one diverges between
@@ -25,10 +30,17 @@ import { create } from "zustand";
 export interface SessionSelectionState {
   /** The resumed conversation, or `null` for the lane's active one. */
   selectedId: string | null;
-  select: (sessionId: string | null) => void;
+  /** That conversation's project (`workspace_id`), or `null` when it has none. */
+  selectedWorkspaceId: string | null;
+  select: (sessionId: string | null, workspaceId?: string | null) => void;
 }
 
 export const useSessionSelection = create<SessionSelectionState>((set) => ({
   selectedId: null,
-  select: (selectedId) => set({ selectedId }),
+  selectedWorkspaceId: null,
+  select: (selectedId, workspaceId = null) =>
+    set({
+      selectedId,
+      selectedWorkspaceId: selectedId === null ? null : workspaceId,
+    }),
 }));

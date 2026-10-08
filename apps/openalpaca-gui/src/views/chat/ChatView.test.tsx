@@ -531,7 +531,7 @@ beforeEach(() => {
   // and these tests reuse request ids.
   clearConfirmationsOver();
   useProjectStore.setState({ path: null });
-  useSessionSelection.setState({ selectedId: null });
+  useSessionSelection.setState({ selectedId: null, selectedWorkspaceId: null });
   vi.stubGlobal("EventSource", FakeEventSource);
   installFetch();
   installEventBus();
@@ -3316,6 +3316,77 @@ describe("ChatView — the conversation sidebar (§5.7)", () => {
     expect(line).toHaveTextContent("/elsewhere");
     expect(line).toHaveTextContent("(/repo)");
     expect(line).not.toHaveTextContent("/repo/apps/gui");
+  });
+
+  /**
+   * R6: a turn that names a conversation runs in that conversation's project
+   * (R49), so its files must be filed there too — under the window's project
+   * they would outlive a delete of the conversation's project, unattached.
+   */
+  it("files an upload into a resumed conversation under that conversation's project", async () => {
+    useProjectStore.setState({ path: "/Users/dev/a" });
+    seedSessions([sessionRow({ id: "sess-b", workspace_id: "/Users/dev/b" })]);
+    renderChat();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Connector audit/ }),
+    );
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedId).toBe("sess-b"),
+    );
+    await pick(textFile("report.txt"));
+
+    await waitFor(() => expect(uploads()).toHaveLength(1));
+    expect(uploads()[0]?.headers.get("x-workspace-path")).toBe("/Users/dev/b");
+  });
+
+  it("files an upload under the window's project when the resumed conversation has none yet", async () => {
+    // The turn binds such a conversation to the window's project, so the
+    // file goes where the turn will.
+    useProjectStore.setState({ path: "/Users/dev/a" });
+    seedSessions([sessionRow({ id: "sess-loose", workspace_id: null })]);
+    renderChat();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Connector audit/ }),
+    );
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedId).toBe("sess-loose"),
+    );
+    await pick(textFile("report.txt"));
+
+    await waitFor(() => expect(uploads()).toHaveLength(1));
+    expect(uploads()[0]?.headers.get("x-workspace-path")).toBe("/Users/dev/a");
+  });
+
+  it("files an upload where the resumed conversation's project has moved since it was picked", async () => {
+    // A first turn binds the conversation, or a re-point moves it: the pin's
+    // project follows the row the sidebar re-reads.
+    useProjectStore.setState({ path: "/Users/dev/a" });
+    seedSessions([sessionRow({ id: "sess-moved", workspace_id: null })]);
+    const client = renderChat();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Connector audit/ }),
+    );
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedId).toBe("sess-moved"),
+    );
+    sessionRows = [
+      sessionRow({ id: "sess-moved", workspace_id: "/Users/dev/b" }),
+    ];
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["sessions"] });
+    });
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedWorkspaceId).toBe(
+        "/Users/dev/b",
+      ),
+    );
+    await pick(textFile("report.txt"));
+
+    await waitFor(() => expect(uploads()).toHaveLength(1));
+    expect(uploads()[0]?.headers.get("x-workspace-path")).toBe("/Users/dev/b");
   });
 
   it("reads the resumed conversation's transcript, not the lane's", async () => {
