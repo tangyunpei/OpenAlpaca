@@ -66,7 +66,11 @@ import { useTasks } from "@/hooks/useTasks";
 import { capsNote, formatSpend, useUsageSummary } from "@/hooks/useUsage";
 import { useChooseProject } from "@/hooks/useWorkspaces";
 import { formatFileSize, type DaemonStatus } from "@/lib/api/types";
-import { isAbsolutePath, useProjectStore } from "@/stores/project";
+import {
+  isAbsolutePath,
+  RELATIVE_PATH_COPY,
+  useProjectStore,
+} from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
 import { relativeTime } from "@/views/library/format";
@@ -619,7 +623,7 @@ function ProjectCard({
 
       <GapNote>
         {invalid
-          ? "An absolute path, please — a relative one would be read against the daemon's own directory, not this one."
+          ? RELATIVE_PATH_COPY
           : path === null || shown.unresolved
             ? `No project: runs are recorded without one and their files go to ${homeStoreLabel(homeRoot)}.`
             : `Runs started here record this project. What they produce is kept under projects/ in ${homeStoreLabel(homeRoot)}; nothing is written into the project folder.`}

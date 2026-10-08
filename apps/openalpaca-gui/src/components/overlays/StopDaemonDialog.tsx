@@ -31,7 +31,8 @@ export const GENERIC_BUSY_LINE =
 export const CONNECTOR_SILENCE_LINE =
   "People messaging OpenAlpaca from Telegram, Discord or iMessage will get no reply and no error while it is stopped — it will simply be silent until you start it again.";
 
-function counted(n: number, one: string, many: string): string {
+/** "1 run" / "2 runs" — a count and the noun that agrees with it. */
+export function counted(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 

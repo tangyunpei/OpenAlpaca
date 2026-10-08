@@ -23,6 +23,10 @@ import { create } from "zustand";
 
 export const PROJECT_STORAGE_KEY = "oa-project";
 
+/** What a relative path is refused with, wherever a project folder is typed. */
+export const RELATIVE_PATH_COPY =
+  "An absolute path, please — a relative one would be read against the daemon's own directory, not this one.";
+
 /**
  * Whether a path is one the daemon can resolve.
  *
