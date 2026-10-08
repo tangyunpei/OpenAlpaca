@@ -201,11 +201,14 @@ export const qk = {
   },
 
   /**
-   * `GET /v1/workspaces?path=`. The path is the key: the route answers about
-   * one root, and another root is a different answer, not a stale one.
+   * `/v1/workspaces`. `list` is every project the home store records;
+   * `detail` is one path's resolution, keyed by the path because another
+   * path is a different answer, not a stale one. `["workspaces"]` is the
+   * prefix a life-cycle write invalidates.
    */
   workspaces: {
     all: () => ["workspaces"] as const,
+    list: () => ["workspaces", "list"] as const,
     detail: (path: string) => ["workspaces", "detail", path] as const,
   },
 } as const;
