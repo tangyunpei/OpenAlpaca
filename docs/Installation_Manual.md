@@ -282,8 +282,8 @@ folder at its top held the artifacts and uploads of its conversations and, on
 a store an earlier build of the Markdown memory used, that project's memory
 notes. This build keeps nothing inside a project — with the daemon the app or
 `openalpaca daemon start` launches in the home store; one started elsewhere
-still writes `file_write`'s plain files into its own directory, as the Daemon
-Manual's *Where an agent's files land* explains. Each project gets a folder
+still writes `file_write`'s plain files into its own directory on a turn with
+a project, as the Daemon Manual's *Where an agent's files land* explains. Each project gets a folder
 in the home store instead, `~/.openalpaca/projects/<name>/`, named after the
 project's path — `/Users/you/dev/app` becomes `-Users-you-dev-app` — with a
 `project.json` that holds the project's permanent id and its path, and the

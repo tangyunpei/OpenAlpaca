@@ -6,7 +6,7 @@
 //! `projects/<name>/` (owner decision ST-1; [`projects`] names and finds the
 //! folders). No store writes inside a project's own folder (a daemon started
 //! outside the home store still writes `file_write`'s plain files into its
-//! own directory — `openalpaca_core`'s `tools/builtins/file_ops.rs`, until
+//! own directory on a turn with a project — `openalpaca_core`'s `tools/builtins/file_ops.rs`, until
 //! the storage design's Stage 2). Both stores have the same shape for
 //! content, so `content_dir(scope, kind)` is `root/<kind>` in both cases.
 //!
