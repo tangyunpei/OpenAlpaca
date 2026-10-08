@@ -892,3 +892,52 @@ fn a_put_that_resolved_its_project_before_the_folder_went_re_creates_nothing() {
         assert_eq!(w.count("SELECT COUNT(*) FROM file_assets"), 0);
     }
 }
+
+/// A directory nobody may write until this drops — then `0700` again, so a
+/// failed assertion never leaves the test's tempdir unremovable.
+#[cfg(unix)]
+struct Locked(PathBuf);
+
+#[cfg(unix)]
+impl Drop for Locked {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// R3: a removal that fails part-way — here a file under the folder that
+/// cannot be unlinked — leaves `project.json`, whatever order the directory
+/// lists its entries in: the project stays registered and listed, and
+/// deleting its data again finishes. `project.json` goes last.
+#[cfg(unix)]
+#[test]
+fn a_folder_removal_that_fails_part_way_keeps_project_json_and_a_second_one_finishes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for kind in ["uploads", "artifacts", "memory"] {
+        let w = World::new();
+        let p = w.project("stuck");
+        let locked = p.dir.join(kind).join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("held.txt"), b"held").unwrap();
+        let guard = Locked(locked.clone());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let err = remove_project_folder(&p).unwrap_err();
+
+        assert!(
+            p.dir.join(projects::PROJECT_FILE).is_file(),
+            "{kind}: project.json went before the removal failed ({err:#})"
+        );
+        assert_eq!(
+            projects::lookup(&p.root).unwrap().map(|found| found.id),
+            Some(p.id),
+            "{kind}: the project stays registered"
+        );
+        drop(guard);
+        assert!(remove_project_folder(&p).unwrap(), "{kind}");
+        assert!(!p.dir.exists(), "{kind}");
+        assert_eq!(projects::lookup(&p.root).unwrap(), None, "{kind}");
+    }
+}

@@ -569,8 +569,11 @@ fn delete_within(tx: &Connection, root: &str, placed: &[Placed]) -> Result<Delet
     })
 }
 
-/// §6 step 3's last part: `projects/<name>/` removed as one directory, under
-/// [`projects::lock`] so no `register` races it. The folder is reached by
+/// §6 step 3's last part: `projects/<name>/` removed, under
+/// [`projects::lock`] so no `register` races it — every entry but
+/// `project.json`, then `project.json`, then the folder, so a removal that
+/// fails part-way leaves the project registered and a second delete
+/// finishes it (R3). The folder is reached by
 /// name under `projects_dir()`, never through `project.dir` (canonical, so
 /// through a link it would be the link's target): `projects/` and the
 /// folder must both be real directories, and the folder must still record
@@ -600,8 +603,32 @@ pub fn remove_project_folder(project: &Project) -> Result<bool> {
             project.id
         ),
     }
-    fs::remove_dir_all(&folder)
-        .with_context(|| format!("failed to remove {}", folder.display()))?;
+    // `project.json` last (R3): a removal that stops part-way — a file that
+    // cannot be unlinked, a permission changed — then leaves a folder that
+    // still records the project, so it stays listed and deleting its data
+    // again finishes, instead of an orphan no verb lists or removes holding
+    // the plain name.
+    let remove = |what: &Path| -> Result<()> {
+        // `symlink_metadata` is the entry's own: a link inside the folder
+        // is unlinked, never followed.
+        let removed = match fs::symlink_metadata(what) {
+            Ok(meta) if meta.file_type().is_dir() => fs::remove_dir_all(what),
+            Ok(_) => fs::remove_file(what),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        };
+        removed.with_context(|| format!("failed to remove {}", what.display()))
+    };
+    let entries =
+        fs::read_dir(&folder).with_context(|| format!("failed to read {}", folder.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("failed to read {}", folder.display()))?;
+        if entry.file_name() != projects::PROJECT_FILE {
+            remove(&entry.path())?;
+        }
+    }
+    remove(&folder.join(projects::PROJECT_FILE))?;
+    fs::remove_dir(&folder).with_context(|| format!("failed to remove {}", folder.display()))?;
     fsync_dir(&projects_dir);
     Ok(true)
 }
