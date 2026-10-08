@@ -19,8 +19,8 @@
 //!
 //! built from `crate::store::{upload_dir, upload_file_name, confine_to_root}` —
 //! this module never joins a literal directory name onto a store root. The
-//! store is the *request's*: `POST /v1/files/upload` resolves its
-//! `x-workspace-path` through `MemoryScopeContext::for_request` and passes the
+//! store is the *request's*: `POST /v1/files/upload` resolves and records its
+//! `x-workspace-path` (`routes::register_request_project`) and passes the
 //! project; a connector attachment carries no project signal at all and passes
 //! [`StoreScope::Home`].
 //!

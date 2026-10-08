@@ -22,18 +22,24 @@ use crate::AppState;
 
 /// The store an upload's bytes belong to (D2).
 ///
-/// The request's project when the client named one — resolved through
-/// `MemoryScopeContext::for_request`, the same single resolver `/v1/chat` and
-/// `/v1/status` use, never a second reading of the header — and the home store
-/// otherwise. "Otherwise" covers every client that chose no project, a path
-/// under no project marker, and `$HOME` itself, which is not a project. It also
-/// covers every connector attachment, which reaches `UploadStore` without ever
-/// passing through here and always takes [`StoreScope::Home`].
-fn upload_scope(headers: &HeaderMap) -> StoreScope {
-    match super::request_project_root(super::workspace_header(headers).as_deref()) {
-        Some(root) => StoreScope::Project(PathBuf::from(root)),
-        None => StoreScope::Home,
-    }
+/// The request's project when the client named one, and the home store
+/// otherwise. An upload accepts work for that root, so the root is resolved
+/// and recorded under `projects/` (storage design §3) through
+/// `routes::register_request_project` — the single resolver `/v1/chat` and
+/// `/v1/status` use, never a second reading of the header. "Otherwise" covers
+/// every client that chose no project, a path under no project, and the home
+/// store with the folders around and inside it, which are no project (R13).
+/// It also covers every connector attachment, which reaches `UploadStore`
+/// without ever passing through here and always takes [`StoreScope::Home`].
+/// `Err` is the route's answer when the root cannot be recorded.
+#[allow(clippy::result_large_err)]
+fn upload_scope(headers: &HeaderMap) -> Result<StoreScope, axum::response::Response> {
+    Ok(
+        match super::register_request_project(super::workspace_header(headers).as_deref())? {
+            Some(root) => StoreScope::Project(PathBuf::from(root)),
+            None => StoreScope::Home,
+        },
+    )
 }
 
 /// POST /v1/files/upload — Multipart file upload
@@ -185,7 +191,10 @@ pub async fn upload_file_handler(
     // land at `<store>/uploads/<YYYY-MM-DD>/NN-<slug>.<ext>`.
     //
     // It writes files and talks to SQLite, so it runs on the blocking pool.
-    let scope = upload_scope(&headers);
+    let scope = match upload_scope(&headers) {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
     let writer_state = state.clone();
     let owner_id = state.local_user_id.clone();
     let write_name = filename.clone();
@@ -675,9 +684,16 @@ mod tests {
         // A path *inside* the project resolves up to the project root — the same
         // marker walk a chat turn does, so an upload lands where that turn's
         // artifacts would.
-        assert_eq!(
-            upload_scope(&headers_with(nested.to_str())),
-            StoreScope::Project(project)
+        let Ok(scope) = upload_scope(&headers_with(nested.to_str())) else {
+            panic!("the project is recorded");
+        };
+        assert_eq!(scope, StoreScope::Project(project.clone()));
+        // An upload accepts work for that root, so the root is recorded under
+        // `projects/` (storage design §3).
+        assert!(
+            openalpaca_storage::store::projects::lookup(&project)
+                .expect("lookup")
+                .is_some()
         );
     }
 
@@ -689,7 +705,10 @@ mod tests {
 
         // No header at all — every client that chose no project, and the shape
         // every connector attachment reaches the writer with.
-        assert_eq!(upload_scope(&headers_with(None)), StoreScope::Home);
+        assert!(matches!(
+            upload_scope(&headers_with(None)),
+            Ok(StoreScope::Home)
+        ));
     }
 
     #[test]
@@ -700,7 +719,10 @@ mod tests {
 
         let loose = root.join("Downloads");
         std::fs::create_dir(&loose).expect("create dir");
-        assert_eq!(upload_scope(&headers_with(loose.to_str())), StoreScope::Home);
+        assert!(matches!(
+            upload_scope(&headers_with(loose.to_str())),
+            Ok(StoreScope::Home)
+        ));
     }
 
     /// `$HOME` is not a project: a header pointing anywhere under it with no
@@ -717,10 +739,10 @@ mod tests {
 
         let documents = home.join("Documents");
         std::fs::create_dir(&documents).expect("create dir");
-        assert_eq!(
+        assert!(matches!(
             upload_scope(&headers_with(documents.to_str())),
-            StoreScope::Home
-        );
+            Ok(StoreScope::Home)
+        ));
     }
 
     #[test]
