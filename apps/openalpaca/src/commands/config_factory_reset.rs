@@ -100,17 +100,26 @@ pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
     ai_config::clear_ai_config_at(&targets.llm_config)?;
     daemon_config_cli::clear_daemon_config_at(&targets.daemon_config)?;
 
-    println!(
-        "Factory reset complete. {} is gone; the next daemon start builds an empty one.",
-        db_path.display()
-    );
-    println!(
-        "Your files under artifacts/, uploads/, sessions/ and projects/ are still \
-         on disk, with nothing pointing at them; your memory notes under memory/ and \
-         in each project's folder keep their control snapshots and can be adopted by \
-         the new owner."
-    );
+    println!("{}", reset_complete_message(&db_path));
     Ok(())
+}
+
+/// What the reset prints once the files are gone. A project's folder under
+/// `projects/` is not among the unreferenced files: its `project.json` still
+/// registers the project, and its `memory/` holds notes `openalpaca memory
+/// adopt` can re-bind (storage design §8) — only its `artifacts/` and
+/// `uploads/` lose the rows that pointed at them.
+pub(super) fn reset_complete_message(db_path: &Path) -> String {
+    format!(
+        "Factory reset complete. {} is gone; the next daemon start builds an empty one.\n\
+         Your files under artifacts/, uploads/ and sessions/, and each project's \
+         projects/<name>/artifacts/ and projects/<name>/uploads/, are still on disk, \
+         with nothing pointing at them. Each project's folder stays registered by its \
+         project.json and holds that project's memory notes: like yours under memory/, \
+         they keep their control snapshots and can be adopted by the new owner \
+         (openalpaca memory adopt), so deleting a project's folder drops them.",
+        db_path.display()
+    )
 }
 
 /// Takes the daemon's singleton lock for the length of the reset — the same

@@ -365,6 +365,37 @@ fn the_confirmation_names_the_root_and_what_survives() {
     assert_eq!(CONFIRM_WORD, "factory-reset");
 }
 
+/// Final review R28: what the reset prints when it is done. A project's
+/// folder under `projects/` is not "unreferenced" — its `project.json` still
+/// registers the project, and its `memory/` holds the notes `openalpaca
+/// memory adopt` re-binds — so the line names each project's `artifacts/`
+/// and `uploads/` as the files nothing points at, never `projects/` itself,
+/// and says that deleting a project's folder drops its notes.
+#[test]
+fn the_closing_line_calls_a_projects_artifacts_and_uploads_unreferenced_never_its_folder() {
+    let done = reset_complete_message(Path::new("/tmp/oa-test-root/state/openalpaca.db"));
+    assert!(
+        done.starts_with(
+            "Factory reset complete. /tmp/oa-test-root/state/openalpaca.db is gone; the next \
+             daemon start builds an empty one.\n"
+        ),
+        "{done}"
+    );
+    assert!(
+        !done.contains("sessions/ and projects/"),
+        "projects/ must not be listed with the unreferenced files:\n{done}"
+    );
+    for needle in [
+        "projects/<name>/artifacts/",
+        "projects/<name>/uploads/",
+        "project.json",
+        "openalpaca memory adopt",
+        "deleting a project's folder drops them",
+    ] {
+        assert!(done.contains(needle), "the closing line must say {needle:?}:\n{done}");
+    }
+}
+
 /// `llm.toml` and `daemon.toml` resolve through `OPENALPACA_CONFIG_DIR`, the
 /// store's `config/`, and last `./config/` under the current directory — a
 /// checkout's own files. So the warning names each by its absolute path,

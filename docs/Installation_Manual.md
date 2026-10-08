@@ -196,8 +196,11 @@ using with an older build is the second case it names. To switch over:
    confirmation word, `factory-reset`. It deletes the database with its `-wal`
    and `-shm` files, clears `llm.toml` — every provider setting and API key,
    with the keychain entries those keys point at — and returns `daemon.toml` to
-   its defaults. Your artifact, upload and session files, and each project's
-   folder under `projects/`, stay on disk with nothing pointing at them;
+   its defaults. Your artifact, upload and session files, and the `artifacts/`
+   and `uploads/` in each project's folder under `projects/`, stay on disk with
+   nothing pointing at them; each project's folder itself stays registered by
+   its `project.json` and keeps the project's memory notes, which
+   `openalpaca memory adopt` re-binds, so deleting it drops them;
    `.master_key`, `logs/`, `backups/`, `plugins/`,
    `mcp.toml`, `agents/`, `skills/` and `orchestrator/` are not touched. See
    [CLI Manual → `config`](CLI_Manual.md#config) for the full list.
