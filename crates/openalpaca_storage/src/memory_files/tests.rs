@@ -4032,6 +4032,41 @@ fn adopt_leaves_an_earlier_builds_idless_project_snapshot_in_place() {
     );
 }
 
+/// R20: `adopt` finds a project partition's folder by the project id in its
+/// snapshot. After a re-point the snapshot's recorded `root` names a folder
+/// that is gone; the partition is adopted where its project now is, under
+/// the key its id gives, and serves its note with its record.
+#[test]
+fn adopt_after_a_repoint_finds_the_partition_by_its_project_id() {
+    let sb = Sandbox::new();
+    let project = crate::store::projects::register(&sb.project_root()).unwrap();
+    let p = sb.open_project(ALICE).unwrap();
+    let pn = p
+        .create(
+            new_note("Project note", "# P\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    drop(p);
+    let db = crate::Database::open(&sb.outside.path().join("db.sqlite")).unwrap();
+    let moved = sb.outside.path().join("moved");
+    std::fs::create_dir(&moved).unwrap();
+    let moved = moved.canonicalize().unwrap();
+    crate::project_life::repoint(&db, &sb.project_root(), &moved).unwrap();
+
+    let reborn = "u_example_alice_reborn";
+    let adopted = adopt(&owner_key(ALICE), reborn, ts(2026, 9, 24, 0, 0, 0)).unwrap();
+    let want = project_partition_key(&owner_key(reborn), &project.id);
+    assert_eq!(adopted, std::slice::from_ref(&want));
+    let moved_scope = StoreScope::Project(moved.clone());
+    assert_eq!(list_owner_keys(&moved_scope).unwrap(), [owner_key(reborn)]);
+    let p = Partition::open(&moved_scope, reborn).unwrap();
+    assert_eq!(p.partition_key(), want);
+    assert_eq!(p.health(), PartitionHealth::Ready);
+    assert!(p.read(&pn.id).unwrap().derived.recorded);
+    assert_eq!(p.snapshot().unwrap().project_id, Some(project.id));
+}
+
 // ============================================================================
 // `doctor`, read-only (design §6, *Management operations*; plan 3.8)
 // ============================================================================

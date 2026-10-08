@@ -2691,9 +2691,15 @@ pub fn list_snapshots() -> Result<Vec<(PathBuf, Result<ControlSnapshot, String>)
 }
 
 /// `memory adopt <owner-key>` (design §6): re-binds every partition of an
-/// orphaned owner key — the home partition and every `proj-<old>-*` snapshot
-/// — to the current owner in one command. One collision refuses the whole
-/// command; nothing is partially adopted. Returns the new partition keys.
+/// orphaned owner key — the home partition and every `proj-<old>-*`
+/// snapshot that carries a project id — to the current owner in one
+/// command. A project partition's folder is found by that id through
+/// `projects::by_id` (storage design R20), never by the directory its
+/// snapshot recorded: a re-point renames the folder and touches no
+/// snapshot. A snapshot with no id (an earlier build's, R22), or whose id
+/// no folder under `projects/` records, is left as it is. One collision
+/// refuses the whole command; nothing is partially adopted. Returns the
+/// new partition keys.
 ///
 /// `old_owner_key` is a directory name, never a path: anything but 32
 /// lowercase hex characters is refused before it is joined to anything.
@@ -2767,11 +2773,19 @@ pub fn adopt(
             );
             continue;
         };
-        let Some(owners_dir) = Path::new(&snapshot.root).parent().map(Path::to_path_buf) else {
+        let Some(project) = projects::by_id(&project_id)? else {
+            tracing::warn!(
+                path = %path.display(),
+                project_id = %project_id,
+                "memory adopt: left alone a project snapshot whose project no folder under projects/ records"
+            );
             continue;
         };
         candidates.push(Candidate {
-            owners_dir,
+            owners_dir: project
+                .dir
+                .join(ContentKind::Memory.dir_name())
+                .join(OWNERS_DIR),
             old_snapshot: Some((path, snapshot)),
             scope: SnapshotScope::Project,
             project_id: Some(project_id),
