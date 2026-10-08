@@ -122,7 +122,10 @@
 | POST | `/v1/tasks` | `tasks.ts` | `apps/openalpaca-gui/src/lib/api/tasks.ts` |
 | GET | `/v1/tools` | `tools.ts` | `apps/openalpaca-gui/src/lib/api/tools.ts` |
 | GET | `/v1/usage/summary` | `usage.ts` | `apps/openalpaca-gui/src/lib/api/usage.ts` |
+| POST | `/v1/workspaces/purge` | `workspaces.ts` | `apps/openalpaca-gui/src/lib/api/workspaces.ts` |
 | GET | `/v1/workspaces` | `workspaces.ts` | `apps/openalpaca-gui/src/lib/api/workspaces.ts` |
+| POST | `/v1/workspaces` | `workspaces.ts` | `apps/openalpaca-gui/src/lib/api/workspaces.ts` |
+| PATCH | `/v1/workspaces` | `workspaces.ts` | `apps/openalpaca-gui/src/lib/api/workspaces.ts` |
 
 ## Request/Query Types
 
@@ -328,5 +331,5 @@
 ### `workspaces.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/workspaces.ts`
-- Exported functions: `getWorkspace`
-- Endpoints: `GET /v1/workspaces`
+- Exported functions: `chooseProject`, `deleteProjectData`, `getWorkspace`, `listProjects`, `repointProject`
+- Endpoints: `GET /v1/workspaces`, `POST /v1/workspaces`, `PATCH /v1/workspaces`, `POST /v1/workspaces/purge`
