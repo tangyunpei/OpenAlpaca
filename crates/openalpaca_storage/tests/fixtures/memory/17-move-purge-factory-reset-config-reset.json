@@ -239,7 +239,7 @@
           "alice_project_moved_three": { "owner_key": "32acea7eb739b08afd959db91e46d450", "owner_id": "u_example_alice" },
           "alice_project_c": { "owner_key": "32acea7eb739b08afd959db91e46d450", "owner_id": "u_example_alice" }
         },
-        "preview_contains": ["state/memory-control/", "state/cache/memory-index-v1.sqlite", "memory/"]
+        "preview_contains": ["state/memory-control/", "state/cache/memory-index-v1.sqlite", "memory/", "projects/"]
       }
     },
     {

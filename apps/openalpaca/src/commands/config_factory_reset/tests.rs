@@ -232,7 +232,8 @@ fn the_reset_holds_the_daemon_lock_while_the_prompt_is_open() {
 /// Design §2: a factory reset does not touch memory. The notes, their control
 /// snapshots (the owner-id mapping and the tombstones `adopt` needs) and the
 /// search index survive byte for byte, beside the master key, the logs, the
-/// backups and the content directories.
+/// backups, the content directories and each project's folder under
+/// `projects/` (storage design §8).
 #[test]
 fn the_memory_snapshots_the_index_and_the_master_key_survive_a_factory_reset() {
     let tmp = tempdir().unwrap();
@@ -260,6 +261,14 @@ fn the_memory_snapshots_the_index_and_the_master_key_survive_a_factory_reset() {
         ("uploads/photo.png", b"\x89PNG".as_slice()),
         ("sessions/s1/log.jsonl", b"{}".as_slice()),
         ("plugins/demo/plugin.toml", b"name = \"demo\"".as_slice()),
+        (
+            "projects/-tmp-app/project.json",
+            b"{\"version\":1}".as_slice(),
+        ),
+        (
+            "projects/-tmp-app/memory/owners/32acea7eb739b08afd959db91e46d450/notes/00000000-0000-4000-8000-000000000002--a-project-note.md",
+            b"---\nschema: 1\n---\n# A project note\n".as_slice(),
+        ),
     ]);
     for (rel, bytes) in &survivors {
         seed(&root, rel, bytes);
@@ -306,6 +315,7 @@ fn the_confirmation_names_the_root_and_what_survives() {
         // Design §2: a factory reset does not touch memory, and the preview
         // names the two `state/` entries it leaves and the notes it orphans.
         "/tmp/oa-test-root/memory/",
+        "/tmp/oa-test-root/projects/",
         "/tmp/oa-test-root/state/memory-control/",
         "/tmp/oa-test-root/state/cache/memory-index-v1.sqlite",
         "state/cache/",
@@ -339,6 +349,19 @@ fn the_confirmation_names_the_root_and_what_survives() {
             "{entry} must be listed as untouched:\n{untouched}"
         );
     }
+    // Storage design §8: a factory reset leaves `projects/` — every project's
+    // `project.json`, and so its id, with it, which is what lets `openalpaca
+    // memory adopt` re-attach a project's notes — and the preview says so.
+    // Fixture 17's `factory_reset` step states the same in `preview_contains`.
+    let orphaned = warning
+        .split("Left on disk, and orphaned until adopted:")
+        .nth(1)
+        .and_then(|rest| rest.split("Untouched:").next())
+        .expect("an orphaned-until-adopted list");
+    assert!(
+        orphaned.contains("/tmp/oa-test-root/projects/") && orphaned.contains("project.json"),
+        "projects/ must be listed as left on disk with its project.json:\n{orphaned}"
+    );
     assert_eq!(CONFIRM_WORD, "factory-reset");
 }
 

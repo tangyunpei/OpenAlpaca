@@ -105,9 +105,10 @@ pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
         db_path.display()
     );
     println!(
-        "Your files under artifacts/, uploads/ and sessions/ are still on disk, \
-         with nothing pointing at them; your memory notes under memory/ keep their \
-         control snapshots and can be adopted by the new owner."
+        "Your files under artifacts/, uploads/, sessions/ and projects/ are still \
+         on disk, with nothing pointing at them; your memory notes under memory/ and \
+         in each project's folder keep their control snapshots and can be adopted by \
+         the new owner."
     );
     Ok(())
 }
@@ -203,6 +204,12 @@ Left on disk, and orphaned until adopted:
   - {root}/memory/ — your memory notes, per owner. The next start mints a new
     owner id, so `openalpaca memory doctor` lists them as orphaned; nothing is
     reassigned for you — `openalpaca memory adopt <owner-key>` re-binds them.
+  - {root}/projects/ — one folder per project. Each keeps its project.json
+    (the project's id and the path it was made for), so the next turn in that
+    project finds the same folder; its artifacts/ and uploads/ are unreferenced
+    like the ones above, and its memory/ notes are orphaned like yours — the
+    same `openalpaca memory adopt` re-binds them, finding each project by that
+    id.
 
 Untouched:
   - {root}/state/memory-control/ — the memory partitions' control snapshots
