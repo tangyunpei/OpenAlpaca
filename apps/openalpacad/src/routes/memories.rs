@@ -70,7 +70,7 @@ use serde::Deserialize;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::{api_error, persona::if_match, workspace_header};
+use super::{api_error, persona::if_match, register_request_project, workspace_header};
 use crate::AppState;
 
 // ── Query and body types ────────────────────────────────────────────────
@@ -475,7 +475,8 @@ pub(crate) struct MemoryApi {
 impl MemoryApi {
     /// The user-directed context for this request (design §7a, the
     /// per-surface table's `/v1/memories*` row): the daemon's owner, the
-    /// header's project, `UserSurface`, every capability.
+    /// header's project, `UserSurface`, every capability. Pure — a read
+    /// records nothing (storage design §3).
     fn context(
         service: &MemoryService,
         owner_id: &str,
@@ -485,6 +486,14 @@ impl MemoryApi {
             Some(path) => WorkspaceHint::Path(Path::new(path)),
             None => WorkspaceHint::None,
         };
+        Self::context_with(service, owner_id, hint)
+    }
+
+    fn context_with(
+        service: &MemoryService,
+        owner_id: &str,
+        hint: WorkspaceHint<'_>,
+    ) -> Result<MemoryAccessContext, MemoryError> {
         service.context(
             owner_id,
             hint,
@@ -512,6 +521,39 @@ impl MemoryApi {
         })
         .await
         .map_err(|e| MemoryError::Internal(anyhow::anyhow!("memory task failed: {e}")))?
+    }
+
+    /// [`Self::run`] for a write (storage design §3): a memory write through a
+    /// route accepts work for the header's root, so on the blocking pool the
+    /// root is first resolved and recorded under `projects/` — through
+    /// `register_request_project`, the upload's call, so a root that cannot be
+    /// recorded is answered exactly as an upload's is and no note is touched —
+    /// then `f` runs under a context built on the recorded root. A refusal of
+    /// `f`'s is [`refusal`]'s answer.
+    async fn run_write<T, F>(&self, headers: &HeaderMap, f: F) -> Result<T, Response>
+    where
+        T: Send + 'static,
+        F: FnOnce(&MemoryService, &MemoryAccessContext) -> Result<T, MemoryError> + Send + 'static,
+    {
+        let service = self.service.clone();
+        let owner_id = self.owner_id.clone();
+        let workspace = workspace_header(headers);
+        let joined = tokio::task::spawn_blocking(move || {
+            let root = register_request_project(workspace.as_deref())?;
+            let hint = match &root {
+                Some(root) => WorkspaceHint::Root(Path::new(root)),
+                None => WorkspaceHint::None,
+            };
+            Self::context_with(&service, &owner_id, hint)
+                .and_then(|ctx| f(&service, &ctx))
+                .map_err(refusal)
+        })
+        .await;
+        joined.unwrap_or_else(|e| {
+            Err(refusal(MemoryError::Internal(anyhow::anyhow!(
+                "memory task failed: {e}"
+            ))))
+        })
     }
 
     async fn list(&self, headers: &HeaderMap, q: ListMemoriesQuery) -> Response {
@@ -602,7 +644,10 @@ impl MemoryApi {
             Ok(i) => i,
             Err(r) => return r.into_response(),
         };
-        match self.run(headers, move |s, ctx| s.store(ctx, input)).await {
+        match self
+            .run_write(headers, move |s, ctx| s.store(ctx, input))
+            .await
+        {
             Ok(out) => {
                 let status = match out.dedup {
                     Dedup::Created => StatusCode::CREATED,
@@ -613,7 +658,7 @@ impl MemoryApi {
                     &out.revision,
                 )
             }
-            Err(e) => refusal(e),
+            Err(response) => response,
         }
     }
 
@@ -634,9 +679,12 @@ impl MemoryApi {
             targets,
             reason: body.reason,
         };
-        match self.run(headers, move |s, ctx| s.forget(ctx, input)).await {
+        match self
+            .run_write(headers, move |s, ctx| s.forget(ctx, input))
+            .await
+        {
             Ok(out) => ok(wire::forget_output_json(&out)),
-            Err(e) => refusal(e),
+            Err(response) => response,
         }
     }
 
@@ -737,9 +785,12 @@ impl MemoryApi {
             action,
             reason: body.reason,
         };
-        match self.run(headers, move |s, ctx| s.update(ctx, input)).await {
+        match self
+            .run_write(headers, move |s, ctx| s.update(ctx, input))
+            .await
+        {
             Ok(out) => with_etag(ok(wire::update_output_json(&out)), &out.revision),
-            Err(e) => refusal(e),
+            Err(response) => response,
         }
     }
 
@@ -753,11 +804,11 @@ impl MemoryApi {
             Err(r) => return r.into_response(),
         };
         match self
-            .run(headers, move |s, ctx| s.undo(ctx, id, &expected_revision))
+            .run_write(headers, move |s, ctx| s.undo(ctx, id, &expected_revision))
             .await
         {
             Ok(out) => ok(wire::withdraw_output_json(&out)),
-            Err(e) => refusal(e),
+            Err(response) => response,
         }
     }
 
@@ -774,9 +825,12 @@ impl MemoryApi {
             targets: vec![(id, expected_revision)],
             reason: None,
         };
-        match self.run(headers, move |s, ctx| s.forget(ctx, input)).await {
+        match self
+            .run_write(headers, move |s, ctx| s.forget(ctx, input))
+            .await
+        {
             Ok(out) => forgotten_one(id, &out),
-            Err(e) => refusal(e),
+            Err(response) => response,
         }
     }
 }

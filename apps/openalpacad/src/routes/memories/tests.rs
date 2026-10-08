@@ -1564,3 +1564,85 @@ async fn the_rebuild_refusal_names_no_model_tool() {
     assert!(message.contains("try again in a minute"), "{json}");
     assert!(!message.contains("memory_"), "{json}");
 }
+
+fn headers_in(dir: &std::path::Path) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-workspace-path", dir.to_str().unwrap().parse().unwrap());
+    headers
+}
+
+/// Storage design §3: a memory write through a route accepts work for the
+/// header's root, so it records the root under `projects/` before the note
+/// is written; a read — the Memory view's list — records nothing.
+#[tokio::test]
+async fn a_write_records_the_headers_project_and_a_read_does_not() {
+    let f = Fixture::new();
+    let work = tempfile::tempdir().unwrap();
+    let repo = work.path().canonicalize().unwrap().join("app");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let headers = headers_in(&repo);
+
+    let (status, json) = split(f.api.list(&headers, ListMemoriesQuery::default()).await).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(
+        store::projects::lookup(&repo).unwrap(),
+        None,
+        "a read records nothing"
+    );
+
+    let (status, json) = split(
+        f.api
+            .create(
+                &headers,
+                create_body(
+                    "Release step",
+                    "# Release step\n\nTag, then run the release script.\n",
+                    "procedure",
+                ),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{json}");
+    let recorded = store::projects::lookup(&repo)
+        .unwrap()
+        .expect("the write recorded its project");
+    assert_eq!(recorded.root, repo);
+}
+
+/// A write whose project cannot be recorded is refused the way an upload is
+/// (the lead's R-S7: one answer on every route that records a root), and
+/// nothing is written anywhere.
+#[tokio::test]
+async fn a_write_whose_project_cannot_be_recorded_is_refused_and_writes_nothing() {
+    let f = Fixture::new();
+    std::fs::write(f.home_store.join("projects"), "not a directory\n").unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let repo = work.path().canonicalize().unwrap().join("app");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+
+    let (status, json) = split(
+        f.api
+            .create(
+                &headers_in(&repo),
+                create_body(
+                    "Release step",
+                    "# Release step\n\nTag first.\n",
+                    "procedure",
+                ),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{json}");
+    assert_eq!(json["error"]["code"], "WORKSPACE_REGISTER_FAILED");
+    let message = json["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.starts_with(&format!(
+            "could not record the project for {}: ",
+            repo.display()
+        )),
+        "{message}"
+    );
+    assert!(!repo.join(".openalpaca").exists(), "nothing was written");
+}
