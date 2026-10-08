@@ -871,7 +871,7 @@ pub(crate) async fn forget_conversation_summaries(
 
 /// Stand this session's writer down and remove its log directory.
 ///
-/// Shared shape with the purge's `remove_purged_bytes`: a missing directory is
+/// Shared shape with the delete's `remove_session_dirs`: a missing directory is
 /// nothing to do (a conversation that never narrated has none — P-22), and an
 /// I/O error is logged rather than raised, because the rows are already gone.
 pub(super) async fn remove_session_log(deps: &Deps<'_>, id: &str) {

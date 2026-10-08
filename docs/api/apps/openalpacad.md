@@ -654,8 +654,7 @@
 
 | Field | Type |
 |---|---|
-| `path` | `Option<String>` |
-| `all` | `bool` |
+| `path` | `String` |
 | `dry_run` | `bool` |
 
 ### `workspaces::RebaseRequest`

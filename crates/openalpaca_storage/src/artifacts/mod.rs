@@ -652,8 +652,8 @@ pub struct WorkspaceRows {
     pub other_owners: usize,
 }
 
-/// How many rows of each kind a purge removed, or would remove
-/// ([`ArtifactStore::purge_plan`] / [`ArtifactStore::purge_project`]).
+/// How many rows of each kind a project's data deletion removed, or would
+/// remove (`project_life::delete_plan` / `delete_project_data`).
 ///
 /// Every member is named on the way out, zeroes included — "nothing else went"
 /// is the half a reader is checking for.
@@ -661,11 +661,13 @@ pub struct WorkspaceRows {
 pub struct PurgeCounts {
     /// `session` rows with `workspace_id = root`.
     pub sessions: usize,
-    /// `conversation_messages` rows belonging to those sessions.
+    /// `conversation_messages` rows of those sessions, or whose own
+    /// `workspace_root` is this root.
     pub messages: usize,
     /// `tool_execution_log` rows keyed by one of those sessions or runs.
     pub tool_calls: usize,
-    /// `lane_followups` rows keyed by one of those sessions.
+    /// `lane_followups` rows of those sessions, or whose `workspace_path` is
+    /// this root.
     pub followups: usize,
     /// `task` rows with `workspace_id = root`.
     pub tasks: usize,
@@ -673,7 +675,8 @@ pub struct PurgeCounts {
     pub spans: usize,
     /// `event_log` rows keyed by one of those runs.
     pub run_events: usize,
-    /// `file_assets` rows with `origin = 'upload'` addressed under this root.
+    /// `file_assets` rows with `origin = 'upload'` addressed under this root
+    /// that no message the delete leaves still links.
     pub uploads: usize,
     /// `file_assets` rows that are not uploads — the project's by-products —
     /// addressed under this root and linked by no message the delete leaves.
@@ -687,65 +690,12 @@ impl PurgeCounts {
     }
 }
 
-/// The rows a purge deliberately leaves where they are (§4.5, §1.3 rule 3).
-///
-/// Memory notes are kept too, but they are files under the project's own
-/// `memory/` directory rather than rows, so a purge — rows only — has nothing
-/// to count for them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PurgeKept {
-    /// `file_assets` rows with `origin = 'produced'` — never garbage-collected.
-    pub artifacts: usize,
-}
-
-/// What the **home** scope holds of the two kinds a project purge removes.
-///
-/// Not a project and never purged by one (§1.1): a conversation with no project
-/// and an upload that carried no project signal belong to the home store, and
-/// `store purge --all` names them as kept rather than sweeping them up.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct HomeScopeRows {
-    /// `session` rows with `workspace_id IS NULL` or `workspace_id = ''` —
-    /// together with [`ArtifactStore::project_roots`]'s `root <> ''`, the two
-    /// partition every session in the table.
-    pub sessions: usize,
-    /// `file_assets` upload rows with no `project_root`.
-    pub uploads: usize,
-}
-
 /// One session a purge would take with it, with the lane it belongs to so a
 /// caller can ask the live registry whether a run of its own is still going.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PurgeSession {
     pub id: String,
     pub lane_key: String,
-}
-
-/// What a purge of one root would do, read without changing anything —
-/// the body of `--dry-run` and the preflight of the real call.
-#[derive(Debug, Clone, Default)]
-pub struct PurgePlan {
-    pub counts: PurgeCounts,
-    pub kept: PurgeKept,
-    /// The sessions bound to this root, for the caller's in-flight guard.
-    pub sessions: Vec<PurgeSession>,
-}
-
-/// What a purge actually removed — the counts, plus the bytes the caller must
-/// now remove, gathered **inside** the transaction so the list can never name
-/// a row the transaction did not delete.
-#[derive(Debug, Clone, Default)]
-pub struct PurgeOutcome {
-    pub counts: PurgeCounts,
-    /// The ids whose `sessions/<id>/` directory in the home store is now
-    /// rowless.
-    pub session_ids: Vec<String>,
-    /// `storage_path` of every upload row that went.
-    pub upload_paths: Vec<String>,
-    /// Every message id the transaction deleted, in id order: the route
-    /// forgets the purged conversations' summaries by them (design 09
-    /// §13.3), and they are gone from the database once this is read.
-    pub message_ids: Vec<i64>,
 }
 
 /// What one [`ArtifactStore::verify`] pass found.
@@ -1644,327 +1594,6 @@ impl<'a> ArtifactStore<'a> {
                 |row| row.get::<_, i64>(0),
             )? as usize)
         })
-    }
-
-    /// Every distinct project root any of the three members names, sorted.
-    ///
-    /// `store purge --all` iterates this; the home scope is deliberately absent
-    /// (its rows carry `NULL`, and the home store is not a project). A project
-    /// known only by its memory partition — notes on disk, no row in any
-    /// member — is not listed here: that is the memory service's knowledge,
-    /// not the database's.
-    pub fn project_roots(&self) -> Result<Vec<String>> {
-        self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT root FROM (
-                     SELECT project_root AS root FROM file_assets
-                     UNION SELECT workspace_id FROM session
-                     UNION SELECT workspace_id FROM task
-                 ) WHERE root IS NOT NULL AND root <> ''
-                 ORDER BY root",
-            )?;
-            let roots = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?;
-            Ok(roots)
-        })
-    }
-
-    /// What the home scope holds of the two kinds a project purge removes —
-    /// the "and these stay where they are" line of `--all`.
-    ///
-    /// `session.workspace_id` is counted as home-scope on `NULL` **or** `''`:
-    /// [`Self::project_roots`] excludes `''` from every root it names
-    /// (`root <> ''`), and the two must partition the table between them —
-    /// nothing today ever writes `''` (the column is an `Option<String>`), but
-    /// a row that did should read as "no project" rather than falling into
-    /// neither half of a `--all` plan.
-    pub fn home_scope_rows(&self) -> Result<HomeScopeRows> {
-        self.db.with_connection(|conn| {
-            let count = |sql: &str| -> Result<usize> {
-                Ok(conn.query_row(sql, [], |row| row.get::<_, i64>(0))? as usize)
-            };
-            Ok(HomeScopeRows {
-                sessions: count(
-                    "SELECT COUNT(*) FROM session
-                      WHERE workspace_id IS NULL OR workspace_id = ''",
-                )?,
-                uploads: count(
-                    "SELECT COUNT(*) FROM file_assets
-                      WHERE origin = 'upload' AND (project_root IS NULL OR project_root = '')",
-                )?,
-            })
-        })
-    }
-
-    /// What a purge of `root` would remove and what it would leave — read-only.
-    ///
-    /// The counting mirrors [`Self::purge_project`]'s statements one for one, so
-    /// a `--dry-run` and the real call cannot disagree about what is there. The
-    /// kept member is counted for the same reason the deleted ones are: "your
-    /// artifacts stay" is a claim, and a plan that prints it should have looked.
-    pub fn purge_plan(&self, root: &str) -> Result<PurgePlan> {
-        self.db.with_connection(|conn| {
-            let count = |sql: &str| -> Result<usize> {
-                Ok(
-                    conn.query_row(sql, rusqlite::params![root], |row| row.get::<_, i64>(0))?
-                        as usize,
-                )
-            };
-            let mut stmt =
-                conn.prepare("SELECT id, lane_key FROM session WHERE workspace_id = ?1")?;
-            let sessions = stmt
-                .query_map(rusqlite::params![root], |row| {
-                    Ok(PurgeSession {
-                        id: row.get(0)?,
-                        lane_key: row.get(1)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<PurgeSession>>>()?;
-
-            Ok(PurgePlan {
-                counts: PurgeCounts {
-                    sessions: sessions.len(),
-                    messages: count(
-                        "SELECT COUNT(*) FROM conversation_messages
-                          WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
-                    )?,
-                    tool_calls: count(
-                        "SELECT COUNT(*) FROM tool_execution_log
-                          WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)
-                             OR task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                    )?,
-                    followups: count(
-                        "SELECT COUNT(*) FROM lane_followups
-                          WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
-                    )?,
-                    tasks: count("SELECT COUNT(*) FROM task WHERE workspace_id = ?1")?,
-                    spans: count(
-                        "SELECT COUNT(*) FROM subagent_span
-                          WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                    )?,
-                    run_events: count(
-                        "SELECT COUNT(*) FROM event_log
-                          WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                    )?,
-                    // The one statement that cannot be copied verbatim from
-                    // `purge_project`: there the attachment rows of this
-                    // project's messages have already cascaded away, so the
-                    // surviving links are simply whatever
-                    // `conversation_message_attachments` still holds. Nothing
-                    // has been deleted here, so the same set is named the long
-                    // way — linked from a message this purge will *not* take.
-                    uploads: count(
-                        "SELECT COUNT(*) FROM file_assets
-                          WHERE origin = 'upload' AND project_root = ?1
-                            AND id NOT IN (
-                                SELECT a.file_id FROM conversation_message_attachments a
-                                  JOIN conversation_messages m ON m.id = a.message_id
-                                 WHERE m.session_id IS NULL
-                                    OR m.session_id NOT IN
-                                       (SELECT id FROM session WHERE workspace_id = ?1))",
-                    )?,
-                    artifacts: 0,
-                },
-                kept: PurgeKept {
-                    artifacts: count(
-                        "SELECT COUNT(*) FROM file_assets
-                          WHERE origin = 'produced' AND project_root = ?1",
-                    )?,
-                },
-                sessions,
-            })
-        })
-    }
-
-    /// Delete one project's conversations, runs and uploads — **one
-    /// transaction**, rows only.
-    ///
-    /// | Goes | Because |
-    /// |---|---|
-    /// | `session` (`workspace_id`), its `conversation_messages`, `tool_execution_log` and `lane_followups` rows | the transcript is the thing being purged |
-    /// | `task` (`workspace_id`), its `subagent_span`, `event_log`, `dispatch_decisions` and `llm_call_log` rows | the run history of this project |
-    /// | `file_assets` where `origin = 'upload'`, `project_root` is this root and no message still links it | copies of what was handed to a turn |
-    ///
-    /// | Stays | Because |
-    /// |---|---|
-    /// | `file_assets` where `origin = 'produced'` | produced artifacts are never garbage-collected (§4.5) |
-    /// | an upload row a surviving message still attaches | an attachment may name any file its owner can see, so the row can be another project's attachment |
-    /// | the project's memory notes | the user's, not the store's — and files under `memory/`, not rows, so a rows-only purge cannot reach them anyway |
-    ///
-    /// `task.session_id` on a run *outside* this root is nulled rather than
-    /// cascaded, exactly as [`ConversationRepository::delete_session`] does
-    /// (`crate::repository::conversation`). `conversation_messages.task_id` is
-    /// left dangling on purpose — migration 038 says so in as many words: a
-    /// purged run must leave the turn that started it readable.
-    ///
-    /// Rows only. The `sessions/<id>/` directories and the upload blobs are the
-    /// caller's to remove, **after** this commits — which is why the outcome
-    /// carries the exact list the transaction deleted rather than a list read
-    /// beforehand.
-    ///
-    /// **Path-scoped, not owner-scoped**, for the same reason
-    /// [`Self::repoint_rows`] is: `session` and `task` carry no `owner_id`, so
-    /// a half-scoped transaction would delete a project's transcripts and leave
-    /// its uploads. The route is what makes it owner-safe — it refuses a root
-    /// holding rows the caller does not own ([`WorkspaceRows::other_owners`]).
-    ///
-    /// [`ConversationRepository::delete_session`]: crate::repository::ConversationRepository::delete_session
-    pub fn purge_project(&self, root: &str) -> Result<PurgeOutcome> {
-        self.db.with_connection(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let outcome = Self::purge_within(&tx, root)?;
-            tx.commit()?;
-            Ok(outcome)
-        })
-    }
-
-    /// [`Self::purge_project`] for **several** roots in one transaction — what
-    /// `POST /v1/workspaces/purge {"all": true}` runs.
-    ///
-    /// `--all` was all-or-nothing only for its refusals: every root was checked
-    /// before the first deletion, and then each was purged in a transaction of
-    /// its own, so a failure on the third root left the first two purged and the
-    /// `500` named none of them. One transaction makes the verb's promise true
-    /// at both ends. The outcomes come back in the order the roots were given,
-    /// so the caller can still remove each root's bytes on its own.
-    pub fn purge_projects(&self, roots: &[String]) -> Result<Vec<PurgeOutcome>> {
-        self.db.with_connection(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let mut outcomes = Vec::with_capacity(roots.len());
-            for root in roots {
-                outcomes.push(Self::purge_within(&tx, root)?);
-            }
-            tx.commit()?;
-            Ok(outcomes)
-        })
-    }
-
-    /// The statements both purge entry points run, inside a transaction the
-    /// caller owns and commits.
-    ///
-    /// The extra block keeps the body at the indentation it had inside
-    /// `with_connection`'s closure, so the extraction reads as a move rather
-    /// than a rewrite — every multi-line SQL literal below is byte for byte
-    /// what it was.
-    fn purge_within(tx: &rusqlite::Transaction<'_>, root: &str) -> Result<PurgeOutcome> {
-        {
-            // Read what is about to go, inside the transaction: this list is
-            // what the caller will remove from disk, and a list gathered before
-            // the transaction could name a session the transaction did not
-            // delete (or miss one it did).
-            let session_ids: Vec<String> = {
-                let mut stmt = tx.prepare("SELECT id FROM session WHERE workspace_id = ?1")?;
-                let ids = stmt
-                    .query_map(rusqlite::params![root], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<String>>>()?;
-                ids
-            };
-            // Every statement below binds the same one parameter.
-            let bind = rusqlite::params![root];
-            let mut message_ids: Vec<i64> = Vec::new();
-            {
-                let mut stmt = tx.prepare(
-                    "SELECT id FROM conversation_messages
-                      WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)
-                      ORDER BY id",
-                )?;
-                for id in stmt.query_map(bind, |row| row.get::<_, i64>(0))? {
-                    message_ids.push(id?);
-                }
-            }
-
-            // Session-keyed rows first: the sub-selects below read `session`,
-            // so its own rows go last of the group.
-            let messages = tx.execute(
-                "DELETE FROM conversation_messages
-                  WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            let tool_calls = tx.execute(
-                "DELETE FROM tool_execution_log
-                  WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)
-                     OR task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            let followups = tx.execute(
-                "DELETE FROM lane_followups
-                  WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            // A run under another root that was started from one of these
-            // conversations keeps its row and loses the link.
-            tx.execute(
-                "UPDATE task SET session_id = NULL, updated_at = datetime('now')
-                  WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            let sessions = tx.execute("DELETE FROM session WHERE workspace_id = ?1", bind)?;
-
-            // Run-keyed rows, then the runs. `subagent_span` would cascade from
-            // `task` on its own; deleting it here is what makes the count
-            // honest.
-            let spans = tx.execute(
-                "DELETE FROM subagent_span
-                  WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            let run_events = tx.execute(
-                "DELETE FROM event_log
-                  WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            tx.execute(
-                "DELETE FROM dispatch_decisions
-                  WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            tx.execute(
-                "DELETE FROM llm_call_log
-                  WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            let tasks = tx.execute("DELETE FROM task WHERE workspace_id = ?1", bind)?;
-
-            // Uploads last, and only the ones nothing still links. Dedup is
-            // scoped to the turn's project (R17), but an attachment may name
-            // any file its owner can see, so one row can still be the
-            // attachment of a message in another project's transcript. The
-            // messages of *this* project are
-            // already gone above and their attachment rows cascaded with them,
-            // so a surviving `conversation_message_attachments` row names a
-            // surviving transcript — and the store never deletes what another
-            // reader still names. `upload_paths` is read from the same filtered
-            // set so the caller unlinks exactly the blobs whose rows went.
-            const UNLINKED: &str = "origin = 'upload' AND project_root = ?1
-                 AND id NOT IN (SELECT file_id FROM conversation_message_attachments)";
-            let upload_paths: Vec<String> = {
-                let mut stmt =
-                    tx.prepare(&format!("SELECT storage_path FROM file_assets WHERE {UNLINKED}"))?;
-                let paths = stmt
-                    .query_map(bind, |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<String>>>()?;
-                paths
-            };
-            let uploads = tx.execute(&format!("DELETE FROM file_assets WHERE {UNLINKED}"), bind)?;
-
-            Ok(PurgeOutcome {
-                counts: PurgeCounts {
-                    sessions,
-                    messages,
-                    tool_calls,
-                    followups,
-                    tasks,
-                    spans,
-                    run_events,
-                    uploads,
-                    artifacts: 0,
-                },
-                session_ids,
-                upload_paths,
-                message_ids,
-            })
-        }
     }
 
     /// Re-stat every produced row under `project_root` (`Some("")` = the home

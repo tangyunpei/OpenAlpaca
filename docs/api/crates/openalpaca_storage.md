@@ -31,7 +31,7 @@
 
 ## Re-exports
 
-- `pub use artifacts::{ ArtifactDiff, ArtifactError, ArtifactQuery, ArtifactRecord, ArtifactStore, ArtifactVersionRow, HomeScopeRows, NewArtifact, PurgeCounts, PurgeKept, PurgeOutcome, PurgePlan, PurgeSession, RebaseCounts, USER_EDIT_NOTE, VerifyReport, WorkspaceRows, };`
+- `pub use artifacts::{ ArtifactDiff, ArtifactError, ArtifactQuery, ArtifactRecord, ArtifactStore, ArtifactVersionRow, NewArtifact, PurgeCounts, PurgeSession, RebaseCounts, USER_EDIT_NOTE, VerifyReport, WorkspaceRows, };`
 - `pub use database::Database;`
 - `pub use models::EventLog;`
 - `pub use models::{AgentMetrics, AgentTaskHistory, SubAgentConfig};`

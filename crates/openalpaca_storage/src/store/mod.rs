@@ -58,12 +58,6 @@ const DB_FILE: &str = "openalpaca.db";
 
 const LAYOUT_FILE: &str = ".layout";
 const README_FILE: &str = "README.md";
-const GITIGNORE_FILE: &str = ".gitignore";
-/// Nested under `artifacts/**/`, never at a store root today — reserved for
-/// store metadata anyway (§1.3 rule 1: dot-prefixed names are reserved
-/// forever), so a future top-level `.versions` is recognised rather than
-/// reported as a name this store did not create.
-const VERSIONS_DIR: &str = ".versions";
 const INSTALL_ID_KEY: &str = "install_id";
 
 // ============================================================================
@@ -406,19 +400,6 @@ pub enum ContentKind {
 }
 
 impl ContentKind {
-    /// Every kind there is. The list a caller walks when it has to reason about
-    /// the whole store rather than one collection — `store purge`, which must
-    /// tell a name the store created from one it did not (§1.3 rule 3).
-    pub const ALL: [ContentKind; 7] = [
-        ContentKind::Artifacts,
-        ContentKind::Uploads,
-        ContentKind::Sessions,
-        ContentKind::Memory,
-        ContentKind::Skills,
-        ContentKind::Scratch,
-        ContentKind::Cache,
-    ];
-
     /// The directory name for this kind, identical in both scopes.
     pub fn dir_name(self) -> &'static str {
         match self {
@@ -492,60 +473,6 @@ pub fn is_the_home_root(root: &Path) -> bool {
     };
     let resolve = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     resolve(root) == resolve(&home)
-}
-
-/// Top-level names inside a store root that this store did not create, sorted.
-///
-/// §1.3 rule 3: unknown directories found in a store root are left untouched and
-/// never swept — the store never deletes what it did not create. `store purge`
-/// is the first caller that has to *say* so, entry by entry, and this is the
-/// list it names. Known names, in **either** scope:
-/// - the [`ContentKind`] directories;
-/// - the store's own metadata — `.layout`, `README.md`, `.gitignore`,
-///   `.versions` and a project folder's `project.json` (design §2);
-/// - `config` — reserved in a project's folder too (the purge plan's
-///   `skills/, config/` keep line), even though it holds something different
-///   there than the home root's real `config/`. Without this, a project folder
-///   that actually has a `config/` was reported twice in a purge plan: once by
-///   the reserved-names keep line, once again here.
-///
-/// Known **only when `is_home` is true**: `state` and `plugins`, the two
-/// names the **home** root alone owns beside its content dirs. Those are
-/// home-root names, not store metadata or a project reservation: a project
-/// root has no `state/` of its own, so a user directory that happens to be
-/// called `state/` (or `plugins/`) inside a project's folder is exactly
-/// the kind of name this list exists to report, not a known one to wave
-/// through.
-///
-/// A root that does not exist, or cannot be read, has nothing to report: the
-/// answer is empty rather than an error, because "what else is in there" is a
-/// remark on a plan and never the reason to refuse one.
-pub fn unknown_entries(store_root: &Path, is_home: bool) -> Vec<String> {
-    let mut known: Vec<&str> = ContentKind::ALL
-        .iter()
-        .map(|kind| kind.dir_name())
-        .chain([
-            LAYOUT_FILE,
-            README_FILE,
-            GITIGNORE_FILE,
-            VERSIONS_DIR,
-            "config",
-            projects::PROJECT_FILE,
-        ])
-        .collect();
-    if is_home {
-        known.extend(["state", "plugins"]);
-    }
-    let Ok(entries) = fs::read_dir(store_root) else {
-        return Vec::new();
-    };
-    let mut out: Vec<String> = entries
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| !known.contains(&name.as_str()))
-        .collect();
-    out.sort();
-    out
 }
 
 /// `store_root(scope)/<kind>` — created on use (reserved names stay absent

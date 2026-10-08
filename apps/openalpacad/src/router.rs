@@ -186,8 +186,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 .post(crate::routes::choose_workspace_handler)
                 .patch(crate::routes::rebase_workspace_handler),
         )
-        // Purge deletes a project's conversations, runs and uploads, and
-        // answers the plan it followed. `dry_run` defaults to true.
+        // Delete a project's data (ST-19): its conversations, runs, by-products,
+        // uploads and every owner's notes, never its own folder. Answers the plan
+        // it followed; `dry_run` defaults to true.
         .route(
             "/v1/workspaces/purge",
             post(crate::routes::purge_workspace_handler),
