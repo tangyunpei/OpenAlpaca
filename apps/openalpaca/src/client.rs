@@ -202,8 +202,15 @@ impl DaemonClient {
         check_response(resp).await
     }
 
-    /// POST /v1/files/upload — Upload a file via multipart form.
-    pub async fn upload_file(&self, path: &std::path::Path) -> Result<serde_json::Value> {
+    /// POST /v1/files/upload — Upload a file via multipart form, with the
+    /// turn's per-request headers. `x-workspace-path` puts the upload in the
+    /// same project as the turn it is attached to (design §4) — the same rule
+    /// as [`Self::post_with_headers`]: per request, never a default header.
+    pub async fn upload_file(
+        &self,
+        path: &std::path::Path,
+        headers: &[(&str, String)],
+    ) -> Result<serde_json::Value> {
         use reqwest::multipart;
 
         let filename = path
@@ -226,8 +233,11 @@ impl DaemonClient {
         let form = multipart::Form::new().part("file", part);
 
         let url = format!("{}/v1/files/upload", self.base_url);
-        let resp = self.http.post(&url).multipart(form).send().await?;
-        let resp = check_response(resp).await?;
+        let mut request = self.http.post(&url).multipart(form);
+        for (name, value) in headers {
+            request = request.header(*name, value);
+        }
+        let resp = check_response(request.send().await?).await?;
         Ok(resp.json().await?)
     }
 }

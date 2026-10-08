@@ -293,7 +293,7 @@ async fn single_message(
     let client = DaemonClient::connect()?;
 
     // Upload files and collect attachment refs
-    let attachments = upload_files(&client, files).await?;
+    let attachments = upload_files(&client, files, target).await?;
 
     // The same rule as the piped path: `--message` is the other non-interactive
     // way in, and `openalpaca chat --message q > answer.txt` had `Alpaca: `
@@ -352,13 +352,17 @@ fn refuse_failed_turn(
     }
 }
 
+/// Uploads each `--file` into the turn's project: every upload carries the
+/// headers the turn itself sends ([`ChatTarget::headers`]).
 async fn upload_files(
     client: &DaemonClient,
     files: &[std::path::PathBuf],
+    target: &ChatTarget,
 ) -> Result<Vec<serde_json::Value>> {
+    let headers = target.headers();
     let mut attachments = Vec::new();
     for path in files {
-        let resp = client.upload_file(path).await?;
+        let resp = client.upload_file(path, &headers).await?;
         let file_id = resp["id"]
             .as_str()
             .context("Upload response missing 'id'")?
@@ -730,6 +734,45 @@ mod tests {
         assert_eq!(
             render_tail(&messages, false),
             "You: hi\u{1b}[?7l\nAlpaca: done\u{1b}]4;3;#000000\u{7}\u{1b}[1;2r\n"
+        );
+    }
+
+    /// Design §4: a `--file` upload goes to the same project as the turn it
+    /// is attached to. The upload request carries exactly the
+    /// `x-workspace-path` the turn sends (percent-encoded, R81), so the
+    /// daemon files the bytes under that project and not at home.
+    #[tokio::test]
+    async fn a_file_upload_carries_the_turns_workspace_header() {
+        let (addr, server) = crate::test_util::serve(vec![crate::test_util::json_answer(
+            "200 OK",
+            "unused",
+            r#"{"id":"file-1"}"#,
+        )]);
+        let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let target = ChatTarget::for_workspace(Some("/Users/dev/项目".to_string()));
+
+        let attachments = upload_files(&client, &[file], &target).await.unwrap();
+
+        assert_eq!(
+            attachments,
+            vec![serde_json::json!({ "file_id": "file-1" })]
+        );
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        let head = requests[0].to_ascii_lowercase();
+        assert!(
+            head.starts_with("post /v1/files/upload "),
+            "{}",
+            requests[0]
+        );
+        let (name, value) = target.headers().into_iter().next().unwrap();
+        assert!(
+            head.contains(&format!("{name}: {value}").to_ascii_lowercase()),
+            "the upload carries the turn's project header:\n{}",
+            requests[0]
         );
     }
 }
