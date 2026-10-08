@@ -72,7 +72,14 @@ const CONTENT = [
   qk.tasks.all(),
   qk.memory.all(),
 ] as const;
-const UNTOUCHED = qk.followups.all();
+/**
+ * The follow-up queue (R24): a delete removes a queued follow-up that names
+ * the project, and a re-point rewrites its path, but the daemon announces
+ * neither with a `followup_*` frame, so the chat's queue would keep drawing
+ * a deleted follow-up whose Cancel is then refused.
+ */
+const FOLLOWUPS = qk.followups.all();
+const UNTOUCHED = qk.skills.all();
 
 /**
  * `staleTime: Infinity` so a cached entry is fresh, as the app's 30 s default
@@ -85,7 +92,7 @@ function seeded(): QueryClient {
       mutations: { retry: false },
     },
   });
-  for (const key of [PROJECTS, STATUS, ...CONTENT, UNTOUCHED]) {
+  for (const key of [PROJECTS, STATUS, ...CONTENT, FOLLOWUPS, UNTOUCHED]) {
     client.setQueryData(key, []);
   }
   return client;
@@ -126,6 +133,7 @@ describe("what each life-cycle write makes stale", () => {
     await waitFor(() => expect(stale(client, PROJECTS)).toBe(true));
     expect(stale(client, STATUS)).toBe(true);
     for (const key of CONTENT) expect(stale(client, key)).toBe(false);
+    expect(stale(client, FOLLOWUPS)).toBe(false);
     expect(stale(client, UNTOUCHED)).toBe(false);
   });
 
@@ -143,6 +151,7 @@ describe("what each life-cycle write makes stale", () => {
     await waitFor(() => expect(stale(client, PROJECTS)).toBe(true));
     expect(stale(client, STATUS)).toBe(true);
     for (const key of CONTENT) expect(stale(client, key)).toBe(true);
+    expect(stale(client, FOLLOWUPS)).toBe(true);
     expect(stale(client, UNTOUCHED)).toBe(false);
   });
 
@@ -155,7 +164,7 @@ describe("what each life-cycle write makes stale", () => {
     result.current.mutate({ path: "/Users/me/repo", dryRun: true });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    for (const key of [PROJECTS, STATUS, ...CONTENT, UNTOUCHED]) {
+    for (const key of [PROJECTS, STATUS, ...CONTENT, FOLLOWUPS, UNTOUCHED]) {
       expect(stale(client, key)).toBe(false);
     }
   });
@@ -171,6 +180,7 @@ describe("what each life-cycle write makes stale", () => {
     await waitFor(() => expect(stale(client, PROJECTS)).toBe(true));
     expect(stale(client, STATUS)).toBe(true);
     for (const key of CONTENT) expect(stale(client, key)).toBe(true);
+    expect(stale(client, FOLLOWUPS)).toBe(true);
     expect(stale(client, UNTOUCHED)).toBe(false);
   });
 });

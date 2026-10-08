@@ -63,7 +63,12 @@ export function useWorkspace(
   });
 }
 
-/** What a re-point re-addresses and a delete removes. */
+/**
+ * What a re-point re-addresses and a delete removes. The follow-up queue is
+ * among them (R24): a delete takes a queued follow-up that names the
+ * project, and a re-point rewrites its path, and neither is announced by a
+ * `followup_*` frame.
+ */
 function invalidateProjectData(client: QueryClient): void {
   for (const key of [
     qk.workspaces.all(),
@@ -71,6 +76,7 @@ function invalidateProjectData(client: QueryClient): void {
     qk.sessions.all(),
     qk.tasks.all(),
     qk.memory.all(),
+    qk.followups.all(),
     qk.statusAll(),
   ]) {
     void client.invalidateQueries({ queryKey: key });
