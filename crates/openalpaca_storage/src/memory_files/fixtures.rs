@@ -260,6 +260,23 @@ impl Harness {
             }
             h.partitions.insert(name, spec);
         }
+        // Links and files inside a project's folder under the home store
+        // (fixture 04): made after registration, which decides the folder's
+        // name a `proj:` path needs.
+        for link in fixture["home_links"].as_array().into_iter().flatten() {
+            let path = h.resolve_path(s(&link["path"]));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let target = h.resolve_input_path(s(&link["target"]));
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            #[cfg(not(unix))]
+            let _ = target;
+        }
+        for file in fixture["home_files"].as_array().into_iter().flatten() {
+            let path = h.resolve_path(s(&file["path"]));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, s(&file["content"])).unwrap();
+        }
         for (name, c) in fixture["contexts"].as_object().into_iter().flatten() {
             let owner_id = c["owner_id"]
                 .as_str()
@@ -296,7 +313,8 @@ impl Harness {
     // Paths
     // ------------------------------------------------------------------------
 
-    /// `home`, `ws:<name>[/rest]`, `dir:<name>[/rest]`, `part:<name>[/rest]`.
+    /// `home`, `ws:<name>[/rest]`, `dir:<name>[/rest]`, `part:<name>[/rest]`,
+    /// `proj:<name>[/rest]` (workspace `<name>`'s folder under `projects/`).
     fn resolve_path(&self, fixture_path: &str) -> PathBuf {
         if fixture_path == "home" {
             return self.home.clone();
@@ -312,6 +330,18 @@ impl Harness {
             "ws" => self.ws_root.join(name),
             "dir" => self.dir_root.join(name),
             "part" => self.partition_root(name),
+            "proj" => {
+                let project = crate::store::projects::lookup(&self.ws_root.join(name))
+                    .unwrap()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "fixture path proj:{name}: the workspace is not a registered project"
+                        )
+                    });
+                crate::store::projects::projects_dir()
+                    .unwrap()
+                    .join(project.name)
+            }
             other => panic!("fixture path root {other}"),
         };
         if tail.is_empty() {
@@ -330,7 +360,14 @@ impl Harness {
         let spec = &self.partitions[name];
         let store = match &spec.scope {
             StoreScope::Home => self.home.clone(),
-            StoreScope::Project(p) => p.join(".openalpaca"),
+            StoreScope::Project(p) => {
+                let project = crate::store::projects::lookup(p)
+                    .unwrap()
+                    .expect("a project partition's workspace is registered");
+                crate::store::projects::projects_dir()
+                    .unwrap()
+                    .join(project.name)
+            }
         };
         store
             .join("memory")

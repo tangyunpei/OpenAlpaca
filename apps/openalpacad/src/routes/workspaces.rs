@@ -488,8 +488,8 @@ fn plan_entry(
     })
 }
 
-/// The deletion plan for one root, in the README's terms (`HOME_README` /
-/// `PROJECT_README`, `store/mod.rs`).
+/// The deletion plan for one root, in the retention terms of the home README
+/// (`HOME_README`, `store/mod.rs`).
 ///
 /// Every member is named including the zeroes: "nothing else went" is the half
 /// a reader is checking for, and a plan that silently omits an empty entry
@@ -553,14 +553,15 @@ fn plan_entries(root: &str, plan: &PurgePlan) -> Vec<serde_json::Value> {
             "keep",
         ),
     ];
-    // `false`: a purge is only ever a project root (the home store is refused
-    // long before this runs), so `state/` and `plugins/` are not the store's
-    // own here — they are exactly the unknown names this list exists to
-    // report (Minor #4). `config` stays off this list in either scope: the
-    // project README reserves it too (the "reserved names" line above already
-    // names it, "skills/, config/"), and `unknown_entries` knows so — an
-    // existing `<project>/.openalpaca/config/` is named once, not twice.
-    for name in store::unknown_entries(&Path::new(root).join(store::STORE_DIR_NAME), false) {
+    // `false`: a purge is only ever a project (the home store is refused long
+    // before this runs). The listing reads the project's folder under
+    // `projects/` — never the project's own folder (ST-9) — and a root with
+    // no folder there has nothing to list.
+    let folder = store::store_root(&store::StoreScope::Project(std::path::PathBuf::from(root)));
+    for name in folder
+        .map(|dir| store::unknown_entries(&dir, false))
+        .unwrap_or_default()
+    {
         entries.push(plan_entry(
             &name,
             "not created by OpenAlpaca",
@@ -686,9 +687,10 @@ fn preflight(
 ///
 /// Rows first is the plan's order, so a crash here leaves files nothing
 /// addresses rather than rows addressing files that are gone. An upload path
-/// outside this project's own store is left alone and logged — the store never
-/// deletes what it did not create, and a row whose `storage_path` points
-/// somewhere else is exactly the ambiguity to fail closed on.
+/// outside the project's folder under `projects/` is left alone and logged —
+/// the store never deletes what it did not create, and a row whose
+/// `storage_path` points somewhere else is exactly the ambiguity to fail
+/// closed on.
 async fn remove_purged_bytes(
     deps: &PurgeDeps<'_>,
     root: &str,
@@ -720,15 +722,28 @@ async fn remove_purged_bytes(
         );
     }
 
-    let store_root = Path::new(root).join(store::STORE_DIR_NAME);
+    // The purge guard: an upload's bytes are removed only from inside this
+    // project's folder under `projects/` (ST-1). The store never deletes what
+    // it did not create, and a row whose `storage_path` points anywhere else
+    // is exactly the ambiguity to fail closed on. A root with no folder there
+    // (R12) has no bytes of its own to remove.
+    let folder =
+        match store::store_root(&store::StoreScope::Project(std::path::PathBuf::from(root))) {
+            Ok(dir) => Some(dir),
+            Err(e) => {
+                if !outcome.upload_paths.is_empty() {
+                    tracing::warn!("Purge left every upload of {root} alone: {e:#}");
+                }
+                None
+            }
+        };
     let mut files = 0;
     for path in &outcome.upload_paths {
         let path = Path::new(path);
-        if !path.starts_with(&store_root) {
+        if !folder.as_deref().is_some_and(|dir| path.starts_with(dir)) {
             tracing::warn!(
-                "Purge left {} alone: it is outside {}",
-                path.display(),
-                store_root.display()
+                "Purge left {} alone: it is outside the project's folder",
+                path.display()
             );
             continue;
         }

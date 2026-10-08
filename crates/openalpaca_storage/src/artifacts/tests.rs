@@ -778,56 +778,64 @@ fn a_create_that_fails_releases_the_name_it_reserved() {
     assert_eq!(fs::read_to_string(&record.storage_path).unwrap(), "a\n");
 }
 
-/// Placement identity *is* address identity. A `<project>/.openalpaca`
-/// symlinked at another store — the home store here — puts both scopes' bytes
-/// in one directory, so they must share one sequence space; keying the address
-/// off the path the caller named would restart it at `01` and hand two
-/// different artifacts the same name. `confine_to_root` cannot catch that: the
-/// symlink is *at* the root it canonicalizes, not under it.
-#[cfg(unix)]
+/// R15: a project artifact's bytes land in the project's folder under the
+/// home store's `projects/`, and its row records the turn's project root —
+/// never the directory the bytes reached. Nothing lands in the project.
 #[test]
-fn a_symlinked_store_root_cannot_open_a_second_sequence_space() {
+fn a_project_artifact_lands_under_projects_and_records_the_turns_root() {
     let f = Fixture::new();
-    std::os::unix::fs::symlink(f.home_root(), f.project_root().join(".openalpaca")).unwrap();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a\n");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
 
-    let home_scope = StoreScope::Home;
-    let mut first = NewArtifact::new(OWNER, &home_scope, ArtifactKind::Markdown, "Alpha", b"hello");
-    first.created = at(1);
-    let (home, _) = f.store().put(first).unwrap();
-
-    let project_scope = f.scope();
-    let mut second = NewArtifact::new(
-        OWNER,
-        &project_scope,
-        ArtifactKind::Markdown,
-        "Beta",
-        b"other bytes",
-    );
-    second.created = at(1);
-    let (project, _) = f.store().put(second).unwrap();
-
-    assert!(
-        home.storage_path.ends_with("/01-alpha.md"),
-        "{}",
-        home.storage_path
-    );
-    assert!(
-        project.storage_path.ends_with("/02-beta.md"),
-        "the second write shares the first's sequence space: {}",
-        project.storage_path
-    );
-    assert_eq!(fs::read_to_string(&home.storage_path).unwrap(), "hello");
+    let folder = f
+        .home_root()
+        .join(crate::store::projects::PROJECTS_DIR)
+        .join(crate::store::projects::folder_name(&f.project_root()));
     assert_eq!(
-        fs::read_to_string(&project.storage_path).unwrap(),
-        "other bytes"
+        PathBuf::from(&record.storage_path),
+        folder
+            .join("artifacts")
+            .join("loose")
+            .join("2026-09-01")
+            .join("01-notes.md")
     );
+    assert_eq!(record.project_root.as_deref(), f.project_root().to_str());
+    assert!(!f.project_root().join(".openalpaca").exists(), "ST-1");
+}
 
-    // One directory, one address space: the row records the store the bytes
-    // reached, not the path the caller named.
+/// R15/R12: a row whose own columns do not name its store falls back to
+/// its scope's store, and that fallback creates nothing — for a project no
+/// folder under `projects/` records, nothing at all.
+#[test]
+fn resolving_a_row_whose_columns_do_not_name_its_store_creates_nothing() {
+    let f = Fixture::new();
+    let stray = tempdir().unwrap();
+    let stray_root = stray.path().canonicalize().unwrap();
+    f.db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes,
+                 storage_path, status, origin, project_root, rel_path)
+             VALUES ('stray-row', ?1, 'sha', 'notes.md', 'text/markdown', 1, '/nowhere/x.md',
+                     'ready', 'produced', ?2, 'loose/2026-09-01/01-notes.md')",
+            rusqlite::params![OWNER, stray_root.to_string_lossy()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    assert!(f.store().resolve_content("stray-row", None).is_err());
     assert!(
-        project.project_root.is_none(),
-        "the bytes reached the home store: {:?}",
-        project.project_root
+        !stray_root.join(".openalpaca").exists(),
+        "nothing in the folder"
+    );
+    assert!(
+        !f.home_root()
+            .join(crate::store::projects::PROJECTS_DIR)
+            .join(crate::store::projects::folder_name(&stray_root))
+            .exists(),
+        "and nothing under projects/"
     );
 }
 

@@ -62,13 +62,12 @@
 //! number came round again. Claiming the name with `O_EXCL` first turns that
 //! into a bumped sequence (or, past [`MAX_HEAD_PROBES`], an `IO_ERROR`).
 //!
-//! ## The address is the store the bytes reached
+//! ## The address is the turn's project
 //!
-//! `project_root` and the sequence lookup are both derived from the
-//! *canonicalized* store root (`store::project_root_at`), never from the path
-//! the caller named. A `<project>/.openalpaca` symlinked at another store
-//! therefore addresses that store, and shares its sequence space, instead of
-//! restarting at `01` over its live files.
+//! `project_root` and the sequence lookup both take the turn's project root,
+//! canonical (`store::project_root_of`, R15) — never the directory the bytes
+//! reached, which under ST-1 is the project's folder under the home store's
+//! `projects/` for every project.
 //!
 //! Everything from the dedup query to the committed row runs inside one
 //! `with_connection` transaction, which holds the database mutex for its whole
@@ -93,7 +92,7 @@ use crate::models::file_asset::{FileAsset, FileAssetStatus};
 use crate::models::{ArtifactKind, ArtifactOrigin};
 use crate::repository::file_asset::{FILE_ASSET_COLUMNS, row_to_file_asset};
 use crate::store::{
-    ContentKind, StoreScope, confine_to_root, content_dir, leading_sequence, project_root_at,
+    ContentKind, StoreScope, confine_to_root, content_dir, leading_sequence, project_root_of,
     relative_to, upload_dir, upload_file_name,
 };
 
@@ -207,21 +206,16 @@ impl<'a> UploadStore<'a> {
         let size_bytes = new.data.len() as i64;
 
         // Placement, by the §4.2 grammar. Creates directories only — `upload_dir`
-        // goes through `content_dir`, which seeds a project store (and its
-        // `.gitignore`) before `uploads/` can exist inside it.
+        // goes through `content_dir`, which creates nothing for a project no
+        // folder under `projects/` records (R12).
         let uploads_root = content_dir(new.scope, ContentKind::Uploads).map_err(path_error)?;
         let uploads_root = uploads_root.canonicalize().map_err(path_error)?;
         let dir = upload_dir(new.scope, new.created).map_err(path_error)?;
         let rel_dir = relative_to(&uploads_root, &dir).map_err(path_error)?;
-        // The address is the store the bytes *reach*, not the path the caller
-        // named — see `project_root_at`. Both the row and the sequence lookup
-        // take it, so two scopes that resolve to one directory share one
-        // sequence space instead of both starting at `01`.
-        let store_root = uploads_root
-            .parent()
-            .with_context(|| format!("{} has no parent store root", uploads_root.display()))
-            .map_err(path_error)?;
-        let project_root = project_root_at(store_root).map_err(path_error)?;
+        // R15: the address is the turn's project (`project_root_of`), never
+        // the directory the bytes reached. Both the row and the sequence
+        // lookup take it.
+        let project_root = project_root_of(new.scope).map_err(path_error)?;
         let project_key = project_root.clone().unwrap_or_default();
 
         self.db.with_connection(|conn| {

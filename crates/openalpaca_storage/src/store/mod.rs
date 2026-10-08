@@ -1,20 +1,24 @@
 //! The single source of truth for every OpenAlpaca path.
 //!
-//! There is one root for app state and no-project content — `~/.openalpaca`
-//! (`home_root()`, overridable with `OPENALPACA_HOME_STORE`) — and one store per
-//! project — `<project>/.openalpaca`. Both roots have exactly the same shape for
-//! content, so `content_dir(scope, kind)` is `root/<kind>` in both cases.
+//! There is one root — `~/.openalpaca` (`home_root()`, overridable with
+//! `OPENALPACA_HOME_STORE`). App state and content with no project live there,
+//! and each project's content lives in its own folder under it,
+//! `projects/<name>/` (owner decision ST-1; [`projects`] names and finds the
+//! folders). Nothing is ever written inside a project's own folder. Both
+//! stores have the same shape for content, so `content_dir(scope, kind)` is
+//! `root/<kind>` in both cases.
 //!
 //! ```text
 //! ~/.openalpaca/
 //!   README.md          seeded once; explains every entry
-//!   .layout            line 1: layout version; line 2 (home root only): install_id=<uuid-v4>
+//!   .layout            line 1: layout version; line 2: install_id=<uuid-v4>
 //!   state/             MACHINE STATE — opaque, never user-edited, never committed
 //!     openalpaca.db (+ -wal, -shm), discovery.json, openalpacad.lock, .master_key
 //!     backups/         rotated copies of hand-edited config files
 //!     logs/            daemon.log, gui.log
 //!   config/            USER-EDITED runtime config (GUI/CLI-managed daemons)
 //!   plugins/           user-dropped plugin dirs + .permissions.toml
+//!   projects/<name>/   one folder per project: project.json, artifacts/, uploads/, memory/
 //!   artifacts/ uploads/ sessions/ …   content store, home scope
 //! ```
 //!
@@ -42,7 +46,7 @@ use std::path::{Path, PathBuf};
 /// Environment override for the home root (D4). Absolute paths only.
 pub const HOME_STORE_ENV: &str = "OPENALPACA_HOME_STORE";
 
-/// The store directory name — `~/.openalpaca` and `<project>/.openalpaca`.
+/// The store directory name — `~/.openalpaca`.
 pub const STORE_DIR_NAME: &str = ".openalpaca";
 
 /// Layout version written to line 1 of `.layout`.
@@ -381,7 +385,9 @@ pub fn ensure_runtime_config_dir() -> Result<PathBuf> {
 /// Which store a piece of content belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreScope {
-    /// `<project>/.openalpaca` — the project root itself (absolute).
+    /// A project, named by its canonical root (absolute) — what the resolver
+    /// returns, never the store directory. Its content lives in its folder
+    /// under `<home>/projects/` (ST-1), found by [`projects::lookup`].
     Project(PathBuf),
     /// `~/.openalpaca` — the no-project fallback.
     Home,
@@ -428,63 +434,59 @@ impl ContentKind {
     }
 }
 
-/// The root directory of a store. Does not create anything.
+/// The root directory of a store. Creates nothing.
+///
+/// Home: [`home_root`]. A project: its folder under `projects/` (ST-1) as
+/// [`projects::lookup`] finds it — `<home>/projects/<name>`, canonical. A
+/// root with no folder there is [`projects::ProjectError::NotRegistered`]
+/// inside the error (R12): a reader asks [`projects::is_not_registered`] and
+/// treats the project as empty, and nothing is created for it here.
 pub fn store_root(scope: &StoreScope) -> Result<PathBuf> {
     match scope {
         StoreScope::Home => home_root(),
-        StoreScope::Project(project) => {
-            if !project.is_absolute() {
+        StoreScope::Project(root) => {
+            if !root.is_absolute() {
                 bail!(
                     "project store root must be an absolute path, got {}",
-                    project.display()
+                    root.display()
                 );
             }
-            Ok(project.join(STORE_DIR_NAME))
+            match projects::lookup(root)? {
+                Some(project) => Ok(project.dir),
+                None => Err(anyhow::Error::new(projects::ProjectError::NotRegistered {
+                    root: root.to_string_lossy().into_owned(),
+                })),
+            }
         }
     }
 }
 
-/// Creates the store root and seeds its metadata: `README.md`, `.layout`
-/// (and, for a project store, `.gitignore`). Idempotent — each file is written
-/// only when absent, so user edits stick.
+/// Creates the home root and seeds its metadata: `README.md` and `.layout`
+/// (line 2 `install_id=<uuid-v4>`). Idempotent — each file is written only
+/// when absent, so user edits stick.
 ///
-/// On the home root, `.layout` line 2 carries `install_id=<uuid-v4>`, written
-/// with the marker and never rewritten; a marker that lacks one keeps lacking it.
-///
-/// Which metadata is seeded follows the **resolved root**, not the scope
-/// variant: `Project($HOME)`'s store root *is* `~/.openalpaca`, and so is a
-/// project whose `.openalpaca` is a symlink to it. Seeding those from the
-/// project branch put a `.gitignore` in the home root and a README describing a
-/// project store — the rule `projects::overlaps_home_store` applies upstream (R13).
+/// A project's folder holds `project.json` and content only (R3) and exists
+/// from its registration, so for a project scope this is [`store_root`] and
+/// nothing else.
 pub fn ensure_store(scope: &StoreScope) -> Result<PathBuf> {
     let root = store_root(scope)?;
+    if matches!(scope, StoreScope::Project(_)) {
+        return Ok(root);
+    }
     fs::create_dir_all(&root)
         .with_context(|| format!("Failed to create store root: {}", root.display()))?;
-
-    let is_home = is_the_home_root(&root);
-
     let readme = root.join(README_FILE);
     if !readme.exists() {
-        write_new(&readme, readme_text(is_home))?;
+        write_new(&readme, HOME_README)?;
     }
-
-    if !is_home {
-        let gitignore = root.join(GITIGNORE_FILE);
-        if !gitignore.exists() {
-            write_new(&gitignore, GITIGNORE_TEXT)?;
-        }
-    }
-
-    ensure_layout(&root, is_home)?;
+    ensure_layout(&root)?;
     Ok(root)
 }
 
-/// Whether a store root *is* the home root — canonicalized, so a symlinked
-/// `<project>/.openalpaca` answers for the store it reaches, the same rule
-/// [`project_root_at`] addresses rows by. Paths that cannot be canonicalized
-/// (nothing there yet) are compared as written; with no home directory to
-/// compare against the answer is `false`, which leaves the root alone.
-/// `file_write` asks the same question of its workspace root (G2).
+/// Whether a store root *is* the home root — canonicalized, so a link to it
+/// answers for the store it reaches. Paths that cannot be canonicalized are
+/// compared as written; with no home directory to compare against the answer
+/// is `false`. `file_write` asks the same question of its workspace root (G2).
 pub fn is_the_home_root(root: &Path) -> bool {
     let Ok(home) = home_root() else {
         return false;
@@ -500,21 +502,19 @@ pub fn is_the_home_root(root: &Path) -> bool {
 /// is the first caller that has to *say* so, entry by entry, and this is the
 /// list it names. Known names, in **either** scope:
 /// - the [`ContentKind`] directories;
-/// - the store's own metadata — `.layout`, `README.md`, `.gitignore`, and
-///   `.versions` (§1.3 rule 1 reserves every dot-prefixed name forever, even
-///   one nothing writes at a store root today);
-/// - `config` — reserved in the **project** README too (`memory/`, `skills/`,
-///   `config/` — "not created until used"), even though it holds something
-///   different there than the home root's real `config/`. Without this, a
-///   project that actually has a `<project>/.openalpaca/config/` was reported
-///   twice in a purge plan: once by the reserved-names keep line, once again
-///   here.
+/// - the store's own metadata — `.layout`, `README.md`, `.gitignore`,
+///   `.versions` and a project folder's `project.json` (design §2);
+/// - `config` — reserved in a project's folder too (the purge plan's
+///   `skills/, config/` keep line), even though it holds something different
+///   there than the home root's real `config/`. Without this, a project folder
+///   that actually has a `config/` was reported twice in a purge plan: once by
+///   the reserved-names keep line, once again here.
 ///
 /// Known **only when `is_home` is true**: `state` and `plugins`, the two
 /// names the **home** root alone owns beside its content dirs. Those are
 /// home-root names, not store metadata or a project reservation: a project
 /// root has no `state/` of its own, so a user directory that happens to be
-/// called `state/` (or `plugins/`) inside `<project>/.openalpaca/` is exactly
+/// called `state/` (or `plugins/`) inside a project's folder is exactly
 /// the kind of name this list exists to report, not a known one to wave
 /// through.
 ///
@@ -525,7 +525,14 @@ pub fn unknown_entries(store_root: &Path, is_home: bool) -> Vec<String> {
     let mut known: Vec<&str> = ContentKind::ALL
         .iter()
         .map(|kind| kind.dir_name())
-        .chain([LAYOUT_FILE, README_FILE, GITIGNORE_FILE, VERSIONS_DIR, "config"])
+        .chain([
+            LAYOUT_FILE,
+            README_FILE,
+            GITIGNORE_FILE,
+            VERSIONS_DIR,
+            "config",
+            projects::PROJECT_FILE,
+        ])
         .collect();
     if is_home {
         known.extend(["state", "plugins"]);
@@ -542,19 +549,12 @@ pub fn unknown_entries(store_root: &Path, is_home: bool) -> Vec<String> {
     out
 }
 
-/// `store_root(scope)/<kind>` — created on use (reserved names stay absent until
-/// something actually needs them).
-///
-/// A project store is seeded first: `uploads/` must never exist before the
-/// `.gitignore` that excludes it, or the first upload lands in the user's git
-/// index. The home root has no `.gitignore` and nothing to race, so it is left
-/// to the explicit `ensure_store` at boot.
+/// `store_root(scope)/<kind>` — created on use (reserved names stay absent
+/// until something needs them). A project's folder exists from its
+/// registration, so nothing is seeded first; a root with no folder is
+/// [`store_root`]'s typed error and nothing is created (R12).
 pub fn content_dir(scope: &StoreScope, kind: ContentKind) -> Result<PathBuf> {
-    let root = match scope {
-        StoreScope::Project(_) => ensure_store(scope)?,
-        StoreScope::Home => store_root(scope)?,
-    };
-    let dir = root.join(kind.dir_name());
+    let dir = store_root(scope)?.join(kind.dir_name());
     fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create content directory: {}", dir.display()))?;
     Ok(dir)
@@ -564,7 +564,9 @@ pub fn content_dir(scope: &StoreScope, kind: ContentKind) -> Result<PathBuf> {
 /// `None` is the home store, which is the address baseline (§4.8).
 ///
 /// The one place a [`StoreScope`] becomes a stored address, so
-/// `COALESCE(project_root, '')` means the same thing to every writer.
+/// `COALESCE(project_root, '')` means the same thing to every writer. R15:
+/// it is the turn's project, never the directory the bytes reached — under
+/// ST-1 that is the project's folder under `projects/` for every project.
 pub fn project_root_of(scope: &StoreScope) -> Result<Option<String>> {
     match scope {
         StoreScope::Home => Ok(None),
@@ -573,30 +575,6 @@ pub fn project_root_of(scope: &StoreScope) -> Result<Option<String>> {
             Ok(Some(canonical.to_string_lossy().to_string()))
         }
     }
-}
-
-/// [`project_root_of`] for bytes that have already been placed: the address
-/// component for a store whose root is `store_root` — *canonicalized*, i.e. the
-/// directory the bytes actually landed under rather than the path the caller
-/// named.
-///
-/// `None` when that is the home root (the address baseline); otherwise the
-/// directory holding the store. Deriving the address from the resolved root is
-/// what keeps placement identity and address identity the same thing: a
-/// `<project>/.openalpaca` symlinked at another store resolves to *that* store's
-/// address, so it cannot open a second sequence space over a directory that
-/// already has one. [`confine_to_root`] cannot see that case — the symlink is
-/// *at* the root it canonicalizes, not under it.
-pub fn project_root_at(store_root: &Path) -> Result<Option<String>> {
-    let home = home_root()?;
-    let home = home.canonicalize().unwrap_or(home);
-    if store_root == home {
-        return Ok(None);
-    }
-    let project = store_root
-        .parent()
-        .with_context(|| format!("Store root has no parent: {}", store_root.display()))?;
-    Ok(Some(project.to_string_lossy().to_string()))
 }
 
 /// `path` relative to `root`, with `/` separators — the `rel_path` column.
@@ -714,18 +692,11 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     fs::rename(&tmp, path).with_context(|| format!("Failed to move {} into place", tmp.display()))
 }
 
-/// Writes `.layout` when absent — line 1 the layout version, then
-/// `install_id=<uuid>` on the home root or `project_root=<canonical path>` on a
-/// project root — and repairs an unreadable version line. Nothing is ever
-/// added to a marker that exists: it keeps whatever keys it has, and any other
-/// line already there is carried through untouched.
-///
-/// **`project_root=` is written once and never rewritten**, which is what makes
-/// it the record of where this store *was* (§4.8's "Project moved"): `ensure_store`
-/// runs on every `content_dir` call, so a line that healed itself to the current
-/// path would erase the very difference a moved project is recognised by.
-/// Nothing rewrites it.
-fn ensure_layout(root: &Path, is_home: bool) -> Result<()> {
+/// Writes the home root's `.layout` when absent — line 1 the layout version,
+/// line 2 `install_id=<uuid>` — and repairs an unreadable version line.
+/// Nothing is ever added to a marker that exists: it keeps whatever keys it
+/// has, and any other line already there is carried through untouched.
+fn ensure_layout(root: &Path) -> Result<()> {
     let path = root.join(LAYOUT_FILE);
     let existing = match fs::read_to_string(&path) {
         Ok(t) => Some(t),
@@ -734,17 +705,10 @@ fn ensure_layout(root: &Path, is_home: bool) -> Result<()> {
     };
 
     let Some(text) = existing else {
-        let mut fresh = format!("{LAYOUT_VERSION}\n");
-        if is_home {
-            fresh.push_str(&format!("{INSTALL_ID_KEY}={}\n", uuid::Uuid::new_v4()));
-        } else {
-            // The address this store records for itself, resolved the way every
-            // stored `project_root` is (canonical, home root folded to `None`).
-            let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-            if let Some(project_root) = project_root_at(&canonical)? {
-                fresh.push_str(&format!("{PROJECT_ROOT_KEY}={project_root}\n"));
-            }
-        }
+        let fresh = format!(
+            "{LAYOUT_VERSION}\n{INSTALL_ID_KEY}={}\n",
+            uuid::Uuid::new_v4()
+        );
         return write_atomic(&path, &fresh);
     };
 
@@ -785,15 +749,6 @@ fn read_layout_value(layout: &str, key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-const GITIGNORE_TEXT: &str = "\
-/.layout
-/uploads/
-/sessions/
-/scratch/
-/cache/
-.versions/
-";
-
 const HOME_README: &str = r#"# OpenAlpaca — home store
 
 Created and maintained by OpenAlpaca. The rule for this directory: **`state/` is
@@ -824,35 +779,6 @@ Directories OpenAlpaca did not create are never touched and never swept.
 
 `.layout` records this store's layout version and its install id. Do not edit it.
 "#;
-
-const PROJECT_README: &str = r#"# OpenAlpaca — project store
-
-Created and maintained by OpenAlpaca for this project. Machine state (database,
-keys, logs, sessions) never lives here — it stays in the home store,
-`~/.openalpaca`.
-
-Deleting a directory below loses those files only.
-
-| Entry | Holds | Retention class |
-|---|---|---|
-| `artifacts/` | files produced by tasks run in this project | never garbage-collected; heads are committable |
-| `artifacts/**/.versions/` | previous versions of a produced file | OpenAlpaca's private history; git-ignored |
-| `uploads/` | copies of files you uploaded here | swept: an upload attached to no message is deleted once past the grace period; git-ignored |
-| `sessions/` | reserved, deliberately unused — session logs live in the home store | — |
-| `memory/` | this project's memory notes, per owner (`owners/<owner-key>/notes/*.md`) | yours — never swept; git-ignored by its own `.gitignore` inside `memory/`, which OpenAlpaca re-asserts, so notes never travel with the repository |
-| `skills/`, `config/` | reserved; not created until used | yours — never swept, and deliberately *not* git-ignored |
-| `scratch/`, `cache/` | reserved; agent working space and derived data | swept freely; git-ignored |
-
-Directories OpenAlpaca did not create are never touched and never swept.
-
-`.gitignore` is store-owned and committable, so the rules travel with the repo;
-it is written only when absent, so your edits stick. `.layout` records this
-store's layout version — do not edit it.
-"#;
-
-fn readme_text(is_home: bool) -> &'static str {
-    if is_home { HOME_README } else { PROJECT_README }
-}
 
 #[cfg(test)]
 pub(crate) mod tests;

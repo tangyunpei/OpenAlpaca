@@ -370,40 +370,34 @@ fn a_stray_file_at_the_next_slot_is_never_overwritten() {
     assert_eq!(std::fs::read(&stored.asset.storage_path).unwrap(), b"hello");
 }
 
-/// Placement identity *is* address identity. A `<project>/.openalpaca` symlinked
-/// at another store — the home store here — puts both scopes' bytes in one
-/// directory, so they must share one sequence space; keying the sequence off the
-/// path the caller named would restart it at `01` and rename over a live file
-/// whose row still points at it. `confine_to_root` cannot catch that: the
-/// symlink is *at* the root it canonicalizes, not under it.
-#[cfg(unix)]
+/// R15 for uploads: the bytes land in the project's folder under the home
+/// store's `projects/`; the row records the turn's project root.
 #[test]
-fn a_symlinked_store_root_cannot_open_a_second_sequence_space() {
+fn a_project_upload_lands_under_projects_and_records_the_turns_root() {
     let fx = Fixture::new();
-    std::os::unix::fs::symlink(fx.home_root(), fx.project_root().join(".openalpaca")).unwrap();
-
-    let home = fx.put("owner-1", "notes.txt", b"hello");
-    let project = fx.put_in(&fx.project_scope(), "owner-2", "notes.txt", b"other bytes");
-
-    assert!(
-        home.asset.storage_path.ends_with("/01-notes.txt"),
-        "{}",
-        home.asset.storage_path
+    let stored = fx.put_in(
+        &fx.project_scope(),
+        "owner-1",
+        "Quarterly Report.PDF",
+        b"pdf-bytes",
     );
-    assert!(
-        project.asset.storage_path.ends_with("/02-notes.txt"),
-        "the second write shares the first's sequence space: {}",
-        project.asset.storage_path
-    );
-    assert_eq!(std::fs::read(&home.asset.storage_path).unwrap(), b"hello");
+
+    let folder = fx
+        .home_root()
+        .join(crate::store::projects::PROJECTS_DIR)
+        .join(crate::store::projects::folder_name(&fx.project_root()));
     assert_eq!(
-        std::fs::read(&project.asset.storage_path).unwrap(),
-        b"other bytes"
+        PathBuf::from(&stored.asset.storage_path),
+        folder
+            .join("uploads")
+            .join("2026-09-05")
+            .join("01-quarterly-report.pdf")
     );
-
-    // One directory, one address space: the row records the store the bytes
-    // reached, not the path the caller named.
-    assert_eq!(fx.address(&project.asset.id).0, None);
+    assert_eq!(
+        fx.address(&stored.asset.id).0.as_deref(),
+        fx.project_root().to_str()
+    );
+    assert!(!fx.project_root().join(".openalpaca").exists(), "ST-1");
 }
 
 // ============================================================================

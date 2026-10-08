@@ -12,10 +12,11 @@
 //! stays the resolved absolute path so the existing content routes need no
 //! change. Bytes are placed by the §4.2 grammar
 //! (`crate::store::{run_dir, loose_dir, artifact_file_name, version_file_path}`) —
-//! this module never joins a literal directory name onto a store root. R24: the
-//! `project_root` half of the address comes from the *canonicalized* store root
-//! ([`crate::store::project_root_at`]), never from the scope the caller named,
-//! so two scopes whose bytes land in one directory address one sequence space.
+//! this module never joins a literal directory name onto a store root. R15: the
+//! `project_root` half of the address is the turn's project root
+//! ([`crate::store::project_root_of`], canonical), never the directory the
+//! bytes reached — every project's bytes land under the home store's
+//! `projects/`.
 //!
 //! ## Write protocol (§4.2 + R24), as implemented by [`ArtifactStore::put`]
 //!
@@ -180,7 +181,8 @@ use crate::models::{ArtifactKind, ArtifactOrigin};
 use crate::sql::escape_like;
 use crate::store::{
     ContentKind, StoreScope, artifact_extension, artifact_file_name, confine_to_root, content_dir,
-    leading_sequence, loose_dir, project_root_at, relative_to, run_dir, version_file_path,
+    leading_sequence, loose_dir, project_root_of, relative_to, run_dir, store_root,
+    version_file_path,
 };
 
 /// `[execution.artifacts] max_versions_per_artifact` (plan §4.6). The config key
@@ -905,15 +907,12 @@ impl<'a> ArtifactStore<'a> {
         };
         let rel_dir = relative_to(&artifacts_root, &dir)?;
         let ext = artifact_extension(new.kind, new.mime_type, new.name_hint);
-        // R24: the address is the store the bytes *reach*, not the path the
-        // caller named — see `store::project_root_at`. Both the row and the
-        // directory scan below take it, so two scopes that resolve to one
-        // directory share one sequence space (and one identity) instead of both
-        // starting at `01` over each other's files.
-        let store_root = artifacts_root
-            .parent()
-            .with_context(|| format!("{} has no parent store root", artifacts_root.display()))?;
-        let project_root = project_root_at(store_root)?;
+        // R15: the address is the turn's project (`store::project_root_of`),
+        // never the directory the bytes reached — every project's bytes land
+        // under `<home>/projects/`. Both the row and the directory scan below
+        // take it; two scopes naming one project canonicalize to one root, so
+        // they share one sequence space and one identity.
+        let project_root = project_root_of(new.scope)?;
         let project_key = project_root.clone().unwrap_or_default();
         let mime = new
             .mime_type
@@ -2818,7 +2817,10 @@ fn prune_versions(conn: &Connection, id: &str, max_versions: u32) -> Result<Vec<
 }
 
 /// `<store>/artifacts` for a record, recovered from its own two address
-/// columns so a changed `OPENALPACA_HOME_STORE` cannot silently re-point a row.
+/// columns so a changed `OPENALPACA_HOME_STORE` cannot silently re-point a
+/// row. A row whose columns do not carry it falls back to its scope's store
+/// through [`store_root`] — which creates nothing, and for a project no
+/// folder under `projects/` records is R12's `NotRegistered`.
 fn artifacts_root_for(record: &ArtifactRecord) -> Result<PathBuf> {
     if let Some(rel) = record.rel_path.as_deref()
         && let Some(prefix) = record.storage_path.strip_suffix(rel)
@@ -2832,7 +2834,7 @@ fn artifacts_root_for(record: &ArtifactRecord) -> Result<PathBuf> {
         Some(root) => StoreScope::Project(PathBuf::from(root)),
         None => StoreScope::Home,
     };
-    content_dir(&scope, ContentKind::Artifacts)
+    Ok(store_root(&scope)?.join(ContentKind::Artifacts.dir_name()))
 }
 
 /// `file_assets.mime_type` is NOT NULL, so a caller that supplies none gets the

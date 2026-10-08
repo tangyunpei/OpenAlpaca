@@ -432,9 +432,11 @@ impl FileWriteTool {
 
 /// The path `file_read` opens a saved artifact by: its file relative to the
 /// workspace root, `/`-separated, both resolved first. `None` when the file
-/// is not under the root — the case of a project's store beside the home
-/// store, and of the home store seen from a root that does not contain it.
-/// `file_read` joins the same root, so the path named is one it opens.
+/// is not under the root — a store seen from a root that does not contain it
+/// (a daemon started outside the home store). A project's by-products are in
+/// its folder under the home store's `projects/`, so from the home store they
+/// are under the root. `file_read` joins the same root, so the path named is
+/// one it opens.
 fn read_back_path(storage_path: &str, workspace_root: &Path) -> Option<String> {
     let file = Path::new(storage_path).canonicalize().ok()?;
     let root = workspace_root.canonicalize().ok()?;
@@ -1444,12 +1446,15 @@ mod tests {
             !out.contains("no project folder"),
             "the turn carries a project: {out}"
         );
-        // The project's store is outside the root `file_read` reads from.
+        // The project's folder is under the home store `file_read` reads from.
+        let name = openalpaca_storage::store::projects::folder_name(&project);
         assert!(
-            out.contains("file_read cannot open it from this conversation"),
+            out.contains(&format!(
+                "To read it back, call file_read with \"projects/{name}/artifacts/"
+            )),
             "{out}"
         );
-        assert!(!out.contains("To read it back"), "{out}");
+        assert!(!out.contains("file_read cannot open it"), "{out}");
     }
 
     /// The root is compared resolved: a workspace root that is a link to the

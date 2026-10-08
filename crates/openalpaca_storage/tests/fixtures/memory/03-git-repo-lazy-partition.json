@@ -1,12 +1,12 @@
 {
   "row": {
     "id": 3,
-    "scenario": "CLI turn inside a git repository with no `.openalpaca/` yet",
-    "required_outcome": "The repository's project partition; the store is created lazily, the same before and after the first artifact"
+    "scenario": "CLI turn inside a git repository; the project's notes go to its folder under the home store",
+    "required_outcome": "The repository's project partition, in its folder under `projects/`; created lazily, the same before and after the first artifact; nothing written into the repository"
   },
-  "design": ["§2 layout (project partition, `.gitignore` `*`)", "§3 rule 1 (MD-5): the marker walk finds `.git`; the store is created lazily on the first project write", "§3 rule 2 (default write scope by kind)", "§7a control snapshot"],
+  "design": ["§2 layout (project partition)", "§3 rule 1: the project is the repository's top folder (storage design §3, ST-6), its notes in `projects/<name>/memory/` (ST-1); the partition is created lazily on the first project write", "§3 rule 2 (default write scope by kind)", "§7a control snapshot"],
   "loads_in": ["slice-2", "slice-3"],
-  "notes_for_implementer": "A read never creates the project store (step 1). The first project write creates `<repo>/.openalpaca/memory/` with its own `.gitignore` (exactly `*\\n`), the owner directory and a control snapshot under home state (step 2). `ensure_project_store` in step 3 stands for the artifact path's `ensure_store` — the first artifact write, which lays out the rest of `<repo>/.openalpaca/`; the partition key derived before and after it must be the same, so step 4's note lands in the same partition and snapshot as step 2's. A `preference` defaults to global even from inside the repo (step 5). Slice 2 runs steps 2 and 4 through `memory_files` with the partition given explicitly and checks the same files and modes.",
+  "notes_for_implementer": "The loader registers the repository when it builds the harness, as the daemon's first turn there would (storage design §3). A read never creates the project's memory (step 1). The first project write creates `memory/` in the project's folder under the home store's `projects/`, the owner directory and a control snapshot under home state (step 2); no `.gitignore` is written anywhere — the notes are not in the repository any more — and the repository gains nothing. `ensure_project_store` in step 3 stands for the artifact path's first write, which creates `artifacts/` in the same folder and nothing else; the partition key derived before and after it must be the same, so step 4's note lands in the same partition and snapshot as step 2's. A `preference` defaults to global even from inside the repo (step 5). Slice 2 runs steps 2 and 4 through `memory_files` with the partition given explicitly and checks the same files and modes.",
   "owners": [
     { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
   ],
@@ -36,7 +36,7 @@
       "input": { "query": "anything" },
       "expect": {
         "ids_unordered": [],
-        "files_absent": ["ws:repo/.openalpaca"]
+        "files_absent": ["proj:repo/memory", "ws:repo/.openalpaca"]
       }
     },
     {
@@ -50,19 +50,18 @@
         "scope": "project",
         "origin": "extracted_user",
         "files_exist": [
-          "ws:repo/.openalpaca/memory/.gitignore",
-          "ws:repo/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/notes",
-          "ws:repo/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/.history"
+          "proj:repo/memory/owners/32acea7eb739b08afd959db91e46d450/notes",
+          "proj:repo/memory/owners/32acea7eb739b08afd959db91e46d450/.history"
         ],
-        "file_content": { "ws:repo/.openalpaca/memory/.gitignore": "*\n" },
-        "path_within": { "first_project_note": "ws:repo/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/notes" },
+        "files_absent": ["proj:repo/memory/.gitignore", "ws:repo/.openalpaca"],
+        "path_within": { "first_project_note": "proj:repo/memory/owners/32acea7eb739b08afd959db91e46d450/notes" },
         "filename_matches": { "first_project_note": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}--test-command\\.md$" },
         "snapshot": {
           "repo_project": {
             "partition_key": "@derived",
             "owner_key": "32acea7eb739b08afd959db91e46d450",
             "owner_id": "u_example_alice",
-            "root_is": "ws:repo/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450",
+            "root_is": "proj:repo/memory/owners/32acea7eb739b08afd959db91e46d450",
             "notes": { "@id:first_project_note": { "revision": "@current", "origin": "extracted_user" } },
             "pending": null
           }
@@ -74,8 +73,8 @@
       "op": "ensure_project_store",
       "input": { "workspace": "ws:repo" },
       "expect": {
-        "files_exist": ["ws:repo/.openalpaca/artifacts", "ws:repo/.openalpaca/memory/.gitignore"],
-        "file_content": { "ws:repo/.openalpaca/memory/.gitignore": "*\n" }
+        "files_exist": ["proj:repo/artifacts", "proj:repo/project.json"],
+        "files_absent": ["proj:repo/memory/.gitignore", "proj:repo/README.md", "proj:repo/.gitignore", "proj:repo/.layout", "ws:repo/.openalpaca"]
       }
     },
     {
@@ -87,7 +86,7 @@
       "expect": {
         "created": true,
         "scope": "project",
-        "path_within": { "second_project_note": "ws:repo/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/notes" },
+        "path_within": { "second_project_note": "proj:repo/memory/owners/32acea7eb739b08afd959db91e46d450/notes" },
         "snapshot": {
           "repo_project": {
             "notes": {
@@ -122,7 +121,7 @@
     }
   ],
   "final_state": {
-    "files_exist": ["ws:repo/.git", "ws:repo/.openalpaca/memory/.gitignore"],
-    "file_content": { "ws:repo/.openalpaca/memory/.gitignore": "*\n" }
+    "files_exist": ["ws:repo/.git", "proj:repo/project.json"],
+    "files_absent": ["ws:repo/.openalpaca", "proj:repo/memory/.gitignore"]
   }
 }

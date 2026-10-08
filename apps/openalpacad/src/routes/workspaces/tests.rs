@@ -755,6 +755,24 @@ async fn a_re_point_renames_the_projects_folder_under_projects() {
     assert!(!before.dir.exists());
     let (_, moved) = f.get(Some(&new)).await;
     assert_eq!(moved["rows"]["artifacts"], 1);
+
+    // The bytes are where the rows now say they are: the folder moved with
+    // the project.
+    let record = ArtifactStore::new(&f.db)
+        .list(&openalpaca_storage::ArtifactQuery::new(OWNER))
+        .expect("list")
+        .0
+        .remove(0);
+    assert!(
+        record
+            .storage_path
+            .starts_with(after.dir.to_string_lossy().as_ref())
+    );
+    assert!(
+        std::path::Path::new(&record.storage_path).exists(),
+        "{} does not exist",
+        record.storage_path
+    );
 }
 
 /// A re-point is refused while a memory write for the project is in flight,
@@ -1091,10 +1109,10 @@ async fn a_real_purge_removes_the_rows_and_the_bytes_it_named() {
     f.task("t-1", &root, "completed");
     f.artifact(&root, "report.md");
     let upload = f.upload(&root, "notes.txt");
-    // A name the store did not create, in the store root itself.
-    let unknown = std::path::Path::new(&root)
-        .join(store::STORE_DIR_NAME)
-        .join("notes-of-my-own");
+    // A name the store did not create, in the project's folder.
+    let folder = store::store_root(&StoreScope::Project(std::path::PathBuf::from(&root)))
+        .expect("the project's folder");
+    let unknown = folder.join("notes-of-my-own");
     std::fs::create_dir_all(&unknown).expect("unknown dir");
 
     let (status, body) = f.purge(Some(&root), false, false).await;
@@ -1125,9 +1143,17 @@ async fn a_real_purge_removes_the_rows_and_the_bytes_it_named() {
         "the store deleted a name it did not create"
     );
     assert_eq!(action(&body, "notes-of-my-own"), "keep");
-    let artifacts = std::path::Path::new(&root)
-        .join(store::STORE_DIR_NAME)
-        .join("artifacts");
+    assert!(
+        entry(&body, "project.json").is_none(),
+        "project.json is the folder's own file, not an unknown one"
+    );
+    assert!(
+        !std::path::Path::new(&root)
+            .join(store::STORE_DIR_NAME)
+            .exists(),
+        "nothing in the project's own folder (ST-1)"
+    );
+    let artifacts = folder.join("artifacts");
     assert!(artifacts.is_dir());
 }
 

@@ -855,7 +855,7 @@ fn symlink(target: &Path, link: &Path) {
 }
 
 // ============================================================================
-// Layout, modes, .gitignore (design §2)
+// Layout and modes (design §2)
 // ============================================================================
 
 #[test]
@@ -939,13 +939,18 @@ fn open_creates_nothing_and_the_first_write_lays_out_privately() {
 }
 
 #[test]
-fn project_partition_is_created_lazily_with_gitignore_and_modes() {
+fn project_partition_is_created_lazily_in_the_projects_folder_with_private_modes() {
     let sb = Sandbox::new();
+    let folder = crate::store::projects::lookup(&sb.project_root())
+        .unwrap()
+        .unwrap()
+        .dir;
+    let memory = folder.join("memory");
     let p = sb.open_project(ALICE).unwrap();
     assert_eq!(p.health(), PartitionHealth::Absent);
     assert!(
-        !sb.project_root().join(".openalpaca").exists(),
-        "a read never creates the store"
+        !memory.exists(),
+        "a read never creates the project's memory"
     );
     let key_before = p.partition_key().to_string();
 
@@ -960,29 +965,16 @@ fn project_partition_is_created_lazily_with_gitignore_and_modes() {
         )
         .unwrap();
     assert_eq!(created.origin, Origin::ExtractedUser);
-    let store = sb.project_root().join(".openalpaca");
-    let memory = store.join("memory");
-    assert_eq!(
-        read_file(&memory.join(".gitignore")),
-        PROJECT_GITIGNORE_TEXT.as_bytes()
+    let owner = memory.join("owners").join(owner_key(ALICE));
+    assert!(owner.join("notes").is_dir());
+    assert!(owner.join(".history").is_dir());
+    assert!(
+        !memory.join(".gitignore").exists(),
+        "the notes are not in a repository any more (ST-1)"
     );
     assert!(
-        store.join("README.md").is_file(),
-        "content_dir seeded the project store"
-    );
-    assert!(
-        memory
-            .join("owners")
-            .join(owner_key(ALICE))
-            .join("notes")
-            .is_dir()
-    );
-    assert!(
-        memory
-            .join("owners")
-            .join(owner_key(ALICE))
-            .join(".history")
-            .is_dir()
+        !sb.project_root().join(".openalpaca").exists(),
+        "nothing in the project's own folder"
     );
     assert!(key_before.starts_with(&format!("proj-{}-", owner_key(ALICE))));
     #[cfg(unix)]
@@ -990,53 +982,14 @@ fn project_partition_is_created_lazily_with_gitignore_and_modes() {
         assert_eq!(fsx::mode_of(&memory), Some(0o700));
         assert_eq!(fsx::mode_of(p.root()), Some(0o700));
         assert_eq!(fsx::mode_of(p.notes_dir()), Some(0o700));
-        assert_eq!(fsx::mode_of(&memory.join(".gitignore")), Some(0o600));
         let file = p.notes_dir().join(&note_files(&p)[0]);
         assert_eq!(fsx::mode_of(&file), Some(0o600));
     }
-    // The key is stable before and after the store exists, and after the
-    // artifact path lays out the rest of `.openalpaca/`.
+    // The key is the same after the artifact path creates `artifacts/` beside it.
     crate::store::content_dir(&sb.project_scope(), crate::store::ContentKind::Artifacts).unwrap();
     let again = sb.open_project(ALICE).unwrap();
     assert_eq!(again.partition_key(), key_before);
     assert_eq!(again.snapshot().unwrap().notes.len(), 1);
-    assert_eq!(read_file(&memory.join(".gitignore")), b"*\n");
-}
-
-#[test]
-fn a_pre_existing_project_gitignore_with_other_content_is_replaced() {
-    let sb = Sandbox::new();
-    let memory = sb.project_root().join(".openalpaca").join("memory");
-    std::fs::create_dir_all(&memory).unwrap();
-    std::fs::write(memory.join(".gitignore"), "!*\n").unwrap();
-    let _p = sb.open_project(ALICE).unwrap();
-    assert_eq!(
-        read_file(&memory.join(".gitignore")),
-        b"*\n",
-        "re-asserted on open"
-    );
-    // Absent: written on open too, since `memory/` exists.
-    std::fs::remove_file(memory.join(".gitignore")).unwrap();
-    let _p = sb.open_project(ALICE).unwrap();
-    assert_eq!(read_file(&memory.join(".gitignore")), b"*\n");
-    // A symlink where the file belongs is replaced by the real file, and the
-    // link's target is not written through.
-    #[cfg(unix)]
-    {
-        std::fs::remove_file(memory.join(".gitignore")).unwrap();
-        let target = sb.outside.path().join("elsewhere");
-        std::fs::write(&target, "!*\n").unwrap();
-        symlink(&target, &memory.join(".gitignore"));
-        let _p = sb.open_project(ALICE).unwrap();
-        assert!(
-            !std::fs::symlink_metadata(memory.join(".gitignore"))
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        assert_eq!(read_file(&memory.join(".gitignore")), b"*\n");
-        assert_eq!(read_file(&target), b"!*\n", "the link target is untouched");
-    }
 }
 
 // ============================================================================
@@ -1048,16 +1001,19 @@ fn a_pre_existing_project_gitignore_with_other_content_is_replaced() {
 fn a_link_or_file_at_any_component_refuses_the_project_partition() {
     let key = owner_key(ALICE);
     let components = [
-        ".openalpaca",
-        ".openalpaca/memory",
-        ".openalpaca/memory/owners",
-        &format!(".openalpaca/memory/owners/{key}"),
-        &format!(".openalpaca/memory/owners/{key}/notes"),
-        &format!(".openalpaca/memory/owners/{key}/.history"),
+        "memory".to_string(),
+        "memory/owners".to_string(),
+        format!("memory/owners/{key}"),
+        format!("memory/owners/{key}/notes"),
+        format!("memory/owners/{key}/.history"),
     ];
-    for component in components {
+    for component in &components {
         let sb = Sandbox::new();
-        let link = sb.project_root().join(component);
+        let folder = crate::store::projects::lookup(&sb.project_root())
+            .unwrap()
+            .unwrap()
+            .dir;
+        let link = folder.join(component);
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         symlink(sb.outside.path(), &link);
         let err = sb
@@ -1075,10 +1031,6 @@ fn a_link_or_file_at_any_component_refuses_the_project_partition() {
             other => panic!("{component}: expected PathRefused, got {other:?}"),
         }
         assert!(
-            err.to_string()
-                .contains(component.rsplit('/').next().unwrap())
-        );
-        assert!(
             sb.outside_is_empty(),
             "{component}: nothing written through the link"
         );
@@ -1086,15 +1038,68 @@ fn a_link_or_file_at_any_component_refuses_the_project_partition() {
     }
     // A regular file where `memory` should be a directory.
     let sb = Sandbox::new();
-    let store = sb.project_root().join(".openalpaca");
-    std::fs::create_dir_all(&store).unwrap();
-    std::fs::write(store.join("memory"), "not a directory\n").unwrap();
+    let folder = crate::store::projects::lookup(&sb.project_root())
+        .unwrap()
+        .unwrap()
+        .dir;
+    std::fs::write(folder.join("memory"), "not a directory\n").unwrap();
     let err = sb.open_project(ALICE).expect_err("a file refuses");
     assert!(
         matches!(&err, MemoryFilesError::PathRefused { reason, .. } if reason == "not a directory")
     );
-    assert_eq!(read_file(&store.join("memory")), b"not a directory\n");
+    assert_eq!(read_file(&folder.join("memory")), b"not a directory\n");
     assert_eq!(err.class(), "fixture:path_refused");
+}
+
+/// The two levels above a project's `memory/` are the home store's own, and a
+/// link at either refuses the partition with nothing written where it leads.
+/// A link at `projects/` is followed by `projects::lookup` (S1 checks no
+/// component above a project's folder), so the open's component check names
+/// it; a link at the project's folder is a folder `lookup` never opens (S1's
+/// `read_project_dir`, R11), so the root reads as not registered.
+#[cfg(unix)]
+#[test]
+fn a_link_at_projects_or_at_the_projects_folder_refuses_the_partition() {
+    for level in ["projects", "folder"] {
+        let sb = Sandbox::new();
+        let folder = crate::store::projects::lookup(&sb.project_root())
+            .unwrap()
+            .unwrap()
+            .dir;
+        let name = folder.file_name().unwrap().to_os_string();
+        let link = match level {
+            "projects" => folder.parent().unwrap().to_path_buf(),
+            _ => folder.clone(),
+        };
+        // The real directory moves beside `outside`, so the link still leads to
+        // the project's project.json; the link takes its place.
+        let moved = sb.outside.path().join("moved");
+        std::fs::rename(&link, &moved).unwrap();
+        symlink(&moved, &link);
+
+        let err = sb
+            .open_project(ALICE)
+            .err()
+            .unwrap_or_else(|| panic!("{level} must refuse"));
+        match (level, &err) {
+            ("projects", MemoryFilesError::PathRefused { component, reason }) => {
+                assert_eq!(component, &link);
+                assert!(reason.contains("symbolic link"), "{reason}");
+            }
+            ("folder", MemoryFilesError::NotRegistered { root }) => {
+                assert_eq!(root, &sb.project_root());
+            }
+            (level, other) => panic!("{level}: unexpected refusal {other:?}"),
+        }
+        let through_link = match level {
+            "projects" => moved.join(&name).join("memory"),
+            _ => moved.join("memory"),
+        };
+        assert!(
+            !through_link.exists(),
+            "{level}: nothing written through the link"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -3593,8 +3598,7 @@ fn move_snapshots_are_classified_stale_abandoned_or_orphaned() {
 /// named project), every other owner's as an orphan, a partition whose
 /// snapshot is gone as quarantined, the same-`fact_key` conflict, and a
 /// move that never finished as an abandoned snapshot — and it opens nothing
-/// for writing: a project `.gitignore` the service would re-assert stays as
-/// it was found.
+/// for writing: a forgotten note's file put back stays as it was found.
 #[test]
 fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing() {
     let sb = Sandbox::new();
@@ -3657,10 +3661,6 @@ fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing(
         ts(2026, 9, 24, 9, 0, 0),
     )
     .unwrap();
-    // A cloned repository's force-added ignore file: `Partition::open` would
-    // rewrite it, the doctor must not.
-    let gitignore = project.memory_dir().join(".gitignore");
-    std::fs::write(&gitignore, "!*\n").unwrap();
     // A forgotten note whose file and `.history` came back (scale slice S3):
     // a scan opened for writing deletes them; the doctor's read-only one
     // leaves the note out and deletes nothing.
@@ -3728,11 +3728,6 @@ fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing(
     assert_eq!(report.move_snapshots[0].partition_key, twin.partition_key);
     assert!(report.refused.is_empty(), "{:?}", report.refused);
     assert!(report.unreadable_snapshots.is_empty());
-    assert_eq!(
-        std::fs::read_to_string(&gitignore).unwrap(),
-        "!*\n",
-        "the doctor changes nothing"
-    );
     assert!(
         gone_file.exists() && gone_history.exists(),
         "nor deletes a forgotten note's file or history"

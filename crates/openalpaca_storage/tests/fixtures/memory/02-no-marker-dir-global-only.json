@@ -1,12 +1,12 @@
 {
   "row": {
     "id": 2,
-    "scenario": "CLI turn in a directory with no `.openalpaca` or `.git` above it",
+    "scenario": "CLI turn in a directory with no `.git` above it and never chosen as a project",
     "required_outcome": "Global only; no partition is created there"
   },
   "design": ["§3 rule 1 (MD-5): a workspace with no marker above it reads and writes only the owner's global partition", "§3 rule 2"],
   "loads_in": ["slice-3"],
-  "notes_for_implementer": "The workspace `plain_dir` has no marker and sits directly under the temporary root, which has none either (the loader must not create the temporary root inside a git checkout — a `.git` above it would turn the whole root into a project). A `fact` store, whose default scope is project, must land in the home partition, and `plain_dir` must gain no `.openalpaca` directory at all, not even an empty one. Step 3 pins a reading the design leaves implicit: an explicit `scope: project` from a request that resolves no project root is refused as `invalid_input` (design §5 step 1: an unknown or unauthorized root fails closed) rather than silently written to global.",
+  "notes_for_implementer": "The workspace `plain_dir` has no marker and sits directly under the temporary root, which has none either (the loader must not create the temporary root inside a git checkout — a `.git` above it would turn the whole root into a project). A `fact` store, whose default scope is project, must land in the home partition, and `plain_dir` must gain nothing, and no folder is created under the home store's `projects/`. Step 3 pins a reading the design leaves implicit: an explicit `scope: project` from a request that resolves no project root is refused as `invalid_input` (design §5 step 1: an unknown or unauthorized root fails closed) rather than silently written to global.",
   "owners": [
     { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
   ],
@@ -77,7 +77,7 @@
         "scope": "global",
         "origin": "extracted_user",
         "path_within": { "fact_here": "part:alice_home/notes" },
-        "files_absent": ["ws:plain_dir/.openalpaca", "ws:plain_dir/notes-about-nothing/.openalpaca"]
+        "files_absent": ["ws:plain_dir/.openalpaca", "ws:plain_dir/notes-about-nothing/.openalpaca", "home/projects"]
       }
     },
     {
@@ -89,7 +89,7 @@
       "expect": {
         "refused": "invalid_input",
         "message_contains": ["project"],
-        "files_absent": ["ws:plain_dir/.openalpaca"]
+        "files_absent": ["ws:plain_dir/.openalpaca", "home/projects"]
       }
     },
     {
@@ -101,7 +101,7 @@
     }
   ],
   "final_state": {
-    "files_absent": ["ws:plain_dir/.openalpaca", "ws:plain_dir/.git"],
+    "files_absent": ["ws:plain_dir/.openalpaca", "ws:plain_dir/.git", "home/projects"],
     "files_exist": ["home/memory/owners/32acea7eb739b08afd959db91e46d450/notes"]
   }
 }

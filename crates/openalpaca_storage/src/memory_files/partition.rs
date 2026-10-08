@@ -3,9 +3,9 @@
 //! `<home-store>/state/memory-control/<partition-key>.json` (design §2).
 //!
 //! **Opening never creates anything** (a read never creates the project
-//! store, design §3 rule 1); the first write lays the partition out lazily
-//! through `store::content_dir` — private directories, the project
-//! `.gitignore`, an initial snapshot — in one place, [`Partition::ensure_laid_out`].
+//! store, design §3 rule 1); the first write lays the partition out lazily —
+//! private directories and an initial snapshot — in one place,
+//! [`Partition::ensure_laid_out`].
 //!
 //! **Every mutation touches at most one note file** (design §6): the steps of
 //! the mutation table are [`Partition::commit_write`] and [`Partition::forget`],
@@ -17,7 +17,7 @@ use super::authority::{Conflict, Derivation, DerivedNote, EffectiveStatus, NoteI
 use super::cache::{FileEntry, NoteParseCache, ParsedNote, StatKey};
 use super::dirstat;
 use super::fsx::{
-    ComponentState, canonical_string_lenient, create_private_dir, fsync_dir, read_regular_nofollow,
+    canonical_string_lenient, create_private_dir, fsync_dir, read_regular_nofollow,
     real_directory_state, remove_dir_all_if_exists, remove_file_if_exists, write_atomic_private,
 };
 use super::note::{NewNote, Note, NoteId, NotePatch, NoteStatus, ReplacePolicy, to_second};
@@ -27,11 +27,11 @@ use super::snapshot::{
 };
 use super::{
     CONTROL_DIR, HISTORY_DIR, HISTORY_KEEP, MemoryFilesError, NAVIGATION_FILE, NOTES_DIR,
-    OWNERS_DIR, PROJECT_GITIGNORE_TEXT, home_partition_key, is_owner_key, is_partition_key,
-    is_revision, owner_key, project_partition_key,
+    OWNERS_DIR, home_partition_key, is_owner_key, is_partition_key, is_revision, owner_key,
+    project_partition_key,
 };
 use crate::store::projects;
-use crate::store::{ContentKind, StoreScope, content_dir, home_root, state_dir, store_root};
+use crate::store::{ContentKind, StoreScope, home_root, state_dir};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, HashSet};
@@ -600,11 +600,17 @@ fn scope_root(scope: &StoreScope) -> Result<(PathBuf, Vec<PathBuf>), MemoryFiles
                     root.display()
                 )));
             }
-            if projects::lookup(root)?.is_none() {
+            let Some(project) = projects::lookup(root)? else {
                 return Err(MemoryFilesError::NotRegistered { root: root.clone() });
-            }
-            let store = store_root(scope)?;
-            Ok((store.clone(), vec![store]))
+            };
+            // The folder as the home store names it, not canonicalized:
+            // `Project::dir` is canonical, so a link at `projects/` (which
+            // `lookup` follows) would be resolved away before it could be
+            // checked. A link at the folder itself never gets here — `lookup`
+            // opens no linked folder (R11) — and the folder is checked anyway.
+            let parent = projects::projects_dir()?;
+            let store = parent.join(&project.name);
+            Ok((store.clone(), vec![parent, store]))
         }
     }
 }
@@ -633,8 +639,8 @@ fn now_seconds() -> DateTime<Utc> {
     to_second(Utc::now())
 }
 
-/// Whether an open may write: an ordinary open re-asserts the project
-/// `.gitignore` and runs recovery; a read-only one does neither.
+/// Whether an open may write: an ordinary open runs recovery; a read-only
+/// one does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenMode {
     ReadWrite,
@@ -644,15 +650,15 @@ enum OpenMode {
 impl Partition {
     /// Opens the owner's partition in `scope` without creating anything.
     ///
-    /// Design §3 rule 1: every component on the way — `<project>/.openalpaca`,
-    /// `memory`, `owners`, `owners/<owner-key>`, `notes`, `.history` — is
-    /// checked with `symlink_metadata`; a link, a junction or a non-directory
-    /// at any level refuses the partition with [`MemoryFilesError::PathRefused`]
-    /// naming it. The home root itself is not checked (it is the store's,
-    /// possibly a link by design); the components below it are.
+    /// Design §3 rule 1: every component on the way — for a project, the home
+    /// store's `projects/` and the project's folder, then `memory`, `owners`,
+    /// `owners/<owner-key>`, `notes`, `.history` — is checked with
+    /// `symlink_metadata`; a link, a junction or a non-directory at any level
+    /// refuses the partition with [`MemoryFilesError::PathRefused`] naming it.
+    /// The home root itself is not checked (it is the store's, possibly a link
+    /// by design); the components below it are.
     ///
-    /// A project partition whose `memory/` exists gets its `.gitignore`
-    /// re-asserted (MD-7). A valid snapshot runs recovery (design §6).
+    /// A valid snapshot runs recovery (design §6).
     pub fn open(scope: &StoreScope, owner_id: &str) -> Result<Self, MemoryFilesError> {
         Self::open_inner(
             scope,
@@ -683,15 +689,14 @@ impl Partition {
 
     /// Opens a partition **by owner key**, for reading only: the path checks
     /// of [`Partition::open`], the snapshot loaded and the quarantine
-    /// decided, but no project `.gitignore` re-asserted and no recovery run
-    /// — the two writes an ordinary open makes. What `doctor` (design §6,
-    /// *Management operations*: "it changes nothing") opens every partition
-    /// with, another owner's included, whose id it does not know. A key that
-    /// is not 32 lowercase hex characters is refused before it is joined to
-    /// anything. Mutations through a partition opened this way are refused
-    /// by the ordinary quarantine check where they would be anyway; nothing
-    /// else distinguishes it, so a caller that opened read-only must not
-    /// write through it.
+    /// decided, but no recovery run — the one write an ordinary open makes.
+    /// What `doctor` (design §6, *Management operations*: "it changes
+    /// nothing") opens every partition with, another owner's included, whose
+    /// id it does not know. A key that is not 32 lowercase hex characters is
+    /// refused before it is joined to anything. Mutations through a partition
+    /// opened this way are refused by the ordinary quarantine check where they
+    /// would be anyway; nothing else distinguishes it, so a caller that opened
+    /// read-only must not write through it.
     pub fn open_readonly(scope: &StoreScope, owner_key: &str) -> Result<Self, MemoryFilesError> {
         if !is_owner_key(owner_key) {
             return Err(MemoryFilesError::InvalidInput(format!(
@@ -723,18 +728,9 @@ impl Partition {
             notes_dir.as_path(),
             history_dir.as_path(),
         ]);
-        let mut memory_exists = false;
         for component in components {
-            match real_directory_state(component) {
-                Ok(ComponentState::Directory) => {
-                    if component == memory_dir {
-                        memory_exists = true;
-                    }
-                }
-                Ok(ComponentState::Absent) => {}
-                Err((component, reason)) => {
-                    return Err(MemoryFilesError::PathRefused { component, reason });
-                }
+            if let Err((component, reason)) = real_directory_state(component) {
+                return Err(MemoryFilesError::PathRefused { component, reason });
             }
         }
 
@@ -771,10 +767,6 @@ impl Partition {
             #[cfg(test)]
             crash: Mutex::new(None),
         };
-
-        if mode == OpenMode::ReadWrite && scope_kind == SnapshotScope::Project && memory_exists {
-            partition.assert_gitignore()?;
-        }
 
         let loaded = match partition.load_snapshot() {
             Ok(Some(snapshot)) => match snapshot.check_binding(
@@ -970,7 +962,7 @@ impl Partition {
     pub fn snapshot_path(&self) -> &Path {
         &self.snapshot_path
     }
-    /// `<store>/memory`, where a project's `.gitignore` lives.
+    /// `<store>/memory`.
     pub fn memory_dir(&self) -> &Path {
         &self.memory_dir
     }
@@ -1013,36 +1005,10 @@ impl Partition {
         Ok(!self.scan()?.is_empty())
     }
 
-    /// MD-7: the project partition's `.gitignore` is store-owned — rewritten
-    /// atomically whenever its bytes are not `*\n`, so a cloned repository's
-    /// force-added `!*` cannot stage the owner's notes.
-    fn assert_gitignore(&self) -> Result<(), MemoryFilesError> {
-        if self.scope_kind != SnapshotScope::Project {
-            return Ok(());
-        }
-        let path = self.memory_dir.join(".gitignore");
-        let current = match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.file_type().is_file() => read_regular_nofollow(&path).ok(),
-            Ok(_) => None, // a link or a directory where our file belongs
-            Err(_) => None,
-        };
-        if current.as_deref() != Some(PROJECT_GITIGNORE_TEXT.as_bytes()) {
-            if let Ok(meta) = fs::symlink_metadata(&path)
-                && meta.file_type().is_dir()
-            {
-                remove_dir_all_if_exists(&path)?;
-            }
-            write_atomic_private(&path, PROJECT_GITIGNORE_TEXT.as_bytes())?;
-        }
-        Ok(())
-    }
-
-    /// Lays the partition out on the first write: the store through
-    /// `store::content_dir` (which seeds a project's `.openalpaca/`), `memory/`
-    /// and the owner directories private (0700), the project `.gitignore`,
-    /// and an initial empty snapshot — written last, so an interrupted layout
-    /// is an empty directory the next open initializes again, never a
-    /// snapshot over notes it did not record.
+    /// Lays the partition out on the first write: `memory/` and the owner
+    /// directories private (0700), and an initial empty snapshot — written
+    /// last, so an interrupted layout is an empty directory the next open
+    /// initializes again, never a snapshot over notes it did not record.
     fn ensure_laid_out(&self, state: &mut State) -> Result<(), MemoryFilesError> {
         if let Some(reason) = &state.quarantine {
             return Err(MemoryFilesError::Quarantined {
@@ -1053,22 +1019,24 @@ impl Partition {
         if state.snapshot.is_some() {
             return Ok(());
         }
-        // Re-check the path right before creating anything on it.
-        for component in [
+        // Re-check the path right before creating anything on it — the
+        // project's folder and `projects/` above `memory/` too.
+        let (_, above) = scope_root(&self.scope)?;
+        let owners = self.memory_dir.join(OWNERS_DIR);
+        let below = [
             self.memory_dir.as_path(),
-            self.memory_dir.join(OWNERS_DIR).as_path(),
+            owners.as_path(),
             self.root.as_path(),
             self.notes_dir.as_path(),
             self.history_dir.as_path(),
-        ] {
+        ];
+        for component in above.iter().map(PathBuf::as_path).chain(below) {
             if let Err((component, reason)) = real_directory_state(component) {
                 return Err(MemoryFilesError::PathRefused { component, reason });
             }
         }
-        let memory = content_dir(&self.scope, ContentKind::Memory)?;
-        create_private_dir(&memory)?;
-        self.assert_gitignore()?;
-        create_private_dir(&self.memory_dir.join(OWNERS_DIR))?;
+        create_private_dir(&self.memory_dir)?;
+        create_private_dir(&owners)?;
         create_private_dir(&self.root)?;
         create_private_dir(&self.notes_dir)?;
         create_private_dir(&self.history_dir)?;

@@ -23,9 +23,9 @@ added (design 09 §6.5.6, LQ17).
 | File | Matrix row (plan §5) | Loads in |
 |---|---|---|
 | `01-cwd-never-selects-partition.json` | Global or connector request, daemon started by hand inside project A | slice 3 |
-| `02-no-marker-dir-global-only.json` | CLI turn in a directory with no `.openalpaca` or `.git` above it | slice 3 |
-| `03-git-repo-lazy-partition.json` | CLI turn inside a git repository with no `.openalpaca/` yet | slice 2, 3 |
-| `04-symlink-on-partition-path-refused.json` | A git-committed symlink at `.openalpaca`, `memory`, `owners/<key>` or `notes` | slice 2, 3 |
+| `02-no-marker-dir-global-only.json` | CLI turn in a directory with no `.git` above it and never chosen as a project | slice 3 |
+| `03-git-repo-lazy-partition.json` | CLI turn inside a git repository; the project's notes go to its folder under the home store | slice 2, 3 |
+| `04-symlink-on-partition-path-refused.json` | A symlink, or a file, at `memory`, `owners/<key>` or `notes` in a project's folder under the home store | slice 2, 3 |
 | `06-newer-database-refused.json` | Any slice-0-or-later build meets a newer database | slice 0 (landed), 3 |
 | `07-hidden-parameters-refused.json` | The model supplies hidden owner, workspace or path parameters | slice 3 |
 | `08-system-principal-no-partition.json` | A `/v1/command process` turn, its workflow and its subagents | slice 3 |
@@ -61,7 +61,9 @@ pre-squash database now meets row 06's refusal.
    `OPENALPACA_HOME_STORE` points at `<tmp>/home` for the whole run.
 2. Set up the **database** rows the file names, the **workspaces**, the extra
    **directories**, the **partitions** with their notes and control snapshots, and
-   the **daemon** facts (its CWD, its LLM configuration).
+   the **daemon** facts (its CWD, its LLM configuration). A workspace a project
+   partition names is registered (`store::projects::register`), as the daemon's
+   first turn there would be; then the `home_links` and `home_files` are made.
 3. Build each named **context** (`MemoryAccessContext`, design §7a) exactly as the
    file says. The loader resolves the project root from the request workspace
    path with the store's own resolver (`store::projects::resolve`, storage design
@@ -87,6 +89,8 @@ library.
 | `owners` | yes | `[{ "id", "owner_key" }]` — every owner id the file mentions, with its derived key (below) |
 | `database` | no | `{ "global_users": [ids], "local_user_id": id, "messages": [rowid strings], "tasks": [uuids] }` — the rows the identity check and source verification see; absent means the same as empty |
 | `workspaces` | no | `[{ "name", "marker": ".git" \| null, "subdirs": [..], "symlinks": [{ "path", "target" }], "files": [{ "path", "content" }] }]` — `subdirs`, `symlinks` and `files` are relative to the workspace and are created in that order, after the marker — any other marker fails the load |
+| `home_links` | no | `[{ "path": <proj: path>, "target": <@ path> }]` — symlinks inside a project's folder under the home store, made after every project partition's workspace is registered |
+| `home_files` | no | `[{ "path": <proj: path>, "content" }]` — files there, made at the same point |
 | `directories` | no | extra plain directories, by name (symlink targets, a moved-to location) |
 | `daemon` | no | `{ "cwd": <fixture path>, "llm": "configured" \| "none", "network": "allowed" \| "denied" }` — `network: denied` means the harness runs under plan §6's no-network mechanism |
 | `partitions` | no | see *Partitions* |
@@ -108,6 +112,7 @@ A fixture path is `<root>/<relative>`; the loader substitutes the root:
 | `ws:<name>` | the workspace directory `<name>` |
 | `dir:<name>` | the extra directory `<name>` |
 | `part:<name>` | the partition directory of partition `<name>` (`…/memory/owners/<owner-key>`) |
+| `proj:<name>` | the folder of workspace `<name>`'s project under the home store's `projects/` (the workspace is registered) |
 
 A `daemon.cwd`, a context's `workspace`, a `move_workspace` target and every
 `files_exist` / `files_absent` entry use this form.
@@ -285,7 +290,7 @@ file's `loads_in` says which slice owns the whole file.
 | `open_database` | `{ "stamped_version": N, "path": <fixture path> }` — create a fresh database there, stamp `schema_version` to N, reopen. The database opener, not the memory library | database |
 | `recently_used` | `{ "limit" }` — `GET /v1/memories/recently-used` | service |
 | `remove_partition` | `{ "partition" }` — the harness deletes that partition's directory and snapshot outright (an owner clearing a collision by hand before `adopt`) | harness |
-| `ensure_project_store` | `{ "workspace": <fixture path> }` — the artifact path's `ensure_store` for that project (the first artifact write), which lays out the rest of `<project>/.openalpaca/` | store |
+| `ensure_project_store` | `{ "workspace": <fixture path> }` — the artifact path's first write for that project, which creates `artifacts/` in the project's folder under `projects/` and nothing else | store |
 | `begin_pending_write` / `end_pending_write` | `{ "partition" }` — hold a memory write of that partition in flight (the quiesce hook's view of "pending") | service |
 | `move_workspace` | `{ "from": <fixture path>, "to": <fixture path>, "crash_after_step"?: 1..5 }` — `PATCH /v1/workspaces` with the five ordered steps of design §3 | service |
 | `purge` | `{ "workspace" }` — `POST /v1/workspaces/purge` | service |

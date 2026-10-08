@@ -10,11 +10,11 @@
 //! - the owner key and partition key derivations (design §2);
 //! - the control snapshot ([`ControlSnapshot`], design §7a), replaced
 //!   atomically, one per partition, under `state/memory-control/`;
-//! - a [`Partition`]: confinement of the path to it (design §3 rule 1), the
-//!   project `.gitignore` assertion (MD-7), private modes, the atomic write,
-//!   `.history`, the mutation protocol with its single `pending` field and the
-//!   recovery table (design §6), tombstone-first forget, the scanner and the
-//!   reconciliation of external changes;
+//! - a [`Partition`]: confinement of the path to it (design §3 rule 1),
+//!   private modes, the atomic write, `.history`, the mutation protocol with
+//!   its single `pending` field and the recovery table (design §6),
+//!   tombstone-first forget, the scanner and the reconciliation of external
+//!   changes;
 //! - the derived supersession, authority and same-`fact_key` computation over
 //!   a partition's notes and snapshot ([`derive`], design §6, §7b P3/P4/P6);
 //! - the management operations: the read-only `doctor` scan ([`doctor`]),
@@ -97,8 +97,6 @@ pub const HISTORY_KEEP: usize = 5;
 pub const SLUG_MAX_BYTES: usize = 48;
 /// The slug used when [`crate::store::slugify`] has nothing left of a title.
 pub const EMPTY_TITLE_SLUG: &str = "note";
-/// The project partition's `.gitignore`, byte-exact (MD-7).
-pub const PROJECT_GITIGNORE_TEXT: &str = "*\n";
 /// Directory names inside a partition (design §2).
 pub const OWNERS_DIR: &str = "owners";
 pub const NOTES_DIR: &str = "notes";

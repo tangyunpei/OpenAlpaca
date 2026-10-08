@@ -259,26 +259,25 @@ fn open_home_database_creates_the_state_directory_at_0700() {
 /// passes — bytes and row — so no retention row may promise those files are kept
 /// forever. Produced artifacts are genuinely never swept; only uploads are.
 #[test]
-fn the_readmes_tell_the_truth_about_upload_retention() {
-    for (name, text) in [("home", HOME_README), ("project", PROJECT_README)] {
-        let uploads = text
+fn the_home_readme_tells_the_truth_about_upload_retention() {
+    let uploads = HOME_README
+        .lines()
+        .find(|line| line.starts_with("| `uploads/`"))
+        .expect("the home README has an uploads/ row");
+    assert!(
+        !uploads.contains("never garbage-collected"),
+        "the home README promises uploads survive, but the sweep deletes them: {uploads}"
+    );
+    assert!(
+        uploads.contains("grace period"),
+        "the home README must name the retention rule the sweep applies: {uploads}"
+    );
+    assert!(
+        HOME_README
             .lines()
-            .find(|line| line.starts_with("| `uploads/`"))
-            .unwrap_or_else(|| panic!("the {name} README has no uploads/ row"));
-        assert!(
-            !uploads.contains("never garbage-collected"),
-            "the {name} README promises uploads survive, but the sweep deletes them: {uploads}"
-        );
-        assert!(
-            uploads.contains("grace period"),
-            "the {name} README must name the retention rule the sweep applies: {uploads}"
-        );
-        assert!(
-            text.lines()
-                .any(|line| line.starts_with("| `artifacts/`") && line.contains("never")),
-            "the {name} README must keep saying produced artifacts are never swept"
-        );
-    }
+            .any(|line| line.starts_with("| `artifacts/`") && line.contains("never")),
+        "the home README must keep saying produced artifacts are never swept"
+    );
 }
 
 #[test]
@@ -319,11 +318,9 @@ fn ensure_store_seeds_the_home_root() {
 
 /// The memory redesign's rows (plan 3.7): the home README names the control
 /// snapshots and the search index under `state/` and the notes under
-/// `memory/`, and says nothing of an embedding model; the project README
-/// says owner memory is git-ignored by its own `.gitignore` (MD-7) — the
-/// opposite of what it said while memory lived in the database.
+/// `memory/`, and says nothing of an embedding model.
 #[test]
-fn the_readmes_describe_markdown_memory() {
+fn the_home_readme_describes_markdown_memory() {
     for needle in [
         "| `state/memory-control/` |",
         "`memory-index-v1.sqlite`",
@@ -341,18 +338,6 @@ fn the_readmes_describe_markdown_memory() {
             "the home README must not say {stale:?}"
         );
     }
-    let memory_row = PROJECT_README
-        .lines()
-        .find(|line| line.starts_with("| `memory/`"))
-        .expect("the project README has its own memory/ row");
-    assert!(
-        memory_row.contains("git-ignored by its own `.gitignore`"),
-        "the project README must say owner memory is git-ignored by its own file: {memory_row}"
-    );
-    assert!(
-        !PROJECT_README.contains("| `memory/`, `skills/`, `config/` |"),
-        "the old shared row said memory was deliberately not git-ignored"
-    );
 }
 
 /// The README is the user's the moment it exists: it is written only when
@@ -374,90 +359,93 @@ fn ensure_store_leaves_an_edited_home_readme_alone() {
     }
 }
 
+/// ST-1: a project's store is its folder under the home store's
+/// `projects/`, found by `projects::lookup`; `content_dir` keeps its shape
+/// beneath it, and nothing is written into the project's own folder — no
+/// README, no `.gitignore`, no `.layout` either (R3).
 #[test]
-fn ensure_store_seeds_a_project_root() {
+fn a_project_store_is_its_folder_under_projects() {
     let tmp = tempdir().unwrap();
-    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
-    // without this it would canonicalize the owner's real store.
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let project = tmp.path().to_path_buf();
+    let root = tmp.path().canonicalize().unwrap();
+    let _guard = HomeStoreGuard::set(&root.join("home"));
+    let project = root.join("work").join("app");
+    fs::create_dir_all(&project).unwrap();
+    let registered = projects::register(&project).unwrap();
     let scope = StoreScope::Project(project.clone());
 
-    let root = ensure_store(&scope).unwrap();
-    assert_eq!(root, project.join(".openalpaca"));
-
-    let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
+    let store = store_root(&scope).unwrap();
+    assert_eq!(store, registered.dir);
     assert_eq!(
-        gitignore,
-        "/.layout\n/uploads/\n/sessions/\n/scratch/\n/cache/\n.versions/\n"
+        store,
+        root.join("home")
+            .join(projects::PROJECTS_DIR)
+            .join(projects::folder_name(&project))
     );
-    assert!(
-        fs::read_to_string(root.join("README.md"))
-            .unwrap()
-            .contains("project store")
-    );
-    assert_eq!(layout_version(&root).unwrap(), Some(1));
+    assert_eq!(ensure_store(&scope).unwrap(), store);
     assert_eq!(
-        install_id(&root).unwrap(),
-        None,
-        "only the home root carries an install id"
+        content_dir(&scope, ContentKind::Uploads).unwrap(),
+        store.join("uploads")
     );
-
-    // User edits stick.
-    fs::write(root.join(".gitignore"), "# mine\n").unwrap();
-    ensure_store(&scope).unwrap();
+    let mut entries: Vec<String> = fs::read_dir(&store)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
     assert_eq!(
-        fs::read_to_string(root.join(".gitignore")).unwrap(),
-        "# mine\n"
+        entries,
+        [projects::PROJECT_FILE, "uploads"],
+        "project.json and content only (R3)"
+    );
+    assert_eq!(
+        fs::read_dir(&project).unwrap().count(),
+        0,
+        "nothing in the project's own folder (ST-1)"
     );
 }
 
-/// `walk_up_for_marker` counts `.openalpaca` as a project marker, so a path
-/// under `$HOME` with no closer marker resolves to `$HOME` — whose "project
-/// store" is the home root itself. Seeded from the project branch, that put a
-/// `.gitignore` in the home root and a README describing a project store. The
-/// metadata follows the resolved root, not the scope variant.
+/// R12: a root with no folder under `projects/` has no store. `store_root`,
+/// `ensure_store` and `content_dir` answer the typed `NotRegistered` error,
+/// which `projects::is_not_registered` recognises, and create nothing — not
+/// under the home store, not in the folder.
 #[test]
-fn ensure_store_on_a_project_that_is_the_home_root_seeds_the_home_metadata() {
+fn an_unregistered_project_root_has_no_store_and_nothing_is_created() {
     let tmp = tempdir().unwrap();
-    let home = tmp.path().join("home");
-    let _guard = HomeStoreGuard::set(&home.join(".openalpaca"));
+    let root = tmp.path().canonicalize().unwrap();
+    let _guard = HomeStoreGuard::set(&root.join("home"));
+    let repo = root.join("work").join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let scope = StoreScope::Project(repo.clone());
 
-    // `Project($HOME)` — the shape a CWD under `$HOME` with no marker resolves
-    // to. Its store root is `$HOME/.openalpaca`, which *is* the home root.
-    let root = ensure_store(&StoreScope::Project(home.clone())).unwrap();
-    assert_eq!(root, home.join(".openalpaca"));
-
-    assert!(
-        !root.join(".gitignore").exists(),
-        "no project .gitignore is written into the home root"
+    for err in [
+        store_root(&scope).unwrap_err(),
+        ensure_store(&scope).unwrap_err(),
+        content_dir(&scope, ContentKind::Artifacts).unwrap_err(),
+    ] {
+        assert!(projects::is_not_registered(&err), "{err:#}");
+        assert_eq!(
+            err.downcast_ref::<projects::ProjectError>()
+                .map(projects::ProjectError::code),
+            Some("WORKSPACE_NOT_FOUND")
+        );
+    }
+    assert!(!root.join("home").exists(), "nothing under the home store");
+    assert_eq!(
+        fs::read_dir(&repo).unwrap().count(),
+        1,
+        "the folder holds its .git and nothing else"
     );
-    let readme = fs::read_to_string(root.join("README.md")).unwrap();
-    assert!(
-        readme.contains("Retention class") && !readme.contains("project store"),
-        "the home README is the one seeded"
-    );
-    assert!(
-        install_id(&root).unwrap().is_some(),
-        "and the home root's install id with it"
-    );
-
-    // A real project under the home directory — one with a root of its own — is
-    // untouched by the fold.
-    let inner = home.join("work");
-    let inner_root = ensure_store(&StoreScope::Project(inner.clone())).unwrap();
-    assert_eq!(inner_root, inner.join(".openalpaca"));
-    assert!(inner_root.join(".gitignore").exists());
 }
 
 #[test]
 fn unknown_entries_names_only_what_the_store_did_not_create() {
     let tmp = tempdir().unwrap();
-    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
-    // without this it would canonicalize the owner's real store.
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let scope = StoreScope::Project(tmp.path().to_path_buf());
-    let root = ensure_store(&scope).unwrap();
+    let root = tmp.path().join("store");
+    fs::create_dir_all(&root).unwrap();
+    // The store's own files are known — a project folder's `project.json` too.
+    for known in [".layout", "README.md", ".gitignore", "project.json"] {
+        fs::write(root.join(known), "x").unwrap();
+    }
     // Two kinds the store created, and two names it did not.
     fs::create_dir_all(root.join("artifacts")).unwrap();
     fs::create_dir_all(root.join("uploads")).unwrap();
@@ -476,11 +464,8 @@ fn unknown_entries_names_only_what_the_store_did_not_create() {
 #[test]
 fn unknown_entries_treats_state_and_plugins_as_home_only_names() {
     let tmp = tempdir().unwrap();
-    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
-    // without this it would canonicalize the owner's real store.
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let scope = StoreScope::Project(tmp.path().to_path_buf());
-    let root = ensure_store(&scope).unwrap();
+    let root = tmp.path().join("store");
+    fs::create_dir_all(&root).unwrap();
     fs::create_dir_all(root.join("state")).unwrap();
     fs::create_dir_all(root.join("plugins")).unwrap();
 
@@ -506,11 +491,8 @@ fn unknown_entries_treats_state_and_plugins_as_home_only_names() {
 #[test]
 fn unknown_entries_treats_config_as_reserved_in_both_scopes() {
     let tmp = tempdir().unwrap();
-    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
-    // without this it would canonicalize the owner's real store.
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let scope = StoreScope::Project(tmp.path().to_path_buf());
-    let root = ensure_store(&scope).unwrap();
+    let root = tmp.path().join("store");
+    fs::create_dir_all(&root).unwrap();
     fs::create_dir_all(root.join("config")).unwrap();
     fs::create_dir_all(root.join("notes")).unwrap();
 
@@ -535,11 +517,8 @@ fn unknown_entries_treats_config_as_reserved_in_both_scopes() {
 #[test]
 fn unknown_entries_reserves_dot_versions_even_though_nothing_writes_it_at_the_root() {
     let tmp = tempdir().unwrap();
-    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
-    // without this it would canonicalize the owner's real store.
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let scope = StoreScope::Project(tmp.path().to_path_buf());
-    let root = ensure_store(&scope).unwrap();
+    let root = tmp.path().join("store");
+    fs::create_dir_all(&root).unwrap();
     fs::create_dir_all(root.join(".versions")).unwrap();
 
     assert!(
@@ -576,22 +555,21 @@ fn a_malformed_layout_marker_is_repaired_not_appended_to() {
 #[test]
 fn layout_lines_this_module_does_not_own_are_preserved() {
     let tmp = tempdir().unwrap();
-    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
-    // without this it would canonicalize the owner's real store.
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let scope = StoreScope::Project(tmp.path().to_path_buf());
-    let root = ensure_store(&scope).unwrap();
-    // A future project id (P-12) must survive a repair of line 1.
-    fs::write(root.join(".layout"), "garbage\nproject_id=abc\n").unwrap();
+    let _guard = HomeStoreGuard::set(tmp.path());
+    fs::write(
+        tmp.path().join(".layout"),
+        "garbage\ninstall_id=abc\nproject_id=def\n",
+    )
+    .unwrap();
 
-    ensure_store(&scope).unwrap();
+    ensure_store(&StoreScope::Home).unwrap();
 
-    let text = fs::read_to_string(root.join(".layout")).unwrap();
     assert_eq!(
-        text, "1\nproject_id=abc\n",
-        "line 1 repaired, the foreign line kept, nothing added"
+        fs::read_to_string(tmp.path().join(".layout")).unwrap(),
+        "1\ninstall_id=abc\nproject_id=def\n",
+        "line 1 repaired, every other line kept, nothing added"
     );
-    assert_eq!(recorded_project_root(&root).unwrap(), None);
+    assert_eq!(install_id(tmp.path()).unwrap().as_deref(), Some("abc"));
 }
 
 /// `recorded_project_root` reads what an earlier build wrote into an
@@ -634,20 +612,6 @@ fn no_temp_file_survives_a_layout_write() {
 // ============================================================================
 // Content stores
 // ============================================================================
-
-#[test]
-fn a_project_content_dir_seeds_the_store_first() {
-    let tmp = tempdir().unwrap();
-    let project = tmp.path().to_path_buf();
-
-    let uploads = content_dir(&StoreScope::Project(project.clone()), ContentKind::Uploads).unwrap();
-
-    assert!(uploads.is_dir());
-    assert!(
-        project.join(".openalpaca").join(".gitignore").exists(),
-        "uploads must never exist before the .gitignore that excludes them from git"
-    );
-}
 
 #[test]
 fn content_dirs_have_the_same_shape_in_both_scopes() {

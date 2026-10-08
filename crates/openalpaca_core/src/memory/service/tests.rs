@@ -427,10 +427,10 @@ fn a_note_stored_from_an_unregistered_repository_lands_in_the_home_partition() {
     );
 }
 
-/// Fixture 03: inside a git repository with no `.openalpaca/` yet, a read
-/// creates nothing; the first project write lays the partition out with its
-/// own `.gitignore`; the artifact path's `ensure_store` in between changes
-/// nothing about the partition key; a preference still goes global.
+/// Fixture 03: inside a git repository, a read creates nothing; the first
+/// project write lays the partition out in the project's folder under
+/// `projects/`; the artifact path's first write in between changes nothing
+/// about the partition key; a preference still goes global.
 #[test]
 fn a_git_repo_gets_its_partition_lazily_before_and_after_the_first_artifact() {
     let h = Harness::new();
@@ -463,9 +463,9 @@ fn a_git_repo_gets_its_partition_lazily_before_and_after_the_first_artifact() {
     assert_eq!(first.scope, NoteScope::Project);
     assert_eq!(first.origin, Origin::ExtractedUser);
     let memory = h.store_dir(&repo).join("memory");
-    assert_eq!(
-        fs::read_to_string(memory.join(".gitignore")).unwrap(),
-        "*\n"
+    assert!(
+        !memory.join(".gitignore").exists(),
+        "the notes are not in the repository any more (ST-1)"
     );
     let notes = memory.join("owners").join(ALICE_KEY).join("notes");
     assert!(notes.is_dir());
@@ -492,11 +492,11 @@ fn a_git_repo_gets_its_partition_lazily_before_and_after_the_first_artifact() {
     assert_eq!(snapshot.notes[&first.id].origin, Origin::ExtractedUser);
     let key_before = snapshot.partition_key.clone();
 
-    // The artifact path lays out the rest of `<repo>/.openalpaca/`.
+    // The artifact path's first write: `artifacts/` beside `memory/`.
     ensure_store(&StoreScope::Project(repo.clone())).unwrap();
-    assert_eq!(
-        fs::read_to_string(memory.join(".gitignore")).unwrap(),
-        "*\n"
+    assert!(
+        !memory.join(".gitignore").exists(),
+        "the notes are not in the repository any more (ST-1)"
     );
 
     let second = h
@@ -555,7 +555,7 @@ fn a_git_repo_gets_its_partition_lazily_before_and_after_the_first_artifact() {
     );
 }
 
-/// Fixture 04: a symlink at `.openalpaca` on the way to the partition
+/// Fixture 04: a symlink at the project's `memory` on the way to the partition
 /// refuses the project partition; the request falls back to global, and an
 /// explicit `scope: project` is then refused like any request with no
 /// project.
@@ -565,7 +565,7 @@ fn a_symlink_on_the_partition_path_refuses_the_project_partition_and_falls_back_
     let h = Harness::new();
     let repo = h.workspace("linked_repo", Some(".git"));
     let elsewhere = h.workspace("elsewhere", None);
-    std::os::unix::fs::symlink(&elsewhere, repo.join(".openalpaca")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, h.store_dir(&repo).join("memory")).unwrap();
     let ctx = h.tool(ALICE, Some(&repo));
     assert_eq!(ctx.project_root.as_deref(), Some(repo.as_path()));
 
@@ -578,7 +578,7 @@ fn a_symlink_on_the_partition_path_refuses_the_project_partition_and_falls_back_
     assert_eq!(fact.scope, NoteScope::Global);
     assert!(note_file_for(&h.home_notes_dir(ALICE_KEY), fact.id).is_some());
     assert!(
-        !elsewhere.join("memory").exists(),
+        fs::read_dir(&elsewhere).unwrap().next().is_none(),
         "nothing lands where the link points"
     );
 
@@ -3627,11 +3627,18 @@ fn known_project_roots_are_the_registered_projects_holding_the_owners_partition(
         std::slice::from_ref(&repo)
     );
 
-    // Gone from disk: before the flip its partition goes with its folder.
+    // Gone from disk: a missing project keeps its notes (ST-7) — they are in
+    // its folder under `projects/`, so it is still known.
     let parked = h.root.path().join("ws").join("parked");
     fs::rename(&repo, &parked).unwrap();
-    assert!(h.service.known_project_roots(ALICE).is_empty());
-    assert!(h.service.known_project_roots(BOB).is_empty());
+    assert_eq!(
+        h.service.known_project_roots(ALICE),
+        std::slice::from_ref(&repo)
+    );
+    assert_eq!(
+        h.service.known_project_roots(BOB),
+        std::slice::from_ref(&repo)
+    );
 }
 
 // ============================================================================
@@ -3992,15 +3999,14 @@ fn reconcile_owner_scans_every_known_partition_and_publishes_external_changes() 
     assert_eq!(view.origin, Origin::External);
 }
 
-/// One partition the timer cannot open does not stop the tick: it is
+/// One partition the timer cannot scan does not stop the tick: it is
 /// skipped with a WARN and every partition after it is still scanned. Here
-/// project `a`'s `memory/` is read-only and holds a `.gitignore` the open
-/// must rewrite (MD-7), so its open fails with an I/O error — neither a
-/// refused path nor a quarantine, the two the scan already skips — and
-/// project `b`'s hand edit is still found and published.
+/// project `a`'s `notes/` cannot be listed, so its scan fails with an I/O
+/// error — neither a refused path nor a quarantine — and project `b`'s hand
+/// edit is still found and published.
 #[cfg(unix)]
 #[test]
-fn a_partition_that_fails_to_open_is_skipped_and_the_rest_are_still_scanned() {
+fn a_partition_that_fails_its_scan_is_skipped_and_the_rest_are_still_scanned() {
     use std::os::unix::fs::PermissionsExt;
     struct RestorePerms(PathBuf);
     impl Drop for RestorePerms {
@@ -4026,16 +4032,17 @@ fn a_partition_that_fails_to_open_is_skipped_and_the_rest_are_still_scanned() {
     );
     assert!(h.service.reconcile_owner(ALICE).unwrap().changes.is_empty());
 
-    let memory_a = h.store_dir(&ws_a).join("memory");
-    fs::write(memory_a.join(".gitignore"), "!*\n").unwrap();
-    fs::set_permissions(&memory_a, fs::Permissions::from_mode(0o555)).unwrap();
-    let _restore = RestorePerms(memory_a);
+    let notes_a = h
+        .store_dir(&ws_a)
+        .join("memory")
+        .join("owners")
+        .join(ALICE_KEY)
+        .join("notes");
+    fs::set_permissions(&notes_a, fs::Permissions::from_mode(0o000)).unwrap();
+    let _restore = RestorePerms(notes_a.clone());
     assert!(
-        matches!(
-            Partition::open(&StoreScope::Project(ws_a.clone()), ALICE),
-            Err(openalpaca_storage::memory_files::MemoryFilesError::Io(_))
-        ),
-        "the injection is an I/O failure at open"
+        fs::read_dir(&notes_a).is_err(),
+        "the injection: a's notes cannot be listed"
     );
 
     let notes_b = h
