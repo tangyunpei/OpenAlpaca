@@ -312,6 +312,110 @@ fn a_re_point_stopped_after_any_step_is_finished_by_the_next_recovery() {
     }
 }
 
+/// R24 (Review Focus #3): a recovery that fails is reported, keeps the marker
+/// and is tried again — never half-applied. After a crash at step 1, the next
+/// recovery cannot rename the folder (`projects/` is read-only): it names the
+/// project by its new root and leaves `project.json` marked, and with the rows
+/// already moved neither path finds the project. The recovery after that,
+/// with the folder renameable again, finishes it; a third has nothing to do.
+#[cfg(unix)]
+#[test]
+fn a_recovery_that_fails_is_reported_keeps_the_marker_and_the_next_one_finishes_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// `projects/` back to the mode `create_private_dir` gave it, panic or not.
+    struct Writable(PathBuf);
+    impl Drop for Writable {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    let w = World::new();
+    let before = w.project("app");
+    w.rows_of(&before);
+    let new = w.dir("app-moved");
+    let err = repoint_with(&w.db, &before.root, &new, &mut |at| {
+        at != RepointStep::Marked
+    })
+    .unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<RepointInterrupted>(),
+        Some(&RepointInterrupted(RepointStep::Marked))
+    );
+
+    let projects_dir = w.home.join(projects::PROJECTS_DIR);
+    let writable = Writable(projects_dir.clone());
+    std::fs::set_permissions(&projects_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // A user who may rename in a read-only directory anyway (root) cannot
+    // make step 3 fail this way.
+    let probe = projects_dir.join(".probe");
+    if std::fs::create_dir(&probe).is_ok() {
+        let _ = std::fs::remove_dir(&probe);
+        return;
+    }
+
+    let report = recover_repoints(&w.db);
+
+    assert!(report.finished.is_empty(), "{report:?}");
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    let (root, reason) = &report.failed[0];
+    assert_eq!(root, &new, "the failure names the project by its new root");
+    assert!(
+        reason.contains("could not rename"),
+        "step 3 failed: {reason}"
+    );
+    let marked = projects::read_project_dir(&before.dir)
+        .unwrap()
+        .expect("the folder keeps its old name and a readable project.json");
+    assert_eq!(marked.id, before.id);
+    assert_eq!(marked.root, new);
+    assert_eq!(
+        marked.previous_root.as_deref(),
+        Some(before.root.as_path()),
+        "the marker survives for the next boot"
+    );
+    assert_eq!(marked.previous_name.as_deref(), Some(before.name.as_str()));
+    assert_eq!(projects::lookup(&new).unwrap(), None);
+    assert_eq!(projects::lookup(&before.root).unwrap(), None);
+    assert_eq!(w.named(&new), 5, "step 2 ran: the rows name the new root");
+
+    drop(writable);
+    assert_eq!(
+        recover_repoints(&w.db),
+        RecoveryReport {
+            finished: vec![new.clone()],
+            failed: Vec::new(),
+        },
+        "the next boot tries again and finishes it"
+    );
+    let after = projects::lookup(&new)
+        .unwrap()
+        .expect("the project is found at its new path");
+    assert_eq!(after.id, before.id);
+    assert_eq!(
+        (after.previous_root.clone(), after.previous_name.clone()),
+        (None, None)
+    );
+    assert!(!before.dir.exists());
+    assert_eq!(w.named(&new), 5);
+    let moved = w.storage_path();
+    assert!(
+        moved.starts_with(after.dir.to_string_lossy().as_ref()),
+        "{moved}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&moved).unwrap(),
+        "notes\n",
+        "the bytes are where the row says"
+    );
+    assert_eq!(
+        recover_repoints(&w.db),
+        RecoveryReport::default(),
+        "a third boot finds nothing to do"
+    );
+}
+
 /// §6 step 2: a failure in the transaction clears the marker and reports;
 /// nothing else changed, and the next boot has nothing to finish.
 #[test]
