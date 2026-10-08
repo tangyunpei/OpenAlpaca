@@ -517,9 +517,13 @@ fn render_delete(result: &DeleteResult) -> String {
         let _ = writeln!(out, "  {} {}", "deleted:".bold(), result.counts.describe());
         let folder = match removed.project_folder {
             true => format!("the folder projects/{}", result.project.name),
+            // R-F2: the delete did not finish (a partition that could not
+            // be dropped, or a folder that could not be removed or was
+            // already gone); a second purge finishes it.
             false => format!(
-                "not the folder projects/{} (the daemon log says why)",
-                result.project.name
+                "not the folder projects/{} — run `openalpaca store purge {} -y` again to finish \
+                 (the daemon log says why)",
+                result.project.name, result.project.root
             ),
         };
         let _ = writeln!(
@@ -902,6 +906,29 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("Nothing was deleted"), "{text}");
+    }
+
+    /// R-F2 (S5b M1): `project_folder: false` is a delete that did not
+    /// finish — a partition that could not be dropped, or a folder already
+    /// gone — and a second purge is what finishes it.
+    #[tokio::test]
+    async fn a_purge_that_kept_the_folder_says_a_second_purge_finishes_it() {
+        let mut answer = delete_answer(true);
+        answer["removed"] =
+            json!({"session_dirs": 2, "memory_partitions": 0, "project_folder": false});
+        let (addr, server) = serve(vec![ok(answer)]);
+
+        let text = strip_ansi(&purge(&client(addr), "/work/app", false).await.unwrap());
+
+        server.join().unwrap();
+        assert!(
+            text.contains(
+                "removed: 2 session log directories, 0 memory partitions, not the folder \
+                 projects/-work-app — run `openalpaca store purge /work/app -y` again to finish \
+                 (the daemon log says why)"
+            ),
+            "{text}"
+        );
     }
 
     #[tokio::test]

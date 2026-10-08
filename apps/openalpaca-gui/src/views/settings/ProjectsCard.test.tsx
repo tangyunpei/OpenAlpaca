@@ -536,7 +536,7 @@ describe("Delete data… (storage design §6, ST-19)", () => {
     await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
   });
 
-  it("says the folder was kept when the daemon kept it, and the window keeps the project it still is", async () => {
+  it("says the delete did not finish when the daemon kept the folder, and the window keeps the project", async () => {
     // S5a's fix round: a partition that could not be dropped keeps
     // projects/<name>/, so the project stays registered and listed, and a
     // second delete finishes it. Nothing here may say the project is gone.
@@ -560,8 +560,10 @@ describe("Delete data… (storage design §6, ST-19)", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(api.remove).toHaveBeenLastCalledWith(REPO.root, false);
     expect(useProjectStore.getState().path).toBe(REPO.root);
+    // R-F2: `project_folder: false` also means the folder was already gone,
+    // so the toast asserts neither that it was kept nor that it is listed.
     expect(useUiStore.getState().toast).toBe(
-      `Deleted the data of ${REPO.root}, but not all of it could be removed: its folder under projects/ was kept, so the project is still listed. Delete its data again to finish.`,
+      `OpenAlpaca could not finish removing the data of ${REPO.root}; run Delete data… again to finish.`,
     );
     // The list is re-read, and the daemon still lists the project.
     await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));

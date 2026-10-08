@@ -18,10 +18,10 @@
  * file its next turn under no project: it takes the new root. After a
  * delete, a window still sending the root would register it again, empty,
  * on its next turn: it lets go of the project, and the toast says so —
- * unless the daemon kept the project's folder (`project_folder: false`, as
- * when not every memory partition could be dropped), in which case the
- * project is still registered and listed, the window keeps it, and the
- * toast says to delete its data again.
+ * unless the delete did not finish (`project_folder: false`: not every
+ * memory partition could be dropped, or the folder could not be removed, or
+ * was already gone — the answer does not say which), in which case the
+ * window keeps the project and the toast says to delete its data again.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -272,11 +272,13 @@ function RepointFlow({ project, current, onClose }: FlowProps) {
  * for the plan, and the delete itself only on the press. The two calls are
  * two mutations, so the plan stays on screen while the delete is in flight.
  *
- * A delete can answer `200` with `removed.project_folder: false`: the daemon
- * kept `projects/<name>/` — not every memory partition could be dropped, or
- * the folder itself could not be removed — so the project stays registered
- * and listed, and deleting its data again finishes it. That answer is never drawn as the project being gone — the
- * window keeps the project it still is, and the toast says to run it again.
+ * A delete can answer `200` with `removed.project_folder: false`: it did
+ * not finish removing `projects/<name>/` — not every memory partition could
+ * be dropped, or the folder could not be removed, or it was already gone.
+ * The answer does not say which (R-F2), so the toast claims neither that the
+ * folder was kept nor that the project is still listed: it says the delete
+ * did not finish and that running it again finishes it, and the window keeps
+ * the project.
  *
  * As in `RepointFlow`, the delete's answer is taken from `mutateAsync`'s
  * promise, so a dialog closed while `Deleting…` (up to 3 s of quiesce, then
@@ -310,7 +312,7 @@ function DeleteFlow({ project, current, onClose }: FlowProps) {
       (result) => {
         if (result.removed?.project_folder === false) {
           showToast(
-            `Deleted the data of ${project.root}, but not all of it could be removed: its folder under projects/ was kept, so the project is still listed. Delete its data again to finish.`,
+            `OpenAlpaca could not finish removing the data of ${project.root}; run Delete data… again to finish.`,
           );
         } else {
           const follows = windowFollows(project, current, pathAtPress);
