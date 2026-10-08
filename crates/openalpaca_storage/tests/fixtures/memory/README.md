@@ -37,7 +37,7 @@ added (design 09 §6.5.6, LQ17).
 | `14-concurrent-saves-conflict-large-note-duplicate-uuid.json` | Two agent saves; an edit conflict; a large note; a duplicate UUID | slice 2, 3 |
 | `15-crash-at-each-recovery-step.json` | A crash at each step of design §6's recovery table | slice 2 |
 | `16-forget-suppression-and-replacement.json` | Forget, erase the cache, re-run source extraction; forget a replacement | slice 2, 3 |
-| `17-move-purge-factory-reset-config-reset.json` | Workspace move while writing; purge; factory reset; config reset | slice 3 (3.7) |
+| `17-move-purge-factory-reset-config-reset.json` | Re-point while writing; a re-point interrupted and finished at boot; purge; factory reset; adopt by project id; config reset | slice 3 (3.7); storage design Stage 1 (4) |
 | `18-malicious-content-stays-reference-data.json` | Malicious Markdown, frontmatter, source text, … cannot mint origin `user` | slice 2, 3 |
 | `19-offline-no-llm.json` | No configured LLM, offline | slice 3 |
 | `20-compaction-handoff-cancelled-task.json` | Compaction, lead/worker handoff, a cancelled task | slice 3 |
@@ -112,9 +112,10 @@ A fixture path is `<root>/<relative>`; the loader substitutes the root:
 | `ws:<name>` | the workspace directory `<name>` |
 | `dir:<name>` | the extra directory `<name>` |
 | `part:<name>` | the partition directory of partition `<name>` (`…/memory/owners/<owner-key>`) |
+| `store:<fixture path>` | the project's folder under `home/projects/` named for that root — `store::projects::folder_name` of the canonical path (storage design R4–R7) — whether or not it exists |
 | `proj:<name>` | the folder of workspace `<name>`'s project under the home store's `projects/` (the workspace is registered) |
 
-A `daemon.cwd`, a context's `workspace`, a `move_workspace` target and every
+A `daemon.cwd`, a context's `workspace`, a `repoint` target and every
 `files_exist` / `files_absent` entry use this form.
 
 ### Owner keys, partition keys, revisions
@@ -127,9 +128,11 @@ A `daemon.cwd`, a context's `workspace`, a `move_workspace` target and every
   `bbc5e661e106c6dcd8dc6dd186454c2f`, `u_example_alice_reborn` →
   `9bfb77d3249642b6ba22fe7dcade07a0`.
 - A home partition key is `home-<owner-key>` and is written literally. A project
-  partition key hashes the **canonical** partition directory, which only exists at
-  run time, so it is written as the placeholder `"@derived"`, as is a project
-  snapshot's `root`.
+  partition key is `proj-<owner-key>-<16 hex of sha256(the project id)>` (storage
+  design R18); the id is minted when the project is registered, at run time, so the
+  key is written as the placeholder `"@derived"`, as are a project snapshot's
+  `project_id` and its `root` (recorded at the first write, never compared). A
+  re-point does not change the key.
 - A revision is the lowercase hex SHA-256 of the note file's exact bytes (design
   §4). A snapshot entry's `revision` is `"@current"` — the hash of the bytes the
   loader wrote for that note — unless the fixture gives a literal 64-hex value,
@@ -144,7 +147,7 @@ it meets and fail on one it does not know.
 | Placeholder | Where | Resolves to |
 |---|---|---|
 | `@current` | snapshot `notes[id].revision` | the hash of the note file as written |
-| `@derived` | snapshot `partition_key`, `root` | the value the library derives for that partition |
+| `@derived` | snapshot `partition_key`, `project_id`, `root` | the value the library derives for that partition |
 | `@rev:<uuid>` / `@rev:<label>` | operation inputs | the note's current revision when the step runs |
 | `@id:<label>` | anywhere after the step that defined the label | the UUID the service minted for the note stored with `"as": "<label>"` |
 | `@from_rev`, `@to_rev` | `crash_at` expectations | the revision before the interrupted mutation, and the one it was writing |
@@ -159,7 +162,7 @@ it meets and fail on one it does not know.
   "name": "alice_home",
   "owner": "u_example_alice",
   "scope": "home" | "project",
-  "workspace": "<workspace name, project scope only; a directory name when a move creates the project there>",
+  "workspace": "<workspace name, project scope only; a directory name when a re-point makes it the project's path>",
   "notes": [ <note>, ... ],
   "snapshot": <snapshot spec, optional>
 }
@@ -207,9 +210,10 @@ the body is exactly `N` bytes (cut on a char boundary).
 ### A snapshot spec
 
 Absent: the loader writes the **default** snapshot — schema 1, the binding
-(`partition_key`, `scope`, `owner_key`, `owner_id`, `root`), `created_at` /
-`updated_at` from the file's `clock` or `2026-09-23T10:00:00Z`, `moved_from`
-null, `repaired_at` null, `pending` null, `notes` = every note with
+(`partition_key`, `scope`, `owner_key`, `owner_id`, `root`, and for a project
+partition its `project_id`), `created_at` / `updated_at` from the file's `clock`
+or `2026-09-23T10:00:00Z`, `moved_from` null (parsed, never set — storage design
+R19), `repaired_at` null, `pending` null, `notes` = every note with
 `recorded != false` at `@current` with its `origin` and `written_at` =
 `updated_at`, `tombstones` `[]`.
 
@@ -292,11 +296,11 @@ file's `loads_in` says which slice owns the whole file.
 | `remove_partition` | `{ "partition" }` — the harness deletes that partition's directory and snapshot outright (an owner clearing a collision by hand before `adopt`) | harness |
 | `ensure_project_store` | `{ "workspace": <fixture path> }` — the artifact path's first write for that project, which creates `artifacts/` in the project's folder under `projects/` and nothing else | store |
 | `begin_pending_write` / `end_pending_write` | `{ "partition" }` — hold a memory write of that partition in flight (the quiesce hook's view of "pending") | service |
-| `move_workspace` | `{ "from": <fixture path>, "to": <fixture path>, "crash_after_step"?: 1..5 }` — `PATCH /v1/workspaces` with the five ordered steps of design §3 | service |
+| `repoint` | `{ "from": <fixture path>, "to": <fixture path>, "crash_after_step"?: 1..3 }` — `PATCH /v1/workspaces`: storage design §6's four steps (1 `project.json` marked with `previous_root`, 2 the rows rewritten, 3 `projects/<name>` renamed, 4 the marker cleared). A crash after step 1, 2 or 3 leaves `project.json` carrying `previous_root`; the next `boot` finishes it (R24) | service |
 | `purge` | `{ "workspace" }` — `POST /v1/workspaces/purge` | service |
 | `factory_reset` | `{}` — `openalpaca config reset --factory` with the daemon stopped | CLI |
 | `config_reset` | `{}` — plain `openalpaca config reset` | CLI |
-| `boot` | `{ "local_user_id" }` — the next daemon start after a reset, minting or reading the owner | service |
+| `boot` | `{ "local_user_id" }` — the next daemon start, minting or reading the owner; it first finishes every re-point a `project.json` still records as in flight (storage design R24) | service |
 | `doctor` | `{}` — the read-only report | library |
 | `doctor_repair` | `{}` — local, daemon stopped | library |
 | `adopt` | `{ "owner_key" }` — local, daemon stopped | library |
@@ -335,8 +339,11 @@ ordered; `*_unordered` lists are sets.
 | `preview_contains` | substrings of the factory-reset preview text |
 | `adopted_partitions_count` | the number of partitions `adopt` reports renaming |
 | `retained` | the `forget` result's `retained` object: `{ "transcript": bool, "session_logs": bool, "note_contains": text }` |
-| `snapshot` | `{ "<partition>": { "notes": { "<id>": { "revision": "@current" \| "@from_rev" \| "@to_rev" \| hex, "origin" } \| null }, "tombstones": [..], "tombstones_count": N, "pending": null \| {..}, "moved_from", "owner_key", "owner_id", "root_is": <fixture path> } }` — a partial match of the control snapshot on disk; a note mapped to `null` must be absent from `notes` |
+| `snapshot` | `{ "<partition>": { "notes": { "<id>": { "revision": "@current" \| "@from_rev" \| "@to_rev" \| hex, "origin" } \| null }, "tombstones": [..], "tombstones_count": N, "pending": null \| {..}, "moved_from", "owner_key", "owner_id", "root_is": <fixture path> } }` — a partial match of the control snapshot on disk (a project snapshot's `root` is recorded at its first write and never compared, so `root_is` is for a home snapshot); a note mapped to `null` must be absent from `notes` |
 | `snapshot_missing` | `["<partition name>"]` — no snapshot file exists for that partition's (derived) key |
+| `snapshot_unchanged` | `["<partition name>"]` — that partition's snapshot file has the same bytes after the step as before it (a re-point touches no snapshot) |
+| `same_partition` | `[["<partition name>", "<partition name>", …]]` — each group derives one partition key (the project's id, storage design R18), so one snapshot file and one set of notes serve every name in it |
+| `project_file` | `{ "<store: fixture path>": { "root_is": <fixture path>, "previous_root": <fixture path> \| null } }` — a partial match of that folder's `project.json`: `root` is the given path; `previous_root` is absent (`null`) or the given path |
 | `files_exist` / `files_absent` | fixture paths |
 | `file_content` | `{ "<fixture path>": "<exact bytes>" }` |
 | `file_unchanged` | `["<fixture path>"]` — SHA-256 before and after the step are equal |
@@ -351,7 +358,7 @@ ordered; `*_unordered` lists are sets.
 | `total_bytes_lte`, `chunks_lte`, `pinned_bytes_lte`, `truncated` | recall budgeting (design §4 limits) |
 | `delivered_as` | `quoted_data` — the recall section is data in user/tool context, never a system instruction |
 | `network_calls`, `model_calls` | integers, `0` for every memory operation |
-| `doctor` | `{ "quarantined": [partitions], "orphans": [owner keys], "conflicts": [{ "type": "supersedes_authority" \| "same_fact_key", "note", "target" }], "malformed": [{ "partition", "file_contains" }], "duplicate_ids": [[ids]], "stale": [fixture paths of the bound directory], "abandoned": [fixture paths] }` — partial match of the report; a list given is matched exactly as a set |
+| `doctor` | `{ "quarantined": [partitions], "orphans": [owner keys], "conflicts": [{ "type": "supersedes_authority" \| "same_fact_key", "note", "target" }], "malformed": [{ "partition", "file_contains" }], "duplicate_ids": [[ids]], "idless": [partition keys of project snapshots that carry no project id] }` — partial match of the report; a list given is matched exactly as a set |
 | `owner_id_after` | `identity.local_user_id` after a reset |
 | `extraction` | `{ "count": N, "count_lte": N, "notes": [{ "origin", "status", "body_contains" }], "unavailable": bool }` |
 | `dedup` | `"created"` (a new note) or `"existing"` (exact dedup returned the existing id) |
@@ -378,7 +385,7 @@ rather than guessing:
 | `fixture:path_refused` | §2 / plan 3.2: a builtin file tool refuses `state/` or a partition's control files |
 | `fixture:confirmation_unavailable` | §7 *Capabilities*: a `destructive_hint` tool on an `unattended` turn (the sandbox's M6 refusal) |
 | `fixture:newer_schema` | plan slice 0.5; `tasks/store-revision/design.md` §1.4 (the one refusal, above this build) |
-| `fixture:write_pending` | §3 *Workspace move* step 1: the move is refused while a write is pending |
+| `fixture:write_pending` | storage design §6 *Re-point*: refused while a memory write of the project is pending (the route answers `WORKSPACE_BUSY`) |
 | `fixture:duplicate_id` | §6 *Management operations*: `doctor --repair` refuses on a duplicate id |
 | `fixture:adopt_collision` | §6 *Management operations*: `adopt` refuses on a collision |
 
@@ -400,7 +407,7 @@ signs these with the frozen set or sends them back as design revisions.
 | P8 | Exact dedup (same owner, same partition, same bytes) answers with the existing note's id rather than creating a second file; the `dedup` expectation reads it | 09 |
 | P9 | The `authority_conflict` and `confirm_refused` messages name the Memory view and the `openalpaca memory` verb | 10, 18 |
 | P10 | An extraction on a daemon with no configured model reports `unavailable` with one WARN and the turn is unaffected | 19 |
-| P11 | `doctor` names a stale or abandoned move snapshot by the directory it is bound to | 17 |
+| P11 | `doctor` lists a project snapshot that carries no project id — an earlier build's (storage design R22) — by its key and the directory it was bound to; nothing opens, adopts or deletes it | 17 |
 | P12 | A `forget` whose target id no longer exists answers `not_found`, not `revision_conflict`, whatever revision was sent | 16 |
 | P13 | A `memory_changed` published by a reconciliation scan (`change: external`) carries no `surface`: §7a's enum is `user \| model_tool \| extraction` and a scan is none of them; the fixture omits the field until the design adds a value or makes it optional | 13 |
 

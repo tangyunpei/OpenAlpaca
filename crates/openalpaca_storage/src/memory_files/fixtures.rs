@@ -46,7 +46,7 @@ const SKIPPED_OPS: &[&str] = &[
     "recently_used",
     "begin_pending_write",
     "end_pending_write",
-    "move_workspace",
+    "repoint",
     "purge",
     "factory_reset",
     "config_reset",
@@ -1844,7 +1844,7 @@ impl Harness {
                                 got.sort();
                                 assert_eq!(got, want, "{at}: doctor.duplicate_ids");
                             }
-                            "stale" | "abandoned" => {}
+                            "idless" => {}
                             other => panic!("{at}: unknown doctor key {other}"),
                         }
                     }
@@ -2154,6 +2154,45 @@ fn every_file_level_fixture_is_satisfied() {
     for file in FILE_LEVEL_FIXTURES {
         eprintln!("=== {file}");
         run_fixture(file);
+    }
+}
+
+/// Fixture 17 is a specification no loader runs — its ops are the
+/// service's, the route's and the CLI's, and `memory_files::tests`,
+/// `memory::service::tests` and `routes::workspaces::tests` pin it — so
+/// this keeps it honest: every op it uses and every expectation it checks
+/// is one the README defines.
+#[test]
+fn fixture_17_uses_only_the_ops_and_expectations_the_readme_defines() {
+    let path = fixtures_dir().join("17-move-purge-factory-reset-config-reset.json");
+    let fixture: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let readme = std::fs::read_to_string(fixtures_dir().join("README.md")).unwrap();
+    let defined: std::collections::BTreeSet<String> = readme
+        .lines()
+        .filter(|l| l.starts_with("| `"))
+        .filter_map(|l| l.split('|').nth(1))
+        .flat_map(|cell| {
+            cell.split('`')
+                .skip(1)
+                .step_by(2)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    for step in arr(&fixture["operations"]) {
+        let op = s(&step["op"]);
+        assert!(
+            defined.contains(op),
+            "step {}: op `{op}` is not in the README",
+            step["step"]
+        );
+        for (key, _) in step["expect"].as_object().into_iter().flatten() {
+            assert!(
+                defined.contains(key.as_str()),
+                "step {}: expectation `{key}` is not in the README",
+                step["step"]
+            );
+        }
     }
 }
 
