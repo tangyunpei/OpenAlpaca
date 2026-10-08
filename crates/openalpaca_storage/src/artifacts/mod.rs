@@ -593,22 +593,24 @@ pub struct ArtifactVersionRow {
     pub created_at: String,
 }
 
-/// How many rows each member of §4.8's one transaction carried — the same three
-/// counts whether they were moved ([`ArtifactStore::rebase_project`]) or merely
+/// How many rows each member of §6's one transaction carried — the same five
+/// counts whether they were moved ([`ArtifactStore::repoint_rows`]) or merely
 /// counted ([`ArtifactStore::workspace_rows`]).
 ///
-/// Memory is not a member: since the memory redesign a project's notes are
-/// files inside the directory that moves (`<project>/.openalpaca/memory/`),
-/// not rows keyed by its path, so there is nothing in the database to re-key
-/// and nothing to count.
+/// Memory is not a member: a project's notes are files in its folder, keyed
+/// by the project (design §5), not rows keyed by its path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RebaseCounts {
     /// `file_assets` rows, **both** origins.
     pub file_assets: usize,
-    /// `session.workspace_id` (migration 039).
+    /// `session.workspace_id`.
     pub sessions: usize,
-    /// `task.workspace_id` (migration 036).
+    /// `task.workspace_id`.
     pub tasks: usize,
+    /// `conversation_messages.workspace_root`.
+    pub messages: usize,
+    /// `lane_followups.workspace_path`.
+    pub followups: usize,
 }
 
 impl RebaseCounts {
@@ -1478,91 +1480,87 @@ impl<'a> ArtifactStore<'a> {
         })
     }
 
-    /// Re-base everything addressed under `old_root` onto `new_root` — §4.8's
-    /// "Project moved", as **one transaction** over its three members.
-    ///
-    /// A project's path is its identity in three places, all of them holding
-    /// the same canonical-path string, so all three move together or none does:
-    ///
-    /// | Member | Column |
-    /// |---|---|
-    /// | `session` (039) | `workspace_id` |
-    /// | `task` (036) | `workspace_id` |
-    /// | `file_assets` (**both** origins — an upload placed in a project store moved with it) | `project_root`, and the `storage_path` prefix |
-    ///
-    /// Memory notes are not a member: they are files inside the project's own
-    /// store directory and move with it, keyed by nothing in the database.
-    ///
-    /// `rel_path` is deliberately untouched: it is the address, and it did not
-    /// change. Only the root prefix does.
-    ///
-    /// This lives on `ArtifactStore` because §4.8 puts it here — the artifact
-    /// address is the member with the most to lose from a half-applied move —
-    /// but the other two are not artifact rows and are updated by their own
-    /// statements, not through their repositories: a transaction is the whole
-    /// point, and each repository call would open its own.
-    ///
-    /// `file_assets` goes **last**: it is the one member with a unique key a
-    /// re-base can violate (`idx_file_assets_addr`, the artifact address —
-    /// re-keying onto a root that already holds a file at the same `rel_path`
-    /// would merge two projects), and the failure that rolls the transaction
-    /// back should be able to roll something back.
-    ///
-    /// Rows only. Moving the store *directory*, when the caller is asking for a
-    /// move rather than recording one that already happened, is
-    /// [`crate::store::project_move::move_project_store`].
-    ///
-    /// **Path-scoped, not owner-scoped**, and deliberately: `session` and `task`
-    /// carry no `owner_id`, so a half-scoped transaction would leave a project
-    /// whose artifacts moved and whose runs did not. The route is what makes it
-    /// owner-safe — it refuses a root holding rows the caller does not own
-    /// ([`WorkspaceRows::other_owners`]) rather than rewrite them here.
+    /// The pre-§6 re-base: [`Self::repoint_rows`] with the project's folder
+    /// taken to be its own path. Removed with its last caller (S3.8).
     pub fn rebase_project(&self, old_root: &str, new_root: &str) -> Result<RebaseCounts> {
+        self.repoint_rows(old_root, new_root, old_root, new_root)
+    }
+
+    /// §6 step 2: one transaction moves every row naming `old_root` in the
+    /// five path columns to `new_root`, and rewrites `storage_path` on the
+    /// rows whose `project_root` is `old_root` — `old_dir` (the project's
+    /// folder under `projects/`) becomes `new_dir`, and, for Stage 2's pointer
+    /// rows, `old_root` becomes `new_root`. A prefix counts only when a `/` or
+    /// a `\` follows it, compared with `substr`, never `LIKE` (whose `_` and
+    /// `%` a path may hold). `rel_path` is the address and does not change.
+    ///
+    /// `missing_since` is cleared with the address it described: the mark
+    /// says "nothing is at `storage_path`", and this rewrites `storage_path`.
+    /// No stat pass inside the transaction (R32) — the read path re-stamps.
+    ///
+    /// `file_assets` goes **last**: `idx_file_assets_addr` is
+    /// (`project_root`, `rel_path`), the one unique key a re-point can
+    /// violate, and the failure that rolls the transaction back must have the
+    /// other four to roll back. Path-scoped, not owner-scoped: `session` and
+    /// `task` carry no `owner_id`; the route refuses a root holding another
+    /// owner's rows ([`WorkspaceRows::other_owners`]) before calling this.
+    /// Idempotent: run again after it committed, it matches nothing.
+    pub fn repoint_rows(
+        &self,
+        old_root: &str,
+        new_root: &str,
+        old_dir: &str,
+        new_dir: &str,
+    ) -> Result<RebaseCounts> {
         self.db.with_connection(|conn| {
             let tx = conn.unchecked_transaction()?;
+            let roots = rusqlite::params![old_root, new_root];
             let sessions = tx.execute(
                 "UPDATE session SET workspace_id = ?2, updated_at = datetime('now')
                   WHERE workspace_id = ?1",
-                rusqlite::params![old_root, new_root],
+                roots,
             )?;
             let tasks = tx.execute(
                 "UPDATE task SET workspace_id = ?2, updated_at = datetime('now')
                   WHERE workspace_id = ?1",
-                rusqlite::params![old_root, new_root],
+                roots,
             )?;
-            // `missing_since` is cleared with the address it described: the
-            // mark says "nothing is at `storage_path`", and `storage_path` is
-            // exactly what this statement rewrites. No stat pass inside the
-            // transaction (R32) — the read path is the authority on absence and
-            // re-stamps on the next head read if the bytes are still away.
-            //
-            // `idx_file_assets_addr` is (project_root, rel_path): re-keying
-            // onto a root that already holds a file at the same address
-            // violates it, and that is exactly when the whole transaction must
-            // roll back rather than merge two projects.
+            let messages = tx.execute(
+                "UPDATE conversation_messages SET workspace_root = ?2 WHERE workspace_root = ?1",
+                roots,
+            )?;
+            let followups = tx.execute(
+                "UPDATE lane_followups SET workspace_path = ?2, updated_at = datetime('now')
+                  WHERE workspace_path = ?1",
+                roots,
+            )?;
             let file_assets = tx.execute(
                 "UPDATE file_assets
                     SET project_root = ?2,
                         storage_path = CASE
-                            WHEN substr(storage_path, 1, length(?1)) = ?1
+                            WHEN substr(storage_path, 1, length(?3) + 1) IN (?3 || '/', ?3 || '\\')
+                            THEN ?4 || substr(storage_path, length(?3) + 1)
+                            WHEN substr(storage_path, 1, length(?1) + 1) IN (?1 || '/', ?1 || '\\')
                             THEN ?2 || substr(storage_path, length(?1) + 1)
                             ELSE storage_path END,
                         missing_since = NULL,
                         updated_at = datetime('now')
                   WHERE project_root = ?1",
-                rusqlite::params![old_root, new_root],
+                rusqlite::params![old_root, new_root, old_dir, new_dir],
             )?;
             tx.commit()?;
             Ok(RebaseCounts {
                 file_assets,
                 sessions,
                 tasks,
+                messages,
+                followups,
             })
         })
     }
 
-    /// What is recorded under `root` right now — the same three members
-    /// [`Self::rebase_project`] moves, plus the runs that are still in flight
+    /// What is recorded under `root` right now — the same five members
+    /// [`Self::repoint_rows`] moves, plus the runs that are still in flight
     /// there.
     ///
     /// The preflight of `PATCH /v1/workspaces` and the body of its `--dry-run`:
@@ -1613,6 +1611,12 @@ impl<'a> ArtifactStore<'a> {
                     file_assets,
                     sessions: count("SELECT COUNT(*) FROM session WHERE workspace_id = ?1")?,
                     tasks: count("SELECT COUNT(*) FROM task WHERE workspace_id = ?1")?,
+                    messages: count(
+                        "SELECT COUNT(*) FROM conversation_messages WHERE workspace_root = ?1",
+                    )?,
+                    followups: count(
+                        "SELECT COUNT(*) FROM lane_followups WHERE workspace_path = ?1",
+                    )?,
                 },
                 active_tasks: count(
                     "SELECT COUNT(*) FROM task

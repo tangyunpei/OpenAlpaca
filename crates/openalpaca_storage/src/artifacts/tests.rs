@@ -1490,103 +1490,155 @@ fn set_pinned_round_trips_and_rejects_an_unknown_id() {
 }
 
 // ============================================================================
-// rebase_project
+// repoint_rows
 // ============================================================================
 
+/// §6 step 2: one transaction moves the five path columns from the old root
+/// to the new one and rewrites both `storage_path` prefixes — the project's
+/// folder under `projects/`, and (Stage 2's pointer rows) the project's own
+/// path — each only on rows whose `project_root` is the old root, and only
+/// where the prefix is followed by a separator.
 #[test]
-fn rebase_project_rewrites_only_rows_under_the_old_root() {
+fn repoint_rows_rewrites_the_five_columns_and_both_storage_path_prefixes() {
     let f = Fixture::new();
-    let other = tempdir().unwrap();
-    let other_root = other.path().canonicalize().unwrap();
+    let (old, new) = ("/w/app", "/w/app-moved");
+    let (old_dir, new_dir) = ("/h/projects/-w-app", "/h/projects/-w-app-moved");
+    f.db.with_connection(|conn| {
+        conn.execute_batch(
+            "INSERT INTO session (id, lane_key, source, workspace_id) VALUES
+                 ('s-1', 'u:gui', 'gui', '/w/app'), ('s-2', 'u:cli', 'cli', '/elsewhere');
+             INSERT INTO task (id, title, created_by, source_lane, workspace_id)
+                 VALUES ('t-1', 't', 'u', 'u:gui', '/w/app');
+             INSERT INTO conversation_messages (lane_key, role, content, session_id, workspace_root)
+                 VALUES ('u:gui', 'user', 'hi', 's-1', '/w/app');
+             INSERT INTO lane_followups (lane_key, kind, content, principal_json, workspace_path)
+                 VALUES ('u:gui', 'followup', 'next', '{}', '/w/app');
+             INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes,
+                                      storage_path, origin, project_root, rel_path) VALUES
+                 ('by-product', 'owner-1', 'a', 'n.md', 'text/markdown', 1,
+                  '/h/projects/-w-app/artifacts/loose/2026-09-01/01-n.md', 'produced',
+                  '/w/app', 'loose/2026-09-01/01-n.md'),
+                 ('pointer', 'owner-1', 'b', 'main.rs', 'text/plain', 1,
+                  '/w/app/src/main.rs', 'produced', '/w/app', NULL),
+                 ('lookalike', 'owner-1', 'c', 'x.md', 'text/markdown', 1,
+                  '/h/projects/-w-app-old/artifacts/x.md', 'produced', '/w/app', 'x.md'),
+                 ('other-project', 'owner-1', 'd', 'y.md', 'text/markdown', 1,
+                  '/h/projects/-w-app/artifacts/y.md', 'produced', '/w/other', 'y.md');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
 
-    let scope = f.scope();
-    let mut mine = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
-    mine.created = at(1);
-    let (mine, _) = f.store().put(mine).unwrap();
-
-    let other_scope = StoreScope::Project(other_root.clone());
-    let mut theirs = NewArtifact::new(OWNER, &other_scope, ArtifactKind::Markdown, "Notes", b"b");
-    theirs.created = at(1);
-    let (theirs, _) = f.store().put(theirs).unwrap();
-
-    let home_scope = StoreScope::Home;
-    let mut homely = NewArtifact::new(OWNER, &home_scope, ArtifactKind::Markdown, "Notes", b"c");
-    homely.created = at(1);
-    let (homely, _) = f.store().put(homely).unwrap();
-
-    let old = f.project_root().to_string_lossy().to_string();
-    let new_root = "/tmp/moved-project";
-    let moved = f.store().rebase_project(&old, new_root).unwrap();
-    assert_eq!(
-        moved.file_assets, 1,
-        "only the rows under the old root move"
-    );
-
-    let mine_after = f.store().get(&mine.id, OWNER).unwrap().unwrap();
-    assert_eq!(mine_after.project_root.as_deref(), Some(new_root));
-    assert_eq!(
-        mine_after.storage_path,
-        format!("{new_root}/.openalpaca/artifacts/loose/2026-09-01/01-notes.md")
-    );
-    assert_eq!(
-        mine_after.rel_path.as_deref(),
-        Some("loose/2026-09-01/01-notes.md"),
-        "the relative address is untouched — that is the point"
-    );
-
-    let theirs_after = f.store().get(&theirs.id, OWNER).unwrap().unwrap();
-    assert_eq!(
-        theirs_after.project_root.as_deref(),
-        Some(other_root.to_string_lossy().as_ref())
-    );
-    assert_eq!(theirs_after.storage_path, theirs.storage_path);
-
-    let home_after = f.store().get(&homely.id, OWNER).unwrap().unwrap();
-    assert!(home_after.project_root.is_none());
-    assert_eq!(home_after.storage_path, homely.storage_path);
-}
-
-#[test]
-fn rebase_project_moves_all_four_members_together() {
-    let f = Fixture::new();
-    let old = f.project_root().to_string_lossy().to_string();
-    let new_root = "/tmp/moved-project";
-
-    let scope = f.scope();
-    let mut produced = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
-    produced.created = at(1);
-    f.store().put(produced).unwrap();
-    // The other origin: an upload placed in the project store moves with it.
-    let upload_path = f.artifacts_root().join("loose/2026-09-01/99-uploaded.md");
-    f.foreign_row("upload-1", "loose/2026-09-01/99-uploaded.md", &upload_path);
-
-    f.session("session-1", &old);
-    f.task_in("task-1", &old, "completed");
-    f.task_in("task-2", &old, "queued");
-    // Bystanders under another root.
-    f.session("session-2", "/elsewhere");
-    f.task_in("task-3", "/elsewhere", "completed");
-
-    let counts = f.store().rebase_project(&old, new_root).unwrap();
+    let counts = f.store().repoint_rows(old, new, old_dir, new_dir).unwrap();
     assert_eq!(
         counts,
         RebaseCounts {
-            file_assets: 2,
+            file_assets: 3,
             sessions: 1,
-            tasks: 2,
+            tasks: 1,
+            messages: 1,
+            followups: 1,
         }
     );
 
-    assert_eq!(f.members_at(&old), (0, 0), "nothing is left behind");
-    assert_eq!(f.members_at(new_root), (1, 2));
-    assert_eq!(f.members_at("/elsewhere"), (1, 1), "bystanders untouched");
-
-    let moved_upload = f.store().get("upload-1", OWNER).unwrap().unwrap();
-    assert_eq!(moved_upload.project_root.as_deref(), Some(new_root));
+    let address = |id: &str| -> (Option<String>, String) {
+        f.db.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT project_root, storage_path FROM file_assets WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap()
+    };
     assert_eq!(
-        moved_upload.storage_path,
-        format!("{new_root}/.openalpaca/artifacts/loose/2026-09-01/99-uploaded.md")
+        address("by-product"),
+        (
+            Some(new.to_string()),
+            "/h/projects/-w-app-moved/artifacts/loose/2026-09-01/01-n.md".to_string()
+        )
     );
+    assert_eq!(
+        address("pointer"),
+        (
+            Some(new.to_string()),
+            "/w/app-moved/src/main.rs".to_string()
+        )
+    );
+    assert_eq!(
+        address("lookalike"),
+        (
+            Some(new.to_string()),
+            "/h/projects/-w-app-old/artifacts/x.md".to_string()
+        ),
+        "a prefix not followed by a separator is not the project's"
+    );
+    assert_eq!(
+        address("other-project"),
+        (
+            Some("/w/other".to_string()),
+            "/h/projects/-w-app/artifacts/y.md".to_string()
+        ),
+        "another project's row is not touched"
+    );
+    let count = |sql: &str| -> i64 {
+        f.db.with_connection(|conn| Ok(conn.query_row(sql, [], |r| r.get(0))?))
+            .unwrap()
+    };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM session WHERE workspace_id = '/w/app-moved'"),
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM session WHERE workspace_id = '/elsewhere'"),
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM task WHERE workspace_id = '/w/app-moved'"),
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM conversation_messages WHERE workspace_root = '/w/app-moved'"),
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM lane_followups WHERE workspace_path = '/w/app-moved'"),
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM file_assets WHERE project_root = '/w/app'"),
+        0
+    );
+}
+
+/// `workspace_rows` counts what `repoint_rows` moves: a root named only by a
+/// message and a follow-up is a root rows name.
+#[test]
+fn workspace_rows_counts_messages_and_followups_too() {
+    let f = Fixture::new();
+    f.db.with_connection(|conn| {
+        conn.execute_batch(
+            "INSERT INTO conversation_messages (lane_key, role, content, workspace_root)
+                 VALUES ('u:gui', 'user', 'hi', '/w/app');
+             INSERT INTO lane_followups (lane_key, kind, content, principal_json, workspace_path)
+                 VALUES ('u:gui', 'followup', 'next', '{}', '/w/app');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let rows = f.store().workspace_rows("/w/app", None).unwrap();
+    assert_eq!(
+        rows.counts,
+        RebaseCounts {
+            file_assets: 0,
+            sessions: 0,
+            tasks: 0,
+            messages: 1,
+            followups: 1,
+        }
+    );
+    assert!(!rows.counts.is_empty());
 }
 
 /// I8: the mark says "nothing is at `storage_path`", and the re-base is what
@@ -1594,7 +1646,7 @@ fn rebase_project_moves_all_four_members_together() {
 /// described. Otherwise a project moved by hand and then re-based stays hidden
 /// from the Library for good.
 #[test]
-fn rebase_project_clears_the_missing_mark_it_re_addresses() {
+fn repoint_rows_clears_the_missing_mark_it_re_addresses() {
     let f = Fixture::new();
     let scope = f.scope();
     let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"body");
@@ -1613,7 +1665,13 @@ fn rebase_project_clears_the_missing_mark_it_re_addresses() {
     );
 
     let old = f.project_root().to_string_lossy().to_string();
-    f.store().rebase_project(&old, "/tmp/moved-project").unwrap();
+    let store_dir = crate::store::store_root(&f.scope())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    f.store()
+        .repoint_rows(&old, "/tmp/moved-project", &store_dir, "/tmp/moved-dir")
+        .unwrap();
 
     let after = f.store().get(&record.id, OWNER).unwrap().unwrap();
     assert!(
@@ -1628,7 +1686,7 @@ fn rebase_project_clears_the_missing_mark_it_re_addresses() {
 }
 
 #[test]
-fn a_failing_member_rolls_the_whole_rebase_back() {
+fn a_failing_member_rolls_the_whole_repoint_back() {
     let f = Fixture::new();
     let old = f.project_root().to_string_lossy().to_string();
     let new_root = "/tmp/already-a-project";
@@ -1648,7 +1706,14 @@ fn a_failing_member_rolls_the_whole_rebase_back() {
     // artifact statement runs, must not stay moved without it.
     f.asset_under("theirs", new_root, produced.rel_path.as_deref().unwrap());
 
-    let err = f.store().rebase_project(&old, new_root).unwrap_err();
+    let store_dir = crate::store::store_root(&f.scope())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let err = f
+        .store()
+        .repoint_rows(&old, new_root, &store_dir, "/tmp/elsewhere-dir")
+        .unwrap_err();
     assert!(
         err.to_string().to_lowercase().contains("unique"),
         "expected the unique-index violation, got: {err}"
@@ -1703,6 +1768,8 @@ fn workspace_rows_counts_the_members_and_the_runs_in_flight() {
             file_assets: 1,
             sessions: 1,
             tasks: 2,
+            messages: 0,
+            followups: 0,
         }
     );
     assert_eq!(
