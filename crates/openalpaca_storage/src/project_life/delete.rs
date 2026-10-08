@@ -20,7 +20,7 @@ use crate::Database;
 use crate::artifacts::{PurgeCounts, PurgeSession};
 use crate::content_io::{fsync_dir, remove_best_effort};
 use crate::memory_files::{NOTES_DIR, OWNERS_DIR, SnapshotScope, list_snapshots};
-use crate::store::projects::{Project, ProjectId};
+use crate::store::projects::{self, Project, ProjectId};
 use crate::store::{ContentKind, StoreScope, confine_to_root, content_dir};
 
 /// The project's conversations.
@@ -495,6 +495,43 @@ fn delete_within(tx: &Connection, root: &str, placed: &[Placed]) -> Result<Delet
         session_ids,
         message_ids,
     })
+}
+
+/// §6 step 3's last part: `projects/<name>/` removed as one directory, under
+/// [`projects::lock`] so no `register` races it. The folder is reached by
+/// name under `projects_dir()`, never through `project.dir` (canonical, so
+/// through a link it would be the link's target): `projects/` and the
+/// folder must both be real directories, and the folder must still record
+/// this project's id. `Ok(false)` when it is already gone.
+pub fn remove_project_folder(project: &Project) -> Result<bool> {
+    let _held = projects::lock();
+    let projects_dir = projects::projects_dir()?;
+    for path in [projects_dir.clone(), projects_dir.join(&project.name)] {
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_dir() => {}
+            Ok(_) => bail!(
+                "{} is not a real directory (a link or a file); it was left in place",
+                path.display()
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to stat {}", path.display()));
+            }
+        }
+    }
+    let folder = projects_dir.join(&project.name);
+    match projects::read_project_dir(&folder)? {
+        Some(found) if found.id == project.id => {}
+        _ => bail!(
+            "{} no longer records project {}; it was left in place",
+            folder.display(),
+            project.id
+        ),
+    }
+    fs::remove_dir_all(&folder)
+        .with_context(|| format!("failed to remove {}", folder.display()))?;
+    fsync_dir(&projects_dir);
+    Ok(true)
 }
 
 #[cfg(test)]

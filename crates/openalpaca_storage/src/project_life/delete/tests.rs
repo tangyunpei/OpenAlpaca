@@ -672,3 +672,77 @@ fn a_file_linked_after_the_copies_were_made_refuses_the_transaction() {
         "the dropped transaction rolled back"
     );
 }
+
+impl World {
+    fn tmp(&self) -> &Path {
+        self.tmp.path()
+    }
+}
+
+#[test]
+fn removing_the_folder_forgets_the_project_and_leaves_its_own_folder_and_the_others() {
+    let w = World::new();
+    let p = w.project("leaving");
+    let q = w.project("staying");
+    std::fs::create_dir_all(p.dir.join("artifacts").join("loose")).unwrap();
+    std::fs::write(p.dir.join("artifacts").join("loose").join("a.md"), b"a").unwrap();
+    std::fs::write(p.root.join("README.md"), b"the user's own file").unwrap();
+
+    assert!(remove_project_folder(&p).unwrap());
+
+    assert!(!p.dir.exists());
+    assert_eq!(projects::lookup(&p.root).unwrap(), None);
+    assert!(q.dir.join("project.json").is_file());
+    assert_eq!(
+        std::fs::read(p.root.join("README.md")).unwrap(),
+        b"the user's own file"
+    );
+    assert!(p.root.join(".git").is_dir());
+    assert!(
+        !remove_project_folder(&p).unwrap(),
+        "a second call finds nothing to do"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_where_the_folder_was_is_refused_and_its_target_kept() {
+    let w = World::new();
+    let p = w.project("linked");
+    let elsewhere = w.tmp().join("elsewhere");
+    std::fs::rename(&p.dir, &elsewhere).unwrap();
+    let link = projects::projects_dir().unwrap().join(&p.name);
+    std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+
+    let err = remove_project_folder(&p).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("is not a real directory"),
+        "{err:#}"
+    );
+    assert!(elsewhere.join("project.json").is_file());
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn a_folder_that_now_records_another_project_is_left_in_place() {
+    let w = World::new();
+    let first = w.project("again");
+    std::fs::remove_dir_all(&first.dir).unwrap();
+    let second = projects::register(&first.root).unwrap();
+    assert_eq!(second.name, first.name);
+    assert_ne!(second.id, first.id);
+
+    let err = remove_project_folder(&first).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("no longer records project"),
+        "{err:#}"
+    );
+    assert!(second.dir.join("project.json").is_file());
+}
