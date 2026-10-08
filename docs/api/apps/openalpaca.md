@@ -252,9 +252,10 @@
 
 - Source: `apps/openalpaca/src/commands/store.rs`
 - Enum `StoreCommands` variants:
+  - `list`
   - `rebase` (fields: `old`, `new`, `dry_run`)
-  - `purge` (fields: `project`, `all`, `dry_run`, `yes`)
-- Parsed flags: `--all`, `--dry-run`, `--yes`, `-y`
+  - `purge` (fields: `project`, `dry_run`, `yes`)
+- Parsed flags: `--dry-run`, `--yes`, `-y`
 
 ### `tail`
 

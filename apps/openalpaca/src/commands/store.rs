@@ -1,42 +1,34 @@
-//! `openalpaca store` — the content store from the command line (plan §4.8).
+//! `openalpaca store` — the projects OpenAlpaca keeps a folder for (design §6).
 //!
 //! ```text
+//! openalpaca store list
 //! openalpaca store rebase <old> <new> [--dry-run]
-//! openalpaca store purge  <project>|--all [--dry-run] [-y]
+//! openalpaca store purge  <project> [--dry-run] [-y]
 //! ```
 //!
-//! A project's path is its identity in three places — its artifacts, its
-//! conversations and its runs — so moving the directory strands all three at
-//! once (its memory notes are files inside the directory and move with it).
-//! `rebase` is the one call that moves them together,
-//! and the `--dry-run` is the same question asked without the answer being
-//! written: how many rows of each kind name the old root, and what would happen
-//! to the store directory.
+//! A project's content lives at home, in `~/.openalpaca/projects/<name>/`, and
+//! its path is recorded in five columns of the database. `list` shows every
+//! project and marks one whose folder is gone. `rebase` re-points a moved
+//! project — its rows and its folder's name under `projects/` — and its
+//! `--dry-run` reads what is recorded at both paths and names what the daemon
+//! would refuse. `purge` deletes everything OpenAlpaca holds for a project
+//! (ST-19) — conversations, runs, by-products, uploads, every owner's notes and
+//! its folder under `projects/` — and never the project's own folder; a file
+//! another conversation still uses is kept, moved to the root store. It prints
+//! the plan and deletes nothing unless you pass `-y`. It takes a project
+//! exactly: its root, or its folder as `store list` prints it
+//! (`projects/<name>`); the daemon refuses a path inside a project, naming
+//! the root.
 //!
-//! Paths are taken as given (absolute, please). The daemon resolves the *old*
-//! one the same way a chat turn's workspace path is resolved, because that is
-//! how the rows were recorded; the *new* one it takes literally, and refuses a
-//! destination that sits inside another project's root rather than quietly
-//! re-basing onto that root instead.
-//!
-//! `purge` is the other direction: a project you are done with, deleted from
-//! the store. It prints a plan first — one line per entry of the store, in the
-//! retention-class terms the seeded README already uses, saying `delete` or
-//! `keep` for each — and prints it *instead of* purging unless you pass `-y`.
-//! Conversations, runs and uploads go; produced artifacts, the project's memory
-//! notes and anything OpenAlpaca did not create stay, and the plan says so by name
-//! rather than by omission. Unlike `rebase`'s *old* path, `<project>` is never
-//! silently walked up to an ancestor root: `purge /repo/src` is refused
-//! (`422 WORKSPACE_NOT_A_ROOT`, naming `/repo`) rather than deleting the whole
-//! project for a path that named one file of it — a destructive verb takes the
-//! path it was given, or it takes nothing.
-//!
-//! Deliberately not a re-implementation of either transaction: everything below
-//! is `GET`/`PATCH /v1/workspaces` and `POST /v1/workspaces/purge`. The daemon
-//! owns the DB and the session-log writers, so the CLI never touches the store
-//! directly; it owns the refusals too, and the CLI prints them.
+//! Everything here is `GET|PATCH /v1/workspaces` and
+//! `POST /v1/workspaces/purge`: the daemon owns the database, the memory and
+//! the session writers, and it owns the refusals; this prints them. A relative
+//! path is made absolute against this shell's directory before it is sent.
 
-use anyhow::Result;
+use std::fmt::Write as _;
+use std::path::Path;
+
+use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use colored::Colorize;
 use openalpaca_storage::store::projects::overlaps_home_store;
@@ -52,24 +44,23 @@ pub struct StoreArgs {
 
 #[derive(Subcommand)]
 pub enum StoreCommands {
-    /// Re-base a moved project onto its new path
+    /// List the projects OpenAlpaca keeps a folder for, and mark a missing one
+    List,
+    /// Re-point a moved project onto its new path
     Rebase {
-        /// The path the project used to have
+        /// The path the project had
         old: String,
         /// The path it has now
         new: String,
-        /// Report what would move and change nothing
+        /// Report what would move and what would be refused; change nothing
         #[arg(long)]
         dry_run: bool,
     },
-    /// Delete the history of a project you are done with
+    /// Delete everything OpenAlpaca holds for a project (never its own folder)
     Purge {
-        /// The project root to purge
-        #[arg(required_unless_present = "all", conflicts_with = "all")]
-        project: Option<String>,
-        /// Purge every project root on record
-        #[arg(long)]
-        all: bool,
+        /// The project: its root as `store list` prints it, or its folder there
+        /// (projects/<name>)
+        project: String,
         /// Print the plan and change nothing — what happens anyway without -y
         #[arg(long)]
         dry_run: bool,
@@ -79,61 +70,77 @@ pub enum StoreCommands {
     },
 }
 
-/// One workspace as `GET /v1/workspaces` describes it.
-#[derive(Debug, Deserialize, Serialize)]
-struct WorkspaceView {
-    path: String,
+/// One project, as the daemon answers it.
+#[derive(Debug, Deserialize)]
+struct ProjectView {
+    id: String,
+    root: String,
+    name: String,
     #[serde(default)]
-    store_present: bool,
-    #[serde(default)]
-    recorded_root: Option<String>,
-    #[serde(default)]
-    moved: bool,
-    rows: Counts,
-    #[serde(default)]
-    active_tasks: usize,
-    /// Runs under this root that are `queued` — named separately because the
-    /// two writers refuse on different sets: a re-base waits for
-    /// `running`/`paused` only, a purge refuses on `queued` as well. `None` is
-    /// a daemon that predates the field, which is why the plan prints the line
-    /// only when the number is actually reported.
-    #[serde(default)]
-    queued_tasks: Option<usize>,
+    missing: bool,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
-struct Counts {
+/// The rows the five path columns hold under one root.
+#[derive(Debug, Default, Deserialize)]
+struct RowCounts {
     #[serde(default)]
     artifacts: usize,
     #[serde(default)]
     sessions: usize,
     #[serde(default)]
     tasks: usize,
+    #[serde(default)]
+    messages: usize,
+    #[serde(default)]
+    followups: usize,
 }
 
-impl Counts {
+impl RowCounts {
     fn is_empty(&self) -> bool {
-        self.artifacts == 0 && self.sessions == 0 && self.tasks == 0
+        self.artifacts == 0
+            && self.sessions == 0
+            && self.tasks == 0
+            && self.messages == 0
+            && self.followups == 0
     }
 
-    /// `12 artifacts, 2 conversations, 3 runs` — every member named,
-    /// including the zeroes, because "nothing else moved" is the part a
+    /// Every member named, zeroes included: "nothing else moved" is the part a
     /// reader is checking for.
     fn describe(&self) -> String {
         format!(
-            "{} artifacts, {} conversations, {} runs",
-            self.artifacts, self.sessions, self.tasks
+            "{} artifacts, {} conversations, {} runs, {} messages, {} follow-ups",
+            self.artifacts, self.sessions, self.tasks, self.messages, self.followups
         )
     }
 }
 
+/// One path, as `GET /v1/workspaces?path=` describes it.
 #[derive(Debug, Deserialize)]
-struct RebaseResult {
+struct WorkspaceView {
+    path: String,
+    #[serde(default)]
+    root: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    missing: bool,
+    #[serde(default)]
+    rows: RowCounts,
+    #[serde(default)]
+    active_tasks: usize,
+    /// `queued` runs: they do not stop a re-point, they do stop a delete.
+    #[serde(default)]
+    queued_tasks: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepointResult {
     old_path: String,
     new_path: String,
-    moved: Counts,
-    #[serde(default)]
-    store_moved: bool,
+    moved: RowCounts,
+    project: ProjectView,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,17 +149,13 @@ struct RebaseRequest<'a> {
     new_path: &'a str,
 }
 
-// ── purge ────────────────────────────────────────────────────────
-
 #[derive(Debug, Serialize)]
 struct PurgeRequest<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path: Option<&'a str>,
-    all: bool,
+    path: &'a str,
     dry_run: bool,
 }
 
-/// One line of the daemon's plan: a store entry, what it holds under this root,
+/// One line of the daemon's plan: an entry, what it holds for this project,
 /// the retention class the README gives it, and `delete` or `keep`.
 #[derive(Debug, Deserialize)]
 struct PlanEntry {
@@ -180,15 +183,18 @@ struct PurgeCounts {
     run_events: usize,
     #[serde(default)]
     uploads: usize,
+    #[serde(default)]
+    artifacts: usize,
+    #[serde(default)]
+    memory_notes: usize,
 }
 
 impl PurgeCounts {
-    /// Every member named, zeroes included — the `Counts::describe`
-    /// convention: "nothing else went" is the part a reader is checking for.
+    /// Every member named, zeroes included.
     fn describe(&self) -> String {
         format!(
             "{} conversations, {} messages, {} tool calls, {} follow-ups, {} runs, {} spans, \
-             {} run events, {} uploads",
+             {} run events, {} uploads, {} by-products, {} memory notes",
             self.sessions,
             self.messages,
             self.tool_calls,
@@ -196,9 +202,19 @@ impl PurgeCounts {
             self.tasks,
             self.spans,
             self.run_events,
-            self.uploads
+            self.uploads,
+            self.artifacts,
+            self.memory_notes
         )
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Kept {
+    #[serde(default)]
+    uploads: usize,
+    #[serde(default)]
+    artifacts: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -206,70 +222,112 @@ struct Removed {
     #[serde(default)]
     session_dirs: usize,
     #[serde(default)]
-    upload_files: usize,
+    memory_partitions: usize,
+    #[serde(default)]
+    project_folder: bool,
 }
 
 #[derive(Debug, Deserialize)]
-struct PurgeProject {
-    path: String,
+struct DeleteResult {
+    #[serde(default)]
+    applied: bool,
+    project: ProjectView,
     #[serde(default)]
     entries: Vec<PlanEntry>,
     #[serde(default)]
     counts: PurgeCounts,
     #[serde(default)]
+    kept: Kept,
+    /// Present only on a real run: what the daemon actually removed.
+    #[serde(default)]
     removed: Option<Removed>,
 }
 
-#[derive(Debug, Deserialize)]
-struct PurgeResult {
-    #[serde(default)]
-    applied: bool,
-    #[serde(default)]
-    projects: Vec<PurgeProject>,
-    /// `--all` only: what the home scope holds and never touches — its own
-    /// conversations and uploads, and the home store's `state/`, each its own
-    /// entry so both get the same "named, not omitted" treatment a project's
-    /// plan gives every member.
-    #[serde(default)]
-    home_scope: Vec<PlanEntry>,
-}
-
 pub async fn run(args: StoreArgs) -> Result<()> {
-    match args.command {
-        StoreCommands::Rebase { old, new, dry_run } => rebase(&old, &new, dry_run).await,
+    let client = DaemonClient::connect()?;
+    let text = match args.command {
+        StoreCommands::List => list(&client).await?,
+        StoreCommands::Rebase { old, new, dry_run } => {
+            rebase(&client, &absolute(&old)?, &absolute(&new)?, dry_run).await?
+        }
         StoreCommands::Purge {
             project,
-            all,
             dry_run,
             yes,
-        } => purge(project.as_deref(), all, purge_is_dry(dry_run, yes)).await,
-    }
+        } => {
+            let root = purge_target(&client, &project).await?;
+            purge(&client, &root, purge_is_dry(dry_run, yes)).await?
+        }
+    };
+    print!("{text}");
+    Ok(())
 }
 
-/// `--dry-run` is the default until `-y`.
-///
-/// The two flags conflict in the parser, so this is not resolving a
-/// contradiction — it is the statement that the *absence* of both means the
-/// safe one.
+/// `--dry-run` is the default until `-y`: the two flags conflict in the
+/// parser, and the absence of both means the safe one.
 fn purge_is_dry(dry_run: bool, yes: bool) -> bool {
     dry_run || !yes
+}
+
+/// A path made absolute against this shell's directory: the daemon refuses a
+/// relative one rather than read it against its own (R22).
+fn absolute(path: &str) -> Result<String> {
+    let trimmed = path.trim();
+    let absolute = std::path::absolute(trimmed)
+        .with_context(|| format!("cannot make {trimmed:?} an absolute path"))?;
+    Ok(absolute.to_string_lossy().into_owned())
 }
 
 fn workspace_query(path: &str) -> String {
     format!("/v1/workspaces?path={}", urlencoding::encode(path))
 }
 
-async fn rebase(old: &str, new: &str, dry_run: bool) -> Result<()> {
-    let client = DaemonClient::connect()?;
+// ── list ─────────────────────────────────────────────────────────
 
+async fn list(client: &DaemonClient) -> Result<String> {
+    let projects: Vec<ProjectView> = client.get("/v1/workspaces").await?;
+    Ok(render_list(&projects))
+}
+
+fn render_list(projects: &[ProjectView]) -> String {
+    let mut out = String::new();
+    if projects.is_empty() {
+        let _ = writeln!(
+            out,
+            "{}",
+            "No projects yet. A chat turn in a git repository, or `openalpaca chat --project \
+             <dir>`, makes one."
+                .yellow()
+        );
+        return out;
+    }
+    for project in projects {
+        let missing = match project.missing {
+            true => format!(
+                "  {}",
+                "missing — its folder is gone: re-point it, or delete its data".yellow()
+            ),
+            false => String::new(),
+        };
+        let _ = writeln!(out, "{}{missing}", project.root.bold());
+        let _ = writeln!(
+            out,
+            "  {}",
+            format!("projects/{} · id {}", project.name, project.id).dimmed()
+        );
+    }
+    out
+}
+
+// ── rebase ───────────────────────────────────────────────────────
+
+async fn rebase(client: &DaemonClient, old: &str, new: &str, dry_run: bool) -> Result<String> {
     if dry_run {
         let from: WorkspaceView = client.get(&workspace_query(old)).await?;
         let to: WorkspaceView = client.get(&workspace_query(new)).await?;
-        print_plan(new, &from, &to);
-        return Ok(());
+        return Ok(render_plan(&from, &to));
     }
-
-    let result: RebaseResult = client
+    let result: RepointResult = client
         .patch(
             "/v1/workspaces",
             &RebaseRequest {
@@ -278,78 +336,212 @@ async fn rebase(old: &str, new: &str, dry_run: bool) -> Result<()> {
             },
         )
         .await?;
-
-    println!(
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
         "{} {} → {}",
-        "Re-based".green().bold(),
+        "Re-pointed".green().bold(),
         result.old_path.dimmed(),
         result.new_path
     );
-    println!("  {}", result.moved.describe());
-    if result.store_moved {
-        println!("  the store directory moved with them");
-    }
-    Ok(())
+    let _ = writeln!(out, "  {}", result.moved.describe());
+    let _ = writeln!(out, "  its folder is now projects/{}", result.project.name);
+    Ok(out)
 }
 
-async fn purge(project: Option<&str>, all: bool, dry_run: bool) -> Result<()> {
-    let client = DaemonClient::connect()?;
-    let result: PurgeResult = client
+fn flag(out: &mut String, text: String) {
+    let _ = writeln!(out, "  {}", text.yellow());
+}
+
+/// The `--dry-run` body: what is recorded at the old path and what the
+/// re-point would refuse. It reports rather than refuses. The home-store and
+/// not-a-directory lines read this machine's filesystem — the daemon's, on the
+/// machine they share; the daemon is what decides.
+fn render_plan(from: &WorkspaceView, to: &WorkspaceView) -> String {
+    let mut out = String::new();
+    let source = from.root.as_deref().unwrap_or(&from.path);
+    let _ = writeln!(
+        out,
+        "{} {} → {}",
+        "Would re-point".bold(),
+        source.dimmed(),
+        to.path
+    );
+    let _ = writeln!(out, "  {}", from.rows.describe());
+    if from.id.is_none() {
+        flag(
+            &mut out,
+            format!("{source} is not a project OpenAlpaca knows; the re-point would be refused"),
+        );
+    }
+    if overlaps_home_store(Path::new(&to.path)) {
+        flag(
+            &mut out,
+            format!(
+                "{} is, contains or lies inside the OpenAlpaca home store; the re-point would \
+                 be refused",
+                to.path
+            ),
+        );
+    } else if !Path::new(&to.path).is_dir() {
+        flag(
+            &mut out,
+            format!(
+                "{} is not a directory; the re-point would be refused — create it first",
+                to.path
+            ),
+        );
+    }
+    if to.root.as_deref() == Some(to.path.as_str()) && (to.id.is_some() || !to.rows.is_empty()) {
+        flag(
+            &mut out,
+            format!(
+                "{} is already a project of its own, or OpenAlpaca's records already name it; \
+                 the re-point would be refused — delete that project's data first, or re-point \
+                 onto another path",
+                to.path
+            ),
+        );
+    }
+    if from.active_tasks > 0 {
+        flag(
+            &mut out,
+            format!(
+                "{} run(s) there are still in flight; the re-point would be refused until they \
+                 finish",
+                from.active_tasks
+            ),
+        );
+    }
+    if from.queued_tasks > 0 {
+        flag(
+            &mut out,
+            format!(
+                "{} run(s) there are queued; the re-point takes their rows with it, but \
+                 deleting that project's data would be refused until they finish",
+                from.queued_tasks
+            ),
+        );
+    }
+    if from.missing {
+        let _ = writeln!(
+            out,
+            "  its folder is gone; re-pointing is what re-attaches its data"
+        );
+    }
+    if let Some(name) = &from.name {
+        let _ = writeln!(
+            out,
+            "  its folder projects/{name} would be renamed for the new path"
+        );
+    }
+    out
+}
+
+// ── purge ────────────────────────────────────────────────────────
+
+/// What `purge` sends (the lead's R-S8): a delete takes a project exactly.
+/// `projects/<name>`, a folder as `store list` prints it, is looked up in
+/// the daemon's list and sent as that project's root; anything else is a
+/// path, made absolute against this shell's directory and sent as written —
+/// the daemon refuses one inside a project, naming the project's root
+/// (`422 WORKSPACE_NOT_A_ROOT`), and one in no project (`404`). A folder of
+/// this shell's directory that is itself called `projects` is
+/// `./projects/…`.
+async fn purge_target(client: &DaemonClient, project: &str) -> Result<String> {
+    let trimmed = project.trim();
+    let Some(name) = trimmed.strip_prefix("projects/") else {
+        return absolute(trimmed);
+    };
+    let name = name.trim_end_matches('/');
+    let projects: Vec<ProjectView> = client.get("/v1/workspaces").await?;
+    projects
+        .into_iter()
+        .find(|listed| listed.name == name)
+        .map(|listed| listed.root)
+        .with_context(|| {
+            format!(
+                "no project's folder is projects/{name}: `openalpaca store list` names each \
+                 project's root and folder"
+            )
+        })
+}
+
+async fn purge(client: &DaemonClient, project: &str, dry_run: bool) -> Result<String> {
+    let result: DeleteResult = client
         .post(
             "/v1/workspaces/purge",
             &PurgeRequest {
                 path: project,
-                all,
                 dry_run,
             },
         )
         .await?;
+    Ok(render_delete(&result))
+}
 
-    if result.projects.is_empty() {
-        println!("{}", "No project roots are on record.".yellow());
-    }
-    for project in &result.projects {
-        println!();
-        let heading = match result.applied {
-            true => format!("{} {}", "Purged".green().bold(), project.path),
-            false => format!("{} {}", "Would purge".bold(), project.path),
+fn render_delete(result: &DeleteResult) -> String {
+    let mut out = String::new();
+    let heading = match result.applied {
+        true => format!(
+            "{} {}",
+            "Deleted the data of".green().bold(),
+            result.project.root
+        ),
+        false => format!(
+            "{} {}",
+            "Would delete the data of".bold(),
+            result.project.root
+        ),
+    };
+    let _ = writeln!(out, "{heading}");
+    let _ = writeln!(
+        out,
+        "  {}",
+        format!(
+            "projects/{} · id {}",
+            result.project.name, result.project.id
+        )
+        .dimmed()
+    );
+    out.push_str(&render_entries(&result.entries));
+    // Present only on a real run: filled from what the daemon actually removed.
+    if let Some(removed) = &result.removed {
+        let _ = writeln!(out, "  {} {}", "deleted:".bold(), result.counts.describe());
+        let folder = match removed.project_folder {
+            true => format!("the folder projects/{}", result.project.name),
+            false => format!(
+                "not the folder projects/{} (the daemon log says why)",
+                result.project.name
+            ),
         };
-        println!("{heading}");
-        print_entries(&project.entries);
-        // Present only on a real run: the daemon fills it from what the
-        // transaction actually deleted, not from the plan it was given.
-        if let Some(removed) = &project.removed {
-            println!("  {} {}", "deleted:".bold(), project.counts.describe());
-            println!(
-                "  {} {} session log directories, {} upload files",
-                "removed:".bold(),
-                removed.session_dirs,
-                removed.upload_files
-            );
-        }
+        let _ = writeln!(
+            out,
+            "  {} {} session log directories, {} memory partitions, {folder}",
+            "removed:".bold(),
+            removed.session_dirs,
+            removed.memory_partitions
+        );
     }
-    if !result.home_scope.is_empty() {
-        println!();
-        print_entries(&result.home_scope);
+    if result.kept.uploads + result.kept.artifacts > 0 {
+        let _ = writeln!(
+            out,
+            "  {} {} uploads and {} by-products another conversation still uses, moved to the \
+             root store",
+            "kept:".bold(),
+            result.kept.uploads,
+            result.kept.artifacts
+        );
     }
     if !result.applied {
-        println!();
-        println!(
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
             "{}",
             "Nothing was deleted. Re-run with -y to carry this out.".dimmed()
         );
     }
-    Ok(())
-}
-
-/// The plan, one entry per two lines: the verdict and what is there, then the
-/// retention class that verdict comes from.
-///
-/// The class is printed for the keeps as much as for the deletes — "artifacts
-/// are never garbage-collected" is the sentence that makes the delete lines
-/// trustworthy.
-fn print_entries(entries: &[PlanEntry]) {
-    print!("{}", render_entries(entries));
+    out
 }
 
 /// Whether a plan entry deletes something or keeps it — the one fact a
@@ -378,8 +570,11 @@ fn paint_verdict(padded: &str, verdict: Verdict) -> String {
     }
 }
 
-/// [`print_entries`]'s body, as a `String` — split out so the column layout
-/// can be asserted on directly instead of only by eye.
+/// The plan's body, one entry per two lines: the verdict and what is there,
+/// then the retention class that verdict comes from — printed for the keeps as
+/// much as for the deletes, because "artifacts are never garbage-collected" is
+/// the sentence that makes the delete lines trustworthy. A `String`, so the
+/// column layout can be asserted on directly instead of only by eye.
 fn render_entries(entries: &[PlanEntry]) -> String {
     render_entries_with(entries, paint_verdict)
 }
@@ -396,8 +591,6 @@ fn render_entries(entries: &[PlanEntry]) -> String {
 /// "padding happens before painting" with a marker that has nothing to do
 /// with that global, so nothing here ever calls `colored::control` at all.
 fn render_entries_with(entries: &[PlanEntry], paint: impl Fn(&str, Verdict) -> String) -> String {
-    use std::fmt::Write as _;
-
     let width = entries
         .iter()
         .map(|e| e.entry.chars().count())
@@ -426,147 +619,12 @@ fn render_entries_with(entries: &[PlanEntry], paint: impl Fn(&str, Verdict) -> S
     out
 }
 
-/// The ancestor a destination would be walked up to, when the daemon resolved
-/// it to something other than the path that was asked about.
-///
-/// The `PATCH` takes its destination literally and answers `422`
-/// `WORKSPACE_NOT_A_ROOT` for exactly this, so the dry run says so first. The
-/// comparison is against the *resolved* answer the `GET` echoed back, which is
-/// the only thing here that knows the daemon's own view of the path.
-fn destination_ancestor<'a>(requested: &str, resolved: &'a str) -> Option<&'a str> {
-    let requested = std::fs::canonicalize(requested.trim())
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| requested.trim().trim_end_matches('/').to_string());
-    (requested.trim_end_matches('/') != resolved).then_some(resolved)
-}
-
-/// The `--dry-run` body: what is there, and what the re-base would do about it.
-fn print_plan(requested_new: &str, from: &WorkspaceView, to: &WorkspaceView) {
-    print!("{}", render_plan(requested_new, from, to));
-}
-
-/// [`print_plan`]'s body, as a `String` — split out for the same reason
-/// [`render_entries`] was: the lines a dry run owes its reader are assertable
-/// text, not something to check by eye.
-///
-/// It reports rather than refuses — a dry run that exits non-zero on a
-/// condition the real call would also refuse tells the caller nothing the real
-/// call would not — except for the one case where there is simply nothing to
-/// re-base, which is a mistyped path far more often than it is a no-op.
-fn render_plan(requested_new: &str, from: &WorkspaceView, to: &WorkspaceView) -> String {
-    use std::fmt::Write as _;
-
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "{} {} → {}",
-        "Would re-base".bold(),
-        from.path.dimmed(),
-        to.path
-    );
-    let _ = writeln!(out, "  {}", from.rows.describe());
-
-    if let Some(ancestor) = destination_ancestor(requested_new, &to.path) {
-        let _ = writeln!(
-            out,
-            "  {}",
-            format!(
-                "the destination is inside the project rooted at {ancestor}; the re-base would \
-                 be refused (a destination must be a project root of its own)"
-            )
-            .yellow()
-        );
-    }
-    // Advisory: this reads *this* process's home root, which is the daemon's on
-    // the machine they share. The daemon is what actually refuses.
-    for (label, view) in [("the old path", from), ("the new path", to)] {
-        if overlaps_home_store(std::path::Path::new(&view.path)) {
-            let _ = writeln!(
-                out,
-                "  {}",
-                format!(
-                    "{label} resolves to {}, which is the home store, lies inside it or contains \
-                     it, so it is not a project; \
-                     the re-base would be refused",
-                    view.path
-                )
-                .yellow()
-            );
-        }
-    }
-
-    if from.rows.is_empty() {
-        let _ = writeln!(
-            out,
-            "  {}",
-            "nothing is recorded under that root — check the path".yellow()
-        );
-    }
-    if from.active_tasks > 0 {
-        let _ = writeln!(
-            out,
-            "  {}",
-            format!(
-                "{} run(s) there are still in flight; the re-base would be refused until they finish",
-                from.active_tasks
-            )
-            .yellow()
-        );
-    }
-    // The other half of "in flight", and the reason `GET /v1/workspaces` names
-    // both numbers: a queued run is not what a re-base waits for (its row moves
-    // with the rest, and it has not resolved a store yet), but it *is* what a
-    // purge of the same root refuses on. A reader shown only `active_tasks`
-    // could not tell why the purge they tried next was refused with nothing
-    // running. Printed only when the daemon actually reports the number.
-    if let Some(queued) = from.queued_tasks.filter(|queued| *queued > 0) {
-        let _ = writeln!(
-            out,
-            "  {}",
-            format!(
-                "{queued} run(s) there are queued; the re-base takes their rows with it, but a \
-                 purge of that root would be refused until they finish"
-            )
-            .yellow()
-        );
-    }
-    if !to.rows.is_empty() {
-        let _ = writeln!(
-            out,
-            "  {}",
-            format!(
-                "{} already has a store recorded against it ({}); the re-base would be refused",
-                to.path,
-                to.rows.describe()
-            )
-            .yellow()
-        );
-    }
-    let _ = match (from.store_present, to.store_present) {
-        (true, true) => writeln!(
-            out,
-            "  {}",
-            "both roots hold a store directory; the re-base would be refused".yellow()
-        ),
-        (true, false) => writeln!(out, "  the store directory would move too"),
-        (false, true) => writeln!(out, "  the store directory is already at the new root"),
-        (false, false) => writeln!(out, "  neither root holds a store directory"),
-    };
-    if to.moved {
-        let _ = writeln!(
-            out,
-            "  the store at {} records {}",
-            to.path,
-            to.recorded_root.as_deref().unwrap_or("nothing").dimmed()
-        );
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::{EnvSandbox, json_answer, serve};
     use clap::Parser;
+    use serde_json::json;
 
     #[derive(Parser)]
     struct Harness {
@@ -583,6 +641,27 @@ mod tests {
             .map(|h| h.command)
     }
 
+    fn client(addr: std::net::SocketAddr) -> DaemonClient {
+        DaemonClient::for_tests(&format!("http://{addr}"), "token")
+    }
+
+    fn ok(body: serde_json::Value) -> String {
+        json_answer("200 OK", "e", &body.to_string())
+    }
+
+    const APP_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const OLD_ID: &str = "22222222-2222-4222-8222-222222222222";
+
+    fn zeros() -> serde_json::Value {
+        json!({"artifacts": 0, "sessions": 0, "tasks": 0, "messages": 0, "followups": 0})
+    }
+
+    #[test]
+    fn list_takes_no_arguments() {
+        assert!(matches!(parse(&["list"]), StoreCommands::List));
+        assert!(try_parse(&["list", "/x"]).is_err());
+    }
+
     #[test]
     fn rebase_takes_two_paths_and_an_optional_dry_run() {
         assert!(matches!(
@@ -597,56 +676,31 @@ mod tests {
     }
 
     #[test]
-    fn the_path_is_url_encoded_into_the_query() {
-        assert_eq!(
-            workspace_query("/Users/me/my project"),
-            "/v1/workspaces?path=%2FUsers%2Fme%2Fmy%20project"
-        );
-    }
-
-    #[test]
-    fn a_destination_the_daemon_resolved_elsewhere_names_the_ancestor() {
-        // The daemon answered about `/mono` for a request about `/mono/sub`:
-        // that is the 422 the real call would give.
-        assert_eq!(
-            destination_ancestor("/mono/sub/proj", "/mono"),
-            Some("/mono")
-        );
-        // A destination the daemon took as given is not flagged, trailing
-        // separator and all.
-        assert_eq!(destination_ancestor("/new/proj", "/new/proj"), None);
-        assert_eq!(destination_ancestor("/new/proj/", "/new/proj"), None);
-    }
-
-    #[test]
-    fn purge_takes_one_project_or_all_and_never_both() {
+    fn purge_takes_exactly_one_project() {
         assert!(matches!(
             parse(&["purge", "/some/proj"]),
-            StoreCommands::Purge { project: Some(p), all: false, .. } if p == "/some/proj"
+            StoreCommands::Purge { project, .. } if project == "/some/proj"
         ));
         assert!(matches!(
-            parse(&["purge", "--all"]),
-            StoreCommands::Purge {
-                project: None,
-                all: true,
-                ..
-            }
+            parse(&["purge", "projects/-some-proj"]),
+            StoreCommands::Purge { project, .. } if project == "projects/-some-proj"
         ));
-        // Both is a parse error, and so is neither — the destructive verb
-        // never has to guess which project was meant.
-        assert!(try_parse(&["purge", "/some/proj", "--all"]).is_err());
-        assert!(try_parse(&["purge"]).is_err());
-        // `--dry-run` and `-y` are the same question asked twice.
+        assert!(
+            try_parse(&["purge"]).is_err(),
+            "a destructive verb never guesses the project"
+        );
+        assert!(
+            try_parse(&["purge", "--all"]).is_err(),
+            "--all is gone (ST-19)"
+        );
         assert!(try_parse(&["purge", "/some/proj", "--dry-run", "-y"]).is_err());
     }
 
     #[test]
     fn a_purge_is_a_dry_run_until_minus_y() {
-        // Neither flag: the plan, not the deletion.
         assert!(purge_is_dry(false, false));
         assert!(purge_is_dry(true, false));
         assert!(!purge_is_dry(false, true));
-
         let StoreCommands::Purge { dry_run, yes, .. } = parse(&["purge", "/p"]) else {
             panic!("not a purge");
         };
@@ -655,10 +709,43 @@ mod tests {
             panic!("not a purge");
         };
         assert!(!purge_is_dry(dry_run, yes));
-        let StoreCommands::Purge { dry_run, yes, .. } = parse(&["purge", "--all", "--yes"]) else {
-            panic!("not a purge");
+    }
+
+    #[test]
+    fn the_path_is_url_encoded_into_the_query() {
+        assert_eq!(
+            workspace_query("/Users/me/my project"),
+            "/v1/workspaces?path=%2FUsers%2Fme%2Fmy%20project"
+        );
+    }
+
+    #[test]
+    fn a_relative_path_is_made_absolute_against_this_shells_directory() {
+        assert_eq!(absolute("/already/absolute").unwrap(), "/already/absolute");
+        let expected = std::env::current_dir()
+            .unwrap()
+            .join("here")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(absolute("here").unwrap(), expected);
+        assert!(absolute("  ").is_err());
+    }
+
+    #[test]
+    fn every_member_is_named_including_the_zeroes() {
+        let counts = RowCounts {
+            artifacts: 12,
+            sessions: 2,
+            tasks: 0,
+            messages: 7,
+            followups: 0,
         };
-        assert!(!purge_is_dry(dry_run, yes));
+        assert_eq!(
+            counts.describe(),
+            "12 artifacts, 2 conversations, 0 runs, 7 messages, 0 follow-ups"
+        );
+        assert!(!counts.is_empty());
+        assert!(RowCounts::default().is_empty());
     }
 
     #[test]
@@ -672,24 +759,339 @@ mod tests {
             spans: 5,
             run_events: 18,
             uploads: 0,
+            artifacts: 4,
+            memory_notes: 9,
         };
         assert_eq!(
             counts.describe(),
             "3 conversations, 41 messages, 12 tool calls, 0 follow-ups, 2 runs, 5 spans, \
-             18 run events, 0 uploads"
+             18 run events, 0 uploads, 4 by-products, 9 memory notes"
         );
     }
 
-    #[test]
-    fn every_member_is_named_including_the_zeroes() {
-        let counts = Counts {
-            artifacts: 12,
-            sessions: 2,
-            tasks: 0,
-        };
-        assert_eq!(counts.describe(), "12 artifacts, 2 conversations, 0 runs");
-        assert!(!counts.is_empty());
-        assert!(Counts::default().is_empty());
+    #[tokio::test]
+    async fn list_prints_every_project_and_marks_a_missing_one() {
+        let (addr, server) = serve(vec![ok(json!([
+            {"id": APP_ID, "root": "/work/app", "name": "-work-app", "missing": false},
+            {"id": OLD_ID, "root": "/work/old", "name": "-work-old", "missing": true},
+        ]))]);
+
+        let text = strip_ansi(&list(&client(addr)).await.unwrap());
+
+        let seen = server.join().unwrap();
+        assert!(
+            seen[0].starts_with("GET /v1/workspaces HTTP/1.1"),
+            "{}",
+            seen[0]
+        );
+        assert_eq!(
+            text,
+            format!(
+                "/work/app\n  projects/-work-app · id {APP_ID}\n\
+                 /work/old  missing — its folder is gone: re-point it, or delete its data\n  \
+                 projects/-work-old · id {OLD_ID}\n"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn list_with_no_projects_says_how_one_is_made() {
+        let (addr, server) = serve(vec![ok(json!([]))]);
+        let text = strip_ansi(&list(&client(addr)).await.unwrap());
+        server.join().unwrap();
+        assert!(text.contains("openalpaca chat --project <dir>"), "{text}");
+    }
+
+    fn delete_answer(applied: bool) -> serde_json::Value {
+        json!({
+            "dry_run": !applied,
+            "applied": applied,
+            "project": {"id": APP_ID, "root": "/work/app", "name": "-work-app", "missing": false},
+            "entries": [{
+                "entry": "sessions/",
+                "holds": "2 conversations",
+                "retention": "size-capped, optional age sweep",
+                "action": "delete"
+            }],
+            "counts": {
+                "sessions": 2, "messages": 5, "tool_calls": 0, "followups": 0, "tasks": 1,
+                "spans": 0, "run_events": 0, "uploads": 1, "artifacts": 3, "memory_notes": 4
+            },
+            "kept": {"uploads": 1, "artifacts": 0},
+            "removed": if applied {
+                json!({"session_dirs": 2, "memory_partitions": 1, "project_folder": true})
+            } else {
+                serde_json::Value::Null
+            },
+        })
+    }
+
+    #[tokio::test]
+    async fn purge_sends_one_project_and_prints_the_plan_by_default() {
+        let (addr, server) = serve(vec![ok(delete_answer(false))]);
+
+        let text = strip_ansi(
+            &purge(&client(addr), "/work/app", purge_is_dry(false, false))
+                .await
+                .unwrap(),
+        );
+
+        let seen = server.join().unwrap();
+        assert!(
+            seen[0].starts_with("POST /v1/workspaces/purge HTTP/1.1"),
+            "{}",
+            seen[0]
+        );
+        assert!(
+            seen[0].ends_with(r#"{"path":"/work/app","dry_run":true}"#),
+            "{}",
+            seen[0]
+        );
+        assert!(
+            text.starts_with("Would delete the data of /work/app\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("delete  sessions/  2 conversations"),
+            "{text}"
+        );
+        assert!(
+            text.contains("kept: 1 uploads and 0 by-products another conversation still uses"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("Nothing was deleted. Re-run with -y to carry this out.\n"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_real_purge_prints_what_went_and_what_was_removed() {
+        let (addr, server) = serve(vec![ok(delete_answer(true))]);
+
+        let text = strip_ansi(&purge(&client(addr), "/work/app", false).await.unwrap());
+
+        let seen = server.join().unwrap();
+        assert!(
+            seen[0].ends_with(r#"{"path":"/work/app","dry_run":false}"#),
+            "{}",
+            seen[0]
+        );
+        assert!(
+            text.starts_with("Deleted the data of /work/app\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "deleted: 2 conversations, 5 messages, 0 tool calls, 0 follow-ups, 1 runs, 0 spans, \
+                 0 run events, 1 uploads, 3 by-products, 4 memory notes"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "removed: 2 session log directories, 1 memory partitions, the folder projects/-work-app"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("Nothing was deleted"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_rebase_dry_run_reads_both_paths_and_names_what_would_be_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvSandbox::enter(tmp.path());
+        let target = tmp.path().canonicalize().unwrap().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let target = target.to_string_lossy().into_owned();
+        let from = json!({
+            "path": "/work/app", "root": "/work/app", "id": APP_ID, "name": "-work-app",
+            "missing": true,
+            "rows": {"artifacts": 2, "sessions": 1, "tasks": 3, "messages": 4, "followups": 0},
+            "active_tasks": 0, "queued_tasks": 2,
+        });
+        let to = json!({
+            "path": target, "root": target, "id": OLD_ID, "name": "-target", "missing": false,
+            "rows": zeros(), "active_tasks": 0, "queued_tasks": 0,
+        });
+        let (addr, server) = serve(vec![ok(from), ok(to)]);
+
+        let text = strip_ansi(
+            &rebase(&client(addr), "/work/app", &target, true)
+                .await
+                .unwrap(),
+        );
+
+        let seen = server.join().unwrap();
+        assert!(seen[0].starts_with(&format!("GET {} HTTP/1.1", workspace_query("/work/app"))));
+        assert!(seen[1].starts_with(&format!("GET {} HTTP/1.1", workspace_query(&target))));
+        assert!(
+            text.contains("2 artifacts, 1 conversations, 3 runs, 4 messages, 0 follow-ups"),
+            "{text}"
+        );
+        assert!(text.contains("is already a project of its own"), "{text}");
+        assert!(
+            text.contains("delete that project's data first, or re-point onto another path"),
+            "{text}"
+        );
+        assert!(text.contains("2 run(s) there are queued"), "{text}");
+        assert!(
+            text.contains("its folder is gone; re-pointing is what re-attaches its data"),
+            "{text}"
+        );
+        assert!(
+            text.contains("its folder projects/-work-app would be renamed"),
+            "{text}"
+        );
+        assert!(!text.contains("not a directory"), "{text}");
+        assert!(!text.contains("not a project OpenAlpaca knows"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_rebase_dry_run_from_an_unknown_path_onto_a_missing_one_says_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvSandbox::enter(tmp.path());
+        let nowhere = tmp
+            .path()
+            .join("nowhere")
+            .join("new")
+            .to_string_lossy()
+            .into_owned();
+        let from = json!({
+            "path": "/work/loose", "root": null, "id": null, "name": null, "missing": false,
+            "rows": zeros(), "active_tasks": 0, "queued_tasks": 0,
+        });
+        let to = json!({
+            "path": nowhere, "root": null, "id": null, "name": null, "missing": false,
+            "rows": zeros(), "active_tasks": 0, "queued_tasks": 0,
+        });
+        let (addr, server) = serve(vec![ok(from), ok(to)]);
+
+        let text = strip_ansi(
+            &rebase(&client(addr), "/work/loose", &nowhere, true)
+                .await
+                .unwrap(),
+        );
+
+        server.join().unwrap();
+        assert!(
+            text.contains("/work/loose is not a project OpenAlpaca knows"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("{nowhere} is not a directory")),
+            "{text}"
+        );
+        assert!(!text.contains("would be renamed"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_rebase_prints_the_project_under_its_new_folder() {
+        let (addr, server) = serve(vec![ok(json!({
+            "old_path": "/work/app",
+            "new_path": "/work/new",
+            "moved": {"artifacts": 2, "sessions": 1, "tasks": 0, "messages": 3, "followups": 0},
+            "project": {"id": APP_ID, "root": "/work/new", "name": "-work-new", "missing": false},
+        }))]);
+
+        let text = strip_ansi(
+            &rebase(&client(addr), "/work/app", "/work/new", false)
+                .await
+                .unwrap(),
+        );
+
+        let seen = server.join().unwrap();
+        assert!(
+            seen[0].starts_with("PATCH /v1/workspaces HTTP/1.1"),
+            "{}",
+            seen[0]
+        );
+        assert!(
+            seen[0].ends_with(r#"{"old_path":"/work/app","new_path":"/work/new"}"#),
+            "{}",
+            seen[0]
+        );
+        assert_eq!(
+            text,
+            "Re-pointed /work/app → /work/new\n  \
+             2 artifacts, 1 conversations, 0 runs, 3 messages, 0 follow-ups\n  \
+             its folder is now projects/-work-new\n"
+        );
+    }
+
+    /// The lead's R-S8: a delete takes a project exactly — its root as
+    /// written, or its folder as `store list` prints it, `projects/<name>`,
+    /// which is looked up in the daemon's list and sent as that root.
+    #[tokio::test]
+    async fn a_project_is_named_by_its_root_or_by_its_folder_as_store_list_prints_it() {
+        let (addr, server) = serve(vec![ok(json!([
+            {"id": APP_ID, "root": "/work/app", "name": "-work-app", "missing": false},
+            {"id": OLD_ID, "root": "/work/old", "name": "-work-old", "missing": true},
+        ]))]);
+
+        let root = purge_target(&client(addr), "projects/-work-old")
+            .await
+            .unwrap();
+
+        let seen = server.join().unwrap();
+        assert!(
+            seen[0].starts_with("GET /v1/workspaces HTTP/1.1"),
+            "{}",
+            seen[0]
+        );
+        assert_eq!(root, "/work/old");
+        // A root is sent as written; nothing is listed for it.
+        assert_eq!(
+            purge_target(&client(addr), "/work/app").await.unwrap(),
+            "/work/app"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_folder_no_project_has_is_an_error_that_names_store_list() {
+        let (addr, server) = serve(vec![ok(json!([
+            {"id": APP_ID, "root": "/work/app", "name": "-work-app", "missing": false},
+        ]))]);
+
+        let error = purge_target(&client(addr), "projects/-work-gone")
+            .await
+            .expect_err("no listed project has that folder");
+
+        server.join().unwrap();
+        let text = format!("{error:#}");
+        assert!(text.contains("projects/-work-gone"), "{text}");
+        assert!(text.contains("openalpaca store list"), "{text}");
+    }
+
+    /// A path inside a project is sent as written, and the daemon's refusal
+    /// — naming the root — is what the command answers.
+    #[tokio::test]
+    async fn a_path_inside_a_project_prints_the_daemons_refusal_naming_the_root() {
+        let refusal = json!({"error": {
+            "code": "WORKSPACE_NOT_A_ROOT",
+            "message": "/work/app/src is inside the project rooted at /work/app; deleting a \
+                        project's data takes its root itself. Delete the data of /work/app if \
+                        that is what you meant",
+        }});
+        let (addr, server) = serve(vec![json_answer(
+            "422 Unprocessable Entity",
+            "e",
+            &refusal.to_string(),
+        )]);
+
+        let error = purge(&client(addr), "/work/app/src", true)
+            .await
+            .expect_err("the daemon refuses a path inside a project");
+
+        let seen = server.join().unwrap();
+        assert!(
+            seen[0].ends_with(r#"{"path":"/work/app/src","dry_run":true}"#),
+            "{}",
+            seen[0]
+        );
+        let text = format!("{error:#}");
+        assert!(text.starts_with("WORKSPACE_NOT_A_ROOT: "), "{text}");
+        assert!(text.contains("Delete the data of /work/app"), "{text}");
     }
 
     /// Every `\x1b[...m` SGR sequence `colored` emits, dropped — so a rendered
@@ -710,81 +1112,6 @@ mod tests {
             }
         }
         out
-    }
-
-    /// A workspace as `GET /v1/workspaces` describes it, with a store at the
-    /// root and rows under it — the ordinary source of a re-base.
-    fn view(path: &str, overrides: fn(&mut WorkspaceView)) -> WorkspaceView {
-        let mut view = WorkspaceView {
-            path: path.to_string(),
-            store_present: true,
-            recorded_root: Some(path.to_string()),
-            moved: false,
-            rows: Counts {
-                artifacts: 12,
-                sessions: 2,
-                tasks: 3,
-            },
-            active_tasks: 0,
-            queued_tasks: Some(0),
-        };
-        overrides(&mut view);
-        view
-    }
-
-    /// D7's CLI half. The two numbers refuse different calls — a re-base waits
-    /// for `running`/`paused`, a purge refuses on `queued` as well — so a plan
-    /// that printed only `active_tasks` left the reader unable to explain the
-    /// purge they tried next.
-    #[test]
-    fn a_dry_run_names_the_queued_runs_a_purge_would_refuse_on() {
-        // `render_plan`'s home-store advisory reads the home root: a sandboxed
-        // one, never the developer's `~/.openalpaca`.
-        let tmp = tempfile::TempDir::new().unwrap();
-        let _env = crate::test_util::EnvSandbox::enter(tmp.path());
-        let from = view("/repo/one", |v| v.queued_tasks = Some(2));
-        let to = view("/repo/two", |v| {
-            v.store_present = false;
-            v.rows = Counts::default();
-        });
-
-        let rendered = strip_ansi(&render_plan("/repo/two", &from, &to));
-        assert!(
-            rendered.contains("2 run(s) there are queued"),
-            "the queued runs are named: {rendered}"
-        );
-        assert!(
-            rendered.contains("a purge of that root would be refused"),
-            "and what they actually refuse is said: {rendered}"
-        );
-        // A queued run is not what the re-base itself waits for, and the plan
-        // must not claim otherwise.
-        assert!(
-            !rendered.contains("still in flight"),
-            "nothing is running: {rendered}"
-        );
-    }
-
-    /// Zero queued runs is not a line, and a daemon that predates the field
-    /// (`None`) is not a line either — never "0 run(s) there are queued".
-    #[test]
-    fn a_dry_run_stays_silent_about_queued_runs_it_has_no_number_for() {
-        // As above: `render_plan` reads a sandboxed home root.
-        let tmp = tempfile::TempDir::new().unwrap();
-        let _env = crate::test_util::EnvSandbox::enter(tmp.path());
-        for queued in [Some(0), None] {
-            let from = view("/repo/one", |_| {});
-            let from = WorkspaceView {
-                queued_tasks: queued,
-                ..from
-            };
-            let to = view("/repo/two", |v| {
-                v.store_present = false;
-                v.rows = Counts::default();
-            });
-            let rendered = strip_ansi(&render_plan("/repo/two", &from, &to));
-            assert!(!rendered.contains("queued"), "{queued:?}: {rendered}");
-        }
     }
 
     /// Minor #8, corrected by ruling R74: `print_entries` had no test, and the
