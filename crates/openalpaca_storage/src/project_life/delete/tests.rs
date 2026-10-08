@@ -673,6 +673,42 @@ fn a_file_linked_after_the_copies_were_made_refuses_the_transaction() {
     );
 }
 
+/// The route checks for runs before it waits for the memory slot; a run that
+/// starts after those checks — under the root, or from one of the project's
+/// conversations with no workspace of its own — is refused by the
+/// transaction itself, before it deletes a row. A finished run is not.
+#[test]
+fn the_transaction_refuses_a_run_started_after_the_routes_checks() {
+    let w = World::new();
+    let s = seed(&w);
+    let root = s.p.root_string();
+    w.exec(
+        "INSERT INTO task (id, title, created_by, source_lane, workspace_id, status)
+         VALUES ('t-queued', 't', 'test', 'test', ?1, 'queued')",
+        &[&root],
+    );
+    w.exec(
+        "INSERT INTO task (id, title, created_by, source_lane, session_id, status)
+         VALUES ('t-from-chat', 't', 'test', 'test', 's-p', 'running')",
+        &[],
+    );
+
+    let err =
+        w.db.with_connection(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            delete_within(&tx, &root, &[])
+        })
+        .unwrap_err();
+
+    assert_eq!(
+        err.downcast_ref::<RunsInFlight>(),
+        Some(&RunsInFlight { root, runs: 2 }),
+        "{err:#}"
+    );
+    assert_eq!(w.count("SELECT COUNT(*) FROM session"), 3);
+    assert_eq!(w.count("SELECT COUNT(*) FROM task"), 4);
+}
+
 /// A daemon that dies between step 1's copies and the commit leaves a copy
 /// at its kept address — whole or cut short — that no row names. The next
 /// delete of the project replaces it instead of failing on it for ever.

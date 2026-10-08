@@ -967,6 +967,46 @@ async fn a_held_memory_slot_answers_busy_and_deletes_nothing() {
     assert!(s.p.dir.is_dir());
 }
 
+/// The route's checks run before it waits for the memory slot, and neither
+/// sees a run the lane registry does not know yet — one dispatched from a
+/// conversation of the project with no workspace of its own, or queued while
+/// the delete waited. The transaction counts the runs again and refuses:
+/// `409`, nothing deleted, the kept copies taken back.
+#[tokio::test]
+async fn a_run_the_routes_checks_did_not_see_is_refused_by_the_transaction() {
+    let w = World::new();
+    let s = w.scene();
+    w.db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO task (id, title, created_by, source_lane, session_id, status)
+             VALUES ('t-dispatching', 't', 'test', 'test', 's-p', 'queued')",
+            [],
+        )?;
+        Ok(())
+    })
+    .expect("a run not yet in the lane registry");
+
+    let (status, body) = w.delete(&s.p.root, false).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_BUSY");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("nothing was deleted"),
+        "{body}"
+    );
+    assert_eq!(w.count("SELECT COUNT(*) FROM session"), 3);
+    assert_eq!(w.count("SELECT COUNT(*) FROM task"), 2);
+    assert!(s.p.dir.is_dir());
+    assert_eq!(project_snapshots(&s.p.id), 2);
+    assert!(
+        tree(&w.home.join("uploads").join(project_life::KEPT_DIR)).is_empty(),
+        "the copy of the kept upload was taken back"
+    );
+}
+
 #[tokio::test]
 async fn a_project_holding_another_owners_rows_is_a_404() {
     let w = World::new();

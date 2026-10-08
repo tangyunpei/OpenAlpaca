@@ -10,6 +10,7 @@
 //! read one predicate ([`DOOMED_MESSAGE`], [`kept_ids`]), and a dry run and
 //! the real call cannot disagree.
 
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -65,6 +66,31 @@ pub struct DeleteOutcome {
     /// those conversations' summaries by them (design 09 §13.3).
     pub message_ids: Vec<i64>,
 }
+
+/// [`delete_project_data`] refused: inside its own transaction, `runs` runs
+/// of the project — under its root, or started from one of its
+/// conversations — were `queued`, `running` or `paused`. The route checks
+/// for runs before it waits for the project's memory slot; this is the check
+/// a run started meanwhile cannot slip past. Returned inside the
+/// `anyhow::Error`: nothing was deleted, and the copies were taken back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunsInFlight {
+    pub root: String,
+    pub runs: usize,
+}
+
+impl fmt::Display for RunsInFlight {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} run(s) of {} are queued, running or paused; nothing was deleted — delete its \
+             data once they finish",
+            self.runs, self.root
+        )
+    }
+}
+
+impl std::error::Error for RunsInFlight {}
 
 /// A file step 1 keeps, as its row names it.
 #[derive(Debug, Clone)]
@@ -336,7 +362,8 @@ fn strings(conn: &Connection, sql: &str, root: &str) -> Result<Vec<String>> {
 /// with no project (a by-product as its newest version only) and deletes
 /// every row naming the project in the five path columns and the rows that
 /// hang off its sessions and runs, `learning_cursor` included. A failure
-/// anywhere deletes nothing and takes the copies back. Never iterates
+/// anywhere deletes nothing and takes the copies back — [`RunsInFlight`]
+/// when the transaction finds a run of the project in flight. Never iterates
 /// `storage_path`; removes no file of the project (step 3 is the route's).
 pub fn delete_project_data(db: &Database, project: &Project) -> Result<DeleteOutcome> {
     let root = project.root_string();
@@ -368,6 +395,26 @@ pub fn delete_project_data(db: &Database, project: &Project) -> Result<DeleteOut
 
 fn delete_within(tx: &Connection, root: &str, placed: &[Placed]) -> Result<DeleteOutcome> {
     let bind = rusqlite::params![root];
+    // Refused while a run is in flight (§6), checked again here: the route's
+    // checks run before it waits for the memory slot, and a run started since
+    // would have its row deleted under its lead. Every write of the daemon
+    // goes through the one connection this transaction holds, so none can
+    // start between this count and the commit.
+    let runs = tx.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM task
+              WHERE status IN ('queued', 'running', 'paused')
+                AND (workspace_id = ?1 OR session_id IN ({DOOMED_SESSIONS}))"
+        ),
+        bind,
+        |row| row.get::<_, i64>(0),
+    )? as usize;
+    if runs > 0 {
+        return Err(anyhow::Error::new(RunsInFlight {
+            root: root.to_string(),
+            runs,
+        }));
+    }
     // A file linked from a surviving message after the copies were made would
     // lose that link with the project's rows: refuse. The other direction — a
     // copied file whose surviving link went meanwhile — is still re-addressed

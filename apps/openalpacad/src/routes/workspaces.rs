@@ -732,11 +732,15 @@ fn announce_deleted_sessions(deps: &PurgeDeps<'_>, plan: &DeletePlan, outcome: &
 /// Refused, before anything moves, while a run is in flight: a `queued`,
 /// `running` or `paused` run whose `workspace_id` is the root
 /// (`busy_tasks`), or a live run of one of its conversations that was
-/// dispatched with no workspace of its own (`session_has_live_run`). A run
-/// dispatched with no workspace is a `queued` row a few statements before its
-/// lane is registered (`dispatcher::lead_agent`), and neither check sees it
-/// in that window; it is accepted, as the old purge accepted it: nothing has
-/// written a transcript yet, and the next attempt refuses. Then,
+/// dispatched with no workspace of its own (`session_has_live_run`). These
+/// checks run before the wait for the memory slot, so the delete's
+/// transaction counts the project's runs in flight again — under the root or
+/// from one of its conversations — and refuses on any
+/// (`project_life::RunsInFlight`, the same `409`). That count also sees a run
+/// dispatched with no workspace in the few statements before its lane is
+/// registered (`dispatcher::lead_agent`), which the lane registry does not;
+/// one dispatched after the commit is accepted, as the old purge accepted
+/// it: nothing has written a transcript yet. Then,
 /// holding the project's memory slot: the rows (`delete_project_data`,
 /// files another conversation links kept in the root store), the
 /// conversations' log directories, their summaries in the owner's home
@@ -837,6 +841,14 @@ pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRe
     let outcome = match project_life::delete_project_data(deps.db, &project) {
         Ok(outcome) => outcome,
         Err(e) => {
+            // A run that started while this waited for the memory slot: the
+            // transaction refused it, and nothing was deleted.
+            if let Some(busy) = e
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<project_life::RunsInFlight>())
+            {
+                return api_error(StatusCode::CONFLICT, "WORKSPACE_BUSY", busy.to_string());
+            }
             return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "DB_ERROR",

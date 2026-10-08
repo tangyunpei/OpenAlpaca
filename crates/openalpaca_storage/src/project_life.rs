@@ -308,7 +308,7 @@ fn stop(checkpoint: &mut dyn FnMut(RepointStep) -> bool, step: RepointStep) -> R
 
 mod delete;
 pub use delete::{
-    DeleteOutcome, DeletePlan, KEPT_DIR, KeptFiles, delete_plan, delete_project_data,
+    DeleteOutcome, DeletePlan, KEPT_DIR, KeptFiles, RunsInFlight, delete_plan, delete_project_data,
     remove_project_folder,
 };
 
