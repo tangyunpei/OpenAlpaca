@@ -101,15 +101,23 @@ impl ScopeArgs {
     /// The directory the request stands in: `None` for `--global`, the named
     /// path for `--project`, else the CLI's working directory. Canonical and
     /// absolute, because the daemon resolves it against *its* directory
-    /// otherwise (R22).
+    /// otherwise (R22) — except an absolute `--project` that is not there any
+    /// more, which is sent as written (R23): the daemon, and the local verbs'
+    /// `resolve_project_root`, still resolve a missing project's root to it.
     fn directory(&self) -> Result<Option<PathBuf>> {
         if self.global {
             return Ok(None);
         }
         let dir = match &self.project {
-            Some(p) => std::fs::canonicalize(p).with_context(|| {
-                format!("--project {}: not a directory I can read", p.display())
-            })?,
+            Some(p) => match std::fs::canonicalize(p) {
+                Ok(canonical) => canonical,
+                Err(_) if p.is_absolute() => p.clone(),
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!("--project {}: not a directory I can read", p.display())
+                    });
+                }
+            },
             None => std::env::current_dir().context("the current directory is unreadable")?,
         };
         Ok(Some(dir))

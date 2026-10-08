@@ -58,7 +58,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
                 "{}",
                 format!("Project {} · projects/{}", project.root, project.name).dimmed()
             );
-            ChatTarget::for_workspace(Some(project.root))
+            ChatTarget::for_project(project.root)
         }
         None => ChatTarget::for_cwd(),
     };
@@ -127,13 +127,17 @@ fn refuse_foreign_lane(session: &SessionItem, lane_key: &str) -> Result<()> {
     )
 }
 
-/// The project a `--resume` is scoped to (plan §5.7): the root of the path
-/// this chat's turns carry — the working directory, or `--project`'s answered
-/// root — resolved as the daemon resolves a turn's `x-workspace-path`.
+/// The project a `--resume` is scoped to (plan §5.7): `--project`'s answered
+/// root as the daemon answered it (R23) — resolving it again here turned a
+/// missing project's root into no project — or else the root of the working
+/// directory, resolved as the daemon resolves a turn's `x-workspace-path`.
 ///
 /// `None` — no project there — leaves the listing lane-wide: "conversations
 /// with no project" is not a filter `GET /v1/sessions` can express.
 fn resume_workspace(target: &ChatTarget) -> Option<String> {
+    if let Some(root) = target.project_root() {
+        return Some(root.to_string());
+    }
     sessions::resolve_workspace_filter(target.workspace_path()?).ok()
 }
 
@@ -883,6 +887,43 @@ mod tests {
         assert_eq!(
             target.body("hi", &[])["session_id"],
             serde_json::json!(resumed.id)
+        );
+    }
+
+    /// R23: `--project`'s answer is the daemon's resolved root, so `--resume`
+    /// lists that root's conversations as answered. Resolved again here, a
+    /// missing project's root canonicalized to nothing and the list widened
+    /// to every conversation on the lane — another project's among them.
+    #[test]
+    fn a_resume_after_project_lists_the_conversations_of_the_root_the_daemon_answered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::EnvSandbox::enter(tmp.path());
+        let answered = tmp.path().canonicalize().unwrap().join("work").join("mono");
+
+        let target = ChatTarget::for_project(answered.to_string_lossy().into_owned());
+
+        assert_eq!(
+            resume_workspace(&target),
+            Some(answered.to_string_lossy().into_owned())
+        );
+    }
+
+    /// R23: a missing project's root (ST-7) — the working directory's path
+    /// as written — still scopes `--resume` to that project.
+    #[test]
+    fn a_resume_from_a_missing_projects_root_lists_that_projects_conversations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::EnvSandbox::enter(tmp.path());
+        let root = tmp.path().canonicalize().unwrap().join("moved-away");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        openalpaca_storage::store::projects::register(&root).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let target = ChatTarget::for_workspace(Some(root.to_string_lossy().into_owned()));
+
+        assert_eq!(
+            resume_workspace(&target),
+            Some(root.to_string_lossy().into_owned())
         );
     }
 

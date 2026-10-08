@@ -127,6 +127,9 @@ pub(crate) fn encode_header_path(path: &str) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct ChatTarget {
     workspace_path: Option<String>,
+    /// `workspace_path` is a root the daemon answered or recorded — `--project`'s
+    /// answer, a resumed conversation's project — not a directory to resolve.
+    resolved: bool,
     session_id: Option<String>,
     unattended: bool,
 }
@@ -142,9 +145,18 @@ impl ChatTarget {
         Self::for_workspace(workspace_path)
     }
 
+    /// The root `--project` chose: what `POST /v1/workspaces` answered.
+    pub fn for_project(root: String) -> Self {
+        Self {
+            resolved: true,
+            ..Self::for_workspace(Some(root))
+        }
+    }
+
     pub fn for_workspace(workspace_path: Option<String>) -> Self {
         Self {
             workspace_path,
+            resolved: false,
             session_id: None,
             unattended: false,
         }
@@ -153,6 +165,17 @@ impl ChatTarget {
     /// The project path this turn carries as `x-workspace-path`, if any.
     pub fn workspace_path(&self) -> Option<&str> {
         self.workspace_path.as_deref()
+    }
+
+    /// The path this turn carries when it is already a project root the
+    /// daemon answered or recorded ([`for_project`](Self::for_project),
+    /// [`in_project`](Self::in_project)) — `None` for a directory that still
+    /// needs resolving, such as [`for_cwd`](Self::for_cwd)'s.
+    pub fn project_root(&self) -> Option<&str> {
+        match self.resolved {
+            true => self.workspace_path.as_deref(),
+            false => None,
+        }
     }
 
     /// Address a stored conversation from here on.
@@ -166,6 +189,7 @@ impl ChatTarget {
     /// project, where R49 runs its turns (R6).
     pub fn in_project(mut self, root: String) -> Self {
         self.workspace_path = Some(root);
+        self.resolved = true;
         self
     }
 

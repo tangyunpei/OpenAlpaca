@@ -591,6 +591,47 @@ fn repair_lifts_a_quarantine_and_adopt_rebinds_an_orphan() {
     );
 }
 
+/// R23: `--project` names a missing project (ST-7) by its root, as the
+/// daemon resolves it; canonicalizing first refused it as "not a directory I
+/// can read".
+#[test]
+fn project_names_a_missing_project_by_its_root() {
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let root = tmp.path().canonicalize().unwrap().join("moved-away");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    store::projects::register(&root).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let at = ScopeArgs {
+        project: Some(root.clone()),
+        ..Default::default()
+    };
+
+    assert_eq!(at.directory().unwrap(), Some(root.clone()));
+    assert_eq!(at.local_project_root().unwrap(), Some(root.clone()));
+    assert_eq!(
+        at.headers().unwrap(),
+        vec![("x-workspace-path", root.to_string_lossy().into_owned())]
+    );
+}
+
+/// A relative `--project` that is not there is still refused here: read
+/// against the daemon's directory it would name another folder (R22).
+#[test]
+fn project_refuses_a_relative_path_that_is_not_there() {
+    let at = ScopeArgs {
+        project: Some(PathBuf::from("no/such/folder-r23")),
+        ..Default::default()
+    };
+
+    let err = at.directory().unwrap_err();
+    assert!(
+        format!("{err:#}").contains("not a directory I can read"),
+        "{err:#}"
+    );
+}
+
 /// R22: `doctor` prints one line per project snapshot that carries no
 /// project id — its key and the directory it was bound to — and says that
 /// nothing opens, adopts or deletes it.

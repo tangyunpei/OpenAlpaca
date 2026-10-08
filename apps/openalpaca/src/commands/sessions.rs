@@ -189,10 +189,18 @@ pub(crate) fn lane_source(lane_key: &str) -> Option<&str> {
 /// value compared here is the one `session.workspace_id` holds. A path under
 /// no project — no git repository, no chosen folder, or the home store — has no project
 /// root, and saying so beats filtering on a path nothing can match.
+///
+/// An absolute path that is not there any more is handed to the resolver as
+/// written (R23): a missing project's root, or a path inside it, still
+/// resolves to that project (ST-7). A relative one that is not there names
+/// nothing.
 pub(crate) fn resolve_workspace_filter(path: &str) -> Result<String> {
-    let absolute = std::path::Path::new(path)
-        .canonicalize()
-        .with_context(|| format!("No such directory: {path}"))?;
+    let written = std::path::Path::new(path);
+    let absolute = match written.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(_) if written.is_absolute() => written.to_path_buf(),
+        Err(e) => return Err(e).with_context(|| format!("No such directory: {path}")),
+    };
     openalpaca_core::memory::scope_context::MemoryScopeContext::for_request(Some(
         &absolute.to_string_lossy(),
     ))

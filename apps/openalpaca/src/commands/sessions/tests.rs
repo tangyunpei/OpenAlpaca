@@ -135,6 +135,35 @@ fn a_workspace_argument_resolves_up_to_the_project_root() {
     assert_eq!(resolved, root.to_string_lossy());
 }
 
+/// R23: a missing project — its folder gone (ST-7) — is addressed by its
+/// root, and by a path inside it, as the daemon resolves them.
+/// Canonicalizing first refused it: "No such directory".
+#[test]
+fn a_missing_projects_root_resolves_to_that_project() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = crate::test_util::EnvSandbox::enter(tmp.path());
+    let root = tmp.path().canonicalize().unwrap().join("moved-away");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    openalpaca_storage::store::projects::register(&root).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let resolved = resolve_workspace_filter(&root.to_string_lossy()).unwrap();
+    assert_eq!(resolved, root.to_string_lossy());
+    let inside = resolve_workspace_filter(&root.join("src").to_string_lossy()).unwrap();
+    assert_eq!(inside, root.to_string_lossy());
+}
+
+/// A relative path is read against this shell's directory; one that is not
+/// there names nothing the daemon could resolve either.
+#[test]
+fn a_relative_path_that_is_not_there_is_still_an_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = crate::test_util::EnvSandbox::enter(tmp.path());
+
+    let err = resolve_workspace_filter("no/such/folder-r23").unwrap_err();
+    assert!(err.to_string().contains("No such directory"), "{err:#}");
+}
+
 #[test]
 fn a_directory_under_no_project_is_an_error_not_an_empty_filter() {
     let tmp = tempfile::TempDir::new().unwrap();
