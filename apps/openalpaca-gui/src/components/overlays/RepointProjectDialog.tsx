@@ -19,10 +19,16 @@
  * Every other refusal — `WORKSPACE_EXISTS` above all (ST-20: re-pointing onto
  * another project would merge two) — is the daemon's sentence, shown as
  * written, and the dialog stays open on it.
+ *
+ * The count is read by the card's root, and its answer names the project the
+ * daemon read that root as. When that is not the card's project (R1: a root
+ * renamed by case, or moved with a link left behind, now reaches another
+ * project — or none), the counts are not this project's, `Re-point` stays
+ * off, and the dialog says so instead of drawing them.
  */
 
 import { Button, Scrim } from "@/components/ui";
-import type { Project, WorkspaceCounts } from "@/lib/api/workspaces";
+import type { Project, Workspace, WorkspaceCounts } from "@/lib/api/workspaces";
 import {
   isAbsolutePath,
   normalizeProjectPath,
@@ -47,6 +53,20 @@ export function rowsLine(rows: WorkspaceCounts): string {
   return parts.length === 0 ? "nothing yet" : parts.join(" · ");
 }
 
+/**
+ * What the dialog says instead of the counts when the card's root no longer
+ * reaches the card's project (R1), or `null` when it does.
+ */
+export function foreignRootLine(
+  project: Project,
+  read: Pick<Workspace, "id" | "root">,
+): string | null {
+  if (read.id === project.id) return null;
+  return read.id === null || read.root === null
+    ? `${project.root} no longer reaches this project: a re-point would not move it. Nothing was changed — close this and look at the list again.`
+    : `${project.root} now reaches another project, ${read.root}: a re-point would move that one, not this one. Nothing was changed — close this and look at the list again.`;
+}
+
 /** The folder a re-point would send, or `null` while the press must stay off. */
 export function repointTarget(value: string, project: Project): string | null {
   const target = normalizeProjectPath(value);
@@ -58,6 +78,11 @@ export interface RepointProjectDialogProps {
   project: Project;
   /** `GET /v1/workspaces?path=<root>`'s counts; `undefined` until read. */
   rows: WorkspaceCounts | undefined;
+  /**
+   * The project that read answered for — its `id` and `root` — or
+   * `undefined` until read.
+   */
+  resolvedAs: Pick<Workspace, "id" | "root"> | undefined;
   /** Runs under the root that are running or paused. */
   activeTasks: number;
   /** The fresh read of the counts is still out. */
@@ -80,6 +105,7 @@ export interface RepointProjectDialogProps {
 export function RepointProjectDialog({
   project,
   rows,
+  resolvedAs,
   activeTasks,
   reading,
   readError,
@@ -94,13 +120,18 @@ export function RepointProjectDialog({
   const trimmed = value.trim();
   const relative = trimmed !== "" && !isAbsolutePath(trimmed);
   const target = repointTarget(value, project);
-  const busy = activeTasks > 0;
-  const canConfirm = !reading && !busy && !repointing && target !== null;
+  const foreign =
+    reading || readError !== null || resolvedAs === undefined
+      ? null
+      : foreignRootLine(project, resolvedAs);
+  const busy = foreign === null && activeTasks > 0;
+  const canConfirm =
+    !reading && foreign === null && !busy && !repointing && target !== null;
   const countLine = reading
     ? "Counting what is recorded there…"
     : readError !== null
       ? `Could not count what is recorded there: ${readError}`
-      : rows === undefined
+      : rows === undefined || foreign !== null
         ? null
         : `Recorded there: ${rowsLine(rows)}.`;
   const paragraph = "m-0 mt-[10px] text-base leading-[1.6] text-secondary";
@@ -147,6 +178,12 @@ export function RepointProjectDialog({
             className="m-0 mt-[12px] font-mono text-2xs-plus leading-[1.6] text-ink"
           >
             {countLine}
+          </p>
+        )}
+
+        {foreign !== null && (
+          <p className="m-0 mt-[12px] text-base leading-[1.6] text-red-ink">
+            {foreign}
           </p>
         )}
 

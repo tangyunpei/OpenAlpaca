@@ -114,6 +114,18 @@ function plan(dryRun: boolean, projectFolder = true) {
   };
 }
 
+/**
+ * Another project the card's root now reaches (R1): the folder was renamed by
+ * case, or moved with a link left behind, and a turn there registered the
+ * new spelling as a project of its own.
+ */
+const OTHER: Project = {
+  id: "c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f",
+  root: "/Users/me/dev/Repo",
+  name: "-Users-me-dev-Repo-1a2b3c4d",
+  missing: false,
+};
+
 const GONE: Project = {
   id: "0a9b8c7d-6e5f-4a3b-9c2d-1e0f9a8b7c6d",
   root: "/Users/me/old/notes",
@@ -333,6 +345,77 @@ describe("Re-point… (storage design §6, ST-20)", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
+  it("refuses to re-point when the daemon reads the root as another project, and says whose", async () => {
+    const user = userEvent.setup();
+    api.list.mockResolvedValue([REPO]);
+    api.get.mockResolvedValue(
+      recorded({ root: OTHER.root, id: OTHER.id, name: OTHER.name }),
+    );
+    renderCard();
+
+    await user.click(await screen.findByRole("button", { name: "Re-point…" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() =>
+      expect(
+        within(dialog).queryByText("Counting what is recorded there…"),
+      ).toBeNull(),
+    );
+    await user.type(
+      within(dialog).getByLabelText("New project folder"),
+      MOVED.root,
+    );
+    expect(
+      within(dialog).getByRole("button", { name: "Re-point" }),
+    ).toBeDisabled();
+    expect(
+      within(dialog).getByText(
+        `${REPO.root} now reaches another project, ${OTHER.root}: a re-point would move that one, not this one. Nothing was changed — close this and look at the list again.`,
+      ),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText(/^Recorded there:/)).toBeNull();
+    expect(api.repoint).not.toHaveBeenCalled();
+  });
+
+  it("refuses to re-point when the root no longer reaches any project", async () => {
+    const user = userEvent.setup();
+    api.list.mockResolvedValue([REPO]);
+    api.get.mockResolvedValue(
+      recorded({
+        root: null,
+        id: null,
+        name: null,
+        rows: {
+          artifacts: 0,
+          sessions: 0,
+          tasks: 0,
+          messages: 0,
+          followups: 0,
+        },
+      }),
+    );
+    renderCard();
+
+    await user.click(await screen.findByRole("button", { name: "Re-point…" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() =>
+      expect(
+        within(dialog).queryByText("Counting what is recorded there…"),
+      ).toBeNull(),
+    );
+    await user.type(
+      within(dialog).getByLabelText("New project folder"),
+      MOVED.root,
+    );
+    expect(
+      within(dialog).getByRole("button", { name: "Re-point" }),
+    ).toBeDisabled();
+    expect(
+      within(dialog).getByText(
+        `${REPO.root} no longer reaches this project: a re-point would not move it. Nothing was changed — close this and look at the list again.`,
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("fills the folder from the native picker", async () => {
     const user = userEvent.setup();
     picker.pick.mockResolvedValue(MOVED.root);
@@ -480,6 +563,40 @@ describe("Delete data… (storage design §6, ST-19)", () => {
     // The list is re-read, and the daemon still lists the project.
     await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(REPO.root)).toBeInTheDocument();
+  });
+
+  it("refuses to delete when the plan the daemon read is another project's, and says whose", async () => {
+    // R1: the plan names the project the daemon resolved the root to. When
+    // that is not the card's project, drawing its counts under this card's
+    // root and enabling the press would delete the wrong project's data.
+    const user = userEvent.setup();
+    api.list.mockResolvedValue([REPO]);
+    api.remove.mockImplementation(async (_path: string, dryRun: boolean) => ({
+      ...plan(dryRun),
+      project: OTHER,
+    }));
+    renderCard();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Delete data…" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() =>
+      expect(
+        within(dialog).queryByText("Reading what would be deleted…"),
+      ).toBeNull(),
+    );
+    expect(
+      within(dialog).getByRole("button", { name: "Delete data" }),
+    ).toBeDisabled();
+    expect(
+      within(dialog).getByText(
+        `${REPO.root} now reaches another project, ${OTHER.root} (projects/${OTHER.name}): this would delete that one's data, not this one's. Nothing was deleted — close this and look at the list again.`,
+      ),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText(/^Deletes /)).toBeNull();
+    expect(api.remove).toHaveBeenCalledTimes(1);
+    expect(api.remove).toHaveBeenLastCalledWith(REPO.root, true);
   });
 
   it("keeps the dialog open on WORKSPACE_BUSY and shows the daemon's sentence", async () => {

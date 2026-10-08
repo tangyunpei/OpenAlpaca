@@ -31,6 +31,7 @@ function renderDialog(overrides: Partial<RepointProjectDialogProps> = {}) {
   const props: RepointProjectDialogProps = {
     project: REPO,
     rows: ROWS,
+    resolvedAs: { id: REPO.id, root: REPO.root },
     activeTasks: 0,
     reading: false,
     readError: null,

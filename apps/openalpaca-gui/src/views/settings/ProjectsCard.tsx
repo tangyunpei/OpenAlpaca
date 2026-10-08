@@ -219,6 +219,10 @@ function RepointFlow({ project, current, onClose }: FlowProps) {
   function confirm() {
     const target = repointTarget(value, project);
     if (target === null) return;
+    // R1: never on counts the daemon read as another project's (the dialog
+    // keeps the press off; this keeps the handler off too).
+    const read = counts.data ?? null;
+    if (read !== null && read.id !== project.id) return;
     setRefusal(null);
     const pathAtPress = windowPath;
     void repoint.mutateAsync({ from: project.root, to: target }).then(
@@ -239,6 +243,7 @@ function RepointFlow({ project, current, onClose }: FlowProps) {
     <RepointProjectDialog
       project={project}
       rows={counts.data?.rows}
+      resolvedAs={counts.data ?? undefined}
       activeTasks={counts.data?.active_tasks ?? 0}
       reading={reading}
       readError={counts.error?.message ?? null}
@@ -296,6 +301,9 @@ function DeleteFlow({ project, current, onClose }: FlowProps) {
   }, [project.root]);
 
   function confirm() {
+    // R1: never on a plan the daemon read as another project's (the dialog
+    // keeps the press off; this keeps the handler off too).
+    if (plan.data?.project.id !== project.id) return;
     setRefusal(null);
     const pathAtPress = windowPath;
     void apply.mutateAsync({ path: project.root, dryRun: false }).then(

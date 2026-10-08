@@ -15,6 +15,12 @@
  * focus (`Cancel` is, and Escape cancels), like `StopDaemonDialog`; no word
  * is typed. A refusal — `WORKSPACE_BUSY` while a run is in flight — is the
  * daemon's sentence, and the dialog stays open on it.
+ *
+ * The plan names the project the daemon read the card's root as. When that
+ * is not the card's project (R1: a root renamed by case, or moved with a
+ * link left behind, now reaches another project), the plan is another
+ * project's: it is not drawn under this card's root, `Delete data` stays
+ * off, and the dialog says whose it is.
  */
 
 import { Button, Scrim, Tag } from "@/components/ui";
@@ -49,6 +55,18 @@ export function deleteCountsLine(counts: DeleteCounts): string {
   return parts.length === 0
     ? "Nothing is recorded for this project but its folder under projects/."
     : `Deletes ${parts.join(" · ")}.`;
+}
+
+/**
+ * What the dialog says instead of the plan when the plan is another
+ * project's (R1), or `null` when it is the card's own.
+ */
+export function foreignPlanLine(
+  project: Project,
+  plan: ProjectDataDeletion,
+): string | null {
+  if (plan.project.id === project.id) return null;
+  return `${project.root} now reaches another project, ${plan.project.root} (projects/${plan.project.name}): this would delete that one's data, not this one's. Nothing was deleted — close this and look at the list again.`;
 }
 
 /** What the delete keeps because another conversation still uses it, or `null`. */
@@ -89,6 +107,7 @@ export function DeleteProjectDataDialog({
 }: DeleteProjectDataDialogProps) {
   const paragraph = "m-0 mt-[10px] text-base leading-[1.6] text-secondary";
   const mono = "m-0 mt-[12px] font-mono text-2xs-plus leading-[1.6] text-ink";
+  const foreign = plan === undefined ? null : foreignPlanLine(project, plan);
   const kept = plan === undefined ? null : keptLine(plan.kept);
 
   return (
@@ -142,7 +161,12 @@ export function DeleteProjectDataDialog({
             {`Could not read what would be deleted: ${planError}`}
           </p>
         )}
-        {plan !== undefined && (
+        {foreign !== null && (
+          <p className="m-0 mt-[12px] text-base leading-[1.6] text-red-ink">
+            {foreign}
+          </p>
+        )}
+        {plan !== undefined && foreign === null && (
           <>
             <p data-testid="delete-plan" className={mono}>
               {deleteCountsLine(plan.counts)}
@@ -190,7 +214,7 @@ export function DeleteProjectDataDialog({
           </Button>
           <Button
             variant="dangerGhost"
-            disabled={plan === undefined || deleting}
+            disabled={plan === undefined || foreign !== null || deleting}
             onClick={onConfirm}
           >
             {deleting ? "Deleting…" : "Delete data"}
