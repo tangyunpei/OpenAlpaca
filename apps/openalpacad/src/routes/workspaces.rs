@@ -694,10 +694,17 @@ pub(crate) struct PurgeDeps<'a> {
     pub learning: Option<Arc<openalpaca_core::memory::learning::LearningQueue>>,
 }
 
-/// The plan, in the README's retention terms; every entry named, zeroes included.
-fn plan_entries(plan: &DeletePlan) -> Vec<DeletePlanEntry> {
-    let c = &plan.counts;
-    let folder = format!("{}/{}/", projects::PROJECTS_DIR, plan.project.name);
+/// The plan, in the README's retention terms; every entry named, zeroes
+/// included. A dry run's figures are the plan's; a real delete's are what it
+/// did — the same figures as its `counts`, `kept` and `removed`.
+fn plan_entries(
+    project: &Project,
+    c: &PurgeCounts,
+    kept: KeptFiles,
+    memory_notes: usize,
+    memory_partitions: usize,
+) -> Vec<DeletePlanEntry> {
+    let folder = format!("{}/{}/", projects::PROJECTS_DIR, project.name);
     let line =
         |entry: String, holds: String, retention: &str, action: &'static str| DeletePlanEntry {
             entry,
@@ -746,8 +753,8 @@ fn plan_entries(plan: &DeletePlan) -> Vec<DeletePlanEntry> {
         line(
             format!("{folder}memory/"),
             format!(
-                "{} memory notes of every owner, in {} partitions, with their history",
-                plan.memory_notes, plan.memory_partitions
+                "{memory_notes} memory notes of every owner, in {memory_partitions} partitions, \
+                 with their history"
             ),
             "yours — never swept",
             "delete",
@@ -762,7 +769,7 @@ fn plan_entries(plan: &DeletePlan) -> Vec<DeletePlanEntry> {
             "uploads/ (root store)".to_string(),
             format!(
                 "{} uploads another conversation still shows, moved here under {}/",
-                plan.kept.uploads,
+                kept.uploads,
                 project_life::KEPT_DIR
             ),
             "swept: an upload attached to no message is deleted once past the grace period",
@@ -773,14 +780,14 @@ fn plan_entries(plan: &DeletePlan) -> Vec<DeletePlanEntry> {
             format!(
                 "{} by-products another conversation still shows, moved here under {}/ as \
                  their newest version",
-                plan.kept.artifacts,
+                kept.artifacts,
                 project_life::KEPT_DIR
             ),
             "never garbage-collected",
             "keep",
         ),
         line(
-            plan.project.root_string(),
+            project.root_string(),
             "the project's own folder — OpenAlpaca never touches it".to_string(),
             "yours",
             "keep",
@@ -796,11 +803,12 @@ fn delete_view(
     removed: Option<RemovedView>,
 ) -> DeleteDataView {
     let dry_run = removed.is_none();
+    let memory_partitions = removed.map_or(plan.memory_partitions, |r| r.memory_partitions);
     DeleteDataView {
         dry_run,
         applied: !dry_run,
         project: ProjectView::from(&plan.project),
-        entries: plan_entries(plan),
+        entries: plan_entries(&plan.project, counts, kept, memory_notes, memory_partitions),
         counts: DeleteCountsView {
             sessions: counts.sessions,
             messages: counts.messages,

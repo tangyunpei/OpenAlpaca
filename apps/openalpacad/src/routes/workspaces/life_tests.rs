@@ -1702,3 +1702,50 @@ async fn a_re_point_that_waited_out_another_re_point_of_its_project_moves_nothin
     );
     assert_eq!(projects::lookup(&second).expect("lookup"), None);
 }
+
+/// S5a M1: a real delete's plan lines are what was done — built from the
+/// same outcome as its counts — not the plan read before the wait for the
+/// memory slot. A conversation started in the project meanwhile is in both.
+#[tokio::test]
+async fn a_real_deletes_entries_say_what_its_counts_say() {
+    let w = World::new();
+    let s = w.scene();
+    let held = w.memory.quiesce(&s.p.id).expect("the slot is idle");
+
+    let answer = delete_on_its_own_thread(&w, &s.p.root);
+    std::thread::sleep(INTO_THE_WAIT);
+    w.session("s-late", &text(&s.p.root));
+    drop(held);
+    let (status, body) = answer
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the delete answered");
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["counts"]["sessions"], 2, "{body}");
+    let sessions_line = body["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|entry| entry["entry"] == "sessions/")
+        .expect("the sessions/ line");
+    let holds = sessions_line["holds"].as_str().unwrap_or_default();
+    assert!(holds.starts_with("2 conversations"), "{holds}");
+    let memory_line = body["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|entry| {
+            entry["entry"]
+                .as_str()
+                .is_some_and(|name| name.ends_with("/memory/"))
+        })
+        .expect("the memory/ line");
+    let holds = memory_line["holds"].as_str().unwrap_or_default();
+    assert!(
+        holds.starts_with(&format!(
+            "{} memory notes of every owner, in {} partitions",
+            body["counts"]["memory_notes"], body["removed"]["memory_partitions"]
+        )),
+        "{holds}"
+    );
+}
