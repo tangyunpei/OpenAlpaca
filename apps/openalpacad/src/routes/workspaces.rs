@@ -655,32 +655,43 @@ pub(crate) async fn rebase_workspace(
             project: ProjectView::from(&done.after),
         })
         .into_response(),
-        Err(e) => {
-            // A run dispatched while this waited for the memory slot: step
-            // 2's transaction counted it, moved nothing and cleared the marker.
-            if let Some(busy) = e
-                .chain()
-                .find_map(|cause| cause.downcast_ref::<project_life::RunsInFlight>())
-            {
-                return api_error(
-                    StatusCode::CONFLICT,
-                    "WORKSPACE_BUSY",
-                    format!(
-                        "{} run(s) of {} are queued, running or paused; nothing was re-pointed \
-                         — re-point it once they finish",
-                        busy.runs, busy.root
-                    ),
-                );
-            }
-            project_error_response(&e).unwrap_or_else(|| {
-                api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "WORKSPACE_MOVE_FAILED",
-                    format!("{root} could not be re-pointed onto {new}: {e:#}"),
-                )
-            })
-        }
+        Err(e) => repoint_failure(&e, &root, &new),
     }
+}
+
+/// How the PATCH answers `project_life::repoint`'s error `e` for the
+/// re-point of `root` onto `new`.
+fn repoint_failure(e: &anyhow::Error, root: &str, new: &str) -> Response {
+    // A run dispatched while this waited for the memory slot: step 2's
+    // transaction counted it, moved nothing and cleared the marker. A marker
+    // that could not be cleared leaves the re-point for the next start to
+    // finish, which is no "nothing was re-pointed": that is the 500 below,
+    // with the whole chain (residual X3).
+    let marker_kept = e
+        .downcast_ref::<project_life::RepointLeftMarked>()
+        .is_some();
+    if let Some(busy) = e
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<project_life::RunsInFlight>())
+        .filter(|_| !marker_kept)
+    {
+        return api_error(
+            StatusCode::CONFLICT,
+            "WORKSPACE_BUSY",
+            format!(
+                "{} run(s) of {} are queued, running or paused; nothing was re-pointed — \
+                 re-point it once they finish",
+                busy.runs, busy.root
+            ),
+        );
+    }
+    project_error_response(e).unwrap_or_else(|| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "WORKSPACE_MOVE_FAILED",
+            format!("{root} could not be re-pointed onto {new}: {e:#}"),
+        )
+    })
 }
 
 // ── POST /v1/workspaces/purge ────────────────────────────────────

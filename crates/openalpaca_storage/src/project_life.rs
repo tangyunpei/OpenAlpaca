@@ -57,6 +57,30 @@ impl fmt::Display for RepointInterrupted {
 
 impl std::error::Error for RepointInterrupted {}
 
+/// The context step 2's failure carries when the marker it should clear
+/// could not be cleared: `project.json` in the folder still records the new
+/// root, so the next start finishes the re-point ([`recover_repoints`]).
+/// Whatever step 2 refused for — a [`RunsInFlight`] included — the re-point
+/// is then not "nothing changed" (residual X3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepointLeftMarked {
+    /// The `project.json` that still names the new root.
+    pub file: PathBuf,
+    /// Why it could not be written back.
+    pub undo: String,
+}
+
+impl fmt::Display for RepointLeftMarked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "and {} still names the new root ({}); the next start finishes the re-point",
+            self.file.display(),
+            self.undo
+        )
+    }
+}
+
 /// What [`recover_repoints`] did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecoveryReport {
@@ -82,7 +106,8 @@ pub struct RecoveryReport {
 /// Then: 1 the file is marked; 2 one transaction moves the rows (a failure
 /// clears the marker and returns the error — [`RunsInFlight`] when that
 /// transaction finds a run under the old root `queued`, `running` or
-/// `paused`); 3 the folder is renamed (its new name is free or this
+/// `paused`; a marker that cannot be cleared adds [`RepointLeftMarked`]);
+/// 3 the folder is renamed (its new name is free or this
 /// project's own, R6); 4 the marker is cleared.
 pub fn repoint(db: &Database, old_path: &Path, new_path: &Path) -> Result<Repointed> {
     repoint_with(db, old_path, new_path, &mut |_| true)
@@ -288,10 +313,10 @@ fn finish(
                 cleared.previous_root = None;
                 cleared.previous_name = None;
                 if let Err(undo) = projects::write_project_file(dir, &cleared) {
-                    return Err(e.context(format!(
-                        "and {} still names the new root ({undo:#}); the next start finishes the re-point",
-                        dir.join(projects::PROJECT_FILE).display()
-                    )));
+                    return Err(e.context(RepointLeftMarked {
+                        file: dir.join(projects::PROJECT_FILE),
+                        undo: format!("{undo:#}"),
+                    }));
                 }
             }
             return Err(e);

@@ -1713,6 +1713,74 @@ async fn a_run_dispatched_while_the_re_point_waits_refuses_it_and_nothing_moves(
     );
 }
 
+/// A directory nobody may write until this drops — then `0700` again, so a
+/// failed assertion never leaves the tempdir unremovable.
+#[cfg(unix)]
+struct ReadOnly(PathBuf);
+
+#[cfg(unix)]
+impl ReadOnly {
+    fn dir(dir: &std::path::Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+        Self(dir.to_path_buf())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ReadOnly {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// A run in flight refuses step 2, and then the marker cannot be cleared
+/// (residual X3): `project.json` still records the new root, which the next
+/// start finishes moving to. That is not "nothing was re-pointed" — the
+/// answer is the `500` with the whole chain, as before R10.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_refused_re_point_whose_marker_stays_is_a_500_carrying_the_whole_chain() {
+    let w = World::new();
+    let p = w.project("stuck");
+    w.task("t-live", &text(&p.root), "running");
+    let new = w.dir("stuck-moved");
+    let mut read_only = None;
+
+    let err = project_life::repoint_with(&w.db, &p.root, &new, &mut |at| {
+        if at == project_life::RepointStep::Marked {
+            read_only = Some(ReadOnly::dir(&p.dir));
+        }
+        true
+    })
+    .expect_err("a run in flight refuses step 2");
+    drop(read_only);
+    let marked = projects::list()
+        .expect("list")
+        .into_iter()
+        .find(|entry| entry.id == p.id)
+        .expect("still listed");
+    if marked.previous_root.is_none() {
+        // The mode did not stop the undo (the tests run as root).
+        return;
+    }
+
+    let (status, body) = split(repoint_failure(&err, &text(&p.root), &text(&new))).await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_MOVE_FAILED", "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    for part in [
+        "still names the new root",
+        "the next start finishes the re-point",
+        "are queued, running or paused",
+    ] {
+        assert!(message.contains(part), "{part}: {message}");
+    }
+    assert_eq!(marked.root, new, "project.json records the new root");
+}
+
 /// A delete that waits for the project's memory slot while a re-point of the
 /// same project holds it acts on nothing it read before the wait: once the
 /// slot is its own, the project is read again by its id, and a project that
