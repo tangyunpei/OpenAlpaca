@@ -43,7 +43,11 @@ export interface WorkspaceCounts {
 
 /** `GET /v1/workspaces?path=` — what one path is. */
 export interface Workspace {
-  /** The path asked about, canonicalized (as written when it is gone). */
+  /**
+   * The path asked about: as sent when it is a root a project records (that
+   * project is the answer, matched before anything is resolved); otherwise
+   * canonicalized (as written when it is gone).
+   */
   path: string;
   /** The project root it resolves to; `null` when it is in no project. */
   root: string | null;

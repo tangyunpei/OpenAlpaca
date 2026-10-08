@@ -918,7 +918,9 @@ pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
     // note. The chunk is dropped exactly as the check before the call drops
     // it — nothing written, nothing else counted, the cursor past it. One
     // re-pointed meanwhile is held instead: the context still names the old
-    // root, which no longer resolves, so a write now would land at home.
+    // root, which no longer resolves, so a write now would be refused (R19:
+    // `Internal`, which the store loop holds on) — this check spares that
+    // loop and says why.
     match check_project(job.root.as_deref(), job.project_id.as_ref()) {
         ProjectCheck::Learn(_) => {}
         ProjectCheck::Hold => {

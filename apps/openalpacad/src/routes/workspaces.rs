@@ -10,12 +10,16 @@
 //!
 //! A project is a folder under `~/.openalpaca/projects/` whose `project.json`
 //! records its id and root (`store::projects`); rows name it by that root in
-//! five columns. These routes resolve a client's path the one way a turn's is
-//! resolved (`projects::resolve`), answer the resolved root, and refuse rather
+//! five columns. A root a project records, sent as written, is matched before
+//! anything is resolved (`projects::by_recorded_root`) and answered as sent —
+//! the root the list printed names its own project even when it now leads
+//! elsewhere; any other client path is resolved the one way a turn's is
+//! (`projects::resolve`) and answered as the resolved root. They refuse rather
 //! than guess: `404` when no project is registered there or a row there is
 //! another owner's (R40), `409` while a run is in flight, the project's
 //! memory slot stays held or its re-point has not finished, `409`/`422` for a
-//! target that is the home store, already a project, or not a directory.
+//! target that is the home store, already a project, or not a directory, and
+//! `500` when `projects/` cannot be listed.
 //!
 //! The delete answers a plan, one line per entry in the seeded README's
 //! retention terms, `delete` or `keep`; `dry_run` defaults to **true**, so a

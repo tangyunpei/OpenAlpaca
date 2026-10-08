@@ -400,7 +400,11 @@ fn the_home_readme_projects_row_names_the_write_a_daemon_started_elsewhere_still
         !projects.contains("Nothing is ever written inside"),
         "the projects/ row must not promise that nothing is ever written in a project: {projects}"
     );
-    for needle in ["`file_write`", "`openalpaca daemon start`"] {
+    for needle in [
+        "`file_write`",
+        "`openalpaca daemon start`",
+        "on a turn with a project",
+    ] {
         assert!(
             projects.contains(needle),
             "the projects/ row must name {needle:?}: {projects}"

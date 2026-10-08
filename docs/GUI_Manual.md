@@ -1042,7 +1042,8 @@ and come with it untouched. Nothing re-points on its own. The daemon refuses
 rather than merges: while a run there is queued, running or paused, or one
 starts while the re-point waits (`WORKSPACE_BUSY` — retry once it finishes),
 when the project was re-pointed or its data deleted elsewhere while this one
-waited, or its own re-point a crash interrupted has not finished (both
+waited, or its own re-point has not finished — a crash, or a live rename
+that failed (both
 `WORKSPACE_BUSY`; the second until the daemon's next start), onto a path that
 is not a directory, onto the home store, and onto a path that is already a
 project, that records name, or that another project's unfinished re-point
