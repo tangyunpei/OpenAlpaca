@@ -340,6 +340,48 @@ fn the_home_readme_describes_markdown_memory() {
     }
 }
 
+/// Storage design R1–R3: the home README lists `projects/` — one folder per
+/// project, the user's like everything at the root but `state/` — and the
+/// CLI's `repl_history` in `state/`. The two reserved kinds that never held
+/// content are gone from it (`skills`: the live one is `config/skills/`;
+/// `cache`: the live one is `state/cache/`), and `scratch/` alone stays
+/// reserved until Stage 2. A deleted project's files that another
+/// conversation still shows are kept under `kept/` in the root's
+/// `artifacts/` and `uploads/`, and those two rows say so.
+#[test]
+fn the_home_readme_lists_projects_and_repl_history_and_only_live_kinds() {
+    let row = |entry: &str| {
+        let head = format!("| `{entry}` |");
+        HOME_README
+            .lines()
+            .find(|line| line.starts_with(&head))
+            .map(str::to_owned)
+    };
+    let projects = row("projects/").expect("the home README has a projects/ row");
+    for needle in ["project.json", "artifacts/", "uploads/", "memory/", "yours"] {
+        assert!(
+            projects.contains(needle),
+            "the projects/ row must name {needle:?}: {projects}"
+        );
+    }
+    let state = row("state/").expect("the home README has a state/ row");
+    assert!(state.contains("`repl_history`"), "{state}");
+    for gone in ["skills/", "cache/", "scratch/`, `cache/"] {
+        assert!(
+            row(gone).is_none(),
+            "the home README must not list {gone:?} as an entry"
+        );
+    }
+    assert!(
+        row("scratch/").is_some(),
+        "scratch/ stays reserved until Stage 2"
+    );
+    for kept in ["artifacts/", "uploads/"] {
+        let line = row(kept).unwrap_or_else(|| panic!("the home README has a {kept} row"));
+        assert!(line.contains("`kept/`"), "{line}");
+    }
+}
+
 /// The README is the user's the moment it exists: it is written only when
 /// absent, so an edited text — even by one byte — and any text of their own
 /// are left alone.
@@ -512,9 +554,7 @@ fn content_dirs_have_the_same_shape_in_both_scopes() {
         ContentKind::Uploads,
         ContentKind::Sessions,
         ContentKind::Memory,
-        ContentKind::Skills,
         ContentKind::Scratch,
-        ContentKind::Cache,
     ] {
         let home = content_dir(&StoreScope::Home, kind).unwrap();
         let proj = content_dir(&scope, kind).unwrap();

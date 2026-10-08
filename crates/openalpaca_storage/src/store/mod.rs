@@ -13,7 +13,8 @@
 //!   README.md          seeded once; explains every entry
 //!   .layout            line 1: layout version; line 2: install_id=<uuid-v4>
 //!   state/             MACHINE STATE — opaque, never user-edited, never committed
-//!     openalpaca.db (+ -wal, -shm), discovery.json, openalpacad.lock, .master_key
+//!     openalpaca.db (+ -wal, -shm), discovery.json, openalpacad.lock, .master_key,
+//!     repl_history     the CLI chat's line history
 //!     backups/         rotated copies of hand-edited config files
 //!     logs/            daemon.log, gui.log
 //!   config/            USER-EDITED runtime config (GUI/CLI-managed daemons)
@@ -386,17 +387,21 @@ pub enum StoreScope {
     Home,
 }
 
-/// Every content collection in the system. Adding a kind here is the *only* way
-/// a new top-level store directory comes into existence (§1.3 rule 2).
+/// Every content collection a store holds — the home store, and each
+/// project's folder under `projects/`. Adding a kind here is the *only* way a
+/// new content directory comes into existence (§1.3 rule 2). `projects/`
+/// itself is not a kind: it holds stores, and only the home root has it
+/// ([`projects::PROJECTS_DIR`]). Nor are `config/skills/` (configuration) or
+/// `state/cache/` (machine state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentKind {
     Artifacts,
     Uploads,
     Sessions,
     Memory,
-    Skills,
+    /// Reserved: nothing creates it until Stage 2 of the storage design gives
+    /// a conversation with no project its working folder here.
     Scratch,
-    Cache,
 }
 
 impl ContentKind {
@@ -407,9 +412,7 @@ impl ContentKind {
             ContentKind::Uploads => "uploads",
             ContentKind::Sessions => "sessions",
             ContentKind::Memory => "memory",
-            ContentKind::Skills => "skills",
             ContentKind::Scratch => "scratch",
-            ContentKind::Cache => "cache",
         }
     }
 }
@@ -672,19 +675,19 @@ directory loses those files only.
 
 | Entry | Holds | Retention class |
 |---|---|---|
-| `state/` | database (+ WAL/SHM), `discovery.json`, `openalpacad.lock`, `.master_key` | never swept — a factory reset deletes the database here and leaves the rest |
+| `state/` | database (+ WAL/SHM), `discovery.json`, `openalpacad.lock`, `.master_key`, `repl_history` (the line history of `openalpaca chat`) | never swept — a factory reset deletes the database here and leaves the rest |
 | `state/memory-control/` | one control snapshot per memory partition: the revision the service last wrote, each note's origin, the tombstones of forgotten notes | never swept — the notes' authority and forget history; a backup of `memory/` includes it |
 | `state/backups/` | rotated copies of hand-edited config (`<name>.bak.<ts>`, `<name>.unparseable-<ts>`) | regenerable — swept freely; never user-edited |
 | `state/logs/` | `daemon.log`, `gui.log` | regenerable — swept freely |
 | `state/cache/` | derived data the machine can rebuild — `memory-index-v1.sqlite`, the memory search index | regenerable — deleting it costs one rebuild from the notes on the next start |
 | `config/` | your runtime config: `llm.toml`, `daemon.toml`, `mcp.toml`, `agents/`, `skills/`, `orchestrator/`, `tools/` | yours — never swept |
 | `plugins/` | plugin directories you dropped in, `.permissions.toml`, `.config/<name>.toml`, `.data/<name>/` | yours — never swept |
-| `artifacts/` | files produced by tasks that had no project | never garbage-collected |
-| `uploads/` | files you uploaded that carried no project signal | swept: an upload attached to no message is deleted once past the grace period |
+| `projects/` | one folder per project you work in, named after the project's path: `project.json` (the project's id and the path of its own folder) and that project's `artifacts/`, `uploads/` and `memory/`, laid out like the entries below. Nothing is ever written inside the project's own folder | yours — never swept; a factory reset leaves it; `openalpaca store purge <project>` deletes one project's folder with the rest of its data |
+| `artifacts/` | files produced by tasks that had no project; under `kept/`, a deleted project's files that another conversation still shows | never garbage-collected |
+| `uploads/` | files you uploaded that carried no project signal; under `kept/`, a deleted project's uploads that another conversation still shows | swept: an upload attached to no message is deleted once past the grace period |
 | `sessions/` | session event logs — all sessions live here, never in a project | size-capped; no age sweep yet (owner decision T12) |
-| `memory/` | your memory notes, per owner: `owners/<owner-key>/notes/*.md`, with `.history/` (the last five service-written revisions) and `MEMORY.md` (a rebuildable index) beside them | yours — never swept; a factory reset leaves them, orphaned until the new owner adopts them |
-| `scratch/`, `cache/` | reserved; agent working space and derived data | swept freely |
-| `skills/` | reserved; not created until used | yours — never swept |
+| `memory/` | your memory notes outside any project, per owner:`owners/<owner-key>/notes/*.md`, with `.history/` (the last five service-written revisions) and `MEMORY.md` (a rebuildable index) beside them | yours — never swept; a factory reset leaves them, orphaned until the new owner adopts them |
+| `scratch/` | reserved; agent working space | swept freely |
 
 Directories OpenAlpaca did not create are never touched and never swept.
 
