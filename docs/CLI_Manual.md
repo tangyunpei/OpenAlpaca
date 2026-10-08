@@ -605,8 +605,11 @@ wherever inside it you are — or a folder you chose (`openalpaca chat --project
 above it. Each has a folder in the home store, `~/.openalpaca/projects/<name>/`,
 named after its path: `project.json` (the project's permanent id and its path)
 and the project's artifacts, uploads and memory notes. Nothing is written
-inside the project's own folder. A project is recorded the first time the
-daemon accepts work for it, and is listed from then on.
+inside the project's own folder by a daemon `openalpaca daemon start` or the
+app launched, which start it in the home store; a daemon started somewhere
+else still writes `file_write`'s plain files into the directory it was started
+in (Daemon Manual → *Where an agent's files land*). A project is recorded the
+first time the daemon accepts work for it, and is listed from then on.
 
 `list` notes:
 - Each project prints its path, then its folder under `projects/` and its id. A project whose path is no longer a directory is marked `missing — its folder is gone: re-point it, or delete its data`; its data is kept and its conversations still open. With no projects yet, it says how one is made.
@@ -973,7 +976,7 @@ Attachment <file id> did not reach the model: the answering model does not suppo
 
 #### Project and conversation
 
-- Every turn carries the CLI's working directory as its project (`x-workspace-path`), the same way the GUI sends the project chosen in its window. The daemon resolves it — to the nearest folder at or above it that is a recorded project's root or holds `.git` — and records the project on that turn; that root is what a run records as its `workspace_id`, and the files the turn writes land in the project's folder under `~/.openalpaca/projects/`, never in the project itself. A directory the CLI cannot canonicalize sends no project at all rather than a path the daemon would resolve against its own directory.
+- Every turn carries the CLI's working directory as its project (`x-workspace-path`), the same way the GUI sends the project chosen in its window. The daemon resolves it — to the nearest folder at or above it that is a recorded project's root or holds `.git` — and records the project on that turn; that root is what a run records as its `workspace_id`, and the files the turn writes land in the project's folder under `~/.openalpaca/projects/`, never in the project itself — with a daemon `openalpaca daemon start` or the app launched, which start it in the home store. A daemon started somewhere else (`cargo run -p openalpacad` in a checkout) still writes `file_write`'s plain files into the directory it was started in, as the Daemon Manual's *Where an agent's files land* explains. A directory the CLI cannot canonicalize sends no project at all rather than a path the daemon would resolve against its own directory.
 - `--project <dir>` chooses the project instead of the working directory: the CLI first asks the daemon to record `<dir>` (`POST /v1/workspaces`) — the nearest recorded project or git repository at or above it, else the folder itself, which is how a folder with no git becomes a project — and every turn of the chat carries the root the daemon answered. A refusal (the home store, a path that is not a directory) is printed and nothing is sent.
 - `--resume` continues a stored conversation instead of the lane's current one. `--session <id>` names one directly; `openalpaca sessions` lists the ids. The two are mutually exclusive.
 - `--resume` is scoped to **this project**: the conversations bound to the working directory's own root (or `--project`'s), newest first. The lane is shared with the GUI and with every other checkout, so a lane-wide list would offer another project's conversations.

@@ -382,6 +382,30 @@ fn the_home_readme_lists_projects_and_repl_history_and_only_live_kinds() {
     }
 }
 
+/// Final review R27: the stores write nothing inside a project's own folder,
+/// but on a turn with a project `file_write` still writes a plain file into
+/// the daemon's starting directory whenever that is not the home store
+/// (`tools/builtins/file_ops.rs`) — a daemon started by hand inside a
+/// repository writes into it. So the `projects/` row may not say nothing is
+/// ever written there; it names the one daemon that still does.
+#[test]
+fn the_home_readme_projects_row_names_the_write_a_daemon_started_elsewhere_still_makes() {
+    let projects = HOME_README
+        .lines()
+        .find(|line| line.starts_with("| `projects/` |"))
+        .expect("the home README has a projects/ row");
+    assert!(
+        !projects.contains("Nothing is ever written inside"),
+        "the projects/ row must not promise that nothing is ever written in a project: {projects}"
+    );
+    for needle in ["`file_write`", "`openalpaca daemon start`"] {
+        assert!(
+            projects.contains(needle),
+            "the projects/ row must name {needle:?}: {projects}"
+        );
+    }
+}
+
 /// The README is the user's the moment it exists: it is written only when
 /// absent, so an edited text — even by one byte — and any text of their own
 /// are left alone.

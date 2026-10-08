@@ -138,7 +138,11 @@ Inside the runtime root, `state/` is the machine's (database, logs, lock,
 master key, caches) and everything else is yours to read and edit. Each
 project you work in has a folder there too, under `projects/`, with its
 artifacts, uploads and memory notes; nothing is written inside the project's
-own folder. The root describes itself: the daemon seeds a `README.md` there
+own folder by a daemon the app or `openalpaca daemon start` launched — both
+start it in this root. A daemon started somewhere else still writes
+`file_write`'s plain files into the directory it was started in on a turn
+with a project (Daemon Manual → *Where an agent's files land*). The root
+describes itself: the daemon seeds a `README.md` there
 that explains every entry.
 
 When the CLI or the desktop app launches the daemon, it sets
@@ -272,7 +276,10 @@ copy you kept in step 1.
 Earlier builds kept a project's files inside the project: a `.openalpaca/`
 folder at its top held the artifacts and uploads of its conversations and, on
 a store an earlier build of the Markdown memory used, that project's memory
-notes. This build writes nothing inside a project. Each project gets a folder
+notes. This build keeps nothing inside a project — with the daemon the app or
+`openalpaca daemon start` launches in the home store; one started elsewhere
+still writes `file_write`'s plain files into its own directory, as the Daemon
+Manual's *Where an agent's files land* explains. Each project gets a folder
 in the home store instead, `~/.openalpaca/projects/<name>/`, named after the
 project's path — `/Users/you/dev/app` becomes `-Users-you-dev-app` — with a
 `project.json` that holds the project's permanent id and its path, and the

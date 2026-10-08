@@ -4,9 +4,11 @@
 //! `OPENALPACA_HOME_STORE`). App state and content with no project live there,
 //! and each project's content lives in its own folder under it,
 //! `projects/<name>/` (owner decision ST-1; [`projects`] names and finds the
-//! folders). Nothing is ever written inside a project's own folder. Both
-//! stores have the same shape for content, so `content_dir(scope, kind)` is
-//! `root/<kind>` in both cases.
+//! folders). No store writes inside a project's own folder (a daemon started
+//! outside the home store still writes `file_write`'s plain files into its
+//! own directory — `openalpaca_core`'s `tools/builtins/file_ops.rs`, until
+//! the storage design's Stage 2). Both stores have the same shape for
+//! content, so `content_dir(scope, kind)` is `root/<kind>` in both cases.
 //!
 //! ```text
 //! ~/.openalpaca/
@@ -768,7 +770,7 @@ directory loses those files only.
 | `state/cache/` | derived data the machine can rebuild — `memory-index-v1.sqlite`, the memory search index | regenerable — deleting it costs one rebuild from the notes on the next start |
 | `config/` | your runtime config: `llm.toml`, `daemon.toml`, `mcp.toml`, `agents/`, `skills/`, `orchestrator/`, `tools/` | yours — never swept |
 | `plugins/` | plugin directories you dropped in, `.permissions.toml`, `.config/<name>.toml`, `.data/<name>/` | yours — never swept |
-| `projects/` | one folder per project you work in, named after the project's path: `project.json` (the project's id and the path of its own folder) and that project's `artifacts/`, `uploads/` and `memory/`, laid out like the entries below. Nothing is ever written inside the project's own folder | yours — never swept; a factory reset leaves it; `openalpaca store purge <project>` deletes one project's folder with the rest of its data |
+| `projects/` | one folder per project you work in, named after the project's path: `project.json` (the project's id and the path of its own folder) and that project's `artifacts/`, `uploads/` and `memory/`, laid out like the entries below. OpenAlpaca's stores write nothing inside the project's own folder; only a daemon started somewhere other than this store — the app and `openalpaca daemon start` start it here — still writes `file_write`'s plain files into the directory it was started in | yours — never swept; a factory reset leaves it; `openalpaca store purge <project>` deletes one project's folder with the rest of its data |
 | `artifacts/` | files produced by tasks that had no project; under `kept/`, a deleted project's files that another conversation still shows | never garbage-collected |
 | `uploads/` | files you uploaded that carried no project signal; under `kept/`, a deleted project's uploads that another conversation still shows | swept: an upload attached to no message is deleted once past the grace period |
 | `sessions/` | session event logs — all sessions live here, never in a project | size-capped; no age sweep yet (owner decision T12) |

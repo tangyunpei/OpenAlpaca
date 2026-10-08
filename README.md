@@ -173,7 +173,7 @@ Data always lives under `~/.openalpaca/`, on every platform:
 | `memory/` | Memory notes, one Markdown file each, per owner |
 | `projects/` | One folder per project — a git repository you chat in, or a folder you chose — with its `project.json`, artifacts, uploads and memory notes |
 
-Set `OPENALPACA_HOME_STORE=/absolute/path` to move the whole root, for example to try things in a sandbox. Nothing is written inside a project's own folder: a project's files and notes live in its folder under `projects/`, named after its path.
+Set `OPENALPACA_HOME_STORE=/absolute/path` to move the whole root, for example to try things in a sandbox. A project's files and notes live in its folder under `projects/`, named after its path, and nothing is written inside the project's own folder — with the daemon the app or `openalpaca daemon start` launches, which they start in the home store. A daemon started somewhere else (`cargo run -p openalpacad` in a checkout, say) still writes `file_write`'s plain files into the directory it was started in on a turn with a project, as the Daemon Manual's *Where an agent's files land* explains.
 
 ## Documentation
 
