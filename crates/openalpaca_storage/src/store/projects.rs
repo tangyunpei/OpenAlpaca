@@ -424,7 +424,10 @@ fn lookup_in(home: &Path, root: &Path) -> Result<Option<Project>> {
 /// `project.json`, a `project.json` that is a link, has another hard link, is
 /// not one this build parses, has another `version`, or records a root that is
 /// not absolute. Each of those is one WARN per folder per process, and
-/// nothing is deleted.
+/// nothing is deleted. A folder that goes while it is read — a re-point
+/// renaming it, a delete removing it, on another thread that holds
+/// [`lock`] while this reader does not — is no folder there, without a word:
+/// R11's report is for a folder that stays without its file.
 pub(crate) fn read_project_dir(dir: &Path) -> Result<Option<Project>> {
     match fs::symlink_metadata(dir) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -435,8 +438,11 @@ pub(crate) fn read_project_dir(dir: &Path) -> Result<Option<Project>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Ok(unreadable(dir, &format!("it cannot be read ({e})"))),
     }
+    #[cfg(test)]
+    during_read(ReadStep::FolderStatted);
     let bytes = match fsx::read_if_exists(&dir.join(PROJECT_FILE)) {
         Ok(Some(bytes)) => bytes,
+        Ok(None) | Err(_) if vanished(dir) => return Ok(None),
         Ok(None) => return Ok(unreadable(dir, "it has no project.json")),
         Err(e) => {
             return Ok(unreadable(
@@ -477,9 +483,15 @@ pub(crate) fn read_project_dir(dir: &Path) -> Result<Option<Project>> {
         .with_context(|| format!("{} names no folder", dir.display()))?
         .to_string_lossy()
         .into_owned();
-    let dir = dir
-        .canonicalize()
-        .with_context(|| format!("Failed to resolve {}", dir.display()))?;
+    #[cfg(test)]
+    during_read(ReadStep::FileRead);
+    let dir = match dir.canonicalize() {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to resolve {}", dir.display()));
+        }
+    };
     let root = PathBuf::from(&file.root);
     Ok(Some(Project {
         id: file.id,
@@ -491,6 +503,50 @@ pub(crate) fn read_project_dir(dir: &Path) -> Result<Option<Project>> {
         previous_root: file.previous_root.map(PathBuf::from),
         previous_name: file.previous_name,
     }))
+}
+
+/// Whether `dir` is gone now — what tells a folder that went while it was
+/// read from one that stays without its file.
+fn vanished(dir: &Path) -> bool {
+    matches!(fs::symlink_metadata(dir), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Where in [`read_project_dir`] a test's step runs: the places a re-point's
+/// rename on another thread can land, which no call boundary lets a test
+/// reach.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadStep {
+    /// The folder's own stat answered; its `project.json` is read next.
+    FolderStatted,
+    /// `project.json` read and parsed; the folder's canonical path is next.
+    FileRead,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: a step [`read_project_dir`] runs once on this thread, at
+    /// the [`ReadStep`] it names.
+    static DURING_READ: std::cell::RefCell<Option<(ReadStep, Box<dyn FnOnce()>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs this thread's [`DURING_READ`] step when it is set for `at`.
+#[cfg(test)]
+fn during_read(at: ReadStep) {
+    let step = DURING_READ.with(|hook| {
+        let mut hook = hook.borrow_mut();
+        match hook.take() {
+            Some((set_for, step)) if set_for == at => Some(step),
+            other => {
+                *hook = other;
+                None
+            }
+        }
+    });
+    if let Some(step) = step {
+        step();
+    }
 }
 
 /// R11's report for `dir`, the first time this process meets it; always
@@ -540,7 +596,15 @@ fn list_in(home: &Path) -> Result<Vec<Project>> {
     };
     let mut found = Vec::new();
     for entry in entries {
-        let entry = entry.with_context(|| format!("Failed to read {}", projects.display()))?;
+        // An entry that went while the listing read it — a re-point's
+        // rename, a delete — is no project now; any other failure is one.
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to read {}", projects.display()));
+            }
+        };
         if entry.file_name().to_string_lossy().starts_with('.') {
             continue;
         }

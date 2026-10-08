@@ -1141,3 +1141,77 @@ fn a_store_that_reaches_the_real_one_by_a_link_a_dot_dot_or_another_case_is_refu
         "nothing was written into the real store"
     );
 }
+
+// ── A folder that goes while it is read (Stage 1 review R2, R-F5) ───────────
+
+/// `step` set to run once on this thread at `at` in `read_project_dir`.
+fn during_read_on_this_thread(at: ReadStep, step: impl FnOnce() + 'static) {
+    DURING_READ.with(|hook| *hook.borrow_mut() = Some((at, Box::new(step))));
+}
+
+/// A re-point renames a project's folder, and a delete removes it, under
+/// `lock()`; a reader that does not hold it can find the folder gone between
+/// reading its `project.json` and resolving its path. That folder is no
+/// project now — never an error that fails the whole listing, the lookup or
+/// `by_id` — so ST-21's check sees the project before or after the rename,
+/// and the Projects list does not fail for one moved folder.
+#[test]
+fn a_folder_renamed_away_while_it_is_read_is_no_project_and_no_error() {
+    let w = World::new();
+    let away = w.tmp.path().join("renamed-away");
+    fs::create_dir_all(&away).unwrap();
+    type Reader = fn(&Project) -> Result<Option<Project>>;
+    let readers: [(&str, Reader); 4] = [
+        ("read_project_dir", |p| read_project_dir(&p.dir)),
+        ("lookup", |p| lookup(&p.root)),
+        ("list", |p| Ok(list()?.into_iter().find(|q| q.id == p.id))),
+        ("by_id", |p| by_id(&p.id)),
+    ];
+    for (i, (name, read)) in readers.into_iter().enumerate() {
+        let project = register(&w.folder(&format!("app-{i}"))).unwrap();
+        let (dir, to) = (project.dir.clone(), away.join(i.to_string()));
+        during_read_on_this_thread(ReadStep::FileRead, move || fs::rename(dir, to).unwrap());
+
+        let found = read(&project);
+
+        assert!(
+            DURING_READ.with(|hook| hook.borrow().is_none()),
+            "{name}: the folder was renamed mid-read"
+        );
+        assert_eq!(found.unwrap(), None, "{name}");
+    }
+}
+
+/// The same race one step earlier: the folder goes between its own stat and
+/// the read of its `project.json`. Nothing is reported, and R11's
+/// once-per-process report is still owed to a folder of that name that
+/// stays without its file.
+#[test]
+#[tracing_test::traced_test]
+fn a_folder_renamed_away_before_its_file_is_read_spends_no_unreadable_report() {
+    let w = World::new();
+    let project = register(&w.folder("app")).unwrap();
+    let (dir, to) = (project.dir.clone(), w.tmp.path().join("renamed-away"));
+    during_read_on_this_thread(ReadStep::FolderStatted, move || {
+        fs::rename(dir, to).unwrap()
+    });
+
+    assert_eq!(read_project_dir(&project.dir).unwrap(), None);
+
+    assert!(DURING_READ.with(|hook| hook.borrow().is_none()));
+    let shown = project.dir.display().to_string();
+    logs_assert(move |lines: &[&str]| {
+        match lines
+            .iter()
+            .filter(|l| l.contains("WARN") && l.contains(&shown))
+            .count()
+        {
+            0 => Ok(()),
+            n => Err(format!("{n} WARN line(s) for {shown}")),
+        }
+    });
+    assert!(
+        first_warning(format!("unreadable {}", project.dir.display())),
+        "the R11 report for this folder was spent on a folder that went"
+    );
+}

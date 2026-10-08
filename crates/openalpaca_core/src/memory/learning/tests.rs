@@ -1489,6 +1489,38 @@ async fn root_gone_means_no_longer_a_registered_project() {
     assert_eq!(check_project(None, None), ProjectCheck::Learn(None));
 }
 
+/// ST-21's check reads `projects/` under `projects::lock()`, the lock a
+/// re-point and a delete change it under (Stage 1 review R2): it sees a
+/// re-point before its rename or after it, never between, where a listing
+/// that missed the renamed folder would read a live project as gone and drop
+/// its turns for good.
+#[tokio::test]
+async fn the_project_check_waits_while_a_re_point_or_a_delete_holds_the_projects_lock() {
+    use super::extractor::{ProjectCheck, check_project};
+    let _scene = Scene::new(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let registered = openalpaca_storage::store::projects::register(&root).unwrap();
+    let held = openalpaca_storage::store::projects::lock();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let checking = root.clone();
+    let checker = std::thread::spawn(move || {
+        tx.send(check_project(Some(&checking), None)).unwrap();
+    });
+
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(150))
+            .is_err(),
+        "the check answered while the projects lock was held"
+    );
+    drop(held);
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+        ProjectCheck::Learn(Some(registered.id))
+    );
+    checker.join().unwrap();
+}
+
 /// ST-21 (supersedes LQ5): a project whose folder was deleted is missing,
 /// not gone — its record under `projects/` stands — so its turns are still
 /// learned into its notes, which live at home; the user's folder is not

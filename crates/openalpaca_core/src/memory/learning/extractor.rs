@@ -1067,6 +1067,13 @@ pub(crate) fn check_project(root: Option<&Path>, seen: Option<&ProjectId>) -> Pr
     let Some(root) = root else {
         return ProjectCheck::Learn(None);
     };
+    // Under the lock a re-point and a delete change `projects/` with, so the
+    // lookup and the listing below see a re-point before its rename or after
+    // it, never between — where a listing that missed the renamed folder
+    // would read a live project as gone and drop its turns. Lock order
+    // (projects lock, then the database mutex): no caller holds the database
+    // mutex or a memory write slot here.
+    let _held = projects::lock();
     match projects::lookup(root) {
         Ok(Some(project)) => return ProjectCheck::Learn(Some(project.id)),
         Ok(None) => {}
