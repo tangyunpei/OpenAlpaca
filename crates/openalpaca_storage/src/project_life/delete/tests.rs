@@ -18,7 +18,7 @@ use crate::{
     PurgeCounts, PurgeSession, UploadStore,
 };
 use chrono::{DateTime, TimeZone, Utc};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
 
 const OWNER: &str = "owner-1";
@@ -426,4 +426,249 @@ fn the_plan_counts_every_owners_partition_and_note_files_of_this_project_only() 
     assert_eq!(plan.memory_notes, 3);
     assert!(plan.counts.is_empty());
     assert_eq!(plan.kept, KeptFiles::default());
+}
+
+/// Every regular file under `dir`, recursively.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            out.extend(files_under(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+#[test]
+fn deleting_takes_every_row_the_plan_counted_and_nothing_else() {
+    let w = World::new();
+    let s = seed(&w);
+    let plan = delete_plan(&w.db, &s.p).unwrap();
+
+    let outcome = delete_project_data(&w.db, &s.p).unwrap();
+
+    assert_eq!(
+        outcome.counts, plan.counts,
+        "the dry run and the real call agree"
+    );
+    assert_eq!(outcome.kept, plan.kept);
+    assert_eq!(outcome.session_ids, vec!["s-p".to_string()]);
+    assert_eq!(outcome.message_ids, vec![s.m_p, s.m_q_leg]);
+
+    // The bystanders' rows, one by one.
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM session WHERE id IN ('s-q', 's-h')"),
+        2
+    );
+    assert_eq!(w.count("SELECT COUNT(*) FROM session"), 2);
+    let messages: Vec<i64> =
+        w.db.with_connection(|conn| {
+            let mut stmt = conn.prepare("SELECT id FROM conversation_messages ORDER BY id")?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?;
+            Ok(ids)
+        })
+        .unwrap();
+    assert_eq!(messages, vec![s.m_q, s.m_h]);
+    assert_eq!(
+        w.count("SELECT message_count FROM session WHERE id = 's-q'"),
+        1,
+        "a surviving conversation that lost a message is recounted"
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT COUNT(*) FROM conversation_messages WHERE id = {} AND task_id = 't-p'",
+            s.m_h
+        )),
+        1,
+        "the home turn that started the deleted run stays readable, its task_id dangling"
+    );
+    assert_eq!(w.count("SELECT COUNT(*) FROM message_feedback"), 0);
+    assert_eq!(w.count("SELECT COUNT(*) FROM tool_execution_log"), 1);
+    assert_eq!(w.count("SELECT COUNT(*) FROM lane_followups"), 1);
+    assert_eq!(
+        w.count(
+            "SELECT COUNT(*) FROM lane_followups
+              WHERE workspace_path = (SELECT workspace_id FROM session WHERE id = 's-q')"
+        ),
+        1
+    );
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM learning_cursor WHERE session_id = 's-q'"),
+        1
+    );
+    assert_eq!(w.count("SELECT COUNT(*) FROM learning_cursor"), 1);
+    assert_eq!(w.count("SELECT COUNT(*) FROM task"), 1);
+    assert_eq!(w.count("SELECT COUNT(*) FROM task WHERE id = 't-q'"), 1);
+    assert_eq!(w.count("SELECT COUNT(*) FROM subagent_span"), 0);
+    assert_eq!(w.count("SELECT COUNT(*) FROM event_log"), 1);
+    assert_eq!(w.count("SELECT COUNT(*) FROM dispatch_decisions"), 0);
+    assert_eq!(w.count("SELECT COUNT(*) FROM llm_call_log"), 0);
+
+    // Files: three gone, q's untouched, two kept with no project.
+    let ids: Vec<String> =
+        w.db.with_connection(|conn| {
+            let mut stmt = conn.prepare("SELECT id FROM file_assets ORDER BY id")?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok(ids)
+        })
+        .unwrap();
+    let mut expected = vec![s.u_shared.clone(), s.u_q.clone(), s.a_shared.clone()];
+    expected.sort();
+    assert_eq!(ids, expected);
+    for gone in [&s.u_alone, &s.u_leg, &s.a_alone] {
+        assert!(!ids.contains(gone));
+    }
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM file_assets WHERE project_root IS NULL"),
+        2,
+        "both kept files are re-addressed with no project"
+    );
+    // The links a surviving message holds survive with their file.
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM conversation_message_attachments"),
+        3
+    );
+
+    // This call removes no file: the project's folder is step 3's.
+    assert!(s.p.dir.join("uploads").is_dir());
+    assert!(s.q.dir.is_dir());
+}
+
+#[test]
+fn a_linked_upload_and_a_linked_by_product_move_to_the_root_store_and_still_read() {
+    let w = World::new();
+    let s = seed(&w);
+
+    delete_project_data(&w.db, &s.p).unwrap();
+
+    let folder = format!("{}-{}", s.p.name, s.p.id);
+    let (storage_path, rel_path): (String, String) =
+        w.db.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT storage_path, rel_path FROM file_assets WHERE id = ?1",
+                [&s.u_shared],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert!(
+        rel_path.starts_with(&format!("{KEPT_DIR}/{folder}/")),
+        "{rel_path}"
+    );
+    assert_eq!(
+        PathBuf::from(&storage_path),
+        w.home.join("uploads").join(&rel_path),
+        "storage_path is the uploads root plus rel_path, byte for byte"
+    );
+    assert_eq!(std::fs::read(&storage_path).unwrap(), b"shared.txt");
+
+    let store = ArtifactStore::new(&w.db);
+    let head = store.resolve_content(&s.a_shared, None).unwrap();
+    assert!(
+        head.starts_with(w.home.join("artifacts").join(KEPT_DIR).join(&folder)),
+        "{}",
+        head.display()
+    );
+    assert_eq!(std::fs::read(&head).unwrap(), b"v2\n");
+}
+
+/// ST-19's consequence (§0.5): a kept by-product keeps its newest version
+/// only; the older ones go with the project.
+#[test]
+fn a_kept_by_product_keeps_its_newest_version_only() {
+    let w = World::new();
+    let s = seed(&w);
+
+    delete_project_data(&w.db, &s.p).unwrap();
+
+    let store = ArtifactStore::new(&w.db);
+    let versions = store.versions(&s.a_shared).unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].version, 2);
+    let rel: String =
+        w.db.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT rel_path FROM file_assets WHERE id = ?1",
+                [&s.a_shared],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        versions[0].rel_path, rel,
+        "the one version row points at the new head"
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT version_count FROM file_assets WHERE id = '{}'",
+            s.a_shared
+        )),
+        1
+    );
+    assert!(
+        store.resolve_content(&s.a_shared, Some(1)).is_err(),
+        "version 1 is gone"
+    );
+}
+
+#[test]
+fn a_failed_transaction_deletes_nothing_and_takes_its_copies_back() {
+    let w = World::new();
+    let s = seed(&w);
+    w.exec(
+        "CREATE TRIGGER refuse_task_delete BEFORE DELETE ON task
+         BEGIN SELECT RAISE(ABORT, 'refused by the test'); END",
+        &[],
+    );
+
+    let err = delete_project_data(&w.db, &s.p).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("refused by the test"),
+        "{err:#}"
+    );
+    assert_eq!(w.count("SELECT COUNT(*) FROM session"), 3);
+    assert_eq!(w.count("SELECT COUNT(*) FROM conversation_messages"), 4);
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM file_assets WHERE project_root IS NULL"),
+        0
+    );
+    assert!(files_under(&w.home.join("uploads").join(KEPT_DIR)).is_empty());
+    assert!(files_under(&w.home.join("artifacts").join(KEPT_DIR)).is_empty());
+}
+
+/// A file linked from another conversation after the copies were made would
+/// lose its link with the project's rows; the transaction refuses instead.
+#[test]
+fn a_file_linked_after_the_copies_were_made_refuses_the_transaction() {
+    let w = World::new();
+    let s = seed(&w);
+    let root = s.p.root_string();
+
+    let err =
+        w.db.with_connection(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            delete_within(&tx, &root, &[])
+        })
+        .unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("was attached to another conversation"),
+        "{err:#}"
+    );
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM session"),
+        3,
+        "the dropped transaction rolled back"
+    );
 }

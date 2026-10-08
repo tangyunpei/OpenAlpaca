@@ -11,15 +11,17 @@
 //! the real call cannot disagree.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
+use rusqlite::Connection;
 
 use crate::Database;
 use crate::artifacts::{PurgeCounts, PurgeSession};
+use crate::content_io::{fsync_dir, remove_best_effort};
 use crate::memory_files::{NOTES_DIR, OWNERS_DIR, SnapshotScope, list_snapshots};
-use crate::store::ContentKind;
 use crate::store::projects::{Project, ProjectId};
+use crate::store::{ContentKind, StoreScope, confine_to_root, content_dir};
 
 /// The project's conversations.
 const DOOMED_SESSIONS: &str = "SELECT id FROM session WHERE workspace_id = ?1";
@@ -44,6 +46,43 @@ fn kept_ids() -> String {
 pub struct KeptFiles {
     pub uploads: usize,
     pub artifacts: usize,
+}
+
+/// Where a kept file lands in the root store:
+/// `<uploads|artifacts>/kept/<project folder>-<project id>/<its old rel_path>`.
+/// No grammar path starts with it, the id makes it fresh for every project
+/// ever deleted, and the old `rel_path` was unique within the project.
+pub const KEPT_DIR: &str = "kept";
+
+/// What [`delete_project_data`] did — read inside its transaction.
+#[derive(Debug, Clone, Default)]
+pub struct DeleteOutcome {
+    pub counts: PurgeCounts,
+    pub kept: KeptFiles,
+    /// The sessions whose `sessions/<id>/` directory is now rowless.
+    pub session_ids: Vec<String>,
+    /// Every message the transaction deleted, in id order — the route forgets
+    /// those conversations' summaries by them (design 09 §13.3).
+    pub message_ids: Vec<i64>,
+}
+
+/// A file step 1 keeps, as its row names it.
+#[derive(Debug, Clone)]
+struct KeptRow {
+    id: String,
+    upload: bool,
+    rel_path: Option<String>,
+}
+
+/// Where step 1 put it.
+#[derive(Debug, Clone)]
+struct Placed {
+    id: String,
+    upload: bool,
+    rel_path: String,
+    storage_path: String,
+    /// The copy this call wrote; `None` when the project held no bytes for it.
+    written: Option<PathBuf>,
 }
 
 /// What deleting a project's data would do, read without changing anything.
@@ -162,6 +201,300 @@ fn note_files(dir: &Path) -> usize {
                 && note.file_type().is_ok_and(|t| t.is_file())
         })
         .count()
+}
+
+fn kept_rows(conn: &Connection, root: &str) -> Result<Vec<KeptRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, origin, rel_path FROM file_assets
+          WHERE project_root = ?1 AND id IN ({}) ORDER BY id",
+        kept_ids()
+    ))?;
+    let rows = stmt
+        .query_map(rusqlite::params![root], |row| {
+            let origin: String = row.get(1)?;
+            Ok(KeptRow {
+                id: row.get(0)?,
+                upload: origin == "upload",
+                rel_path: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<KeptRow>>>()?;
+    Ok(rows)
+}
+
+/// Copies one kept file into the root store. The source is read from
+/// `projects/<name>/<kind>/<rel_path>` confined to that directory — never from
+/// `storage_path` — and a link out of it reads as no bytes.
+fn place_one(project: &Project, row: &KeptRow) -> Result<Placed> {
+    let kind = if row.upload {
+        ContentKind::Uploads
+    } else {
+        ContentKind::Artifacts
+    };
+    let home_dir = content_dir(&StoreScope::Home, kind)?;
+    let home_dir = home_dir
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", home_dir.display()))?;
+    let tail = row.rel_path.clone().unwrap_or_else(|| row.id.clone());
+    let rel_path = format!("{KEPT_DIR}/{}-{}/{tail}", project.name, project.id);
+    let target = confine_to_root(&home_dir, &home_dir.join(&rel_path))?;
+    let source_root = project.dir.join(kind.dir_name());
+    let source = match row.rel_path.as_deref() {
+        Some(rel) if source_root.is_dir() => confine_to_root(&source_root, &source_root.join(rel))
+            .ok()
+            .filter(|path| path.is_file()),
+        _ => None,
+    };
+    let written = match source {
+        Some(source) => {
+            copy_fresh(&source, &target)?;
+            Some(target.clone())
+        }
+        None => None,
+    };
+    Ok(Placed {
+        id: row.id.clone(),
+        upload: row.upload,
+        rel_path,
+        storage_path: target.to_string_lossy().into_owned(),
+        written,
+    })
+}
+
+/// `source` to a `target` that must not exist yet, synced.
+fn copy_fresh(source: &Path, target: &Path) -> Result<()> {
+    let dir = target
+        .parent()
+        .with_context(|| format!("{} has no parent", target.display()))?;
+    fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let mut from =
+        fs::File::open(source).with_context(|| format!("failed to open {}", source.display()))?;
+    let mut to = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .with_context(|| format!("failed to create {}", target.display()))?;
+    let copied = std::io::copy(&mut from, &mut to).and_then(|_| to.sync_all());
+    if let Err(e) = copied {
+        drop(to);
+        remove_best_effort(target);
+        return Err(e).with_context(|| {
+            format!(
+                "failed to copy {} to {}",
+                source.display(),
+                target.display()
+            )
+        });
+    }
+    fsync_dir(dir);
+    Ok(())
+}
+
+fn unplace(placed: &[Placed]) {
+    for p in placed {
+        if let Some(path) = &p.written {
+            remove_best_effort(path);
+        }
+    }
+}
+
+fn strings(conn: &Connection, sql: &str, root: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(sql)?;
+    let out = stmt
+        .query_map(rusqlite::params![root], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(out)
+}
+
+/// §6 *Delete its data*, steps 1 and 2: the files a surviving message links
+/// are copied into the root store, then one transaction re-addresses them
+/// with no project (a by-product as its newest version only) and deletes
+/// every row naming the project in the five path columns and the rows that
+/// hang off its sessions and runs, `learning_cursor` included. A failure
+/// anywhere deletes nothing and takes the copies back. Never iterates
+/// `storage_path`; removes no file of the project (step 3 is the route's).
+pub fn delete_project_data(db: &Database, project: &Project) -> Result<DeleteOutcome> {
+    let root = project.root_string();
+    let rows = db.with_connection(|conn| kept_rows(conn, &root))?;
+    let mut placed: Vec<Placed> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        match place_one(project, row) {
+            Ok(p) => placed.push(p),
+            Err(e) => {
+                unplace(&placed);
+                return Err(e.context(format!(
+                    "keeping file {} of {root}; nothing was deleted",
+                    row.id
+                )));
+            }
+        }
+    }
+    let result = db.with_connection(|conn| {
+        let tx = conn.unchecked_transaction()?;
+        let outcome = delete_within(&tx, &root, &placed)?;
+        tx.commit()?;
+        Ok(outcome)
+    });
+    if result.is_err() {
+        unplace(&placed);
+    }
+    result
+}
+
+fn delete_within(tx: &Connection, root: &str, placed: &[Placed]) -> Result<DeleteOutcome> {
+    let bind = rusqlite::params![root];
+    // A file linked from a surviving message after the copies were made would
+    // lose that link with the project's rows: refuse. The other direction — a
+    // copied file whose surviving link went meanwhile — is still re-addressed
+    // into the root store; the orphan-upload sweep takes an unlinked upload
+    // once its grace period has passed.
+    if let Some(row) = kept_rows(tx, root)?
+        .iter()
+        .find(|row| !placed.iter().any(|p| p.id == row.id))
+    {
+        bail!(
+            "file {} of {root} was attached to another conversation while its data was being \
+             deleted; nothing was deleted — try again",
+            row.id
+        );
+    }
+    let session_ids = strings(tx, &format!("{DOOMED_SESSIONS} ORDER BY id"), root)?;
+    let message_ids: Vec<i64> = {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT id FROM conversation_messages WHERE {DOOMED_MESSAGE} ORDER BY id"
+        ))?;
+        stmt.query_map(bind, |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?
+    };
+    // Conversations that stay but lose a message naming the project.
+    let touched = strings(
+        tx,
+        &format!(
+            "SELECT DISTINCT session_id FROM conversation_messages
+              WHERE workspace_root = ?1 AND session_id IS NOT NULL
+                AND session_id NOT IN ({DOOMED_SESSIONS})"
+        ),
+        root,
+    )?;
+
+    // Step 1's rows, re-addressed before anything they hang off goes.
+    for p in placed {
+        tx.execute(
+            "UPDATE file_assets
+                SET project_root = NULL, rel_path = ?2, storage_path = ?3,
+                    missing_since = CASE WHEN ?4 THEN NULL ELSE datetime('now') END,
+                    updated_at = datetime('now')
+              WHERE id = ?1 AND project_root = ?5",
+            rusqlite::params![p.id, p.rel_path, p.storage_path, p.written.is_some(), root],
+        )?;
+        if !p.upload {
+            tx.execute(
+                "DELETE FROM artifact_versions
+                  WHERE artifact_id = ?1
+                    AND version <> (SELECT version FROM file_assets WHERE id = ?1)",
+                rusqlite::params![p.id],
+            )?;
+            tx.execute(
+                "UPDATE artifact_versions SET rel_path = ?2 WHERE artifact_id = ?1",
+                rusqlite::params![p.id, p.rel_path],
+            )?;
+            tx.execute(
+                "UPDATE file_assets SET version_count = 1 WHERE id = ?1",
+                rusqlite::params![p.id],
+            )?;
+        }
+    }
+
+    // Messages first (their feedback and attachment links cascade), then
+    // what hangs off the sessions, then the sessions.
+    let messages = tx.execute(
+        &format!("DELETE FROM conversation_messages WHERE {DOOMED_MESSAGE}"),
+        bind,
+    )?;
+    for id in &touched {
+        tx.execute(
+            "UPDATE session
+                SET message_count = (SELECT COUNT(*) FROM conversation_messages WHERE session_id = ?1),
+                    updated_at = datetime('now')
+              WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+    }
+    let tool_calls = tx.execute(
+        &format!(
+            "DELETE FROM tool_execution_log
+              WHERE session_id IN ({DOOMED_SESSIONS}) OR task_id IN ({DOOMED_TASKS})"
+        ),
+        bind,
+    )?;
+    // A queued follow-up naming the project goes even when its session is
+    // another project's: left, it would start later in a deleted project.
+    let followups = tx.execute(
+        &format!(
+            "DELETE FROM lane_followups
+              WHERE workspace_path = ?1 OR session_id IN ({DOOMED_SESSIONS})"
+        ),
+        bind,
+    )?;
+    tx.execute(
+        &format!("DELETE FROM learning_cursor WHERE session_id IN ({DOOMED_SESSIONS})"),
+        bind,
+    )?;
+    // A run of another project started from one of these conversations
+    // keeps its row and loses the link, as `delete_session` does it.
+    tx.execute(
+        &format!(
+            "UPDATE task SET session_id = NULL, updated_at = datetime('now')
+              WHERE session_id IN ({DOOMED_SESSIONS})"
+        ),
+        bind,
+    )?;
+    let sessions = tx.execute("DELETE FROM session WHERE workspace_id = ?1", bind)?;
+
+    let spans = tx.execute(
+        &format!("DELETE FROM subagent_span WHERE task_id IN ({DOOMED_TASKS})"),
+        bind,
+    )?;
+    let run_events = tx.execute(
+        &format!("DELETE FROM event_log WHERE task_id IN ({DOOMED_TASKS})"),
+        bind,
+    )?;
+    tx.execute(
+        &format!("DELETE FROM dispatch_decisions WHERE task_id IN ({DOOMED_TASKS})"),
+        bind,
+    )?;
+    tx.execute(
+        &format!("DELETE FROM llm_call_log WHERE task_id IN ({DOOMED_TASKS})"),
+        bind,
+    )?;
+    let tasks = tx.execute("DELETE FROM task WHERE workspace_id = ?1", bind)?;
+
+    // The project's files the kept set did not take (their versions cascade).
+    let uploads = tx.execute(
+        "DELETE FROM file_assets WHERE project_root = ?1 AND origin = 'upload'",
+        bind,
+    )?;
+    let artifacts = tx.execute("DELETE FROM file_assets WHERE project_root = ?1", bind)?;
+
+    Ok(DeleteOutcome {
+        counts: PurgeCounts {
+            sessions,
+            messages,
+            tool_calls,
+            followups,
+            tasks,
+            spans,
+            run_events,
+            uploads,
+            artifacts,
+        },
+        kept: KeptFiles {
+            uploads: placed.iter().filter(|p| p.upload).count(),
+            artifacts: placed.iter().filter(|p| !p.upload).count(),
+        },
+        session_ids,
+        message_ids,
+    })
 }
 
 #[cfg(test)]
