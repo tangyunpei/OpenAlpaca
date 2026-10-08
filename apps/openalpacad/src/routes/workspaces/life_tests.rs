@@ -1619,3 +1619,78 @@ async fn a_run_dispatched_while_the_re_point_waits_refuses_it_and_nothing_moves(
         "no row moved"
     );
 }
+
+/// A delete that waits for the project's memory slot while a re-point of the
+/// same project holds it acts on nothing it read before the wait: once the
+/// slot is its own, the project is read again by its id, and a project that
+/// moved (or went) meanwhile is a `409` — no row, no control snapshot and no
+/// folder of the re-pointed project is touched, and its notes still read.
+#[tokio::test]
+async fn a_delete_that_waited_out_a_re_point_of_its_project_deletes_nothing() {
+    let w = World::new();
+    let s = w.scene();
+    let snapshots = project_snapshots(&s.p.id);
+    let new = w.dir("doomed-moved");
+    let held = w.memory.quiesce(&s.p.id).expect("the slot is idle");
+
+    let answer = delete_on_its_own_thread(&w, &s.p.root);
+    std::thread::sleep(INTO_THE_WAIT);
+    let moved = project_life::repoint(&w.db, &s.p.root, &new).expect("the re-point");
+    drop(held);
+    let (status, body) = answer
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the delete answered");
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_BUSY");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("nothing was deleted"), "{message}");
+    assert_eq!(project_snapshots(&s.p.id), snapshots, "no snapshot went");
+    assert!(moved.after.dir.is_dir(), "the re-pointed folder is kept");
+    assert_eq!(
+        w.count(&format!(
+            "SELECT COUNT(*) FROM session WHERE workspace_id = '{}'",
+            text(&new)
+        )),
+        1,
+        "its conversation is kept"
+    );
+    assert_eq!(
+        crate::test_util::note_titles(&w.memory, OWNER, Some(new.as_path())),
+        vec!["Kept at home".to_string(), "Release on Fridays".to_string()],
+        "its notes still read under the new root"
+    );
+}
+
+/// The re-point's twin: one that waits out another re-point of the same
+/// project answers `409` rather than acting on the root it read before the
+/// wait.
+#[tokio::test]
+async fn a_re_point_that_waited_out_another_re_point_of_its_project_moves_nothing() {
+    let w = World::new();
+    let p = w.project("wandering");
+    let first = w.dir("first-stop");
+    let second = w.dir("second-stop");
+    let held = w.memory.quiesce(&p.id).expect("the slot is idle");
+
+    let answer = repoint_on_its_own_thread(&w, &p.root, &second);
+    std::thread::sleep(INTO_THE_WAIT);
+    project_life::repoint(&w.db, &p.root, &first).expect("the first re-point");
+    drop(held);
+    let (status, body) = answer
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the re-point answered");
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_BUSY");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("nothing was re-pointed"), "{message}");
+    assert_eq!(
+        projects::lookup(&first)
+            .expect("lookup")
+            .map(|found| found.id),
+        Some(p.id),
+        "the project stays where the first re-point put it"
+    );
+    assert_eq!(projects::lookup(&second).expect("lookup"), None);
+}

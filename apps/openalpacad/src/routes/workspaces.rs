@@ -392,6 +392,43 @@ async fn quiesce_project(
     }
 }
 
+/// `project` as its folder records it now, read again once the project's
+/// memory slot is held: the re-point and the delete each resolve their
+/// project before they wait for that slot, and another re-point or delete of
+/// the same project may hold it meanwhile. Read by id — never by root, which
+/// for a recorded root that now leads elsewhere would name another project —
+/// and taken only when its root and its folder are still the ones it was
+/// read with; once the slot is held no other re-point or delete of this id
+/// can start, so it stays so until the slot is let go. Anything else — moved,
+/// deleted, re-registered under a new id, or marked mid re-point — is
+/// `409 WORKSPACE_BUSY`, saying `nothing was <done>`.
+#[allow(clippy::result_large_err)]
+fn still_the_project(project: &Project, done: &str) -> Result<Project, Response> {
+    match projects::by_id(&project.id) {
+        Ok(Some(now))
+            if now.root == project.root
+                && now.dir == project.dir
+                && now.previous_root.is_none() =>
+        {
+            Ok(now)
+        }
+        Ok(_) => Err(api_error(
+            StatusCode::CONFLICT,
+            "WORKSPACE_BUSY",
+            format!(
+                "{} was re-pointed or its data deleted while this waited; nothing was {done}. \
+                 List the projects again",
+                project.root.display()
+            ),
+        )),
+        Err(e) => Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "IO_ERROR",
+            format!("the projects folder could not be read: {e:#}"),
+        )),
+    }
+}
+
 // ── GET /v1/workspaces ───────────────────────────────────────────
 
 /// With no `path`: every project OpenAlpaca knows, as its folder under
@@ -526,7 +563,9 @@ pub(crate) fn project_error_response(e: &anyhow::Error) -> Option<Response> {
 /// project's folder under `projects/` renamed — `project_life::repoint`.
 ///
 /// Owner-scoped (R40): a project holding another owner's rows is the same
-/// `404` an unknown one is. Refused while a run is `queued`, `running` or
+/// `404` an unknown one is. A project re-pointed or deleted while this waited
+/// for its memory slot is a `409` ([`still_the_project`]). Refused while a
+/// run is `queued`, `running` or
 /// `paused` there — counted here and again inside `repoint`'s transaction
 /// (`project_life::RunsInFlight`, the same `409`), since a run dispatched
 /// while this waits has already resolved the project by its old root — and
@@ -587,6 +626,10 @@ pub(crate) async fn rebase_workspace(
                 ),
             );
         }
+    };
+    let project = match still_the_project(&project, "re-pointed") {
+        Ok(project) => project,
+        Err(response) => return response,
     };
     match project_life::repoint(db, &project.root, Path::new(&new)) {
         Ok(done) => Json(RepointView {
@@ -843,8 +886,10 @@ fn announce_deleted_sessions(deps: &PurgeDeps<'_>, plan: &DeletePlan, outcome: &
 /// dispatched with no workspace in the few statements before its lane is
 /// registered (`dispatcher::lead_agent`), which the lane registry does not;
 /// one dispatched after the commit is accepted, as the old purge accepted
-/// it: nothing has written a transcript yet. Then,
-/// holding the project's memory slot: the rows (`delete_project_data`,
+/// it: nothing has written a transcript yet. A project re-pointed or deleted
+/// while this waited for its memory slot — the plan was made for the project
+/// as it was — is a `409` and nothing is deleted ([`still_the_project`]).
+/// Then, holding the project's memory slot: the rows (`delete_project_data`,
 /// files another conversation links kept in the root store), the
 /// conversations' log directories, their summaries in the owner's home
 /// partition, every owner's partitions
@@ -947,6 +992,10 @@ pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRe
                 ),
             );
         }
+    };
+    let project = match still_the_project(&project, "deleted") {
+        Ok(project) => project,
+        Err(response) => return response,
     };
     let outcome = match project_life::delete_project_data(deps.db, &project) {
         Ok(outcome) => outcome,
