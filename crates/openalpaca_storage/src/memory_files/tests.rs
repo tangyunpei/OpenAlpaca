@@ -3739,6 +3739,39 @@ fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing(
     );
 }
 
+/// Design §5: the doctor finds a project partition it was not asked about
+/// through `projects::list()` — a snapshot whose project is no longer
+/// registered (its folder under `projects/` removed by hand) is left out:
+/// never opened, and never reported refused.
+#[test]
+fn the_doctor_leaves_out_a_snapshot_whose_project_is_no_longer_registered() {
+    let sb = Sandbox::new();
+    sb.open_project(ALICE)
+        .unwrap()
+        .create(
+            new_note("Release", "# Release\n\nTag first.\n", NoteKind::Procedure),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let folder = crate::store::projects::lookup(&sb.project_root())
+        .unwrap()
+        .unwrap()
+        .dir;
+    std::fs::remove_dir_all(&folder).unwrap();
+
+    let report = doctor(ALICE, None).unwrap();
+
+    assert!(report.refused.is_empty(), "{:?}", report.refused);
+    assert!(
+        report
+            .partitions
+            .iter()
+            .all(|p| p.scope == SnapshotScope::Home),
+        "{:?}",
+        report.partitions
+    );
+}
+
 // ============================================================================
 // Learning v2 L3 (design 09 §3.1–§3.3): suggestions, S1–S5, S9, S10, withdraw
 // ============================================================================

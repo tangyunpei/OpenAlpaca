@@ -87,11 +87,12 @@ pub struct DoctorReport {
 
 /// The scan. `current_owner_id` decides which partitions are orphans;
 /// `project` is the request's project root (the marker root, design §3 rule
-/// 1), whose owner directories are scanned beside the home store's. Every
-/// project snapshot whose directory exists is scanned too, whichever project
-/// it belongs to, so a partition is never missed because the caller stood
-/// elsewhere. The current owner's home partition is reported even when it
-/// does not exist yet (`Absent`).
+/// 1), whose owner directories are scanned beside the home store's — when a
+/// project is registered there (R12). Every project snapshot a registered
+/// project's folder holds is scanned too (`projects::list()`, design §5),
+/// whichever project it belongs to, so a partition is never missed because
+/// the caller stood elsewhere. The current owner's home partition is
+/// reported even when it does not exist yet (`Absent`).
 pub fn doctor(
     current_owner_id: &str,
     project: Option<&Path>,
@@ -143,21 +144,35 @@ pub fn doctor(
             scan_partition(&mut report, &mut seen, scope, &key, &current_key);
         }
     }
-    // Project partitions the snapshots know that the caller did not name.
+    // Project partitions the snapshots know that the caller did not name,
+    // through `projects::list()` (design §5, interfaces §4.3 — by folder): the
+    // listed project whose folder holds the snapshot's recorded `root`.
+    // `store_root` names the folder on either side of the flip; S4 matches by
+    // id.
+    let project_dirs: Vec<(PathBuf, PathBuf)> = crate::store::projects::list()?
+        .into_iter()
+        .filter_map(|p| {
+            let dir = crate::store::store_root(&StoreScope::Project(p.root.clone())).ok()?;
+            Some((p.root, dir))
+        })
+        .collect();
     for s in snapshots
         .iter()
-        .filter(|s| s.scope == SnapshotScope::Project && Path::new(&s.root).is_dir())
+        .filter(|s| s.scope == SnapshotScope::Project)
     {
         if seen.contains(&s.partition_key) {
             continue;
         }
-        let Some(project) = Path::new(&s.root).ancestors().nth(4) else {
+        let Some((root, _)) = project_dirs
+            .iter()
+            .find(|(_, dir)| Path::new(&s.root).starts_with(dir))
+        else {
             continue;
         };
         scan_partition(
             &mut report,
             &mut seen,
-            &StoreScope::Project(project.to_path_buf()),
+            &StoreScope::Project(root.clone()),
             &s.owner_key,
             &current_key,
         );

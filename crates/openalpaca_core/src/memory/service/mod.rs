@@ -83,7 +83,7 @@ use openalpaca_storage::memory_files::{
 use openalpaca_storage::memory_index::{
     self as index, FileStat, IndexRecord, IndexState, MemoryIndex,
 };
-use openalpaca_storage::store::StoreScope;
+use openalpaca_storage::store::{ContentKind, StoreScope};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -824,34 +824,38 @@ impl MemoryService {
             .map_err(|()| MemoryError::WritePending { key })
     }
 
-    /// The project roots `owner_id`'s control snapshots know (plan 3.7): a
-    /// project can be known by its memory partition alone, with no row in
-    /// any database member, and the workspace listing adds these to the
-    /// roots the database names. Scoped to the owner like every other
-    /// workspace answer (design §3, R40): another owner's partition in a
-    /// project of its own must not name that root to this one. Only a
-    /// snapshot whose partition directory exists counts — one bound to a
-    /// missing directory is a stale, abandoned or orphaned move snapshot,
-    /// which is `doctor`'s to name — and each root is listed once. Sorted,
-    /// as the snapshots record them (canonical). Unreadable snapshots are
-    /// skipped.
+    /// The registered projects in which `owner_id` has a partition directory
+    /// (design §5: known projects come from `projects::list()`), sorted —
+    /// what the purge's listing and the 30 s reconciliation iterate. Scoped
+    /// to the owner like every workspace answer (R40): another owner's
+    /// partition in a project of its own does not name that root to this one.
+    /// A project whose folder under `projects/` is gone is no project; a
+    /// listing failure is logged and lists nothing.
     pub fn known_project_roots(&self, owner_id: &str) -> Vec<PathBuf> {
         let owner_key = files::owner_key(owner_id);
-        let snapshots = match files::list_snapshots() {
+        let projects = match openalpaca_storage::store::projects::list() {
             Ok(list) => list,
             Err(e) => {
                 tracing::warn!(
-                    "memory: control snapshots unreadable, listing no project roots: {e:#}"
+                    "memory: the projects under projects/ could not be listed, listing no project roots: {e:#}"
                 );
                 return Vec::new();
             }
         };
-        let mut roots: Vec<PathBuf> = snapshots
+        let mut roots: Vec<PathBuf> = projects
             .into_iter()
-            .filter_map(|(_, parsed)| parsed.ok())
-            .filter(|s| s.scope == files::SnapshotScope::Project && s.owner_key == owner_key)
-            .filter(|s| Path::new(&s.root).is_dir())
-            .filter_map(|s| Path::new(&s.root).ancestors().nth(4).map(Path::to_path_buf))
+            .filter(|p| {
+                openalpaca_storage::store::store_root(&StoreScope::Project(p.root.clone()))
+                    .map(|store| {
+                        store
+                            .join(ContentKind::Memory.dir_name())
+                            .join(files::OWNERS_DIR)
+                            .join(&owner_key)
+                            .is_dir()
+                    })
+                    .unwrap_or(false)
+            })
+            .map(|p| p.root)
             .collect();
         roots.sort();
         roots.dedup();
@@ -1186,6 +1190,18 @@ impl MemoryService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        // Interfaces §4.3, by folder: a project partition belongs to the
+        // listed project whose folder holds its recorded `root` (S4 matches by
+        // id). `store_root` names that folder on either side of the flip.
+        let project_dirs: Vec<(PathBuf, PathBuf)> = openalpaca_storage::store::projects::list()?
+            .into_iter()
+            .filter_map(|p| {
+                let dir =
+                    openalpaca_storage::store::store_root(&StoreScope::Project(p.root.clone()))
+                        .ok()?;
+                Some((p.root, dir))
+            })
+            .collect();
         let mut partitions: Vec<(StoreScope, String, String)> = Vec::new();
         for (path, parsed) in files::list_snapshots()? {
             let snapshot = match parsed {
@@ -1198,10 +1214,17 @@ impl MemoryService {
             let scope = match snapshot.scope {
                 files::SnapshotScope::Home => StoreScope::Home,
                 files::SnapshotScope::Project => {
-                    let Some(project) = Path::new(&snapshot.root).ancestors().nth(4) else {
+                    let Some((root, _)) = project_dirs
+                        .iter()
+                        .find(|(_, dir)| Path::new(&snapshot.root).starts_with(dir))
+                    else {
+                        tracing::debug!(
+                            partition = %snapshot.partition_key,
+                            "memory: a project snapshot no registered project's folder holds is left out of the rebuild"
+                        );
                         continue;
                     };
-                    StoreScope::Project(project.to_path_buf())
+                    StoreScope::Project(root.clone())
                 }
             };
             partitions.push((scope, snapshot.owner_id, snapshot.partition_key));

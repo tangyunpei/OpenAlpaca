@@ -107,10 +107,11 @@ impl MemoryService {
 
     /// The daemon's reconciliation timer (design §5, *Freshness without a
     /// watcher*: a bounded stat scan every 30 s): every partition of
-    /// `owner_id` the control snapshots know — the home one and each project
-    /// whose directory exists — is re-hashed, a change made behind the
-    /// service's back is re-recorded `external` and published as
-    /// `memory_changed` with no surface (§7b P13), and the index follows.
+    /// `owner_id` — the home one and one in each registered project that
+    /// holds its directory ([`Self::known_project_roots`], design §5) — is
+    /// re-hashed, a change made behind the service's back is re-recorded
+    /// `external` and published as `memory_changed` with no surface (§7b
+    /// P13), and the index follows.
     /// Needs no context: nothing here is on a caller's behalf. A partition
     /// that is quarantined, absent or refused (a link on its path) is
     /// skipped, and so — with one WARN — is one whose open or scan fails

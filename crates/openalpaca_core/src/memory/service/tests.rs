@@ -3555,16 +3555,16 @@ fn undrained_requests_are_bounded() {
 }
 
 // ============================================================================
-// The workspace move (design §3, five steps) and the listing's partition
-// roots (plan 3.7; fixture 17)
+// Known projects (design §5; plan 3.7): the registered projects that hold an
+// owner's partition
 // ============================================================================
 
-/// A project the database has no row for is still a project when its memory
-/// partition exists: that is the memory service's knowledge, and the
-/// workspace listing reads it here. The home partition is not a project, and
-/// a snapshot whose directory is gone is `doctor`'s to name, not a root.
+/// Known projects come from `projects::list()` (design §5): a registered
+/// project is known to an owner whose partition directory it holds. The home
+/// partition is not a project, and a snapshot whose directory is gone is
+/// `doctor`'s to name, not a root.
 #[test]
-fn known_project_roots_are_the_partitions_whose_directory_exists() {
+fn known_project_roots_are_the_registered_projects_holding_the_owners_partition() {
     let h = Harness::new();
     assert!(h.service.known_project_roots(ALICE).is_empty());
     h.store(
@@ -3615,14 +3615,23 @@ fn known_project_roots_are_the_partitions_whose_directory_exists() {
     bobs.sort();
     assert_eq!(h.service.known_project_roots(BOB), bobs);
 
-    // Gone from disk: the snapshot stays for doctor, the listing drops it.
+    // No longer registered — its folder under `projects/` removed by hand —
+    // it is no project, whatever its snapshot says.
+    let folder = openalpaca_storage::store::projects::lookup(&other)
+        .unwrap()
+        .expect("registered")
+        .dir;
+    fs::remove_dir_all(&folder).unwrap();
+    assert_eq!(
+        h.service.known_project_roots(BOB),
+        std::slice::from_ref(&repo)
+    );
+
+    // Gone from disk: before the flip its partition goes with its folder.
     let parked = h.root.path().join("ws").join("parked");
     fs::rename(&repo, &parked).unwrap();
     assert!(h.service.known_project_roots(ALICE).is_empty());
-    assert_eq!(
-        h.service.known_project_roots(BOB),
-        std::slice::from_ref(&other)
-    );
+    assert!(h.service.known_project_roots(BOB).is_empty());
 }
 
 // ============================================================================
