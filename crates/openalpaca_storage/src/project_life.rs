@@ -170,10 +170,14 @@ enum OnRowsFailure {
 /// The project whose recorded root is `old_path` as written
 /// ([`projects::by_recorded_root`]) — a root the list printed names its own
 /// project even when it now leads elsewhere — else the project `old_path`
-/// resolves to, or [`ProjectError::NotRegistered`]. A listing that fails
-/// leaves the answer to the resolution, as before.
+/// resolves to, or [`ProjectError::NotRegistered`]. A listing that fails is
+/// that error, naming the projects folder — never a fall-through to the
+/// resolution, which for a recorded root that now leads elsewhere would name
+/// that other project (residual X1).
 fn registered(old_path: &Path) -> Result<Project> {
-    if let Ok(Some(project)) = projects::by_recorded_root(old_path) {
+    if let Some(project) =
+        projects::by_recorded_root(old_path).context("the projects folder could not be read")?
+    {
         return Ok(project);
     }
     match projects::resolve(old_path)? {

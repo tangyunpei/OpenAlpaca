@@ -1489,6 +1489,91 @@ async fn a_re_point_naming_a_root_that_now_links_to_another_project_moves_that_p
     assert_eq!((still.id, still.dir), (b.id, b.dir));
 }
 
+/// `projects/` made searchable but not readable until this drops — then
+/// `0700` again, so a failed assertion never leaves the tempdir unremovable.
+#[cfg(unix)]
+struct Unlistable(PathBuf);
+
+#[cfg(unix)]
+impl Unlistable {
+    /// `None` when the mode does not stop a listing (the tests run as root).
+    fn projects() -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = projects::projects_dir().expect("projects dir");
+        let guard = Self(dir.clone());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o300)).expect("chmod");
+        std::fs::read_dir(&dir).is_err().then_some(guard)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Unlistable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// The R1 state while `projects/` can be searched but not listed (residual
+/// X1): each `project.json` still opens, so resolving A's root canonically
+/// would find B. A listing that fails is a `500` naming the projects folder
+/// — for the read, the plan, the delete and the re-point — and never a
+/// fall-through to that resolution: nothing of either project moves or goes.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_recorded_root_whose_listing_fails_answers_500_and_nothing_moves_or_goes() {
+    let w = World::new();
+    let (a, b) = w.moved_behind_a_link("a", "b");
+    let b_root = text(&b.root);
+    w.session("s-b", &b_root);
+    w.message("s-b", &b_root);
+    let new = w.dir("a-new-home");
+    let Some(unlistable) = Unlistable::projects() else {
+        return;
+    };
+
+    let answers = [
+        ("read", w.get(&text(&a.root)).await),
+        ("plan", w.delete(&a.root, true).await),
+        ("delete", w.delete(&a.root, false).await),
+        ("re-point", w.repoint(&a.root, &new).await),
+    ];
+    drop(unlistable);
+
+    let got: Vec<(&str, u16, String)> = answers
+        .iter()
+        .map(|(what, (status, body))| (*what, status.as_u16(), error_code(body).to_string()))
+        .collect();
+    let want: Vec<(&str, u16, String)> = ["read", "plan", "delete", "re-point"]
+        .into_iter()
+        .map(|what| (what, 500, "IO_ERROR".to_string()))
+        .collect();
+    assert_eq!(got, want, "{answers:?}");
+    for (what, (_, body)) in answers {
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("the projects folder could not be read"),
+            "{what}: {message}"
+        );
+    }
+    let listed = projects::list().expect("list");
+    assert_eq!(listed.len(), 2, "nothing was registered or removed");
+    for (p, root) in [(&a, &a.root), (&b, &b.root)] {
+        let now = listed
+            .iter()
+            .find(|entry| entry.id == p.id)
+            .expect("still listed");
+        assert_eq!((&now.root, &now.dir), (root, &p.dir));
+    }
+    assert_eq!(w.count("SELECT COUNT(*) FROM session WHERE id = 's-b'"), 1);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT COUNT(*) FROM conversation_messages WHERE workspace_root = '{b_root}'"
+        )),
+        1
+    );
+}
+
 // ── A re-point that has not finished (review R11) ───────────────────────
 
 /// A re-point whose rename failed leaves the project listed at its new root

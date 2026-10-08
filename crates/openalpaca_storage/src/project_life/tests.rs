@@ -546,6 +546,62 @@ fn a_root_that_now_links_to_another_project_re_points_its_own_project() {
     assert_eq!((still.id, still.dir), (b.id, b.dir));
 }
 
+/// `projects/` made searchable but not readable until this drops — then
+/// `0700` again, so a failed assertion never leaves the tempdir unremovable.
+#[cfg(unix)]
+struct Unlistable(PathBuf);
+
+#[cfg(unix)]
+impl Unlistable {
+    /// `None` when the mode does not stop a listing (the tests run as root).
+    fn projects() -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = projects::projects_dir().unwrap();
+        let guard = Self(dir.clone());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o300)).unwrap();
+        std::fs::read_dir(&dir).is_err().then_some(guard)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Unlistable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// The same state while `projects/` cannot be listed (residual X1): the
+/// recorded root cannot be matched, and the re-point names no project rather
+/// than resolving the root canonically — which is the second project's.
+#[cfg(unix)]
+#[test]
+fn a_recorded_root_whose_listing_fails_names_no_project_rather_than_resolving_it() {
+    let w = World::new();
+    let a = w.project("a");
+    let moved = w.work.join("b");
+    std::fs::rename(&a.root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &a.root).unwrap();
+    let b = projects::register(&moved).unwrap();
+    let Some(unlistable) = Unlistable::projects() else {
+        return;
+    };
+
+    let found = registered(&a.root);
+    drop(unlistable);
+
+    let err = found.expect_err("a listing that fails names no project");
+    assert!(
+        format!("{err:#}").contains("the projects folder could not be read"),
+        "{err:#}"
+    );
+    assert_eq!(
+        projects::lookup(&moved).unwrap().map(|p| (p.id, p.dir)),
+        Some((b.id, b.dir)),
+        "the second project is where it was"
+    );
+}
+
 /// ST-20 against a project whose re-point has not finished (Stage 1 review
 /// R9). P1 — notes, no rows, as `Use` or a memory write leaves one — stopped
 /// after step 2: its folder under the old name records the new root with the

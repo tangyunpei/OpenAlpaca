@@ -298,6 +298,17 @@ fn owner_mismatch(root: &str, other_owners: usize) -> Response {
     )
 }
 
+/// The `500` for a listing of `projects/` that failed — the list's own
+/// answer, and the only one a recorded root gets while its project cannot be
+/// matched as written (residual X1).
+fn projects_unreadable(e: &anyhow::Error) -> Response {
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "IO_ERROR",
+        format!("the projects folder could not be read: {e:#}"),
+    )
+}
+
 /// The registered project a client path names, or the answer that refuses
 /// it. `written` is the path as the client sent it ([`written_path`]) and
 /// `path` its canonical form ([`canonical_of`]). A recorded root sent as
@@ -306,8 +317,11 @@ fn owner_mismatch(root: &str, other_owners: usize) -> Response {
 /// with a link left at the old path, whose canonical form may be another
 /// project's root. Anything else is resolved the way a turn's path is:
 /// `404 WORKSPACE_NOT_FOUND` for a root no folder under `projects/` records
-/// (R12's words) or a path in no project. A listing that fails leaves the
-/// answer to the resolution.
+/// (R12's words) or a path in no project. A listing of `projects/` that
+/// fails is `500 IO_ERROR` naming the projects folder
+/// ([`projects_unreadable`]) — never a fall-through to the resolution,
+/// which for a recorded root that now leads elsewhere would name that other
+/// project.
 ///
 /// First, a project whose re-point has not finished — listed at its new
 /// root, its folder under the old name, found by `lookup` under neither path
@@ -322,26 +336,31 @@ fn registered_project(written: &str, path: &str) -> Result<Project, Response> {
         vec![written, path]
     };
     for named in named {
-        if let Ok(Some(moving)) = projects::unfinished_repoint_at(Path::new(named)) {
-            let from = moving
-                .previous_root
-                .as_deref()
-                .map_or_else(String::new, |p| p.display().to_string());
-            return Err(api_error(
-                StatusCode::CONFLICT,
-                "WORKSPACE_BUSY",
-                format!(
-                    "{named} names the project in {}, whose re-point from {from} to {} has not \
-                     finished; the next start of the daemon finishes it, and until then the \
-                     project can be neither re-pointed nor have its data deleted",
-                    moving.dir.display(),
-                    moving.root.display()
-                ),
-            ));
-        }
+        let moving = match projects::unfinished_repoint_at(Path::new(named)) {
+            Ok(Some(moving)) => moving,
+            Ok(None) => continue,
+            Err(e) => return Err(projects_unreadable(&e)),
+        };
+        let from = moving
+            .previous_root
+            .as_deref()
+            .map_or_else(String::new, |p| p.display().to_string());
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "WORKSPACE_BUSY",
+            format!(
+                "{named} names the project in {}, whose re-point from {from} to {} has not \
+                 finished; the next start of the daemon finishes it, and until then the \
+                 project can be neither re-pointed nor have its data deleted",
+                moving.dir.display(),
+                moving.root.display()
+            ),
+        ));
     }
-    if let Ok(Some(project)) = projects::by_recorded_root(Path::new(written)) {
-        return Ok(project);
+    match projects::by_recorded_root(Path::new(written)) {
+        Ok(Some(project)) => return Ok(project),
+        Ok(None) => {}
+        Err(e) => return Err(projects_unreadable(&e)),
     }
     match projects::resolve(Path::new(path)) {
         Ok(Some(ResolvedProject {
@@ -424,11 +443,7 @@ fn still_the_project(project: &Project, done: &str) -> Result<Project, Response>
                 project.root.display()
             ),
         )),
-        Err(e) => Err(api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "IO_ERROR",
-            format!("the projects folder could not be read: {e:#}"),
-        )),
+        Err(e) => Err(projects_unreadable(&e)),
     }
 }
 
@@ -440,11 +455,7 @@ fn still_the_project(project: &Project, done: &str) -> Result<Project, Response>
 pub(crate) fn list_workspaces() -> Response {
     match projects::list() {
         Ok(list) => Json(list.iter().map(ProjectView::from).collect::<Vec<_>>()).into_response(),
-        Err(e) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "IO_ERROR",
-            format!("the projects folder could not be read: {e:#}"),
-        ),
+        Err(e) => projects_unreadable(&e),
     }
 }
 
@@ -462,7 +473,8 @@ pub(crate) fn get_workspace(db: &Database, query: WorkspaceQuery) -> Response {
     };
     // A recorded root, as the list printed it, names its own project — the
     // re-point and delete dialogs read their counts here (see
-    // `registered_project`).
+    // `registered_project`). A listing that fails says so rather than
+    // resolving: the canonical form may be another project's root.
     let (path, resolved) = match projects::by_recorded_root(Path::new(&written)) {
         Ok(Some(project)) => (
             written,
@@ -471,7 +483,8 @@ pub(crate) fn get_workspace(db: &Database, query: WorkspaceQuery) -> Response {
                 project: Some(project),
             }),
         ),
-        Ok(None) | Err(_) => {
+        Err(e) => return projects_unreadable(&e),
+        Ok(None) => {
             let path = canonical_of(&written);
             match projects::resolve(Path::new(&path)) {
                 Ok(resolved) => (path, resolved),
