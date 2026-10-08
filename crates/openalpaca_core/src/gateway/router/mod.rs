@@ -129,7 +129,11 @@ pub struct HandleRequest {
     pub scope: Scope,
     /// The lane this turn landed on, canonical `"{user_id}:{source}"`.
     pub lane_key: String,
-    /// Workspace path the client provided (GUI project dir, CLI cwd).
+    /// The turn's project root. From the gateway, the root it resolved and
+    /// recorded from the path the client sent (GUI project dir, CLI cwd) —
+    /// the root the conversation row is bound to — never the raw path, so
+    /// the handler cannot resolve it to another project (the final fix
+    /// wave's R7); `None` for a turn under no project.
     pub workspace_path: Option<String>,
     /// SSE stream ID for routing tool confirmation prompts to the chat stream.
     pub stream_id: Option<String>,
@@ -485,7 +489,9 @@ impl Gateway {
             principal: req.principal,
             scope: req.scope,
             lane_key: lane_key_str.clone(),
-            workspace_path: req.workspace_path,
+            // R7: the root `for_turn` recorded and the user row is bound to,
+            // not the raw path, which the handler would resolve again.
+            workspace_path: turn_scope.request_workspace_root.clone(),
             stream_id: req.stream_id,
             model_override: req.model_override,
             unattended: req.unattended,

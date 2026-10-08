@@ -883,6 +883,68 @@ async fn test_changing_project_opens_a_new_session() {
     assert_eq!(announced, vec![(second.id.clone(), "active".to_string())]);
 }
 
+/// Records the workspace each turn handed the handler.
+#[derive(Default)]
+struct WorkspaceRecordingHandler(std::sync::Mutex<Vec<Option<String>>>);
+
+#[async_trait]
+impl MessageHandler for WorkspaceRecordingHandler {
+    async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+        self.0.lock().unwrap().push(request.workspace_path.clone());
+        Ok(HandleResult::text("ok".to_string()))
+    }
+}
+
+/// R7 (the final fix wave): the gateway resolves and records the turn's
+/// project and binds the conversation row to it; the handler is handed that
+/// same root — not the raw path the client sent, which it would resolve a
+/// second time and might answer differently — so the turn's tools, recall
+/// and memory use the project the row was bound to. A path under no project
+/// hands the handler none.
+#[tokio::test]
+async fn the_handler_is_handed_the_root_the_gateway_recorded_not_the_raw_path() {
+    let (_home, _home_store, _env) = guarded_home();
+    let handler = Arc::new(WorkspaceRecordingHandler::default());
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        handler.clone(),
+        EventBus::default(),
+        None,
+    );
+    let project = project_dir();
+    let below = project.path().join("src").join("lib");
+    std::fs::create_dir_all(&below).unwrap();
+    let plain = tempfile::tempdir().unwrap();
+    let turn = |workspace_path: Option<String>| GatewayRequest {
+        source: EventSource::Gui {
+            connection_id: "user1".to_string(),
+        },
+        content: "hello".to_string(),
+        principal: Principal::System,
+        scope: Scope::Global,
+        attachments: Vec::new(),
+        workspace_path,
+        stream_id: None,
+        lane_override: None,
+        model_override: None,
+        unattended: false,
+        turn_sink: None,
+    };
+
+    gw.handle_event(turn(Some(below.to_string_lossy().into_owned())))
+        .await;
+    gw.handle_event(turn(Some(plain.path().to_string_lossy().into_owned())))
+        .await;
+    gw.handle_event(turn(None)).await;
+
+    let root = project.path().canonicalize().unwrap();
+    assert_eq!(
+        *handler.0.lock().unwrap(),
+        vec![Some(root.to_string_lossy().into_owned()), None, None]
+    );
+}
+
 // ── Session event log (§5.5) ────────────────────────────────────────
 
 /// The gateway's three emit points, on one delegating turn: the boot-boundary
