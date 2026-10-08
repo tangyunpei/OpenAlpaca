@@ -12,6 +12,7 @@ use openalpaca_storage::memory_files::{
     self as files, DoctorReport, NoteId, Origin, PartitionHealth, revision_of,
 };
 use openalpaca_storage::store::StoreScope;
+use openalpaca_storage::store::projects::ProjectId;
 
 impl MemoryService {
     /// The service-written revisions kept for `id`, newest first (design
@@ -103,6 +104,49 @@ impl MemoryService {
     pub fn doctor(&self, ctx: &MemoryAccessContext) -> Result<DoctorReport, MemoryError> {
         Self::require(ctx.capabilities.read, "memory_read")?;
         Ok(files::doctor(&ctx.owner_id, ctx.project_root.as_deref())?)
+    }
+
+    /// ST-19 step 3 (design §6, *Delete its data*): every owner's partition
+    /// of the project — a control snapshot carrying its id — is dropped from
+    /// the index, forgotten by this process's fingerprints, scans and parse
+    /// cache, and its snapshot removed from `state/memory-control/`. The note
+    /// files go with `projects/<name>/` (`project_life::remove_project_folder`).
+    ///
+    /// The caller holds [`MemoryService::quiesce`] for the project; this
+    /// takes no write slot, so it never waits on that hold. Answers how many
+    /// partitions were dropped. An unreadable snapshot is skipped: it cannot
+    /// be told to be this project's.
+    pub fn remove_project(&self, project_id: &ProjectId) -> Result<usize, MemoryError> {
+        let snapshots = files::list_snapshots()?;
+        let mut fingerprints = self.fingerprints.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last_scans = self.last_scans.lock().unwrap_or_else(|e| e.into_inner());
+        let mut removed = 0;
+        for (path, parsed) in snapshots {
+            let Ok(snapshot) = parsed else {
+                continue;
+            };
+            if snapshot.scope != files::SnapshotScope::Project
+                || snapshot.project_id.as_ref() != Some(project_id)
+            {
+                continue;
+            }
+            let key = snapshot.partition_key;
+            self.indexed(self.index.remove_partition(&key))?;
+            fingerprints.remove(&key);
+            last_scans.remove(&key);
+            self.parse_cache.evict_partition(&key);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(MemoryError::Internal(anyhow::Error::new(e).context(
+                        format!("could not remove the control snapshot {}", path.display()),
+                    )));
+                }
+            }
+            removed += 1;
+        }
+        Ok(removed)
     }
 
     /// The daemon's reconciliation timer (design §5, *Freshness without a

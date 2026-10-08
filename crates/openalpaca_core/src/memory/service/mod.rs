@@ -40,6 +40,8 @@ mod bench;
 #[cfg(test)]
 mod episode_tests;
 #[cfg(test)]
+mod remove_project_tests;
+#[cfg(test)]
 mod scale_tests;
 #[cfg(test)]
 mod tests;
