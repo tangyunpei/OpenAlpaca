@@ -671,6 +671,102 @@ fn snapshot_unknown_fields_and_schemas_are_invalid() {
     assert!(ControlSnapshot::load(&path).unwrap().is_none());
 }
 
+/// R19: a snapshot exactly as today's build writes it — every one carries
+/// `"moved_from": null`, none a `project_id` — still loads under
+/// `deny_unknown_fields`, binds, and is written back with no `project_id`
+/// key, so a home snapshot this build saves stays readable to an earlier
+/// one. The schema number is still 1.
+#[test]
+fn a_snapshot_as_todays_build_writes_it_loads_and_binds() {
+    let home_example = SNAPSHOT_EXAMPLE
+        .replace(
+            "proj-3f9a1c2d4e5b6a7f8091a2b3c4d5e6f7-0a1b2c3d4e5f6071",
+            "home-3f9a1c2d4e5b6a7f8091a2b3c4d5e6f7",
+        )
+        .replace("\"scope\": \"project\"", "\"scope\": \"home\"")
+        .replace(
+            "/Users/x/dev/app/.openalpaca/memory",
+            "/Users/x/.openalpaca/memory",
+        );
+    assert!(home_example.contains("\"moved_from\": null"));
+    assert!(!home_example.contains("project_id"));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("home-3f9a1c2d4e5b6a7f8091a2b3c4d5e6f7.json");
+    std::fs::write(&path, &home_example).unwrap();
+    let loaded = ControlSnapshot::load(&path).unwrap().expect("the file is there");
+    assert_eq!(SNAPSHOT_SCHEMA, 1);
+    assert_eq!(loaded.schema, SNAPSHOT_SCHEMA);
+    assert_eq!(loaded.project_id, None);
+    assert_eq!(loaded.moved_from, None);
+    assert!(
+        loaded
+            .check_binding(&loaded.partition_key, &loaded.owner_key, &loaded.root)
+            .is_ok()
+    );
+    let written = loaded.to_json();
+    assert!(!written.contains("project_id"), "{written}");
+    assert!(written.contains("\"moved_from\": null"), "{written}");
+}
+
+/// R19: `project_id` is written right after `root`, and only when set; it
+/// reads back as the same id; an explicit `null` reads as absent; a
+/// spelling that is not the canonical one is refused, so the partition it
+/// guards is quarantined rather than bound to a guess.
+#[test]
+fn a_project_id_is_written_after_root_only_when_set() {
+    let id = ProjectId::parse("7d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d").unwrap();
+    let plain: ControlSnapshot = serde_json::from_str(SNAPSHOT_EXAMPLE).unwrap();
+    assert_eq!(plain.project_id, None);
+    assert!(!plain.to_json().contains("project_id"));
+
+    let stamped = plain.clone().with_project_id(id);
+    let json = stamped.to_json();
+    let keys: Vec<&str> = json
+        .lines()
+        .filter(|l| l.starts_with("  \""))
+        .map(|l| l.trim().split('"').nth(1).unwrap())
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "schema",
+            "partition_key",
+            "scope",
+            "owner_key",
+            "owner_id",
+            "root",
+            "project_id",
+            "created_at",
+            "updated_at",
+            "moved_from",
+            "repaired_at",
+            "pending",
+            "notes",
+            "tombstones"
+        ]
+    );
+    assert!(json.contains("\"project_id\": \"7d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d\""));
+    let again: ControlSnapshot = serde_json::from_str(&json).unwrap();
+    assert_eq!(again.project_id, Some(id));
+    assert_eq!(again, stamped);
+
+    let with_null = SNAPSHOT_EXAMPLE.replace(
+        "\"moved_from\": null,",
+        "\"project_id\": null,\n  \"moved_from\": null,",
+    );
+    assert_eq!(
+        serde_json::from_str::<ControlSnapshot>(&with_null)
+            .unwrap()
+            .project_id,
+        None
+    );
+    let upper = SNAPSHOT_EXAMPLE.replace(
+        "\"moved_from\": null,",
+        "\"project_id\": \"7D1C2B3A-4E5F-4A6B-8C7D-9E0F1A2B3C4D\",\n  \"moved_from\": null,",
+    );
+    assert!(serde_json::from_str::<ControlSnapshot>(&upper).is_err());
+}
+
 #[test]
 fn snapshot_save_is_atomic_private_and_compacts() {
     let dir = tempfile::tempdir().unwrap();
@@ -750,6 +846,7 @@ fn origin_ranks_are_strictly_ordered() {
 // ============================================================================
 
 use crate::store::StoreScope;
+use crate::store::projects::ProjectId;
 use crate::store::tests::HomeStoreGuard;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

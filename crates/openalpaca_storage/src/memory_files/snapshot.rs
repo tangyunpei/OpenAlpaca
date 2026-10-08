@@ -9,6 +9,7 @@
 
 use super::fsx::{create_private_dir, read_if_exists, write_atomic_private};
 use super::note::{NoteId, format_ts, parse_ts, to_second};
+use crate::store::projects::ProjectId;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -162,6 +163,13 @@ pub struct ControlSnapshot {
     pub owner_key: String,
     pub owner_id: String,
     pub root: String,
+    /// The project this partition belongs to (storage design R18): the id
+    /// in `projects/<name>/project.json` beside its `memory/`. Absent on a
+    /// home snapshot and on an earlier build's project snapshot (R22).
+    /// Written only when set, never as `null`, so a home snapshot this
+    /// build saves stays readable to an earlier build (R19).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
     #[serde(with = "ts")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "ts")]
@@ -215,6 +223,7 @@ impl ControlSnapshot {
             owner_key: owner_key.into(),
             owner_id: owner_id.into(),
             root: root.into(),
+            project_id: None,
             created_at: now,
             updated_at: now,
             moved_from: None,
@@ -223,6 +232,14 @@ impl ControlSnapshot {
             notes: BTreeMap::new(),
             tombstones: Vec::new(),
         }
+    }
+
+    /// The same snapshot bound to project `id` (storage design R18): what
+    /// the places that build a fresh project snapshot stamp — the first
+    /// write and `repair` — and what `adopt` carries over.
+    pub fn with_project_id(mut self, id: ProjectId) -> Self {
+        self.project_id = Some(id);
+        self
     }
 
     /// Reads a snapshot file. `Ok(None)` when absent.
