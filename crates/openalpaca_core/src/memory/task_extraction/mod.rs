@@ -35,6 +35,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::daemon_config::DaemonConfig;
+use crate::memory::learning::{ProjectCheck, check_project};
 use crate::memory::service::{
     Attribution, Capabilities, ExtractionProvenance, MemoryError, MemoryService, StoreInput,
     Surface, WorkspaceHint,
@@ -156,10 +157,22 @@ pub(crate) async fn extract_task_memories(
 
     // ST-21: a run whose project's data was deleted since it ran — its root
     // no longer a registered project — teaches nothing, and no model call is
-    // spent finding that out. A missing project is still learned into.
-    if crate::memory::learning::root_gone(params.project_root.as_deref()) {
-        tracing::debug!(task_id = %params.task_id, "task extraction: the run's project is no longer registered");
-        return TaskExtractionOutcome::Skipped("root_gone");
+    // spent finding that out. A missing project is still learned into. One
+    // being re-pointed is not gone, but its root resolves to no partition
+    // now, and a run has no cursor to hold: it teaches nothing either.
+    match check_project(params.project_root.as_deref(), None) {
+        ProjectCheck::Learn(_) => {}
+        ProjectCheck::Gone => {
+            tracing::debug!(task_id = %params.task_id, "task extraction: the run's project is no longer registered");
+            return TaskExtractionOutcome::Skipped("root_gone");
+        }
+        ProjectCheck::Hold => {
+            tracing::info!(
+                task_id = %params.task_id,
+                "task extraction skipped: the run's project is being re-pointed (or the projects could not be listed), so its root names no project now"
+            );
+            return TaskExtractionOutcome::Skipped("root_held");
+        }
     }
 
     // Guard: the daily cost cap, read durably for today's UTC date (Learning

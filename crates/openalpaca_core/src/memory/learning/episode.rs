@@ -24,7 +24,9 @@
 //!   ([`crate::memory::service::ExtractionProvenance::Summary`]).
 
 use super::EPISODE_MAX_KNOWLEDGE_BYTES;
-use super::extractor::{StoreEnd, fill_template, one_line, root_gone};
+use super::extractor::{
+    ProjectCheck, StoreEnd, check_project, fill_template, hold_reason, one_line,
+};
 use super::window::{LearnRow, RowKind};
 use crate::memory::service::{
     ExtractionProvenance, MemoryAccessContext, MemoryError, MemoryService, StoreInput,
@@ -32,6 +34,7 @@ use crate::memory::service::{
 use chrono::{DateTime, NaiveDateTime, Utc};
 use openalpaca_llm::{ChatMessage, RequestContext, RouterRequest};
 use openalpaca_storage::memory_files::{Dedup, MAX_SOURCES, NoteKind, NoteSource, SourceType};
+use openalpaca_storage::store::projects::ProjectId;
 use openalpaca_storage::{ConversationRepository, Database, LearningCursorRepository};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -287,7 +290,8 @@ pub(crate) enum EpisodeWrite {
     Refused,
     /// Not attempted: the window's project's data was deleted while the
     /// model wrote the summary — no longer a registered project, ST-21
-    /// ([`StoreEnd::RootGone`]).
+    /// ([`StoreEnd::RootGone`]) — or it was re-pointed meanwhile, and the
+    /// window holds ([`ProjectCheck::Hold`]).
     NotAttempted,
 }
 
@@ -299,6 +303,10 @@ pub(crate) struct EpisodeJob {
     pub session_id: String,
     /// The window's project directory, checked again right before the write.
     pub root: Option<PathBuf>,
+    /// The project the check before the call found at `root`: one
+    /// re-pointed while the model wrote is still listed under this id, so
+    /// the window is held, not dropped ([`check_project`]).
+    pub project_id: Option<ProjectId>,
     pub input: StoreInput,
     pub through: i64,
     pub expected: i64,
@@ -311,7 +319,8 @@ pub(crate) struct EpisodeJob {
 /// since the window was read gets nothing (LQ4), and so does a project
 /// whose data was deleted while the model wrote (ST-21): the window is
 /// skipped as the check before the call skips it, and the summary's write
-/// never re-creates its folder.
+/// never re-creates its folder. A project re-pointed meanwhile holds the
+/// window instead.
 pub(crate) fn store_and_advance(job: EpisodeJob) -> (EpisodeWrite, StoreEnd) {
     match ConversationRepository::new(&job.db).get_session(&job.session_id) {
         Ok(Some(_)) => {}
@@ -323,15 +332,24 @@ pub(crate) fn store_and_advance(job: EpisodeJob) -> (EpisodeWrite, StoreEnd) {
             );
         }
     }
-    if root_gone(job.root.as_deref()) {
-        let end = advance_past(
-            &job.db,
-            &job.session_id,
-            job.through,
-            job.expected,
-            StoreEnd::RootGone,
-        );
-        return (EpisodeWrite::NotAttempted, end);
+    match check_project(job.root.as_deref(), job.project_id.as_ref()) {
+        ProjectCheck::Learn(_) => {}
+        ProjectCheck::Hold => {
+            return (
+                EpisodeWrite::NotAttempted,
+                StoreEnd::Held(hold_reason(job.root.as_deref())),
+            );
+        }
+        ProjectCheck::Gone => {
+            let end = advance_past(
+                &job.db,
+                &job.session_id,
+                job.through,
+                job.expected,
+                StoreEnd::RootGone,
+            );
+            return (EpisodeWrite::NotAttempted, end);
+        }
     }
     let written = match job.service.store(&job.ctx, job.input) {
         Ok(out) => {

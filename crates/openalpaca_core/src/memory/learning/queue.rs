@@ -38,7 +38,9 @@
 //! model a chunk starts only when half of the key's rate budget would remain.
 
 use super::episode::{self, EPISODE_LABEL, EpisodeJob, EpisodeWrite};
-use super::extractor::{self, AGENT_LABEL, PromptInput, StoreCounts, StoreEnd, StoreJob};
+use super::extractor::{
+    self, AGENT_LABEL, ProjectCheck, PromptInput, StoreCounts, StoreEnd, StoreJob,
+};
 use super::lookup;
 use super::window::{self, NextChunk};
 use super::{
@@ -116,7 +118,8 @@ pub enum FlushStop {
     Quarantined,
     /// A daily cap binds (§1.8). The window stays queued.
     Cap,
-    /// A note write failed on I/O. The window holds, with backoff.
+    /// A note write failed on I/O, or the chunk's project is being
+    /// re-pointed. The window holds, with backoff.
     StoreError,
     /// The session was deleted (LQ4): its unlearned turns went with it.
     SessionGone,
@@ -650,12 +653,14 @@ async fn blocking<T: Send + 'static>(
     }
 }
 
-/// [`extractor::root_gone`] on the blocking pool: two small file reads. A
-/// task that could not run reads as "not gone" — the write checks again.
-async fn root_gone_now(root: Option<PathBuf>) -> bool {
-    tokio::task::spawn_blocking(move || extractor::root_gone(root.as_deref()))
+/// [`extractor::check_project`] before the model call, on the blocking pool:
+/// two small file reads, and a listing only when no folder records the
+/// root. A task that could not run reads as "learn" — the write checks
+/// again.
+async fn check_project_now(root: Option<PathBuf>) -> ProjectCheck {
+    tokio::task::spawn_blocking(move || extractor::check_project(root.as_deref(), None))
         .await
-        .unwrap_or(false)
+        .unwrap_or(ProjectCheck::Learn(None))
 }
 
 impl LearningQueue {
@@ -1372,20 +1377,35 @@ impl LearningQueue {
             // project) learns nothing: its turns are dropped, as a deleted
             // conversation's are (LQ4), and the cursor moves past them. A
             // missing project — its folder gone, its record kept — is still
-            // learned into its notes.
+            // learned into its notes, and one being re-pointed waits, with no
+            // call, until it is found at its new root.
             let root = chunk.root.as_ref().map(PathBuf::from);
-            if root_gone_now(root.clone()).await {
-                tracing::info!(
-                    session_id,
-                    first_row = expected + 1,
-                    last_row = chunk.through,
-                    "memory learning skipped rows whose project is no longer registered (its data was deleted)"
-                );
-                self.advance(session_id, chunk.through, expected).await;
-                report.chunks += 1;
-                report.skipped_root_gone += 1;
-                continue;
-            }
+            let project_id = match check_project_now(root.clone()).await {
+                ProjectCheck::Learn(id) => id,
+                ProjectCheck::Gone => {
+                    tracing::info!(
+                        session_id,
+                        first_row = expected + 1,
+                        last_row = chunk.through,
+                        "memory learning skipped rows whose project is no longer registered (its data was deleted)"
+                    );
+                    self.advance(session_id, chunk.through, expected).await;
+                    report.chunks += 1;
+                    report.skipped_root_gone += 1;
+                    continue;
+                }
+                ProjectCheck::Hold => {
+                    tracing::info!(
+                        session_id,
+                        first_row = expected + 1,
+                        last_row = chunk.through,
+                        "memory learning holds the window: {}",
+                        extractor::hold_reason(root.as_deref())
+                    );
+                    report.stopped = Some(FlushStop::StoreError);
+                    return report;
+                }
+            };
 
             // The owner must be a `global_user` row (design §3): anything
             // else learns nothing, and its cursor advances.
@@ -1558,6 +1578,7 @@ impl LearningQueue {
                 ctx,
                 session_id: session_id.to_string(),
                 root,
+                project_id,
                 items: validated.items,
                 listed: lookup.listed,
                 from_this_window: lookup.from_this_window,
@@ -2194,13 +2215,25 @@ impl LearningQueue {
                 continue;
             }
             let root = chunk.root.as_ref().map(PathBuf::from);
-            if root_gone_now(root.clone()).await {
-                self.advance_episode(session_id, chunk.through, expected)
-                    .await;
-                windows += 1;
-                report.skipped_root_gone += 1;
-                continue;
-            }
+            let project_id = match check_project_now(root.clone()).await {
+                ProjectCheck::Learn(id) => id,
+                ProjectCheck::Gone => {
+                    self.advance_episode(session_id, chunk.through, expected)
+                        .await;
+                    windows += 1;
+                    report.skipped_root_gone += 1;
+                    continue;
+                }
+                ProjectCheck::Hold => {
+                    tracing::info!(
+                        session_id,
+                        "memory learning holds an episode note's window: {}",
+                        extractor::hold_reason(root.as_deref())
+                    );
+                    report.stopped = Some(FlushStop::StoreError);
+                    return report;
+                }
+            };
             let ctx = match self
                 .owner_context(session_id, &session, root.clone(), chunk.last_request_id())
                 .await
@@ -2365,6 +2398,7 @@ impl LearningQueue {
                 ctx,
                 session_id: session_id.to_string(),
                 root,
+                project_id,
                 input: episode::store_input(&summary, &chunk.rows, &today),
                 through: chunk.through,
                 expected,

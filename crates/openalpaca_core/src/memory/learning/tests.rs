@@ -1452,27 +1452,40 @@ async fn a_chunk_never_mixes_roots() {
 }
 
 /// ST-21's predicate: a root is gone when no folder under `projects/`
-/// records it — never registered, or its data deleted. A registered root
-/// whose folder is missing is not gone, and no root is never gone. The root
-/// is built by hand and no turn is run, so nothing registers it before the
-/// first assertion. (Async only because the `Scene` that holds the
-/// home-store guard builds a learning queue.)
+/// records it and nothing listed names it — never registered, or its data
+/// deleted. A registered root whose folder is missing is not gone, and no
+/// root is never gone. The root is built by hand and no turn is run, so
+/// nothing registers it before the first assertion. (Async only because the
+/// `Scene` that holds the home-store guard builds a learning queue.)
 #[tokio::test]
 async fn root_gone_means_no_longer_a_registered_project() {
+    use super::extractor::{ProjectCheck, check_project};
     let _scene = Scene::new(vec![]);
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
-    assert!(super::extractor::root_gone(Some(&root)), "never registered");
+    assert_eq!(
+        check_project(Some(&root), None),
+        ProjectCheck::Gone,
+        "never registered"
+    );
     let registered = openalpaca_storage::store::projects::register(&root).unwrap();
-    assert!(!super::extractor::root_gone(Some(&root)));
+    assert_eq!(
+        check_project(Some(&root), None),
+        ProjectCheck::Learn(Some(registered.id))
+    );
     drop(dir);
-    assert!(
-        !super::extractor::root_gone(Some(&root)),
+    assert_eq!(
+        check_project(Some(&root), None),
+        ProjectCheck::Learn(Some(registered.id)),
         "missing, still registered"
     );
     std::fs::remove_dir_all(&registered.dir).unwrap();
-    assert!(super::extractor::root_gone(Some(&root)), "its data deleted");
-    assert!(!super::extractor::root_gone(None));
+    assert_eq!(
+        check_project(Some(&root), Some(&registered.id)),
+        ProjectCheck::Gone,
+        "its data deleted"
+    );
+    assert_eq!(check_project(None, None), ProjectCheck::Learn(None));
 }
 
 /// ST-21 (supersedes LQ5): a project whose folder was deleted is missing,
@@ -1597,6 +1610,135 @@ async fn a_project_whose_data_is_deleted_during_the_call_learns_nothing() {
         scene.active().is_empty(),
         "nothing was learned at home either"
     );
+}
+
+/// A re-pointed project is not a deleted one (ST-21; the S4 review's I1),
+/// even when the re-point lands while the model answers: no folder records
+/// the chunk's old root any more, but the project the check before the call
+/// found is still listed under its id. The store holds the chunk — nothing
+/// written, nothing skipped, the cursor where it was — and the next flush
+/// reads the rows the re-point rewrote and learns them into the project at
+/// its new root.
+#[tokio::test]
+async fn a_project_repointed_during_the_call_is_held_and_learned_at_its_new_root() {
+    let fact = || {
+        items(&[item(
+            "Project fact",
+            "The project ships on Tuesdays.",
+            "fact",
+            "user",
+            &[1],
+        )])
+    };
+    let model = Scripted::new(vec![fact(), fact()]);
+    let scene = Scene::with(model.clone(), DaemonConfig::default());
+    let (_old_dir, old) = project();
+    let (_new_dir, new) = project();
+    let s = scene.session();
+    let (_, answer) = scene.turn_in(
+        &s,
+        "This project ships on Tuesdays.",
+        "Noted.",
+        Some(&old.to_string_lossy()),
+    );
+    let before = scene.cursor(&s);
+    let db = scene.db.clone();
+    let (from, to) = (old.clone(), new.clone());
+    *model.on_call.lock().unwrap() = Some(Arc::new(move |n| {
+        if n == 1 {
+            openalpaca_storage::project_life::repoint(&db, &from, &to).unwrap();
+        }
+    }));
+
+    let held = scene.queue.flush_session(&s).await;
+    assert_eq!(model.calls(), 1, "{held:?}");
+    assert_eq!(held.stored, 0, "{held:?}");
+    assert_eq!(
+        held.skipped_root_gone, 0,
+        "a re-pointed project is not a deleted one: {held:?}"
+    );
+    assert_eq!(held.stopped, Some(FlushStop::StoreError), "{held:?}");
+    assert_eq!(scene.cursor(&s), before, "the cursor holds the chunk");
+
+    let learned = scene.queue.flush_session(&s).await;
+    assert_eq!(model.calls(), 2, "{learned:?}");
+    assert_eq!(learned.stopped, None, "{learned:?}");
+    assert_eq!(learned.stored, 1, "{learned:?}");
+    assert_eq!(scene.cursor(&s), answer);
+    let notes = scene.list(&scene.ctx_in(Some(&new)), None);
+    let fact = notes
+        .iter()
+        .find(|i| i.title == "Project fact")
+        .expect("learned at the new root");
+    assert_eq!(fact.scope, NoteScope::Project);
+    assert!(scene.active().is_empty(), "nothing was learned at home");
+}
+
+/// A re-point stopped between its steps — its marker still in
+/// `project.json`, as after a rename that failed, until the next boot
+/// finishes it — leaves no folder recording either root, yet the project is
+/// no deleted one (the S4 review's I1). Whether the chunk's rows still carry
+/// the old root (stopped after the marker) or already the new one (stopped
+/// after the rows), the flush holds it with no model call and the cursor
+/// where it was; once the re-point is finished the next flush learns it into
+/// the project at its new root.
+#[tokio::test]
+async fn a_project_left_marked_mid_repoint_holds_its_turns_until_the_repoint_finishes() {
+    use openalpaca_storage::project_life::{
+        RepointInterrupted, RepointStep, recover_repoints, repoint_with,
+    };
+    for step in [RepointStep::Marked, RepointStep::RowsRewritten] {
+        let scene = Scene::new(vec![items(&[item(
+            "Project fact",
+            "The project ships on Tuesdays.",
+            "fact",
+            "user",
+            &[1],
+        )])]);
+        let (_old_dir, old) = project();
+        let (_new_dir, new) = project();
+        let s = scene.session();
+        let (_, answer) = scene.turn_in(
+            &s,
+            "This project ships on Tuesdays.",
+            "Noted.",
+            Some(&old.to_string_lossy()),
+        );
+        let before = scene.cursor(&s);
+        let stopped = repoint_with(&scene.db, &old, &new, &mut |at| at != step).unwrap_err();
+        assert_eq!(
+            stopped.downcast_ref::<RepointInterrupted>(),
+            Some(&RepointInterrupted(step))
+        );
+
+        let held = scene.queue.flush_session(&s).await;
+        assert_eq!(
+            scene.model.calls(),
+            0,
+            "{step:?}: no call for a project in flight: {held:?}"
+        );
+        assert_eq!(held.skipped_root_gone, 0, "{step:?}: {held:?}");
+        assert_eq!(
+            held.stopped,
+            Some(FlushStop::StoreError),
+            "{step:?}: {held:?}"
+        );
+        assert_eq!(scene.cursor(&s), before, "{step:?}: the cursor holds");
+
+        let recovered = recover_repoints(&scene.db);
+        assert_eq!(recovered.finished, vec![new.clone()], "{step:?}");
+        let learned = scene.queue.flush_session(&s).await;
+        assert_eq!(scene.model.calls(), 1, "{step:?}: {learned:?}");
+        assert_eq!(learned.stopped, None, "{step:?}: {learned:?}");
+        assert_eq!(scene.cursor(&s), answer, "{step:?}");
+        let notes = scene.list(&scene.ctx_in(Some(&new)), None);
+        assert!(
+            notes
+                .iter()
+                .any(|i| i.title == "Project fact" && i.scope == NoteScope::Project),
+            "{step:?}: {notes:?}"
+        );
+    }
 }
 
 // ── Long text (§1.2, §1.6, ruling LR21) ─────────────────────────────────

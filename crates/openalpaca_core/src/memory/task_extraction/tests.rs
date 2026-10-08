@@ -369,6 +369,29 @@ mod through_the_service {
         assert!(registered.dir.join("memory").is_dir());
     }
 
+    /// The S4 review's I1: a run whose project is mid re-point — its marker
+    /// still in `project.json`, so no folder records the run's root — is no
+    /// deleted project, but it has no partition to learn into either: it is
+    /// skipped as held, not as gone, and no model call is spent. (A run has
+    /// no cursor to hold, so its extraction is not tried again.)
+    #[tokio::test]
+    async fn a_run_whose_project_is_mid_repoint_makes_no_call_and_is_not_gone() {
+        use openalpaca_storage::project_life::{RepointStep, repoint_with};
+        let scene = Scene::new(EVIDENCE_ITEM);
+        let old_dir = tempfile::tempdir().unwrap();
+        let old = old_dir.path().canonicalize().unwrap();
+        let new_dir = tempfile::tempdir().unwrap();
+        let new = new_dir.path().canonicalize().unwrap();
+        openalpaca_storage::store::projects::register(&old).unwrap();
+        repoint_with(&scene.db, &old, &new, &mut |at| at != RepointStep::Marked).unwrap_err();
+        let mut params = scene.params(OWNER, true);
+        params.project_root = Some(old.clone());
+
+        let outcome = extract_task_memories(&scene.deps(), params).await;
+        assert_eq!(outcome, TaskExtractionOutcome::Skipped("root_held"));
+        assert!(scene.provider.first_request_opt().is_none());
+    }
+
     /// LQ13 keeps the L8 fix slice's P1 for a run (repair round 1 of the L8
     /// product slice): an answer stopped at its output ceiling is held to
     /// the forms read before LQ13, so the `extractions` object in the prose

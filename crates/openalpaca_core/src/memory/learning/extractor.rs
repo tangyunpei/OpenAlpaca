@@ -45,7 +45,7 @@ use openalpaca_storage::memory_files::{
     Dedup, NoteKind, NoteScope, NoteSource, Origin, ReplacePolicy, SourceType, is_valid_fact_key,
     normalize_statement,
 };
-use openalpaca_storage::store::projects;
+use openalpaca_storage::store::projects::{self, ProjectId};
 use openalpaca_storage::{ConversationRepository, Database, LearningCursorRepository};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -766,7 +766,8 @@ pub(crate) enum StoreEnd {
     CursorMoved,
     /// The session was deleted (LQ4): nothing was written.
     SessionGone,
-    /// A store failed on I/O or a quarantine: the cursor holds. The notes
+    /// A store failed on I/O or a quarantine, or the chunk's project is
+    /// being re-pointed ([`ProjectCheck::Hold`]): the cursor holds. The notes
     /// already written answer `dedup` or `already_learned` on the retry.
     Held(String),
     /// The chunk's project's data was deleted while the model answered (no
@@ -785,6 +786,10 @@ pub(crate) struct StoreJob {
     /// The chunk's project directory (its rows' `workspace_root`), checked
     /// again right before the first write.
     pub root: Option<PathBuf>,
+    /// The project the check before the call found at `root`: one
+    /// re-pointed while the model answered is still listed under this id,
+    /// so the chunk is held, not dropped ([`check_project`]).
+    pub project_id: Option<ProjectId>,
     pub items: Vec<ValidItem>,
     /// The notes the prompt listed: `replaces: n<k>` names `listed[k - 1]`.
     pub listed: Vec<KnownNote>,
@@ -910,16 +915,27 @@ pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
     // The project, again, right before the first write (ST-21): one whose
     // data was deleted while the model answered is not re-created by a
     // note. The chunk is dropped exactly as the check before the call drops
-    // it — nothing written, nothing else counted, the cursor past it.
-    if root_gone(job.root.as_deref()) {
-        let end = advance_past(
-            &job.db,
-            &job.session_id,
-            job.through,
-            job.expected,
-            StoreEnd::RootGone,
-        );
-        return (StoreCounts::default(), end);
+    // it — nothing written, nothing else counted, the cursor past it. One
+    // re-pointed meanwhile is held instead: the context still names the old
+    // root, which no longer resolves, so a write now would land at home.
+    match check_project(job.root.as_deref(), job.project_id.as_ref()) {
+        ProjectCheck::Learn(_) => {}
+        ProjectCheck::Hold => {
+            return (
+                StoreCounts::default(),
+                StoreEnd::Held(hold_reason(job.root.as_deref())),
+            );
+        }
+        ProjectCheck::Gone => {
+            let end = advance_past(
+                &job.db,
+                &job.session_id,
+                job.through,
+                job.expected,
+                StoreEnd::RootGone,
+            );
+            return (StoreCounts::default(), end);
+        }
     }
 
     for (item, plan) in planned {
@@ -1017,17 +1033,76 @@ pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
     (counts, end)
 }
 
-/// Whether a chunk's project is gone (owner decision ST-21, superseding
-/// LQ5): its root is no longer a registered project — its data was deleted.
-/// A missing project, whose folder is gone but whose record under
-/// `projects/` stands, is not gone: its turns are learned into its notes,
-/// which live in the home store and re-create nothing in the user's
-/// folder. A lookup that fails is not "gone" either: the chunk goes on,
-/// and the write's own error holds the cursor. The check before the model
-/// call (`queue.rs`, task extraction) and the one right before the first
-/// write ask the same question.
-pub(crate) fn root_gone(root: Option<&Path>) -> bool {
-    root.is_some_and(|r| matches!(projects::lookup(r), Ok(None)))
+/// What a chunk's project is right now (owner decision ST-21, superseding
+/// LQ5). The check before the model call (`queue.rs`, task extraction) and
+/// the one right before the first write ask it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectCheck {
+    /// Learn the chunk: it names no project, or a folder under `projects/`
+    /// records its root — `Some` of that project's id — or the lookup
+    /// failed, which is not "gone": the write's own error holds the cursor.
+    /// A missing project, whose folder is gone but whose record stands, is
+    /// learned into its notes, which live in the home store and re-create
+    /// nothing in the user's folder.
+    Learn(Option<ProjectId>),
+    /// Not now: no folder records the root, but the project is not gone — a
+    /// re-point in flight names the root as its old or its new one (until
+    /// the next boot finishes a re-point whose rename failed), or the
+    /// project seen before the call is still listed under its id (re-pointed
+    /// while the model answered) — or the projects could not be listed.
+    /// Nothing is written and the cursor holds; the next flush reads the
+    /// rows the re-point rewrote and learns them at the new root.
+    Hold,
+    /// Gone: no folder records the root and nothing listed names it — the
+    /// project's data was deleted, or it was never registered. Its turns are
+    /// dropped and the cursor moves past them.
+    Gone,
+}
+
+/// [`ProjectCheck`] for a chunk's `root`. `seen` is the id the check before
+/// the model call found there (`None` for that check itself): a re-pointed
+/// project is not a deleted one, though no folder records its old root.
+pub(crate) fn check_project(root: Option<&Path>, seen: Option<&ProjectId>) -> ProjectCheck {
+    let Some(root) = root else {
+        return ProjectCheck::Learn(None);
+    };
+    match projects::lookup(root) {
+        Ok(Some(project)) => return ProjectCheck::Learn(Some(project.id)),
+        Ok(None) => {}
+        Err(_) => return ProjectCheck::Learn(None),
+    }
+    // As `lookup` compares: the canonical form, which the rows and
+    // `project.json` both hold.
+    let want = projects::canonical_root(root).unwrap_or_else(|_| root.to_path_buf());
+    match projects::list() {
+        Ok(listed) => {
+            let named = listed.iter().any(|p| {
+                seen == Some(&p.id)
+                    || (p.previous_root.is_some()
+                        && (p.root == want || p.previous_root.as_deref() == Some(want.as_path())))
+            });
+            if named {
+                ProjectCheck::Hold
+            } else {
+                ProjectCheck::Gone
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                root = %root.display(),
+                "memory learning cannot list the projects to tell whether this one was deleted, so it holds: {e:#}"
+            );
+            ProjectCheck::Hold
+        }
+    }
+}
+
+/// Why a [`ProjectCheck::Hold`] holds the window, for the log.
+pub(crate) fn hold_reason(root: Option<&Path>) -> String {
+    let root = root.map_or_else(String::new, |r| r.display().to_string());
+    format!(
+        "the project at {root} is being re-pointed (or the projects could not be listed); its rows are learned once it is found at its new root"
+    )
 }
 
 /// The chunk's cursor advance (§1.4 step 4): `done` when it moved; another

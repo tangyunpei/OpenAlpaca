@@ -748,6 +748,104 @@ async fn a_missing_projects_conversation_is_still_summarised() {
     assert!(registered.dir.join("memory").join("owners").is_dir());
 }
 
+/// The episodes of the project at `root`.
+fn project_episodes(scene: &Scene, root: &std::path::Path) -> Vec<ListItem> {
+    scene
+        .list(&scene.ctx_in(Some(root)), None)
+        .into_iter()
+        .filter(|i| i.kind == NoteKind::Episode && i.scope == NoteScope::Project)
+        .collect()
+}
+
+/// A re-pointed project is not a deleted one, as for learning (the S4
+/// review's I1): a project re-pointed while the model writes the summary is
+/// still listed under the id the check before the call found, so the write
+/// holds the window — no episode, nothing skipped, the episode cursor where
+/// it was — and the next close writes the summary into the project at its
+/// new root.
+#[tokio::test]
+async fn a_project_repointed_during_the_summary_call_is_held_and_summarised_at_its_new_root() {
+    let model = Scripted::new(vec![trip_state(), trip_summary(), trip_summary()]);
+    let scene = Scene::with(model.clone(), DaemonConfig::default());
+    let (_old_dir, old) = project();
+    let (_new_dir, new) = project();
+    let old_str = old.to_string_lossy().into_owned();
+    let s = scene.session();
+    let mut last = 0;
+    for (i, text) in TURNS.iter().enumerate() {
+        last = scene
+            .turn_in(&s, text, &format!("Answer {i}."), Some(&old_str))
+            .1;
+    }
+    // The second call is the summary's: the refresh's comes first.
+    let db = scene.db.clone();
+    let (from, to) = (old.clone(), new.clone());
+    *model.on_call.lock().unwrap() = Some(Arc::new(move |n| {
+        if n == 2 {
+            openalpaca_storage::project_life::repoint(&db, &from, &to).unwrap();
+        }
+    }));
+
+    let held = scene.queue.flush_episodes(&s).await;
+    assert_eq!(model.calls(), 2, "{held:?}");
+    assert_eq!(held.episodes, 0, "{held:?}");
+    assert_eq!(
+        held.skipped_root_gone, 0,
+        "a re-pointed project is not a deleted one: {held:?}"
+    );
+    assert_eq!(held.stopped, Some(FlushStop::StoreError), "{held:?}");
+    assert_eq!(episode_cursor(&scene, &s), 0, "the episode cursor holds");
+
+    let written = scene.queue.flush_episodes(&s).await;
+    assert_eq!(model.calls(), 3, "the summary's call alone: {written:?}");
+    assert_eq!(written.stopped, None, "{written:?}");
+    assert_eq!(written.episodes, 1, "{written:?}");
+    assert_eq!(episode_cursor(&scene, &s), last);
+    assert_eq!(project_episodes(&scene, &new).len(), 1);
+    assert!(episodes(&scene).is_empty(), "no summary at home");
+}
+
+/// A re-point left marked after its rows were rewritten — as after a rename
+/// that failed, until the next boot finishes it — leaves no folder recording
+/// either root; the close holds the summary's window before its call, with
+/// the episode cursor where it was (the S4 review's I1), and once the
+/// re-point is finished the next close writes the summary into the project
+/// at its new root.
+#[tokio::test]
+async fn a_project_left_marked_mid_repoint_holds_its_summary_until_the_repoint_finishes() {
+    use openalpaca_storage::project_life::{RepointStep, recover_repoints, repoint_with};
+    let scene = Scene::new(vec![trip_state(), trip_summary()]);
+    let (_old_dir, old) = project();
+    let (_new_dir, new) = project();
+    let old_str = old.to_string_lossy().into_owned();
+    let s = scene.session();
+    let mut last = 0;
+    for (i, text) in TURNS.iter().enumerate() {
+        last = scene
+            .turn_in(&s, text, &format!("Answer {i}."), Some(&old_str))
+            .1;
+    }
+    repoint_with(&scene.db, &old, &new, &mut |at| {
+        at != RepointStep::RowsRewritten
+    })
+    .unwrap_err();
+
+    let held = scene.queue.flush_episodes(&s).await;
+    assert_eq!(scene.model.calls(), 1, "the refresh's call alone: {held:?}");
+    assert_eq!(held.episodes, 0, "{held:?}");
+    assert_eq!(held.skipped_root_gone, 0, "{held:?}");
+    assert_eq!(held.stopped, Some(FlushStop::StoreError), "{held:?}");
+    assert_eq!(episode_cursor(&scene, &s), 0, "the episode cursor holds");
+
+    assert_eq!(recover_repoints(&scene.db).finished, vec![new.clone()]);
+    let written = scene.queue.flush_episodes(&s).await;
+    assert_eq!(scene.model.calls(), 2, "{written:?}");
+    assert_eq!(written.stopped, None, "{written:?}");
+    assert_eq!(written.episodes, 1, "{written:?}");
+    assert_eq!(episode_cursor(&scene, &s), last);
+    assert_eq!(project_episodes(&scene, &new).len(), 1);
+}
+
 /// The same crash, with turns that arrived after it: the re-run passes
 /// only the rows the summary already covers — its sources run to its
 /// window's last row — and summarises the turns after them, instead of
