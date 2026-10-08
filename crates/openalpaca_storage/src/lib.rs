@@ -2,6 +2,7 @@
 //!
 //! Provides the single path module (`store`), the discovery mechanism,
 //! the singleton lock, the daemon-liveness primitive (`daemon_lifecycle`),
+//! a project's re-point and its recovery (`project_life`),
 //! and the SQLite database for daemon/GUI/CLI coordination.
 
 pub mod artifacts;
@@ -14,6 +15,7 @@ pub mod memory_files;
 pub mod memory_index;
 pub mod migrations;
 pub mod models;
+pub mod project_life;
 pub mod repository;
 mod sql;
 pub mod store;

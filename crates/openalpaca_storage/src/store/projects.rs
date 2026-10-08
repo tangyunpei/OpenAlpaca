@@ -751,11 +751,10 @@ pub fn register(root: &Path) -> Result<Project> {
 /// `projects/<plain>` exists and is not this project's — its file records
 /// another root and, when `this` is `Some`, carries another id; or it holds
 /// no readable file — then the hashed name under the same test; neither free
-/// is an error naming both. `this` is `Some` only on a re-point (S3), so a
-/// project whose new plain name is its own folder's keeps it.
-// Its first caller outside the tests is S3's re-point; `register` calls
-// `name_for_in` with the home store it resolved once.
-#[cfg_attr(not(test), allow(dead_code))]
+/// is an error naming both. `this` is `Some` only on a re-point
+/// (`project_life`), so a project whose new plain name is its own folder's
+/// keeps it. `register` calls `name_for_in` with the home store it resolved
+/// once.
 pub(crate) fn name_for(
     root: &Path,
     this: Option<&ProjectId>,
