@@ -1107,6 +1107,67 @@ fn a_link_below_the_home_root_refuses_the_home_partition_too() {
     assert!(sb.outside_is_empty());
 }
 
+/// R12: a root with no folder under `projects/` has no partition. Every way
+/// in — the open, the read-only open, the key, the owner listing — answers
+/// `NotRegistered` naming the root, and nothing is created anywhere.
+#[test]
+fn an_unregistered_project_root_has_no_partition_and_nothing_is_created() {
+    let sb = Sandbox::new();
+    let stray = sb.outside.path().canonicalize().unwrap();
+    let scope = StoreScope::Project(stray.clone());
+
+    let err = Partition::open(&scope, ALICE).expect_err("refused");
+    assert!(
+        matches!(&err, MemoryFilesError::NotRegistered { root } if root == &stray),
+        "{err:?}"
+    );
+    assert_eq!(err.class(), "fixture:not_registered");
+    assert!(err.to_string().contains("is not registered"), "{err}");
+    assert!(matches!(
+        Partition::open_readonly(&scope, &owner_key(ALICE)),
+        Err(MemoryFilesError::NotRegistered { .. })
+    ));
+    assert!(matches!(
+        partition_key_for(&scope, &owner_key(ALICE)),
+        Err(MemoryFilesError::NotRegistered { .. })
+    ));
+    let listed = list_owner_keys(&scope).unwrap_err();
+    assert!(
+        matches!(
+            listed.downcast_ref::<MemoryFilesError>(),
+            Some(MemoryFilesError::NotRegistered { .. })
+        ),
+        "{listed:#}"
+    );
+    assert!(sb.outside_is_empty(), "nothing in the folder");
+}
+
+/// R12: asked about a root no project is registered at, the doctor reports
+/// no project partition and refuses nothing — it answers from the home notes.
+#[test]
+fn the_doctor_reports_no_project_partition_for_an_unregistered_root() {
+    let sb = Sandbox::new();
+    sb.open_home(ALICE)
+        .create(
+            new_note("Editor", "# Editor\n\nvim\n", NoteKind::Preference),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let stray = sb.outside.path().canonicalize().unwrap();
+
+    let report = doctor(ALICE, Some(&stray)).unwrap();
+
+    assert!(
+        report
+            .partitions
+            .iter()
+            .all(|p| p.scope == SnapshotScope::Home),
+        "{:?}",
+        report.partitions
+    );
+    assert!(report.refused.is_empty(), "{:?}", report.refused);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_symlinked_note_file_is_not_read_written_or_listed() {

@@ -250,6 +250,11 @@ pub enum MemoryFilesError {
     /// would rename into (design §6). (An argument that is not an owner key
     /// is `InvalidInput`, refused before anything is looked at.)
     AdoptCollision(String),
+    /// R12: the scope names a project root with no folder under the home
+    /// store's `projects/`. A reader treats it as an empty project (the
+    /// service, the doctor, `doctor --repair`); a writer reports it. Decided
+    /// before a path is joined, so nothing is created.
+    NotRegistered { root: PathBuf },
     /// A test-injected crash: the mutation stopped after the named step with
     /// the on-disk state exactly as it was at that point.
     #[cfg(test)]
@@ -293,6 +298,11 @@ impl fmt::Display for MemoryFilesError {
                 )
             }
             Self::AdoptCollision(m) => write!(f, "adopt refused: {m}"),
+            Self::NotRegistered { root } => write!(
+                f,
+                "the project {} is not registered; its notes read as empty",
+                root.display()
+            ),
             #[cfg(test)]
             Self::Crashed(point) => write!(f, "crashed after {point:?}"),
             Self::Io(e) => write!(f, "{e:#}"),
@@ -328,6 +338,7 @@ impl MemoryFilesError {
             Self::PathRefused { .. } => "fixture:path_refused",
             Self::DuplicateId { .. } => "fixture:duplicate_id",
             Self::AdoptCollision(_) => "fixture:adopt_collision",
+            Self::NotRegistered { .. } => "fixture:not_registered",
             #[cfg(test)]
             Self::Crashed(_) => "crashed",
             Self::Io(_) => "io",

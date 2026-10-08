@@ -30,6 +30,7 @@ use super::{
     OWNERS_DIR, PROJECT_GITIGNORE_TEXT, home_partition_key, is_owner_key, is_partition_key,
     is_revision, owner_key, project_partition_key,
 };
+use crate::store::projects;
 use crate::store::{ContentKind, StoreScope, content_dir, home_root, state_dir, store_root};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -583,6 +584,31 @@ pub fn snapshot_path_for(partition_key: &str) -> Result<PathBuf, MemoryFilesErro
         .join(format!("{partition_key}.json")))
 }
 
+/// The store directory a partition of `scope` lives under, and the
+/// components above its `memory/` that [`Partition::open`] checks before any
+/// below (design §3 rule 1). The home root is the store's own and is not
+/// checked. A project is R12's question first: a root with no folder under
+/// `projects/` has no partition ([`MemoryFilesError::NotRegistered`]),
+/// decided before a path is joined, so nothing is created.
+fn scope_root(scope: &StoreScope) -> Result<(PathBuf, Vec<PathBuf>), MemoryFilesError> {
+    match scope {
+        StoreScope::Home => Ok((home_root()?, Vec::new())),
+        StoreScope::Project(root) => {
+            if !root.is_absolute() {
+                return Err(MemoryFilesError::Io(anyhow::anyhow!(
+                    "project store root must be an absolute path, got {}",
+                    root.display()
+                )));
+            }
+            if projects::lookup(root)?.is_none() {
+                return Err(MemoryFilesError::NotRegistered { root: root.clone() });
+            }
+            let store = store_root(scope)?;
+            Ok((store.clone(), vec![store]))
+        }
+    }
+}
+
 /// The partition key of `owner_key`'s partition in `scope` — what
 /// [`Partition::open`] derives — without opening or creating anything. For
 /// a log line that must name a partition it has not opened.
@@ -590,7 +616,8 @@ pub fn partition_key_for(scope: &StoreScope, owner_key: &str) -> Result<String, 
     match scope {
         StoreScope::Home => Ok(home_partition_key(owner_key)),
         StoreScope::Project(_) => {
-            let root = store_root(scope)?
+            let (store, _) = scope_root(scope)?;
+            let root = store
                 .join(ContentKind::Memory.dir_name())
                 .join(OWNERS_DIR)
                 .join(owner_key);
@@ -681,17 +708,14 @@ impl Partition {
         mode: OpenMode,
         cache: Option<Arc<NoteParseCache>>,
     ) -> Result<Self, MemoryFilesError> {
-        let store = store_root(scope)?;
+        let (store, above) = scope_root(scope)?;
         let memory_dir = store.join(ContentKind::Memory.dir_name());
         let owners = memory_dir.join(OWNERS_DIR);
         let root = owners.join(&key);
         let notes_dir = root.join(NOTES_DIR);
         let history_dir = root.join(HISTORY_DIR);
 
-        let mut components: Vec<&Path> = Vec::new();
-        if matches!(scope, StoreScope::Project(_)) {
-            components.push(&store);
-        }
+        let mut components: Vec<&Path> = above.iter().map(PathBuf::as_path).collect();
         components.extend([
             memory_dir.as_path(),
             owners.as_path(),
@@ -2639,9 +2663,8 @@ fn authority_conflict(id: NoteId, verb: &str) -> MemoryFilesError {
 
 /// The owner keys that have a directory under `<store>/memory/owners/`.
 pub fn list_owner_keys(scope: &StoreScope) -> Result<Vec<String>> {
-    let owners = store_root(scope)?
-        .join(ContentKind::Memory.dir_name())
-        .join(OWNERS_DIR);
+    let (store, _) = scope_root(scope).map_err(anyhow::Error::new)?;
+    let owners = store.join(ContentKind::Memory.dir_name()).join(OWNERS_DIR);
     let entries = match fs::read_dir(&owners) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

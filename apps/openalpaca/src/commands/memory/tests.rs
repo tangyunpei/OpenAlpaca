@@ -591,6 +591,27 @@ fn repair_lifts_a_quarantine_and_adopt_rebinds_an_orphan() {
     );
 }
 
+/// R12: `doctor --repair` in a git repository no turn has registered has no
+/// project partition to repair. It answers from the home notes and creates
+/// nothing — no folder under `projects/`, nothing in the repository.
+#[test]
+fn repair_answers_from_the_home_notes_for_an_unregistered_project() {
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    seed_owner("u_example_alice");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+
+    repair_locally(&ScopeArgs {
+        project: Some(repo.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+
+    assert!(!store::home_root().unwrap().join("projects").exists());
+    assert!(!repo.join(".openalpaca").exists());
+}
+
 // ── The list page's "more" hint ──────────────────────────────────
 
 /// A page with a `next_cursor` gets one hint, and the hint names only a

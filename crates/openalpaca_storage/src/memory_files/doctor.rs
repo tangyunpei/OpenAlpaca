@@ -127,7 +127,11 @@ pub fn doctor(
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut scopes = vec![StoreScope::Home];
     if let Some(project) = project {
-        scopes.push(StoreScope::Project(project.to_path_buf()));
+        // R12: a root with no folder under `projects/` has no partition; the
+        // doctor answers from the home notes, as for a refused path.
+        if crate::store::projects::lookup(project)?.is_some() {
+            scopes.push(StoreScope::Project(project.to_path_buf()));
+        }
     }
     for scope in &scopes {
         let mut keys = list_owner_keys(scope)?;

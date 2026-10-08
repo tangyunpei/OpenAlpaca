@@ -1712,7 +1712,16 @@ pub(crate) fn repair_locally(at: &ScopeArgs) -> Result<()> {
     let owner_key = files::owner_key(&owner_id);
     let mut scopes = vec![StoreScope::Home];
     if let Some(root) = at.local_project_root()? {
-        scopes.push(StoreScope::Project(root));
+        if store::projects::lookup(&root)?.is_some() {
+            scopes.push(StoreScope::Project(root));
+        } else {
+            // R12: a folder no turn has registered has no notes to repair.
+            println!(
+                "{} {}: not a registered project, so it has no notes to repair; answered from the home notes.",
+                "=".dimmed(),
+                root.display()
+            );
+        }
     }
     for scope in &scopes {
         let label = match scope {

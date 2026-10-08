@@ -398,6 +398,35 @@ fn a_directory_with_no_marker_is_global_only() {
     );
 }
 
+/// R12: a git repository no turn has registered has no project partition.
+/// Its context still names the root, but the service reads it as an empty
+/// project, and a note whose kind defaults to the project lands in the home
+/// partition. Nothing is created for the repository, and the service
+/// registers nothing — only the daemon's turns and routes do.
+#[test]
+fn a_note_stored_from_an_unregistered_repository_lands_in_the_home_partition() {
+    let h = Harness::new();
+    let repo = h.root.path().join("ws").join("unused-repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let repo = repo.canonicalize().unwrap();
+    let ctx = h.tool(ALICE, Some(&repo));
+    assert_eq!(ctx.project_root.as_deref(), Some(repo.as_path()));
+
+    let fact = h.store(&ctx, "Build", "# Build\n\nRun make.\n", NoteKind::Fact);
+
+    assert_eq!(fact.scope, NoteScope::Global);
+    assert!(note_file_for(&h.home_notes_dir(ALICE_KEY), fact.id).is_some());
+    assert!(!repo.join(".openalpaca").exists());
+    assert!(
+        !h.home().join("projects").exists(),
+        "the service registers nothing"
+    );
+    assert_eq!(
+        h.list_ids(&ctx, ListInput::default()),
+        HashSet::from([fact.id])
+    );
+}
+
 /// Fixture 03: inside a git repository with no `.openalpaca/` yet, a read
 /// creates nothing; the first project write lays the partition out with its
 /// own `.gitignore`; the artifact path's `ensure_store` in between changes

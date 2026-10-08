@@ -757,11 +757,12 @@ impl MemoryService {
         Partition::open_cached(scope, owner_id, &self.parse_cache)
     }
 
-    /// The owner's home partition and, when the request resolved a project
-    /// root whose path to the partition is clean, the project partition. A
-    /// link, a junction or a non-directory on that path refuses the project
-    /// partition with one WARN naming the component, and the request falls
-    /// back to the global partition (design §3 rule 1).
+    /// The owner's home partition and, when the request resolved a
+    /// registered project whose path to the partition is clean, the project
+    /// partition. An unregistered root reads as an empty project (R12, logged
+    /// at debug); a link, a junction or a non-directory on that path refuses
+    /// the project partition with one WARN naming the component, and the
+    /// request falls back to the global partition (design §3 rule 1).
     pub(super) fn resolve(&self, ctx: &MemoryAccessContext) -> Result<Resolved, MemoryError> {
         let home = self.open_partition(&StoreScope::Home, &ctx.owner_id)?;
         let project = match &ctx.project_root {
@@ -775,6 +776,13 @@ impl MemoryService {
                             component = %component.display(),
                             %reason,
                             "memory: project partition refused, using the global partition only"
+                        );
+                        None
+                    }
+                    Err(MemoryFilesError::NotRegistered { root }) => {
+                        tracing::debug!(
+                            project_root = %root.display(),
+                            "memory: no project is registered at this root, so it has no notes (R12)"
                         );
                         None
                     }
