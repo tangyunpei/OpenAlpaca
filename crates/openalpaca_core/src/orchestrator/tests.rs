@@ -9697,3 +9697,170 @@ async fn a_skill_turn_says_what_it_continued_from() {
         })
     );
 }
+
+/// The final fix wave's R19 gate (the lead's ruling): a turn that has no
+/// project — a client path under `$HOME` with no repository (R13), or no path
+/// at all (R-S13) — files the model's unscoped `memory_store` in the home
+/// partition, as it always did. The refusal R19 adds for a project that went
+/// while the turn ran must never reach such a turn: its tools carry no
+/// project root, so nothing about a root can be stale.
+mod memory_store_on_a_turn_with_no_project {
+    use super::*;
+    use crate::memory::service::{
+        Attribution, Capabilities, ListInput, MemoryService, Surface, WorkspaceHint,
+    };
+    use openalpaca_storage::memory_files::NoteScope;
+
+    struct Scene {
+        _env: crate::test_util::HomeStoreGuard,
+        _root: tempfile::TempDir,
+        home: std::path::PathBuf,
+        home_store: std::path::PathBuf,
+        service: Arc<MemoryService>,
+        orch: Orchestrator,
+        requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+    }
+
+    /// A stand-in `$HOME` holding the home store, an owner, a memory
+    /// service and a main loop whose model calls `memory_store` once with no
+    /// `scope`.
+    fn scene() -> Scene {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().canonicalize().unwrap().join("home");
+        let home_store = home.join(".openalpaca");
+        std::fs::create_dir_all(&home_store).unwrap();
+        let env = crate::test_util::HomeStoreGuard::set(&home_store);
+        let db = openalpaca_storage::Database::open(&root.path().join("t.db")).unwrap();
+        openalpaca_storage::IdentityRepository::new(&db)
+            .create_global_user("user1", None)
+            .unwrap();
+        let service = Arc::new(MemoryService::new(
+            Some(db.clone()),
+            openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+        ));
+        service.rebuild_index().unwrap();
+        let (orch, requests) = make_tool_mode_orchestrator_with_db(
+            Some((
+                "memory_store".to_string(),
+                serde_json::json!({
+                    "title": "Release day",
+                    "body": "# Release day\n\nWe ship on Fridays.\n",
+                    "kind": "decision",
+                }),
+            )),
+            "noted",
+            DaemonConfig::default(),
+            vec![],
+            Some(db),
+        );
+        orch.set_memory_service(service.clone());
+        Scene {
+            _env: env,
+            _root: root,
+            home,
+            home_store,
+            service,
+            orch,
+            requests,
+        }
+    }
+
+    async fn turn(scene: &Scene, workspace_path: Option<String>) {
+        let reply = scene
+            .orch
+            .handle_message(HandleRequest {
+                request_id: Uuid::new_v4(),
+                source: "cli".to_string(),
+                content: "remember that we ship on Fridays".to_string(),
+                principal: Principal::User {
+                    global_id: "user1".to_string(),
+                },
+                scope: Scope::Global,
+                lane_key: "user1:cli".to_string(),
+                workspace_path,
+                stream_id: None,
+                model_override: None,
+                unattended: false,
+                turn_sink: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply, "noted");
+    }
+
+    /// The tool result the model read back, and the owner's notes as the
+    /// home partition lists them.
+    fn outcome(scene: &Scene) -> (String, Vec<(String, NoteScope)>) {
+        let result = scene
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|r| r.messages.iter())
+            .find(|m| matches!(m.role, openalpaca_llm::Role::Tool))
+            .map(|m| m.content.clone())
+            .expect("the model read the tool's result back");
+        let home_only = scene
+            .service
+            .context(
+                "user1",
+                WorkspaceHint::None,
+                Surface::UserSurface,
+                Capabilities::ALL,
+                Attribution::default(),
+            )
+            .unwrap();
+        let notes = scene
+            .service
+            .list(&home_only, ListInput::default())
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|i| (i.title, i.scope))
+            .collect();
+        (result, notes)
+    }
+
+    #[tokio::test]
+    async fn an_unscoped_memory_store_on_a_turn_under_home_with_no_repository_lands_at_home() {
+        let scene = scene();
+        let documents = scene.home.join("Documents");
+        std::fs::create_dir_all(&documents).unwrap();
+
+        turn(&scene, Some(documents.to_string_lossy().into_owned())).await;
+
+        let (result, notes) = outcome(&scene);
+        assert!(
+            result.contains(r#""scope":"global""#) && result.contains(r#""dedup":"created""#),
+            "the store succeeded, into global memory: {result}"
+        );
+        assert_eq!(
+            notes,
+            vec![("Release day".to_string(), NoteScope::Global)],
+            "the note is in the home partition: {result}"
+        );
+        assert!(
+            !scene.home_store.join("projects").exists(),
+            "no project was recorded for $HOME (R13)"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unscoped_memory_store_on_a_turn_that_sent_no_path_lands_at_home() {
+        let scene = scene();
+
+        turn(&scene, None).await;
+
+        let (result, notes) = outcome(&scene);
+        assert!(
+            result.contains(r#""scope":"global""#) && result.contains(r#""dedup":"created""#),
+            "the store succeeded, into global memory: {result}"
+        );
+        assert_eq!(
+            notes,
+            vec![("Release day".to_string(), NoteScope::Global)],
+            "the note is in the home partition: {result}"
+        );
+        assert!(!scene.home_store.join("projects").exists());
+    }
+}
