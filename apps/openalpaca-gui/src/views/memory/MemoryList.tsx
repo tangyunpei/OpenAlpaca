@@ -26,7 +26,13 @@ import type {
   NoteStatus,
 } from "@/lib/api/memories";
 
-import { MEMORY_EMPTY_COPY, noteCount, scopeLabel } from "./copy";
+import {
+  MEMORY_EMPTY_COPY,
+  NO_PROJECT_LINE,
+  NO_PROJECT_TITLE,
+  noteCount,
+  scopeLabel,
+} from "./copy";
 import { MemoryRow, listRow, searchRow } from "./MemoryRow";
 import { RecentlyLearned } from "./RecentlyLearned";
 import { Suggestions } from "./Suggestions";
@@ -141,8 +147,7 @@ export function MemoryList({
               disabled={value === "project" && projectRoot === null}
               title={
                 value === "project"
-                  ? (projectRoot ??
-                    "Choose a project in Settings → Connection; it needs a .git or .openalpaca above it.")
+                  ? (projectRoot ?? NO_PROJECT_TITLE)
                   : undefined
               }
               onClick={() => onScopeChange(value)}
@@ -153,8 +158,7 @@ export function MemoryList({
         </div>
         {projectUnavailable && (
           <p className="m-0 font-mono text-2xs-plus leading-[1.5] text-faint">
-            This window has no project, or its path is inside none (no .git or
-            .openalpaca above it), so Global is shown.
+            {NO_PROJECT_LINE}
           </p>
         )}
 

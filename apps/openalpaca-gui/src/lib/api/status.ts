@@ -12,10 +12,10 @@
  *
  * The project half is the one only this client can ask. The daemon holds no per-lane
  * record of a workspace (R22): a turn carries `x-workspace-path` and the daemon
- * walks up to the nearest `.git`/`.openalpaca` to decide which root owns it.
- * That resolution is not reproducible here — the picker's value is free text,
- * checked only for absoluteness, and nothing in the browser can canonicalize a
- * symlink or find a marker directory. So the route is asked the same question a
+ * resolves it — the nearest registered project root or git repository above
+ * it — to decide which root owns it. That resolution is not reproducible
+ * here: nothing in the browser can canonicalize a symlink, read the home
+ * store's `projects/` or find a `.git`. So the route is asked the same question a
  * turn asks, with the same header, and its `project_root` is the window's
  * canonical root (ruling R50).
  *

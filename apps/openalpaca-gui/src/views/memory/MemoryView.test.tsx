@@ -24,6 +24,8 @@ import {
   MEMORY_ACTION_CONFLICT,
   MEMORY_CONFLICT_COPY,
   MEMORY_EMPTY_COPY,
+  NO_PROJECT_LINE,
+  NO_PROJECT_TITLE,
   noteCount,
 } from "./copy";
 import MemoryView from "./MemoryView";
@@ -601,16 +603,20 @@ describe("the Memory view", () => {
     renderView();
     const project = await screen.findByRole("button", { name: "This project" });
     expect(project).toBeDisabled();
+    // Storage design §3: a project is a git repository or a folder chosen
+    // with Use; `.openalpaca` is no marker, and the reason does not name it.
+    expect(NO_PROJECT_TITLE).not.toMatch(/\.openalpaca/);
+    expect(project).toHaveAttribute("title", NO_PROJECT_TITLE);
   });
 
   it("says so when This project was chosen and the window has none", async () => {
     useUiStore.setState({ memoryScope: "project" });
     renderView();
-    expect(
-      await screen.findByText(
-        /This window has no project, or its path is inside none/,
-      ),
-    ).toBeInTheDocument();
+    expect(NO_PROJECT_LINE).toMatch(
+      /^This window has no project, or its path is inside none/,
+    );
+    expect(NO_PROJECT_LINE).not.toMatch(/\.openalpaca/);
+    expect(await screen.findByText(NO_PROJECT_LINE)).toBeInTheDocument();
     await waitFor(() =>
       expect(
         sent("GET", "/v1/memories")[0]?.url.searchParams.get("scope"),

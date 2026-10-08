@@ -121,9 +121,9 @@ export function useSessionSidebar(
    * half has to be the daemon's answer, not the picker's raw text.
    *
    * `session.workspace_id` is what `MemoryScopeContext::for_request` resolved
-   * — a marker walk up to a `.git`/`.openalpaca` root, with symlinks
-   * canonicalized. `useProjectStore.path` is free text validated only for
-   * absoluteness. Comparing the two announced an override for every window
+   * — the nearest registered project root or git repository, with symlinks
+   * canonicalized. `useProjectStore.path` may be a path an earlier build
+   * stored as typed. Comparing the two announced an override for every window
    * pointed at a subdirectory of its own project (`/repo/apps/gui` vs `/repo`)
    * or at an uncanonicalized path (`/tmp/...` vs `/private/tmp/...`) — a claim
    * of a scope change in exactly the case where the daemon is provably not

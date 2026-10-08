@@ -51,8 +51,7 @@ import { MemoryList } from "./MemoryList";
 /**
  * The window's project root as the daemon resolved it: a path; `null` when
  * there is no project or the path is inside none; `undefined` while the
- * answer is out. The picker holds free text; only the daemon can walk it to a
- * marker.
+ * answer is out. Only the daemon can resolve a path to a project.
  */
 function useProjectRoot(projectPath: string | null): string | null | undefined {
   const status = useDaemonStatus(projectPath);

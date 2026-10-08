@@ -10,10 +10,11 @@
  * Three rules shape the module:
  *
  *  * **The project is the header.** `x-workspace-path` selects the project
- *    partition exactly as it does on `POST /v1/chat` (the daemon walks up to
- *    the nearest `.openalpaca`/`.git`); no header means the global partition
- *    only. Every function takes the window's project path and sends it, so a
- *    note opened from either scope reads and writes the same way.
+ *    partition exactly as it does on `POST /v1/chat` (the daemon resolves it
+ *    to a registered project or the git repository it is in); no header
+ *    means the global partition only. Every function takes the window's
+ *    project path and sends it, so a note opened from either scope reads and
+ *    writes the same way.
  *  * **A revision travels in `If-Match` and nowhere else.** A single-note
  *    mutation sends `If-Match: "<revision>"`; a body `expected_revision` is a
  *    `400 MEMORY_INVALID_INPUT` from the daemon. A stale one is

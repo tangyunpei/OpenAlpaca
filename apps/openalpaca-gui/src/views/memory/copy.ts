@@ -249,3 +249,15 @@ export function sourceLabel(source: MemorySource): string {
 export function shortRevision(revision: string): string {
   return revision.slice(0, 8);
 }
+
+/**
+ * Why `This project` is off (storage design §3): a project is a git
+ * repository, or a folder chosen with `Use` in Settings → Connection.
+ * `.openalpaca` marks nothing any more, and no copy names it.
+ */
+export const NO_PROJECT_TITLE =
+  "Choose a project in Settings → Connection: a git repository, or any folder you Use there.";
+
+/** Said under the scope chips when This project was chosen and is not available. */
+export const NO_PROJECT_LINE =
+  "This window has no project, or its path is inside none (no git repository and no folder chosen with Use holds it), so Global is shown.";
