@@ -196,9 +196,12 @@ pub fn canonical_root(path: &Path) -> Result<PathBuf> {
 /// R13, which replaces `resolves_to_the_home_store` in S2: whether `root` is
 /// the home store, lies inside it, or contains it — never a project, so
 /// `$HOME` stays "no project" even with a `~/.git`. Both sides canonical, so a
-/// link to the home store answers for the store it reaches. `false` when
-/// there is no usable home root or `root` is relative: a question, never a
-/// reason to fail.
+/// link to the home store answers for the store it reaches. The store is
+/// also judged as it is named — its parent resolved, its last component not
+/// followed — so when the store itself is a link (`~/.openalpaca` leading to
+/// another volume), the folder holding that link (`$HOME`) still contains
+/// it. `false` when there is no usable home root or `root` is relative: a
+/// question, never a reason to fail.
 pub fn overlaps_home_store(root: &Path) -> bool {
     let Ok(home) = super::home_root() else {
         return false;
@@ -212,10 +215,16 @@ fn overlaps_home_store_in(home: &Path, root: &Path) -> bool {
     let Ok(root) = canonical_root(root) else {
         return false;
     };
-    let Ok(home) = canonical_root(home) else {
-        return false;
-    };
-    root.starts_with(&home) || home.starts_with(&root)
+    let overlaps = |store: &Path| root.starts_with(store) || store.starts_with(&root);
+    if canonical_root(home).is_ok_and(|reached| overlaps(&reached)) {
+        return true;
+    }
+    match (home.parent(), home.file_name()) {
+        (Some(parent), Some(name)) => {
+            canonical_root(parent).is_ok_and(|parent| overlaps(&parent.join(name)))
+        }
+        _ => false,
+    }
 }
 
 // ============================================================================

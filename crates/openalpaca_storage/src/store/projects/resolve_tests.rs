@@ -209,6 +209,47 @@ fn the_home_store_its_insides_and_the_folders_around_it_are_no_project() {
     }
 }
 
+/// R13 with a home store reached through a link (Stage 1 review R4):
+/// `~/.openalpaca` leads to another volume and `$HOME` holds a dotfiles
+/// `.git`. `$HOME`, and a folder under it with no repository of its own, stay
+/// no project, and `$HOME` cannot be chosen; choosing the folder makes it a
+/// project of its own. The store is judged as it is named — its parent
+/// resolved, its last component not followed — as well as where it leads.
+#[cfg(unix)]
+#[test]
+fn a_home_store_reached_through_a_link_keeps_the_folder_around_its_name_no_project() {
+    let tmp = tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let home = base.join("home");
+    let elsewhere = base.join("volume").join("oa");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&elsewhere).unwrap();
+    let link = home.join(".openalpaca");
+    std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+    let _guard = HomeStoreGuard::set(&link);
+    fs::create_dir(home.join(".git")).unwrap();
+    let notes = home.join("notes");
+    fs::create_dir(&notes).unwrap();
+
+    for path in [&home, &notes] {
+        assert_eq!(resolve(path).unwrap(), None, "{}", path.display());
+    }
+    let err = choose(&home).unwrap_err();
+    assert!(
+        matches!(
+            err.downcast_ref::<ProjectError>(),
+            Some(ProjectError::IsHome { .. })
+        ),
+        "{err:#}"
+    );
+    assert_eq!(
+        choose(&notes).unwrap().root,
+        notes,
+        "R10: the folder itself"
+    );
+    assert_eq!(list().unwrap().len(), 1, "$HOME was never recorded");
+}
+
 #[test]
 fn a_relative_path_is_no_project_even_where_the_working_directory_has_one() {
     let _s = Scene::new();
