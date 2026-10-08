@@ -675,6 +675,9 @@ pub struct PurgeCounts {
     pub run_events: usize,
     /// `file_assets` rows with `origin = 'upload'` addressed under this root.
     pub uploads: usize,
+    /// `file_assets` rows that are not uploads — the project's by-products —
+    /// addressed under this root and linked by no message the delete leaves.
+    pub artifacts: usize,
 }
 
 impl PurgeCounts {
@@ -1761,6 +1764,7 @@ impl<'a> ArtifactStore<'a> {
                                     OR m.session_id NOT IN
                                        (SELECT id FROM session WHERE workspace_id = ?1))",
                     )?,
+                    artifacts: 0,
                 },
                 kept: PurgeKept {
                     artifacts: count(
@@ -1954,6 +1958,7 @@ impl<'a> ArtifactStore<'a> {
                     spans,
                     run_events,
                     uploads,
+                    artifacts: 0,
                 },
                 session_ids,
                 upload_paths,

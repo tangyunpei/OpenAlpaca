@@ -1977,6 +1977,7 @@ fn purge_project_takes_the_conversations_the_runs_and_the_uploads() {
             spans: 1,
             run_events: 1,
             uploads: 1,
+            artifacts: 0,
         }
     );
     assert_eq!(outcome.session_ids, vec!["session-1".to_string()]);

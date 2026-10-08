@@ -306,5 +306,8 @@ fn stop(checkpoint: &mut dyn FnMut(RepointStep) -> bool, step: RepointStep) -> R
     }
 }
 
+mod delete;
+pub use delete::{DeletePlan, KeptFiles, delete_plan};
+
 #[cfg(test)]
 mod tests;
