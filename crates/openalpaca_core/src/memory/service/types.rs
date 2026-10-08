@@ -67,7 +67,7 @@ pub struct KnownNote {
     /// The file's revision as the verification read it — what a
     /// replacement's `expected_revision` binds.
     pub revision: String,
-    /// `home-<owner-key>` or `proj-<owner-key>-<dir-key>`.
+    /// `home-<owner-key>` or `proj-<owner-key>-<project-key>`.
     pub partition_key: String,
     pub scope: NoteScope,
     pub title: String,

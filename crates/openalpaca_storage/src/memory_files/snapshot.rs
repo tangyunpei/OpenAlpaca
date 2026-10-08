@@ -262,17 +262,45 @@ impl ControlSnapshot {
         Ok(Some(snapshot))
     }
 
-    /// Whether this snapshot is the one for the partition at `root` with
-    /// `partition_key` and `owner_key` (design §7a: a `root` that is not the
-    /// directory it was read for is invalid).
+    /// Whether this snapshot is the one for the partition with
+    /// `partition_key` and `owner_key` (design §7a). A home snapshot is
+    /// bound to its directory: `root` must be the directory it was read for,
+    /// and it carries no project id. A project snapshot is bound to its
+    /// project (storage design R18): `project_id` must be the id in the
+    /// `project.json` beside the partition's `memory/`, and `root` is not
+    /// compared — a re-point renames the folder and touches no snapshot. A
+    /// project snapshot with no id is an earlier build's (R22) and binds
+    /// nothing.
     pub fn check_binding(
         &self,
         partition_key: &str,
         owner_key: &str,
         root: &str,
+        project_id: Option<&ProjectId>,
     ) -> Result<(), String> {
-        if self.root != root {
-            return Err(format!("bound to `{}`, read for `{root}`", self.root));
+        match (project_id, self.project_id.as_ref()) {
+            (None, None) => {
+                if self.root != root {
+                    return Err(format!("bound to `{}`, read for `{root}`", self.root));
+                }
+            }
+            (None, Some(theirs)) => {
+                return Err(format!(
+                    "a home partition's snapshot names project {theirs}"
+                ));
+            }
+            (Some(ours), None) => {
+                return Err(format!(
+                    "the snapshot carries no project id (an earlier build's), read for project {ours}"
+                ));
+            }
+            (Some(ours), Some(theirs)) => {
+                if ours != theirs {
+                    return Err(format!(
+                        "bound to project {theirs}, read for project {ours}"
+                    ));
+                }
+            }
         }
         if self.partition_key != partition_key {
             return Err(format!(

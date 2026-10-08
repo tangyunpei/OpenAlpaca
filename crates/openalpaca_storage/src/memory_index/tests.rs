@@ -3170,6 +3170,38 @@ fn an_index_at_schema_4_is_rebuilt_for_the_widened_scripts() {
     assert_eq!(rows, 1, "a Devanagari body is in the trigram table");
 }
 
+/// R21 (storage design): every project partition's key changed from its
+/// directory's hash to its project id's, so a cache written at schema 5 —
+/// rows under the old keys — is recreated and rebuilt from the notes, never
+/// served.
+#[test]
+fn an_index_at_schema_5_is_rebuilt_for_the_project_id_keys() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(INDEX_FILE_NAME);
+    {
+        let index = MemoryIndex::open(&path).unwrap();
+        index
+            .rebuild(&[record(
+                "n1",
+                "Release step",
+                "Tag, then run the release script.\n",
+            )])
+            .unwrap();
+        let conn = index.lock();
+        conn.execute(
+            "UPDATE meta SET value = '5' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    }
+    let index = MemoryIndex::open(&path).unwrap();
+    let report = index.index_state().unwrap();
+    assert_eq!(SCHEMA_VERSION, 6);
+    assert_eq!(report.state, IndexState::Rebuilding);
+    assert_eq!(report.schema_version, 6);
+    assert_eq!(report.notes, 0, "nothing of the v5 cache is served");
+}
+
 /// Five dated notes a day apart, one per status the timeline shows or hides.
 fn timeline_notes(index: &MemoryIndex) {
     let mut superseded = dated("d2", "2026-06-02T00:00:00Z", None);

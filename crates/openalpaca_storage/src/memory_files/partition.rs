@@ -30,7 +30,7 @@ use super::{
     OWNERS_DIR, home_partition_key, is_owner_key, is_partition_key, is_revision, owner_key,
     project_partition_key,
 };
-use crate::store::projects;
+use crate::store::projects::{self, ProjectId};
 use crate::store::{ContentKind, StoreScope, home_root, state_dir};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -536,6 +536,10 @@ struct State {
 pub struct Partition {
     scope: StoreScope,
     scope_kind: SnapshotScope,
+    /// The project this partition belongs to (R18), read from the
+    /// `project.json` beside its `memory/` when it was opened; `None` for
+    /// the home partition.
+    project_id: Option<ProjectId>,
     owner_id: String,
     owner_key: String,
     partition_key: String,
@@ -575,7 +579,7 @@ impl std::fmt::Debug for Partition {
 pub fn snapshot_path_for(partition_key: &str) -> Result<PathBuf, MemoryFilesError> {
     if !is_partition_key(partition_key) {
         return Err(MemoryFilesError::InvalidInput(format!(
-            "`{partition_key}` is not a partition key (home-<owner-key> or proj-<owner-key>-<dir-key>)"
+            "`{partition_key}` is not a partition key (home-<owner-key> or proj-<owner-key>-<project-key>)"
         )));
     }
     Ok(home_root()?
@@ -615,24 +619,30 @@ fn scope_root(scope: &StoreScope) -> Result<(PathBuf, Vec<PathBuf>), MemoryFiles
     }
 }
 
+/// The project a scope's partition belongs to (storage design R18): `None`
+/// at home; for a project, the id in the `project.json` that records its
+/// root, or `NotRegistered` (R12) when no folder under `projects/` does. A
+/// relative root is refused by `lookup` (it has no existing ancestor).
+fn project_id_of(scope: &StoreScope) -> Result<Option<ProjectId>, MemoryFilesError> {
+    match scope {
+        StoreScope::Home => Ok(None),
+        StoreScope::Project(root) => match projects::lookup(root)? {
+            Some(project) => Ok(Some(project.id)),
+            None => Err(MemoryFilesError::NotRegistered { root: root.clone() }),
+        },
+    }
+}
+
 /// The partition key of `owner_key`'s partition in `scope` — what
 /// [`Partition::open`] derives — without opening or creating anything. For
-/// a log line that must name a partition it has not opened.
+/// a log line that must name a partition it has not opened. A project
+/// partition's key is its project id's (R18): `NotRegistered` for a root no
+/// folder under `projects/` records.
 pub fn partition_key_for(scope: &StoreScope, owner_key: &str) -> Result<String, MemoryFilesError> {
-    match scope {
-        StoreScope::Home => Ok(home_partition_key(owner_key)),
-        StoreScope::Project(_) => {
-            let (store, _) = scope_root(scope)?;
-            let root = store
-                .join(ContentKind::Memory.dir_name())
-                .join(OWNERS_DIR)
-                .join(owner_key);
-            Ok(project_partition_key(
-                owner_key,
-                &canonical_string_lenient(&root)?,
-            ))
-        }
-    }
+    Ok(match project_id_of(scope)? {
+        None => home_partition_key(owner_key),
+        Some(id) => project_partition_key(owner_key, &id),
+    })
 }
 
 fn now_seconds() -> DateTime<Utc> {
@@ -714,6 +724,7 @@ impl Partition {
         cache: Option<Arc<NoteParseCache>>,
     ) -> Result<Self, MemoryFilesError> {
         let (store, above) = scope_root(scope)?;
+        let project_id = project_id_of(scope)?;
         let memory_dir = store.join(ContentKind::Memory.dir_name());
         let owners = memory_dir.join(OWNERS_DIR);
         let root = owners.join(&key);
@@ -735,18 +746,16 @@ impl Partition {
         }
 
         let root_canonical = canonical_string_lenient(&root)?;
-        let (scope_kind, partition_key) = match scope {
-            StoreScope::Home => (SnapshotScope::Home, home_partition_key(&key)),
-            StoreScope::Project(_) => (
-                SnapshotScope::Project,
-                project_partition_key(&key, &root_canonical),
-            ),
+        let (scope_kind, partition_key) = match &project_id {
+            None => (SnapshotScope::Home, home_partition_key(&key)),
+            Some(id) => (SnapshotScope::Project, project_partition_key(&key, id)),
         };
         let snapshot_path = snapshot_path_for(&partition_key)?;
 
         let partition = Self {
             scope: scope.clone(),
             scope_kind,
+            project_id,
             owner_id: owner_id.to_string(),
             owner_key: key,
             partition_key: partition_key.clone(),
@@ -773,6 +782,7 @@ impl Partition {
                 &partition_key,
                 &partition.owner_key,
                 &partition.root_canonical,
+                partition.project_id.as_ref(),
             ) {
                 Ok(()) => Ok(Some(snapshot)),
                 Err(reason) => Err(format!("snapshot binding: {reason}")),
@@ -936,6 +946,10 @@ impl Partition {
     pub fn scope(&self) -> &StoreScope {
         &self.scope
     }
+    /// The project this partition belongs to (R18); `None` at home.
+    pub fn project_id(&self) -> Option<&ProjectId> {
+        self.project_id.as_ref()
+    }
     pub fn owner_id(&self) -> &str {
         &self.owner_id
     }
@@ -1005,6 +1019,25 @@ impl Partition {
         Ok(!self.scan()?.is_empty())
     }
 
+    /// An empty snapshot bound to this partition — for a project partition
+    /// stamped with its project id (R18). The first write and `repair`
+    /// save it; `derive_view` reads it in memory for a partition that has
+    /// none.
+    fn fresh_snapshot(&self, created_at: DateTime<Utc>) -> ControlSnapshot {
+        let fresh = ControlSnapshot::new(
+            &self.partition_key,
+            self.scope_kind,
+            &self.owner_key,
+            &self.owner_id,
+            &self.root_canonical,
+            created_at,
+        );
+        match self.project_id {
+            Some(id) => fresh.with_project_id(id),
+            None => fresh,
+        }
+    }
+
     /// Lays the partition out on the first write: `memory/` and the owner
     /// directories private (0700), and an initial empty snapshot — written
     /// last, so an interrupted layout is an empty directory the next open
@@ -1040,14 +1073,7 @@ impl Partition {
         create_private_dir(&self.root)?;
         create_private_dir(&self.notes_dir)?;
         create_private_dir(&self.history_dir)?;
-        let mut snapshot = Arc::new(ControlSnapshot::new(
-            &self.partition_key,
-            self.scope_kind,
-            &self.owner_key,
-            &self.owner_id,
-            &self.root_canonical,
-            self.now(),
-        ));
+        let mut snapshot = Arc::new(self.fresh_snapshot(self.now()));
         // `state/` itself is the store's and is created 0700 by the store,
         // never by the snapshot's `create_dir_all` with the umask default.
         state_dir()?;
@@ -1373,14 +1399,7 @@ impl Partition {
         let (snapshot, unverified) = match (&state.snapshot, &state.quarantine) {
             (Some(s), None) => (&**s, false),
             _ => {
-                empty = ControlSnapshot::new(
-                    &self.partition_key,
-                    self.scope_kind,
-                    &self.owner_key,
-                    &self.owner_id,
-                    &self.root_canonical,
-                    self.now(),
-                );
+                empty = self.fresh_snapshot(self.now());
                 (&empty, true)
             }
         };
@@ -2580,14 +2599,7 @@ impl Partition {
             .flatten()
             .map(|s| s.created_at)
             .unwrap_or(now);
-        let mut snapshot = ControlSnapshot::new(
-            &self.partition_key,
-            self.scope_kind,
-            &self.owner_key,
-            &self.owner_id,
-            &self.root_canonical,
-            created_at,
-        );
+        let mut snapshot = self.fresh_snapshot(created_at);
         snapshot.repaired_at = Some(now);
         for (_, p) in &parsed {
             snapshot.notes.insert(
@@ -2752,6 +2764,8 @@ pub fn adopt(
         owners_dir: PathBuf,
         old_snapshot: Option<(PathBuf, ControlSnapshot)>,
         scope: SnapshotScope,
+        /// A project partition's id, from its snapshot (R18).
+        project_id: Option<ProjectId>,
     }
     let mut candidates: Vec<Candidate> = Vec::new();
     let home_owners = home.join(ContentKind::Memory.dir_name()).join(OWNERS_DIR);
@@ -2769,6 +2783,7 @@ pub fn adopt(
             owners_dir: home_owners.clone(),
             old_snapshot: home_snapshot.map(|s| (home_snapshot_path.clone(), s)),
             scope: SnapshotScope::Home,
+            project_id: None,
         });
     }
     for (path, parsed) in list_snapshots()? {
@@ -2786,6 +2801,15 @@ pub fn adopt(
                 path.display()
             ))
         })?;
+        // R22: an earlier build's project snapshot carries no project id; it
+        // has no key in this build and is never adopted. The doctor lists it.
+        let Some(project_id) = snapshot.project_id else {
+            tracing::info!(
+                path = %path.display(),
+                "memory adopt: left alone a project snapshot with no project id (an earlier build's)"
+            );
+            continue;
+        };
         let Some(owners_dir) = Path::new(&snapshot.root).parent().map(Path::to_path_buf) else {
             continue;
         };
@@ -2793,6 +2817,7 @@ pub fn adopt(
             owners_dir,
             old_snapshot: Some((path, snapshot)),
             scope: SnapshotScope::Project,
+            project_id: Some(project_id),
         });
     }
     if candidates.is_empty() {
@@ -2810,11 +2835,9 @@ pub fn adopt(
                 target_dir.display()
             )));
         }
-        let new_partition_key = match c.scope {
-            SnapshotScope::Home => home_partition_key(&new_key),
-            SnapshotScope::Project => {
-                project_partition_key(&new_key, &canonical_string_lenient(&target_dir)?)
-            }
+        let new_partition_key = match &c.project_id {
+            None => home_partition_key(&new_key),
+            Some(id) => project_partition_key(&new_key, id),
         };
         let new_snapshot_path = control.join(format!("{new_partition_key}.json"));
         if new_snapshot_path.exists() {
@@ -2841,9 +2864,9 @@ pub fn adopt(
             fsync_dir(&c.owners_dir)?;
         }
         let root_canonical = canonical_string_lenient(&new_dir)?;
-        let new_partition_key = match c.scope {
-            SnapshotScope::Home => home_partition_key(&new_key),
-            SnapshotScope::Project => project_partition_key(&new_key, &root_canonical),
+        let new_partition_key = match &c.project_id {
+            None => home_partition_key(&new_key),
+            Some(id) => project_partition_key(&new_key, id),
         };
         let mut snapshot = match &c.old_snapshot {
             Some((_, s)) => s.clone(),
@@ -2860,6 +2883,7 @@ pub fn adopt(
         snapshot.owner_key = new_key.clone();
         snapshot.owner_id = current_owner_id.to_string();
         snapshot.root = root_canonical;
+        snapshot.project_id = c.project_id;
         snapshot.save(&control.join(format!("{new_partition_key}.json")), now)?;
         if let Some((old_path, _)) = &c.old_snapshot {
             remove_file_if_exists(old_path)?;

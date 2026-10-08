@@ -608,7 +608,7 @@ pub enum SystemEvent {
     /// behind its back (`change: external`, no `surface`; §7b P13). Bridged
     /// to `ServerEvent::MemoryChanged`; persisted nowhere.
     MemoryChanged {
-        /// `home-<owner-key>` or `proj-<owner-key>-<dir-key>` (design §2).
+        /// `home-<owner-key>` or `proj-<owner-key>-<project-key>` (design §2).
         partition_key: String,
         note_id: String,
         /// `created | updated | archived | confirmed | forgotten | external`.

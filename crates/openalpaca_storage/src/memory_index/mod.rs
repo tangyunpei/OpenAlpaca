@@ -71,6 +71,9 @@ pub const INDEX_FILE_NAME: &str = "memory-index-v1.sqlite";
 /// scripts whose words `unicode61` breaks at their vowel signs (Devanagari
 /// and the rest) and to Tibetan, Yi and the other scripts written without
 /// spaces, so their bodies are in `fts_tri` again.
+/// Version 6 (storage design R21) changes no table: every project
+/// partition's key went from its directory's hash to its project id's
+/// (R18), so the rows of a version-5 cache sit under keys nothing reads.
 ///
 /// **It versions what a row holds, not only the tables.** Since scale slice
 /// S1 the service re-indexes a note only when its bytes, its file's stat or
@@ -84,7 +87,7 @@ pub const INDEX_FILE_NAME: &str = "memory-index-v1.sqlite";
 /// `fts_tri` hold — must bump this too, or the old rows are served for
 /// good; the bump is what re-derives every row, by a rebuild off the
 /// request path.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 /// Design §4: a note is at most 32 KiB. A larger body is refused by
 /// [`MemoryIndex::upsert`] so the cache stays bounded by what `memory_files`
 /// would have written.
@@ -240,7 +243,7 @@ pub struct IndexRecord {
     pub id: String,
     /// The revision the caller read the file at — 64 lowercase hex.
     pub revision: String,
-    /// `home-<owner-key>` or `proj-<owner-key>-<dir-key>` (design §2).
+    /// `home-<owner-key>` or `proj-<owner-key>-<project-key>` (design §2; storage design R18).
     pub partition_key: String,
     /// `global` or `project` — reported on every hit.
     pub scope: String,

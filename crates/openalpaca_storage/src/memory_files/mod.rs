@@ -72,6 +72,7 @@ pub use snapshot::{
     Tombstone, snapshot_loads_on_this_thread,
 };
 
+use crate::store::projects::ProjectId;
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::path::PathBuf;
@@ -107,8 +108,10 @@ pub const CONTROL_DIR: &str = "memory-control";
 /// The owner key is the first 32 lowercase hex characters of SHA-256 over the
 /// UTF-8 bytes of the owner id (design §2).
 pub const OWNER_KEY_HEX: usize = 32;
-/// The directory key is the first 16 lowercase hex characters of SHA-256 over
-/// the canonical partition directory string (design §2).
+/// The project key is the first 16 lowercase hex characters of SHA-256 over
+/// the project's id (storage design R18). The name is kept from when it
+/// hashed the partition directory; the length is unchanged, so
+/// `is_partition_key` and `snapshot_path_for` hold as they were.
 pub const DIR_KEY_HEX: usize = 16;
 
 // ============================================================================
@@ -153,12 +156,13 @@ pub fn owner_key(owner_id: &str) -> String {
     key
 }
 
-/// The directory key of a project partition: the first [`DIR_KEY_HEX`]
-/// characters of `sha256_hex` over the **canonical** partition directory
-/// string (`…/.openalpaca/memory/owners/<owner-key>` after `canonicalize()`,
-/// hashed as the platform returns it).
-pub fn dir_key(canonical_partition_dir: &str) -> String {
-    let mut key = sha256_hex(canonical_partition_dir.as_bytes());
+/// The project key of a project partition (storage design R18): the first
+/// [`DIR_KEY_HEX`] characters of `sha256_hex` over the project's id in its
+/// canonical form — the id in `projects/<name>/project.json`, which a
+/// re-point never changes, so a partition keeps its key, its snapshot and
+/// its index rows when its project moves.
+pub fn project_key(project_id: &ProjectId) -> String {
+    let mut key = sha256_hex(project_id.to_string().as_bytes());
     key.truncate(DIR_KEY_HEX);
     key
 }
@@ -168,9 +172,9 @@ pub fn home_partition_key(owner_key: &str) -> String {
     format!("home-{owner_key}")
 }
 
-/// `proj-<owner-key>-<dir-key>`.
-pub fn project_partition_key(owner_key: &str, canonical_partition_dir: &str) -> String {
-    format!("proj-{owner_key}-{}", dir_key(canonical_partition_dir))
+/// `proj-<owner-key>-<project-key>`.
+pub fn project_partition_key(owner_key: &str, project_id: &ProjectId) -> String {
+    format!("proj-{owner_key}-{}", project_key(project_id))
 }
 
 /// Whether `s` is exactly `len` lowercase hex characters.
@@ -194,8 +198,9 @@ pub fn is_owner_key(s: &str) -> bool {
 }
 
 /// Whether `s` has the shape of a partition key — `home-<owner-key>` or
-/// `proj-<owner-key>-<dir-key>` (design §2). What [`snapshot_path_for`]
-/// checks before joining a key into `state/memory-control/`.
+/// `proj-<owner-key>-<project-key>` (design §2, storage design R18). What
+/// [`snapshot_path_for`] checks before joining a key into
+/// `state/memory-control/`.
 pub fn is_partition_key(s: &str) -> bool {
     if let Some(owner) = s.strip_prefix("home-") {
         return is_owner_key(owner);

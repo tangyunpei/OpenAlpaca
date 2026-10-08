@@ -486,7 +486,7 @@ pub enum ServerEvent {
     /// nowhere (`events/persistence.rs` answers `Ok(0)`), like
     /// `daemon_shutting_down`.
     MemoryChanged {
-        /// `home-<owner-key>` or `proj-<owner-key>-<dir-key>` (design §2).
+        /// `home-<owner-key>` or `proj-<owner-key>-<project-key>` (design §2).
         partition_key: String,
         note_id: String,
         /// `created | updated | archived | confirmed | forgotten | external`.

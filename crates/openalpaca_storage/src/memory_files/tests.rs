@@ -77,18 +77,23 @@ fn partition_keys_have_the_design_shape() {
         home_partition_key(&owner),
         "home-32acea7eb739b08afd959db91e46d450"
     );
-    let dir = "/tmp/x/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450";
-    let key = project_partition_key(&owner, dir);
-    assert!(key.starts_with("proj-32acea7eb739b08afd959db91e46d450-"));
+    // R18: a project partition is keyed by its project id, never by the
+    // directory it lies in.
+    let id = ProjectId::parse("7d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d").unwrap();
+    let key = project_partition_key(&owner, &id);
+    let tail = key
+        .strip_prefix("proj-32acea7eb739b08afd959db91e46d450-")
+        .expect("proj-<owner-key>-");
+    assert_eq!(tail, project_key(&id));
+    let mut want = sha256_hex(b"7d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d");
+    want.truncate(DIR_KEY_HEX);
+    assert_eq!(project_key(&id), want);
     assert_eq!(key.len(), "proj-".len() + OWNER_KEY_HEX + 1 + DIR_KEY_HEX);
-    assert_eq!(&key["proj-".len() + OWNER_KEY_HEX + 1..], dir_key(dir));
-    assert_eq!(dir_key(dir), &sha256_hex(dir.as_bytes())[..DIR_KEY_HEX]);
-    // Two different directories, two different keys; the same one, the same.
-    assert_ne!(
-        dir_key(dir),
-        dir_key("/tmp/y/.openalpaca/memory/owners/abc")
-    );
-    assert_eq!(project_partition_key(&owner, dir), key);
+    assert!(is_partition_key(&key));
+    // Two projects, two keys; one project, one key.
+    let other = ProjectId::parse("0f1e2d3c-4b5a-4968-8776-655443322110").unwrap();
+    assert_ne!(project_key(&id), project_key(&other));
+    assert_eq!(project_partition_key(&owner, &id), key);
 }
 
 #[test]
@@ -691,16 +696,20 @@ fn a_snapshot_as_todays_build_writes_it_loads_and_binds() {
     assert!(home_example.contains("\"moved_from\": null"));
     assert!(!home_example.contains("project_id"));
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("home-3f9a1c2d4e5b6a7f8091a2b3c4d5e6f7.json");
+    let path = dir
+        .path()
+        .join("home-3f9a1c2d4e5b6a7f8091a2b3c4d5e6f7.json");
     std::fs::write(&path, &home_example).unwrap();
-    let loaded = ControlSnapshot::load(&path).unwrap().expect("the file is there");
+    let loaded = ControlSnapshot::load(&path)
+        .unwrap()
+        .expect("the file is there");
     assert_eq!(SNAPSHOT_SCHEMA, 1);
     assert_eq!(loaded.schema, SNAPSHOT_SCHEMA);
     assert_eq!(loaded.project_id, None);
     assert_eq!(loaded.moved_from, None);
     assert!(
         loaded
-            .check_binding(&loaded.partition_key, &loaded.owner_key, &loaded.root)
+            .check_binding(&loaded.partition_key, &loaded.owner_key, &loaded.root, None)
             .is_ok()
     );
     let written = loaded.to_json();
@@ -799,24 +808,61 @@ fn snapshot_save_is_atomic_private_and_compacts() {
     assert!(stray.is_empty(), "no temp file is left behind");
 }
 
+/// R18: a project snapshot binds by its project id and never compares its
+/// recorded `root`; one with no id (an earlier build's, R22) binds nothing.
+/// A home snapshot binds by its directory and carries no id. The key and
+/// the owner key are checked either way.
 #[test]
 fn snapshot_binding_is_checked() {
-    let snapshot: ControlSnapshot = serde_json::from_str(SNAPSHOT_EXAMPLE).unwrap();
+    let id = ProjectId::parse("7d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d").unwrap();
+    let other = ProjectId::parse("0f1e2d3c-4b5a-4968-8776-655443322110").unwrap();
+    let earlier: ControlSnapshot = serde_json::from_str(SNAPSHOT_EXAMPLE).unwrap();
+    let project = earlier.clone().with_project_id(id);
+    let key = project.partition_key.clone();
+    let owner = project.owner_key.clone();
+
     assert!(
-        snapshot
-            .check_binding(&snapshot.partition_key, &snapshot.owner_key, &snapshot.root)
+        project
+            .check_binding(&key, &owner, &project.root, Some(&id))
             .is_ok()
     );
     assert!(
-        snapshot
-            .check_binding(&snapshot.partition_key, &snapshot.owner_key, "/elsewhere")
+        project
+            .check_binding(&key, &owner, "/elsewhere", Some(&id))
+            .is_ok(),
+        "a project snapshot's root is not compared"
+    );
+    let err = project
+        .check_binding(&key, &owner, &project.root, Some(&other))
+        .unwrap_err();
+    assert!(err.contains("bound to project"), "{err}");
+    let err = earlier
+        .check_binding(&key, &owner, &earlier.root, Some(&id))
+        .unwrap_err();
+    assert!(err.contains("earlier build"), "{err}");
+
+    // The home arm, on a copy that still carries the example's `proj-…` key:
+    // the key is compared with the one passed, never parsed for its scope.
+    let mut home = earlier.clone();
+    home.scope = SnapshotScope::Home;
+    assert!(home.check_binding(&key, &owner, &home.root, None).is_ok());
+    assert!(
+        home.check_binding(&key, &owner, "/elsewhere", None)
             .is_err()
     );
     assert!(
-        snapshot
-            .check_binding("home-x", &snapshot.owner_key, &snapshot.root)
+        project
+            .check_binding(&key, &owner, &project.root, None)
+            .is_err(),
+        "a snapshot carrying an id is no home snapshot"
+    );
+
+    assert!(
+        project
+            .check_binding("home-x", &owner, &project.root, Some(&id))
             .is_err()
     );
+    assert!(home.check_binding(&key, "x", &home.root, None).is_err());
 }
 
 #[test]
@@ -3633,6 +3679,239 @@ fn snapshot_path_for_refuses_a_key_that_is_not_a_partition_key() {
     assert!(!control.exists(), "a path query creates nothing");
 }
 
+/// R18: a project partition is keyed by its project id, carries the id in
+/// its snapshot from the first write, and says which project it belongs to;
+/// the home partition carries none, and its snapshot file has no
+/// `project_id` key.
+#[test]
+fn a_project_partition_is_keyed_and_stamped_by_its_project_id() {
+    let sb = Sandbox::new();
+    let project = crate::store::projects::register(&sb.project_root()).unwrap();
+    let want = project_partition_key(&owner_key(ALICE), &project.id);
+    assert_eq!(
+        partition_key_for(&sb.project_scope(), &owner_key(ALICE)).unwrap(),
+        want
+    );
+    let p = sb.open_project(ALICE).unwrap();
+    assert_eq!(p.partition_key(), want);
+    assert_eq!(p.project_id(), Some(&project.id));
+    p.create(
+        new_note("Release", "# Release\n\nTag first.\n", NoteKind::Procedure),
+        Actor::UserSurface,
+    )
+    .unwrap();
+    let snapshot = p.snapshot().unwrap();
+    assert_eq!(snapshot.partition_key, want);
+    assert_eq!(snapshot.project_id, Some(project.id));
+    let on_disk = std::fs::read_to_string(p.snapshot_path()).unwrap();
+    assert!(
+        on_disk.contains(&format!("\"project_id\": \"{}\"", project.id)),
+        "{on_disk}"
+    );
+
+    let home = sb.open_home(ALICE);
+    home.create(
+        new_note("Editor", "# Editor\n\nvim\n", NoteKind::Preference),
+        Actor::UserSurface,
+    )
+    .unwrap();
+    assert_eq!(home.project_id(), None);
+    assert_eq!(home.snapshot().unwrap().project_id, None);
+    assert!(
+        !std::fs::read_to_string(home.snapshot_path())
+            .unwrap()
+            .contains("project_id")
+    );
+}
+
+/// R18, R22: a project snapshot that names another project, or none (an
+/// earlier build's), quarantines the partition with a reason naming which;
+/// `doctor --repair` rebuilds it stamped with the project's own id, and the
+/// partition serves its note again.
+#[test]
+fn a_project_snapshot_bound_elsewhere_is_quarantined_and_repair_stamps_the_id() {
+    let sb = Sandbox::new();
+    let project = crate::store::projects::register(&sb.project_root()).unwrap();
+    let p = sb.open_project(ALICE).unwrap();
+    let created = p
+        .create(
+            new_note("Release", "# Release\n\nTag first.\n", NoteKind::Procedure),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let path = p.snapshot_path().to_path_buf();
+    drop(p);
+    for (stamp, needle) in [
+        (Some(ProjectId::new()), "bound to project"),
+        (None, "earlier build"),
+    ] {
+        let mut s = ControlSnapshot::load(&path).unwrap().unwrap();
+        s.project_id = stamp;
+        s.save(&path, ts(2026, 9, 24, 0, 0, 0)).unwrap();
+        let reopened = sb.open_project(ALICE).unwrap();
+        match reopened.health() {
+            PartitionHealth::Quarantined(reason) => {
+                assert!(reason.contains(needle), "{needle}: {reason}")
+            }
+            other => panic!("{needle}: {other:?}"),
+        }
+        let report = reopened.repair(&owner_key(ALICE)).unwrap();
+        assert!(report.rebuilt, "{needle}");
+        assert_eq!(reopened.snapshot().unwrap().project_id, Some(project.id));
+        assert_eq!(reopened.health(), PartitionHealth::Ready);
+        assert!(reopened.read(&created.id).is_ok(), "{needle}");
+    }
+}
+
+/// R18 with S3's re-point: the project's folder under `projects/` is
+/// renamed and no snapshot is touched — the partition keeps its key, its
+/// snapshot file byte for byte, and its note, read at the new path. The old
+/// path is no project any more.
+#[test]
+fn a_repointed_project_partition_keeps_its_key_snapshot_and_notes() {
+    let sb = Sandbox::new();
+    let project = crate::store::projects::register(&sb.project_root()).unwrap();
+    let p = sb.open_project(ALICE).unwrap();
+    let note = p
+        .create(
+            new_note("Release", "# Release\n\nTag first.\n", NoteKind::Procedure),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let key = p.partition_key().to_string();
+    let snapshot_file = p.snapshot_path().to_path_buf();
+    let before = std::fs::read(&snapshot_file).unwrap();
+    drop(p);
+
+    let db = crate::Database::open(&sb.outside.path().join("db.sqlite")).unwrap();
+    let moved = sb.outside.path().join("moved");
+    std::fs::create_dir(&moved).unwrap();
+    let moved = moved.canonicalize().unwrap();
+    crate::project_life::repoint(&db, &sb.project_root(), &moved).unwrap();
+
+    let at_new = Partition::open(&StoreScope::Project(moved.clone()), ALICE).unwrap();
+    assert_eq!(at_new.partition_key(), key);
+    assert_eq!(at_new.project_id(), Some(&project.id));
+    assert_eq!(at_new.health(), PartitionHealth::Ready);
+    let read = at_new.read(&note.id).unwrap();
+    assert_eq!(read.revision, note.revision);
+    assert!(read.derived.recorded);
+    assert_eq!(
+        std::fs::read(&snapshot_file).unwrap(),
+        before,
+        "a re-point touches no snapshot"
+    );
+    assert!(
+        matches!(
+            Partition::open(&sb.project_scope(), ALICE),
+            Err(MemoryFilesError::NotRegistered { .. })
+        ),
+        "the old path is no project any more"
+    );
+}
+
+/// R24 with R18: a re-point stopped after any of its first three steps is
+/// finished by the next boot's recovery, and the partition comes through
+/// under the same key, Ready, serving its note at the same revision.
+#[test]
+fn a_repoint_interrupted_after_any_step_keeps_the_partition_once_recovered() {
+    use crate::project_life::{RepointStep, recover_repoints, repoint_with};
+    for stop in [
+        RepointStep::Marked,
+        RepointStep::RowsRewritten,
+        RepointStep::Renamed,
+    ] {
+        let sb = Sandbox::new();
+        crate::store::projects::register(&sb.project_root()).unwrap();
+        let p = sb.open_project(ALICE).unwrap();
+        let note = p
+            .create(
+                new_note("Release", "# Release\n\nTag first.\n", NoteKind::Procedure),
+                Actor::UserSurface,
+            )
+            .unwrap();
+        let key = p.partition_key().to_string();
+        drop(p);
+        let db = crate::Database::open(&sb.outside.path().join("db.sqlite")).unwrap();
+        let moved = sb.outside.path().join("moved");
+        std::fs::create_dir(&moved).unwrap();
+        let moved = moved.canonicalize().unwrap();
+
+        let stopped = repoint_with(&db, &sb.project_root(), &moved, &mut |step| step != stop);
+        assert!(stopped.is_err(), "{stop:?}: the hook stopped it");
+        let report = recover_repoints(&db);
+        assert_eq!(
+            report.finished,
+            std::slice::from_ref(&moved),
+            "{stop:?}: {report:?}"
+        );
+        assert!(report.failed.is_empty(), "{stop:?}: {report:?}");
+
+        let at_new = Partition::open(&StoreScope::Project(moved.clone()), ALICE).unwrap();
+        assert_eq!(at_new.partition_key(), key, "{stop:?}");
+        assert_eq!(at_new.health(), PartitionHealth::Ready, "{stop:?}");
+        assert_eq!(
+            at_new.read(&note.id).unwrap().revision,
+            note.revision,
+            "{stop:?}"
+        );
+    }
+}
+
+/// R22: a project snapshot an earlier build wrote — keyed by its directory,
+/// no project id — is left where it is: `adopt` neither renames it nor
+/// refuses because of it, and adopts everything else.
+#[test]
+fn adopt_leaves_an_earlier_builds_idless_project_snapshot_in_place() {
+    let sb = Sandbox::new();
+    crate::store::projects::register(&sb.project_root()).unwrap();
+    let home = sb.open_home(ALICE);
+    home.create(
+        new_note("Home note", "# H\n", NoteKind::Preference),
+        Actor::UserSurface,
+    )
+    .unwrap();
+    let project = sb.open_project(ALICE).unwrap();
+    project
+        .create(
+            new_note("Project note", "# P\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    drop((home, project));
+    let earlier_key = format!("proj-{}-0123456789abcdef", owner_key(ALICE));
+    let earlier_path = snapshot_path_for(&earlier_key).unwrap();
+    let earlier_root = sb
+        .project_root()
+        .join(".openalpaca/memory/owners")
+        .join(owner_key(ALICE));
+    ControlSnapshot::new(
+        &earlier_key,
+        SnapshotScope::Project,
+        owner_key(ALICE),
+        ALICE,
+        earlier_root.to_string_lossy(),
+        ts(2026, 9, 20, 0, 0, 0),
+    )
+    .save(&earlier_path, ts(2026, 9, 20, 0, 0, 0))
+    .unwrap();
+    let before = std::fs::read(&earlier_path).unwrap();
+
+    let reborn = "u_example_alice_reborn";
+    let adopted = adopt(&owner_key(ALICE), reborn, ts(2026, 9, 24, 0, 0, 0)).unwrap();
+    assert_eq!(adopted.len(), 2, "{adopted:?}");
+    assert!(adopted.contains(&format!("home-{}", owner_key(reborn))));
+    assert!(
+        adopted.iter().all(|k| !k.ends_with("-0123456789abcdef")),
+        "{adopted:?}"
+    );
+    assert_eq!(
+        std::fs::read(&earlier_path).unwrap(),
+        before,
+        "left byte for byte"
+    );
+}
+
 #[test]
 fn move_snapshots_are_classified_stale_abandoned_or_orphaned() {
     let dir = tempdir().unwrap();
@@ -3751,7 +4030,7 @@ fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing(
         .join(owner_key(ALICE))
         .to_string_lossy()
         .into_owned();
-    twin.partition_key = project_partition_key(&owner_key(ALICE), &twin.root);
+    twin.partition_key = project_partition_key(&owner_key(ALICE), &ProjectId::new());
     twin.moved_from = Some(old.partition_key.clone());
     twin.save(
         &snapshot_path_for(&twin.partition_key).unwrap(),
