@@ -939,7 +939,7 @@ pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
         }
     }
 
-    for (item, plan) in planned {
+    for (n, (item, plan)) in planned.into_iter().enumerate() {
         // §2.5's table: the file layer applies it (S1, S2) — an automatic
         // replacement of a learned note, a suggestion for one the user
         // saved, edited by hand or imported, and an inferred candidate that
@@ -985,6 +985,7 @@ pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
             provenance: Some(provenance),
             ..Default::default()
         };
+        (job.hooks.before_store)(n);
         match job.service.store(&job.ctx, input) {
             Ok(out) if out.dedup == Dedup::Existing => counts.deduplicated += 1,
             Ok(out) => {
@@ -1009,6 +1010,10 @@ pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
             {
                 counts.dropped_conflict += 1;
             }
+            // Also a project that went between two items (R19): the
+            // service refuses a note meant for it as `Internal`, so the
+            // chunk holds and the next flush's check decides — learned at
+            // the new root after a re-point, dropped after a delete.
             Err(e @ (MemoryError::Internal(_) | MemoryError::Quarantined { .. })) => {
                 return (counts, StoreEnd::Held(e.to_string()));
             }

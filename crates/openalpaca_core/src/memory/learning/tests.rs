@@ -1237,6 +1237,7 @@ async fn a_cancelled_flush_still_advances_after_its_store_loop() {
             go_rx.lock().unwrap().recv().unwrap();
         }),
         skip_advance: false,
+        ..StoreHooks::default()
     });
     let queue = scene.queue.clone();
     let session = s.clone();
@@ -1772,6 +1773,91 @@ async fn a_project_left_marked_mid_repoint_holds_its_turns_until_the_repoint_fin
             "{step:?}: {notes:?}"
         );
     }
+}
+
+/// R19 (the final fix wave): the project is re-pointed between two items
+/// of a flush's store loop — after the check right before the first write
+/// found it registered. The first item is written into the project; the
+/// second's context still names the old root, which no folder records now,
+/// and used to be filed in the home partition. The service refuses it, the
+/// chunk holds with the cursor where it was, and the next flush reads the
+/// rows the re-point rewrote and learns the rest into the project at its
+/// new root — nothing at home.
+#[tokio::test]
+async fn a_project_repointed_between_two_items_holds_the_chunk_and_learns_at_its_new_root() {
+    let both = || {
+        items(&[
+            item(
+                "Release day",
+                "The project ships on Tuesdays.",
+                "fact",
+                "user",
+                &[1],
+            ),
+            item(
+                "Build command",
+                "The project builds with make.",
+                "procedure",
+                "user",
+                &[1],
+            ),
+        ])
+    };
+    let model = Scripted::new(vec![both(), both()]);
+    let scene = Scene::with(model.clone(), DaemonConfig::default());
+    let (_old_dir, old) = project();
+    let (_new_dir, new) = project();
+    let s = scene.session();
+    let (_, answer) = scene.turn_in(
+        &s,
+        "This project ships on Tuesdays and builds with make.",
+        "Noted.",
+        Some(&old.to_string_lossy()),
+    );
+    let before = scene.cursor(&s);
+    let db = scene.db.clone();
+    let (from, to) = (old.clone(), new.clone());
+    scene.queue.set_store_hooks(StoreHooks {
+        before_store: Arc::new(move |n| {
+            if n == 1 {
+                openalpaca_storage::project_life::repoint(&db, &from, &to).unwrap();
+            }
+        }),
+        ..StoreHooks::default()
+    });
+
+    let held = scene.queue.flush_session(&s).await;
+    assert_eq!(model.calls(), 1, "{held:?}");
+    assert_eq!(held.stored, 1, "the first item was written: {held:?}");
+    assert_eq!(held.failed, 0, "{held:?}");
+    assert_eq!(held.stopped, Some(FlushStop::StoreError), "{held:?}");
+    assert_eq!(scene.cursor(&s), before, "the cursor holds the chunk");
+    assert!(
+        scene.active().is_empty(),
+        "nothing was filed at home: {:?}",
+        scene.active()
+    );
+
+    scene.queue.set_store_hooks(StoreHooks::default());
+    let learned = scene.queue.flush_session(&s).await;
+    assert_eq!(model.calls(), 2, "{learned:?}");
+    assert_eq!(learned.stopped, None, "{learned:?}");
+    assert_eq!(scene.cursor(&s), answer);
+    let mut at_new: Vec<(String, NoteScope)> = scene
+        .list(&scene.ctx_in(Some(&new)), None)
+        .into_iter()
+        .map(|i| (i.title, i.scope))
+        .collect();
+    at_new.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        at_new,
+        vec![
+            ("Build command".to_string(), NoteScope::Project),
+            ("Release day".to_string(), NoteScope::Project),
+        ],
+        "both learned into the project at its new root, once each"
+    );
+    assert!(scene.active().is_empty(), "and nothing at home");
 }
 
 // ── Long text (§1.2, §1.6, ruling LR21) ─────────────────────────────────

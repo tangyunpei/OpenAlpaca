@@ -96,6 +96,13 @@ pub struct MemoryAccessContext {
     /// registered project or folder holding `.git`); `None` = the global
     /// partition only.
     pub project_root: Option<PathBuf>,
+    /// A stored root ([`WorkspaceHint::Root`]) that no folder under
+    /// `projects/` recorded when this context was built — its project was
+    /// re-pointed or had its data deleted after the request resolved it.
+    /// `project_root` is then what that path resolves to afresh, so reads go
+    /// on (design §3); a write meant for the project is refused instead of
+    /// landing at home or in a project around it (the final fix wave's R19).
+    pub(crate) stale_root: Option<PathBuf>,
     /// Who is asking. Set by the constructor, never by a caller.
     pub surface: Surface,
     /// What this call may do.
@@ -126,7 +133,8 @@ pub enum WorkspaceHint<'a> {
     None,
     /// A root a turn resolved or a row stored
     /// (`ToolContext.request_workspace_root`, R22): used as given when it is
-    /// a registered project's root, otherwise resolved as a fresh path.
+    /// a registered project's root, otherwise resolved as a fresh path for
+    /// reads and reported stale for writes (R19).
     Root(&'a Path),
     /// A directory the request named (the `x-workspace-path` header, a CLI's
     /// CWD): resolved from it.
@@ -138,21 +146,44 @@ pub enum WorkspaceHint<'a> {
 /// registered project or folder holding `.git`, registered or not; whether a
 /// partition can open there is decided where it opens. A path under neither,
 /// a relative path and the home store with its insides and the folders
-/// around it (R13) are global. If `projects/` cannot be read, a stored root
-/// is kept as given, so the write it carries fails where its partition opens
+/// around it (R13) are global. A stored root that no folder under
+/// `projects/` records is resolved afresh like a client path — reads go on
+/// with what it resolves to, and [`resolve_hint`] reports it stale so a
+/// write is refused (R19). If `projects/` cannot be read, a stored root is
+/// kept as given, so the write it carries fails where its partition opens
 /// instead of landing in the global partition, and a client path scopes no
 /// project.
 pub fn resolve_project_root(hint: WorkspaceHint<'_>) -> Option<PathBuf> {
+    resolve_hint(hint).project_root
+}
+
+/// What a hint resolves to (storage design §3).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct HintResolution {
+    /// [`resolve_project_root`]'s answer.
+    pub project_root: Option<PathBuf>,
+    /// The stored root itself, when it was a [`WorkspaceHint::Root`] whose
+    /// lookup found no folder recording it ([`MemoryAccessContext::stale_root`]).
+    pub stale_root: Option<PathBuf>,
+}
+
+/// [`resolve_project_root`], with the stored root it found stale.
+pub(super) fn resolve_hint(hint: WorkspaceHint<'_>) -> HintResolution {
     use openalpaca_storage::store::projects;
     match hint {
-        WorkspaceHint::None => None,
+        WorkspaceHint::None => HintResolution::default(),
         WorkspaceHint::Root(root) if root.is_absolute() => {
-            let found = match projects::lookup(root) {
-                Ok(Some(project)) => return Some(project.root),
-                Ok(None) => projects::resolve(root),
-                Err(e) => Err(e),
+            let (found, stale_root) = match projects::lookup(root) {
+                Ok(Some(project)) => {
+                    return HintResolution {
+                        project_root: Some(project.root),
+                        stale_root: None,
+                    };
+                }
+                Ok(None) => (projects::resolve(root), Some(root.to_path_buf())),
+                Err(e) => (Err(e), None),
             };
-            match found {
+            let project_root = match found {
                 Ok(found) => found.map(|r| r.root),
                 Err(e) => {
                     tracing::debug!(
@@ -161,19 +192,26 @@ pub fn resolve_project_root(hint: WorkspaceHint<'_>) -> Option<PathBuf> {
                     );
                     Some(root.to_path_buf())
                 }
+            };
+            HintResolution {
+                project_root,
+                stale_root,
             }
         }
         // A relative stored root is no project (R22).
-        WorkspaceHint::Root(_) => None,
-        WorkspaceHint::Path(path) => match projects::resolve(path) {
-            Ok(found) => found.map(|r| r.root),
-            Err(e) => {
-                tracing::debug!(
-                    path = %path.display(),
-                    "resolving a memory workspace failed, so it scopes no project: {e:#}"
-                );
-                None
-            }
+        WorkspaceHint::Root(_) => HintResolution::default(),
+        WorkspaceHint::Path(path) => HintResolution {
+            project_root: match projects::resolve(path) {
+                Ok(found) => found.map(|r| r.root),
+                Err(e) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        "resolving a memory workspace failed, so it scopes no project: {e:#}"
+                    );
+                    None
+                }
+            },
+            stale_root: None,
         },
     }
 }

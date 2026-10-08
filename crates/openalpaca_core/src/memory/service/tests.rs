@@ -398,13 +398,17 @@ fn a_directory_with_no_marker_is_global_only() {
     );
 }
 
-/// R12: a git repository no turn has registered has no project partition.
-/// Its context still names the root, but the service reads it as an empty
-/// project, and a note whose kind defaults to the project lands in the home
-/// partition. Nothing is created for the repository, and the service
-/// registers nothing — only the daemon's turns and routes do.
+/// R12, and the final fix wave's R19 for a writer: a git repository no turn
+/// has registered has no project partition, so its context reads as an
+/// empty project — but a note whose kind defaults to the project is
+/// refused rather than written into the home partition, as storage's
+/// `NotRegistered` says a writer must ("a writer reports it"). In
+/// production every turn's root is registered before the turn runs, so
+/// only a root that went stale meets this. Nothing is created for the
+/// repository, the service registers nothing, and a preference — global by
+/// kind — still lands at home.
 #[test]
-fn a_note_stored_from_an_unregistered_repository_lands_in_the_home_partition() {
+fn a_note_stored_from_an_unregistered_repository_is_refused_not_filed_at_home() {
     let h = Harness::new();
     let repo = h.root.path().join("ws").join("unused-repo");
     fs::create_dir_all(repo.join(".git")).unwrap();
@@ -412,10 +416,27 @@ fn a_note_stored_from_an_unregistered_repository_lands_in_the_home_partition() {
     let ctx = h.tool(ALICE, Some(&repo));
     assert_eq!(ctx.project_root.as_deref(), Some(repo.as_path()));
 
-    let fact = h.store(&ctx, "Build", "# Build\n\nRun make.\n", NoteKind::Fact);
+    let err = h
+        .service
+        .store(
+            &ctx,
+            StoreInput {
+                title: "Build".into(),
+                body: "# Build\n\nRun make.\n".into(),
+                kind: Some(NoteKind::Fact),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "io", "{err}");
+    assert!(
+        err.to_string().contains(&repo.display().to_string()),
+        "{err}"
+    );
+    assert!(home_ids(&h).is_empty(), "nothing was written at home");
 
-    assert_eq!(fact.scope, NoteScope::Global);
-    assert!(note_file_for(&h.home_notes_dir(ALICE_KEY), fact.id).is_some());
+    let preference = h.store(&ctx, "Editor", "# Editor\n\nvim.\n", NoteKind::Preference);
+    assert_eq!(preference.scope, NoteScope::Global);
     assert!(!repo.join(".openalpaca").exists());
     assert!(
         !h.home().join("projects").exists(),
@@ -423,8 +444,174 @@ fn a_note_stored_from_an_unregistered_repository_lands_in_the_home_partition() {
     );
     assert_eq!(
         h.list_ids(&ctx, ListInput::default()),
-        HashSet::from([fact.id])
+        HashSet::from([preference.id])
     );
+}
+
+/// What a turn's tools carry: its owner and the project root it resolved
+/// when it began. Each tool call builds its memory context from this anew.
+fn turn_in(root: &Path) -> ToolContext {
+    ToolContext {
+        principal: Some(Principal::User {
+            global_id: ALICE.into(),
+        }),
+        request_workspace_root: Some(root.to_string_lossy().into_owned()),
+        ..Default::default()
+    }
+}
+
+/// A store with no `scope` from a tool call's context.
+fn unscoped(title: &str, kind: NoteKind) -> StoreInput {
+    StoreInput {
+        title: title.into(),
+        body: format!("# {title}\n\nSomething about the project.\n"),
+        kind: Some(kind),
+        ..Default::default()
+    }
+}
+
+/// The ids of the notes in the owner's home partition alone.
+fn home_ids(h: &Harness) -> HashSet<NoteId> {
+    h.list_ids(&h.user(ALICE, None), ListInput::default())
+}
+
+/// R19 (the final fix wave; R5, R13): a person moves the project's folder
+/// and re-points the project in Settings while a chat turn of it runs — no
+/// run is in flight, so the re-point goes ahead. The turn's next
+/// `memory_store` with no `scope` builds its context from the old root,
+/// which no folder under `projects/` records any more, and used to be filed
+/// in the home partition, recalled in every conversation and every project.
+/// It is refused, naming the root, and nothing lands at home or at the new
+/// root. A note the model scopes `global` itself, and a preference, still
+/// go home: only a write meant for the project is refused.
+#[test]
+fn an_unscoped_store_from_a_turn_whose_project_was_re_pointed_meanwhile_is_refused() {
+    let h = Harness::new();
+    let old = h.workspace("app", Some(".git"));
+    let turn = turn_in(&old);
+    let new = old.with_file_name("app-moved");
+    fs::rename(&old, &new).unwrap();
+    openalpaca_storage::project_life::repoint(&h.db, &old, &new).unwrap();
+
+    let ctx = h
+        .service
+        .context_for_tool(&turn, Capabilities::READ_WRITE)
+        .unwrap();
+    let err = h
+        .service
+        .store(&ctx, unscoped("Release day", NoteKind::Decision))
+        .unwrap_err();
+    assert_eq!(err.class(), "io", "{err}");
+    let said = err.to_string();
+    assert!(said.contains(&old.display().to_string()), "{said}");
+    assert!(said.contains("re-pointed"), "{said}");
+    assert!(said.contains("not saved"), "{said}");
+    assert!(home_ids(&h).is_empty(), "nothing was filed at home");
+    assert!(
+        h.list_ids(&h.user(ALICE, Some(&new)), ListInput::default())
+            .is_empty(),
+        "nor in the project at its new root"
+    );
+
+    // Only a write meant for the project is refused.
+    let preference = h
+        .service
+        .store(&ctx, unscoped("Editor", NoteKind::Preference))
+        .unwrap();
+    let global = h
+        .service
+        .store(
+            &ctx,
+            StoreInput {
+                scope: Some(NoteScope::Global),
+                ..unscoped("Office", NoteKind::Fact)
+            },
+        )
+        .unwrap();
+    assert_eq!(preference.scope, NoteScope::Global);
+    assert_eq!(global.scope, NoteScope::Global);
+    assert_eq!(home_ids(&h), HashSet::from([preference.id, global.id]));
+}
+
+/// R19 for a delete: `Delete data…` lands while a chat turn of the project
+/// runs. The repository is still on disk, so the turn's root resolves to
+/// it — unregistered now — and the model's unscoped `memory_store` used to
+/// go home: a new note from the project whose data was just deleted, shown
+/// in global memory. It is refused, nothing lands at home, and the
+/// project's folder under `projects/` is not re-created.
+#[test]
+fn an_unscoped_store_from_a_turn_whose_projects_data_was_deleted_meanwhile_is_refused() {
+    let h = Harness::new();
+    let root = h.workspace("app", Some(".git"));
+    let project = openalpaca_storage::store::projects::lookup(&root)
+        .unwrap()
+        .unwrap();
+    let turn = turn_in(&root);
+    {
+        let _held = h.service.quiesce(&project.id).unwrap();
+        h.service.remove_project(&project.id).unwrap();
+        openalpaca_storage::project_life::remove_project_folder(&project).unwrap();
+    }
+
+    let ctx = h
+        .service
+        .context_for_tool(&turn, Capabilities::READ_WRITE)
+        .unwrap();
+    let err = h
+        .service
+        .store(&ctx, unscoped("Release day", NoteKind::Fact))
+        .unwrap_err();
+    assert_eq!(err.class(), "io", "{err}");
+    assert!(
+        err.to_string().contains(&root.display().to_string()),
+        "{err}"
+    );
+    assert!(home_ids(&h).is_empty(), "nothing was filed at home");
+    assert!(
+        !project.dir.exists(),
+        "the project's folder is not re-created"
+    );
+    assert!(!root.join(".openalpaca").exists());
+}
+
+/// R19's variant (R5): the re-pointed project lay inside another
+/// registered project — a chosen `~/work` holding `~/work/app`. The turn's
+/// old root no longer names `app`, and resolving it afresh stops at the
+/// outer project, whose partition the unscoped note used to go into. It is
+/// refused instead, and the outer project gets nothing.
+#[test]
+fn an_unscoped_store_from_a_re_pointed_project_inside_another_does_not_go_to_the_outer_one() {
+    let h = Harness::new();
+    let outer = h.workspace("work", None);
+    openalpaca_storage::store::projects::register(&outer).unwrap();
+    let old = outer.join("app");
+    fs::create_dir_all(old.join(".git")).unwrap();
+    openalpaca_storage::store::projects::register(&old).unwrap();
+    let turn = turn_in(&old);
+    let moved = outer.with_file_name("app-moved");
+    fs::rename(&old, &moved).unwrap();
+    openalpaca_storage::project_life::repoint(&h.db, &old, &moved).unwrap();
+
+    let ctx = h
+        .service
+        .context_for_tool(&turn, Capabilities::READ_WRITE)
+        .unwrap();
+    assert_eq!(
+        ctx.project_root.as_deref(),
+        Some(outer.as_path()),
+        "precondition: the old root now resolves to the outer project"
+    );
+    let err = h
+        .service
+        .store(&ctx, unscoped("Release day", NoteKind::Decision))
+        .unwrap_err();
+    assert_eq!(err.class(), "io", "{err}");
+    assert!(
+        h.list_ids(&h.user(ALICE, Some(&outer)), ListInput::default())
+            .is_empty(),
+        "nothing went into the outer project"
+    );
+    assert!(home_ids(&h).is_empty(), "nor home");
 }
 
 /// Fixture 03: inside a git repository, a read creates nothing; the first

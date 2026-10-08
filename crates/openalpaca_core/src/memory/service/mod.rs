@@ -281,6 +281,10 @@ pub(crate) struct TestGates {
 pub(super) struct Resolved {
     home: Partition,
     project: Option<Partition>,
+    /// The context's project root when no folder under `projects/` records
+    /// it (storage's `NotRegistered`): read as an empty project, and a write
+    /// meant for it is refused (R12; the final fix wave's R19).
+    unregistered: Option<PathBuf>,
 }
 
 impl Resolved {
@@ -702,10 +706,12 @@ impl MemoryService {
         if owner_id.is_empty() || !self.owner_exists(owner_id) {
             return Err(MemoryError::NoOwner(owner_id.to_string()));
         }
+        let workspace = context::resolve_hint(workspace);
         Ok(MemoryAccessContext {
             owner_id: owner_id.to_string(),
             owner_key: files::owner_key(owner_id),
-            project_root: resolve_project_root(workspace),
+            project_root: workspace.project_root,
+            stale_root: workspace.stale_root,
             surface,
             capabilities,
             attribution,
@@ -764,11 +770,14 @@ impl MemoryService {
     /// The owner's home partition and, when the request resolved a
     /// registered project whose path to the partition is clean, the project
     /// partition. An unregistered root reads as an empty project (R12, logged
-    /// at debug); a link, a junction or a non-directory on that path refuses
-    /// the project partition with one WARN naming the component, and the
-    /// request falls back to the global partition (design §3 rule 1).
+    /// at debug) and is kept as [`Resolved::unregistered`], so a write meant
+    /// for it is refused rather than filed at home (R19); a link, a junction
+    /// or a non-directory on that path refuses the project partition with
+    /// one WARN naming the component, and the request falls back to the
+    /// global partition (design §3 rule 1).
     pub(super) fn resolve(&self, ctx: &MemoryAccessContext) -> Result<Resolved, MemoryError> {
         let home = self.open_partition(&StoreScope::Home, &ctx.owner_id)?;
+        let mut unregistered = None;
         let project = match &ctx.project_root {
             None => None,
             Some(root) => {
@@ -788,13 +797,18 @@ impl MemoryService {
                             project_root = %root.display(),
                             "memory: no project is registered at this root, so it has no notes (R12)"
                         );
+                        unregistered = Some(root);
                         None
                     }
                     Err(e) => return Err(e.into()),
                 }
             }
         };
-        Ok(Resolved { home, project })
+        Ok(Resolved {
+            home,
+            project,
+            unregistered,
+        })
     }
 
     /// The partition keys a context reaches — its home partition and, when
@@ -817,9 +831,11 @@ impl MemoryService {
             StoreScope::Project(root) => {
                 match openalpaca_storage::store::projects::lookup(root) {
                     Ok(Some(project)) => Self::project_slot_key(&project.id),
-                    // Not a registered project (R12): its writes are refused
-                    // where the partition opens; this slot only keeps two of
-                    // them apart, and never meets a project's.
+                    // Not a registered project (R12): `store` refuses a
+                    // write meant for it before it takes any slot (R19), and
+                    // a partition opened there answers `NotRegistered`; this
+                    // slot only keeps two such writes apart, and never meets
+                    // a project's.
                     Ok(None) => format!("unregistered:{}", canonical_lenient(root)),
                     // The same slot, said aloud: should the partition then
                     // open, this write does not wait for a re-point's or a
@@ -1940,6 +1956,36 @@ impl MemoryService {
             }
             _ => None,
         };
+        // R19 (the final fix wave): the context's project went after the
+        // request resolved it — re-pointed, or its data deleted, while a turn
+        // or a learning pass ran. A note meant for the project is refused,
+        // on every surface, rather than filed in the home partition (where
+        // every conversation and project would recall it) or in a project
+        // around the old root. Learning holds on it (`Internal`), and the
+        // next pass decides: learned at the new root, or dropped with the
+        // project. A note the caller scoped `global`, or one global by kind,
+        // still lands at home.
+        if let Some(gone) = ctx.stale_root.as_ref().or(resolved.unregistered.as_ref())
+            && input
+                .scope
+                .or(replaced_scope)
+                .unwrap_or_else(|| kind.default_scope())
+                == NoteScope::Project
+        {
+            // Said to the chat model in words it acts on: saving it again
+            // as `global` is exactly the landing this refusal prevents.
+            let advice = if ctx.surface == Surface::ModelTool {
+                "; tell the user rather than saving it with scope `global`"
+            } else {
+                ""
+            };
+            return Err(MemoryError::Internal(anyhow::anyhow!(
+                "the project at {} is no longer recorded — it was re-pointed, or its data was \
+                 deleted, after this request named it — so the note was not saved, neither in \
+                 the project nor in global memory instead{advice}",
+                gone.display()
+            )));
+        }
         let target_scope = match (input.scope.or(replaced_scope), resolved.project.is_some()) {
             (Some(NoteScope::Project), false) => {
                 return Err(MemoryError::invalid(

@@ -365,6 +365,9 @@ enum Job {
 /// [`StoreHooks::default`]: a no-op and the advance.
 #[derive(Clone)]
 pub(crate) struct StoreHooks {
+    /// Runs on the blocking thread before the store loop's `n`-th item (from
+    /// 0) is written: a re-point or a delete landing between two items.
+    pub before_store: Arc<dyn Fn(usize) + Send + Sync>,
     /// Runs on the blocking thread after the store loop, before the advance.
     pub after_store_loop: Arc<dyn Fn() + Send + Sync>,
     /// Skips the advance: a crash between §1.4's steps 3 and 4.
@@ -374,6 +377,7 @@ pub(crate) struct StoreHooks {
 impl Default for StoreHooks {
     fn default() -> Self {
         Self {
+            before_store: Arc::new(|_| {}),
             after_store_loop: Arc::new(|| {}),
             skip_advance: false,
         }
