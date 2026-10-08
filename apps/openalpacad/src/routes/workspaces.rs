@@ -27,6 +27,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Json,
@@ -35,13 +36,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use openalpaca_storage::project_life;
-use openalpaca_storage::store::projects::{Project, ProjectError, ResolvedProject};
+use openalpaca_storage::store::projects::{Project, ProjectError, ProjectId, ResolvedProject};
 use openalpaca_storage::store::{self, projects};
 use openalpaca_storage::{ArtifactStore, Database, PurgePlan, RebaseCounts};
 use serde::{Deserialize, Serialize};
 
 use openalpaca_core::context::SharedContext;
-use openalpaca_core::memory::service::MemoryService;
+use openalpaca_core::memory::service::{MemoryError, MemoryService, QuiesceGuard};
 
 use super::{api_error, request_project_root};
 use crate::AppState;
@@ -154,6 +155,15 @@ pub struct WorkspaceView {
     pub queued_tasks: usize,
 }
 
+/// `PATCH /v1/workspaces`: what moved, and the project at its new root.
+#[derive(Debug, Clone, Serialize)]
+pub struct RepointView {
+    pub old_path: String,
+    pub new_path: String,
+    pub moved: RowCountsView,
+    pub project: ProjectView,
+}
+
 // ── Path resolution ──────────────────────────────────────────────
 
 /// A client's path, canonicalized and nothing more — no marker walk.
@@ -260,6 +270,63 @@ fn owner_mismatch(root: &str, other_owners: usize) -> Response {
     )
 }
 
+/// The registered project a client path resolves to, or the answer that
+/// refuses it: `404 WORKSPACE_NOT_FOUND` for a root no folder under
+/// `projects/` records (R12's words) or a path in no project.
+#[allow(clippy::result_large_err)]
+fn registered_project(path: &str) -> Result<Project, Response> {
+    match projects::resolve(Path::new(path)) {
+        Ok(Some(ResolvedProject {
+            project: Some(project),
+            ..
+        })) => Ok(project),
+        Ok(Some(resolved)) => Err(api_error(
+            StatusCode::NOT_FOUND,
+            "WORKSPACE_NOT_FOUND",
+            ProjectError::NotRegistered {
+                root: resolved.root_string(),
+            }
+            .to_string(),
+        )),
+        Ok(None) => Err(api_error(
+            StatusCode::NOT_FOUND,
+            "WORKSPACE_NOT_FOUND",
+            format!(
+                "{path} is in no project: no folder under projects/ records it and no git \
+                 repository holds it"
+            ),
+        )),
+        Err(e) => Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "IO_ERROR",
+            format!("{path} could not be resolved: {e:#}"),
+        )),
+    }
+}
+
+/// How often, and for how long, the re-point and the delete try for the
+/// project's memory slot. `quiesce` refuses rather than waits, and the 30 s
+/// reconciliation and an index rebuild hold the same slot for moments, so
+/// three seconds outlasts them in practice and is short enough for a dialog.
+pub(crate) const QUIESCE_RETRY_EVERY: Duration = Duration::from_millis(100);
+pub(crate) const QUIESCE_RETRY_FOR: Duration = Duration::from_secs(3);
+
+/// `MemoryService::quiesce`, tried every [`QUIESCE_RETRY_EVERY`] until
+/// [`QUIESCE_RETRY_FOR`] has passed; the last refusal is returned.
+async fn quiesce_project(
+    memory: &MemoryService,
+    id: &ProjectId,
+) -> Result<QuiesceGuard, MemoryError> {
+    let deadline = tokio::time::Instant::now() + QUIESCE_RETRY_FOR;
+    loop {
+        match memory.quiesce(id) {
+            Ok(guard) => return Ok(guard),
+            Err(e) if tokio::time::Instant::now() >= deadline => return Err(e),
+            Err(_) => tokio::time::sleep(QUIESCE_RETRY_EVERY).await,
+        }
+    }
+}
+
 /// The home store is not a project and never becomes one (R24, and R13's
 /// `store::projects::overlaps_home_store`, which also refuses a folder inside
 /// it or around it): the purge's refusal. The re-point's is
@@ -277,16 +344,6 @@ fn refuse_the_home_root(field: &str, root: &str) -> Result<(), Response> {
              it — that is not a project and cannot be one. Name the project directory itself"
         ),
     ))
-}
-
-// ── Serialisation ────────────────────────────────────────────────
-
-fn counts_json(counts: &RebaseCounts) -> serde_json::Value {
-    serde_json::json!({
-        "artifacts": counts.file_assets,
-        "sessions": counts.sessions,
-        "tasks": counts.tasks,
-    })
 }
 
 // ── GET /v1/workspaces ───────────────────────────────────────────
@@ -403,105 +460,80 @@ pub(crate) fn project_error_response(e: &anyhow::Error) -> Option<Response> {
     Some(api_error(status, error.code(), error.to_string()))
 }
 
-/// Re-point a project onto the folder it is in now (design §6): the route's
-/// half — the owner check, the in-flight check, the memory quiesce — then
-/// [`project_life::repoint`], which refuses a new path that is not a
-/// directory, overlaps the home store, is the same path, or is already a
-/// project or named by rows (ST-20), and otherwise rewrites the five path
-/// columns and both `storage_path` prefixes in one transaction and renames
-/// the project's folder under `projects/`.
+/// Re-point a project onto its new path (§6): the rows of the five path
+/// columns and both `storage_path` prefixes in one transaction, and the
+/// project's folder under `projects/` renamed — `project_life::repoint`.
 ///
-/// Owner-scoped like every injecting write (R40): a path no project owns and
-/// a project holding another owner's rows answer the same `404`, in the same
-/// words. The project's memory is keyed by its id (R18), so a re-point
-/// touches no control snapshot and no index row: the hold below and the
-/// notes it guards are the same under the old path and the new.
-pub(crate) fn rebase_workspace(
+/// Owner-scoped (R40): a project holding another owner's rows is the same
+/// `404` an unknown one is. Refused while a run is `running` or `paused`
+/// there, and while the project's memory slot stays held for
+/// [`QUIESCE_RETRY_FOR`]. The target's refusals are `repoint`'s: not a
+/// directory (422), the home store (409), already a project or named by the
+/// rows (409, ST-20), the same path (400).
+pub(crate) async fn rebase_workspace(
     db: &Database,
     memory: &MemoryService,
     owner_id: &str,
     request: RebaseRequest,
 ) -> Response {
-    let old_path = match canonical_path(&request.old_path) {
+    let old = match canonical_path(&request.old_path) {
         Ok(path) => path,
         Err(response) => return response,
     };
-    let new_path = match canonical_path(&request.new_path) {
+    let new = match canonical_path(&request.new_path) {
         Ok(path) => path,
         Err(response) => return response,
     };
-    let project = match projects::resolve(Path::new(&old_path)) {
-        Ok(Some(ResolvedProject {
-            project: Some(project),
-            ..
-        })) => project,
-        Ok(_) => {
-            return api_error(
-                StatusCode::NOT_FOUND,
-                "WORKSPACE_NOT_FOUND",
-                format!("nothing of yours is recorded under {old_path}"),
-            );
-        }
-        Err(e) => {
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "WORKSPACE_MOVE_FAILED",
-                format!("{e:#}"),
-            );
-        }
+    let project = match registered_project(&old) {
+        Ok(project) => project,
+        Err(response) => return response,
     };
-    let old_root = project.root_string();
-
-    let store = ArtifactStore::new(db);
-    let rows = match store.workspace_rows(&old_root, Some(owner_id)) {
+    let root = project.root_string();
+    let rows = match ArtifactStore::new(db).workspace_rows(&root, Some(owner_id)) {
         Ok(rows) => rows,
-        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()),
+        Err(e) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string());
+        }
     };
     if rows.other_owners > 0 {
-        return owner_mismatch(&old_root, rows.other_owners);
+        return owner_mismatch(&root, rows.other_owners);
     }
     if rows.active_tasks > 0 {
         return api_error(
             StatusCode::CONFLICT,
             "WORKSPACE_BUSY",
             format!(
-                "{} run(s) under {old_root} are still in flight; a running or paused run \
-                 resolved its store when it started, and re-pointing the row would not move it",
+                "{} run(s) under {root} are still in flight; re-point it once they finish",
                 rows.active_tasks
             ),
         );
     }
-
-    // Held until this function returns: every memory write for the project
-    // waits, and one already in flight refuses the re-point. Named by the
-    // project's id (R18), so it covers the old path and the new alike.
-    let _quiesced = match memory.quiesce(&project.id) {
+    let _quiesced = match quiesce_project(memory, &project.id).await {
         Ok(guard) => guard,
         Err(e) => {
             return api_error(
                 StatusCode::CONFLICT,
                 "WORKSPACE_BUSY",
                 format!(
-                    "a memory write under {old_root} is still in flight ({e}); re-pointing now \
-                     would move its folder out from under it. Try again in a moment"
+                    "a memory write under {root} is still in flight ({e}); re-pointing now \
+                     would rename its folder out from under it. Try again in a moment"
                 ),
             );
         }
     };
-
-    match project_life::repoint(db, Path::new(&old_root), Path::new(&new_path)) {
-        Ok(done) => Json(serde_json::json!({
-            "old_path": done.before.root_string(),
-            "new_path": done.after.root_string(),
-            "moved": counts_json(&done.rows),
-            "store_moved": done.before.name != done.after.name,
-        }))
+    match project_life::repoint(db, &project.root, Path::new(&new)) {
+        Ok(done) => Json(RepointView {
+            old_path: done.before.root_string(),
+            new_path: done.after.root_string(),
+            moved: RowCountsView::from(&done.rows),
+            project: ProjectView::from(&done.after),
+        })
         .into_response(),
         Err(e) => project_error_response(&e).unwrap_or_else(|| {
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "WORKSPACE_MOVE_FAILED",
-                format!("{old_root} was not re-pointed onto {new_path}: {e:#}"),
+                format!("{root} could not be re-pointed onto {new}: {e:#}"),
             )
         }),
     }
@@ -1023,6 +1055,7 @@ pub async fn rebase_workspace_handler(
         &state.local_user_id,
         request,
     )
+    .await
 }
 
 /// Delete a project's conversations, runs and uploads, or report the plan.

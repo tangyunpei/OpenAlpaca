@@ -12,11 +12,15 @@ use tempfile::TempDir;
 
 use crate::test_util::HomeStoreGuard;
 
+const OWNER: &str = "owner-1";
+const OTHER: &str = "owner-2";
+
 struct World {
     tmp: TempDir,
     _env: HomeStoreGuard,
     home: PathBuf,
     db: Database,
+    memory: Arc<MemoryService>,
 }
 
 impl World {
@@ -30,11 +34,22 @@ impl World {
         std::fs::create_dir_all(&home).expect("home store");
         let env = HomeStoreGuard::set(&home);
         let db = Database::open(&tmp.path().join("test.db")).expect("open db");
+        for owner in [OWNER, OTHER] {
+            openalpaca_storage::IdentityRepository::new(&db)
+                .create_global_user(owner, None)
+                .expect("owner row");
+        }
+        let memory = MemoryService::new(
+            Some(db.clone()),
+            openalpaca_storage::memory_index::MemoryIndex::open_in_memory().expect("index"),
+        );
+        memory.rebuild_index().expect("an empty index");
         Self {
             tmp,
             _env: env,
             home,
             db,
+            memory: Arc::new(memory),
         }
     }
 
@@ -108,6 +123,26 @@ impl World {
                 path: Some(path.to_string()),
             },
         ))
+        .await
+    }
+
+    async fn repoint(
+        &self,
+        old: &std::path::Path,
+        new: &std::path::Path,
+    ) -> (StatusCode, serde_json::Value) {
+        split(
+            rebase_workspace(
+                &self.db,
+                &self.memory,
+                OWNER,
+                RebaseRequest {
+                    old_path: text(old),
+                    new_path: text(new),
+                },
+            )
+            .await,
+        )
         .await
     }
 }
@@ -375,4 +410,159 @@ async fn choosing_a_relative_path_is_invalid() {
     let (status, body) = choose("some/folder").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(error_code(&body), "INVALID_PATH");
+}
+
+// ── PATCH /v1/workspaces ────────────────────────────────────────
+
+#[tokio::test]
+async fn a_re_point_answers_the_project_under_its_new_root_and_five_counts() {
+    let w = World::new();
+    let p = w.project("old-home");
+    let root = text(&p.root);
+    w.session("s-1", &root);
+    w.message("s-1", &root);
+    w.task("t-1", &root, "completed");
+    let new = w.dir("new-home");
+
+    let (status, body) = w.repoint(&p.root, &new).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let after = projects::lookup(&new)
+        .expect("lookup")
+        .expect("the project is at its new root");
+    assert_eq!(after.id, p.id);
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "old_path": root,
+            "new_path": text(&new),
+            "moved": {"artifacts": 0, "sessions": 1, "tasks": 1, "messages": 1, "followups": 0},
+            "project": {
+                "id": p.id.to_string(),
+                "root": text(&new),
+                "name": after.name.clone(),
+                "missing": false,
+            },
+        })
+    );
+}
+
+/// `quiesce` refuses rather than waits, and the 30 s reconciliation and an
+/// index rebuild take the same slot, so the route tries for a while (§5).
+/// The slot is let go after 150 ms, well inside `QUIESCE_RETRY_FOR`.
+#[tokio::test]
+async fn a_re_point_waits_for_a_held_memory_slot_and_then_answers() {
+    let w = World::new();
+    let p = w.project("held-briefly");
+    let new = w.dir("free-at-last");
+    let held = w.memory.quiesce(&p.id).expect("the slot is idle");
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        drop(held);
+    });
+
+    let (status, body) = w.repoint(&p.root, &new).await;
+
+    release.join().expect("the releasing thread");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["project"]["root"], text(&new));
+}
+
+/// Waits out the real `QUIESCE_RETRY_FOR` (3 s): the daemon's tests have
+/// no paused tokio clock.
+#[tokio::test]
+async fn a_re_point_answers_busy_when_the_memory_slot_stays_held() {
+    let w = World::new();
+    let p = w.project("held");
+    let new = w.dir("never-reached");
+    let _held = w.memory.quiesce(&p.id).expect("the slot is idle");
+
+    let started = std::time::Instant::now();
+    let (status, body) = w.repoint(&p.root, &new).await;
+
+    assert!(
+        started.elapsed() >= QUIESCE_RETRY_FOR,
+        "the route gave up before its window"
+    );
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_BUSY");
+    assert_eq!(
+        projects::lookup(&p.root)
+            .expect("lookup")
+            .map(|found| found.id),
+        Some(p.id),
+        "nothing moved"
+    );
+}
+
+#[tokio::test]
+async fn a_running_run_refuses_the_re_point() {
+    let w = World::new();
+    let p = w.project("running");
+    w.task("t-run", &text(&p.root), "running");
+    let new = w.dir("later");
+
+    let (status, body) = w.repoint(&p.root, &new).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_BUSY");
+}
+
+/// R40, unchanged: rows another owner holds answer the same 404 an
+/// unknown root does, and say nothing about them.
+#[tokio::test]
+async fn rows_of_another_owner_answer_404() {
+    let w = World::new();
+    let p = w.project("theirs");
+    w.db
+        .with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO file_assets
+                     (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, origin, project_root)
+                 VALUES ('f-other', ?1, 'sha', 'x.txt', 'text/plain', 1, '/nowhere', 'upload', ?2)",
+                [OTHER, text(&p.root).as_str()],
+            )?;
+            Ok(())
+        })
+        .expect("a row of another owner");
+    let new = w.dir("mine-now");
+
+    let (status, body) = w.repoint(&p.root, &new).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(
+        body["error"]["message"],
+        format!("nothing of yours is recorded under {}", text(&p.root))
+    );
+}
+
+#[tokio::test]
+async fn a_re_point_of_a_path_no_project_records_is_a_404() {
+    let w = World::new();
+    let repo = w.repo("never-used");
+    let new = w.dir("anywhere");
+
+    let (status, body) = w.repoint(&repo, &new).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_FOUND");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("is not a project OpenAlpaca knows"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_relative_path_on_either_side_of_a_re_point_is_invalid() {
+    let w = World::new();
+    let p = w.project("absolute");
+    let rel = std::path::Path::new("relative/dir");
+    for (old, new) in [(rel, p.root.as_path()), (p.root.as_path(), rel)] {
+        let (status, body) = w.repoint(old, new).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(error_code(&body), "INVALID_PATH");
+    }
 }

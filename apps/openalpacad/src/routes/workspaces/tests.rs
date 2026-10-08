@@ -239,15 +239,18 @@ impl Fixture {
     }
 
     async fn patch_as(&self, owner: &str, old: &str, new: &str) -> (StatusCode, serde_json::Value) {
-        split(rebase_workspace(
-            &self.db,
-            &self.memory,
-            owner,
-            RebaseRequest {
-                old_path: old.to_string(),
-                new_path: new.to_string(),
-            },
-        ))
+        split(
+            rebase_workspace(
+                &self.db,
+                &self.memory,
+                owner,
+                RebaseRequest {
+                    old_path: old.to_string(),
+                    new_path: new.to_string(),
+                },
+            )
+            .await,
+        )
         .await
     }
 
@@ -626,10 +629,6 @@ async fn a_project_moved_by_hand_is_re_pointed_with_its_rows_and_its_folder() {
     assert_eq!(body["moved"]["artifacts"], 1);
     assert_eq!(body["moved"]["sessions"], 1);
     assert_eq!(body["moved"]["tasks"], 1);
-    assert_eq!(
-        body["store_moved"], true,
-        "the folder under projects/ was renamed"
-    );
 
     let after = project_at(&new);
     assert_eq!(after.id, before.id);
@@ -669,7 +668,6 @@ async fn a_re_point_renames_the_projects_folder_under_projects() {
 
     let (status, body) = f.patch(&old, &new).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["store_moved"], true);
     let after = project_at(&new);
     assert_eq!(after.id, before.id);
     assert_eq!(
