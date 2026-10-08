@@ -28,12 +28,14 @@
 //! `<store>/uploads`); `storage_path` stays the resolved absolute path, so the
 //! content and open routes need no change.
 //!
-//! **Dedup is a sha256 query scoped to this owner's uploads, never the path.**
-//! Two uploads of the same bytes by the same owner resolve to the first row and
-//! write nothing. The same bytes from a different owner get their own row and
-//! their own file, and a byte-identical *produced* artifact never answers at
-//! all: it is not an upload, and handing it back would put it under the upload
-//! quota and on the end of a chat message.
+//! **Dedup is a sha256 query scoped to this owner's uploads in this store,
+//! never the path** (R17: `project_root` is part of the query). Two uploads of
+//! the same bytes by the same owner into one store — the home store, or one
+//! project — resolve to the first row and write nothing; into two stores they
+//! are two rows and two files. The same bytes from a different owner get their
+//! own row and their own file, and a byte-identical *produced* artifact never
+//! answers at all: it is not an upload, and handing it back would put it under
+//! the upload quota and on the end of a chat message.
 //!
 //! A match is an answer only while its bytes are still there. When the matched
 //! row's file is gone, the upload is placed and written as usual and that row is
