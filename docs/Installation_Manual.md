@@ -352,8 +352,12 @@ without the message above — the first start also changes four things:
   first turn after the switch, or `Use`, gives it one. Until then
   `openalpaca store purge` does not know it, and learning that reaches its
   unread turns — as the catch-up shortly after a start usually does — drops
-  them rather than learn them. A folder only an `.openalpaca/` marked never
-  gets one unless you choose it.
+  them rather than learn them. To keep them, set `[orchestrator.learning]
+  enabled = false` in `daemon.toml` before the first start, give each such
+  project its folder (a turn in it, `Use`, or `openalpaca chat --project
+  <dir>`), then set it back to `true` and restart the daemon: its next
+  start's catch-up finds those turns again. A folder only an `.openalpaca/`
+  marked never gets one unless you choose it.
 - The memory search index is rebuilt from the notes in the background (about
   15 to 17 seconds at 100,000 notes); search answers from the note files
   meanwhile.
