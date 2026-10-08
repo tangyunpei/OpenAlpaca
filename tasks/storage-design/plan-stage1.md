@@ -27438,14 +27438,14 @@ strings -a target/debug/openalpacad | grep -cF "take the crate's home-store guar
   the command is S2's slice-gate form (R-S5) — `-a`, so no section of the binary is skipped and S6.5's `0` cannot be a
   miss. This binary must not be launched; S6.5 rebuilds it with `cargo build` and expects `0`.
 
-- [ ] **Step 4: Clippy against the baseline of 80.**
+- [ ] **Step 4: Clippy against the baseline of 78** (80 until S5a deleted two warnings; the lead's ruling).
 
 ```bash
 CARGO_TERM_COLOR=never cargo clippy --workspace --exclude openalpaca_gui --all-targets > /tmp/stage1-gate/clippy.log 2>&1; echo "exit $?"
 echo $(( $(grep -c '^warning' /tmp/stage1-gate/clippy.log) - $(grep -c '^warning: .* generated [0-9]* warning' /tmp/stage1-gate/clippy.log) ))
 ```
 
-  Expected: `exit 0`; `80` (`CLAUDE.md`'s baseline; `32292608` kept it). A higher count is a warning this stage added:
+  Expected: `exit 0`; `78` (`CLAUDE.md`'s baseline of 80, less the two S5a deleted). A higher count is a warning this stage added:
   `grep -A3 '^warning' /tmp/stage1-gate/clippy.log | grep -- '-->'` names the file; fix it in its slice's area.
 
 - [ ] **Step 5: The generated API docs.** `python3 scripts/gen_api_docs.py --check` — expected exit 0, no drift
@@ -27540,7 +27540,7 @@ screen access (Step 13); otherwise their vitest suites, run in S6.4, are the pro
 ```bash
 cargo build -p openalpacad -p openalpaca; echo "exit $?"
 strings -a target/debug/openalpacad | grep -cF "take the crate's home-store guard"
-export OA="$(mktemp -d /tmp/stage1-live.XXXXXX)"
+export OA="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$(mktemp -d /tmp/stage1-live.XXXXXX)")"  # canonical: the daemon records canonical paths (/private/tmp on macOS)
 export OPENALPACA_HOME_STORE="$OA/store" OPENALPACA_CONFIG_DIR="$OA/config"
 export OA_BIN="$PWD/target/debug" OA_PROFILE="$PWD/scripts/eval/memory/loopback-only.sb"
 mkdir -p "$OPENALPACA_HOME_STORE" "$OPENALPACA_CONFIG_DIR" "$OA/repo/src" "$OA/evidence"
