@@ -1931,10 +1931,10 @@ fn purge_project_takes_the_conversations_the_runs_and_the_uploads() {
     );
 }
 
-/// Upload dedup is store-blind (`UploadStore::put` matches on sha + owner
-/// across every store), so one row can be the attachment of a message in
-/// another project's transcript. The purge must leave that row — the store
-/// never deletes what another reader still names.
+/// An attachment may name any file its owner can see, so one upload row can
+/// be the attachment of a message in another project's transcript. The purge
+/// must leave that row — the store never deletes what another reader still
+/// names.
 #[test]
 fn a_purge_keeps_an_upload_a_surviving_message_still_links() {
     let f = Fixture::new();

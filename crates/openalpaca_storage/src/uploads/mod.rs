@@ -227,8 +227,9 @@ impl<'a> UploadStore<'a> {
         self.db.with_connection(|conn| {
             let tx = conn.unchecked_transaction()?;
 
-            // Dedup: the owner- and origin-scoped sha256 query, never the path.
-            let existing = load_by_sha256(&tx, &sha256, new.owner_id)?;
+            // Dedup: the owner-, origin- and store-scoped sha256 query (R17),
+            // never the path.
+            let existing = load_by_sha256(&tx, &sha256, new.owner_id, project_root.as_deref())?;
             // I7: a dedup hit is only an answer while its bytes are there. A row
             // whose file is gone — marked `missing_since` or not; a removed
             // project directory leaves no mark at all — would otherwise discard
@@ -339,8 +340,8 @@ impl<'a> UploadStore<'a> {
 // Internals
 // ============================================================================
 
-/// The dedup answer: this owner's own *upload* row for these bytes, if it has
-/// one.
+/// The dedup answer: this owner's own *upload* row for these bytes **in this
+/// store**, if it has one.
 ///
 /// Every predicate is in the SQL, because `idx_file_assets_sha256` is not
 /// unique and `LIMIT 1` picks a row rather than *the* row. Filtering the owner
@@ -348,13 +349,28 @@ impl<'a> UploadStore<'a> {
 /// failed the check, and wrote a new row and a new file every single time.
 /// `origin` is here for the same reason: a produced artifact can be
 /// byte-identical to an upload, and answering with it would hand the uploader a
-/// row that is not an upload.
-fn load_by_sha256(conn: &Connection, sha256: &str, owner_id: &str) -> Result<Option<FileAsset>> {
+/// row that is not an upload. `project_root` is here because dedup is scoped to
+/// the turn's project (R17): matched across every store, one project's turn was
+/// handed a row that belongs to another, and a delete of that project took the
+/// file out of the other's transcript. `COALESCE(project_root, '')` is the
+/// address baseline every writer shares (`store::project_root_of`).
+fn load_by_sha256(
+    conn: &Connection,
+    sha256: &str,
+    owner_id: &str,
+    project_root: Option<&str>,
+) -> Result<Option<FileAsset>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {FILE_ASSET_COLUMNS} FROM file_assets
-         WHERE sha256 = ?1 AND owner_id = ?2 AND origin = 'upload' LIMIT 1"
+         WHERE sha256 = ?1 AND owner_id = ?2 AND origin = 'upload'
+           AND COALESCE(project_root, '') = ?3
+         LIMIT 1"
     ))?;
-    let mut rows = stmt.query(rusqlite::params![sha256, owner_id])?;
+    let mut rows = stmt.query(rusqlite::params![
+        sha256,
+        owner_id,
+        project_root.unwrap_or("")
+    ])?;
     match rows.next()? {
         Some(row) => Ok(Some(row_to_file_asset(row)?)),
         None => Ok(None),

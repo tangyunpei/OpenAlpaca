@@ -446,18 +446,50 @@ fn a_duplicate_sha_for_the_same_owner_writes_nothing() {
     );
 }
 
-/// Dedup is the sha256 query, so it is store-blind: the same bytes uploaded
-/// again with a *project* this time still resolve to the row that already
-/// exists. Placement never gets a second opinion about identity.
+/// R17: dedup answers only inside the turn's own project. The same bytes
+/// uploaded at home, in this project and in another project are three rows,
+/// each addressed to its own store — one project's turn is never handed
+/// another's row (nor a home row, nor the other way round). Inside one store
+/// dedup still holds.
 #[test]
-fn a_duplicate_sha_deduplicates_across_stores() {
+fn a_duplicate_sha_is_scoped_to_the_turns_project() {
     let fx = Fixture::new();
-    let home = fx.put("owner-1", "notes.txt", b"hello");
-    let second = fx.put_in(&fx.project_scope(), "owner-1", "notes.txt", b"hello");
+    let other = tempdir().unwrap();
+    let other_root = other.path().canonicalize().unwrap();
+    crate::store::projects::register(&other_root).unwrap();
+    let other_scope = StoreScope::Project(other_root.clone());
 
-    assert!(second.deduped);
-    assert_eq!(second.asset.id, home.asset.id);
-    assert_eq!(second.asset.storage_path, home.asset.storage_path);
+    let home = fx.put("owner-1", "notes.txt", b"hello");
+    let project = fx.put_in(&fx.project_scope(), "owner-1", "notes.txt", b"hello");
+    let elsewhere = fx.put_in(&other_scope, "owner-1", "notes.txt", b"hello");
+
+    assert!(
+        !project.deduped,
+        "a home row never answers a project's turn"
+    );
+    assert!(
+        !elsewhere.deduped,
+        "one project's row never answers another's turn"
+    );
+    assert_ne!(project.asset.id, home.asset.id);
+    assert_ne!(elsewhere.asset.id, project.asset.id);
+    assert_eq!(fx.address(&home.asset.id).0, None);
+    assert_eq!(
+        fx.address(&project.asset.id).0.as_deref(),
+        fx.project_root().to_str()
+    );
+    assert_eq!(
+        fx.address(&elsewhere.asset.id).0.as_deref(),
+        other_root.to_str()
+    );
+
+    // Inside one store, dedup still holds — at home and in a project.
+    let again_home = fx.put("owner-1", "other-name.txt", b"hello");
+    assert!(again_home.deduped);
+    assert_eq!(again_home.asset.id, home.asset.id);
+    let again_project = fx.put_in(&fx.project_scope(), "owner-1", "x.txt", b"hello");
+    assert!(again_project.deduped);
+    assert_eq!(again_project.asset.id, project.asset.id);
 }
 
 #[test]

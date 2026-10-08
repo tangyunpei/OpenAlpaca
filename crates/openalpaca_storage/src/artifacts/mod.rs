@@ -1788,7 +1788,7 @@ impl<'a> ArtifactStore<'a> {
     /// | Stays | Because |
     /// |---|---|
     /// | `file_assets` where `origin = 'produced'` | produced artifacts are never garbage-collected (§4.5) |
-    /// | an upload row a surviving message still attaches | dedup is store-blind, so the row can be another project's attachment |
+    /// | an upload row a surviving message still attaches | an attachment may name any file its owner can see, so the row can be another project's attachment |
     /// | the project's memory notes | the user's, not the store's — and files under `memory/`, not rows, so a rows-only purge cannot reach them anyway |
     ///
     /// `task.session_id` on a run *outside* this root is nulled rather than
@@ -1926,9 +1926,10 @@ impl<'a> ArtifactStore<'a> {
             let tasks = tx.execute("DELETE FROM task WHERE workspace_id = ?1", bind)?;
 
             // Uploads last, and only the ones nothing still links. Dedup is
-            // store-blind (`UploadStore::put` matches on sha + owner across
-            // every store), so one row can be the attachment of a message in
-            // another project's transcript. The messages of *this* project are
+            // scoped to the turn's project (R17), but an attachment may name
+            // any file its owner can see, so one row can still be the
+            // attachment of a message in another project's transcript. The
+            // messages of *this* project are
             // already gone above and their attachment rows cascaded with them,
             // so a surviving `conversation_message_attachments` row names a
             // surviving transcript — and the store never deletes what another
