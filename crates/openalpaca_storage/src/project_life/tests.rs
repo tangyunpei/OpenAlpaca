@@ -461,3 +461,59 @@ fn a_new_path_whose_plain_name_is_the_folders_own_keeps_the_folder() {
     assert_eq!(done.after.dir, before.dir);
     assert_eq!(done.after.root, new);
 }
+
+/// A re-point whose rename failed (§6 step 3) leaves the project's folder
+/// under its old name, recording the new root with the marker, so neither
+/// path finds the project until the next start finishes it (R24). Meanwhile
+/// a turn in the new root — a git repository — must not register a second
+/// project there: the moved rows already address the folder name the
+/// re-point is taking, and a second project in it would leave the rename
+/// failing at every start. Registering is refused and creates nothing; once
+/// the recovery has run, the root is the one project it was.
+#[test]
+fn a_root_a_re_point_has_not_finished_moving_onto_is_not_registered_again() {
+    let w = World::new();
+    let before = w.project("app");
+    w.rows_of(&before);
+    let new = w.dir("app-moved");
+    std::fs::create_dir_all(new.join(".git")).unwrap();
+    // The disk as a live re-point whose step 3 failed leaves it: marked,
+    // rows moved, folder not renamed.
+    repoint_with(&w.db, &before.root, &new, &mut |at| {
+        at != RepointStep::RowsRewritten
+    })
+    .unwrap_err();
+    assert_eq!(projects::lookup(&new).unwrap(), None);
+
+    for err in [
+        projects::register(&new).unwrap_err(),
+        projects::resolve_and_register(&new).unwrap_err(),
+    ] {
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("re-point") && message.contains("next start"),
+            "the refusal names the unfinished re-point and its remedy: {message}"
+        );
+    }
+    let folders = w.home.join(projects::PROJECTS_DIR);
+    assert!(!folders.join(projects::folder_name(&new)).exists());
+    assert!(!folders.join(projects::hashed_folder_name(&new)).exists());
+    assert_eq!(projects::list().unwrap().len(), 1, "no second project");
+
+    assert_eq!(
+        recover_repoints(&w.db),
+        RecoveryReport {
+            finished: vec![new.clone()],
+            failed: Vec::new(),
+        }
+    );
+    let after = projects::register(&new).unwrap();
+    assert_eq!(after.id, before.id, "the root is the one project it was");
+    assert_eq!(after.name, projects::folder_name(&new));
+    assert_eq!(w.named(&new), 5);
+    assert!(
+        w.storage_path()
+            .starts_with(after.dir.to_string_lossy().as_ref())
+    );
+    assert_eq!(projects::list().unwrap().len(), 1);
+}

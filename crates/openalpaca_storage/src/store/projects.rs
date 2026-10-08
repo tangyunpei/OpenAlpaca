@@ -516,7 +516,12 @@ fn first_warning(key: String) -> bool {
 /// folder — are both left out with one WARN (R11): neither can be told from
 /// the other, so neither is opened, and neither is deleted.
 pub fn list() -> Result<Vec<Project>> {
-    let projects = projects_dir()?;
+    list_in(&super::home_root()?)
+}
+
+/// [`list`] under the home store `home`, as [`register`] resolved it once.
+fn list_in(home: &Path) -> Result<Vec<Project>> {
+    let projects = projects_dir_in(home);
     let entries = match fs::read_dir(&projects) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -700,7 +705,10 @@ pub fn lock() -> ProjectsLock {
 /// an entry [`lookup`] finds is returned as it is, a
 /// missing project's included (ST-7); a root that overlaps the home store is
 /// [`ProjectError::IsHome`] (R13), one that is not a directory
-/// [`ProjectError::NotADirectory`]; then the folder is built as
+/// [`ProjectError::NotADirectory`], and one a re-point is moving a project
+/// onto whose rename or last write failed is refused until the next start
+/// finishes that re-point (R24) — a second project there would take the
+/// folder name its moved rows address; then the folder is built as
 /// `projects/.<name>.<pid>-<n>.tmp/` holding `project.json` (0700 / 0600,
 /// fsynced) and renamed to `projects/<name>`, so a crash never leaves a
 /// folder without its file; a build that fails is removed. The lock makes it
@@ -725,6 +733,23 @@ pub fn register(root: &Path) -> Result<Project> {
     }
     if !root.is_dir() {
         return Err(ProjectError::NotADirectory { path }.into());
+    }
+    // A re-point onto this root whose rename or last write failed (§6 steps
+    // 3–4) leaves the project's folder under its old name, recording this
+    // root with the marker: `lookup` finds it under neither path until the
+    // next start finishes it (R24). A second project registered here
+    // meanwhile would take the folder name the moved rows already address,
+    // and the re-point's rename would fail at every start after.
+    if let Some(moving) = list_in(&home)?
+        .into_iter()
+        .find(|p| p.previous_root.is_some() && p.root_string() == path)
+    {
+        bail!(
+            "{path} is where a re-point is moving the project in {}, and the re-point has not \
+             finished; the next start of the daemon finishes it, and until then nothing is \
+             registered here",
+            moving.dir.display()
+        );
     }
     let name = name_for_in(&home, &root, None, &held)?;
     let projects = projects_dir_in(&home);
