@@ -123,7 +123,6 @@
 | GET | `/v1/tools` | `tools.ts` | `apps/openalpaca-gui/src/lib/api/tools.ts` |
 | GET | `/v1/usage/summary` | `usage.ts` | `apps/openalpaca-gui/src/lib/api/usage.ts` |
 | GET | `/v1/workspaces` | `workspaces.ts` | `apps/openalpaca-gui/src/lib/api/workspaces.ts` |
-| PATCH | `/v1/workspaces` | `workspaces.ts` | `apps/openalpaca-gui/src/lib/api/workspaces.ts` |
 
 ## Request/Query Types
 
@@ -320,8 +319,14 @@
 - Exported functions: `getLlmUsage`, `getLlmUsageDaily`, `getUsageSummary`
 - Endpoints: `GET /v1/llm/usage`, `GET /v1/llm/usage/daily`, `GET /v1/usage/summary`
 
+### `workspaces.test.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/workspaces.test.ts`
+- Exported functions: none
+- Endpoints: none
+
 ### `workspaces.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/workspaces.ts`
-- Exported functions: `getWorkspace`, `rebaseWorkspace`
-- Endpoints: `GET /v1/workspaces`, `PATCH /v1/workspaces`
+- Exported functions: `getWorkspace`
+- Endpoints: `GET /v1/workspaces`
