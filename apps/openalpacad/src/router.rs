@@ -178,11 +178,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/artifacts/{id}/pin",
             put(crate::routes::pin_artifact_handler),
         )
-        // Workspaces (plan §4.8, "Project moved"). One root per call: the GET
-        // describes it, the PATCH re-bases everything addressed under it.
+        // Workspaces (design §6, §9): list or describe (GET), choose a folder
+        // (POST), re-point a project (PATCH).
         .route(
             "/v1/workspaces",
-            get(crate::routes::get_workspace_handler).patch(crate::routes::rebase_workspace_handler),
+            get(crate::routes::get_workspace_handler)
+                .post(crate::routes::choose_workspace_handler)
+                .patch(crate::routes::rebase_workspace_handler),
         )
         // Purge deletes a project's conversations, runs and uploads, and
         // answers the plan it followed. `dry_run` defaults to true.

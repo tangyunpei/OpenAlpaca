@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 121.
+- Total documented method/path endpoints: 122.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -138,6 +138,7 @@
 | GET | `/v1/tools` | `bearer` | `list_tools_handler` | - | - | `apps/openalpacad/src/routes/tools.rs` |
 | GET | `/v1/usage/summary` | `bearer` | `get_usage_summary` | - | `UsageSummaryQuery` | `apps/openalpacad/src/routes/settings.rs` |
 | GET | `/v1/workspaces` | `bearer` | `get_workspace_handler` | - | `workspaces::WorkspaceQuery` | `apps/openalpacad/src/routes/workspaces.rs` |
+| POST | `/v1/workspaces` | `bearer` | `choose_workspace_handler` | `workspaces::ChooseWorkspaceRequest` | - | `apps/openalpacad/src/routes/workspaces.rs` |
 | PATCH | `/v1/workspaces` | `bearer` | `rebase_workspace_handler` | `workspaces::RebaseRequest` | - | `apps/openalpacad/src/routes/workspaces.rs` |
 | POST | `/v1/workspaces/purge` | `bearer` | `purge_workspace_handler` | `workspaces::PurgeRequest` | - | `apps/openalpacad/src/routes/workspaces.rs` |
 
@@ -636,6 +637,15 @@
 ### `super::TokenParams`
 
 - External or generic type; see handler source.
+
+### `workspaces::ChooseWorkspaceRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/workspaces.rs`
+
+| Field | Type |
+|---|---|
+| `path` | `String` |
 
 ### `workspaces::PurgeRequest`
 

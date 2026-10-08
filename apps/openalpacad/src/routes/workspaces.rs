@@ -3,6 +3,7 @@
 //! ```text
 //! GET   /v1/workspaces                     -> every project, as projects/ records it
 //! GET   /v1/workspaces?path=<abs>          -> what the path resolves to, and the rows there
+//! POST  /v1/workspaces {path}              -> choose a folder: register its project (R10)
 //! PATCH /v1/workspaces {old_path,new_path} -> re-point a project onto its new folder
 //! POST  /v1/workspaces/purge {path|all}    -> delete one project's history
 //! ```
@@ -58,6 +59,15 @@ pub struct WorkspaceQuery {
 pub struct RebaseRequest {
     pub old_path: String,
     pub new_path: String,
+}
+
+/// `POST /v1/workspaces`: the folder a person chose (the app's `Use`,
+/// `openalpaca chat --project`).
+#[derive(Debug, Deserialize)]
+pub struct ChooseWorkspaceRequest {
+    /// Absolute. Inside a git repository it chooses the repository; any other
+    /// folder becomes a project of its own (R10).
+    pub path: String,
 }
 
 /// `{"path": "<root>"}` **or** `{"all": true}`, never both and never neither,
@@ -349,6 +359,29 @@ pub(crate) fn get_workspace(db: &Database, query: WorkspaceQuery) -> Response {
         queued_tasks: rows.queued_tasks,
     })
     .into_response()
+}
+
+// ── POST /v1/workspaces ──────────────────────────────────────────
+
+/// Choose a folder: register the project it resolves to — the git repository
+/// it lies in, else the folder itself (R10, ST-6) — and answer it. A choice
+/// already registered answers the same project. The fifth registration site
+/// of §2.2: the daemon registers, a read never does.
+pub(crate) fn choose_workspace(request: ChooseWorkspaceRequest) -> Response {
+    let path = match canonical_path(&request.path) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match projects::choose(Path::new(&path)) {
+        Ok(project) => Json(ProjectView::from(&project)).into_response(),
+        Err(e) => project_error_response(&e).unwrap_or_else(|| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "WORKSPACE_REGISTER_FAILED",
+                format!("could not record the project for {path}: {e:#}"),
+            )
+        }),
+    }
 }
 
 // ── PATCH /v1/workspaces ─────────────────────────────────────────
@@ -974,6 +1007,10 @@ pub async fn get_workspace_handler(
     Query(query): Query<WorkspaceQuery>,
 ) -> Response {
     get_workspace(&state.db, query)
+}
+
+pub async fn choose_workspace_handler(Json(request): Json<ChooseWorkspaceRequest>) -> Response {
+    choose_workspace(request)
 }
 
 pub async fn rebase_workspace_handler(

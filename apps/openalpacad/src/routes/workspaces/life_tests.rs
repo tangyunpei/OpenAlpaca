@@ -275,3 +275,104 @@ async fn a_relative_or_empty_path_is_invalid() {
         assert_eq!(error_code(&body), "INVALID_PATH");
     }
 }
+
+// ── POST /v1/workspaces ─────────────────────────────────────────
+
+async fn choose(path: &str) -> (StatusCode, serde_json::Value) {
+    split(choose_workspace(ChooseWorkspaceRequest {
+        path: path.to_string(),
+    }))
+    .await
+}
+
+#[tokio::test]
+async fn choosing_a_folder_inside_a_git_repository_registers_the_repository() {
+    let w = World::new();
+    let repo = w.repo("mono");
+    let sub = repo.join("packages").join("web");
+    std::fs::create_dir_all(&sub).expect("sub");
+
+    let (status, body) = choose(&text(&sub)).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let registered = projects::lookup(&repo)
+        .expect("lookup")
+        .expect("registered");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "id": registered.id.to_string(),
+            "root": text(&repo),
+            "name": registered.name.clone(),
+            "missing": false,
+        })
+    );
+    assert!(
+        projects::lookup(&sub).expect("lookup").is_none(),
+        "the subfolder is no project of its own"
+    );
+}
+
+#[tokio::test]
+async fn choosing_a_folder_with_no_git_makes_it_a_project_once() {
+    let w = World::new();
+    let notes = w.dir("notes");
+
+    let (first_status, first) = choose(&text(&notes)).await;
+    let (second_status, second) = choose(&text(&notes)).await;
+
+    assert_eq!(first_status, StatusCode::OK, "{first}");
+    assert_eq!(second_status, StatusCode::OK, "{second}");
+    assert_eq!(first["root"], text(&notes));
+    assert_eq!(first, second, "a second choice answers the same project");
+    let name = first["name"].as_str().expect("a name");
+    assert!(
+        w.home
+            .join(projects::PROJECTS_DIR)
+            .join(name)
+            .join(projects::PROJECT_FILE)
+            .is_file()
+    );
+    assert_eq!(projects::list().expect("list").len(), 1);
+}
+
+#[tokio::test]
+async fn choosing_the_home_store_or_a_folder_holding_it_is_refused() {
+    let w = World::new();
+    let inside = w.home.join("artifacts");
+    std::fs::create_dir_all(&inside).expect("inside");
+    let holding = w.tmp.path().canonicalize().expect("canonical temp");
+    for path in [w.home.clone(), inside, holding] {
+        let (status, body) = choose(&text(&path)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{}: {body}", path.display());
+        assert_eq!(error_code(&body), "WORKSPACE_IS_HOME");
+    }
+    assert!(projects::list().expect("list").is_empty());
+}
+
+#[tokio::test]
+async fn choosing_a_file_or_a_missing_path_is_unprocessable() {
+    let w = World::new();
+    let loose = w.dir("loose");
+    let file = loose.join("note.txt");
+    std::fs::write(&file, b"a file").expect("file");
+    for path in [file, loose.join("no-such-folder")] {
+        let (status, body) = choose(&text(&path)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}: {body}",
+            path.display()
+        );
+        assert_eq!(error_code(&body), "WORKSPACE_NOT_A_DIRECTORY");
+    }
+    assert!(projects::list().expect("list").is_empty());
+}
+
+#[tokio::test]
+async fn choosing_a_relative_path_is_invalid() {
+    let _w = World::new();
+    let (status, body) = choose("some/folder").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(error_code(&body), "INVALID_PATH");
+}
