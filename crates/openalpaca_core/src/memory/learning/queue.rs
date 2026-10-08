@@ -189,8 +189,9 @@ pub struct FlushReport {
     pub skipped_no_owner: usize,
     /// Chunks advanced past after `MAX_ATTEMPTS` unusable answers.
     pub skipped_unusable: usize,
-    /// Chunks whose project directory no longer exists: advanced past with
-    /// no call, and the directory is not re-created.
+    /// Chunks whose project is no longer registered — its data was deleted
+    /// (ST-21): advanced past with no call, and nothing is re-created. A
+    /// missing project's chunks are learned.
     pub skipped_root_gone: usize,
     /// Each unusable answer this flush received, in order — in memory only
     /// (the L8 fix slice's P2).
@@ -309,7 +310,8 @@ pub struct EpisodeReport {
     pub skipped_short: usize,
     /// Windows of a lane whose owner is not a `global_user` row.
     pub skipped_no_owner: usize,
-    /// Windows whose project directory no longer exists.
+    /// Windows whose project is no longer registered — its data was deleted
+    /// (ST-21).
     pub skipped_root_gone: usize,
     /// A refresh given up after `MAX_ATTEMPTS` unusable answers — the state
     /// stays as it was, and the summary is written all the same — and
@@ -646,6 +648,14 @@ async fn blocking<T: Send + 'static>(
         Ok(result) => result,
         Err(e) => Err(anyhow::anyhow!("learning task failed: {e}")),
     }
+}
+
+/// [`extractor::root_gone`] on the blocking pool: two small file reads. A
+/// task that could not run reads as "not gone" — the write checks again.
+async fn root_gone_now(root: Option<PathBuf>) -> bool {
+    tokio::task::spawn_blocking(move || extractor::root_gone(root.as_deref()))
+        .await
+        .unwrap_or(false)
 }
 
 impl LearningQueue {
@@ -1358,19 +1368,18 @@ impl LearningQueue {
                 continue;
             }
 
-            // A project directory deleted since the turn is not re-created:
-            // a note write would bring it back with a fresh `.openalpaca/`
-            // store. Its turns are dropped, as a deleted conversation's are
-            // (LQ4), and the cursor moves past them.
+            // A project whose data was deleted (ST-21: no longer a registered
+            // project) learns nothing: its turns are dropped, as a deleted
+            // conversation's are (LQ4), and the cursor moves past them. A
+            // missing project — its folder gone, its record kept — is still
+            // learned into its notes.
             let root = chunk.root.as_ref().map(PathBuf::from);
-            if let Some(r) = &root
-                && !tokio::fs::metadata(r).await.is_ok_and(|m| m.is_dir())
-            {
+            if root_gone_now(root.clone()).await {
                 tracing::info!(
                     session_id,
                     first_row = expected + 1,
                     last_row = chunk.through,
-                    "memory learning skipped rows whose project directory no longer exists"
+                    "memory learning skipped rows whose project is no longer registered (its data was deleted)"
                 );
                 self.advance(session_id, chunk.through, expected).await;
                 report.chunks += 1;
@@ -1578,7 +1587,7 @@ impl LearningQueue {
                         session_id,
                         first_row = expected + 1,
                         last_row = chunk.through,
-                        "memory learning skipped rows whose project directory was deleted during the call"
+                        "memory learning skipped rows whose project's data was deleted during the call"
                     );
                     report.chunks += 1;
                     report.skipped_root_gone += 1;
@@ -2185,9 +2194,7 @@ impl LearningQueue {
                 continue;
             }
             let root = chunk.root.as_ref().map(PathBuf::from);
-            if let Some(r) = &root
-                && !tokio::fs::metadata(r).await.is_ok_and(|m| m.is_dir())
-            {
+            if root_gone_now(root.clone()).await {
                 self.advance_episode(session_id, chunk.through, expected)
                     .await;
                 windows += 1;

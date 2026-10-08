@@ -324,6 +324,51 @@ mod through_the_service {
         assert_eq!(note.sources[0].id, TASK);
     }
 
+    /// ST-21: a run whose project's data was deleted since it ran — its root
+    /// no longer a registered project — is not extracted, and no model call
+    /// is spent finding that out.
+    #[tokio::test]
+    async fn a_run_whose_projects_data_was_deleted_makes_no_call() {
+        let scene = Scene::new(EVIDENCE_ITEM);
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let registered = openalpaca_storage::store::projects::register(&root).unwrap();
+        std::fs::remove_dir_all(&registered.dir).unwrap();
+        let mut params = scene.params(OWNER, true);
+        params.project_root = Some(root.clone());
+
+        let outcome = extract_task_memories(&scene.deps(), params).await;
+        assert_eq!(outcome, TaskExtractionOutcome::Skipped("root_gone"));
+        assert!(scene.provider.first_request_opt().is_none());
+        assert!(!registered.dir.exists());
+    }
+
+    /// ST-21: a missing project's run — its folder deleted, its record kept —
+    /// is still extracted into the project's notes at home.
+    #[tokio::test]
+    async fn a_missing_projects_run_is_still_extracted() {
+        let scene = Scene::new(EVIDENCE_ITEM);
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let registered = openalpaca_storage::store::projects::register(&root).unwrap();
+        drop(project);
+        let mut params = scene.params(OWNER, true);
+        params.project_root = Some(root.clone());
+
+        let outcome = extract_task_memories(&scene.deps(), params).await;
+        assert_eq!(
+            outcome,
+            TaskExtractionOutcome::Extracted(TaskExtractionReport {
+                stored: 1,
+                ..Default::default()
+            })
+        );
+        assert!(!root.exists(), "the user's folder is not re-created");
+        assert!(registered.dir.join("memory").is_dir());
+    }
+
     /// LQ13 keeps the L8 fix slice's P1 for a run (repair round 1 of the L8
     /// product slice): an answer stopped at its output ceiling is held to
     /// the forms read before LQ13, so the `extractions` object in the prose

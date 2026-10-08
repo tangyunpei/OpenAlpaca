@@ -674,19 +674,21 @@ async fn a_rerun_after_a_crash_writes_no_second_episode() {
     assert_eq!(episode_cursor(&scene, &s), *rows.last().unwrap());
 }
 
-/// L1 re-review, as for learning: a project directory deleted while the
-/// model writes the summary is not re-created by the summary's write. The
-/// store re-checks the root right before it writes; gone, the window is
-/// skipped as the check before the call skips it — no episode, the
-/// directory stays deleted, `skipped_root_gone`, the episode cursor past it.
+/// ST-21, as for learning: a project whose data is deleted while the model
+/// writes the summary — no folder under `projects/` records it any more —
+/// gets no summary. The store re-checks right before it writes; gone, the
+/// window is skipped as the check before the call skips it — no episode,
+/// the project's folder at home not re-created, `skipped_root_gone`, the
+/// episode cursor past it.
 #[tokio::test]
-async fn a_project_deleted_during_the_summary_call_is_not_recreated() {
+async fn a_project_whose_data_is_deleted_during_the_summary_call_gets_no_summary() {
+    let model = Scripted::new(vec![trip_state(), trip_summary()]);
+    let scene = Scene::with(model.clone(), DaemonConfig::default());
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
     let root = dir.path().canonicalize().unwrap();
+    let registered = openalpaca_storage::store::projects::register(&root).unwrap();
     let root_str = root.to_string_lossy().into_owned();
-    let model = Scripted::new(vec![trip_state(), trip_summary()]);
-    let scene = Scene::with(model.clone(), DaemonConfig::default());
     let s = scene.session();
     let mut last = 0;
     for (i, text) in TURNS.iter().enumerate() {
@@ -695,7 +697,7 @@ async fn a_project_deleted_during_the_summary_call_is_not_recreated() {
             .1;
     }
     // The second call is the summary's: the refresh's comes first.
-    let doomed = root.clone();
+    let doomed = registered.dir.clone();
     *model.on_call.lock().unwrap() = Some(Arc::new(move |n| {
         if n == 2 {
             std::fs::remove_dir_all(&doomed).unwrap();
@@ -706,14 +708,44 @@ async fn a_project_deleted_during_the_summary_call_is_not_recreated() {
     assert_eq!(
         model.calls(),
         2,
-        "the root was there when the summary's call went out"
+        "the project was registered when the summary's call went out"
     );
-    assert!(!root.exists(), "the summary re-created the deleted project");
+    assert!(
+        !registered.dir.exists(),
+        "the summary re-created the deleted project's folder"
+    );
+    assert!(root.exists(), "the user's folder is not touched");
     assert_eq!(report.stopped, None, "{report:?}");
     assert_eq!(report.episodes, 0, "{report:?}");
     assert_eq!(report.skipped_root_gone, 1, "{report:?}");
     assert_eq!(episode_cursor(&scene, &s), last);
     assert!(episodes(&scene).is_empty());
+}
+
+/// ST-21: a missing project — its folder deleted, its record under
+/// `projects/` kept — is still summarised: the episode is written into the
+/// project's notes at home, and the user's folder is not re-created.
+#[tokio::test]
+async fn a_missing_projects_conversation_is_still_summarised() {
+    let scene = Scene::new(vec![trip_state(), trip_summary()]);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let registered = openalpaca_storage::store::projects::register(&root).unwrap();
+    let root_str = root.to_string_lossy().into_owned();
+    let s = scene.session();
+    for (i, text) in TURNS.iter().enumerate() {
+        scene.turn_in(&s, text, &format!("Answer {i}."), Some(&root_str));
+    }
+    drop(dir);
+    assert!(!root.exists());
+
+    let report = scene.queue.flush_episodes(&s).await;
+    assert_eq!(report.stopped, None, "{report:?}");
+    assert_eq!(report.skipped_root_gone, 0, "{report:?}");
+    assert_eq!(report.episodes, 1, "{report:?}");
+    assert!(!root.exists(), "the summary re-created the user's folder");
+    assert!(registered.dir.join("memory").join("owners").is_dir());
 }
 
 /// The same crash, with turns that arrived after it: the re-run passes

@@ -285,8 +285,9 @@ pub(crate) enum EpisodeWrite {
     /// The service refused it — a cited row deleted since the window was
     /// read, say. Nothing was written; the cursor still moves.
     Refused,
-    /// Not attempted: the window's project directory was deleted while the
-    /// model wrote the summary ([`StoreEnd::RootGone`]).
+    /// Not attempted: the window's project's data was deleted while the
+    /// model wrote the summary — no longer a registered project, ST-21
+    /// ([`StoreEnd::RootGone`]).
     NotAttempted,
 }
 
@@ -308,9 +309,9 @@ pub(crate) struct EpisodeJob {
 /// advance, as **one** blocking task: a cancellation after the model
 /// answered cannot separate them (design 09 §1.4's shape). A session deleted
 /// since the window was read gets nothing (LQ4), and so does a project
-/// directory deleted while the model wrote: the window is skipped as the
-/// check before the call skips it, and the summary's write never re-creates
-/// the directory.
+/// whose data was deleted while the model wrote (ST-21): the window is
+/// skipped as the check before the call skips it, and the summary's write
+/// never re-creates its folder.
 pub(crate) fn store_and_advance(job: EpisodeJob) -> (EpisodeWrite, StoreEnd) {
     match ConversationRepository::new(&job.db).get_session(&job.session_id) {
         Ok(Some(_)) => {}

@@ -1451,13 +1451,36 @@ async fn a_chunk_never_mixes_roots() {
     );
 }
 
-/// A turn whose project directory was deleted before learning reached it is
-/// skipped with no call, and the directory stays deleted: learning never
-/// re-creates a project — or its `.openalpaca/` store — the user removed.
-/// Its turns are dropped the way a deleted conversation's are (LQ4).
+/// ST-21's predicate: a root is gone when no folder under `projects/`
+/// records it — never registered, or its data deleted. A registered root
+/// whose folder is missing is not gone, and no root is never gone. The root
+/// is built by hand and no turn is run, so nothing registers it before the
+/// first assertion. (Async only because the `Scene` that holds the
+/// home-store guard builds a learning queue.)
 #[tokio::test]
-async fn a_turn_whose_project_directory_is_gone_is_skipped() {
-    let (dir, root) = project();
+async fn root_gone_means_no_longer_a_registered_project() {
+    let _scene = Scene::new(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    assert!(super::extractor::root_gone(Some(&root)), "never registered");
+    let registered = openalpaca_storage::store::projects::register(&root).unwrap();
+    assert!(!super::extractor::root_gone(Some(&root)));
+    drop(dir);
+    assert!(
+        !super::extractor::root_gone(Some(&root)),
+        "missing, still registered"
+    );
+    std::fs::remove_dir_all(&registered.dir).unwrap();
+    assert!(super::extractor::root_gone(Some(&root)), "its data deleted");
+    assert!(!super::extractor::root_gone(None));
+}
+
+/// ST-21 (supersedes LQ5): a project whose folder was deleted is missing,
+/// not gone — its record under `projects/` stands — so its turns are still
+/// learned into its notes, which live at home; the user's folder is not
+/// re-created.
+#[tokio::test]
+async fn a_missing_projects_turn_is_still_learned() {
     let scene = Scene::new(vec![items(&[item(
         "Project fact",
         "The project ships on Tuesdays.",
@@ -1465,6 +1488,8 @@ async fn a_turn_whose_project_directory_is_gone_is_skipped() {
         "user",
         &[1],
     )])]);
+    let (dir, root) = project();
+    let registered = openalpaca_storage::store::projects::register(&root).unwrap();
     let s = scene.session();
     let (_, answer) = scene.turn_in(
         &s,
@@ -1476,21 +1501,62 @@ async fn a_turn_whose_project_directory_is_gone_is_skipped() {
     assert!(!root.exists());
 
     let report = scene.queue.flush_session(&s).await;
-    assert!(!root.exists(), "learning re-created the deleted project");
-    assert_eq!(scene.model.calls(), 0, "no call: nowhere to write");
+    assert_eq!(scene.model.calls(), 1, "a missing project is still learned");
+    assert_eq!(report.stopped, None, "{report:?}");
+    assert_eq!(report.skipped_root_gone, 0, "{report:?}");
+    assert!(!root.exists(), "learning re-created the user's folder");
+    assert!(registered.dir.join("memory").join("owners").is_dir());
+    assert_eq!(scene.cursor(&s), answer);
+    let notes = scene.list(&scene.ctx_in(Some(&root)), None);
+    assert!(notes.iter().any(|i| i.title == "Project fact"), "{notes:?}");
+}
+
+/// ST-21: a project whose data was deleted — no folder under `projects/`
+/// records it — is gone: its turns are skipped with no call, the cursor
+/// moves past them, and nothing is re-created, at home or in the user's
+/// folder. They are dropped the way a deleted conversation's are (LQ4).
+#[tokio::test]
+async fn a_turn_whose_projects_data_was_deleted_is_skipped() {
+    let scene = Scene::new(vec![items(&[item(
+        "Project fact",
+        "The project ships on Tuesdays.",
+        "fact",
+        "user",
+        &[1],
+    )])]);
+    let (_dir, root) = project();
+    let registered = openalpaca_storage::store::projects::register(&root).unwrap();
+    let s = scene.session();
+    let (_, answer) = scene.turn_in(
+        &s,
+        "This project ships on Tuesdays.",
+        "Noted.",
+        Some(&root.to_string_lossy()),
+    );
+    std::fs::remove_dir_all(&registered.dir).unwrap();
+
+    let report = scene.queue.flush_session(&s).await;
+    assert_eq!(
+        scene.model.calls(),
+        0,
+        "no call: the project's data was deleted"
+    );
     assert_eq!(report.stopped, None, "{report:?}");
     assert_eq!(report.skipped_root_gone, 1, "{report:?}");
     assert_eq!(scene.cursor(&s), answer, "the cursor moved past its turns");
+    assert!(
+        !registered.dir.exists(),
+        "learning re-created the project's folder"
+    );
+    assert!(!root.join(".openalpaca").exists());
 }
 
-/// L1 re-review: the project directory can also go while the model is
-/// answering. The store re-checks the root right before it writes, and a
-/// root gone by then is treated as the check before the call treats it —
-/// nothing is written, the directory stays deleted, the chunk counts as
-/// `skipped_root_gone` and the cursor moves past it.
+/// ST-21, the store-time check: a project whose data is deleted while the
+/// model answers learns nothing — the store re-checks right before it
+/// writes — the chunk counts as `skipped_root_gone`, the cursor moves past
+/// it, and the project's folder at home is not re-created.
 #[tokio::test]
-async fn a_project_deleted_during_the_call_is_not_recreated() {
-    let (_dir, root) = project();
+async fn a_project_whose_data_is_deleted_during_the_call_learns_nothing() {
     let model = Scripted::new(vec![items(&[item(
         "Project fact",
         "The project ships on Tuesdays.",
@@ -1499,6 +1565,8 @@ async fn a_project_deleted_during_the_call_is_not_recreated() {
         &[1],
     )])]);
     let scene = Scene::with(model.clone(), DaemonConfig::default());
+    let (_dir, root) = project();
+    let registered = openalpaca_storage::store::projects::register(&root).unwrap();
     let s = scene.session();
     let (_, answer) = scene.turn_in(
         &s,
@@ -1506,7 +1574,7 @@ async fn a_project_deleted_during_the_call_is_not_recreated() {
         "Noted.",
         Some(&root.to_string_lossy()),
     );
-    let doomed = root.clone();
+    let doomed = registered.dir.clone();
     *model.on_call.lock().unwrap() = Some(Arc::new(move |_| {
         std::fs::remove_dir_all(&doomed).unwrap();
     }));
@@ -1515,9 +1583,12 @@ async fn a_project_deleted_during_the_call_is_not_recreated() {
     assert_eq!(
         model.calls(),
         1,
-        "the root was there when the call went out"
+        "the project was registered when the call went out"
     );
-    assert!(!root.exists(), "learning re-created the deleted project");
+    assert!(
+        !registered.dir.exists(),
+        "learning re-created the deleted project's folder"
+    );
     assert_eq!(report.stopped, None, "{report:?}");
     assert_eq!(report.stored, 0, "{report:?}");
     assert_eq!(report.skipped_root_gone, 1, "{report:?}");

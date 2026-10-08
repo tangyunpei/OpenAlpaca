@@ -45,6 +45,7 @@ use openalpaca_storage::memory_files::{
     Dedup, NoteKind, NoteScope, NoteSource, Origin, ReplacePolicy, SourceType, is_valid_fact_key,
     normalize_statement,
 };
+use openalpaca_storage::store::projects;
 use openalpaca_storage::{ConversationRepository, Database, LearningCursorRepository};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -768,10 +769,10 @@ pub(crate) enum StoreEnd {
     /// A store failed on I/O or a quarantine: the cursor holds. The notes
     /// already written answer `dedup` or `already_learned` on the retry.
     Held(String),
-    /// The chunk's project directory was deleted while the model answered:
-    /// nothing was written, so nothing re-created it, and the cursor moved
-    /// past the chunk — what the check before the call does (design 09 rev
-    /// 3.2, `skipped_root_gone`).
+    /// The chunk's project's data was deleted while the model answered (no
+    /// longer a registered project, ST-21): nothing was written, so nothing
+    /// re-created it, and the cursor moved past the chunk — what the check
+    /// before the call does (`skipped_root_gone`).
     RootGone,
 }
 
@@ -906,10 +907,10 @@ pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
         planned.truncate(job.max_items);
     }
 
-    // The project directory, again, right before the first write: one
-    // deleted while the model answered is not re-created by a note. The
-    // chunk is dropped exactly as the check before the call drops it —
-    // nothing written, nothing else counted, the cursor past it.
+    // The project, again, right before the first write (ST-21): one whose
+    // data was deleted while the model answered is not re-created by a
+    // note. The chunk is dropped exactly as the check before the call drops
+    // it — nothing written, nothing else counted, the cursor past it.
     if root_gone(job.root.as_deref()) {
         let end = advance_past(
             &job.db,
@@ -1016,11 +1017,17 @@ pub(crate) fn store_and_advance(job: StoreJob) -> (StoreCounts, StoreEnd) {
     (counts, end)
 }
 
-/// Whether a chunk's project directory is gone — no longer a directory.
-/// The check before the model call (`queue.rs`) and the one right before
-/// the first write ask the same question.
+/// Whether a chunk's project is gone (owner decision ST-21, superseding
+/// LQ5): its root is no longer a registered project — its data was deleted.
+/// A missing project, whose folder is gone but whose record under
+/// `projects/` stands, is not gone: its turns are learned into its notes,
+/// which live in the home store and re-create nothing in the user's
+/// folder. A lookup that fails is not "gone" either: the chunk goes on,
+/// and the write's own error holds the cursor. The check before the model
+/// call (`queue.rs`, task extraction) and the one right before the first
+/// write ask the same question.
 pub(crate) fn root_gone(root: Option<&Path>) -> bool {
-    root.is_some_and(|r| !std::fs::metadata(r).is_ok_and(|m| m.is_dir()))
+    root.is_some_and(|r| matches!(projects::lookup(r), Ok(None)))
 }
 
 /// The chunk's cursor advance (§1.4 step 4): `done` when it moved; another

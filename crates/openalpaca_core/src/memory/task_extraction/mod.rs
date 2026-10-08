@@ -154,6 +154,14 @@ pub(crate) async fn extract_task_memories(
         }
     };
 
+    // ST-21: a run whose project's data was deleted since it ran — its root
+    // no longer a registered project — teaches nothing, and no model call is
+    // spent finding that out. A missing project is still learned into.
+    if crate::memory::learning::root_gone(params.project_root.as_deref()) {
+        tracing::debug!(task_id = %params.task_id, "task extraction: the run's project is no longer registered");
+        return TaskExtractionOutcome::Skipped("root_gone");
+    }
+
     // Guard: the daily cost cap, read durably for today's UTC date (Learning
     // v2, design 09 §1.8, ruling LR8). The in-memory cost tracker is seeded
     // once at boot and never reset, so "daily" used to mean "since boot".
