@@ -229,6 +229,17 @@ impl TaskDispatcher {
         // today's behaviour.
         unattended: bool,
     ) -> Result<DispatchOutcome, String> {
+        // Storage design §3, conflict C4: a dispatch accepts work for its
+        // root, so the root is recorded under `projects/` before anything of
+        // the run exists — no spawned lead, no registry entry, no lane, no
+        // event, no row. A `rerun`, `start` or `resume` has no turn of its
+        // own to have done it. First of all, and so before every repository
+        // call: the projects lock is never taken inside a `with_connection`
+        // closure (lock order: that lock, then the database mutex).
+        if let Some(root) = workspace.request_workspace_root.as_deref() {
+            openalpaca_storage::store::projects::register(std::path::Path::new(root))
+                .map_err(|e| format!("could not record the project {root}: {e:#}"))?;
+        }
         let now = Utc::now();
         // Whether this dispatch is §5.6c's `resume`, asked before the seed is
         // moved into the spawn: the row write and the state init both differ.

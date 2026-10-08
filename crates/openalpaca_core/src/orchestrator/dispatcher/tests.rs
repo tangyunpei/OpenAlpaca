@@ -1562,6 +1562,13 @@ async fn test_lead_agent_completion_report_empty_falls_back_to_template_with_sta
 #[test]
 fn dispatch_persists_the_requests_workspace_id() {
     let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let home_store = root.join("home").join(".openalpaca");
+    std::fs::create_dir_all(&home_store).unwrap();
+    let _env = crate::test_util::HomeStoreGuard::set(&home_store);
+    let project = root.join("work").join("openalpaca");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    let project_root = project.to_string_lossy().into_owned();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
     let dispatcher = setup_with_config_and_db(
         vec![make_agent("lead-01", vec!["orchestration"])],
@@ -1577,8 +1584,8 @@ fn dispatch_persists_the_requests_workspace_id() {
             "user1:gui",
             "gui",
             MemoryScopeContext {
-                workspace_id: Some("/Users/dev/openalpaca".to_string()),
-                request_workspace_root: Some("/Users/dev/openalpaca".to_string()),
+                workspace_id: Some(project_root.clone()),
+                request_workspace_root: Some(project_root.clone()),
             },
             None,
             false,
@@ -1591,9 +1598,61 @@ fn dispatch_persists_the_requests_workspace_id() {
         .unwrap();
     assert_eq!(
         task.workspace_id.as_deref(),
-        Some("/Users/dev/openalpaca"),
+        Some(project_root.as_str()),
         "the run must remember the project the request named"
     );
+    // Conflict C4: a dispatch accepts work for its root, so the root is
+    // recorded — a `rerun` of a run only an earlier build's rows name has no
+    // turn of its own to have done it.
+    let recorded = openalpaca_storage::store::projects::lookup(&project)
+        .unwrap()
+        .expect("the dispatch recorded its project");
+    assert_eq!(recorded.root, project);
+}
+
+/// A root that cannot be recorded starts nothing: the dispatch is refused
+/// before the lead is spawned or its row written.
+#[test]
+fn a_dispatch_whose_project_cannot_be_recorded_starts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let home_store = root.join("home").join(".openalpaca");
+    std::fs::create_dir_all(&home_store).unwrap();
+    std::fs::write(home_store.join("projects"), "not a directory\n").unwrap();
+    let _env = crate::test_util::HomeStoreGuard::set(&home_store);
+    let project = root.join("work").join("openalpaca");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    let project_root = project.to_string_lossy().into_owned();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_config_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        Some(db.clone()),
+    );
+
+    let Err(err) = dispatcher.dispatch_lead_agent(
+        "Ship the release",
+        "Ship the release".to_string(),
+        "user1",
+        "user1:gui",
+        "gui",
+        MemoryScopeContext {
+            workspace_id: Some(project_root.clone()),
+            request_workspace_root: Some(project_root.clone()),
+        },
+        None,
+        false,
+    ) else {
+        panic!("`projects` is a file, so the project cannot be recorded");
+    };
+    assert!(
+        err.starts_with(&format!("could not record the project {project_root}: ")),
+        "{err}"
+    );
+    let tasks: i64 = db
+        .with_connection(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM task", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(tasks, 0, "no row names a project with no folder");
 }
 
 /// A `workspace_id` with no request root — the connector shape before R-S13,
