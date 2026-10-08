@@ -332,6 +332,34 @@ impl Gateway {
                 LaneKey::new(&user_id, &source_name)
             }
         };
+        // Storage design §3: a chat turn accepts work for its root, so the
+        // root is resolved and recorded under `projects/` before anything of
+        // the turn exists — no in-flight learning entry, no row, no handler
+        // run. A root that cannot be recorded ends the turn here, so no row
+        // ever names a project with no folder. A gateway without a database
+        // records it too: its handler places content all the same.
+        let turn_scope = match crate::memory::scope_context::MemoryScopeContext::for_turn(
+            req.workspace_path.as_deref(),
+        ) {
+            Ok(scope) => scope,
+            Err(e) => {
+                let path = req.workspace_path.as_deref().unwrap_or_default();
+                tracing::warn!(path, "could not record the turn's project: {e:#}");
+                return GatewayResponse {
+                    lane_key: key,
+                    content: format!("Could not record the project for {path}: {e:#}"),
+                    is_error: true,
+                    model: None,
+                    tokens_in: None,
+                    tokens_out: None,
+                    attachments_used: Vec::new(),
+                    attachments_skipped: Vec::new(),
+                    memory_used: Vec::new(),
+                    delegation: None,
+                    continuity: TurnContinuity::default(),
+                };
+            }
+        };
         let lane_key_str = key.to_string();
         let lane = self.lane_manager.get_or_create_conversation(key.clone());
 
@@ -373,14 +401,10 @@ impl Gateway {
         if let Some(ref p) = self.persistence {
             // The canonical project root, not the raw header: a session's
             // `workspace_id` is the same key `task.workspace_id` and memory
-            // scoping use, and `MemoryScopeContext::for_request` is the one
-            // resolver (R22). `None` — no header, or a path under no marker —
-            // means no project, and the session stays unbound.
-            let workspace_root =
-                crate::memory::scope_context::MemoryScopeContext::for_request(
-                    req.workspace_path.as_deref(),
-                )
-                .request_workspace_root;
+            // scoping use, resolved once above (R22). `None` — no header, or a
+            // path under no project — means no project, and the session stays
+            // unbound.
+            let workspace_root = turn_scope.request_workspace_root.clone();
             let workspace_path = workspace_root.as_deref();
             let persisted = if req.attachments.is_empty() {
                 p.persist_user_message(

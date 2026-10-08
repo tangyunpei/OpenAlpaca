@@ -88,6 +88,29 @@ impl MemoryScopeContext {
         }
     }
 
+    /// The daemon's turn entry (storage design §3): [`for_request`]'s answer
+    /// for the client path, with its root recorded under `projects/` when
+    /// nobody has used it yet — through `projects::resolve_and_register`, the
+    /// one call every registration site makes. A chat turn and a follow-up's
+    /// re-entry come through `Gateway::handle_event`, and an upload through
+    /// the daemon's `register_request_project`; a read never does. A turn
+    /// that names no workspace records nothing and has no project (R-S13).
+    /// `Err` is a root that could not be recorded: the caller takes no work
+    /// for it.
+    ///
+    /// [`for_request`]: Self::for_request
+    pub fn for_turn(workspace_path: Option<&str>) -> anyhow::Result<Self> {
+        let Some(path) = workspace_path else {
+            return Ok(Self::for_request(None));
+        };
+        let root =
+            projects::resolve_and_register(Path::new(path))?.map(|project| project.root_string());
+        Ok(Self {
+            workspace_id: root.clone(),
+            request_workspace_root: root,
+        })
+    }
+
     /// Recover the request's workspace context from a `ToolContext` that was
     /// built from one.
     pub fn from_tool_context(ctx: &crate::tools::registry::ToolContext) -> Self {
@@ -302,5 +325,63 @@ mod tests {
         let ctx = MemoryScopeContext::for_request(project.path().to_str());
         assert_eq!(ctx.workspace_id.as_deref(), root.to_str());
         assert_eq!(ctx.request_workspace_root.as_deref(), root.to_str());
+    }
+
+    /// Storage design §3: the daemon's turn entry records the root the pure
+    /// resolver only finds; the pure resolver records nothing.
+    #[test]
+    fn for_turn_records_the_project_that_for_request_only_finds() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let home_store = root.join("home").join(".openalpaca");
+        std::fs::create_dir_all(&home_store).unwrap();
+        let _guard = crate::test_util::HomeStoreGuard::set(&home_store);
+        let repo = root.join("work").join("app");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let sent = repo.join("src");
+        std::fs::create_dir_all(&sent).unwrap();
+
+        let read = MemoryScopeContext::for_request(sent.to_str());
+        assert_eq!(read.request_workspace_root.as_deref(), repo.to_str());
+        assert!(
+            !home_store.join("projects").exists(),
+            "a read records nothing"
+        );
+
+        let turn = MemoryScopeContext::for_turn(sent.to_str()).unwrap();
+        assert_eq!(turn.request_workspace_root, read.request_workspace_root);
+        assert_eq!(turn.workspace_id, read.workspace_id);
+        let recorded = projects::lookup(&repo)
+            .unwrap()
+            .expect("the turn recorded its project");
+        assert_eq!(recorded.root, repo);
+    }
+
+    #[test]
+    fn for_turn_without_a_workspace_records_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home_store = tmp.path().canonicalize().unwrap().join(".openalpaca");
+        std::fs::create_dir_all(&home_store).unwrap();
+        let _guard = crate::test_util::HomeStoreGuard::set(&home_store);
+
+        let ctx = MemoryScopeContext::for_turn(None).unwrap();
+        assert_eq!(ctx.request_workspace_root, None);
+        assert_eq!(ctx.workspace_id, None, "no path, no project (R-S13)");
+        assert!(!home_store.join("projects").exists());
+    }
+
+    #[test]
+    fn for_turn_reports_a_project_it_cannot_record() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let home_store = root.join("home").join(".openalpaca");
+        std::fs::create_dir_all(&home_store).unwrap();
+        // A file where `projects/` belongs: nothing can be recorded.
+        std::fs::write(home_store.join("projects"), "not a directory\n").unwrap();
+        let _guard = crate::test_util::HomeStoreGuard::set(&home_store);
+        let repo = root.join("work").join("app");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+
+        assert!(MemoryScopeContext::for_turn(repo.to_str()).is_err());
     }
 }

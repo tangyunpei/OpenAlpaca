@@ -692,6 +692,102 @@ fn project_path(dir: &tempfile::TempDir) -> String {
     dir.path().to_string_lossy().to_string()
 }
 
+/// A temp home store for a test whose turns name a project: the gateway
+/// records every turn's project under `projects/` (storage design §3), and
+/// recording outside a test's own home store panics in a test build.
+fn guarded_home() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    crate::test_util::HomeStoreGuard,
+) {
+    let home = tempfile::tempdir().unwrap();
+    let home_store = home.path().canonicalize().unwrap().join(".openalpaca");
+    std::fs::create_dir_all(&home_store).unwrap();
+    let guard = crate::test_util::HomeStoreGuard::set(&home_store);
+    (home, home_store, guard)
+}
+
+/// Counts the turns that reached the handler.
+#[derive(Default)]
+struct CountingHandler {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl MessageHandler for CountingHandler {
+    async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(HandleResult::text(format!("Echo: {}", request.content)))
+    }
+}
+
+/// Storage design §3: a chat turn accepts work for its root, so the gateway
+/// records the root under `projects/` before anything of the turn is written.
+#[tokio::test]
+async fn a_turn_records_its_project() {
+    let (_home, _home_store, _env) = guarded_home();
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(StubHandler),
+        EventBus::default(),
+        Some(db),
+    );
+    let project = project_dir();
+
+    let resp = gw
+        .handle_event(learning_turn("in a project", Some(project_path(&project))))
+        .await;
+    assert!(!resp.is_error, "{}", resp.content);
+    let root = project.path().canonicalize().unwrap();
+    let recorded = openalpaca_storage::store::projects::lookup(&root)
+        .unwrap()
+        .expect("the turn recorded its project");
+    assert_eq!(recorded.root, root);
+}
+
+/// A root that cannot be recorded ends the turn before anything of it is
+/// persisted or run: no row would ever name a project with no folder.
+#[tokio::test]
+async fn a_turn_whose_project_cannot_be_recorded_ends_before_anything_is_persisted() {
+    let (_home, home_store, _env) = guarded_home();
+    std::fs::write(home_store.join("projects"), "not a directory\n").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let handler = Arc::new(CountingHandler::default());
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        handler.clone(),
+        EventBus::default(),
+        Some(db.clone()),
+    );
+    let project = project_dir();
+    let path = project_path(&project);
+
+    let resp = gw
+        .handle_event(learning_turn("in a project", Some(path.clone())))
+        .await;
+    assert!(resp.is_error);
+    assert!(
+        resp.content
+            .starts_with(&format!("Could not record the project for {path}: ")),
+        "{}",
+        resp.content
+    );
+    assert_eq!(
+        handler.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "nothing ran"
+    );
+    let rows = openalpaca_storage::ConversationRepository::new(&db)
+        .list_by_lane("user1:gui", 50, 0)
+        .unwrap();
+    assert!(rows.is_empty(), "nothing was persisted");
+}
+
 /// §5.1: a session belongs to exactly one project, and changing project is a
 /// **new** session, never a re-pointed one. The repository half of that rule
 /// (never re-bind) was already there; this is the half that opens the new
@@ -699,8 +795,7 @@ fn project_path(dir: &tempfile::TempDir) -> String {
 /// about which project they belong to.
 #[tokio::test]
 async fn test_changing_project_opens_a_new_session() {
-    let home = tempfile::tempdir().unwrap();
-    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+    let (_home, _home_store, _env) = guarded_home();
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let bus = EventBus::default();
@@ -762,6 +857,18 @@ async fn test_changing_project_opens_a_new_session() {
     let second = repo.get_session(&second).unwrap().expect("second session");
     assert_eq!(second.workspace_id, root(&project_path(&two)));
     assert_eq!(second.status, "active");
+
+    // Both projects were recorded by their turns (storage design §3).
+    for project in [&one, &two] {
+        let root = project.path().canonicalize().unwrap();
+        assert!(
+            openalpaca_storage::store::projects::lookup(&root)
+                .unwrap()
+                .is_some(),
+            "{} was not recorded",
+            root.display()
+        );
+    }
 
     // The switch is announced, so a second window's sidebar does not keep
     // showing the conversation that is no longer the live one.
@@ -1107,8 +1214,7 @@ fn learning_turn(content: &str, workspace_path: Option<String>) -> GatewayReques
 /// is what keeps NULL, and learning reads that as "not a turn".
 #[tokio::test]
 async fn the_gateway_stamps_the_turn_id_on_both_halves_and_the_root_on_the_user_half() {
-    let home = tempfile::tempdir().unwrap();
-    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+    let (_home, _home_store, _env) = guarded_home();
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let gw = Gateway::new(
