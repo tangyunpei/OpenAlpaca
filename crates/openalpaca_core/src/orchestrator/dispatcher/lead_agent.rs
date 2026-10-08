@@ -355,9 +355,9 @@ impl TaskDispatcher {
                 artifact_count: 0,
                 // §4.7 item 3: the project this run belonged to. The request's
                 // workspace root and nothing else — `workspace_id` on the same
-                // context falls back to the daemon CWD for memory scoping, and
-                // recording *that* would claim a Telegram run belonged to
-                // whatever repository the daemon started in (R22).
+                // context is memory scoping's (it once fell back to the daemon
+                // CWD, R-S13), and recording that would claim a Telegram run
+                // belonged to whatever repository the daemon started in (R22).
                 workspace_id: workspace.request_workspace_root.clone(),
                 // Set only by `rerun`, which is the only dispatch that copies
                 // another run's goal onto a new id (GAP-06).
@@ -1105,8 +1105,8 @@ impl TaskDispatcher {
             // on the orchestrator's `BackgroundJobs`, candidates only (MD-2),
             // nothing for a failed or cancelled run. Its project is the
             // request's root — the same field `task.workspace_id` above
-            // records — never `workspace_id`, which a request with no
-            // workspace fills from the daemon CWD (design §3 rule 1, MD-5).
+            // records — never `workspace_id`, memory scoping's field, which the
+            // daemon CWD once filled (design §3 rule 1, MD-5; R-S13).
             if let Some(ref db) = db {
                 spawn_task_memory_extraction(
                     &background,

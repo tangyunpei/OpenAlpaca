@@ -29,9 +29,10 @@ pub use capabilities::{
 /// carried — `x-workspace-path` on `/v1/chat`, `workspace_path` on
 /// `/v1/command` — and each consumer reads exactly one of them:
 ///
-/// - `workspace_id` — the resolved root for **memory scoping**, CWD-derived when
+/// - `workspace_id` — the resolved root for **memory scoping**, `None` when
 ///   the request carried none (`memory/scope_context.rs`,
-///   `MemoryScopeContext::for_request`). Set by the main loop, the skill tier
+///   `MemoryScopeContext::for_request`; never the daemon's CWD since R-S13, so
+///   it equals `request_workspace_root`). Set by the main loop, the skill tier
 ///   and the lead. One builtin reads it: `start_workflow` forwards it, beside
 ///   `request_workspace_root`, into the workflow it dispatches
 ///   (`MemoryScopeContext::from_tool_context`, `start_workflow.rs`), where it
@@ -56,9 +57,10 @@ pub use capabilities::{
 ///   (`runner/lead_agent/tools.rs`) persist `request_workspace_root`, which
 ///   the lead's context — which never carried the as-sent path — has too.
 ///
-/// Collapsing them means one resolved root plus the two bits that actually
-/// differ (did a client send it; is it CWD-derived), so a new consumer cannot
-/// pick the wrong view — which is what R22 fixed once already.
+/// Collapsing them means one resolved root plus the bit that still differs
+/// (did a client send it — since R-S13 none of the three comes from the
+/// daemon's CWD), so a new consumer cannot pick the wrong view — which is what
+/// R22 fixed once already.
 #[derive(Debug, Clone, Default)]
 pub struct ToolContext {
     /// The id capability violations are reported against — the template id
@@ -74,9 +76,9 @@ pub struct ToolContext {
     pub agent_instance_id: Option<String>,
     pub task_id: Option<String>,
     pub owner_id: Option<String>,
-    /// Workspace root for **memory scoping**. Derived from the daemon's current
-    /// directory when the request carried no workspace, so it is never proof
-    /// that the turn belongs to a project — see `request_workspace_root`.
+    /// Workspace root for **memory scoping**: the root the request's path
+    /// resolved to, `None` when it carried none — never the daemon's current
+    /// directory (R-S13). Content placement reads `request_workspace_root`.
     pub workspace_id: Option<String>,
     /// The project root the originating *request* supplied (`x-workspace-path`
     /// on `/v1/chat`, `workspace_path` on `/v1/command`), resolved to its root.

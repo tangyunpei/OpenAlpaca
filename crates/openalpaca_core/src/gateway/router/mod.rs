@@ -200,7 +200,7 @@ pub struct GatewayRequest {
     pub principal: Principal,
     pub scope: Scope,
     /// Optional workspace path provided by the client (GUI project dir, CLI cwd).
-    /// Used for memory scoping instead of the daemon's CWD.
+    /// With none the turn has no project; the daemon's CWD is never read.
     pub workspace_path: Option<String>,
     /// SSE stream ID for routing tool confirmation prompts to the active chat stream.
     /// Set by `ChatService::send_message()`, `None` for connector/API requests.

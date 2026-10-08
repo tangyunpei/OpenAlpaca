@@ -79,10 +79,10 @@ impl Orchestrator {
             _ => None,
         };
 
-        // Resolve the turn's workspace context. Memory scoping prefers the
-        // request-provided path (GUI/CLI) and falls back to the daemon CWD;
-        // `request_workspace_root` is set only on the request branch, so
-        // content writers never inherit the CWD (R22 — see `for_request`).
+        // Resolve the turn's workspace context from the request-provided path
+        // (GUI/CLI) alone: a turn that sent none has no project, and nothing
+        // is read from the daemon's working directory (R22, R-S13 — see
+        // `for_request`).
         let scope_ctx = MemoryScopeContext::for_request(workspace_path.as_deref());
 
         // 3. Try slash commands, task queries, and skill invocations first

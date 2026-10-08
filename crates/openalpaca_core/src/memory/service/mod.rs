@@ -1918,7 +1918,7 @@ impl MemoryService {
             (Some(NoteScope::Project), false) => {
                 return Err(MemoryError::invalid(
                     "scope `project` needs a project, and this request resolved no project root \
-                     (no `.openalpaca` or `.git` above its workspace, or none was named)",
+                     (no registered project or git repository above its workspace, or none was named)",
                 ));
             }
             (Some(scope), _) => scope,

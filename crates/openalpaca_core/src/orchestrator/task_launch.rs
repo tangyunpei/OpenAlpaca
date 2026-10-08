@@ -148,8 +148,8 @@ impl RunPlan {
             // The row's `workspace_id` is the workspace the *request* supplied
             // (R22), which is exactly what `for_request` takes — so a re-launch
             // resolves its project the same way the original turn did, home
-            // fold included, and a row with no project falls back to memory
-            // scoping alone just as that turn did.
+            // fold included, and a row with no project has none, just as that
+            // turn had none (R-S13).
             workspace: MemoryScopeContext::for_request(task.workspace_id.as_deref()),
         })
     }

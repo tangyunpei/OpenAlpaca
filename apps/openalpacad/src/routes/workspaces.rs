@@ -21,13 +21,11 @@
 //! any two leaves a state `memory doctor` names.)
 //!
 //! **A root a project came *from* is resolved the way a turn's
-//! `x-workspace-path` is** (R22, `request_project_root_uncached` — the same
-//! rule, answered from the filesystem rather than from the marker walk's cache,
-//! because these three routes answer *about* a directory the caller is
-//! changing): up to the nearest
-//! `.git`/`.openalpaca`, falling back to the path itself when there is no
-//! marker to walk to — which is the usual state of a root a project has already
-//! been moved *out of*. A re-base **destination** is taken literally instead
+//! `x-workspace-path` is** (R22, `request_project_root` — the storage design's
+//! resolver, which keeps no cache): up to the nearest registered project or
+//! `.git`, falling back to the path itself when there is neither — which is the
+//! usual state of a root a project has already been moved *out of*. A re-base
+//! **destination** is taken literally instead
 //! (`resolve_destination`): walking it up would re-address a history onto a
 //! directory nobody named. The resolved values are what comes back, so a caller
 //! can see what was answered about rather than assume.
@@ -78,7 +76,7 @@ use serde::Deserialize;
 use openalpaca_core::context::SharedContext;
 use openalpaca_core::memory::service::MemoryService;
 
-use super::{api_error, request_project_root_uncached};
+use super::{api_error, request_project_root};
 use crate::AppState;
 
 // ── Request types ────────────────────────────────────────────────
@@ -167,7 +165,7 @@ fn resolve_root(store: &ArtifactStore<'_>, input: &str) -> Result<String, Respon
     if !rows.counts.is_empty() {
         return Ok(literal);
     }
-    Ok(request_project_root_uncached(Some(&literal)).unwrap_or(literal))
+    Ok(request_project_root(Some(&literal)).unwrap_or(literal))
 }
 
 /// A canonicalized path, refused when the marker walk finds it sits *inside*
@@ -175,20 +173,17 @@ fn resolve_root(store: &ArtifactStore<'_>, input: &str) -> Result<String, Respon
 /// [`resolve_destination`] and [`resolve_purge_root`] share, `describe`
 /// supplying the message that is specific to which of the two callers this is.
 ///
-/// A path that resolves to itself — its own `.git`, its own `.openalpaca` (the
-/// P-12 shape, where the store is already there) — or to no marker anywhere,
-/// is taken as given.
+/// A path that resolves to itself — its own `.git`, or a registered project of
+/// its own — or to no project anywhere, is taken as given.
 ///
-/// Resolved **uncached**: this refusal's own remediation is "give it a project
-/// marker of its own first", and the marker walk's process-lifetime cache used
-/// to pin the ancestor answer this very call wrote, so the retry after `mkdir
-/// .openalpaca` answered the same `422` until the daemon restarted.
+/// The resolver keeps no cache, so the remediation this refusal names — give
+/// the path a `.git` of its own — is seen by the very next request.
 #[allow(clippy::result_large_err)]
 fn refuse_if_inside_another_root(
     literal: String,
     describe: impl FnOnce(&str, &str) -> String,
 ) -> Result<String, Response> {
-    match request_project_root_uncached(Some(&literal)) {
+    match request_project_root(Some(&literal)) {
         Some(ancestor) if ancestor != literal => Err(api_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "WORKSPACE_NOT_A_ROOT",

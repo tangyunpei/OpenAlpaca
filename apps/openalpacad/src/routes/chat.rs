@@ -1848,6 +1848,8 @@ mod tests {
     #[tokio::test]
     async fn resuming_a_named_session_keeps_its_workspace_and_does_not_switch() {
         let (_dir, db) = sessions_db();
+        let home = tempfile::tempdir().expect("home store");
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
         let bus = openalpaca_core::bus::EventBus::default();
         let mut rx = bus.subscribe();
         let repo = openalpaca_storage::ConversationRepository::new(&db);
@@ -1932,6 +1934,8 @@ mod tests {
     #[tokio::test]
     async fn a_named_session_with_no_project_takes_the_header() {
         let (_dir, db) = sessions_db();
+        let home = tempfile::tempdir().expect("home store");
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
         let bus = openalpaca_core::bus::EventBus::default();
         let unbound = openalpaca_storage::ConversationRepository::new(&db)
             .get_or_create_active_session("user1:gui", "gui", None)
@@ -1959,6 +1963,8 @@ mod tests {
     #[tokio::test]
     async fn a_turn_naming_no_session_still_switches_project() {
         let (_dir, db) = sessions_db();
+        let home = tempfile::tempdir().expect("home store");
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
         let bus = openalpaca_core::bus::EventBus::default();
         let repo = openalpaca_storage::ConversationRepository::new(&db);
 

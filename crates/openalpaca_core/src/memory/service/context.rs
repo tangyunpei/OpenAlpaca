@@ -92,7 +92,8 @@ pub struct MemoryAccessContext {
     pub owner_id: String,
     /// Derived: the first 32 hex characters of `sha256(owner_id)`.
     pub owner_key: String,
-    /// The MD-5 marker root of the request workspace; `None` = the global
+    /// The project root the request resolved (storage design §3: the nearest
+    /// registered project or folder holding `.git`); `None` = the global
     /// partition only.
     pub project_root: Option<PathBuf>,
     /// Who is asking. Set by the constructor, never by a caller.
@@ -116,35 +117,65 @@ impl MemoryAccessContext {
     }
 }
 
-/// Where the request says it is working (design §3 rule 1, MD-5).
+/// Where the request says it is working (design §3 rule 1, MD-5; storage
+/// design §3).
 #[derive(Debug, Clone, Copy)]
 pub enum WorkspaceHint<'a> {
     /// The request named no workspace: the global partition only. The
     /// daemon's own CWD is never consulted.
     None,
-    /// A root the marker walk already found (`ToolContext.request_workspace_root`,
-    /// R22).
+    /// A root a turn resolved or a row stored
+    /// (`ToolContext.request_workspace_root`, R22): used as given when it is
+    /// a registered project's root, otherwise resolved as a fresh path.
     Root(&'a Path),
     /// A directory the request named (the `x-workspace-path` header, a CLI's
-    /// CWD): the marker walk runs from it.
+    /// CWD): resolved from it.
     Path(&'a Path),
 }
 
 /// Resolves a hint to the project root that scopes memory, or `None` for the
-/// global partition only. A directory with no marker above it is global; a
-/// root whose store *is* the home store (`$HOME`) is not a project.
+/// global partition only (storage design §3). The answer is the nearest
+/// registered project or folder holding `.git`, registered or not; whether a
+/// partition can open there is decided where it opens. A path under neither,
+/// a relative path and the home store with its insides and the folders
+/// around it (R13) are global. If `projects/` cannot be read, a stored root
+/// is kept as given, so the write it carries fails where its partition opens
+/// instead of landing in the global partition, and a client path scopes no
+/// project.
 pub fn resolve_project_root(hint: WorkspaceHint<'_>) -> Option<PathBuf> {
-    let root = match hint {
-        WorkspaceHint::None => return None,
-        WorkspaceHint::Root(root) => root.to_path_buf(),
-        WorkspaceHint::Path(path) => {
-            crate::memory::workspace::detect_workspace_root_uncached(path)?
+    use openalpaca_storage::store::projects;
+    match hint {
+        WorkspaceHint::None => None,
+        WorkspaceHint::Root(root) if root.is_absolute() => {
+            let found = match projects::lookup(root) {
+                Ok(Some(project)) => return Some(project.root),
+                Ok(None) => projects::resolve(root),
+                Err(e) => Err(e),
+            };
+            match found {
+                Ok(found) => found.map(|r| r.root),
+                Err(e) => {
+                    tracing::debug!(
+                        root = %root.display(),
+                        "reading projects/ failed, so the stored root is kept as given: {e:#}"
+                    );
+                    Some(root.to_path_buf())
+                }
+            }
         }
-    };
-    if openalpaca_storage::store::projects::overlaps_home_store(&root) {
-        return None;
+        // A relative stored root is no project (R22).
+        WorkspaceHint::Root(_) => None,
+        WorkspaceHint::Path(path) => match projects::resolve(path) {
+            Ok(found) => found.map(|r| r.root),
+            Err(e) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    "resolving a memory workspace failed, so it scopes no project: {e:#}"
+                );
+                None
+            }
+        },
     }
-    Some(root)
 }
 
 /// The derived sources of the chats a person types into directly (design 09
@@ -169,7 +200,7 @@ pub struct ChatCommandTurn {
     pub source: String,
     /// The turn's own M6 declaration: nobody is there to read the answer.
     pub unattended: bool,
-    /// The MD-5 marker root the turn resolved from its workspace (R22) —
+    /// The project root the turn resolved from its workspace (R22) —
     /// the root that turn's own tool calls use; `None`: global only.
     pub request_workspace_root: Option<PathBuf>,
     pub lane_key: String,

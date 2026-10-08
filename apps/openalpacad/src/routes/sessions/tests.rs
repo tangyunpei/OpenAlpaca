@@ -575,6 +575,8 @@ async fn archiving_leaves_the_lane_with_no_active_session() {
 
 #[tokio::test]
 async fn patching_renames_and_binds_a_workspace_the_session_does_not_have() {
+    let home = tempfile::tempdir().expect("home store");
+    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
     let h = Harness::new();
     let session = h
         .repo()

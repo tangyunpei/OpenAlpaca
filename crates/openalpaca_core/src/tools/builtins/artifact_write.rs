@@ -44,10 +44,10 @@ const KINDS: &[&str] = &[
 /// The **only** input is [`ToolContext::request_workspace_root`]: the project
 /// root a client actually sent with the turn (`x-workspace-path` on
 /// `/v1/chat`, `workspace_path` on `/v1/command`), already resolved to its
-/// root. `ToolContext::workspace_id` is deliberately not read — it falls back
-/// to the daemon's current directory for memory scoping, and placing files by
-/// it would drop a Telegram lane's deliverables into whatever repository the
-/// daemon was started in.
+/// root. `ToolContext::workspace_id` is deliberately not read — it is memory
+/// scoping's field, and until the lead's R-S13 it fell back to the daemon's
+/// current directory: placing files by it would drop a Telegram lane's
+/// deliverables into whatever repository the daemon was started in.
 ///
 /// Absent — a connector turn, a scheduled skill, a detached loop — the
 /// artifact belongs to the home store. A non-absolute value is not a project
@@ -576,8 +576,8 @@ mod tests {
     /// A turn that arrived with a workspace. Only `request_workspace_root` is
     /// set: it is the field that places content, and leaving `workspace_id`
     /// empty keeps every project-store assertion below a statement about the
-    /// *request*. The reverse shape — a CWD-derived `workspace_id` and no
-    /// request root — is the connector regression above.
+    /// *request*. The reverse shape — a `workspace_id` and no request root,
+    /// which no turn builds since R-S13 — is the connector regression above.
     fn ctx(request_workspace_root: Option<&str>, task_id: Option<&str>) -> ToolContext {
         ToolContext {
             agent_id: Some("writing_agent".to_string()),
@@ -687,29 +687,31 @@ mod tests {
     }
 
     /// R22, the regression this fix exists for. A Telegram/iMessage/Discord
-    /// turn and every scheduled skill pass `workspace_path: None`, and
-    /// `handlers.rs` then derives `workspace_id` by walking up from the
-    /// *daemon's* current directory — a plausible absolute project root. That
-    /// id scopes memory; it must never place an artifact, or a daemon started
-    /// from a checkout writes chat deliverables into the developer's working
-    /// tree (`artifacts/` is deliberately not in the store's `.gitignore`).
+    /// turn and every scheduled skill pass `workspace_path: None`; until R-S13
+    /// `handlers.rs` derived `workspace_id` from the *daemon's* current
+    /// directory. No turn builds that context now, but the field is still
+    /// there: it must never place an artifact, or a daemon started from a
+    /// checkout writes chat deliverables into the developer's working tree
+    /// (`artifacts/` is deliberately not in the store's `.gitignore`).
     #[tokio::test]
     async fn a_connector_turn_never_places_an_artifact_in_the_daemons_project() {
         let fx = Fixture::new();
 
-        // The daemon's CWD, inside a marker-bearing project — resolved exactly
-        // as `handlers.rs` resolves it.
+        // A project the daemon might have been started in, resolved the way a
+        // client's path is.
         let cwd_project = TempDir::new().unwrap();
         std::fs::create_dir(cwd_project.path().join(".git")).unwrap();
         let cwd_root = cwd_project.path().canonicalize().unwrap();
-        let cwd_workspace_id =
-            crate::memory::workspace::resolve_workspace_id(cwd_project.path()).unwrap();
+        let cwd_workspace_id = openalpaca_storage::store::projects::resolve(cwd_project.path())
+            .unwrap()
+            .expect("a directory holding .git is a project")
+            .root_string();
         assert_eq!(PathBuf::from(&cwd_workspace_id), cwd_root);
 
         let telegram_ctx = ToolContext {
             agent_id: Some("writing_agent".to_string()),
             owner_id: Some(OWNER.to_string()),
-            // Memory scoping keeps its CWD-derived id …
+            // A memory-scoping id naming that project …
             workspace_id: Some(cwd_workspace_id),
             // … and the request carried no workspace at all.
             request_workspace_root: None,

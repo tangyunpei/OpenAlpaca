@@ -171,7 +171,7 @@ fn note_file_for(dir: &Path, id: NoteId) -> Option<PathBuf> {
 #[test]
 fn an_owner_that_is_not_a_global_user_row_has_no_partition() {
     let h = Harness::new();
-    let ws = h.workspace("project_a", Some(".openalpaca"));
+    let ws = h.workspace("project_a", Some(".git"));
     for id in ["system", "provider:telegram:12345", "", "u_nobody"] {
         let err = h
             .ctx(id, Some(&ws), Surface::ModelTool, Capabilities::ALL)
@@ -285,7 +285,7 @@ fn a_tool_context_takes_its_owner_from_the_principal_first() {
 #[test]
 fn a_request_that_names_no_workspace_uses_the_global_partition_only() {
     let h = Harness::new();
-    let project_a = h.workspace("project_a", Some(".openalpaca"));
+    let project_a = h.workspace("project_a", Some(".git"));
     let in_project = h.user(ALICE, Some(&project_a));
     let theme = h.store(
         &h.user(ALICE, None),
@@ -590,6 +590,41 @@ fn the_home_store_itself_is_never_a_project() {
     assert!(ctx.project_root.is_none());
 }
 
+/// Storage design §3: a stored root is used as given only when it is a
+/// registered project's root; anything else is resolved as a fresh path.
+#[test]
+fn a_stored_root_is_used_as_given_only_when_it_is_registered() {
+    let h = Harness::new();
+    let repo = h.workspace("repo", Some(".git"));
+    let src = repo.join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    // Unregistered: resolved like a client path — up to the repository.
+    assert_eq!(
+        resolve_project_root(WorkspaceHint::Root(&src)),
+        Some(repo.clone())
+    );
+    // Registered: used as given, though a repository holds it.
+    openalpaca_storage::store::projects::register(&src).unwrap();
+    assert_eq!(
+        resolve_project_root(WorkspaceHint::Root(&src)),
+        Some(src.clone())
+    );
+    // A registered project whose folder is gone still scopes its notes
+    // (ST-7), as given and from a path below it.
+    let gone = h.workspace("gone", None);
+    openalpaca_storage::store::projects::register(&gone).unwrap();
+    fs::remove_dir_all(&gone).unwrap();
+    assert_eq!(
+        resolve_project_root(WorkspaceHint::Root(&gone)),
+        Some(gone.clone())
+    );
+    assert_eq!(
+        resolve_project_root(WorkspaceHint::Path(&gone.join("sub"))),
+        Some(gone)
+    );
+}
+
 // ============================================================================
 // Ownership on every read (fixtures 07, 09)
 // ============================================================================
@@ -597,7 +632,7 @@ fn the_home_store_itself_is_never_a_project() {
 #[test]
 fn read_and_list_never_cross_owners() {
     let h = Harness::new();
-    let bobs_project = h.workspace("bobs_project", Some(".openalpaca"));
+    let bobs_project = h.workspace("bobs_project", Some(".git"));
     let bob_note = h.store(
         &h.user(BOB, None),
         "Bob's deploy notes location",
@@ -666,7 +701,7 @@ fn read_and_list_never_cross_owners() {
 #[test]
 fn exact_dedup_is_within_one_partition_only() {
     let h = Harness::new();
-    let project_a = h.workspace("project_a", Some(".openalpaca"));
+    let project_a = h.workspace("project_a", Some(".git"));
     let body = "# Indentation preference\n\nPrefers tabs over spaces for indentation.\n";
     let a1 = h.store(
         &h.user(ALICE, None),
@@ -1352,7 +1387,7 @@ fn search(h: &Harness, ctx: &MemoryAccessContext, query: &str) -> SearchOutput {
 #[test]
 fn recall_and_search_stay_within_the_owners_partitions() {
     let h = Harness::new();
-    let project_a = h.workspace("project_a", Some(".openalpaca"));
+    let project_a = h.workspace("project_a", Some(".git"));
     let theme = h.store(&h.user(ALICE, None), "Color theme preference", "# Color theme preference\n\n## Knowledge\nThe user prefers a dark color theme in every editor.\n", NoteKind::Preference);
     let pnpm = h.store(&h.user(ALICE, Some(&project_a)), "Package manager for project A", "# Package manager for project A\n\n## Knowledge\nProject A installs with pnpm, never npm.\n", NoteKind::Procedure);
     let bobs = h.store(
@@ -3557,7 +3592,7 @@ fn known_project_roots_are_the_partitions_whose_directory_exists() {
 #[test]
 fn a_workspace_move_through_the_service_re_keys_and_re_indexes() {
     let h = Harness::new();
-    let old = h.workspace("old", Some(".openalpaca"));
+    let old = h.workspace("old", Some(".git"));
     let new = h.root.path().join("ws").join("new");
     let note = h.store(
         &h.user(ALICE, Some(&old)),
@@ -3586,6 +3621,9 @@ fn a_workspace_move_through_the_service_re_keys_and_re_indexes() {
     assert_eq!(mv.partitions(), 1);
     fs::create_dir_all(&new).unwrap();
     fs::rename(old.join(".openalpaca"), new.join(".openalpaca")).unwrap();
+    // The user's `mv` carries the repository: `new` is the project now and
+    // `old` a directory with no marker.
+    fs::rename(old.join(".git"), new.join(".git")).unwrap();
     h.service.finish_project_move(mv).unwrap();
     let new = new.canonicalize().unwrap();
 
@@ -3894,7 +3932,7 @@ fn a_notes_kept_revisions_are_listed_and_readable() {
 #[test]
 fn the_doctor_reports_under_the_contexts_owner_and_project() {
     let h = Harness::new();
-    let ws = h.workspace("proj", Some(".openalpaca"));
+    let ws = h.workspace("proj", Some(".git"));
     let user = h.user(ALICE, Some(&ws));
     h.store(&user, "Global", "# G\n", NoteKind::Preference);
     h.store(&user, "Project", "# P\n", NoteKind::Fact);
@@ -3925,7 +3963,7 @@ fn the_doctor_reports_under_the_contexts_owner_and_project() {
 #[test]
 fn reconcile_owner_scans_every_known_partition_and_publishes_external_changes() {
     let h = Harness::new();
-    let ws = h.workspace("proj", Some(".openalpaca"));
+    let ws = h.workspace("proj", Some(".git"));
     let at_project = h.user(ALICE, Some(&ws));
     h.store(
         &at_project,
@@ -3999,8 +4037,8 @@ fn a_partition_that_fails_to_open_is_skipped_and_the_rest_are_still_scanned() {
     }
 
     let h = Harness::new();
-    let ws_a = h.workspace("a", Some(".openalpaca"));
-    let ws_b = h.workspace("b", Some(".openalpaca"));
+    let ws_a = h.workspace("a", Some(".git"));
+    let ws_b = h.workspace("b", Some(".git"));
     h.store(
         &h.user(ALICE, Some(&ws_a)),
         "A",
@@ -5663,7 +5701,7 @@ fn the_service_reads_an_unchanged_partition_through_its_cache() {
 #[test]
 fn a_workspace_move_evicts_the_old_keys() {
     let h = cached_harness();
-    let old = h.workspace("old", Some(".openalpaca"));
+    let old = h.workspace("old", Some(".git"));
     let new = h.root.path().join("ws").join("new");
     let at_old = h.user(ALICE, Some(&old));
     h.store(
@@ -5682,6 +5720,9 @@ fn a_workspace_move_evicts_the_old_keys() {
     let mv = h.service.begin_project_move(&old, &new).unwrap();
     fs::create_dir_all(&new).unwrap();
     fs::rename(old.join(".openalpaca"), new.join(".openalpaca")).unwrap();
+    // The user's `mv` carries the repository: `new` is the project now and
+    // `old` a directory with no marker.
+    fs::rename(old.join(".git"), new.join(".git")).unwrap();
     h.service.finish_project_move(mv).unwrap();
     assert_eq!(h.service.parse_cache().cached_files(&old_key), None);
 

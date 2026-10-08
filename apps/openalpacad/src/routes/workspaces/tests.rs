@@ -173,14 +173,24 @@ impl Fixture {
         files
     }
 
-    /// A project directory carrying a real `.openalpaca` store — seeded through
-    /// `ensure_store`, so its `.layout` records the root it was seeded at.
+    /// A project directory: a git repository (what makes it a root since the
+    /// storage design's resolver, §3) carrying a real `.openalpaca` store —
+    /// seeded through `ensure_store`, so its `.layout` records the root it was
+    /// seeded at.
     fn project(&self, name: &str) -> String {
         let dir = self.projects.path().join(name);
-        std::fs::create_dir_all(&dir).expect("project dir");
+        std::fs::create_dir_all(dir.join(".git")).expect("project dir");
         let dir = dir.canonicalize().expect("canonicalize project");
         store::ensure_store(&StoreScope::Project(dir.clone())).expect("seed store");
         dir.to_string_lossy().into_owned()
+    }
+
+    /// A git repository with no store at all — a re-base destination that is
+    /// a root of its own.
+    fn repo(&self, name: &str) -> String {
+        let dir = self.bare_dir(name);
+        std::fs::create_dir(std::path::Path::new(&dir).join(".git")).expect(".git");
+        dir
     }
 
     /// A project directory with no store at all.
@@ -438,13 +448,19 @@ fn error_code(body: &serde_json::Value) -> &str {
 }
 
 /// The user's `mv`: the whole store travels to the new root, marker and all,
-/// so it still records the root it was seeded at. Nothing in the database moves
-/// — which is precisely the state a re-base exists to fix.
+/// so it still records the root it was seeded at — and the repository with it,
+/// so the new root is a project and the old one a directory with nothing in it.
+/// Nothing in the database moves — which is precisely the state a re-base
+/// exists to fix.
 fn move_the_store_by_hand(old: &str, new: &str) {
     let from = std::path::Path::new(old).join(store::STORE_DIR_NAME);
     let to = std::path::Path::new(new).join(store::STORE_DIR_NAME);
     std::fs::create_dir_all(new).expect("new project dir");
     std::fs::rename(&from, &to).expect("move the store");
+    let git = std::path::Path::new(old).join(".git");
+    if git.exists() {
+        std::fs::rename(&git, std::path::Path::new(new).join(".git")).expect("move the repository");
+    }
 }
 
 // ============================================================================
@@ -819,7 +835,7 @@ async fn a_recorded_root_under_anothers_marker_re_bases_by_its_literal_path() {
 /// `WORKSPACE_NOT_A_ROOT` tells the caller to give the path a project marker of
 /// its own; the marker walk's process-lifetime cache used to pin the ancestor
 /// answer that the refusal's own lookup had just written, so the retry after
-/// `mkdir .openalpaca` answered the same `422` until the daemon restarted. Same
+/// `git init` answered the same `422` until the daemon restarted. Same
 /// process, same path, marker created in between.
 #[tokio::test]
 async fn a_marker_created_after_the_422_is_seen_by_the_next_request() {
@@ -840,8 +856,7 @@ async fn a_marker_created_after_the_422_is_seen_by_the_next_request() {
     );
 
     // Exactly what the message asked for.
-    std::fs::create_dir_all(std::path::Path::new(&inside).join(store::STORE_DIR_NAME))
-        .expect("marker");
+    std::fs::create_dir_all(std::path::Path::new(&inside).join(".git")).expect("marker");
 
     let (status, body) = f.purge(Some(&inside), false, true).await;
     assert_ne!(
@@ -1468,7 +1483,7 @@ async fn a_move_while_a_memory_write_is_pending_is_refused() {
 async fn a_move_re_keys_the_projects_memory_partition() {
     let f = Fixture::new();
     let old = f.project("old-project");
-    let new = f.bare_dir("new-project");
+    let new = f.repo("new-project");
     f.artifact(&old, "Notes");
     let note = f.note(&old, "Release step");
     let old_key = f.project_snapshot(&old).unwrap().partition_key;
@@ -1582,7 +1597,7 @@ async fn a_project_moved_by_hand_gets_its_snapshot_re_keyed_too() {
 async fn a_project_known_only_by_its_memory_can_be_re_based() {
     let f = Fixture::new();
     let old = f.project("old-project");
-    let new = f.bare_dir("new-project");
+    let new = f.repo("new-project");
     let note = f.note(&old, "Release step");
     let old_key = f.project_snapshot(&old).unwrap().partition_key;
     let old_snapshot_path = openalpaca_storage::memory_files::snapshot_path_for(&old_key).unwrap();

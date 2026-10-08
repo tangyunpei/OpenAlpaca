@@ -361,32 +361,21 @@ pub(crate) fn decode_workspace_header(raw: &str) -> String {
         .unwrap_or_else(|_| raw.to_string())
 }
 
-/// Resolve a client-sent workspace path the way a chat turn would.
+/// Resolve a client-sent workspace path the way a chat turn would — and
+/// record nothing.
 ///
 /// One resolver, no second opinion: `MemoryScopeContext::for_request` owns the
-/// rule (marker walk, canonicalisation, and the `$HOME`-is-not-a-project fold),
-/// so a route never resolves a header a second way. `None` — no header, a path
-/// under no marker, or one that resolves to the home store — means *no
-/// project*, and content placement falls back to the home store. Never the
-/// daemon's working directory (ruling R22).
+/// rule (`openalpaca_storage::store::projects::resolve`: the nearest registered
+/// project or `.git`, never the home store — R13), so a route never resolves a
+/// header a second way. `None` means *no project*: no header, a path under no
+/// project, or one that is, lies inside or contains the home store. Content
+/// placement then falls back to the home store. Never the daemon's working
+/// directory (ruling R22). The routes that only read call this — the status
+/// poll, sessions, follow-ups, steering, the workspace routes — and a read
+/// never records a project (storage design §3).
 pub(crate) fn request_project_root(workspace_path: Option<&str>) -> Option<String> {
     let path = workspace_path?;
     MemoryScopeContext::for_request(Some(path)).request_workspace_root
-}
-
-/// [`request_project_root`], answering from the filesystem every time.
-///
-/// The marker walk behind it memoises `canonical start path → root` for the
-/// process lifetime (`memory::workspace`), which is right for a chat turn — a
-/// project's markers do not move while the daemon runs — and wrong for the three
-/// `/v1/workspaces` routes, whose whole job is to answer about a directory the
-/// user is *changing*. `422 WORKSPACE_NOT_A_ROOT` tells the caller to "give it a
-/// project marker of its own first"; the cached answer made that instruction
-/// impossible to follow until the daemon restarted, because the refusal's own
-/// call wrote the entry. Same rule, same fold — no cache.
-pub(crate) fn request_project_root_uncached(workspace_path: Option<&str>) -> Option<String> {
-    let path = workspace_path?;
-    MemoryScopeContext::for_request_uncached(Some(path)).request_workspace_root
 }
 
 // ── Paging bounds, shared (R26) ──────────────────────────────────────────

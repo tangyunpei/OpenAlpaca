@@ -699,6 +699,8 @@ fn project_path(dir: &tempfile::TempDir) -> String {
 /// about which project they belong to.
 #[tokio::test]
 async fn test_changing_project_opens_a_new_session() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let bus = EventBus::default();
@@ -1105,6 +1107,8 @@ fn learning_turn(content: &str, workspace_path: Option<String>) -> GatewayReques
 /// is what keeps NULL, and learning reads that as "not a turn".
 #[tokio::test]
 async fn the_gateway_stamps_the_turn_id_on_both_halves_and_the_root_on_the_user_half() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let gw = Gateway::new(

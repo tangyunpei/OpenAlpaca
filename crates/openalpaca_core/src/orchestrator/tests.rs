@@ -590,9 +590,9 @@ fn make_orchestrator_with_tools_and_llm(
 /// Ruling R22, through the real request path: `handle_message` →
 /// `MemoryScopeContext::for_request` → `simple_query_handler`'s `ToolContext`
 /// → the tool. A turn that carried no workspace — every connector lane, every
-/// scheduled skill — must reach tools with `request_workspace_root: None`,
-/// even though the CWD fallback still hands memory a `workspace_id` (this test
-/// process runs inside a `.git` checkout, so it does).
+/// scheduled skill — must reach tools with no project on either field, though
+/// this test process runs inside a `.git` checkout (the lead's R-S13: the
+/// daemon's current directory is never read).
 mod request_workspace_threading {
     use super::*;
     use crate::tools::registry::{BuiltInTool, ToolContext};
@@ -730,19 +730,23 @@ mod request_workspace_threading {
 
     #[tokio::test]
     async fn a_turn_without_a_workspace_path_carries_no_request_root() {
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
         let ctx = tool_context_for_turn(None).await;
 
         assert_eq!(
             ctx.request_workspace_root, None,
             "the daemon CWD must never reach a tool as a request workspace root"
         );
-        assert_eq!(
-            ctx.workspace_id,
-            std::env::current_dir()
-                .ok()
-                .and_then(|d| crate::memory::workspace::resolve_workspace_id(&d)),
-            "memory scoping keeps its CWD fallback"
+        // Nor as a memory workspace (the lead's R-S13), though this test
+        // process runs inside a git checkout.
+        let cwd = std::env::current_dir().unwrap();
+        assert!(
+            cwd.ancestors().any(|dir| dir.join(".git").exists()),
+            "precondition: this test runs inside a git checkout ({})",
+            cwd.display()
         );
+        assert_eq!(ctx.workspace_id, None, "a turn with no path has no project");
     }
 
     #[tokio::test]
@@ -751,6 +755,8 @@ mod request_workspace_threading {
         std::fs::create_dir(project.path().join(".git")).unwrap();
         let root = project.path().canonicalize().unwrap();
 
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
         let ctx = tool_context_for_turn(Some(project.path().to_string_lossy().to_string())).await;
 
         assert_eq!(ctx.request_workspace_root.as_deref(), root.to_str());
@@ -2546,6 +2552,8 @@ async fn test_steer_prefix_single_workflow_pushes_and_confirms() {
 /// inbox is the whole observable.
 #[tokio::test]
 async fn a_steer_command_carries_the_turns_resolved_project_root() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
     let project = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(project.path().join(".git")).unwrap();
     let sent = project.path().join("src");

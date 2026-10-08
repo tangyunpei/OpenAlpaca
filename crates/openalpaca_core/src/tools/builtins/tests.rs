@@ -721,9 +721,9 @@ mod workspace_artifact_spill {
         assert_eq!(entry.content, "# Tiny\n");
     }
 
-    /// The spill resolves its store exactly like the tool (R22): a connector
-    /// turn carries a CWD-derived `workspace_id` and no request root, and its
-    /// bytes belong in the home store.
+    /// The spill resolves its store exactly like the tool (R22): a context
+    /// with a `workspace_id` and no request root — a connector turn's before
+    /// R-S13 — still puts its bytes in the home store.
     #[tokio::test]
     async fn a_connector_turn_spills_into_the_home_store() {
         let fx = Fixture::new();

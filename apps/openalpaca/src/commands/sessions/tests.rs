@@ -126,6 +126,7 @@ fn a_lane_key_yields_its_source() {
 #[test]
 fn a_workspace_argument_resolves_up_to_the_project_root() {
     let tmp = tempfile::TempDir::new().unwrap();
+    let _env = crate::test_util::EnvSandbox::enter(tmp.path());
     let root = tmp.path().canonicalize().unwrap().join("repo");
     std::fs::create_dir_all(root.join("crates/deep")).unwrap();
     std::fs::create_dir(root.join(".git")).unwrap();
@@ -137,6 +138,7 @@ fn a_workspace_argument_resolves_up_to_the_project_root() {
 #[test]
 fn a_directory_under_no_project_is_an_error_not_an_empty_filter() {
     let tmp = tempfile::TempDir::new().unwrap();
+    let _env = crate::test_util::EnvSandbox::enter(tmp.path());
     let loose = tmp.path().canonicalize().unwrap().join("loose");
     std::fs::create_dir(&loose).unwrap();
 

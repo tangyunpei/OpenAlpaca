@@ -1116,13 +1116,14 @@ async fn test_queue_followup_system_owner_maps_to_system_principal() {
 #[tokio::test]
 async fn a_queue_followup_from_the_main_loop_stores_the_turns_resolved_project_root() {
     let dir = tempfile::tempdir().unwrap();
+    let _env = crate::test_util::HomeStoreGuard::set(&dir.path().join("home"));
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir(project.path().join(".git")).unwrap();
     let sent = project.path().join("src").join("lib");
     std::fs::create_dir_all(&sent).unwrap();
     let sent = sent.to_string_lossy().to_string();
-    // The root as the resolver spells it (`memory/workspace.rs:81-86`):
+    // The root as the resolver spells it (`store::projects::resolve`):
     // canonical, which on macOS turns `/var/folders/…` into
     // `/private/var/folders/…`.
     let root = project
@@ -1184,6 +1185,7 @@ async fn a_queue_followup_from_the_main_loop_stores_the_turns_resolved_project_r
 #[tokio::test]
 async fn a_queue_followup_from_the_lead_stores_the_runs_project_root() {
     let dir = tempfile::tempdir().unwrap();
+    let _env = crate::test_util::HomeStoreGuard::set(&dir.path().join("home"));
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir(project.path().join(".git")).unwrap();
@@ -1252,14 +1254,15 @@ async fn a_queue_followup_from_the_lead_stores_the_runs_project_root() {
 
 /// Review focus — a turn whose path no longer exists (a CLI started in a
 /// directory since deleted, a row from an older build): the path cannot
-/// be canonicalised, so the resolver falls back to it as sent and walks
-/// its lexical ancestors for a marker; none under the temporary directory
-/// carries one (the precondition below), so it yields no root and the row
-/// holds NULL — the same as a path under no marker. Nothing panics,
+/// be canonicalised, so the resolver matches it against registered
+/// project roots only (storage design §3); the guarded home store
+/// registers none, so it yields no root and the row holds NULL — the
+/// same as a path under no project. Nothing panics,
 /// nothing is stored as sent.
 #[tokio::test]
 async fn a_queue_followup_from_a_path_that_no_longer_exists_stores_no_project() {
     let dir = tempfile::tempdir().unwrap();
+    let _env = crate::test_util::HomeStoreGuard::set(&dir.path().join("home"));
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let gone = tempfile::tempdir().unwrap();
     let sent = gone.path().join("deleted").join("project");

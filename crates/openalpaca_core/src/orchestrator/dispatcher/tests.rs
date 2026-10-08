@@ -1596,9 +1596,9 @@ fn dispatch_persists_the_requests_workspace_id() {
     );
 }
 
-/// The connector shape: a CWD-derived `workspace_id` for memory scoping and no
-/// request root. The column stays `NULL` — a Telegram run belongs to no
-/// project, whatever directory the daemon was started in (R22).
+/// A `workspace_id` with no request root — the connector shape before R-S13,
+/// which no turn builds now. The column stays `NULL` — a Telegram run belongs
+/// to no project, whatever directory the daemon was started in (R22).
 #[test]
 fn dispatch_without_a_request_workspace_leaves_workspace_id_null() {
     let dir = tempfile::tempdir().unwrap();
@@ -1795,8 +1795,8 @@ impl ExtractionScene {
 /// (design §3 rule 1, MD-5, §7a's task-output row): a run whose request
 /// named no workspace writes its `extracted_other` candidates into the
 /// owner's home partition — never into the project the daemon happens to be
-/// running in. The connector shape again: `workspace_id` CWD-derived for
-/// memory scoping (R22), `request_workspace_root` empty; the extraction must
+/// running in. The pre-R-S13 connector shape again: a `workspace_id` (the
+/// CWD fallback's, once), `request_workspace_root` empty; the extraction must
 /// read the second field, or a Telegram run's findings land under whatever
 /// checkout started the daemon — a partition the run itself never read.
 #[tokio::test]

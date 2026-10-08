@@ -186,7 +186,7 @@ pub(crate) fn lane_source(lane_key: &str) -> Option<&str> {
 ///
 /// The same resolver a turn's `x-workspace-path` goes through (R22), so the
 /// value compared here is the one `session.workspace_id` holds. A path under
-/// no project marker — or one that resolves to the home store — has no project
+/// no project — no git repository, no chosen folder, or the home store — has no project
 /// root, and saying so beats filtering on a path nothing can match.
 pub(crate) fn resolve_workspace_filter(path: &str) -> Result<String> {
     let absolute = std::path::Path::new(path)
@@ -198,7 +198,7 @@ pub(crate) fn resolve_workspace_filter(path: &str) -> Result<String> {
     .request_workspace_root
     .ok_or_else(|| {
         anyhow::anyhow!(
-            "{} is not inside a project — conversations are bound to a root marked by .openalpaca or .git",
+            "{} is not inside a project — conversations are bound to a git repository or a folder chosen as a project",
             absolute.display()
         )
     })
