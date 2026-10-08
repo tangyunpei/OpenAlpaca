@@ -1698,6 +1698,13 @@ async fn a_run_dispatched_while_the_re_point_waits_refuses_it_and_nothing_moves(
     assert_eq!(error_code(&body), "WORKSPACE_BUSY");
     let message = body["error"]["message"].as_str().unwrap_or_default();
     assert!(message.contains(&root), "{message}");
+    // The transaction's refusal, not the count before the wait: a route
+    // thread that reached its checks only after the insert would answer the
+    // same 409 without exercising the transaction (residual X4).
+    assert!(
+        message.contains("are queued, running or paused; nothing was re-pointed"),
+        "{message}"
+    );
     assert_eq!(
         projects::lookup(&p.root).expect("lookup"),
         Some(p.clone()),

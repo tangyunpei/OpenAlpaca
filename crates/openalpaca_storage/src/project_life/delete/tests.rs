@@ -846,7 +846,8 @@ fn a_put_that_resolved_its_project_before_the_folder_went_re_creates_nothing() {
         let p = w.project("racing");
         let db = w.db.clone();
         let root = p.root.clone();
-        let put =
+        let kind = if upload { "uploads" } else { "artifacts" };
+        let (put, reached) =
             w.db.with_connection(|_| {
                 let put = std::thread::spawn(move || {
                     let scope = StoreScope::Project(root);
@@ -877,12 +878,20 @@ fn a_put_that_resolved_its_project_before_the_folder_went_re_creates_nothing() {
                 // Long enough for the put to resolve its project and wait
                 // here for the database.
                 std::thread::sleep(std::time::Duration::from_millis(300));
+                // `content_dir` made the kind's folder outside the mutex: the
+                // put met the gone folder at its leaf, not at its lookup
+                // (residual X4).
+                let reached = p.dir.join(kind).is_dir();
                 assert!(remove_project_folder(&p).unwrap());
-                Ok(put)
+                Ok((put, reached))
             })
             .unwrap();
         let stored = put.join().unwrap();
 
+        assert!(
+            reached,
+            "upload {upload}: the put had not made {kind}/ when the folder went"
+        );
         assert!(stored.is_err(), "upload {upload}: the put went through");
         assert!(
             !p.dir.exists(),
