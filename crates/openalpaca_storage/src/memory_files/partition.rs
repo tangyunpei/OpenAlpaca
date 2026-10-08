@@ -17,8 +17,9 @@ use super::authority::{Conflict, Derivation, DerivedNote, EffectiveStatus, NoteI
 use super::cache::{FileEntry, NoteParseCache, ParsedNote, StatKey};
 use super::dirstat;
 use super::fsx::{
-    canonical_string_lenient, create_private_dir, fsync_dir, read_regular_nofollow,
-    real_directory_state, remove_dir_all_if_exists, remove_file_if_exists, write_atomic_private,
+    canonical_string_lenient, create_private_dir, create_private_dir_below, fsync_dir,
+    read_regular_nofollow, real_directory_state, remove_dir_all_if_exists, remove_file_if_exists,
+    write_atomic_private,
 };
 use super::note::{NewNote, Note, NoteId, NotePatch, NoteStatus, ReplacePolicy, to_second};
 use super::snapshot::{
@@ -1068,11 +1069,11 @@ impl Partition {
                 return Err(MemoryFilesError::PathRefused { component, reason });
             }
         }
-        create_private_dir(&self.memory_dir)?;
-        create_private_dir(&owners)?;
-        create_private_dir(&self.root)?;
-        create_private_dir(&self.notes_dir)?;
-        create_private_dir(&self.history_dir)?;
+        self.create_private(&self.memory_dir)?;
+        self.create_private(&owners)?;
+        self.create_private(&self.root)?;
+        self.create_private(&self.notes_dir)?;
+        self.create_private(&self.history_dir)?;
         let mut snapshot = Arc::new(self.fresh_snapshot(self.now()));
         // `state/` itself is the store's and is created 0700 by the store,
         // never by the snapshot's `create_dir_all` with the umask default.
@@ -1082,6 +1083,34 @@ impl Partition {
         self.remember_snapshot(state, saved);
         self.write_navigation(&[]);
         Ok(())
+    }
+
+    /// `dir` of this partition, 0700. A project's partition creates it below
+    /// the project's folder under `projects/` one level at a time and never
+    /// that folder itself: one the delete removed (or a re-point renamed)
+    /// since this partition was opened is `NotRegistered`, not a folder
+    /// re-created with no `project.json` (R-F3). The home partition makes its
+    /// parents as it always has.
+    fn create_private(&self, dir: &Path) -> Result<(), MemoryFilesError> {
+        let StoreScope::Project(root) = &self.scope else {
+            return Ok(create_private_dir(dir)?);
+        };
+        let base = self.memory_dir.parent().ok_or_else(|| {
+            MemoryFilesError::Io(anyhow::anyhow!(
+                "{} has no parent",
+                self.memory_dir.display()
+            ))
+        })?;
+        create_private_dir_below(base, dir).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                MemoryFilesError::NotRegistered { root: root.clone() }
+            } else {
+                MemoryFilesError::Io(
+                    anyhow::Error::new(e)
+                        .context(format!("Failed to create directory: {}", dir.display())),
+                )
+            }
+        })
     }
 
     /// Creates the partition now, with an empty snapshot (what a loader does;
@@ -1563,7 +1592,7 @@ impl Partition {
         self.crash_check(CrashPoint::WriteAfter1)?;
 
         // Step 2a: the new bytes into `.history` before the note's rename.
-        create_private_dir(&self.history_dir.join(note.id.to_string()))?;
+        self.create_private(&self.history_dir.join(note.id.to_string()))?;
         write_atomic_private(&self.history_file(&note.id, &to_rev), bytes.as_bytes())?;
         self.crash_check(CrashPoint::WriteAfter2a)?;
 
@@ -2611,7 +2640,7 @@ impl Partition {
                 },
             );
         }
-        create_private_dir(&self.history_dir)?;
+        self.create_private(&self.history_dir)?;
         state_dir()?; // `state/` private before the snapshot's parent is made
         let mut snapshot = Arc::new(snapshot);
         let saved = self.save_snapshot(&mut snapshot, now)?;

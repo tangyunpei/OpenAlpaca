@@ -181,8 +181,8 @@ use crate::models::{ArtifactKind, ArtifactOrigin};
 use crate::sql::escape_like;
 use crate::store::{
     ContentKind, StoreScope, artifact_extension, artifact_file_name, confine_to_root, content_dir,
-    leading_sequence, loose_dir, project_root_of, relative_to, run_dir, store_root,
-    version_file_path,
+    create_below, leading_sequence, loose_dir, project_folder_gone, project_root_of, relative_to,
+    run_dir, store_root, version_file_path,
 };
 
 /// `[execution.artifacts] max_versions_per_artifact` (plan §4.6). The config key
@@ -924,8 +924,17 @@ impl<'a> ArtifactStore<'a> {
             let version = previous_version.map_or(1, |previous| previous + 1);
 
             // --- The §4.2 write protocol -------------------------------------
-            fs::create_dir_all(&dir)
-                .with_context(|| format!("failed to create {}", dir.display()))?;
+            // Below the canonical artifacts root, one level at a time: a
+            // project's folder the delete removed since `content_dir` read it
+            // is `NotRegistered`, never re-created with no `project.json`.
+            create_below(&artifacts_root, Path::new(&rel_dir)).map_err(|e| match new.scope {
+                StoreScope::Project(root) => project_folder_gone(e, root).unwrap_or_else(|e| {
+                    anyhow::Error::new(e).context(format!("failed to create {}", dir.display()))
+                }),
+                StoreScope::Home => {
+                    anyhow::Error::new(e).context(format!("failed to create {}", dir.display()))
+                }
+            })?;
             // R24: claim the name with `O_EXCL` before a byte is written. Only
             // a *new* artifact reserves — superseding one already owns the name
             // its own row addresses, and step 3 moves that file aside itself.
@@ -2409,8 +2418,12 @@ fn write_bytes_steps(
             // head path.
             rotated_rel = Some(relative_to(artifacts_root, &version_path)?);
         } else if head_path.exists() {
+            // `.versions/…` below the head's own directory, never above it.
             if let Some(parent) = version_path.parent() {
-                fs::create_dir_all(parent)
+                let below = parent.strip_prefix(dir).with_context(|| {
+                    format!("{} is not under {}", parent.display(), dir.display())
+                })?;
+                create_below(dir, below)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
             fs::rename(head_path, &version_path).with_context(|| {

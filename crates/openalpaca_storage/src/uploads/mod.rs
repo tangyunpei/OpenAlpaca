@@ -94,8 +94,8 @@ use crate::models::file_asset::{FileAsset, FileAssetStatus};
 use crate::models::{ArtifactKind, ArtifactOrigin};
 use crate::repository::file_asset::{FILE_ASSET_COLUMNS, row_to_file_asset};
 use crate::store::{
-    ContentKind, StoreScope, confine_to_root, content_dir, leading_sequence, project_root_of,
-    relative_to, upload_dir, upload_file_name,
+    ContentKind, StoreScope, confine_to_root, content_dir, create_below, leading_sequence,
+    project_folder_gone, project_root_of, relative_to, upload_dir, upload_file_name,
 };
 
 // ============================================================================
@@ -243,8 +243,19 @@ impl<'a> UploadStore<'a> {
             // through and create a new row. A hit whose bytes are gone falls
             // through too, and is re-addressed in place below.
 
-            fs::create_dir_all(&dir)
-                .map_err(|e| io_error(format!("Failed to create storage directory: {e}")))?;
+            // Below the canonical uploads root, one level at a time: a
+            // project's folder the delete removed since `content_dir` read it
+            // is `NotRegistered`, never re-created with no `project.json`.
+            create_below(&uploads_root, Path::new(&rel_dir)).map_err(|e| {
+                let message = format!("Failed to create storage directory {}: {e}", dir.display());
+                match new.scope {
+                    StoreScope::Project(root) => match project_folder_gone(e, root) {
+                        Ok(gone) => gone.context(UploadError::Io(message)),
+                        Err(_) => io_error(message),
+                    },
+                    StoreScope::Home => io_error(message),
+                }
+            })?;
 
             let seq = next_sequence(&tx, &project_key, &rel_dir)?;
             let (head_name, head_path) = reserve_head(&uploads_root, &dir, seq, new.filename)?;

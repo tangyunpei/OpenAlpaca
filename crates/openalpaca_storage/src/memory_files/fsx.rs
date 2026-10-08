@@ -28,6 +28,29 @@ pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// [`create_private_dir`] for a `dir` below `base` that never creates
+/// `base`: the levels between are made one at a time
+/// ([`crate::store::create_below`]), an existing one taken only when it is a
+/// real directory, and `dir` is set to 0700 (best effort, as there). A
+/// `base` that is gone is `ErrorKind::NotFound` with nothing created — a
+/// project's folder under `projects/` the delete removed is never re-created
+/// with no `project.json` (R-F3).
+pub(crate) fn create_private_dir_below(base: &Path, dir: &Path) -> std::io::Result<()> {
+    let below = dir.strip_prefix(base).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not under {}", dir.display(), base.display()),
+        )
+    })?;
+    crate::store::create_below(base, below)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
 /// What `symlink_metadata` says a path component on the way to a partition is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ComponentState {

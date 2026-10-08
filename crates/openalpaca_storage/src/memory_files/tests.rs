@@ -6289,3 +6289,35 @@ fn a_candidates_forget_suppresses_no_row_a_saved_note_cites() {
     assert!(!kept.derived.source_forgotten);
     assert!(kept.derived.recallable(), "still in force");
 }
+
+/// R-F3, defence in depth: a project partition opened before the delete
+/// removed `projects/<name>/` re-creates nothing of it on its next write —
+/// its directories are made below the folder, never the folder itself.
+#[test]
+fn a_write_through_a_partition_whose_project_folder_went_re_creates_nothing() {
+    let sb = Sandbox::new();
+    let folder = crate::store::projects::lookup(&sb.project_root())
+        .unwrap()
+        .unwrap()
+        .dir;
+    let p = sb.open_project(ALICE).unwrap();
+    p.create(
+        new_note("First", "# First\n\nBefore.\n", NoteKind::Fact),
+        Actor::UserSurface,
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&folder).unwrap();
+
+    let err = p
+        .create(
+            new_note("Second", "# Second\n\nAfter.\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .expect_err("the project's folder is gone");
+
+    assert!(
+        !folder.exists(),
+        "{} was re-created with no project.json ({err})",
+        folder.display()
+    );
+}

@@ -833,3 +833,62 @@ fn a_folder_that_now_records_another_project_is_left_in_place() {
     );
     assert!(second.dir.join("project.json").is_file());
 }
+
+/// R16 (R-F3): an upload or a by-product that resolved its project before
+/// the delete removed `projects/<name>/`, and reaches the disk only after,
+/// re-creates nothing. The put resolves its directories outside the
+/// database mutex and creates its leaf inside it; the test holds the mutex
+/// across the folder's removal, so the put meets the gone folder there.
+#[test]
+fn a_put_that_resolved_its_project_before_the_folder_went_re_creates_nothing() {
+    for upload in [true, false] {
+        let w = World::new();
+        let p = w.project("racing");
+        let db = w.db.clone();
+        let root = p.root.clone();
+        let put =
+            w.db.with_connection(|_| {
+                let put = std::thread::spawn(move || {
+                    let scope = StoreScope::Project(root);
+                    let stored = if upload {
+                        UploadStore::new(&db)
+                            .put(NewUpload {
+                                owner_id: OWNER,
+                                filename: "late.txt",
+                                mime_type: "text/plain",
+                                data: b"late",
+                                scope: &scope,
+                                created: at(),
+                            })
+                            .map(|_| ())
+                    } else {
+                        let mut new = NewArtifact::new(
+                            OWNER,
+                            &scope,
+                            ArtifactKind::Markdown,
+                            "Late",
+                            b"late",
+                        );
+                        new.created = at();
+                        ArtifactStore::new(&db).put(new).map(|_| ())
+                    };
+                    stored.map_err(|e| format!("{e:#}"))
+                });
+                // Long enough for the put to resolve its project and wait
+                // here for the database.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                assert!(remove_project_folder(&p).unwrap());
+                Ok(put)
+            })
+            .unwrap();
+        let stored = put.join().unwrap();
+
+        assert!(stored.is_err(), "upload {upload}: the put went through");
+        assert!(
+            !p.dir.exists(),
+            "upload {upload}: {} was re-created with no project.json",
+            p.dir.display()
+        );
+        assert_eq!(w.count("SELECT COUNT(*) FROM file_assets"), 0);
+    }
+}

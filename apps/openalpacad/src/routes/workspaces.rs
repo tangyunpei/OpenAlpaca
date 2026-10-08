@@ -890,10 +890,12 @@ fn announce_deleted_sessions(deps: &PurgeDeps<'_>, plan: &DeletePlan, outcome: &
 /// while this waited for its memory slot — the plan was made for the project
 /// as it was — is a `409` and nothing is deleted ([`still_the_project`]).
 /// Then, holding the project's memory slot: the rows (`delete_project_data`,
-/// files another conversation links kept in the root store), the
-/// conversations' log directories, their summaries in the owner's home
-/// partition, every owner's partitions
-/// (`MemoryService::remove_project`) and `projects/<name>/`. A failure
+/// files another conversation links kept in the root store), every owner's
+/// partitions (`MemoryService::remove_project`) and `projects/<name>/` —
+/// directly after the rows, so a put that resolved the project before the
+/// transaction finds its folder gone as soon as possible — then the
+/// conversations' log directories and their summaries in the owner's home
+/// partition. A failure
 /// after the rows went is logged and reported in `removed`, never a `500`:
 /// the deletion the caller asked for has happened. A partition that could
 /// not be dropped keeps `projects/<name>/` (`project_folder: false`), so the
@@ -1015,29 +1017,18 @@ pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRe
             );
         }
     };
-    let session_dirs = remove_session_dirs(deps, &outcome.session_ids).await;
-    if let Some(queue) = deps.learning.as_deref() {
-        for id in &outcome.session_ids {
-            queue.forget_session(id);
-        }
-    }
-    // Design 09 §13.3 (LQ4), as today: the deleted conversations' summaries
-    // go with them — from the owner's home partition only. The project's
-    // own partitions go whole just below, and a forget into one of them would
-    // wait for ever on the slot this call holds (`begin_write` waits while
-    // `quiesce` holds the slot).
-    crate::routes::sessions::forget_conversation_summaries(
-        Some(deps.memory.clone()),
-        deps.owner,
-        None,
-        outcome.message_ids.clone(),
-    )
-    .await;
-    // `remove_project` stops at the first partition it cannot drop. The folder
-    // then stays, so the project stays registered and the delete run again —
-    // finding no row left — drops the rest and the folder. Removed now, it
-    // would strand the snapshots left: nothing lists one whose project no
-    // folder records (R-S11), and a delete of that root answers `404`.
+    // The partitions and the folder first, straight after the rows: a put
+    // that resolved the project before the transaction can land its bytes
+    // and a row in `projects/<name>/` until the folder goes, and none can
+    // once it has (`store::create_below`, R-F3); the window left between
+    // the commit and the removal is design §18's residue.
+    //
+    // `remove_project` stops at the first partition it cannot drop. The
+    // folder then stays, so the project stays registered and the delete run
+    // again — finding no row left — drops the rest and the folder. Removed
+    // now, it would strand the snapshots left: nothing lists one whose
+    // project no folder records (R-S11), and a delete of that root answers
+    // `404`.
     let (memory_partitions, partitions_left) = match deps.memory.remove_project(&project.id) {
         Ok(dropped) => (dropped, false),
         Err(e) => {
@@ -1070,6 +1061,24 @@ pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRe
             }
         }
     };
+    let session_dirs = remove_session_dirs(deps, &outcome.session_ids).await;
+    if let Some(queue) = deps.learning.as_deref() {
+        for id in &outcome.session_ids {
+            queue.forget_session(id);
+        }
+    }
+    // Design 09 §13.3 (LQ4), as today: the deleted conversations' summaries
+    // go with them — from the owner's home partition only. The project's
+    // own partitions went whole above, and a forget into one of them would
+    // wait for ever on the slot this call holds (`begin_write` waits while
+    // `quiesce` holds the slot).
+    crate::routes::sessions::forget_conversation_summaries(
+        Some(deps.memory.clone()),
+        deps.owner,
+        None,
+        outcome.message_ids.clone(),
+    )
+    .await;
     announce_deleted_sessions(deps, &plan, &outcome);
     Json(delete_view(
         &plan,

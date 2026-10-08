@@ -792,3 +792,90 @@ fn read_log_tail_of_a_large_log_never_shows_a_line_cut_in_half() {
     }
     assert!(tail.len() as u64 <= LOG_TAIL_READ_BYTES);
 }
+
+// ============================================================================
+// create_below (R-F3)
+// ============================================================================
+
+#[test]
+fn create_below_makes_each_missing_level_and_keeps_the_ones_there() {
+    let tmp = tempdir().unwrap();
+    let base = tmp.path().join("projects").join("-repo");
+    fs::create_dir_all(base.join("uploads")).unwrap();
+    fs::write(base.join("uploads").join("kept.txt"), b"kept").unwrap();
+
+    let dir = create_below(&base, Path::new("uploads/2026-10-08")).unwrap();
+
+    assert_eq!(dir, base.join("uploads").join("2026-10-08"));
+    assert!(dir.is_dir());
+    assert_eq!(
+        fs::read(base.join("uploads").join("kept.txt")).unwrap(),
+        b"kept"
+    );
+    assert_eq!(
+        create_below(&base, Path::new("uploads/2026-10-08")).unwrap(),
+        dir,
+        "a second call finds every level there"
+    );
+    assert_eq!(create_below(&base, Path::new("")).unwrap(), base);
+}
+
+#[test]
+fn create_below_a_base_that_is_gone_is_not_found_and_creates_nothing() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    fs::create_dir_all(&projects).unwrap();
+    let gone = projects.join("-repo");
+
+    for rel in ["", "uploads", "artifacts/loose/2026-10-08"] {
+        let err = create_below(&gone, Path::new(rel)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{rel:?}: {err}");
+    }
+    assert!(!gone.exists(), "the base was re-created");
+    assert_eq!(fs::read_dir(&projects).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn create_below_refuses_a_level_that_is_a_link_or_a_file() {
+    let tmp = tempdir().unwrap();
+    let base = tmp.path().join("base");
+    let elsewhere = tmp.path().join("elsewhere");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, base.join("uploads")).unwrap();
+    fs::write(base.join("artifacts"), b"a file").unwrap();
+    let linked_base = tmp.path().join("linked-base");
+    std::os::unix::fs::symlink(&base, &linked_base).unwrap();
+
+    for (b, rel) in [
+        (&base, "uploads/2026-10-08"),
+        (&base, "artifacts/loose"),
+        (&linked_base, "memory"),
+    ] {
+        let err = create_below(b, Path::new(rel)).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::NotADirectory,
+            "{}/{rel}: {err}",
+            b.display()
+        );
+    }
+    assert_eq!(
+        fs::read_dir(&elsewhere).unwrap().count(),
+        0,
+        "followed a link"
+    );
+    assert!(!base.join("memory").exists());
+}
+
+#[test]
+fn create_below_takes_plain_names_only() {
+    let tmp = tempdir().unwrap();
+    for rel in ["../escape", "/abs", "a/../b"] {
+        let err = create_below(tmp.path(), Path::new(rel)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{rel}: {err}");
+    }
+    assert!(!tmp.path().join("a").exists());
+    assert!(!tmp.path().parent().unwrap().join("escape").exists());
+}

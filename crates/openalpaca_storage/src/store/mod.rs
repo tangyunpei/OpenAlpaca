@@ -484,12 +484,95 @@ pub fn is_the_home_root(root: &Path) -> bool {
 /// `store_root(scope)/<kind>` — created on use (reserved names stay absent
 /// until something needs them). A project's folder exists from its
 /// registration, so nothing is seeded first; a root with no folder is
-/// [`store_root`]'s typed error and nothing is created (R12).
+/// [`store_root`]'s typed error and nothing is created (R12). For a project
+/// the kind is created below its folder and never the folder itself
+/// ([`create_below`]): a folder the delete removed (or a re-point renamed)
+/// since the lookup is the same typed error, not a folder re-created with
+/// no `project.json`.
 pub fn content_dir(scope: &StoreScope, kind: ContentKind) -> Result<PathBuf> {
-    let dir = store_root(scope)?.join(kind.dir_name());
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("Failed to create content directory: {}", dir.display()))?;
+    let root = store_root(scope)?;
+    match scope {
+        StoreScope::Home => {
+            let dir = root.join(kind.dir_name());
+            fs::create_dir_all(&dir).with_context(|| {
+                format!("Failed to create content directory: {}", dir.display())
+            })?;
+            Ok(dir)
+        }
+        StoreScope::Project(project_root) => create_below(&root, Path::new(kind.dir_name()))
+            .map_err(|e| {
+                project_folder_gone(e, project_root).unwrap_or_else(|e| {
+                    anyhow::Error::new(e).context(format!(
+                        "Failed to create content directory: {}",
+                        root.join(kind.dir_name()).display()
+                    ))
+                })
+            }),
+    }
+}
+
+/// `base/rel`, created one level at a time and never `base` itself: each
+/// missing level with `fs::create_dir`, an existing one taken only when it is
+/// a real directory (`symlink_metadata`: no link, no file —
+/// `ErrorKind::NotADirectory` otherwise). A `base` that is gone fails with
+/// `ErrorKind::NotFound` and creates nothing — the guard for a project's
+/// folder under `projects/`, which `create_dir_all` would re-create with no
+/// `project.json` for a writer that resolved the project before the delete
+/// removed it (R-F3). `rel` must be plain names (`ErrorKind::InvalidInput`
+/// otherwise); an empty `rel` answers `base` when it is a directory.
+pub(crate) fn create_below(base: &Path, rel: &Path) -> std::io::Result<PathBuf> {
+    use std::io::{Error, ErrorKind};
+    let real_directory = |dir: &Path| -> std::io::Result<()> {
+        if fs::symlink_metadata(dir)?.file_type().is_dir() {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorKind::NotADirectory,
+                format!(
+                    "{} is not a real directory (a link or a file)",
+                    dir.display()
+                ),
+            ))
+        }
+    };
+    let names = rel
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => Ok(name),
+            _ => Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("{} is not a relative path of plain names", rel.display()),
+            )),
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    real_directory(base)?;
+    let mut dir = base.to_path_buf();
+    for name in names {
+        dir.push(name);
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => real_directory(&dir)?,
+            Err(e) => return Err(e),
+        }
+    }
     Ok(dir)
+}
+
+/// [`create_below`]'s `NotFound` under a project's folder as the
+/// [`projects::ProjectError::NotRegistered`] every reader of a project scope
+/// already handles (R12): the folder went since the lookup. Any other error
+/// is handed back.
+pub(crate) fn project_folder_gone(
+    e: std::io::Error,
+    project_root: &Path,
+) -> std::result::Result<anyhow::Error, std::io::Error> {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        Ok(anyhow::Error::new(projects::ProjectError::NotRegistered {
+            root: project_root.to_string_lossy().into_owned(),
+        }))
+    } else {
+        Err(e)
+    }
 }
 
 /// The canonical-path string a content row records as its `project_root`;
