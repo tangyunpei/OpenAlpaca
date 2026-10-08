@@ -14,7 +14,8 @@
  * deletes nothing and is undone by re-pointing back — and the folder field
  * takes the focus. `Re-point` stays off until the count on screen has been
  * read, and after a read that failed; while a run under the root is in
- * flight (the daemon answers `409 WORKSPACE_BUSY` and changes nothing); and
+ * flight — queued, running or paused (the daemon answers
+ * `409 WORKSPACE_BUSY` for each and changes nothing); and
  * for a relative path, which the daemon refuses, or one where the project
  * already is.
  * Every other refusal — `WORKSPACE_EXISTS` above all (ST-20: re-pointing onto
@@ -84,8 +85,12 @@ export interface RepointProjectDialogProps {
    * `undefined` until read.
    */
   resolvedAs: Pick<Workspace, "id" | "root"> | undefined;
-  /** Runs under the root that are running or paused. */
-  activeTasks: number;
+  /**
+   * Runs under the root still in flight — queued, running or paused
+   * (`queued_tasks` + `active_tasks`): the daemon refuses the re-point for
+   * each kind (R10).
+   */
+  runsInFlight: number;
   /** The fresh read of the counts is still out. */
   reading: boolean;
   /** Why the counts could not be read, or `null`. */
@@ -107,7 +112,7 @@ export function RepointProjectDialog({
   project,
   rows,
   resolvedAs,
-  activeTasks,
+  runsInFlight,
   reading,
   readError,
   value,
@@ -125,7 +130,7 @@ export function RepointProjectDialog({
     reading || readError !== null || resolvedAs === undefined
       ? null
       : foreignRootLine(project, resolvedAs);
-  const busy = foreign === null && activeTasks > 0;
+  const busy = foreign === null && runsInFlight > 0;
   // A failed read leaves no count, and so no busy gate either (S5b M2).
   const canConfirm =
     !reading &&
@@ -196,7 +201,7 @@ export function RepointProjectDialog({
 
         {busy && (
           <p className={paragraph}>
-            {`${counted(activeTasks, "run there is", "runs there are")} still in flight — a re-point is refused while one is; retry once it finishes.`}
+            {`${counted(runsInFlight, "run there is", "runs there are")} still in flight — a re-point is refused while one is; retry once it finishes.`}
           </p>
         )}
 

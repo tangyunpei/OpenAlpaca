@@ -244,7 +244,9 @@ function RepointFlow({ project, current, onClose }: FlowProps) {
       project={project}
       rows={counts.data?.rows}
       resolvedAs={counts.data ?? undefined}
-      activeTasks={counts.data?.active_tasks ?? 0}
+      runsInFlight={
+        (counts.data?.active_tasks ?? 0) + (counts.data?.queued_tasks ?? 0)
+      }
       reading={reading}
       readError={counts.error?.message ?? null}
       value={value}

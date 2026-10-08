@@ -1031,7 +1031,7 @@ dialog counts what is recorded at the old path (`GET /v1/workspaces?path=`) —
 conversations, messages, runs, files, queued follow-ups — and says when runs
 there are still in flight; type the new folder or press `Choose…`, then
 `Re-point` (`PATCH /v1/workspaces`), which stays off while a run there is
-running or paused, and after a count that could not be read — the dialog says
+queued, running or paused, and after a count that could not be read — the dialog says
 why. Should the daemon read the project's path as another project, or as
 none, the dialog says so instead of drawing the counts, and `Re-point` stays
 off: it would move the wrong project, or nothing. (The daemon matches a root

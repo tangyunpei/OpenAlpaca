@@ -419,6 +419,57 @@ describe("Re-point… (storage design §6, ST-20)", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps Re-point off while a run there is queued and counts it as in flight", async () => {
+    // R10: a queued run has already resolved the project by this root, so
+    // the daemon refuses the re-point for it as for a running one.
+    const user = userEvent.setup();
+    api.list.mockResolvedValue([REPO]);
+    api.get.mockResolvedValue(recorded({ active_tasks: 1, queued_tasks: 1 }));
+    renderCard();
+
+    await user.click(await screen.findByRole("button", { name: "Re-point…" }));
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByText(
+      "Recorded there: 2 conversations · 40 messages · 3 runs · 4 files.",
+    );
+    await user.type(
+      within(dialog).getByLabelText("New project folder"),
+      MOVED.root,
+    );
+
+    expect(
+      within(dialog).getByRole("button", { name: "Re-point" }),
+    ).toBeDisabled();
+    expect(dialog).toHaveTextContent(
+      "2 runs there are still in flight — a re-point is refused while one is; retry once it finishes.",
+    );
+  });
+
+  it("keeps Re-point off when the only run there is queued", async () => {
+    const user = userEvent.setup();
+    api.list.mockResolvedValue([REPO]);
+    api.get.mockResolvedValue(recorded({ active_tasks: 0, queued_tasks: 1 }));
+    renderCard();
+
+    await user.click(await screen.findByRole("button", { name: "Re-point…" }));
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByText(
+      "Recorded there: 2 conversations · 40 messages · 3 runs · 4 files.",
+    );
+    await user.type(
+      within(dialog).getByLabelText("New project folder"),
+      MOVED.root,
+    );
+
+    expect(
+      within(dialog).getByRole("button", { name: "Re-point" }),
+    ).toBeDisabled();
+    expect(dialog).toHaveTextContent(
+      "1 run there is still in flight — a re-point is refused while one is; retry once it finishes.",
+    );
+    expect(api.repoint).not.toHaveBeenCalled();
+  });
+
   it("fills the folder from the native picker", async () => {
     const user = userEvent.setup();
     picker.pick.mockResolvedValue(MOVED.root);

@@ -32,7 +32,7 @@ function renderDialog(overrides: Partial<RepointProjectDialogProps> = {}) {
     project: REPO,
     rows: ROWS,
     resolvedAs: { id: REPO.id, root: REPO.root },
-    activeTasks: 0,
+    runsInFlight: 0,
     reading: false,
     readError: null,
     value: "",
@@ -132,7 +132,7 @@ describe("RepointProjectDialog", () => {
   });
 
   it("refuses a press while a run there is in flight, and says why", () => {
-    renderDialog({ activeTasks: 2, value: "/Users/me/work/repo" });
+    renderDialog({ runsInFlight: 2, value: "/Users/me/work/repo" });
 
     expect(screen.getByRole("dialog")).toHaveTextContent(
       "2 runs there are still in flight — a re-point is refused while one is; retry once it finishes.",

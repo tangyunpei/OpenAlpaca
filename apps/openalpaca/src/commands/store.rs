@@ -130,7 +130,8 @@ struct WorkspaceView {
     rows: RowCounts,
     #[serde(default)]
     active_tasks: usize,
-    /// `queued` runs: they do not stop a re-point, they do stop a delete.
+    /// `queued` runs: they stop a re-point and a delete as running ones do —
+    /// their dispatch has already resolved the project by this root (R10).
     #[serde(default)]
     queued_tasks: usize,
 }
@@ -424,8 +425,8 @@ fn render_plan(from: &WorkspaceView, to: &WorkspaceView) -> String {
         flag(
             &mut out,
             format!(
-                "{} run(s) there are queued; the re-point takes their rows with it, but \
-                 deleting that project's data would be refused until they finish",
+                "{} run(s) there are queued; the re-point would be refused until they finish, \
+                 as would deleting that project's data",
                 from.queued_tasks
             ),
         );
@@ -968,7 +969,14 @@ mod tests {
             text.contains("delete that project's data first, or re-point onto another path"),
             "{text}"
         );
-        assert!(text.contains("2 run(s) there are queued"), "{text}");
+        // R10: a queued run refuses the re-point as a running one does.
+        assert!(
+            text.contains(
+                "2 run(s) there are queued; the re-point would be refused until they finish"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("takes their rows with it"), "{text}");
         assert!(
             text.contains("its folder is gone; re-pointing is what re-attaches its data"),
             "{text}"
