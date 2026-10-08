@@ -1004,8 +1004,9 @@ and what to do: "`<path>` is in no project: no git repository holds it and it
 was not chosen with Use. Its folder may have moved: Use its new folder, or
 Re-point… its project in the list below. If the folder is still there, press
 Use to make it one." A project re-pointed from somewhere else — `openalpaca
-store rebase`, or another window — is followed: the window finds its project's
-id listed at the new root, takes that root, and says "This window's project
+store rebase`, or another window — is followed once its old path resolves to
+no project (the folder moved away): the window finds its project's id listed
+at the new root, takes that root, and says "This window's project
 was re-pointed to `<root>`: its turns go there now." A path an earlier build
 stored carries no id and is not followed; press `Use` on the new folder. The
 window sends that root as `x-workspace-path` on `POST /v1/chat`; runs started
