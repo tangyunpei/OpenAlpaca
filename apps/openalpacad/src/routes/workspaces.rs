@@ -739,7 +739,8 @@ fn announce_deleted_sessions(deps: &PurgeDeps<'_>, plan: &DeletePlan, outcome: &
 /// written a transcript yet, and the next attempt refuses. Then,
 /// holding the project's memory slot: the rows (`delete_project_data`,
 /// files another conversation links kept in the root store), the
-/// conversations' log directories, every owner's partitions
+/// conversations' log directories, their summaries in the owner's home
+/// partition, every owner's partitions
 /// (`MemoryService::remove_project`) and `projects/<name>/`. A failure
 /// after the rows went is logged and reported in `removed`, never a `500`:
 /// the deletion the caller asked for has happened.
@@ -849,6 +850,18 @@ pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRe
             queue.forget_session(id);
         }
     }
+    // Design 09 §13.3 (LQ4), as today: the deleted conversations' summaries
+    // go with them — from the owner's home partition only. The project's
+    // own partitions go whole just below, and a forget into one of them would
+    // wait for ever on the slot this call holds (`begin_write` waits while
+    // `quiesce` holds the slot).
+    crate::routes::sessions::forget_conversation_summaries(
+        Some(deps.memory.clone()),
+        deps.owner,
+        None,
+        outcome.message_ids.clone(),
+    )
+    .await;
     let memory_partitions = match deps.memory.remove_project(&project.id) {
         Ok(dropped) => dropped,
         Err(e) => {

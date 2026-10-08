@@ -1113,3 +1113,92 @@ async fn a_delete_stands_the_writers_down_and_announces_every_conversation() {
     deleted.sort();
     assert_eq!(deleted, vec!["s-a".to_string(), "s-b".to_string()]);
 }
+
+/// The delete on a thread of its own with its own runtime, so a hang fails
+/// the test instead of hanging the suite (a stuck thread is left behind when
+/// the process exits). No session writer: the test's runtime is blocked
+/// while it waits.
+fn delete_on_its_own_thread(
+    w: &World,
+    path: &std::path::Path,
+) -> std::sync::mpsc::Receiver<(StatusCode, serde_json::Value)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let db = w.db.clone();
+    let memory = w.memory.clone();
+    let bus = w.bus.clone();
+    let sessions_root = w.sessions_root.clone();
+    let path = text(path);
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let answer = runtime.block_on(async {
+            let ctx = SharedContext::new();
+            let deps = PurgeDeps {
+                db: &db,
+                ctx: &ctx,
+                bus: &bus,
+                owner: OWNER,
+                memory: &memory,
+                sessions_root: Some(sessions_root),
+                session_log: None,
+                learning: None,
+            };
+            split(
+                delete_workspace_data(
+                    &deps,
+                    PurgeRequest {
+                        path,
+                        dry_run: false,
+                    },
+                )
+                .await,
+            )
+            .await
+        });
+        let _ = tx.send(answer);
+    });
+    rx
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_forgets_its_conversations_home_summaries_without_waiting_on_its_own_slot() {
+    let w = World::new();
+    let p = w.project("summarised");
+    let root = text(&p.root);
+    w.session("s-1", &root);
+    let row = w.message("s-1", &root);
+    crate::test_util::extracted_note(
+        &w.memory,
+        OWNER,
+        None,
+        "Conversation on 2026-10-01: at home",
+        &[row],
+        true,
+    );
+    crate::test_util::extracted_note(
+        &w.memory,
+        OWNER,
+        Some(p.root.as_path()),
+        "Conversation on 2026-10-01: in the project",
+        &[row],
+        true,
+    );
+    w.note(OWNER, None, "Kept at home");
+
+    let (status, body) = delete_on_its_own_thread(&w, &p.root)
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the delete did not finish: a forget into the project's partition waits on the slot the delete holds");
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        crate::test_util::note_titles(&w.memory, OWNER, None),
+        vec!["Kept at home".to_string()],
+        "the home summary of the deleted conversation is forgotten"
+    );
+    assert_eq!(
+        body["removed"]["memory_partitions"], 1,
+        "the project's own summary went with its partition"
+    );
+}
