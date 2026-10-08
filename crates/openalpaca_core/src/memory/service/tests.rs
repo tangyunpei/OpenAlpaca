@@ -3907,8 +3907,9 @@ fn known_project_roots_are_the_registered_projects_holding_the_owners_partition(
 /// A listed project is known by its own folder under `projects/`, not by a
 /// second lookup of its root (S3 M5 / S4 M2): a project whose recorded root
 /// no longer canonicalizes to itself — its folder moved and a link left at
-/// the old path, or renamed by case only on macOS — keeps its place in the
-/// 30 s reconciliation.
+/// the old path, or renamed by case only on macOS — is still listed by
+/// `known_project_roots`. (Its partition is not reconciled while the root
+/// leads elsewhere: the scan opens a scope by its root — design §18.)
 #[cfg(unix)]
 #[test]
 fn a_project_whose_root_now_leads_elsewhere_is_still_known_by_its_own_folder() {
@@ -3928,6 +3929,44 @@ fn a_project_whose_root_now_leads_elsewhere_is_still_known_by_its_own_folder() {
         h.service.known_project_roots(ALICE),
         std::slice::from_ref(&repo)
     );
+}
+
+/// That project's root opens as no registered project in the 30 s
+/// reconciliation, every tick, for as long as it leads elsewhere: a skip
+/// logged at debug, not a WARN every 30 s (residual X6). Nothing else of the
+/// tick changes.
+#[cfg(unix)]
+#[test]
+#[tracing_test::traced_test]
+fn the_reconciliation_skips_a_root_that_names_no_project_now_at_debug() {
+    let h = Harness::new();
+    let repo = h.workspace("repo", Some(".git"));
+    h.store(
+        &h.user(ALICE, Some(&repo)),
+        "Release step",
+        "# Release step\n\nTag first.\n",
+        NoteKind::Procedure,
+    );
+    h.store(
+        &h.user(ALICE, None),
+        "Editor",
+        "# Editor\n\nvim.\n",
+        NoteKind::Preference,
+    );
+    let moved = repo.with_file_name("repo-moved");
+    fs::rename(&repo, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &repo).unwrap();
+
+    let report = h.service.reconcile_owner(ALICE).unwrap();
+
+    assert_eq!(report.scanned, 1, "the home partition is still scanned");
+    assert!(
+        !logs_contain("it did not open"),
+        "a root that names no project now is no WARN"
+    );
+    assert!(logs_contain(
+        "names no registered project now, so the reconciliation scan skips it"
+    ));
 }
 
 // ============================================================================

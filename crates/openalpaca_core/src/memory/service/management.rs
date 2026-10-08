@@ -157,8 +157,9 @@ impl MemoryService {
     /// `external` and published as `memory_changed` with no surface (§7b
     /// P13), and the index follows.
     /// Needs no context: nothing here is on a caller's behalf. A partition
-    /// that is quarantined, absent or refused (a link on its path) is
-    /// skipped, and so — with one WARN — is one whose open or scan fails
+    /// that is quarantined, absent or refused (a link on its path), or whose
+    /// root names no registered project now, is skipped, and so — with one
+    /// WARN — is one whose open or scan fails
     /// for any other reason: one broken partition never stops the tick for
     /// the partitions after it.
     ///
@@ -191,6 +192,18 @@ impl MemoryService {
                         component = %component.display(),
                         %reason,
                         "memory: partition skipped by the reconciliation scan"
+                    );
+                    continue;
+                }
+                // A listed project whose recorded root now leads elsewhere
+                // (its folder moved with a link left behind, or renamed by
+                // case only) opens as no project, every tick for as long as
+                // that lasts: not a WARN every 30 s (residual X6).
+                Err(files::MemoryFilesError::NotRegistered { root }) => {
+                    tracing::debug!(
+                        root = %root.display(),
+                        "memory: a project root names no registered project now, so the \
+                         reconciliation scan skips it"
                     );
                     continue;
                 }
