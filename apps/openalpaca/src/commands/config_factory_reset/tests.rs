@@ -392,7 +392,10 @@ fn the_closing_line_calls_a_projects_artifacts_and_uploads_unreferenced_never_it
         "openalpaca memory adopt",
         "deleting a project's folder drops them",
     ] {
-        assert!(done.contains(needle), "the closing line must say {needle:?}:\n{done}");
+        assert!(
+            done.contains(needle),
+            "the closing line must say {needle:?}:\n{done}"
+        );
     }
 }
 
