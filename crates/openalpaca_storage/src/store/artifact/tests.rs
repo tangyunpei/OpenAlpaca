@@ -590,15 +590,19 @@ fn upload_dir_is_uploads_date() {
 #[test]
 fn upload_dir_confines_to_the_uploads_root_for_a_project_scope() {
     let tmp = tempdir().unwrap();
-    let project = fs::canonicalize(tmp.path()).unwrap();
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    let _guard = HomeStoreGuard::set(&root.join("home"));
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    crate::store::projects::register(&project).unwrap();
+    let scope = StoreScope::Project(project);
     let created = Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap();
 
-    let dir = upload_dir(&StoreScope::Project(project.clone()), created).unwrap();
+    let dir = upload_dir(&scope, created).unwrap();
     assert_eq!(
         dir,
-        project
-            .join(".openalpaca")
-            .join("uploads")
+        content_dir(&scope, ContentKind::Uploads)
+            .unwrap()
             .join("2026-09-02")
     );
 }
@@ -622,7 +626,11 @@ fn upload_file_name_grammar() {
 #[test]
 fn full_grammar_matches_the_worked_example_in_the_plan() {
     let tmp = tempdir().unwrap();
-    let project = fs::canonicalize(tmp.path()).unwrap();
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    let _guard = HomeStoreGuard::set(&root.join("home"));
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    crate::store::projects::register(&project).unwrap();
     let scope = StoreScope::Project(project);
     let created = Utc.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap();
     let task_id = "3f2a1b7c-1111-4222-8333-444455556666";

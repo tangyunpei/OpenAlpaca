@@ -1907,16 +1907,20 @@ async fn task_extraction_of_a_run_with_a_request_workspace_lands_in_that_project
         scene.candidate_titles(None).is_empty(),
         "nothing was written to the home partition"
     );
+    // The dispatch registered the project (storage design §3, site 2), so its
+    // store is the one `store_root` names.
     assert!(
-        project
-            .join(".openalpaca")
-            .join("memory")
-            .join("owners")
-            .join(openalpaca_storage::memory_files::owner_key(
-                ExtractionScene::OWNER
-            ))
-            .join("notes")
-            .is_dir()
+        openalpaca_storage::store::store_root(&openalpaca_storage::store::StoreScope::Project(
+            project.clone()
+        ))
+        .unwrap()
+        .join("memory")
+        .join("owners")
+        .join(openalpaca_storage::memory_files::owner_key(
+            ExtractionScene::OWNER
+        ))
+        .join("notes")
+        .is_dir()
     );
 }
 

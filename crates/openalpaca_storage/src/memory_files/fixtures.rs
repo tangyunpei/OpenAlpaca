@@ -240,7 +240,14 @@ impl Harness {
             let name = s(&p["name"]).to_string();
             let scope = match s(&p["scope"]) {
                 "home" => StoreScope::Home,
-                "project" => StoreScope::Project(h.ws_root.join(s(&p["workspace"]))),
+                "project" => {
+                    // A project partition is a registered project's (design
+                    // §3, R12): the loader registers the workspace the way the
+                    // daemon's first turn there would.
+                    let ws = h.ws_root.join(s(&p["workspace"]));
+                    crate::store::projects::register(&ws).unwrap();
+                    StoreScope::Project(ws)
+                }
                 other => panic!("scope {other}"),
             };
             let spec = PartitionSpec {

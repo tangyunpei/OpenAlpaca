@@ -67,14 +67,25 @@ impl Harness {
         self.root.path().join("home").canonicalize().unwrap()
     }
 
-    /// A workspace directory under the temp root with an optional marker.
+    /// A workspace directory under the temp root with an optional marker. A
+    /// `.git` workspace is a project and is registered (design §3), as the
+    /// daemon's turn there would have done — under this harness's home.
     pub(super) fn workspace(&self, name: &str, marker: Option<&str>) -> PathBuf {
         let dir = self.root.path().join("ws").join(name);
         fs::create_dir_all(&dir).unwrap();
         if let Some(m) = marker {
             fs::create_dir_all(dir.join(m)).unwrap();
         }
-        dir.canonicalize().unwrap()
+        let dir = dir.canonicalize().unwrap();
+        if marker == Some(".git") {
+            openalpaca_storage::store::projects::register(&dir).unwrap();
+        }
+        dir
+    }
+
+    /// A registered project's store directory — where its `memory/` is.
+    pub(super) fn store_dir(&self, root: &Path) -> PathBuf {
+        openalpaca_storage::store::store_root(&StoreScope::Project(root.to_path_buf())).unwrap()
     }
 
     pub(super) fn ctx(
@@ -402,8 +413,8 @@ fn a_git_repo_gets_its_partition_lazily_before_and_after_the_first_artifact() {
 
     assert!(h.list_ids(&ctx, ListInput::default()).is_empty());
     assert!(
-        !repo.join(".openalpaca").exists(),
-        "a read never creates the project store"
+        !h.store_dir(&repo).join("memory").exists(),
+        "a read never creates the project's memory"
     );
 
     let first = h
@@ -422,7 +433,7 @@ fn a_git_repo_gets_its_partition_lazily_before_and_after_the_first_artifact() {
         .unwrap();
     assert_eq!(first.scope, NoteScope::Project);
     assert_eq!(first.origin, Origin::ExtractedUser);
-    let memory = repo.join(".openalpaca").join("memory");
+    let memory = h.store_dir(&repo).join("memory");
     assert_eq!(
         fs::read_to_string(memory.join(".gitignore")).unwrap(),
         "*\n"
@@ -3657,8 +3668,9 @@ fn a_workspace_move_through_the_service_re_keys_and_re_indexes() {
         h.service.known_project_roots(ALICE),
         std::slice::from_ref(&new)
     );
-    // The old root is a directory with no marker now: global only.
-    assert!(h.user(ALICE, Some(&old)).project_root.is_none());
+    // The old root is still a registered project (design §3, ST-7): this move
+    // machinery never touches `projects/`, and the re-point that replaces it
+    // (S3.8) deletes this test.
 }
 
 // ============================================================================
@@ -3979,8 +3991,8 @@ fn reconcile_owner_scans_every_known_partition_and_publishes_external_changes() 
     assert!(clean.changes.is_empty());
     assert!(rx.try_recv().is_err(), "a clean scan publishes nothing");
 
-    let notes = ws
-        .join(".openalpaca")
+    let notes = h
+        .store_dir(&ws)
         .join("memory")
         .join("owners")
         .join(ALICE_KEY)
@@ -4053,7 +4065,7 @@ fn a_partition_that_fails_to_open_is_skipped_and_the_rest_are_still_scanned() {
     );
     assert!(h.service.reconcile_owner(ALICE).unwrap().changes.is_empty());
 
-    let memory_a = ws_a.join(".openalpaca").join("memory");
+    let memory_a = h.store_dir(&ws_a).join("memory");
     fs::write(memory_a.join(".gitignore"), "!*\n").unwrap();
     fs::set_permissions(&memory_a, fs::Permissions::from_mode(0o555)).unwrap();
     let _restore = RestorePerms(memory_a);
@@ -4065,8 +4077,8 @@ fn a_partition_that_fails_to_open_is_skipped_and_the_rest_are_still_scanned() {
         "the injection is an I/O failure at open"
     );
 
-    let notes_b = ws_b
-        .join(".openalpaca")
+    let notes_b = h
+        .store_dir(&ws_b)
         .join("memory")
         .join("owners")
         .join(ALICE_KEY)

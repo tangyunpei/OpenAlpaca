@@ -36,6 +36,9 @@ impl Fixture {
         let home = tempdir().unwrap();
         let env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
         let project = tempdir().unwrap();
+        // A project scope is a registered project's (design §3, R12) —
+        // registered under this fixture's home, never the developer's.
+        crate::store::projects::register(&project.path().canonicalize().unwrap()).unwrap();
         let db_dir = tempdir().unwrap();
         let db = Database::open(&db_dir.path().join("test.db")).unwrap();
         Self {
@@ -208,9 +211,7 @@ fn a_project_scoped_upload_lands_in_the_project_store() {
     let stored = fx.put_in(&scope, "owner-1", "Quarterly Report.PDF", b"pdf-bytes");
 
     let expected = fx
-        .project_root()
-        .join(".openalpaca")
-        .join("uploads")
+        .uploads_root(&scope)
         .join("2026-09-05")
         .join("01-quarterly-report.pdf");
     assert_eq!(PathBuf::from(&stored.asset.storage_path), expected);
@@ -311,11 +312,7 @@ fn a_traversal_shaped_name_is_slugified_into_the_day_directory() {
 
     let stored = fx.put_in(&scope, "owner-1", "../../../etc/passwd.png", b"not-a-png");
 
-    let day_dir = fx
-        .project_root()
-        .join(".openalpaca")
-        .join("uploads")
-        .join("2026-09-05");
+    let day_dir = fx.uploads_root(&scope).join("2026-09-05");
     assert_eq!(
         PathBuf::from(&stored.asset.storage_path),
         day_dir.join("01-passwd.png")

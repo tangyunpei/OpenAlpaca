@@ -300,6 +300,11 @@ impl Scene {
     }
 
     fn turn_in(&self, session: &str, user: &str, answer: &str, root: Option<&str>) -> (i64, i64) {
+        // A turn in a project registers it, as the daemon's turn does
+        // (storage design §3) — under this scene's home store.
+        if let Some(root) = root {
+            openalpaca_storage::store::projects::register(std::path::Path::new(root)).unwrap();
+        }
         let request = uuid::Uuid::new_v4().to_string();
         let q = self.row(session, "user", user, "gui", Some(&request), root);
         let a = self.row(session, "assistant", answer, "gui", Some(&request), None);

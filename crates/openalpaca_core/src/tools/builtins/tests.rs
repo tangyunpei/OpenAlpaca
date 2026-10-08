@@ -296,6 +296,10 @@ mod workspace_artifact_spill {
             let home = TempDir::new().unwrap();
             let env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
             let project = TempDir::new().unwrap();
+            // A project scope is a registered project's (design §3, R12) —
+            // registered under this fixture's home, never the developer's.
+            openalpaca_storage::store::projects::register(&project.path().canonicalize().unwrap())
+                .unwrap();
             let db_dir = TempDir::new().unwrap();
             let db = Database::open(&db_dir.path().join("test.db")).unwrap();
             let now = chrono::Utc::now();
@@ -438,7 +442,13 @@ mod workspace_artifact_spill {
         assert_eq!(asset.owner_id, OWNER);
         let path = PathBuf::from(&asset.storage_path);
         assert!(
-            path.starts_with(fx.project_root().join(".openalpaca").join("artifacts")),
+            path.starts_with(
+                openalpaca_storage::store::store_root(
+                    &openalpaca_storage::store::StoreScope::Project(fx.project_root())
+                )
+                .unwrap()
+                .join("artifacts")
+            ),
             "spilled to {}",
             path.display()
         );
@@ -487,8 +497,13 @@ mod workspace_artifact_spill {
                 assert_eq!(kind, "markdown");
                 assert_eq!(version, 1);
                 assert!(
-                    PathBuf::from(&path)
-                        .starts_with(fx.project_root().join(".openalpaca").join("artifacts")),
+                    PathBuf::from(&path).starts_with(
+                        openalpaca_storage::store::store_root(
+                            &openalpaca_storage::store::StoreScope::Project(fx.project_root())
+                        )
+                        .unwrap()
+                        .join("artifacts")
+                    ),
                     "announced {path}"
                 );
             }
@@ -629,9 +644,14 @@ mod workspace_artifact_spill {
     async fn a_failed_spill_degrades_loudly_and_keeps_the_content() {
         let fx = Fixture::new();
         let body = long_body();
-        // A file where the store root must be a directory — `ensure_store`
-        // cannot create `<project>/.openalpaca`, so `put` fails.
-        std::fs::write(fx.project_root().join(".openalpaca"), b"not a directory").unwrap();
+        // A file where the project's `artifacts/` must be a directory, so
+        // `put` fails — on either side of the flip.
+        let store = openalpaca_storage::store::store_root(
+            &openalpaca_storage::store::StoreScope::Project(fx.project_root()),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("artifacts"), b"not a directory").unwrap();
 
         let out = fx
             .tool()

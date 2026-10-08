@@ -671,6 +671,10 @@ fn content_dirs_have_the_same_shape_in_both_scopes() {
     let tmp = tempdir().unwrap();
     let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let project = tmp.path().join("proj");
+    fs::create_dir_all(&project).unwrap();
+    let project = project.canonicalize().unwrap();
+    projects::register(&project).unwrap();
+    let scope = StoreScope::Project(project);
 
     for kind in [
         ContentKind::Artifacts,
@@ -682,9 +686,9 @@ fn content_dirs_have_the_same_shape_in_both_scopes() {
         ContentKind::Cache,
     ] {
         let home = content_dir(&StoreScope::Home, kind).unwrap();
-        let proj = content_dir(&StoreScope::Project(project.clone()), kind).unwrap();
+        let proj = content_dir(&scope, kind).unwrap();
         assert_eq!(home, tmp.path().join("home").join(kind.dir_name()));
-        assert_eq!(proj, project.join(".openalpaca").join(kind.dir_name()));
+        assert_eq!(proj, store_root(&scope).unwrap().join(kind.dir_name()));
         assert!(home.is_dir() && proj.is_dir(), "content_dir creates on use");
     }
 

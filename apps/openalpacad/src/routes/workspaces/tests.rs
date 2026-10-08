@@ -176,12 +176,14 @@ impl Fixture {
     /// A project directory: a git repository (what makes it a root since the
     /// storage design's resolver, §3) carrying a real `.openalpaca` store —
     /// seeded through `ensure_store`, so its `.layout` records the root it was
-    /// seeded at.
+    /// seeded at — and registered under this fixture's home store, as the
+    /// daemon's first turn there would register it.
     fn project(&self, name: &str) -> String {
         let dir = self.projects.path().join(name);
         std::fs::create_dir_all(dir.join(".git")).expect("project dir");
         let dir = dir.canonicalize().expect("canonicalize project");
         store::ensure_store(&StoreScope::Project(dir.clone())).expect("seed store");
+        openalpaca_storage::store::projects::register(&dir).expect("register the project");
         dir.to_string_lossy().into_owned()
     }
 
@@ -340,8 +342,8 @@ impl Fixture {
 
     /// An upload addressed under `root`, with its bytes where the row says.
     fn upload(&self, root: &str, name: &str) -> std::path::PathBuf {
-        let dir = std::path::Path::new(root)
-            .join(store::STORE_DIR_NAME)
+        let dir = store::store_root(&StoreScope::Project(std::path::PathBuf::from(root)))
+            .expect("the project's store")
             .join("uploads");
         std::fs::create_dir_all(&dir).expect("uploads dir");
         let path = dir.join(name);

@@ -3319,7 +3319,9 @@ fn lead_memory_scene() -> LeadMemoryScene {
     );
     service.rebuild_index().unwrap();
     for name in ["projA", "projB"] {
-        std::fs::create_dir_all(root.path().join("ws").join(name).join(".git")).unwrap();
+        let dir = root.path().join("ws").join(name);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        openalpaca_storage::store::projects::register(&dir.canonicalize().unwrap()).unwrap();
     }
     let store = |workspace: Option<&std::path::Path>, title: &str, body: &str, kind: NoteKind| {
         let hint = match workspace {

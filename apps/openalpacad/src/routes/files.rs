@@ -598,6 +598,10 @@ mod tests {
         let _guard =
             crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().expect("canonical"));
         let project = tempfile::tempdir().expect("project root");
+        openalpaca_storage::store::projects::register(
+            &project.path().canonicalize().expect("canonical"),
+        )
+        .expect("register");
         let (_dir, db) = test_db();
 
         let scope = StoreScope::Project(project.path().canonicalize().expect("canonical"));

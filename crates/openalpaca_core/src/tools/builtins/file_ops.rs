@@ -1275,12 +1275,17 @@ mod tests {
     impl Store {
         fn new() -> Self {
             let home = SandboxedHome::new();
+            // A project scope is a registered project's (design §3, R12) —
+            // registered under this store's home, never the developer's.
+            let project = tempfile::tempdir().unwrap();
+            openalpaca_storage::store::projects::register(&project.path().canonicalize().unwrap())
+                .unwrap();
             let db_dir = tempfile::tempdir().unwrap();
             let db = Database::open(&db_dir.path().join("test.db")).unwrap();
             Self {
                 home,
                 work: tempfile::tempdir().unwrap(),
-                project: tempfile::tempdir().unwrap(),
+                project,
                 _db_dir: db_dir,
                 db,
             }
@@ -1424,8 +1429,11 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].project_root.as_deref(), project.to_str());
         assert!(
-            Path::new(&rows[0].storage_path)
-                .starts_with(project.join(".openalpaca").join("artifacts")),
+            Path::new(&rows[0].storage_path).starts_with(
+                openalpaca_storage::store::store_root(&StoreScope::Project(project.clone()))
+                    .unwrap()
+                    .join("artifacts")
+            ),
             "{}",
             rows[0].storage_path
         );

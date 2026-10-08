@@ -23,6 +23,9 @@ impl Fixture {
         let home = tempdir().unwrap();
         let env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
         let project = tempdir().unwrap();
+        // A project scope is a registered project's (design §3, R12) —
+        // registered under this fixture's home, never the developer's.
+        crate::store::projects::register(&project.path().canonicalize().unwrap()).unwrap();
         let db_dir = tempdir().unwrap();
         let db = Database::open(&db_dir.path().join("test.db")).unwrap();
         Self {
@@ -52,9 +55,11 @@ impl Fixture {
         self._home.path().canonicalize().unwrap()
     }
 
-    /// `<project>/.openalpaca/artifacts` — the root `rel_path` is relative to.
+    /// The project's `artifacts/` — the root `rel_path` is relative to.
     fn artifacts_root(&self) -> PathBuf {
-        self.project_root().join(".openalpaca").join("artifacts")
+        crate::store::store_root(&self.scope())
+            .unwrap()
+            .join("artifacts")
     }
 
     /// A `file_assets` row written by neither `ArtifactStore` nor this owner's

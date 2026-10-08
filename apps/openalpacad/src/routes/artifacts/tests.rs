@@ -44,6 +44,12 @@ impl Fixture {
         let home = tempfile::tempdir().expect("home root");
         let env = HomeStoreGuard::set(&home.path().canonicalize().expect("canonicalize home"));
         let project = tempfile::tempdir().expect("project root");
+        // A project scope is a registered project's (design §3, R12) —
+        // registered under this fixture's home, never the developer's.
+        openalpaca_storage::store::projects::register(
+            &project.path().canonicalize().expect("canonicalize"),
+        )
+        .expect("register");
         let db_dir = tempfile::tempdir().expect("db dir");
         let db = Database::open(&db_dir.path().join("test.db")).expect("open db");
         Self {

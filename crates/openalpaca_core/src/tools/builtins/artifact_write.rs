@@ -497,6 +497,10 @@ mod tests {
             std::fs::create_dir(&home).unwrap();
             let env = HomeStoreGuard::set(&home.canonicalize().unwrap());
             let project = TempDir::new().unwrap();
+            // A project scope is a registered project's (design §3, R12) —
+            // registered under this fixture's home, never the developer's.
+            openalpaca_storage::store::projects::register(&project.path().canonicalize().unwrap())
+                .unwrap();
             let db_dir = TempDir::new().unwrap();
             let db = Database::open(&db_dir.path().join("test.db")).unwrap();
             Self {
@@ -645,7 +649,11 @@ mod tests {
         assert_eq!(v["version"], 1);
         assert!(!v["artifact_id"].as_str().unwrap().is_empty());
         assert!(
-            path.starts_with(root.join(".openalpaca").join("artifacts")),
+            path.starts_with(
+                openalpaca_storage::store::store_root(&StoreScope::Project(root.clone()))
+                    .unwrap()
+                    .join("artifacts")
+            ),
             "artifact must land in the project store, got {}",
             path.display()
         );
@@ -678,7 +686,9 @@ mod tests {
             .unwrap();
 
         let path = PathBuf::from(parse(&out)["path"].as_str().unwrap());
-        assert!(path.starts_with(&root));
+        assert!(path.starts_with(
+            openalpaca_storage::store::store_root(&StoreScope::Project(root.clone())).unwrap()
+        ));
         assert!(
             !path.starts_with(&cwd),
             "artifact escaped into the daemon CWD: {}",
@@ -1339,7 +1349,11 @@ mod tests {
 
         let path = PathBuf::from(parse(&out)["path"].as_str().unwrap());
         assert!(
-            path.starts_with(project.join(".openalpaca").join("artifacts")),
+            path.starts_with(
+                openalpaca_storage::store::store_root(&StoreScope::Project(project.clone()))
+                    .unwrap()
+                    .join("artifacts")
+            ),
             "expected the request's project store, got {}",
             path.display()
         );

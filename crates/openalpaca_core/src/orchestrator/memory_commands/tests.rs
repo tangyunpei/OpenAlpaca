@@ -205,11 +205,15 @@ impl Scene {
         }
     }
 
-    /// A project directory with a `.git` marker, canonical.
+    /// A project directory with a `.git` marker, canonical, and registered
+    /// under this scene's home store as the daemon's turn there would
+    /// register it (storage design §3).
     fn project(&self, name: &str) -> PathBuf {
         let dir = self.root.path().join("ws").join(name);
         std::fs::create_dir_all(dir.join(".git")).unwrap();
-        dir.canonicalize().unwrap()
+        let dir = dir.canonicalize().unwrap();
+        openalpaca_storage::store::projects::register(&dir).unwrap();
+        dir
     }
 
     /// The owner's user-directed context, for reading back what a command did.

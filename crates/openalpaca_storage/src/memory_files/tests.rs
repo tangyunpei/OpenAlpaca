@@ -777,11 +777,15 @@ impl Sandbox {
         let home = tempdir().unwrap();
         let canonical = home.path().canonicalize().unwrap();
         let env = HomeStoreGuard::set(&canonical);
+        // A project partition is a registered project's (design §3, R12) —
+        // registered under this sandbox's home, never the developer's.
+        let project = tempdir().unwrap();
+        crate::store::projects::register(&project.path().canonicalize().unwrap()).unwrap();
         Self {
             _home: home,
             _env: env,
             home: canonical,
-            project: tempdir().unwrap(),
+            project,
             outside: tempdir().unwrap(),
             clock: Arc::new(ticking_clock()),
         }

@@ -234,8 +234,11 @@ mod tests {
     #[tokio::test]
     async fn delivers_a_produced_artifact() {
         let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
         let project = tempfile::tempdir().unwrap();
         let project = project.path().canonicalize().unwrap();
+        openalpaca_storage::store::projects::register(&project).unwrap();
         let db = Database::open(&dir.path().join("test.db")).unwrap();
         task_row(&db);
         let id = produce(&db, &project, "final-report", "# Report\n");
@@ -262,8 +265,11 @@ mod tests {
         assert_eq!(files.len(), 1, "the artifact should have been delivered");
         let (path, filename, mime) = &files[0];
         assert!(
-            std::path::Path::new(path)
-                .starts_with(project.join(".openalpaca").join("artifacts")),
+            std::path::Path::new(path).starts_with(
+                openalpaca_storage::store::store_root(&StoreScope::Project(project.clone()))
+                    .unwrap()
+                    .join("artifacts")
+            ),
             "delivered {path}"
         );
         assert_eq!(filename, "01-final-report.md");
@@ -302,8 +308,11 @@ mod tests {
     #[tokio::test]
     async fn refuses_to_deliver_another_owners_artifact() {
         let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
         let project = tempfile::tempdir().unwrap();
         let project = project.path().canonicalize().unwrap();
+        openalpaca_storage::store::projects::register(&project).unwrap();
         let db = Database::open(&dir.path().join("test.db")).unwrap();
         task_row(&db);
         let id = produce(&db, &project, "secret", "classified\n");

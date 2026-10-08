@@ -2412,11 +2412,16 @@ fn new_owner_id() -> String {
     )
 }
 
-/// A scratch project: a directory with a `.git` marker, canonical.
+/// A scratch project: a directory with a `.git` marker, canonical, and
+/// registered under the scratch store as the daemon's first turn there would
+/// register it (storage design §3), so its notes have a folder under the
+/// store's `projects/`.
 fn scratch_project(under: &Path) -> PathBuf {
     let project = under.join("project");
     std::fs::create_dir_all(project.join(".git")).expect("scratch project marker");
-    project.canonicalize().expect("canonical scratch project")
+    let project = project.canonicalize().expect("canonical scratch project");
+    openalpaca_storage::store::projects::register(&project).expect("register the scratch project");
+    project
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
