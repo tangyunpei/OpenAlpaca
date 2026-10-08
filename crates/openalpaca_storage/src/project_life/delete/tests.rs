@@ -673,6 +673,57 @@ fn a_file_linked_after_the_copies_were_made_refuses_the_transaction() {
     );
 }
 
+/// A daemon that dies between step 1's copies and the commit leaves a copy
+/// at its kept address — whole or cut short — that no row names. The next
+/// delete of the project replaces it instead of failing on it for ever.
+#[test]
+fn a_copy_a_crashed_attempt_left_is_replaced_and_the_delete_goes_through() {
+    let w = World::new();
+    let s = seed(&w);
+    let folder = format!("{}-{}", s.p.name, s.p.id);
+    let column = |sql: &str, id: &str| -> String {
+        w.db.with_connection(|conn| Ok(conn.query_row(sql, [id], |row| row.get(0))?))
+            .unwrap()
+    };
+    let rel = |id: &str| column("SELECT rel_path FROM file_assets WHERE id = ?1", id);
+    let upload = w
+        .home
+        .join("uploads")
+        .join(KEPT_DIR)
+        .join(&folder)
+        .join(rel(&s.u_shared));
+    let by_product = w
+        .home
+        .join("artifacts")
+        .join(KEPT_DIR)
+        .join(&folder)
+        .join(rel(&s.a_shared));
+    for (stale, bytes) in [(&upload, b"shar".as_slice()), (&by_product, b"v1\n")] {
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(stale, bytes).unwrap();
+    }
+
+    let outcome = delete_project_data(&w.db, &s.p).unwrap();
+
+    assert_eq!(
+        outcome.kept,
+        KeptFiles {
+            uploads: 1,
+            artifacts: 1
+        }
+    );
+    assert_eq!(std::fs::read(&upload).unwrap(), b"shared.txt");
+    assert_eq!(std::fs::read(&by_product).unwrap(), b"v2\n");
+    let storage = |id: &str| column("SELECT storage_path FROM file_assets WHERE id = ?1", id);
+    assert_eq!(PathBuf::from(storage(&s.u_shared)), upload);
+    assert_eq!(PathBuf::from(storage(&s.a_shared)), by_product);
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM session"),
+        2,
+        "the delete went through"
+    );
+}
+
 impl World {
     fn tmp(&self) -> &Path {
         self.tmp.path()

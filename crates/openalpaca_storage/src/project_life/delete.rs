@@ -237,7 +237,16 @@ fn place_one(project: &Project, row: &KeptRow) -> Result<Placed> {
         .with_context(|| format!("failed to canonicalize {}", home_dir.display()))?;
     let tail = row.rel_path.clone().unwrap_or_else(|| row.id.clone());
     let rel_path = format!("{KEPT_DIR}/{}-{}/{tail}", project.name, project.id);
-    let target = confine_to_root(&home_dir, &home_dir.join(&rel_path))?;
+    let joined = home_dir.join(&rel_path);
+    let target = confine_to_root(&home_dir, &joined)?;
+    // `confine_to_root` resolves a link it meets inside the root; the kept
+    // address is written, and a stale copy at it replaced, through none.
+    if target != joined {
+        bail!(
+            "{} has a link on its path; it was left in place",
+            joined.display()
+        );
+    }
     let source_root = project.dir.join(kind.dir_name());
     let source = match row.rel_path.as_deref() {
         Some(rel) if source_root.is_dir() => confine_to_root(&source_root, &source_root.join(rel))
@@ -261,7 +270,13 @@ fn place_one(project: &Project, row: &KeptRow) -> Result<Placed> {
     })
 }
 
-/// `source` to a `target` that must not exist yet, synced.
+/// `source` to `target`, synced. A regular file already at `target` is a
+/// copy an earlier attempt wrote before the daemon died ahead of its
+/// transaction — whole or cut short — and it is replaced: left, it would make
+/// every later delete of the project fail. Nothing else can be there: no row
+/// names `kept/<folder>-<id>/` until a transaction commits, and one that
+/// committed re-addressed its kept rows away from the project, so no later
+/// attempt copies onto them. Anything but a regular file is refused.
 fn copy_fresh(source: &Path, target: &Path) -> Result<()> {
     let dir = target
         .parent()
@@ -269,6 +284,16 @@ fn copy_fresh(source: &Path, target: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let mut from =
         fs::File::open(source).with_context(|| format!("failed to open {}", source.display()))?;
+    match fs::symlink_metadata(target) {
+        Ok(meta) if meta.file_type().is_file() => fs::remove_file(target)
+            .with_context(|| format!("failed to replace the stale copy {}", target.display()))?,
+        Ok(_) => bail!(
+            "{} is not a regular file; it was left in place",
+            target.display()
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("failed to stat {}", target.display())),
+    }
     let mut to = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
