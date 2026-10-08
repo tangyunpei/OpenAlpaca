@@ -297,7 +297,7 @@ file's `loads_in` says which slice owns the whole file.
 | `ensure_project_store` | `{ "workspace": <fixture path> }` — the artifact path's first write for that project, which creates `artifacts/` in the project's folder under `projects/` and nothing else | store |
 | `begin_pending_write` / `end_pending_write` | `{ "partition" }` — hold a memory write of that partition in flight (the quiesce hook's view of "pending") | service |
 | `repoint` | `{ "from": <fixture path>, "to": <fixture path>, "crash_after_step"?: 1..3 }` — `PATCH /v1/workspaces`: storage design §6's four steps (1 `project.json` marked with `previous_root`, 2 the rows rewritten, 3 `projects/<name>` renamed, 4 the marker cleared). A crash after step 1, 2 or 3 leaves `project.json` carrying `previous_root`; the next `boot` finishes it (R24) | service |
-| `purge` | `{ "workspace" }` — `POST /v1/workspaces/purge` | service |
+| `purge` | `{ "workspace", "dry_run" }` — `POST /v1/workspaces/purge`; `dry_run: false` deletes everything OpenAlpaca holds for the workspace's project, every owner's notes included (ST-19) | daemon route |
 | `factory_reset` | `{}` — `openalpaca config reset --factory` with the daemon stopped | CLI |
 | `config_reset` | `{}` — plain `openalpaca config reset` | CLI |
 | `boot` | `{ "local_user_id" }` — the next daemon start, minting or reading the owner; it first finishes every re-point a `project.json` still records as in flight (storage design R24) | service |

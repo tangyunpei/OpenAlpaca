@@ -2,7 +2,7 @@
   "row": {
     "id": 17,
     "scenario": "Re-point while writing; a re-point interrupted and finished at boot; purge; factory reset; adopt by project id; config reset",
-    "required_outcome": "Re-point refused while a write is pending, then done; the partition keeps its key, its snapshot and its notes under the new path; a re-point interrupted after any step is finished by the next boot; purge keeps memory; a factory reset orphans but never reassigns, and leaves projects/, the snapshots and the index; adopt finds each project partition by its project id; config reset keeps the owner"
+    "required_outcome": "Re-point refused while a write is pending, then done; the partition keeps its key, its snapshot and its notes under the new path; a re-point interrupted after any step is finished by the next boot; deleting a project's data drops its notes and no other partition's; a factory reset orphans but never reassigns, and leaves projects/, the snapshots and the index; adopt finds each project partition by its project id; config reset keeps the owner"
   },
   "design": [
     "storage design §5 R18: a project partition's key is proj-<owner-key>-<16 hex of sha256(project id)>; its snapshot binds by project id and its root is never compared",
@@ -12,7 +12,7 @@
     "memory design §3 Resets: a plain config reset must not delete identity.*; a factory reset mints a new owner; doctor lists the orphans; adopt re-binds"
   ],
   "loads_in": ["slice-3"],
-  "notes_for_implementer": "No loader runs this file; it is pinned by hand-written tests. Steps 1-5 (a re-point refused while a write of the project is pending, then done; the partition keeps its key, snapshot file and note under the new path): routes::workspaces::tests::a_repoint_keeps_the_projects_memory_under_its_key and memory::service::tests::a_repointed_projects_notes_keep_their_key_revision_and_index_rows. Steps 6-10 (a re-point stopped after step 1, then after step 3, finished by the next boot): memory_files::tests::a_repoint_interrupted_after_any_step_keeps_the_partition_once_recovered, with S3's project_life recovery tests. Step 11 and step 16 (the doctor): memory_files::tests::doctor_finds_a_repointed_partition_by_id_and_lists_an_idless_snapshot. Step 12 purges project_d, a project no later step names, so whatever the purge does to memory changes no later expectation; S5a rewrites step 12 as the delete (ST-19: every owner's notes and projects/<name>/ go). Steps 13-15 and 23-24 are the reset rows of the slice-3 fixture: the factory reset deletes only the database and the two config files (apps/openalpaca config_factory_reset tests). Steps 17-22 (adopt refused on a collision, then adopting by project id after three re-points): memory_files::tests::adopt_after_a_repoint_finds_the_partition_by_its_project_id, adopt_refuses_the_whole_command_on_one_collision, and the CLI's repair_lifts_a_quarantine_and_adopt_rebinds_an_orphan. The re-point's crash hook is project_life::repoint_with; `crash_after_step` names RepointStep 1 Marked, 2 RowsRewritten, 3 Renamed.",
+  "notes_for_implementer": "No loader runs this file; it is pinned by hand-written tests. Steps 1-5 (a re-point refused while a write of the project is pending, then done; the partition keeps its key, snapshot file and note under the new path): routes::workspaces::tests::a_repoint_keeps_the_projects_memory_under_its_key and memory::service::tests::a_repointed_projects_notes_keep_their_key_revision_and_index_rows. Steps 6-10 (a re-point stopped after step 1, then after step 3, finished by the next boot): memory_files::tests::a_repoint_interrupted_after_any_step_keeps_the_partition_once_recovered, with S3's project_life recovery tests. Step 11 and step 16 (the doctor): memory_files::tests::doctor_finds_a_repointed_partition_by_id_and_lists_an_idless_snapshot. Step 12: deleting a project's data (ST-19) drops every owner's notes of that project — its partition directory, its control snapshot and its index rows — and touches no other partition: project_d is deleted, so project A's partition (at moved_three by then) and project_c's survive for the steps after it. No loader runs this step (memory_files/fixtures.rs skips purge); the route test fixture_17_deleting_a_projects_data_drops_its_partition_and_no_other in apps/openalpacad/src/routes/workspaces/life_tests.rs is its proof. Steps 13-15 and 23-24 are the reset rows of the slice-3 fixture: the factory reset deletes only the database and the two config files (apps/openalpaca config_factory_reset tests). Steps 17-22 (adopt refused on a collision, then adopting by project id after three re-points): memory_files::tests::adopt_after_a_repoint_finds_the_partition_by_its_project_id, adopt_refuses_the_whole_command_on_one_collision, and the CLI's repair_lifts_a_quarantine_and_adopt_rebinds_an_orphan. The re-point's crash hook is project_life::repoint_with; `crash_after_step` names RepointStep 1 Marked, 2 RowsRewritten, 3 Renamed.",
   "owners": [
     { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" },
     { "id": "u_example_alice_reborn", "owner_key": "9bfb77d3249642b6ba22fe7dcade07a0" }
@@ -215,10 +215,15 @@
     {
       "step": 12,
       "op": "purge",
-      "input": { "workspace": "ws:project_d" },
+      "input": { "workspace": "ws:project_d", "dry_run": false },
       "expect": {
-        "notes_on_disk": [{ "partition": "alice_project_d", "id": "00000017-0000-4000-8000-000000000004" }],
-        "snapshot": { "alice_project_d": { "notes": { "00000017-0000-4000-8000-000000000004": { "revision": "@current", "origin": "user" } } } }
+        "files_absent": ["part:alice_project_d"],
+        "snapshot_missing": ["alice_project_d"],
+        "notes_not_on_disk": [{ "partition": "alice_project_d", "id": "00000017-0000-4000-8000-000000000004" }],
+        "notes_on_disk": [
+          { "partition": "alice_project_moved_three", "id": "00000017-0000-4000-8000-000000000002" },
+          { "partition": "alice_project_c", "id": "00000017-0000-4000-8000-000000000003" }
+        ]
       }
     },
     {
@@ -325,6 +330,7 @@
   ],
   "final_state": {
     "files_absent": ["home/memory/owners/32acea7eb739b08afd959db91e46d450"],
-    "snapshot": { "reborn_home": { "owner_id": "u_example_alice_reborn" } }
+    "snapshot": { "reborn_home": { "owner_id": "u_example_alice_reborn" } },
+    "snapshot_missing": ["alice_project_d"]
   }
 }

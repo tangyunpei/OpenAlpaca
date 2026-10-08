@@ -1202,3 +1202,89 @@ async fn a_delete_forgets_its_conversations_home_summaries_without_waiting_on_it
         "the project's own summary went with its partition"
     );
 }
+
+/// Every file under `dir`, with its bytes, sorted.
+fn tree(dir: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_type().expect("type").is_dir() {
+            out.extend(tree(&path));
+        } else {
+            out.push((path.clone(), std::fs::read(&path).expect("bytes")));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Fixture 17, the delete step (ST-19): deleting `project_d`'s data drops
+/// its partition — note, snapshot, index rows — and leaves `moved`'s and
+/// `project_c`'s partitions and the home partition byte for byte, so the
+/// factory reset and `adopt` steps after it still find them.
+#[tokio::test]
+async fn fixture_17_deleting_a_projects_data_drops_its_partition_and_no_other() {
+    let w = World::new();
+    let moved = w.project("moved");
+    let c = w.project("project_c");
+    let d = w.project("project_d");
+    w.note(OWNER, None, "Global note");
+    w.note(OWNER, Some(moved.root.as_path()), "Project A release step");
+    w.note(OWNER, Some(c.root.as_path()), "Project C note");
+    w.note(OWNER, Some(d.root.as_path()), "Project D note");
+    let others_before: Vec<_> = [&moved.dir, &c.dir, &w.home.join("memory")]
+        .into_iter()
+        .flat_map(|dir| tree(dir))
+        .collect();
+    // The parsed snapshots, by key: `list_snapshots` skips anything in
+    // `state/memory-control/` that is not one.
+    let snapshots = || {
+        let mut all: Vec<_> = list_snapshots()
+            .expect("snapshots")
+            .into_iter()
+            .filter_map(|(_, parsed)| parsed.ok())
+            .collect();
+        all.sort_by(|a, b| a.partition_key.cmp(&b.partition_key));
+        all
+    };
+    let snapshots_before = snapshots();
+    assert_eq!(snapshots_before.len(), 4);
+
+    let (status, body) = w.delete(&d.root, false).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !d.dir.exists(),
+        "part:alice_project_d is gone with projects/<name>/"
+    );
+    assert_eq!(
+        project_snapshots(&d.id),
+        0,
+        "snapshot_missing: alice_project_d"
+    );
+    // Compared before any read below can touch a partition.
+    let others_after: Vec<_> = [&moved.dir, &c.dir, &w.home.join("memory")]
+        .into_iter()
+        .flat_map(|dir| tree(dir))
+        .collect();
+    assert_eq!(
+        others_after, others_before,
+        "no other partition's files changed"
+    );
+    let snapshots_after = snapshots();
+    assert_eq!(snapshots_after.len(), 3);
+    assert!(
+        snapshots_after
+            .iter()
+            .all(|snapshot| snapshots_before.contains(snapshot)),
+        "no other snapshot changed"
+    );
+    assert_eq!(
+        crate::test_util::note_titles(&w.memory, OWNER, Some(d.root.as_path())),
+        vec!["Global note".to_string()],
+        "notes_not_on_disk: the project's note is no longer found"
+    );
+}
