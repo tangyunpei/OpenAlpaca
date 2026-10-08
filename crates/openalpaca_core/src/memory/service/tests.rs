@@ -3699,6 +3699,32 @@ fn known_project_roots_are_the_registered_projects_holding_the_owners_partition(
     );
 }
 
+/// A listed project is known by its own folder under `projects/`, not by a
+/// second lookup of its root (S3 M5 / S4 M2): a project whose recorded root
+/// no longer canonicalizes to itself — its folder moved and a link left at
+/// the old path, or renamed by case only on macOS — keeps its place in the
+/// 30 s reconciliation.
+#[cfg(unix)]
+#[test]
+fn a_project_whose_root_now_leads_elsewhere_is_still_known_by_its_own_folder() {
+    let h = Harness::new();
+    let repo = h.workspace("repo", Some(".git"));
+    h.store(
+        &h.user(ALICE, Some(&repo)),
+        "Release step",
+        "# Release step\n\nTag first.\n",
+        NoteKind::Procedure,
+    );
+    let moved = repo.with_file_name("repo-moved");
+    fs::rename(&repo, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &repo).unwrap();
+
+    assert_eq!(
+        h.service.known_project_roots(ALICE),
+        std::slice::from_ref(&repo)
+    );
+}
+
 // ============================================================================
 // `memory_changed` (design §7a; plan 3.8): one publish per service write,
 // one per change a reconciliation scan detects, none for a no-op

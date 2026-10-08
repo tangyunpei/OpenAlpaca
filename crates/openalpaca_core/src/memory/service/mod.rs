@@ -853,7 +853,11 @@ impl MemoryService {
     /// workspace answer (R40): another owner's partition in a project of its
     /// own does not name that root to this one.
     /// A project whose folder under `projects/` is gone is no project; a
-    /// listing failure is logged and lists nothing.
+    /// listing failure is logged and lists nothing. Each project is read in
+    /// its own folder, the listed entry's `dir` — never by a second lookup of
+    /// its root, which for a root that no longer canonicalizes to itself (a
+    /// folder moved with a link left behind, a case-only rename) would name
+    /// no project, or another one.
     pub fn known_project_roots(&self, owner_id: &str) -> Vec<PathBuf> {
         let owner_key = files::owner_key(owner_id);
         let projects = match openalpaca_storage::store::projects::list() {
@@ -868,15 +872,11 @@ impl MemoryService {
         let mut roots: Vec<PathBuf> = projects
             .into_iter()
             .filter(|p| {
-                openalpaca_storage::store::store_root(&StoreScope::Project(p.root.clone()))
-                    .map(|store| {
-                        store
-                            .join(ContentKind::Memory.dir_name())
-                            .join(files::OWNERS_DIR)
-                            .join(&owner_key)
-                            .is_dir()
-                    })
-                    .unwrap_or(false)
+                p.dir
+                    .join(ContentKind::Memory.dir_name())
+                    .join(files::OWNERS_DIR)
+                    .join(&owner_key)
+                    .is_dir()
             })
             .map(|p| p.root)
             .collect();
