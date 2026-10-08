@@ -35,7 +35,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::daemon_config::DaemonConfig;
-use crate::memory::learning::{ProjectCheck, check_project};
+use crate::memory::learning::ProjectCheck;
+use crate::memory::learning::queue::check_project_now;
 use crate::memory::service::{
     Attribution, Capabilities, ExtractionProvenance, MemoryError, MemoryService, StoreInput,
     Surface, WorkspaceHint,
@@ -159,8 +160,11 @@ pub(crate) async fn extract_task_memories(
     // no longer a registered project — teaches nothing, and no model call is
     // spent finding that out. A missing project is still learned into. One
     // being re-pointed is not gone, but its root resolves to no partition
-    // now, and a run has no cursor to hold: it teaches nothing either.
-    match check_project(params.project_root.as_deref(), None) {
+    // now, and a run has no cursor to hold: it teaches nothing either. The
+    // check waits for `projects::lock()`, which a re-point or a delete holds
+    // across its transaction or its folder removal: on the blocking pool,
+    // never on a runtime worker (residual X5).
+    match check_project_now(params.project_root.clone()).await {
         ProjectCheck::Learn(_) => {}
         ProjectCheck::Gone => {
             tracing::debug!(task_id = %params.task_id, "task extraction: the run's project is no longer registered");

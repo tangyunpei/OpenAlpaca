@@ -661,7 +661,7 @@ async fn blocking<T: Send + 'static>(
 /// two small file reads, and a listing only when no folder records the
 /// root. A task that could not run reads as "learn" — the write checks
 /// again.
-async fn check_project_now(root: Option<PathBuf>) -> ProjectCheck {
+pub(crate) async fn check_project_now(root: Option<PathBuf>) -> ProjectCheck {
     tokio::task::spawn_blocking(move || extractor::check_project(root.as_deref(), None))
         .await
         .unwrap_or(ProjectCheck::Learn(None))

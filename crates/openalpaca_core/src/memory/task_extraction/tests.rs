@@ -344,6 +344,53 @@ mod through_the_service {
         assert!(!registered.dir.exists());
     }
 
+    /// Residual X5: the project check waits for `projects::lock()` — held by
+    /// a re-point or a delete for as long as its transaction or its folder
+    /// removal takes — on the blocking pool, never on a runtime worker. On a
+    /// current-thread runtime a check made in place would stop the test's
+    /// own task from running until the holder let go by itself.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_project_check_waits_for_the_projects_lock_off_the_runtime() {
+        use openalpaca_storage::store::projects;
+        use std::time::Duration;
+        let scene = Scene::new(EVIDENCE_ITEM);
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let registered = projects::register(&root).unwrap();
+        std::fs::remove_dir_all(&registered.dir).unwrap();
+        let mut params = scene.params(OWNER, true);
+        params.project_root = Some(root.clone());
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _held = projects::lock();
+            held_tx.send(()).unwrap();
+            // Let go when the runtime's task says so — or, with the runtime
+            // stuck on the lock, once this gives up waiting.
+            release_rx.recv_timeout(Duration::from_secs(5)).is_ok()
+        });
+        held_rx.recv().unwrap();
+        let deps = scene.deps();
+        let extraction = tokio::spawn(async move { extract_task_memories(&deps, params).await });
+
+        // The extraction runs until it waits for the lock.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = release_tx.send(());
+        let released_by_this_task = holder.join().unwrap();
+
+        assert!(
+            released_by_this_task,
+            "the extraction held the runtime's only thread while it waited for projects::lock()"
+        );
+        assert_eq!(
+            extraction.await.unwrap(),
+            TaskExtractionOutcome::Skipped("root_gone")
+        );
+        assert!(scene.provider.first_request_opt().is_none());
+    }
+
     /// ST-21: a missing project's run — its folder deleted, its record kept —
     /// is still extracted into the project's notes at home.
     #[tokio::test]
