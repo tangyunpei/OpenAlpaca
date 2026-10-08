@@ -523,11 +523,15 @@ enum ReadStep {
     FileRead,
 }
 
+/// A step and where [`read_project_dir`] runs it.
+#[cfg(test)]
+type ReadHook = (ReadStep, Box<dyn FnOnce()>);
+
 #[cfg(test)]
 thread_local! {
     /// Test-only: a step [`read_project_dir`] runs once on this thread, at
     /// the [`ReadStep`] it names.
-    static DURING_READ: std::cell::RefCell<Option<(ReadStep, Box<dyn FnOnce()>)>> =
+    static DURING_READ: std::cell::RefCell<Option<ReadHook>> =
         const { std::cell::RefCell::new(None) };
 }
 
