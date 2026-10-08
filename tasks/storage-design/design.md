@@ -1,12 +1,14 @@
-# Storage and project work — design (rev 0.8, approved by the owner with ST-22; Stage 0 built)
+# Storage and project work — design (rev 0.9, approved by the owner with ST-22; Stages 0 and 1 built)
 
 **Status:** approved. The owner read rev 0.5 on 2026-10-05 ("everything in the design file is good") and asked for one
 addition, an edit tool, taken as **ST-22**. Owner decisions **ST-1…ST-13** (2026-10-04) and **ST-14…ST-22** (2026-10-05)
 are taken and are not reopened here. The lead's rulings are numbered **R1…R49** and are the lead's to change; the ones
 the owner was shown on 2026-10-05 are listed in §0.3 and §0.5. **Stage 0 is built** (2026-10-06…07, `931460a4..a9dbed4e`,
 from `tasks/storage-design/plan-stage0.md`, which the owner approved on 2026-10-06; one gate pass at `09b40624`; the
-live check `stage0-live-report.md`, all four fixes PASS). Stages 1 and 2 are not built, and neither is built before
-the owner approves its plan.
+live check `stage0-live-report.md`, all four fixes PASS). **Stage 1 is built** (2026-10-07…08, `b8b768b6^..44d53783`,
+from `tasks/storage-design/plan-stage1.md`, which the owner approved on 2026-10-07; one gate pass at `00f057fe`; the
+live check `stage1-live-report.md`, `44d53783`). Stage 2 is not built, and is not built before the owner approves its
+plan. Building Stage 1 raised two owner questions, pending (§0.2).
 
 **Branch:** `feat/markdown-memory` at approval (2026-10-05), its code that of `032f6ae2`, the last commit before
 the design's own. **Evidence:** two rounds of read-only
@@ -53,8 +55,19 @@ what a beta waits for beyond the stages.
 
 ### 0.2 Questions
 
-None open. Q1 was answered on 2026-10-05 and is ST-14. Q2…Q8 were put together at the owner's request and all were
-taken as recommended: ST-15…ST-21.
+Q1 was answered on 2026-10-05 and is ST-14. Q2…Q8 were put together at the owner's request and all were taken as
+recommended: ST-15…ST-21. Building Stage 1 raised two, pending and adopted nowhere (rev 0.9; §18):
+
+- **T36.** `PATCH /v1/workspaces` with an `old_path` inside a project re-points the whole project — the route
+  resolves the path up to the project's root — while the delete refuses that shape with `422 WORKSPACE_NOT_A_ROOT`
+  naming the root (the lead's ruling R-S8). §9's `PATCH` row says `WORKSPACE_NOT_A_ROOT` is gone for `PATCH`, so
+  refusing it there would reverse an approved row. Options: refuse a non-root `old_path` on `PATCH` with
+  `422 WORKSPACE_NOT_A_ROOT` naming the root (recommended — an inside path re-points the whole project's record to
+  wherever the subfolder went), or keep. A pending row in `tasks/api-fix-plan.md` §0.
+- **ST-7's `missing`.** Should a project whose recorded root no longer canonicalizes to itself — a folder renamed by
+  case only, or moved with a link left at the old path — read as `missing`? Today `missing` is "the root is not a
+  directory", so such a project is listed present (the whole-stage review's R1; its route half is built, §3's
+  *As built*).
 
 ### 0.3 Lead's rulings the owner was shown (2026-10-05, no objection)
 
@@ -231,6 +244,21 @@ nothing.
 - In test builds, `register` under a home root that was not set through `OPENALPACA_HOME_STORE` fails loudly, so no
   test can write into a developer's real store.
 
+**As built (rev 0.9).** `register` is called at five sites, not four: a chat turn, an upload and a memory write
+through a route (`MemoryScopeContext::for_turn`, `memory/scope_context.rs:102`), choosing a folder
+(`POST /v1/workspaces`, `projects::choose`), and the dispatch — a `rerun`, `start` or `resume` has no turn of its own,
+so it records the run's root before anything of the run exists (`dispatcher/lead_agent.rs:239-241`; the plan's
+conflict C4). A turn whose client sent no path has no project: nothing is resolved from the daemon's working
+directory (the lead's ruling R-S13). The walk is the one above — the nearest folder at or above the path that is a
+recorded project's root or holds `.git`, R13 ending it first — and R13 also judges a home store that is itself a
+link by the folder holding the link (the whole-stage review's finding R4 — *review R4*; its numbers are not this design's rulings). A route sent a root a project records matches it
+as written before anything is resolved (`projects::by_recorded_root`), so a project whose root now leads elsewhere is
+still the one its row names (review R1); `lookup`, `store_root`, the dispatch's `register` and memory still take such a
+root by its canonical form (§18). A folder that vanishes while it is read is no project, and `list` and `by_id` pass
+it over (review R2). The test-build guard is a Cargo feature, `test-home-guard`, armed through `[dev-dependencies]` in the
+five crates that reach `register`; its panic is a backstop — the rule is that every test that resolves, registers
+or lists projects holds its crate's home-store guard, and no test reads `~/.openalpaca`, not even its metadata.
+
 ## 4. Where content goes, and how rows address it
 
 - **R14 (identity in rows: path).** Rows keep the project's canonical path: `task.workspace_id`,
@@ -296,6 +324,12 @@ nothing.
   explicit check: a store error holds the cursor and retries, a model call each time (`extractor.rs:992-994`). Task
   extraction gains the same check before its call (`task_extraction/mod.rs:398-404`). A missing project's turns are
   learned into its notes; a deleted project's are dropped.
+  *As built (rev 0.9):* the check is `extractor::check_project`, taken under `projects::lock()`: a root a folder
+  records is learned, a missing project's included; a root an unfinished re-point names as its old or its new one,
+  or whose project seen before the call is still listed under its id, is **held**, and so is every root while
+  `projects/` cannot be listed; a root nothing listed names is dropped — a deleted project's, and also one never
+  registered, the rows of an earlier build (the switch-over note says how to keep them). A memory write for a
+  project re-pointed or deleted mid-request is refused, never filed in the home partition (§9's *As built*).
 
 ## 6. A project's life
 
@@ -354,11 +388,21 @@ step 3 through the memory service. `store purge --all` and the route's `all` for
 `PROJECT_GITIGNORE_TEXT` and `assert_gitignore`; `recorded_project_root` / `set_recorded_project_root`;
 `project_root_at`; `project_root_of` (no caller); `resolves_to_the_home_store`; `unknown_entries` for a project
 store; the `.openalpaca` marker; the walk's cache and the uncached resolver pair; the memory move functions,
-`MemoryService::begin_project_move` / `finish_project_move` / `known_project_roots`, the doctor report's
+`MemoryService::begin_project_move` / `finish_project_move` (`known_project_roots` stays — *As built* below), the doctor report's
 `move_snapshots` and the CLI code that prints it; `MoveStep` and `rebase_workspace_with` (replaced by §6); the purge's
 upload-unlink loop and `upload_paths`; the app's `useMovedProject` and `MovedProjectOffer`; the messages that tell a
 user to `mkdir .openalpaca`; memory fixtures 03, 04 and 17 are rewritten. `is_the_home_root` stays: `ensure_store` calls it
 (`store/mod.rs:464`), and Round G's `file_write` rule calls it until Stage 2.
+
+**As built (rev 0.9).** Stage 1 removed the list above with these differences, each a ruling of the plan's:
+`MemoryService::known_project_roots` **stays**, read from `projects::list()` — each listed project's own folder —
+because the 30 s reconciliation calls it (`reconcile_owner`; the lead's ruling R-S3); `project_root_of` stays — R15
+gives it two callers, the artifact and the upload writers (the plan's conflict C3); `unknown_entries` went whole,
+with `ContentKind::ALL`, `GITIGNORE_FILE` and `VERSIONS_DIR`, its last users, because its one caller was the purge
+plan; R2 removed `ContentKind::Skills` and `ContentKind::Cache`; `is_the_home_root` stays for Round G's `file_write`
+rule alone (`file_ops.rs:335`; `ensure_store` seeds the home store only and no longer calls it); and fixtures 01,
+02, 07, 08, 09 and 24 were rewritten too (they named `.openalpaca` as a marker or as the project's folder), beside
+03, 04 and 17.
 
 ## 8. Existing data, the database, reset
 
@@ -395,6 +439,29 @@ user to `mkdir .openalpaca`; memory fixtures 03, 04 and 17 are rewritten. `is_th
   `.git or .openalpaca`.
 - **Text.** The home README, four manuals, `API_MAP.md`, `DESIGN_SPEC.md`, `CLAUDE.md`, the factory-reset preview,
   and `artifact_write`'s description, which names `<project>/.openalpaca/artifacts` today.
+
+**As built (rev 0.9).** The wire shipped as the table says, with these additions. Two new codes,
+`422 WORKSPACE_NOT_A_DIRECTORY` and `500 WORKSPACE_REGISTER_FAILED`; a registration failure answers the same on every
+route that registers (the lead's ruling R-S7), though only the workspace routes can answer `409 WORKSPACE_IS_HOME` —
+an upload or a memory write from the home store is no project and goes home. The purge keeps
+`422 WORKSPACE_NOT_A_ROOT` for a path inside a project and takes the root exactly (R-S8; T36 in §0.2 asks whether
+`PATCH` should too); `PATCH` and the purge answer `404 WORKSPACE_NOT_FOUND` for a root no folder records or a project
+holding another owner's rows (the fix plan's R40); a re-point onto the project's own path is `400 INVALID_PATH`. `rows` also counts
+`messages` and `followups`; `PATCH` answers `{old_path, new_path, moved, project}`; the memory slot is tried every
+100 ms for 3 s. The whole-stage review's fix wave and its residual pass added (*review R…* and X…): a root a project records, sent as
+written, is matched before anything is resolved and answered as sent (review R1); `409 WORKSPACE_BUSY` for a project whose
+re-point has not finished, naming the next start (review R11), for a project re-pointed or deleted while the route waited
+for its slot (review R15), and for a run queued, running or paused under the root, counted again inside the re-point's
+transaction as the delete already did (`project_life::RunsInFlight`, review R10); a re-point onto either path of an
+unfinished re-point is `409 WORKSPACE_EXISTS` naming that start (`ProjectError::RepointUnfinished`, X7);
+`500 IO_ERROR` on `GET ?path=`, `PATCH` and the purge while `projects/` cannot be listed (X1); `memory_store`,
+`/remember` and `POST /v1/memories` for a project re-pointed or deleted mid-request are refused — the route's
+`500 MEMORY_INTERNAL` — rather than saved in global memory (review R19); and the handler is handed the root the gateway
+recorded, not the raw path (review R7). The app keeps `{root, id}` in `oa-project` and follows its project by id to a root a
+re-point made elsewhere (review R22); an upload into a conversation bound to a project is filed under that project, in the
+app and the CLI (review R6); a re-point or a delete refreshes the follow-up queue too (review R24); a content write creates the
+folders below a project's folder one level at a time and never re-creates the folder itself (`store::create_below`,
+review R16); and the delete removes the folder straight after the rows, `project.json` last (review R3).
 
 ---
 
@@ -603,8 +670,9 @@ it. (2) The resolver and registration (§3), content still in the project. (3) T
 R15, R17, the `nth(4)` sites, `revealable_path`, the purge guard, migration `003`, every fixture, and an audit that
 every test passing a project path holds the home-store guard. (4) Memory: the id key and binding, R19–R22, the re-point
 that replaces the move machinery. (5) Life cycle: the routes and the CLI, then the app. (6) Text and records. One gate
-pass; a live check on the rebuilt app (isolated home, the daemon under `scripts/eval/memory/loopback-only.sb` from its
-first launch).
+pass; a live check on the rebuilt daemon through its HTTP API and the CLI (isolated home, the daemon under
+`scripts/eval/memory/loopback-only.sb` from its first launch); the app's surfaces by their vitest suites, the session
+having no screen access.
 
 **Stage 2.** Guards before the root moves: (1) confinement, the filter and the kill (R29–R33, R23, R45); (2) approvals (ST-15, R34);
 (3) the working folder (R26–R28, R44) — until (4) lands, `file_write` on a project turn stays a by-product; (4) pointer
@@ -625,7 +693,9 @@ untracked evidence.
 Research on sandbox methods for shell commands, for a later version (ST-14): what confines a command to the
 project on each platform, and what it costs. Merging two projects on a re-point (ST-20). **T35**: an extension
 tool that does not declare itself harmless prompts — three options (no change; MCP only; MCP and plugins), with the
-consequence that an unattended turn using such a tool is refused. A run-wide "Always allow" (R43).
+consequence that an unattended turn using such a tool is refused. A run-wide "Always allow" (R43). And the two
+owner questions Stage 1 raised (§0.2): **T36**, whether `PATCH /v1/workspaces` refuses an `old_path` inside a project
+as the delete does; and whether a project whose recorded root no longer canonicalizes to itself reads as `missing`.
 
 From Stage 0, each found by its review or its live check and left as it is:
 
@@ -644,7 +714,122 @@ From Stage 0, each found by its review or its live check and left as it is:
 - `wait_for_subagents` can lose a wakeup: the loop checks `all_done()` (`runner/lead_agent/tools.rs:1205`) before it
   creates the `notified()` future it waits on (`:1232`), and `notify_waiters` keeps no permit, so a last completion
   between the two leaves the lead idle until a steering message or the 600 s cap. Older than Stage 0; offered to the
-  owner as its own task.
+  owner as its own task. **Fixed** in `32292608` (2026-10-07): the `Notified` future is created and enabled before the
+  `all_done()` re-check.
+
+From Stage 1, each found while planning, building, reviewing or checking it, and left as it is. The source is the
+plan's ruling (R-S…), the lead's ruling on the final review (R-F…), a slice's review (S1…S5b), the whole-stage
+review's finding (written *review R1…R33*, apart from this design's own rulings R1…R49) or the residual pass's (X1…X10, B1…B4, A-N2).
+
+*Registry and resolution*
+
+- **A control snapshot whose project id names no registered folder** — a project's folder under `projects/` removed
+  by hand, or one of R11's two folders with one id, which `list()` leaves out — is skipped by the rebuild and the
+  doctor and not listed by the doctor (`IdlessSnapshot` lists only id-less snapshots); `adopt` skips it with a WARN.
+  Recorded, not built (the lead's ruling R-S11).
+- **R11 is kept by `list` and `by_id`, not by `lookup`.** `lookup` reads two folder names, so it cannot see a copy of
+  a project's folder elsewhere under `projects/` and still answers for the original; two folders recording one root
+  under *different* ids (a copy whose id was edited) read as the plain-name one by `lookup` and as both by `list`.
+  `still_the_project`'s `by_id` finds nothing for an id two folders carry, so a re-point or a delete of such a project
+  answers that it was "re-pointed or deleted" while it waited.
+- **A stranded `projects/.<name>.<pid>-<n>.tmp/`** after a crash in the middle of `register` is hidden, passed over by
+  `list` and never swept (a few hundred bytes; a sweep would be a deletion path). Recorded, not built (the lead's
+  ruling R-S14).
+- **Case-insensitive home volumes** keep R6 by construction (`name_for` and `lookup` read the folder through the
+  volume) but no test covers a case-sensitive project volume beside a case-insensitive home.
+- **Review R1's deeper cross-wiring** (R-F7): only the routes match a recorded root as written; `lookup`, `store_root`, the
+  dispatch's `register` and memory's resolution still take a root that now leads elsewhere (a case-only rename, a
+  link left at the old path) to the project its canonical form names, so that project's follow-ups write into the
+  other's folder and partitions. `missing` stays "the root is not a directory" (the owner's question, §0.2).
+- **Review R4's other variant** (R-F7): with `OPENALPACA_HOME_STORE` outside `$HOME`, a `~/.git` makes `$HOME` a project.
+  Older than Stage 1.
+- **A root that is not valid UTF-8** is held through `to_string_lossy` and can alias another (S1 M4; Linux; the shape
+  of every path column).
+- **An absolute path whose missing tail ends in `..`** is refused by `for_turn` rather than resolved to no project
+  (S2 M1).
+- **The test guard is a backstop** (the plan's interfaces §7.4): an unguarded test that calls `register` while
+  another test of its crate holds that crate's guard passes the check and writes into that test's temp store,
+  unreported; a `~/.openalpaca` that is itself a link, with the variable set to the link's target, is not recognised
+  as the real store. The guard audit, not the panic, is what makes a test guarded.
+- **While `projects/` cannot be listed**, every `GET /v1/workspaces?path=`, purge and `PATCH` answers `500 IO_ERROR`,
+  for a path that is no recorded root too (X1, failing closed); a turn's own resolution is unchanged. The route's
+  error arm for that listing has no route-level test — only a transient failure reaches it, and its storage twin is
+  pinned (B4).
+- **A project whose recorded root no longer opens** is listed, but the 30 s reconciliation skips its partition
+  (logged at debug, X6; A-N2).
+- **`openalpaca memory --project`** reads the home store's registry itself for a missing absolute root (X9), so a CLI
+  and a daemon started with different `OPENALPACA_HOME_STORE` can disagree, as the local verbs already can.
+
+*The re-point*
+
+- **After a live re-point's rename fails past step 2** (S3's re-review): `lookup` of both roots answers `None` until
+  the next boot, and a turn at the old root can still register a fresh project there, whose rows recovery's step 2
+  would then merge; learning holds the whole session's cursor until that boot (S4).
+- **Recovery before step 3 chooses the new folder name again** (`name_for`, `project_life.rs:292-296`) rather than
+  reading the name step 2 wrote into the `storage_path` prefixes; if the plain name was taken in between, the two
+  differ (S3 M1).
+- **`store rebase --dry-run`** advises "delete that project's data first" for a target that is an unfinished
+  re-point's root, where the daemon answers `RepointUnfinished`'s `409` naming the restart (B1).
+- **A turn's file writes during a re-point** (review R13's file half): `file_write` and `artifact_write` on the old root are
+  refused "… is not a project OpenAlpaca knows", which a model may route around through the shell.
+
+*Memory and learning*
+
+- **A write for a root no folder records** is refused before it takes a slot (review R19); the slot
+  `unregistered:<canonical root>` is left only to keep two such writes apart, and a lookup that fails takes it with a
+  WARN, so that write does not wait for a re-point's or a delete's hold (`memory/service/mod.rs:828-856`, S4 M1).
+- **`root_gone` reads a failed `lookup` as "not gone"**, so while `projects/` is unreadable each learning retry spends
+  a model call before the write's own error holds the cursor (S4).
+- **Task extraction across a re-point or a delete** (R-F4's remainder): a run re-pointed before its pre-call check is
+  `Skipped(root_gone)`; items re-pointed during its model call are refused, counted failed and lost — a run has no
+  cursor; and the delete half's verify-then-resolve window stays. Closing it needs the extraction descheduled across
+  the delete, or the dispatch's project id threaded through the dispatcher.
+- **Review R7's narrower window**: the handler resolves the root the gateway recorded once more, so a re-point committing
+  between the two leaves the turn with no project and no stale root, and its unscoped notes land home as a no-project
+  turn's do.
+- **The stale-root refusal's shape**: `POST /v1/memories` answers it `500 MEMORY_INTERNAL`, not a typed `409` (that
+  would be a wire change), and the model reads it with the `io:` class prefix.
+- **A deleted conversation's summary in a third project's partition** stays until forgotten by hand: the delete
+  forgets its conversations' summaries in the home partition only, and the project's own go with it (R-F1, SC-1).
+- **The delete publishes no `memory_changed`** for the partitions it drops (the event names one note): the window
+  that deleted invalidates its own Memory queries (S5b); an open Memory view in another window keeps showing the
+  deleted notes until a later `memory_changed` or a fresh read — the 30 s reconciliation scans the home partition
+  and the registered projects' only, so it announces nothing for a deleted project, and the view's queries do not
+  poll. Recorded, not built (the lead's ruling R-S14, whose "refreshes at the next reconciliation" the code does not
+  bear out).
+
+*The delete*
+
+- **The delete's edges** (S5a): a chat turn — not a run — in one of the project's conversations is not refused, so
+  its write between the transaction and the folder's removal is lost with the folder, and its answer leaves an
+  orphan message row (review R17; closing it needs a per-lane in-flight-turn signal); a project only an earlier build's
+  rows name cannot be deleted until a turn registers it (`404`); the delete and the re-point do their database and
+  file work inside the async handler, and registration runs inline on the runtime at the chat turn and the upload
+  (S2).
+- **Review R16's remaining window** (R-F7): a put whose whole transaction lands between the delete's commit and the
+  folder's removal leaves a row of the deleted project, answered `410`. **Review R3's**: an entry created in the folder after
+  its listing fails `remove_dir` once `project.json` went, leaving a folder no list shows (the hidden-rename variant
+  was not taken).
+- **Kept files** (S5a): empty `kept/<folder>-<id>/` folders after a failed attempt; a target that NFD or case folding
+  changes is refused (`kept_address`'s `target != joined`, `project_life/delete.rs:279`); a `written: None` row can
+  adopt a kept copy a crash cut short; and `copy_fresh`'s refusal of an address a committed row names is permanent
+  until resolved by hand (`500 DB_ERROR` naming the address).
+- **No daemon field tells "the folder was kept" from "it was already gone"** (R-F2): the toast and the CLI line cover
+  both, and when it was already gone the toast's "run Delete data… again" has nothing to press.
+
+*The app and the CLI*
+
+- **The CLI's counts print "1 partitions", "1 uploads"**: the plural is not chosen by count.
+- **The app's Projects list** (S5b): no event announces a project a turn registered, so the list re-reads on mount
+  and after the app's own writes; a project root is drawn unescaped there, in the two dialogs and in the CLI (the
+  owner's own path, not text a tool, model or extension controls — S5b's recorded choice, review R25); `Delete data…` takes
+  no typed word (the lead's R-S10; T33 stays the owner's question).
+- **The dialogs** (S5b): `windowFollows` diverges in a subfolder after a cancel; `Use`'s own per-call `onSuccess` is
+  dropped on a view switch; a refusal after the dialog closed is silent; a reopened dialog keeps the old project; the
+  card header lags briefly after a re-point.
+- **Following a project** (review R22, review R6): an `oa-project` an earlier build wrote has no id and cannot follow a re-point
+  made elsewhere until `Use`; after a delete elsewhere the Project card's note says the folder "may have moved"; a
+  pinned conversation's project re-syncs from the sidebar's loaded page only.
 
 ## 19. What the panel changed (rev 0.1 → 0.2)
 
@@ -683,15 +868,16 @@ refuted outright, and 24 further findings (9 major).
 ## 21. What a beta waits for
 
 On 2026-10-05 the owner asked whether the app is ready for a beta. It is not. Stage 0's fixes are built
-(`931460a4..a9dbed4e`, 2026-10-06…07); the folder in every repository (Stage 1), agents not in the project
-(Stage 2) and B1–B3 below remain. The gaps, and where each is fixed:
+(`931460a4..a9dbed4e`, 2026-10-06…07), and so is Stage 1 (`b8b768b6^..44d53783`, 2026-10-07…08): nothing is written
+in a repository any more. Agents not in the project (Stage 2) and B1–B3 below remain. The gaps, and where each is
+fixed:
 
 | Gap | Fix | Stage |
 |---|---|---|
 | The shipped `system_agent` ran shell commands and wrote files with no approval card | F1, built | 0 |
 | Every program the daemon started inherited the master key | F3, built | 0 |
 | A workflow's report could name the wrong path for a file it wrote (the 500-character cut) | F2, built | 0 |
-| A CLI chat inside any git repository creates `<repo>/.openalpaca/` in the tester's repository | Part I | 1 |
+| A CLI chat inside any git repository creates `<repo>/.openalpaca/` in the tester's repository | Part I, built | 1 |
 | From the app, agents cannot read, write or edit the project's files, and the shell runs in the daemon's folder | Part II, with `file_edit` (ST-22) | 2 |
 
 Three things a beta needs that no stage covers:
@@ -717,6 +903,56 @@ own project needs.
 
 ## Revision log
 
+- **rev 0.9 (2026-10-08).** **Stage 1 built**, from `tasks/storage-design/plan-stage1.md` (approved by the owner on
+  2026-10-07), as `b8b768b6^..44d53783` (131 commits): slices S1–S6, each reviewed with one fix round; the whole-stage
+  review (eight reviewers by dimension; 33 findings, 1 Critical, 9 Important, cited as *review R1…R33*) and its fix wave `b923c81e..a9ea4864`
+  with a residual pass `a9ea4864..909e724c`; one gate pass at `00f057fe`; the live check `stage1-live-report.md`
+  (`44d53783`; (a)–(h) PASS, 0 ERROR lines; the app's surfaces by their vitest suites, no screen access). The status
+  line and §21 say so (§21's Stage 1 row reads built); §0.2 names the two owner questions it raised, T36 and
+  `missing` for a root that no longer canonicalizes to itself; §3, §5 (ST-21) and §9 gain *As built* paragraphs (the
+  dispatch as a fifth registration site, R-S13, the recorded root matched as written, the hold, the wire's added
+  codes and refusals); §7's list marks `known_project_roots` kept (R-S3), and an *As built* paragraph records how the
+  removals were built (`known_project_roots` read from `projects::list()`; `project_root_of` kept; `unknown_entries`
+  whole; R2; `is_the_home_root`'s one caller; six more fixtures); §16's Stage 1 clause says the app's surfaces were
+  proven by their tests; §18 marks Stage 0's `wait_for_subagents` residual fixed in `32292608` and gains Stage 1's
+  residue. The lead's rulings that shaped the build, one line each:
+  - R-S1: S6 — text, gate, live check, records — drafted with the plan.
+  - R-S2: the tests that only resolve a path take their crate's home-store guard in the commit that switches
+    resolution; no test reads `~/.openalpaca`, even read-only.
+  - R-S3: `known_project_roots` stays, over `projects::list()`, for the 30 s reconciliation.
+  - R-S4: the guard is not called inside `repoint_with` or `remove_project_folder`; the guard audit covers their
+    tests.
+  - R-S5: the guard is proved compiled into a daemon `cargo test` builds and absent from one `cargo build` builds;
+    every live check rebuilds first.
+  - R-S6: `qk.statusAll()` joins the app's invalidation lists.
+  - R-S7 (amended): a registration failure answers the same on every route — `409 WORKSPACE_IS_HOME`,
+    `500 WORKSPACE_REGISTER_FAILED`.
+  - R-S8: the delete takes the project exactly; a path inside it is `422 WORKSPACE_NOT_A_ROOT` naming the root, on
+    the purge only (T36 asks about `PATCH`).
+  - R-S9: the two daemon tests that wait a real 3 s stay.
+  - R-S10: `Delete data…` confirms with the plan and a danger button, no typed word (T33 stays the owner's).
+  - R-S11: a snapshot whose project id names no registered folder is not listed by the doctor (§18).
+  - R-S12: the `wait_for_subagents` fix stays as built, with its test-only hook.
+  - R-S13: the daemon-CWD fallback goes — a turn whose client sent no path has no project.
+  - R-S14: each slice's recorded spec conflicts stand as drafted; the stranded `.tmp` folder and the delete's missing
+    `memory_changed` go to §18.
+  - R-S15: the four tests S2.5's verifier added are guarded under R-S2's rule.
+  - R-S16: the tests that need a `.git` above the test process's directory stay.
+  - R-S17: the app's copy about a relative path is swept with the code text.
+  - R-S18: `ToolContext.workspace_id` and `request_workspace_root` stay two fields (equal since R-S13).
+  - R-F1: SC-1 not built — the delete forgets its conversations' summaries in the home partition only (§18).
+  - R-F2: the kept-folder toast is softened; a daemon field telling "kept" from "already gone" is residue (§18).
+  - R-F3: a content write creates below a project's folder one level at a time and never re-creates it — built
+    (`store::create_below`, review R16).
+  - R-F4: task extraction across a delete or a re-point is not built (§18); its re-point half was later closed by
+    review R19's refusal.
+  - R-F5: `list()` and `by_id` pass over a vanished folder, and `known_project_roots` reads each project's own
+    folder — built.
+  - R-F6: the gate, the live check and the records run outside the slice workflow; the app half of the live check is
+    proven by vitest, the session having no screen access.
+  - R-F7: R-F1, R-F4's remainder, review R4's store-outside-`$HOME` variant, review R1's deeper cross-wiring,
+    review R16's remaining window and review R17 go to §18.
+  - R-F8: the review's R21 and R30–R33 are defects in the plan's own text, fixed by the lead at S6.5 and S6.6.
 - **rev 0.8 (2026-10-07).** Records corrected after the Stage 0 records check. The Stage 0 lead-in writes each
   fix's range with its first commit (`bbfc676e^..7f16eba6`, `0047cf90^..f3980cba`, `0d9a9293^..85c9cacc` — in
   git `A..B` leaves `A` out) and says once that the table's Where column is the code before Stage 0; the branch line

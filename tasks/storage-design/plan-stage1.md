@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.93.0 (edition 2024), rusqlite, serde, tokio, axum; React 19 + TypeScript + Vitest (bun) for the app; `cargo test` per crate; the local Ollama `qwen3.8:27b-mlx` for the live check only.
 
-**Spec:** `tasks/storage-design/design.md` rev 0.8 (approved 2026-10-05; Stage 0 built) — §0.1 (owner decisions ST-1…ST-22), Part I §1–§9, §16 *Order*, §17 *Records*. **Lead's rulings on the drafts:** R-S1…R-S14, in the section *Rulings* below — binding on every implementer.
+**Spec:** `tasks/storage-design/design.md` rev 0.8 (approved 2026-10-05; Stage 0 built) — §0.1 (owner decisions ST-1…ST-22), Part I §1–§9, §16 *Order*, §17 *Records*. **Lead's rulings on the drafts:** R-S1…R-S18 (three rounds), in the section *Rulings* below — binding on every implementer.
 
 **Where this plan came from:** an interfaces sheet, six slice drafts and S6, each written against the tree at `6aecb614`/`32292608` by an Opus drafter and corrected in place by an Opus verifier; a cross-slice consistency check; two rounds of the lead's rulings applied and verified. Line numbers are of that tree and drift as slices land: **locate code by content**.
 
@@ -19,7 +19,7 @@
 - **One cargo process at a time**, always (`pgrep -x cargo` before each). Per task: `cargo test -p <crate> <filter>` as the task gives it. The workspace run happens **once**, at S6.4, then `pkill -f "sleep 3600"`.
 - **The owner's store is never touched.** `~/.openalpaca` is never read, written, listed or pointed at — not by a command, not by a test, not even read-only. Every test that touches a store uses a tempfile directory and the crate's home-store guard; from S1.9 on, the `test-home-guard` feature makes `register` under an unguarded home fail loudly; from S2.5 on, a turn with no client path resolves no project (R-S13), so no test walks the process's current directory into `projects/`.
 - **No test reaches `localhost:11434`** (a test enabling a provider uses a mock or `127.0.0.1:1`). The live check (S6.5) is the one place the local model is used, under the owner's standing authorization, with the daemon under `scripts/eval/memory/loopback-only.sb` from its first launch.
-- **Clippy baseline 80** (`CARGO_TERM_COLOR=never cargo clippy --workspace --exclude openalpaca_gui --all-targets`, lines starting `warning` minus the `generated N warnings` lines). A slice may not add one.
+- **Clippy baseline 80** (`CARGO_TERM_COLOR=never cargo clippy --workspace --exclude openalpaca_gui --all-targets`, lines starting `warning` minus the `generated N warnings` lines) — **78** from S5a on, which deleted two (the lead's ruling). A slice may not add one.
 - **Routes:** a commit that changes a route or a migration regenerates `docs/api` with `python3 scripts/gen_api_docs.py` in the same commit; `--check` is clean at every slice's end.
 - **GUI:** a commit under `apps/openalpaca-gui/` runs all four bun gates (`bun run check`, `bun run test`, `bun run format:check`, `bun run build` in `apps/openalpaca-gui`); `cargo check -p openalpaca_gui` at the gate.
 - **Migration 003** follows CLAUDE.md's recipe (the file's number is its version; `MIGRATIONS` entry; the comment bump; `gen_api_docs` parity). The memory index's `SCHEMA_VERSION` goes 5 → 6 in S4 (rows change with the partition key); no retrieval-proxy run is needed, since tables, tokenizers and ranking are unchanged.
@@ -1125,6 +1125,68 @@ registers each workspace a project partition names (S3). Core's `memory/service/
   printing nothing.
 - `str::floor_char_boundary` compiles on the pinned 1.93.0: core already calls it (`learning/episode.rs:195`).
   `unicode_normalization::char::is_combining_mark` exists in the locked 0.1.25 (`src/lib.rs:88`).
+
+### 11. As built (the final fix wave, 2026-10-08)
+
+Recorded by S6.6 once Stage 1 was built (`b8b768b6^..44d53783`): the whole-stage review's fix wave and its residual
+pass (`b923c81e..909e724c`) changed these contracts — the numbers below are that review's findings (R1…R33)
+and the residual pass's (X1…X10), not the design's rulings. The sections above are the contract the slices were drafted
+against and stay as written; the design's rev 0.9 (§3, §5, §9 *As built*, §18) records the behaviour.
+
+- **§1.7 and §7.4 — the guard is a backstop** (S1's fix round, `ecfd8db3`). `register` reads `OPENALPACA_HOME_STORE`
+  and the user's home once (`register_home`); the guard judges that reading as written and where it leads (a link, a
+  `..`, another case), and every read and write of the call is under that one store, so no test can pass the check
+  and then write into `<HOME>/.openalpaca`. Detection stays probabilistic: an unguarded test that calls `register`
+  while another test of its crate holds that crate's guard passes the check and writes into that test's temp store,
+  unreported; a `~/.openalpaca` that is itself a link, with the variable set to the link's target, is not recognised
+  as the real store, because the guard resolves the user's home and appends `.openalpaca` rather than read the real
+  store, not even its metadata. The audit, not the panic, is what makes a test guarded: every test that resolves,
+  registers or lists projects holds its crate's guard.
+- **§1.4 — `ProjectError::RepointUnfinished { path }`**, a sixth variant: code `WORKSPACE_EXISTS`, `409` on the wire;
+  its sentence names the next start of the daemon, which finishes that re-point (X7). The re-point refuses with it a
+  target that is an unfinished re-point's new or old root, before `Exists` (R9).
+- **§1.5 — two readers.** `projects::by_recorded_root(root)`: the project whose recorded root is `root` as written,
+  compared component by component, nothing resolved, an entry mid re-point never the answer (R1; the routes trim the
+  path and strip a trailing `/` first). `projects::unfinished_repoint_at(root)`: a marked project recording `root` as
+  its new or its old root (R9, R11). `read_project_dir` answers `Ok(None)` for a folder or a `project.json` that
+  vanishes while it is read, and `list` and `by_id` pass it over (R2).
+- **`store::create_below(base, rel)`** (`pub(crate)`): creates `rel` below `base` one level at a time, accepts an
+  existing level only when it is a real directory, never creates `base`, and answers `NotFound` when `base` is gone.
+  `content_dir` for a project scope, the upload writer and the artifact writer (the leaf and the `.versions`
+  rotation) use it, and the memory files through `memory_files::fsx` (R16, R-F3).
+- **§5.1 — the re-point.** `repoint_rows` takes an `InFlightRuns` (`openalpaca_storage::artifacts::InFlightRuns`,
+  not re-exported at the crate root): the live re-point counts the runs `queued`, `running` or `paused` under the old
+  root inside step 2's transaction and refuses with `project_life::RunsInFlight` (`409 WORKSPACE_BUSY`), the delete's
+  error, now the `PATCH`'s too; recovery does not count, since it runs before the interrupted runs are swept (R10). A
+  step-2 failure whose marker could not be cleared carries `project_life::RepointLeftMarked`, and the route answers
+  it `500 WORKSPACE_MOVE_FAILED` with the whole chain, never "nothing was re-pointed" (X3). `project_life::registered`
+  matches a recorded root first and propagates a listing failure (R1, X1).
+- **§5.2 — the delete.** `KeptRow` carries the version it was copied at, and the transaction refuses a kept file whose
+  row changed since, its version or its address (R18); `copy_fresh` never overwrites a kept file a committed row
+  names (S5a's re-review); `remove_project` and `remove_project_folder` run straight after `delete_project_data`, and
+  the folder's removal takes `project.json` last (R16, R3).
+- **§6.1 — the routes.** A recorded root sent as written is matched before anything is resolved, and `GET ?path=`
+  answers it as sent (R1). A marked project at either path is `409 WORKSPACE_BUSY` naming the next start (R11). Once
+  the memory slot is held, the re-point and the delete read the project again by id (`still_the_project`) and answer
+  `409 WORKSPACE_BUSY`, "nothing was re-pointed / deleted", if it was re-pointed or deleted meanwhile (R15).
+  `RunsInFlight` is the `PATCH`'s too, and its pre-check counts queued runs beside running and paused ones (R10).
+  `GET ?path=`, `PATCH` and the purge answer `500 IO_ERROR` when `projects/` cannot be listed (X1). A delete that kept
+  the folder counts only the notes that went (R26), and a real delete's plan lines are built from its counts (S5a M1).
+- **§4.4 — memory writes.** `MemoryService::store` refuses a write whose effective scope is the project when the
+  context's root no longer looks up (`MemoryAccessContext`'s stale root) or resolved to an unregistered root:
+  `MemoryError::Internal`, one sentence, `500 MEMORY_INTERNAL` on `POST /v1/memories`; learning's and the episode's
+  existing `Internal` arms hold the cursor (R19, closing R5 and R13's memory half). A conversation's close checks its
+  project before its refresh reads the forgets (R20). The handler is handed the root the gateway recorded
+  (`HandleRequest.workspace_path`, R7).
+- **§4.5 — ST-21's check.** `extractor::check_project` runs under `projects::lock()` (R2);
+  `learning::queue::check_project_now` (`pub(crate)`) runs it on the blocking pool, and task extraction calls it there
+  too — the learning module no longer re-exports `check_project` (X5). The 30 s reconciliation logs a project root
+  that names no project at debug (X6).
+- **§6.3 — the app.** `qk.followups.all()` joins the project-data invalidation set (R24). `oa-project` holds
+  `{root, id}` — a root-only value an earlier build wrote migrates with `id: null` — and `useProjectFollow` follows the
+  project by id to the root a re-point made elsewhere, reading a fresh list (R22, X8). `Delete data…` and `Re-point…`
+  refuse a plan or a count the daemon read as another project, and `Re-point…` stays off while runs are running or
+  queued (R1, X2). An upload into a bound conversation carries that conversation's `workspace_id` (R6).
 
 ---
 
@@ -28007,6 +28069,12 @@ git commit -m "docs(storage-design): Stage 1 live check report" \
 
 ### Task S6.6: Records
 
+*(Corrected when it was run, 2026-10-08 — the whole-stage review's R30–R33, ruling R-F8: the clippy baseline is 78,
+S5a having deleted two of the 80 (R30); the resolver is "the nearest folder at or above the path that is a recorded
+project's root or holds `.git`" (R31); the guard's panic is a backstop, and the rule is that every test that resolves,
+registers or lists projects holds its crate's home-store guard (R32); and the records carry the lead's rulings and the
+residue, not only the facts (R33). The texts below are corrected in place for R30–R32; R33 is the records commit's.)*
+
 The tokens below — `<range>` (the stage's commits, written `first^..last`), `<gate>` (the commit S6.4 ran at),
 `<report>` (S6.5's commit), `<N>` and `<M>` (the workspace and vitest totals), `<date>` / `<dates>` (`date +%F`),
 `<plan-approved>` (the day the owner approved `plan-stage1.md`) — are filled from `git log`, `tasks/todo.md` (S6.4
@@ -28195,7 +28263,7 @@ any more. Agents not in the project (Stage 2) and B1–B3 below remain. The gaps
   after the storage paragraph:
 
 ```markdown
-**Stage 1 of the storage design is landed** (`<range>`, <dates>; `tasks/storage-design/plan-stage1.md`, approved by the owner on <plan-approved>). Every project's content lives in its folder in the home store, `~/.openalpaca/projects/<name>/` — `<name>` the canonical root with every character that is not a letter, digit or combining mark as `-`, plus `-<8 hex of sha256(path)>` when the name is taken or over 200 bytes (R4–R7) — holding `project.json` (`{version, id, root, created_at}`, the permanent id, ST-13) and the project's `artifacts/`, `uploads/` and `memory/`; nothing is written inside the project's own folder (ST-1), and an `.openalpaca/` an earlier build left there is never read (ST-9). `openalpaca_storage::store::projects` is functions over those files — `lookup`, `list`, `by_id`, `register` under one lock, and the pure `resolve` (a registered root, else the nearest `.git`; the home store, inside it or around it, is never a project, R13; a turn whose client sent no path has no project, and nothing is resolved from the daemon's working directory — the lead's R-S13). Only the daemon registers, where it accepts work — a chat turn, a dispatch, an upload, a memory write route, `POST /v1/workspaces` — and a read registers nothing (R12: an unregistered root has no store, and its readers answer from the home notes). `.openalpaca` is no marker; `memory/workspace.rs`, the walk and its cache, is gone. Rows keep the canonical path (R14), `file_assets.project_root` is the turn's project (R15), upload dedup is per project (R17), and Reveal admits a file under the home root only. Memory partitions are keyed and bound by the project id (`proj-<owner-key>-<16 hex of sha256(id)>`, the control snapshot's optional `project_id`, R18–R20), the index is at schema 6 (R21), an id-less project snapshot an earlier build wrote is listed by the doctor and never opened, adopted or deleted (R22), and learning drops only a project that is no longer registered (ST-21, superseding LQ5). A project's life: list (`GET /v1/workspaces`, `openalpaca store list`, Settings → Connection → Projects with a `missing` tag), choose (`POST /v1/workspaces`, `openalpaca chat --project`, `Use`), re-point (`PATCH /v1/workspaces`, `store rebase`, `Re-point…`: `project.json` marked, one transaction over the five path columns and both `storage_path` prefixes, the folder renamed, finished at boot if interrupted, R24; `MemoryService::quiesce` by id, tried for 3 s before `WORKSPACE_BUSY`), and delete its data (`POST /v1/workspaces/purge`, `store purge <project>`, `Delete data…`: ST-19 — everything held for the project, every owner's notes and its folder, a file a surviving conversation still shows kept under `uploads/kept/` or `artifacts/kept/`, the project's own folder never touched; the project's root exactly, a path inside it refused naming the root, R-S8; `store purge --all` is gone). Migration `003_no_project_store_rows.sql` (R25) drops the rows of files stored inside a project's own folder; `ContentKind` lost `skills` and `cache` (R2); a factory reset leaves `projects/` and its preview says so. In test builds `store::projects::register` panics unless the home store was set through `OPENALPACA_HOME_STORE` and not into the real one (storage's `test-home-guard`, *Feature Flags*). **Gate at `<gate>`:** `cargo test --workspace --exclude openalpaca_gui` <N> passed, 0 failed, 16 ignored; clippy 80, the baseline; `gen_api_docs.py --check` clean; `cargo check -p openalpaca_gui` and the live-eval compile clean; the four bun gates green (<M> tests). **Checked live** (`tasks/storage-design/stage1-live-report.md`, `<report>`; an isolated store, the daemon under `scripts/eval/memory/loopback-only.sb` from its first launch, driven through its HTTP API and the CLI, `qwen3.8:27b-mlx`): <each check's verdict>; the app's surfaces <checked live | proven by their vitest suites, the session having no screen access>. Recorded, not built, in design §18: <the residue, R-S11's and R-S14's among it>.
+**Stage 1 of the storage design is landed** (`<range>`, <dates>; `tasks/storage-design/plan-stage1.md`, approved by the owner on <plan-approved>). Every project's content lives in its folder in the home store, `~/.openalpaca/projects/<name>/` — `<name>` the canonical root with every character that is not a letter, digit or combining mark as `-`, plus `-<8 hex of sha256(path)>` when the name is taken or over 200 bytes (R4–R7) — holding `project.json` (`{version, id, root, created_at}`, the permanent id, ST-13) and the project's `artifacts/`, `uploads/` and `memory/`; nothing is written inside the project's own folder (ST-1), and an `.openalpaca/` an earlier build left there is never read (ST-9). `openalpaca_storage::store::projects` is functions over those files — `lookup`, `list`, `by_id`, `register` under one lock, and the pure `resolve` (the nearest folder at or above the path that is a recorded project's root or holds `.git`; the home store, inside it or around it, is never a project, R13; a turn whose client sent no path has no project, and nothing is resolved from the daemon's working directory — the lead's R-S13). Only the daemon registers, where it accepts work — a chat turn, a dispatch, an upload, a memory write route, `POST /v1/workspaces` — and a read registers nothing (R12: an unregistered root has no store, and its readers answer from the home notes). `.openalpaca` is no marker; `memory/workspace.rs`, the walk and its cache, is gone. Rows keep the canonical path (R14), `file_assets.project_root` is the turn's project (R15), upload dedup is per project (R17), and Reveal admits a file under the home root only. Memory partitions are keyed and bound by the project id (`proj-<owner-key>-<16 hex of sha256(id)>`, the control snapshot's optional `project_id`, R18–R20), the index is at schema 6 (R21), an id-less project snapshot an earlier build wrote is listed by the doctor and never opened, adopted or deleted (R22), and learning drops only a project that is no longer registered (ST-21, superseding LQ5). A project's life: list (`GET /v1/workspaces`, `openalpaca store list`, Settings → Connection → Projects with a `missing` tag), choose (`POST /v1/workspaces`, `openalpaca chat --project`, `Use`), re-point (`PATCH /v1/workspaces`, `store rebase`, `Re-point…`: `project.json` marked, one transaction over the five path columns and both `storage_path` prefixes, the folder renamed, finished at boot if interrupted, R24; `MemoryService::quiesce` by id, tried for 3 s before `WORKSPACE_BUSY`), and delete its data (`POST /v1/workspaces/purge`, `store purge <project>`, `Delete data…`: ST-19 — everything held for the project, every owner's notes and its folder, a file a surviving conversation still shows kept under `uploads/kept/` or `artifacts/kept/`, the project's own folder never touched; the project's root exactly, a path inside it refused naming the root, R-S8; `store purge --all` is gone). Migration `003_no_project_store_rows.sql` (R25) drops the rows of files stored inside a project's own folder; `ContentKind` lost `skills` and `cache` (R2); a factory reset leaves `projects/` and its preview says so. In test builds `store::projects::register` panics unless the home store was set through `OPENALPACA_HOME_STORE` and not into the real one (storage's `test-home-guard`, *Feature Flags*). **Gate at `<gate>`:** `cargo test --workspace --exclude openalpaca_gui` <N> passed, 0 failed, 16 ignored; clippy 78, the baseline since S5a deleted two of the 80; `gen_api_docs.py --check` clean; `cargo check -p openalpaca_gui` and the live-eval compile clean; the four bun gates green (<M> tests). **Checked live** (`tasks/storage-design/stage1-live-report.md`, `<report>`; an isolated store, the daemon under `scripts/eval/memory/loopback-only.sb` from its first launch, driven through its HTTP API and the CLI, `qwen3.8:27b-mlx`): <each check's verdict>; the app's surfaces <checked live | proven by their vitest suites, the session having no screen access>. Recorded, not built, in design §18: <the residue, R-S11's and R-S14's among it>.
 ```
 
   (b) The documents table's design row (`:118`): replace `` (rev 0.8 — **approved 2026-10-05, ST-1…ST-22 taken; Stage 0
@@ -28230,7 +28298,7 @@ any more. Agents not in the project (Stage 2) and B1–B3 below remain. The gaps
   (e) *Storage*, the memory paragraph (`:286`). Replace `` `<home>/memory/owners/<owner-key>/` or `<project>/.openalpaca/memory/owners/<owner-key>/` (`<owner-key>` = first 32 hex of `sha256(owner_id)`; the project is the nearest `.openalpaca`/`.git` root of the request's `request_workspace_root`, created lazily on the first write, and `memory/.gitignore` = `*` is re-asserted on every open — MD-7). `` with
 
 ```markdown
-`<home>/memory/owners/<owner-key>/` or `<home>/projects/<name>/memory/owners/<owner-key>/` (`<owner-key>` = first 32 hex of `sha256(owner_id)`; the project is what `store::projects::resolve` makes of the request's `request_workspace_root` — a registered root, else the nearest `.git` — and has a partition only once registered, R12; the partition is created lazily on the first write, keyed `proj-<owner-key>-<16 hex of sha256(project id)>` and bound by the `project_id` its control snapshot carries, so a re-point touches neither, R18–R20; MD-5's marker half and MD-7's `.gitignore` are superseded by the storage design's ST-1 and ST-6).
+`<home>/memory/owners/<owner-key>/` or `<home>/projects/<name>/memory/owners/<owner-key>/` (`<owner-key>` = first 32 hex of `sha256(owner_id)`; the project is what `store::projects::resolve` makes of the request's `request_workspace_root` — the nearest folder at or above it that is a recorded project's root or holds `.git` — and has a partition only once registered, R12; the partition is created lazily on the first write, keyed `proj-<owner-key>-<16 hex of sha256(project id)>` and bound by the `project_id` its control snapshot carries, so a re-point touches neither, R18–R20; MD-5's marker half and MD-7's `.gitignore` are superseded by the storage design's ST-1 and ST-6).
 ```
 
   Replace `` its tables are `SCHEMA_VERSION` **5**, `:87`: L2 added `note_source` and `supersedes`, L10a the dates,
@@ -28285,7 +28353,7 @@ sit at the root, with `scratch/` reserved and uncreated (Stage 2's working folde
   one bullet at the end of *Gotchas*:
 
 ```markdown
-- **No test may write into the developer's `~/.openalpaca`, and the projects module enforces it** (storage design Stage 1). A test that reaches `store::projects::register` — a chat turn, an upload, a memory write or a dispatch with a project, or any test that registers a project — holds its crate's home-store guard (`crate::store::tests::HomeStoreGuard` in storage, `crate::test_util::HomeStoreGuard` in core and the daemon, `crate::test_util::EnvSandbox` in the CLI, the module guards in plugins and connectors); without it the test panics (`test-home-guard`, *Feature Flags*). A test that only *resolves* a project path reads `~/.openalpaca/projects/` and takes the guard too (the lead's R-S2); a turn with no workspace path resolves nothing and needs none (R-S13). A daemon binary `cargo test` built carries the guard (`apps/openalpacad/tests/daemon_args.rs` builds it inside the run): run `cargo build -p openalpacad` before starting it by hand, or its first project turn panics.
+- **No test may write into the developer's `~/.openalpaca`, and the projects module enforces it** (storage design Stage 1). A test that reaches `store::projects::register` — a chat turn, an upload, a memory write or a dispatch with a project, or any test that registers a project — holds its crate's home-store guard (`crate::store::tests::HomeStoreGuard` in storage, `crate::test_util::HomeStoreGuard` in core and the daemon, `crate::test_util::EnvSandbox` in the CLI, the module guards in plugins and connectors); without it the test usually panics (`test-home-guard`, *Feature Flags*) — a backstop, not a guarantee: under parallel tests an unguarded test can pass the check while another test of its crate holds that crate's guard (interfaces §7.4), so the guard audit, not the panic, makes a test guarded. A test that only *resolves* a project path reads `~/.openalpaca/projects/` and takes the guard too (the lead's R-S2); a turn with no workspace path resolves nothing and needs none (R-S13). A daemon binary `cargo test` built carries the guard (`apps/openalpacad/tests/daemon_args.rs` builds it inside the run): run `cargo build -p openalpacad` before starting it by hand, or its first project turn panics.
 ```
 
 - [ ] **Step 3: `tasks/api-fix-plan.md`.** Title and status: `rev 3.21` → `rev 3.22` (`:1`, and `rev 3.21 is the record of
@@ -28301,7 +28369,7 @@ sit at the root, with `scratch/` reserved and uncreated (Stage 2's working folde
   its folder under `~/.openalpaca/projects/` with a permanent id, the resolver and registration, memory keyed by the
   project id, the re-point and the delete — was built on <dates> as `<range>`, from
   `tasks/storage-design/plan-stage1.md` (approved <plan-approved>); gate at `<gate>` (<N> passed, 0 failed, 16
-  ignored; clippy 80; the four bun gates green); live check `tasks/storage-design/stage1-live-report.md`
+  ignored; clippy 78; the four bun gates green); live check `tasks/storage-design/stage1-live-report.md`
   (`<report>`). **Stage 2 is not built.** ``; and the ST row's Commits cell `` Stage 0 `931460a4..a9dbed4e`; Stages 1 and
   2 not built `` → `` Stage 0 `931460a4..a9dbed4e`; Stage 1 `<range>`; Stage 2 not built ``. Under the
   heading `` ## 1. The `.openalpaca/` taxonomy — the contract `` insert the line
