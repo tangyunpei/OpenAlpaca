@@ -77,9 +77,11 @@ export function keptLine(kept: ProjectDataDeletion["kept"]): string | null {
       ? counted(kept.artifacts, "by-product", "by-products")
       : null,
   ].filter((part): part is string => part !== null);
-  return parts.length === 0
-    ? null
-    : `Keeps ${parts.join(" and ")} another conversation still uses, moved out of the project — a by-product as its newest version only.`;
+  if (parts.length === 0) return null;
+  // An upload is kept whole; only a by-product is cut to its newest version.
+  const rule =
+    kept.artifacts > 0 ? " — a by-product as its newest version only" : "";
+  return `Keeps ${parts.join(" and ")} another conversation still uses, moved out of the project${rule}.`;
 }
 
 export interface DeleteProjectDataDialogProps {

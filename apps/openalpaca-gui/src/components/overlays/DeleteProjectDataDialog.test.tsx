@@ -104,6 +104,17 @@ describe("keptLine", () => {
       "Keeps 1 upload and 2 by-products another conversation still uses, moved out of the project — a by-product as its newest version only.",
     );
   });
+
+  it("names the by-product rule only when a by-product is kept", () => {
+    // S5b M3: an upload is kept whole; the newest-version clause is about
+    // by-products alone.
+    expect(keptLine({ uploads: 1, artifacts: 0 })).toBe(
+      "Keeps 1 upload another conversation still uses, moved out of the project.",
+    );
+    expect(keptLine({ uploads: 0, artifacts: 1 })).toBe(
+      "Keeps 1 by-product another conversation still uses, moved out of the project — a by-product as its newest version only.",
+    );
+  });
 });
 
 describe("DeleteProjectDataDialog", () => {
