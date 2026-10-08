@@ -326,6 +326,8 @@ fn the_home_readme_describes_markdown_memory() {
         "`memory-index-v1.sqlite`",
         "| `memory/` |",
         "`owners/<owner-key>/",
+        // S6text M1: the row reads as a sentence, a space before the path.
+        "per owner: `owners/<owner-key>/notes/*.md`",
     ] {
         assert!(
             HOME_README.contains(needle),

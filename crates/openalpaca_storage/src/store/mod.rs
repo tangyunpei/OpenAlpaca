@@ -774,7 +774,7 @@ directory loses those files only.
 | `artifacts/` | files produced by tasks that had no project; under `kept/`, a deleted project's files that another conversation still shows | never garbage-collected |
 | `uploads/` | files you uploaded that carried no project signal; under `kept/`, a deleted project's uploads that another conversation still shows | swept: an upload attached to no message is deleted once past the grace period |
 | `sessions/` | session event logs — all sessions live here, never in a project | size-capped; no age sweep yet (owner decision T12) |
-| `memory/` | your memory notes outside any project, per owner:`owners/<owner-key>/notes/*.md`, with `.history/` (the last five service-written revisions) and `MEMORY.md` (a rebuildable index) beside them | yours — never swept; a factory reset leaves them, orphaned until the new owner adopts them |
+| `memory/` | your memory notes outside any project, per owner: `owners/<owner-key>/notes/*.md`, with `.history/` (the last five service-written revisions) and `MEMORY.md` (a rebuildable index) beside them | yours — never swept; a factory reset leaves them, orphaned until the new owner adopts them |
 | `scratch/` | reserved; agent working space | swept freely |
 
 Directories OpenAlpaca did not create are never touched and never swept.
