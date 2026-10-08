@@ -665,6 +665,22 @@ pub fn by_recorded_root(root: &Path) -> Result<Option<Project>> {
         .find(|project| project.previous_root.is_none() && project.root == root))
 }
 
+/// [`list`] narrowed to a project whose re-point has not finished (§6, R24)
+/// and that records `root` as where it is going or where it was. Between a
+/// re-point's failed rename (or last write) and the next start, which
+/// finishes it, [`lookup`] finds such a project under neither path: its
+/// folder keeps the old name and records the new root. A second project at
+/// either path would split it (ST-20) — the re-point's rename onto a held
+/// name failing at every start, or its rows step merging the other project's
+/// rows into it. Compared component by component, nothing resolved; the
+/// caller passes the canonical form both fields hold.
+pub fn unfinished_repoint_at(root: &Path) -> Result<Option<Project>> {
+    Ok(list()?.into_iter().find(|project| {
+        project.previous_root.is_some()
+            && (project.root == root || project.previous_root.as_deref() == Some(root))
+    }))
+}
+
 // ============================================================================
 // The test-build guard (§3, last bullet)
 // ============================================================================

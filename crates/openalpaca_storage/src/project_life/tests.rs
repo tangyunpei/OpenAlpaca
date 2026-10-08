@@ -545,3 +545,52 @@ fn a_root_that_now_links_to_another_project_re_points_its_own_project() {
         .expect("the second project is where it was");
     assert_eq!((still.id, still.dir), (b.id, b.dir));
 }
+
+/// ST-20 against a project whose re-point has not finished (Stage 1 review
+/// R9). P1 — notes, no rows, as `Use` or a memory write leaves one — stopped
+/// after step 2: its folder under the old name records the new root with the
+/// marker, so `lookup` finds it under neither path until the next start. A
+/// re-point of another project onto either of P1's paths is refused, as onto
+/// a path that is already a project; then the recovery finishes P1, and the
+/// other project stays where it was.
+#[test]
+fn a_re_point_onto_either_path_of_a_re_point_that_has_not_finished_is_refused() {
+    let w = World::new();
+    let p1 = w.project("notes");
+    let new = w.dir("notes-moved");
+    repoint_with(&w.db, &p1.root, &new, &mut |at| {
+        at != RepointStep::RowsRewritten
+    })
+    .unwrap_err();
+    assert_eq!(projects::lookup(&new).unwrap(), None);
+    assert_eq!(projects::lookup(&p1.root).unwrap(), None);
+    let p2 = w.project("other");
+
+    for target in [&new, &p1.root] {
+        let err = repoint(&w.db, &p2.root, target).unwrap_err();
+        assert_eq!(
+            code(&err),
+            Some("WORKSPACE_EXISTS"),
+            "{}: {err:#}",
+            target.display()
+        );
+    }
+    assert_eq!(
+        projects::lookup(&p2.root).unwrap().map(|p| p.id),
+        Some(p2.id),
+        "the other project did not move"
+    );
+
+    assert_eq!(
+        recover_repoints(&w.db),
+        RecoveryReport {
+            finished: vec![new.clone()],
+            failed: Vec::new(),
+        }
+    );
+    assert_eq!(projects::lookup(&new).unwrap().map(|p| p.id), Some(p1.id));
+    assert_eq!(
+        projects::lookup(&p2.root).unwrap().map(|p| p.id),
+        Some(p2.id)
+    );
+}

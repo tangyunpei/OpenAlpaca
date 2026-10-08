@@ -75,8 +75,10 @@ pub struct RecoveryReport {
 /// canonicalized, must be a directory ([`ProjectError::NotADirectory`] — a
 /// mistyped path is never created), must not overlap the home store
 /// ([`ProjectError::IsHome`]), must differ from the project's root
-/// ([`ProjectError::SamePath`]), and must be neither a registered project nor
-/// named by any of the five path columns ([`ProjectError::Exists`], ST-20).
+/// ([`ProjectError::SamePath`]), and must be neither a registered project —
+/// one whose re-point has not finished included, at its new root or its old
+/// one — nor named by any of the five path columns ([`ProjectError::Exists`],
+/// ST-20).
 /// Then: 1 the file is marked; 2 one transaction moves the rows (a failure
 /// clears the marker and returns the error); 3 the folder is renamed (its new
 /// name is free or this project's own, R6); 4 the marker is cleared.
@@ -207,7 +209,13 @@ fn target_root(db: &Database, before: &Project, new_path: &Path) -> Result<PathB
         .workspace_rows(&text, None)?
         .counts
         .is_empty();
-    if named || projects::lookup(&root)?.is_some() {
+    // A project whose re-point has not finished records the target as its
+    // new root or its old one, and `lookup` finds it under neither until the
+    // next start: it is a project there all the same (ST-20).
+    if named
+        || projects::lookup(&root)?.is_some()
+        || projects::unfinished_repoint_at(&root)?.is_some()
+    {
         return Err(anyhow::Error::new(ProjectError::Exists { path: text }));
     }
     Ok(root)
