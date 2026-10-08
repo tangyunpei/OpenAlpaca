@@ -66,6 +66,48 @@ const MOVED: Project = {
   name: "-Users-me-work-repo",
 };
 
+/**
+ * The purge's answer. `projectFolder` is `removed.project_folder` on a real
+ * delete: `false` when not every memory partition could be dropped, so the
+ * daemon kept `projects/<name>/` and the project stays registered.
+ */
+function plan(dryRun: boolean, projectFolder = true) {
+  return {
+    dry_run: dryRun,
+    applied: !dryRun,
+    project: REPO,
+    entries: [
+      {
+        entry: "projects/-Users-me-dev-repo/",
+        holds:
+          "project.json — the project's id and path; OpenAlpaca forgets the project",
+        retention: "store metadata",
+        action: "delete" as const,
+      },
+    ],
+    counts: {
+      sessions: 2,
+      messages: 41,
+      tool_calls: 0,
+      followups: 0,
+      tasks: 3,
+      spans: 0,
+      run_events: 0,
+      uploads: 0,
+      artifacts: 4,
+      memory_notes: 12,
+    },
+    kept: { uploads: 0, artifacts: 0 },
+    removed: dryRun
+      ? null
+      : {
+          session_dirs: 2,
+          memory_partitions: projectFolder ? 1 : 0,
+          project_folder: projectFolder,
+        },
+  };
+}
+
 const GONE: Project = {
   id: "0a9b8c7d-6e5f-4a3b-9c2d-1e0f9a8b7c6d",
   root: "/Users/me/old/notes",
@@ -252,5 +294,125 @@ describe("Re-point… (storage design §6, ST-20)", () => {
         MOVED.root,
       ),
     );
+  });
+});
+
+describe("Delete data… (storage design §6, ST-19)", () => {
+  it("shows the plan from one dry run, deletes on the press, and the window lets go of the project", async () => {
+    const user = userEvent.setup();
+    useProjectStore.setState({ path: REPO.root });
+    api.list.mockResolvedValue([REPO]);
+    api.remove.mockImplementation(async (_path: string, dryRun: boolean) =>
+      plan(dryRun),
+    );
+    renderCard(REPO.root);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Delete data…" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByText(
+      "Deletes 2 conversations · 41 messages · 3 runs · 4 by-products · 12 memory notes.",
+    );
+    expect(api.remove).toHaveBeenCalledTimes(1);
+    expect(api.remove).toHaveBeenLastCalledWith(REPO.root, true);
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete data" }),
+    );
+
+    await waitFor(() => expect(api.remove).toHaveBeenCalledTimes(2));
+    expect(api.remove).toHaveBeenLastCalledWith(REPO.root, false);
+    await waitFor(() => expect(useProjectStore.getState().path).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(useUiStore.getState().toast).toBe(
+      `Deleted the data of ${REPO.root}. This window has no project now.`,
+    );
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+  });
+
+  it("leaves a window on another project where it is", async () => {
+    const user = userEvent.setup();
+    useProjectStore.setState({ path: "/Users/me/other" });
+    api.list.mockResolvedValue([REPO]);
+    api.remove.mockImplementation(async (_path: string, dryRun: boolean) =>
+      plan(dryRun),
+    );
+    renderCard("/Users/me/other");
+
+    await user.click(
+      await screen.findByRole("button", { name: "Delete data…" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByText(/^Deletes 2 conversations/);
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete data" }),
+    );
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(useProjectStore.getState().path).toBe("/Users/me/other");
+    expect(useUiStore.getState().toast).toBe(
+      `Deleted the data of ${REPO.root}.`,
+    );
+  });
+
+  it("says the folder was kept when the daemon kept it, and the window keeps the project it still is", async () => {
+    // S5a's fix round: a partition that could not be dropped keeps
+    // projects/<name>/, so the project stays registered and listed, and a
+    // second delete finishes it. Nothing here may say the project is gone.
+    const user = userEvent.setup();
+    useProjectStore.setState({ path: REPO.root });
+    api.list.mockResolvedValue([REPO]);
+    api.remove.mockImplementation(async (_path: string, dryRun: boolean) =>
+      plan(dryRun, false),
+    );
+    renderCard(REPO.root);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Delete data…" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByText(/^Deletes 2 conversations/);
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete data" }),
+    );
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(api.remove).toHaveBeenLastCalledWith(REPO.root, false);
+    expect(useProjectStore.getState().path).toBe(REPO.root);
+    expect(useUiStore.getState().toast).toBe(
+      `Deleted the data of ${REPO.root}, but not all of it could be removed: its folder under projects/ was kept, so the project is still listed. Delete its data again to finish.`,
+    );
+    // The list is re-read, and the daemon still lists the project.
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(REPO.root)).toBeInTheDocument();
+  });
+
+  it("keeps the dialog open on WORKSPACE_BUSY and shows the daemon's sentence", async () => {
+    const user = userEvent.setup();
+    // S5a refuses the dry run with this too, when a run is already in flight;
+    // here the run started after the plan was read, and the delete's own
+    // transaction refused it.
+    const sentence =
+      "1 run(s) under /Users/me/dev/repo are queued, running or paused; delete its data once they finish";
+    useProjectStore.setState({ path: REPO.root });
+    api.list.mockResolvedValue([REPO]);
+    api.remove.mockImplementation(async (_path: string, dryRun: boolean) => {
+      if (dryRun) return plan(true);
+      throw new ApiError(sentence, 409, "WORKSPACE_BUSY");
+    });
+    renderCard(REPO.root);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Delete data…" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByText(/^Deletes 2 conversations/);
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete data" }),
+    );
+
+    expect(await within(dialog).findByText(sentence)).toBeInTheDocument();
+    expect(useProjectStore.getState().path).toBe(REPO.root);
   });
 });
