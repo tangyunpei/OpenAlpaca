@@ -13,9 +13,9 @@
 //! five columns. These routes resolve a client's path the one way a turn's is
 //! resolved (`projects::resolve`), answer the resolved root, and refuse rather
 //! than guess: `404` when no project is registered there or a row there is
-//! another owner's (R40), `409` while a run is in flight or the project's
-//! memory slot stays held, `409`/`422` for a target that is the home store,
-//! already a project, or not a directory.
+//! another owner's (R40), `409` while a run is in flight, the project's
+//! memory slot stays held or its re-point has not finished, `409`/`422` for a
+//! target that is the home store, already a project, or not a directory.
 //!
 //! The delete answers a plan, one line per entry in the seeded README's
 //! retention terms, `delete` or `keep`; `dry_run` defaults to **true**, so a
@@ -304,8 +304,38 @@ fn owner_mismatch(root: &str, other_owners: usize) -> Response {
 /// `404 WORKSPACE_NOT_FOUND` for a root no folder under `projects/` records
 /// (R12's words) or a path in no project. A listing that fails leaves the
 /// answer to the resolution.
+///
+/// First, a project whose re-point has not finished — listed at its new
+/// root, its folder under the old name, found by `lookup` under neither path
+/// until the next start finishes it — answers `409 WORKSPACE_BUSY` at either
+/// path, naming that restart, as `register` does there: re-pointed or
+/// deleted now, it would be split from the rows already moved.
 #[allow(clippy::result_large_err)]
 fn registered_project(written: &str, path: &str) -> Result<Project, Response> {
+    let named = if written == path {
+        vec![written]
+    } else {
+        vec![written, path]
+    };
+    for named in named {
+        if let Ok(Some(moving)) = projects::unfinished_repoint_at(Path::new(named)) {
+            let from = moving
+                .previous_root
+                .as_deref()
+                .map_or_else(String::new, |p| p.display().to_string());
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "WORKSPACE_BUSY",
+                format!(
+                    "{named} names the project in {}, whose re-point from {from} to {} has not \
+                     finished; the next start of the daemon finishes it, and until then the \
+                     project can be neither re-pointed nor have its data deleted",
+                    moving.dir.display(),
+                    moving.root.display()
+                ),
+            ));
+        }
+    }
     if let Ok(Some(project)) = projects::by_recorded_root(Path::new(written)) {
         return Ok(project);
     }

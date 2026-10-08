@@ -1480,3 +1480,48 @@ async fn a_re_point_naming_a_root_that_now_links_to_another_project_moves_that_p
         .expect("B is where it was");
     assert_eq!((still.id, still.dir), (b.id, b.dir));
 }
+
+// ── A re-point that has not finished (review R11) ───────────────────────
+
+/// A re-point whose rename failed leaves the project listed at its new root
+/// with its folder under the old name; `lookup` finds it under neither path
+/// until the next start finishes it. Re-point and Delete data on its row —
+/// or on its old root — answer `409 WORKSPACE_BUSY` naming that restart, not
+/// a `404` saying no folder records it, and nothing moves.
+#[tokio::test]
+async fn a_project_whose_re_point_has_not_finished_answers_busy_naming_the_restart() {
+    let w = World::new();
+    let p = w.project("half-moved");
+    let new = w.dir("half-moved-new");
+    project_life::repoint_with(&w.db, &p.root, &new, &mut |at| {
+        at != project_life::RepointStep::RowsRewritten
+    })
+    .expect_err("stopped after its rows moved");
+    let elsewhere = w.dir("elsewhere");
+
+    for path in [&new, &p.root] {
+        for (what, (status, body)) in [
+            ("re-point", w.repoint(path, &elsewhere).await),
+            ("delete", w.delete(path, false).await),
+        ] {
+            assert_eq!(
+                status,
+                StatusCode::CONFLICT,
+                "{what} {}: {body}",
+                text(path)
+            );
+            assert_eq!(error_code(&body), "WORKSPACE_BUSY", "{body}");
+            let message = body["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("next start of the daemon finishes it"),
+                "{what} {}: {message}",
+                text(path)
+            );
+        }
+    }
+    let marked = projects::list().expect("list");
+    assert_eq!(marked.len(), 1, "nothing was registered or removed");
+    assert_eq!(marked[0].id, p.id);
+    assert_eq!(marked[0].dir, p.dir, "the folder was not touched");
+    assert_eq!(marked[0].root, new);
+}
