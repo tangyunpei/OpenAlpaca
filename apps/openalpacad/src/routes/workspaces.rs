@@ -141,7 +141,9 @@ impl From<&RebaseCounts> for RowCountsView {
 /// `GET /v1/workspaces?path=`: what the path resolves to, and what is recorded there.
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceView {
-    /// The path asked about, canonicalized (as written when it does not exist).
+    /// The path asked about, canonicalized (as written when it does not
+    /// exist) — or, when it is a project's recorded root as written, that
+    /// root.
     pub path: String,
     /// The project root it resolves to; `null` = no project.
     pub root: Option<String>,
@@ -224,13 +226,16 @@ pub struct DeleteDataView {
 
 // ── Path resolution ──────────────────────────────────────────────
 
-/// A client's path, canonicalized and nothing more — not resolved to a
-/// project's root here.
+/// A client's path as written: trimmed, absolute, without a trailing `/` —
+/// nothing resolved. What the Projects list and `store list` print is a
+/// recorded root in exactly this form, so a caller naming one is matched
+/// against the recorded roots before anything canonicalizes it
+/// ([`projects::by_recorded_root`]).
 ///
 /// A relative path is refused rather than resolved: it would be read against
 /// the *daemon's* working directory, which is the bug ruling R22 fixed.
 #[allow(clippy::result_large_err)]
-fn canonical_path(input: &str) -> Result<String, Response> {
+fn written_path(input: &str) -> Result<String, Response> {
     let trimmed = input.trim();
     if trimmed.is_empty() || !Path::new(trimmed).is_absolute() {
         return Err(api_error(
@@ -239,16 +244,32 @@ fn canonical_path(input: &str) -> Result<String, Response> {
             format!("a workspace path must be absolute, got '{input}'"),
         ));
     }
-    let path = Path::new(trimmed);
-    let canonical = path.canonicalize();
-    let resolved = canonical.as_deref().unwrap_or(path);
-    let text = resolved.to_string_lossy();
-    // `/repo/` and `/repo` are one project; a bare root keeps its separator.
+    Ok(without_trailing_slash(trimmed))
+}
+
+/// `/repo/` and `/repo` are one project; a bare root keeps its separator.
+fn without_trailing_slash(text: &str) -> String {
     let without_slash = text.trim_end_matches('/');
-    Ok(match without_slash.is_empty() {
+    match without_slash.is_empty() {
         true => text.to_string(),
         false => without_slash.to_string(),
-    })
+    }
+}
+
+/// A client's path, canonicalized and nothing more — not resolved to a
+/// project's root here. As [`written_path`] refuses it.
+#[allow(clippy::result_large_err)]
+fn canonical_path(input: &str) -> Result<String, Response> {
+    Ok(canonical_of(&written_path(input)?))
+}
+
+/// [`canonical_path`] of a path [`written_path`] already accepted: as written
+/// when it does not exist.
+fn canonical_of(written: &str) -> String {
+    let path = Path::new(written);
+    let canonical = path.canonicalize();
+    let resolved = canonical.as_deref().unwrap_or(path);
+    without_trailing_slash(&resolved.to_string_lossy())
 }
 
 /// The `404` for a root holding somebody else's rows — the same words a root
@@ -273,11 +294,21 @@ fn owner_mismatch(root: &str, other_owners: usize) -> Response {
     )
 }
 
-/// The registered project a client path resolves to, or the answer that
-/// refuses it: `404 WORKSPACE_NOT_FOUND` for a root no folder under
-/// `projects/` records (R12's words) or a path in no project.
+/// The registered project a client path names, or the answer that refuses
+/// it. `written` is the path as the client sent it ([`written_path`]) and
+/// `path` its canonical form ([`canonical_of`]). A recorded root sent as
+/// written is that project ([`projects::by_recorded_root`]), even when it no
+/// longer canonicalizes to itself — a folder renamed by case only, or moved
+/// with a link left at the old path, whose canonical form may be another
+/// project's root. Anything else is resolved the way a turn's path is:
+/// `404 WORKSPACE_NOT_FOUND` for a root no folder under `projects/` records
+/// (R12's words) or a path in no project. A listing that fails leaves the
+/// answer to the resolution.
 #[allow(clippy::result_large_err)]
-fn registered_project(path: &str) -> Result<Project, Response> {
+fn registered_project(written: &str, path: &str) -> Result<Project, Response> {
+    if let Ok(Some(project)) = projects::by_recorded_root(Path::new(written)) {
+        return Ok(project);
+    }
     match projects::resolve(Path::new(path)) {
         Ok(Some(ResolvedProject {
             project: Some(project),
@@ -354,18 +385,33 @@ pub(crate) fn get_workspace(db: &Database, query: WorkspaceQuery) -> Response {
     let Some(raw) = query.path else {
         return list_workspaces();
     };
-    let path = match canonical_path(&raw) {
-        Ok(path) => path,
+    let written = match written_path(&raw) {
+        Ok(written) => written,
         Err(response) => return response,
     };
-    let resolved = match projects::resolve(Path::new(&path)) {
-        Ok(resolved) => resolved,
-        Err(e) => {
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "IO_ERROR",
-                format!("{path} could not be resolved: {e:#}"),
-            );
+    // A recorded root, as the list printed it, names its own project — the
+    // re-point and delete dialogs read their counts here (see
+    // `registered_project`).
+    let (path, resolved) = match projects::by_recorded_root(Path::new(&written)) {
+        Ok(Some(project)) => (
+            written,
+            Some(ResolvedProject {
+                root: project.root.clone(),
+                project: Some(project),
+            }),
+        ),
+        Ok(None) | Err(_) => {
+            let path = canonical_of(&written);
+            match projects::resolve(Path::new(&path)) {
+                Ok(resolved) => (path, resolved),
+                Err(e) => {
+                    return api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "IO_ERROR",
+                        format!("{path} could not be resolved: {e:#}"),
+                    );
+                }
+            }
         }
     };
     let Some(resolved) = resolved else {
@@ -460,7 +506,7 @@ pub(crate) async fn rebase_workspace(
     owner_id: &str,
     request: RebaseRequest,
 ) -> Response {
-    let old = match canonical_path(&request.old_path) {
+    let old_written = match written_path(&request.old_path) {
         Ok(path) => path,
         Err(response) => return response,
     };
@@ -468,7 +514,7 @@ pub(crate) async fn rebase_workspace(
         Ok(path) => path,
         Err(response) => return response,
     };
-    let project = match registered_project(&old) {
+    let project = match registered_project(&old_written, &canonical_of(&old_written)) {
         Ok(project) => project,
         Err(response) => return response,
     };
@@ -754,18 +800,22 @@ fn announce_deleted_sessions(deps: &PurgeDeps<'_>, plan: &DeletePlan, outcome: &
 /// project stays registered and deleting its data again — which finds no row
 /// left — drops the rest and the folder.
 pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRequest) -> Response {
-    let path = match canonical_path(&request.path) {
+    let written = match written_path(&request.path) {
         Ok(path) => path,
         Err(response) => return response,
     };
-    let project = match registered_project(&path) {
+    let path = canonical_of(&written);
+    let project = match registered_project(&written, &path) {
         Ok(project) => project,
         Err(response) => return response,
     };
     let root = project.root_string();
-    // The root as `register` recorded it: canonical, a missing tail as
-    // written (ST-7), so a missing project's root also compares equal.
-    let exact = projects::canonical_root(Path::new(&path)).is_ok_and(|p| p == project.root);
+    // The root as `register` recorded it, sent as written — what the list
+    // prints, even when it no longer canonicalizes to itself — or a path
+    // whose canonical form is it (a missing tail as written, ST-7, so a
+    // missing project's root also compares equal).
+    let exact = project.root.as_path() == Path::new(&written)
+        || projects::canonical_root(Path::new(&path)).is_ok_and(|p| p == project.root);
     if !exact {
         return api_error(
             StatusCode::UNPROCESSABLE_ENTITY,

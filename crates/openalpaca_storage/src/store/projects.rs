@@ -578,6 +578,20 @@ pub fn by_id(id: &ProjectId) -> Result<Option<Project>> {
     Ok(list()?.into_iter().find(|project| project.id == *id))
 }
 
+/// [`list`] narrowed to the project whose `project.json` records `root`
+/// **as written** — compared component by component, nothing resolved — or
+/// `None`. What a caller holding a root the list printed asks first: a
+/// recorded root that no longer canonicalizes to itself (its folder renamed
+/// by case only on a case-insensitive volume, or moved with a link left at
+/// the old path) still names its own project, never the one its canonical
+/// form leads to, which [`lookup`] and [`resolve`] would answer. An entry
+/// mid re-point is never the answer: its root is where it is going.
+pub fn by_recorded_root(root: &Path) -> Result<Option<Project>> {
+    Ok(list()?
+        .into_iter()
+        .find(|project| project.previous_root.is_none() && project.root == root))
+}
+
 // ============================================================================
 // The test-build guard (§3, last bullet)
 // ============================================================================

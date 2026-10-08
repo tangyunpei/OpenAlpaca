@@ -261,6 +261,22 @@ impl World {
         projects::register(&self.repo(name)).expect("register")
     }
 
+    /// Project A registered at `repos/<from>`, its folder then moved to
+    /// `repos/<to>` with a link left at the old path — on macOS a case-only
+    /// rename does the same: the recorded root no longer canonicalizes to
+    /// itself — and project B registered where the link leads, as the next
+    /// turn in the moved folder would.
+    #[cfg(unix)]
+    fn moved_behind_a_link(&self, from: &str, to: &str) -> (Project, Project) {
+        let a = self.project(from);
+        let moved = a.root.with_file_name(to);
+        std::fs::rename(&a.root, &moved).expect("the user moves the folder");
+        std::os::unix::fs::symlink(&moved, &a.root).expect("and leaves a link at the old path");
+        let b = projects::register(&moved).expect("a turn in the moved folder registers it");
+        assert_ne!(a.id, b.id);
+        (a, b)
+    }
+
     fn session(&self, id: &str, root: &str) {
         self.db
             .with_connection(|conn| {
@@ -1405,4 +1421,62 @@ async fn fixture_17_deleting_a_projects_data_drops_its_partition_and_no_other() 
         vec!["Global note".to_string()],
         "notes_not_on_disk: the project's note is no longer found"
     );
+}
+
+// ── A recorded root that no longer canonicalizes to itself (review R1) ──
+
+/// The Projects list prints A's recorded root, which now leads, through a
+/// link, to B's. The read, the plan and the delete that name it are A's;
+/// B's rows, notes and folder are untouched.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_root_now_linking_to_another_project_names_its_own_for_the_read_and_the_delete() {
+    let w = World::new();
+    let (a, b) = w.moved_behind_a_link("a", "b");
+    let b_root = text(&b.root);
+    w.session("s-b", &b_root);
+    w.message("s-b", &b_root);
+    w.note(OWNER, Some(b.root.as_path()), "B's own note");
+
+    let (status, body) = w.get(&text(&a.root)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], a.id.to_string(), "{body}");
+    assert_eq!(body["root"], text(&a.root), "{body}");
+
+    let (status, body) = w.delete(&a.root, true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["project"]["id"], a.id.to_string(), "{body}");
+    assert_eq!(body["project"]["root"], text(&a.root), "{body}");
+
+    let (status, body) = w.delete(&a.root, false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["project"]["id"], a.id.to_string(), "{body}");
+    assert!(!a.dir.exists(), "A's folder under projects/ went");
+    assert!(b.dir.is_dir(), "B's folder under projects/ stays");
+    assert_eq!(
+        projects::lookup(&b.root).expect("lookup").map(|p| p.id),
+        Some(b.id)
+    );
+    assert_eq!(w.count("SELECT COUNT(*) FROM session WHERE id = 's-b'"), 1);
+    assert_eq!(project_snapshots(&b.id), 1, "B's partition stays");
+}
+
+/// The same state, re-pointed: the PATCH naming A's recorded root moves A,
+/// and B stays where it is.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_re_point_naming_a_root_that_now_links_to_another_project_moves_that_project() {
+    let w = World::new();
+    let (a, b) = w.moved_behind_a_link("a", "b");
+    let new = w.dir("a-new-home");
+
+    let (status, body) = w.repoint(&a.root, &new).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["project"]["id"], a.id.to_string(), "{body}");
+    assert_eq!(body["project"]["root"], text(&new), "{body}");
+    let still = projects::lookup(&b.root)
+        .expect("lookup")
+        .expect("B is where it was");
+    assert_eq!((still.id, still.dir), (b.id, b.dir));
 }

@@ -69,8 +69,9 @@ pub struct RecoveryReport {
 
 /// §6 *Re-point*: the project `old_path` resolves to is now at `new_path`.
 ///
-/// Under [`projects::lock`] for the whole call. `old_path` must resolve to a
-/// registered project ([`ProjectError::NotRegistered`]). `new_path`,
+/// Under [`projects::lock`] for the whole call. `old_path` must be a
+/// registered project's recorded root, or resolve to a registered project
+/// ([`ProjectError::NotRegistered`]). `new_path`,
 /// canonicalized, must be a directory ([`ProjectError::NotADirectory`] — a
 /// mistyped path is never created), must not overlap the home store
 /// ([`ProjectError::IsHome`]), must differ from the project's root
@@ -158,8 +159,15 @@ enum OnRowsFailure {
     Leave,
 }
 
-/// The project `old_path` resolves to, or [`ProjectError::NotRegistered`].
+/// The project whose recorded root is `old_path` as written
+/// ([`projects::by_recorded_root`]) — a root the list printed names its own
+/// project even when it now leads elsewhere — else the project `old_path`
+/// resolves to, or [`ProjectError::NotRegistered`]. A listing that fails
+/// leaves the answer to the resolution, as before.
 fn registered(old_path: &Path) -> Result<Project> {
+    if let Ok(Some(project)) = projects::by_recorded_root(old_path) {
+        return Ok(project);
+    }
     match projects::resolve(old_path)? {
         Some(projects::ResolvedProject {
             project: Some(project),

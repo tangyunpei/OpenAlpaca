@@ -517,3 +517,31 @@ fn a_root_a_re_point_has_not_finished_moving_onto_is_not_registered_again() {
     );
     assert_eq!(projects::list().unwrap().len(), 1);
 }
+
+/// A project whose recorded root no longer canonicalizes to itself — its
+/// folder moved and a link left at the old path (on macOS a case-only rename
+/// does the same) — while a second project is registered where the link
+/// leads. A re-point naming the first by its recorded root re-points the
+/// first; the second stays where it is (Stage 1 review R1).
+#[cfg(unix)]
+#[test]
+fn a_root_that_now_links_to_another_project_re_points_its_own_project() {
+    let w = World::new();
+    let a = w.project("a");
+    let moved = w.work.join("b");
+    std::fs::rename(&a.root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &a.root).unwrap();
+    let b = projects::register(&moved).unwrap();
+    assert_ne!(a.id, b.id);
+    let new = w.dir("elsewhere");
+
+    let done = repoint(&w.db, &a.root, &new).unwrap();
+
+    assert_eq!(done.before.id, a.id, "the project its root names");
+    assert_eq!(done.after.id, a.id);
+    assert_eq!(done.after.root, new);
+    let still = projects::lookup(&moved)
+        .unwrap()
+        .expect("the second project is where it was");
+    assert_eq!((still.id, still.dir), (b.id, b.dir));
+}
