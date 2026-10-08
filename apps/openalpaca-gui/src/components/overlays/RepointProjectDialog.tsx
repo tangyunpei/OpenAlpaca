@@ -13,9 +13,10 @@
  * cancels. The confirm is `primarySm`, not the danger ghost — a re-point
  * deletes nothing and is undone by re-pointing back — and the folder field
  * takes the focus. `Re-point` stays off until the count on screen has been
- * read, while a run under the root is in flight (the daemon answers
- * `409 WORKSPACE_BUSY` and changes nothing), and for a relative path, which
- * the daemon refuses, or one where the project already is.
+ * read, and after a read that failed; while a run under the root is in
+ * flight (the daemon answers `409 WORKSPACE_BUSY` and changes nothing); and
+ * for a relative path, which the daemon refuses, or one where the project
+ * already is.
  * Every other refusal — `WORKSPACE_EXISTS` above all (ST-20: re-pointing onto
  * another project would merge two) — is the daemon's sentence, shown as
  * written, and the dialog stays open on it.
@@ -125,8 +126,14 @@ export function RepointProjectDialog({
       ? null
       : foreignRootLine(project, resolvedAs);
   const busy = foreign === null && activeTasks > 0;
+  // A failed read leaves no count, and so no busy gate either (S5b M2).
   const canConfirm =
-    !reading && foreign === null && !busy && !repointing && target !== null;
+    !reading &&
+    readError === null &&
+    foreign === null &&
+    !busy &&
+    !repointing &&
+    target !== null;
   const countLine = reading
     ? "Counting what is recorded there…"
     : readError !== null

@@ -115,6 +115,22 @@ describe("RepointProjectDialog", () => {
     expect(screen.getByRole("button", { name: "Re-point" })).toBeDisabled();
   });
 
+  it("keeps Re-point off when the counts could not be read, and says why", () => {
+    // S5b M2: with no count, the busy gate cannot show a run in flight
+    // either, so the press waits for a read that answered.
+    renderDialog({
+      rows: undefined,
+      resolvedAs: undefined,
+      readError: "daemon unreachable",
+      value: "/Users/me/work/repo",
+    });
+
+    expect(screen.getByTestId("repoint-counts")).toHaveTextContent(
+      "Could not count what is recorded there: daemon unreachable",
+    );
+    expect(screen.getByRole("button", { name: "Re-point" })).toBeDisabled();
+  });
+
   it("refuses a press while a run there is in flight, and says why", () => {
     renderDialog({ activeTasks: 2, value: "/Users/me/work/repo" });
 
