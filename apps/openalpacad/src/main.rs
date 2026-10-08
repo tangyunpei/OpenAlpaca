@@ -227,6 +227,10 @@ async fn async_main(
     let db_path = store::database_path()?;
     let db = Database::open(&db_path).context("Failed to initialize database")?;
     info!("Database initialized: {}", db_path.display());
+    // R24: a project re-point the previous process did not finish is
+    // finished here — after the database opens and before anything resolves
+    // a project (the routes and every ingress start later).
+    bootstrap::recover_repoints(&db);
     // §5.6b: recover the undelivered interjections of every run the previous
     // generation left in flight, then mark those runs `interrupted`. MUST stay
     // here — after the DB opens and before any ingress starts

@@ -5,6 +5,7 @@ mod content;
 mod interrupted;
 mod migration;
 mod persona;
+mod repoints;
 
 #[cfg(test)]
 mod tests;
@@ -18,3 +19,4 @@ pub use persona::{
     load_identity_document_from_file, load_system_persona_from_soul_file,
     load_user_document_from_file, persona_backup_dir,
 };
+pub use repoints::recover_repoints;
