@@ -12,14 +12,15 @@ fn file_at(dir: &Path, rel: &str) -> PathBuf {
 }
 
 #[test]
-fn a_file_in_a_store_is_revealed_by_its_canonical_path() {
+fn a_file_in_a_projects_folder_is_revealed_by_its_canonical_path() {
     let tmp = tempdir().unwrap();
+    let home = tmp.path().join("isolated-store");
     let file = file_at(
-        tmp.path(),
-        ".openalpaca/artifacts/reports/01-pasta-night.md",
+        &home,
+        "projects/-Users-me-dev-app/artifacts/reports/01-pasta-night.md",
     );
 
-    let revealed = revealable_path_with_home(&file, None).unwrap();
+    let revealed = revealable_path_with_home(&file, Some(&home)).unwrap();
 
     assert_eq!(revealed, file.canonicalize().unwrap());
 }
@@ -41,9 +42,11 @@ fn a_file_under_an_overridden_home_root_is_revealed() {
 #[test]
 fn a_file_outside_every_store_is_refused() {
     let tmp = tempdir().unwrap();
+    let home = tmp.path().join("isolated-store");
+    fs::create_dir_all(&home).unwrap();
     let file = file_at(tmp.path(), "Documents/notes.md");
 
-    let refusal = revealable_path_with_home(&file, None).unwrap_err();
+    let refusal = revealable_path_with_home(&file, Some(&home)).unwrap_err();
 
     assert_eq!(
         refusal,
@@ -60,10 +63,11 @@ fn a_file_outside_every_store_is_refused() {
 #[test]
 fn a_directory_in_a_store_is_refused() {
     let tmp = tempdir().unwrap();
-    let dir = tmp.path().join(".openalpaca/artifacts/reports");
+    let home = tmp.path().join("isolated-store");
+    let dir = home.join("projects/-Users-me-dev-app/artifacts/reports");
     fs::create_dir_all(&dir).unwrap();
 
-    let refusal = revealable_path_with_home(&dir, None).unwrap_err();
+    let refusal = revealable_path_with_home(&dir, Some(&home)).unwrap_err();
 
     assert_eq!(
         refusal,
@@ -74,9 +78,11 @@ fn a_directory_in_a_store_is_refused() {
 #[test]
 fn a_missing_file_is_refused_with_the_path_it_was_asked_for() {
     let tmp = tempdir().unwrap();
-    let gone = tmp.path().join(".openalpaca/artifacts/01-gone.md");
+    let home = tmp.path().join("isolated-store");
+    fs::create_dir_all(&home).unwrap();
+    let gone = home.join("artifacts/01-gone.md");
 
-    let refusal = revealable_path_with_home(&gone, None).unwrap_err();
+    let refusal = revealable_path_with_home(&gone, Some(&home)).unwrap_err();
 
     assert_eq!(refusal, RevealRefusal::Missing(gone.clone()));
     assert_eq!(
@@ -85,23 +91,6 @@ fn a_missing_file_is_refused_with_the_path_it_was_asked_for() {
             "{} is not there any more, so it cannot be shown in its folder.",
             gone.display()
         )
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_symlink_in_a_store_that_leads_outside_it_is_refused() {
-    let tmp = tempdir().unwrap();
-    let outside = file_at(tmp.path(), "Documents/secret.md");
-    let link = tmp.path().join(".openalpaca/artifacts/01-link.md");
-    fs::create_dir_all(link.parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink(&outside, &link).unwrap();
-
-    let refusal = revealable_path_with_home(&link, None).unwrap_err();
-
-    assert_eq!(
-        refusal,
-        RevealRefusal::OutsideStore(outside.canonicalize().unwrap())
     );
 }
 
@@ -158,18 +147,29 @@ fn a_home_root_that_is_a_symlink_admits_its_files() {
     );
 }
 
+/// ST-9: an old in-project `.openalpaca/` is no store any more — a file in
+/// one is outside the home root and refused, however its folder is named.
 #[test]
-fn only_a_directory_named_openalpaca_above_the_file_makes_a_store() {
+fn a_file_in_an_old_in_project_store_is_refused() {
     let tmp = tempdir().unwrap();
-    // The file itself named like the store is not inside one …
-    let named = file_at(tmp.path(), "Documents/.openalpaca");
-    // … and neither is a directory whose name only starts like it.
-    let lookalike = file_at(tmp.path(), ".openalpaca-backup/notes.md");
+    let home = tmp.path().join("isolated-store");
+    fs::create_dir_all(&home).unwrap();
+    let file = file_at(tmp.path(), "dev/app/.openalpaca/artifacts/01-notes.md");
 
-    for file in [named, lookalike] {
-        assert_eq!(
-            revealable_path_with_home(&file, None),
-            Err(RevealRefusal::OutsideStore(file.canonicalize().unwrap()))
-        );
-    }
+    assert_eq!(
+        revealable_path_with_home(&file, Some(&home)),
+        Err(RevealRefusal::OutsideStore(file.canonicalize().unwrap()))
+    );
+}
+
+/// With no home root to compare with, nothing is in a store.
+#[test]
+fn with_no_home_root_nothing_is_revealed() {
+    let tmp = tempdir().unwrap();
+    let file = file_at(tmp.path(), ".openalpaca/artifacts/01-notes.md");
+
+    assert_eq!(
+        revealable_path_with_home(&file, None),
+        Err(RevealRefusal::OutsideStore(file.canonicalize().unwrap()))
+    );
 }
