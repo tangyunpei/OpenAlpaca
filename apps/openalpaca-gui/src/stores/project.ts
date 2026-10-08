@@ -1,20 +1,22 @@
 /**
- * The chosen project — the workspace a chat turn belongs to (plan §4.7 item 2).
+ * The chosen project — the workspace a chat turn belongs to (plan §4.7 item
+ * 2; storage design §3, §9).
  *
  * The daemon reads `x-workspace-path` on `POST /v1/chat` and resolves it to a
- * project root (the nearest `.git`/`.openalpaca` above it). That root is what
- * a run records as its `workspace_id` and where `artifact_write` puts the
- * files it produces. Until this store had a value, **no client sent the
- * header at all**, so every GUI run was project-less and every artifact landed
- * in the home store.
+ * project: a registered root, or the git repository it is in. That root is
+ * what a run records as its `workspace_id`, and the files it produces are
+ * kept under the project's folder in `<home>/projects/`, never in the
+ * project folder itself.
  *
- * Deliberately small. There is no project *concept* on the daemon yet — no
- * `GET /v1/projects`, no activation, no per-project state (plan §10 keeps that
- * out of scope) — so this is one path, chosen by the owner, kept per machine
- * in `localStorage`, exactly like the pane widths and the artifact pins. It is
- * not a list, not a recent-projects menu, and it is never guessed: an empty
- * value means "no project", and the GUI then sends no header, which is the
- * honest signal for "this turn belongs to no project".
+ * The value is the root `POST /v1/workspaces` answered when the owner pressed
+ * `Use` in Settings → Connection, or the root a re-point moved the project
+ * to, kept per machine in `localStorage` like the pane widths and the
+ * artifact pins. A value an earlier build wrote is the text that was typed;
+ * it is sent as it is and the daemon resolves it like any path. It is never
+ * guessed: an empty value means "no project", and the GUI then sends no
+ * header, which is the honest signal for "this turn belongs to no project".
+ * The projects the daemon knows are `GET /v1/workspaces`; this store is only
+ * which one this window uses.
  */
 
 import { create } from "zustand";

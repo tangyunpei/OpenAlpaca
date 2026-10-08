@@ -64,6 +64,7 @@ import {
 import { stopDaemon, stopToast } from "@/lib/daemon-control";
 import { useTasks } from "@/hooks/useTasks";
 import { capsNote, formatSpend, useUsageSummary } from "@/hooks/useUsage";
+import { useChooseProject } from "@/hooks/useWorkspaces";
 import { formatFileSize, type DaemonStatus } from "@/lib/api/types";
 import { isAbsolutePath, useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
@@ -232,7 +233,12 @@ export function ConnectionSection() {
         )}
       </StatCard>
 
-      <ProjectCard homeRoot={status.data?.home_root ?? null} />
+      <ProjectCard
+        homeRoot={status.data?.home_root ?? null}
+        resolvedRoot={
+          status.data === undefined ? undefined : status.data.project_root
+        }
+      />
     </div>
   );
 }
@@ -477,35 +483,74 @@ export function homeStoreLabel(homeRoot: string | null): string {
 }
 
 /**
- * The chosen project — one absolute path, kept on this machine.
- *
- * What it changes is concrete, so the copy says it: runs started from here
- * record that project and the files they produce land in
- * `<project>/.openalpaca/`. With no project chosen the GUI sends no header at
- * all and the daemon puts everything in the home store — stated plainly rather
- * than left for the owner to discover from a file that appeared in the wrong
- * place.
- *
- * The home store is named from `GET /v1/status`'s `home_root`, never from the
- * literal `~/.openalpaca` (G7): `OPENALPACA_HOME_STORE` moves the root, and a
- * path printed from this side would then be a confident lie about where the
- * owner's files went. A daemon that has not answered yet is "the home store".
+ * What the Project card names (storage design §9: the resolved root, not the
+ * typed text): the root `GET /v1/status` resolved the window's path to; the
+ * stored path while the daemon has not answered; and the stored path,
+ * flagged, when the daemon answered that it is in no project — a value an
+ * earlier build kept as typed, such as a folder an `.openalpaca` directory
+ * used to mark.
  */
-function ProjectCard({ homeRoot }: { homeRoot: string | null }) {
+export function projectCardRoot(
+  path: string | null,
+  resolved: string | null | undefined,
+): { text: string; unresolved: boolean } {
+  if (path === null) return { text: "none", unresolved: false };
+  if (typeof resolved === "string") {
+    return { text: resolved, unresolved: false };
+  }
+  return { text: path, unresolved: resolved === null };
+}
+
+/**
+ * The window's project (storage design §3, §9).
+ *
+ * `Use` asks the daemon what the typed folder is — `POST /v1/workspaces`:
+ * the git repository it is in, or, when there is none, the folder itself,
+ * which becomes a project (R10) — and keeps the root it answered, never the
+ * text typed. A refusal (`WORKSPACE_IS_HOME`, `WORKSPACE_NOT_A_DIRECTORY`,
+ * `INVALID_PATH`, `WORKSPACE_REGISTER_FAILED`) is the daemon's sentence,
+ * shown as written, and the project the window had stays.
+ *
+ * Where a run's files go is said plainly: with no project, the home store;
+ * with one, its folder under `projects/` in the home store — never the
+ * project folder itself (ST-1). The home store is named from
+ * `GET /v1/status`'s `home_root`, never from the literal `~/.openalpaca`
+ * (G7): `OPENALPACA_HOME_STORE` moves the root, and a path printed from this
+ * side would then be a confident lie. A daemon that has not answered yet is
+ * "the home store".
+ */
+function ProjectCard({
+  homeRoot,
+  resolvedRoot,
+}: {
+  homeRoot: string | null;
+  /** `GET /v1/status.project_root`; `undefined` until the daemon answered. */
+  resolvedRoot: string | null | undefined;
+}) {
   const path = useProjectStore((s) => s.path);
   const setPath = useProjectStore((s) => s.setPath);
   const showToast = useUiStore((s) => s.showToast);
+  const choose = useChooseProject();
   const [draft, setDraft] = useState(path ?? "");
+  const [refusal, setRefusal] = useState<string | null>(null);
 
   const trimmed = draft.trim();
   // Only a genuine typo is an error: an empty box is "no project", not a
   // mistake, and Use is simply inert there.
   const invalid = trimmed !== "" && !isAbsolutePath(trimmed);
+  const shown = projectCardRoot(path, resolvedRoot);
 
   function applyPath() {
-    if (trimmed === "" || invalid) return;
-    setPath(trimmed);
-    showToast("Project set — new runs will use it");
+    if (trimmed === "" || invalid || choose.isPending) return;
+    setRefusal(null);
+    choose.mutate(trimmed, {
+      onSuccess: (project) => {
+        setPath(project.root);
+        setDraft(project.root);
+        showToast(`Project set to ${project.root} — new runs will use it`);
+      },
+      onError: (error) => setRefusal(error.message),
+    });
   }
 
   return (
@@ -513,7 +558,7 @@ function ProjectCard({ homeRoot }: { homeRoot: string | null }) {
       <div className="flex items-center gap-[10px]">
         <span className="text-md-plus font-semibold text-ink">Project</span>
         <span className="ml-auto font-mono text-xs-plus text-muted-fg">
-          {path ?? "none"}
+          {shown.text}
         </span>
       </div>
 
@@ -526,7 +571,10 @@ function ProjectCard({ homeRoot }: { homeRoot: string | null }) {
             aria-label="Project path"
             placeholder="/Users/you/code/your-project"
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              setRefusal(null);
+            }}
             onKeyDown={(event) => {
               if (event.key === "Enter") applyPath();
             }}
@@ -534,16 +582,17 @@ function ProjectCard({ homeRoot }: { homeRoot: string | null }) {
           />
           <Button
             variant="primarySm"
-            disabled={trimmed === "" || invalid}
+            disabled={trimmed === "" || invalid || choose.isPending}
             onClick={applyPath}
           >
-            Use
+            {choose.isPending ? "Using…" : "Use"}
           </Button>
           <Button
             variant="ghostSm"
             disabled={path === null && trimmed === ""}
             onClick={() => {
               setDraft("");
+              setRefusal(null);
               setPath(null);
               showToast("Project cleared");
             }}
@@ -553,12 +602,24 @@ function ProjectCard({ homeRoot }: { homeRoot: string | null }) {
         </div>
       </div>
 
+      {refusal !== null && (
+        <p className="mt-[6px] mb-0 text-base leading-[1.6] text-red-ink">
+          {refusal}
+        </p>
+      )}
+
+      {shown.unresolved && (
+        <GapNote>
+          {`${path} is in no project: no git repository holds it and it was not chosen with Use. Press Use to make it one.`}
+        </GapNote>
+      )}
+
       <GapNote>
         {invalid
           ? "An absolute path, please — a relative one would be read against the daemon's own directory, not this one."
-          : path === null
+          : path === null || shown.unresolved
             ? `No project: runs are recorded without one and their files go to ${homeStoreLabel(homeRoot)}.`
-            : "Runs started here record this project; files they produce land in <project>/.openalpaca/."}
+            : `Runs started here record this project. What they produce is kept under projects/ in ${homeStoreLabel(homeRoot)}; nothing is written into the project folder.`}
       </GapNote>
     </Card>
   );

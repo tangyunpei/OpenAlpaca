@@ -7,9 +7,10 @@
  */
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DaemonStatus, SessionSweep } from "@/lib/api/types";
+import { useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
 import {
@@ -17,6 +18,7 @@ import {
   DAEMON_LOG_LINES,
   StorageCard,
   homeStoreLabel,
+  projectCardRoot,
 } from "./ConnectionSection";
 
 /**
@@ -42,6 +44,40 @@ vi.mock("@/hooks/useUsage", async (importOriginal) => ({
     isPending: false,
     error: null,
   }),
+}));
+
+/**
+ * `Use` (storage design §9) asks `POST /v1/workspaces`. `choose.answer` is
+ * what the daemon answers and `choose.refusal` what it refuses with; the
+ * mutation is a spy, so a test sees what was sent.
+ */
+const choose = vi.hoisted(() => {
+  const state = {
+    answer: null as {
+      id: string;
+      root: string;
+      name: string;
+      missing: boolean;
+    } | null,
+    refusal: null as Error | null,
+  };
+  const mutate = vi.fn(
+    (
+      _path: string,
+      options?: {
+        onSuccess?: (project: NonNullable<typeof state.answer>) => void;
+        onError?: (error: Error) => void;
+      },
+    ) => {
+      if (state.refusal !== null) options?.onError?.(state.refusal);
+      else if (state.answer !== null) options?.onSuccess?.(state.answer);
+    },
+  );
+  return Object.assign(state, { mutate });
+});
+
+vi.mock("@/hooks/useWorkspaces", () => ({
+  useChooseProject: () => ({ mutate: choose.mutate, isPending: false }),
 }));
 
 /** What `GET /v1/status` has answered, per test. */
@@ -125,6 +161,10 @@ afterEach(() => {
   connectorRows.data = [];
   shellLog.read.mockReset();
   daemon.data = undefined;
+  choose.answer = null;
+  choose.refusal = null;
+  choose.mutate.mockClear();
+  useProjectStore.setState({ path: null });
 });
 
 vi.mock("@/hooks/useTasks", () => ({
@@ -580,5 +620,118 @@ describe("while the daemon is stopped", () => {
     expect(
       screen.getByRole("button", { name: "Start daemon" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("Use (storage design §9)", () => {
+  beforeEach(() => {
+    useProjectStore.setState({ path: null });
+    useUiStore.setState({ toast: null });
+  });
+
+  it("keeps the root the daemon answered, not the text that was typed", async () => {
+    const user = userEvent.setup();
+    choose.answer = {
+      id: "0b5c1d2e-3f40-4a5b-8c6d-7e8f9a0b1c2d",
+      root: "/Users/dev/repo",
+      name: "-Users-dev-repo",
+      missing: false,
+    };
+    render(<ConnectionSection />);
+
+    await user.type(
+      screen.getByLabelText("Project path"),
+      "/Users/dev/repo/src",
+    );
+    await user.click(screen.getByRole("button", { name: "Use" }));
+
+    expect(choose.mutate).toHaveBeenCalledTimes(1);
+    expect(choose.mutate.mock.calls[0]?.[0]).toBe("/Users/dev/repo/src");
+    expect(useProjectStore.getState().path).toBe("/Users/dev/repo");
+    expect(screen.getByLabelText("Project path")).toHaveValue(
+      "/Users/dev/repo",
+    );
+    expect(useUiStore.getState().toast).toBe(
+      "Project set to /Users/dev/repo — new runs will use it",
+    );
+  });
+
+  it("shows the daemon's refusal as written and keeps the project the window had", async () => {
+    const user = userEvent.setup();
+    useProjectStore.setState({ path: "/Users/dev/repo" });
+    choose.refusal = new Error(
+      "/Users/dev is, contains or lies inside the OpenAlpaca home store, so it cannot be a project. Name the project directory itself",
+    );
+    render(<ConnectionSection />);
+
+    const field = screen.getByLabelText("Project path");
+    await user.clear(field);
+    await user.type(field, "/Users/dev");
+    await user.click(screen.getByRole("button", { name: "Use" }));
+
+    expect(
+      screen.getByText(
+        /so it cannot be a project\. Name the project directory itself$/,
+      ),
+    ).toBeInTheDocument();
+    expect(useProjectStore.getState().path).toBe("/Users/dev/repo");
+  });
+
+  it("names the root the daemon resolved the window's path to", () => {
+    useProjectStore.setState({ path: "/Users/dev/repo/src" });
+    daemon.data = status({ project_root: "/Users/dev/repo" });
+    render(<ConnectionSection />);
+
+    expect(screen.getByText("/Users/dev/repo")).toBeInTheDocument();
+    expect(screen.queryByText("/Users/dev/repo/src")).toBeNull();
+  });
+
+  it("says so when the window's path is in no project", () => {
+    useProjectStore.setState({ path: "/Users/dev/notes" });
+    daemon.data = status({ project_root: null });
+    render(<ConnectionSection />);
+
+    expect(
+      screen.getByText(/^\/Users\/dev\/notes is in no project/),
+    ).toBeInTheDocument();
+    // Its turns are filed with no project, so the card promises no folder
+    // under projects/.
+    expect(
+      screen.getByText(/^No project: runs are recorded without one/),
+    ).toBeInTheDocument();
+  });
+
+  it("says a run's files are kept under projects/ at home, never in the project folder", () => {
+    useProjectStore.setState({ path: "/Users/dev/repo" });
+    daemon.data = status({ project_root: "/Users/dev/repo" });
+    render(<ConnectionSection />);
+
+    expect(
+      screen.getByText(
+        /kept under projects\/ in the home store \(\/home\/\.openalpaca\); nothing is written into the project folder/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/<project>\/\.openalpaca/)).toBeNull();
+  });
+});
+
+describe("projectCardRoot", () => {
+  it("names the resolved root, the stored path until the daemon answers, and flags one in no project", () => {
+    expect(projectCardRoot(null, "/r")).toEqual({
+      text: "none",
+      unresolved: false,
+    });
+    expect(projectCardRoot("/r/src", "/r")).toEqual({
+      text: "/r",
+      unresolved: false,
+    });
+    expect(projectCardRoot("/r/src", undefined)).toEqual({
+      text: "/r/src",
+      unresolved: false,
+    });
+    expect(projectCardRoot("/notes", null)).toEqual({
+      text: "/notes",
+      unresolved: true,
+    });
   });
 });

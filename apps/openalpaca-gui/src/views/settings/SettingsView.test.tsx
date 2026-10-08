@@ -40,6 +40,36 @@ const DAEMON_STATUS: DaemonStatus = {
 };
 let daemonStatus: DaemonStatus = { ...DAEMON_STATUS };
 
+/**
+ * `Use` (storage design §9) asks `POST /v1/workspaces`; `chosen.answer` is
+ * what the daemon answers, and the mutation is a spy.
+ */
+const chosen = vi.hoisted(() => {
+  const state = {
+    answer: null as {
+      id: string;
+      root: string;
+      name: string;
+      missing: boolean;
+    } | null,
+  };
+  const mutate = vi.fn(
+    (
+      _path: string,
+      options?: {
+        onSuccess?: (project: NonNullable<typeof state.answer>) => void;
+      },
+    ) => {
+      if (state.answer !== null) options?.onSuccess?.(state.answer);
+    },
+  );
+  return Object.assign(state, { mutate });
+});
+
+vi.mock("@/hooks/useWorkspaces", () => ({
+  useChooseProject: () => ({ mutate: chosen.mutate, isPending: false }),
+}));
+
 vi.mock("@/hooks/useConnection", () => ({
   useConnectionStatus: () => ({
     info: null,
@@ -323,6 +353,8 @@ beforeEach(() => {
   useUiStore.setState({ settingsSectionId: "connection", toast: null });
   useProjectStore.setState({ path: null });
   daemonStatus = { ...DAEMON_STATUS };
+  chosen.answer = null;
+  chosen.mutate.mockClear();
   sessionsPage.rows = [CONVERSATION];
   sessionsPage.total = 1;
   localStorage.clear();
@@ -475,17 +507,29 @@ describe("SettingsView (§2.5, §5.4)", () => {
     expect(useUiStore.getState().toast).toMatch(/no daemon route yet/);
   });
 
-  /** Plan §4.7 item 2 — where the owner chooses the project the GUI sends. */
-  it("takes a project path and keeps it", async () => {
+  /**
+   * Plan §4.7 item 2, storage design §9 — where the owner chooses the project
+   * the GUI sends: `Use` asks the daemon, and the window keeps its root.
+   */
+  it("takes a project path and keeps the root the daemon answered", async () => {
     const user = userEvent.setup();
+    chosen.answer = {
+      id: "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b",
+      root: "/Users/dev/openalpaca",
+      name: "-Users-dev-openalpaca",
+      missing: false,
+    };
     render(<SettingsView />);
 
     await user.type(
       screen.getByLabelText("Project path"),
-      "/Users/dev/openalpaca",
+      "/Users/dev/openalpaca/apps/gui",
     );
     await user.click(screen.getByRole("button", { name: "Use" }));
 
+    expect(chosen.mutate.mock.calls[0]?.[0]).toBe(
+      "/Users/dev/openalpaca/apps/gui",
+    );
     expect(useProjectStore.getState().path).toBe("/Users/dev/openalpaca");
     expect(useUiStore.getState().toast).toMatch(/Project set/);
   });
