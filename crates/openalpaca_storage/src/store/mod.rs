@@ -24,7 +24,6 @@
 //! root.
 
 mod artifact;
-pub mod project_move;
 pub mod projects;
 mod reveal;
 
@@ -650,28 +649,6 @@ pub fn recorded_project_root(root: &Path) -> Result<Option<String>> {
         .and_then(|text| read_layout_value(text, PROJECT_ROOT_KEY)))
 }
 
-/// Rewrite a project store's recorded root — the one thing that may, because a
-/// re-base is precisely the statement that the store now lives somewhere else.
-///
-/// Writes the whole marker atomically, preserving every other line.
-pub fn set_recorded_project_root(root: &Path, project_root: &str) -> Result<()> {
-    let path = root.join(LAYOUT_FILE);
-    let text = layout_text(root)?.unwrap_or_else(|| format!("{LAYOUT_VERSION}\n"));
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-    let line = format!("{PROJECT_ROOT_KEY}={project_root}");
-    match lines
-        .iter_mut()
-        .skip(1)
-        .find(|l| l.trim().starts_with(&format!("{PROJECT_ROOT_KEY}=")))
-    {
-        Some(existing) => *existing = line,
-        None => lines.push(line),
-    }
-    let mut out = lines.join("\n");
-    out.push('\n');
-    write_atomic(&path, &out)
-}
-
 /// `<root>/.layout`'s contents, or `None` when the root carries no marker.
 fn layout_text(root: &Path) -> Result<Option<String>> {
     let path = root.join(LAYOUT_FILE);
@@ -746,9 +723,8 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
 /// **`project_root=` is written once and never rewritten**, which is what makes
 /// it the record of where this store *was* (§4.8's "Project moved"): `ensure_store`
 /// runs on every `content_dir` call, so a line that healed itself to the current
-/// path would erase the very difference a moved project is recognised by. The
-/// one thing that rewrites it is a re-base, through
-/// [`set_recorded_project_root`].
+/// path would erase the very difference a moved project is recognised by.
+/// Nothing rewrites it.
 fn ensure_layout(root: &Path, is_home: bool) -> Result<()> {
     let path = root.join(LAYOUT_FILE);
     let existing = match fs::read_to_string(&path) {

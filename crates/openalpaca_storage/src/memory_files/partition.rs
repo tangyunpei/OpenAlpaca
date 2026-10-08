@@ -30,9 +30,7 @@ use super::{
     OWNERS_DIR, PROJECT_GITIGNORE_TEXT, home_partition_key, is_owner_key, is_partition_key,
     is_revision, owner_key, project_partition_key,
 };
-use crate::store::{
-    ContentKind, STORE_DIR_NAME, StoreScope, content_dir, home_root, state_dir, store_root,
-};
+use crate::store::{ContentKind, StoreScope, content_dir, home_root, state_dir, store_root};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, HashSet};
@@ -2730,119 +2728,6 @@ pub fn classify_move_snapshots(snapshots: &[ControlSnapshot]) -> Vec<(String, Mo
         out.push((s.partition_key.clone(), state));
     }
     out
-}
-
-/// One project snapshot a workspace move re-keys (design §3, *Workspace
-/// move*): what step 2 wrote under the new key and what step 5 deletes under
-/// the old one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SnapshotMove {
-    pub old_key: String,
-    pub new_key: String,
-    pub old_path: PathBuf,
-    pub new_path: PathBuf,
-}
-
-/// The project a partition directory belongs to:
-/// `<project>/.openalpaca/memory/owners/<owner-key>` → `<project>`.
-fn project_of_partition_root(root: &str) -> Option<PathBuf> {
-    Path::new(root).ancestors().nth(4).map(Path::to_path_buf)
-}
-
-/// Step 2 of the workspace move (design §3): for every project partition of
-/// `old_project` whose snapshot is readable, writes that snapshot's twin
-/// under the **new** partition key — bound to the directory the partition
-/// will have once the store is renamed, `moved_from` naming the old key,
-/// notes, tombstones and `pending` copied — before anything is renamed. The
-/// old snapshot is not touched. Returns one entry per partition re-keyed;
-/// a project with no partition yields none, and writes nothing.
-///
-/// Until step 5 the twin is bound to a directory that does not exist yet,
-/// which [`classify_move_snapshots`] reads as *abandoned* while the old
-/// directory still stands, and the old snapshot as *stale* once the rename
-/// has run — the two states a crash between the steps leaves for `doctor`.
-///
-/// A snapshot file that does not parse is skipped: it names no directory
-/// this function could match, the partition it belongs to is quarantined
-/// wherever its directory lands, and `doctor --repair` is its remedy.
-pub fn begin_project_move(
-    old_project: &Path,
-    new_project: &Path,
-    now: DateTime<Utc>,
-) -> Result<Vec<SnapshotMove>, MemoryFilesError> {
-    let old_project = PathBuf::from(canonical_string_lenient(old_project)?);
-    let new_project = PathBuf::from(canonical_string_lenient(new_project)?);
-    let mut moves = Vec::new();
-    for (old_path, parsed) in list_snapshots()? {
-        let snapshot = match parsed {
-            Ok(s) if s.scope == SnapshotScope::Project => s,
-            Ok(_) => continue,
-            Err(reason) => {
-                tracing::debug!(
-                    path = %old_path.display(),
-                    "memory: unreadable control snapshot left alone by the workspace move: {reason}"
-                );
-                continue;
-            }
-        };
-        if project_of_partition_root(&snapshot.root).as_deref() != Some(old_project.as_path()) {
-            continue;
-        }
-        // The same string `Partition::open` will compute after the rename:
-        // the canonical project root plus components the rename carries over
-        // unchanged (a link at any of them would refuse the partition anyway).
-        let new_root = new_project
-            .join(STORE_DIR_NAME)
-            .join(ContentKind::Memory.dir_name())
-            .join(OWNERS_DIR)
-            .join(&snapshot.owner_key)
-            .to_string_lossy()
-            .into_owned();
-        let new_key = project_partition_key(&snapshot.owner_key, &new_root);
-        let new_path = snapshot_path_for(&new_key)?;
-        let mut twin = snapshot.clone();
-        twin.partition_key = new_key.clone();
-        twin.root = new_root;
-        twin.moved_from = Some(snapshot.partition_key.clone());
-        twin.save(&new_path, now)?;
-        moves.push(SnapshotMove {
-            old_key: snapshot.partition_key,
-            new_key,
-            old_path,
-            new_path,
-        });
-    }
-    Ok(moves)
-}
-
-/// Step 5 of the workspace move (design §3): deletes each old-key snapshot,
-/// then clears `moved_from` on its twin — in that order, so a crash between
-/// the two leaves a twin bound to a directory that exists, whose
-/// `moved_from` names a snapshot that is gone: nothing for
-/// [`classify_move_snapshots`] to flag, and nothing left bound to a missing
-/// directory. Idempotent: a finished move finishes again as a no-op.
-pub fn finish_project_move(
-    moves: &[SnapshotMove],
-    now: DateTime<Utc>,
-) -> Result<(), MemoryFilesError> {
-    for mv in moves {
-        remove_file_if_exists(&mv.old_path)?;
-        let mut twin = match ControlSnapshot::load(&mv.new_path) {
-            Ok(Some(twin)) => twin,
-            Ok(None) => {
-                return Err(MemoryFilesError::Io(anyhow::anyhow!(
-                    "the re-keyed control snapshot {} is gone; run `openalpaca memory doctor`",
-                    mv.new_path.display()
-                )));
-            }
-            Err(e) => return Err(MemoryFilesError::Io(anyhow::anyhow!("{e}"))),
-        };
-        if twin.moved_from.is_some() {
-            twin.moved_from = None;
-            twin.save(&mv.new_path, now)?;
-        }
-    }
-    Ok(())
 }
 
 /// `memory adopt <owner-key>` (design §6): re-binds every partition of an

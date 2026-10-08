@@ -1,25 +1,22 @@
 //! The verification cell for `/v1/workspaces` (§4.8, "Project moved").
 //!
-//! The transaction itself belongs to `ArtifactStore::rebase_project` and is
-//! proved in `openalpaca_storage::artifacts::tests`; the store-directory move
-//! belongs to `store::project_move` and is proved there. What is proved here is what
-//! the route owns — which refusal becomes which status code, that every refusal
-//! happens *before* a row changes, and what the JSON carries.
+//! The transaction belongs to `ArtifactStore::repoint_rows` and the re-point
+//! to `project_life`; both are proved in `openalpaca_storage`. What is proved
+//! here is what the route owns — which refusal becomes which status code, that
+//! every refusal happens before a row or a folder changes, and what the JSON
+//! carries.
 
 use super::*;
 
 use axum::body::to_bytes;
 use openalpaca_core::memory::service::{
-    Attribution, Capabilities, MemoryAccessContext, ReadInput, StoreInput, StoreOutput, Surface,
-    WorkspaceHint,
+    Attribution, Capabilities, MemoryAccessContext, StoreInput, StoreOutput, Surface, WorkspaceHint,
 };
 use openalpaca_storage::IdentityRepository;
-use openalpaca_storage::memory_files::{
-    ControlSnapshot, MoveSnapshotState, NoteKind, Partition, PartitionHealth,
-    classify_move_snapshots, list_snapshots,
-};
+use openalpaca_storage::memory_files::{ControlSnapshot, NoteKind, Partition, list_snapshots};
 use openalpaca_storage::memory_index::MemoryIndex;
 use openalpaca_storage::store::StoreScope;
+use openalpaca_storage::store::projects;
 use openalpaca_storage::{ArtifactKind, NewArtifact};
 use tempfile::TempDir;
 
@@ -107,12 +104,8 @@ impl Fixture {
 
     // ── memory fixtures ──────────────────────────────────────────
 
-    /// A user-directed context on `root` — what `/v1/memories` builds.
-    fn memory_ctx(&self, root: &str) -> MemoryAccessContext {
-        self.memory_ctx_as(OWNER, root)
-    }
-
-    /// The same, for `owner` — who must be a `global_user` row.
+    /// A user-directed context on `root` for `owner` — what `/v1/memories`
+    /// builds. `owner` must be a `global_user` row.
     fn memory_ctx_as(&self, owner: &str, root: &str) -> MemoryAccessContext {
         self.memory
             .context(
@@ -153,11 +146,6 @@ impl Fixture {
             .expect("store a project note")
     }
 
-    /// The owner's partition snapshot at `root`, if the partition has one.
-    fn project_snapshot(&self, root: &str) -> Option<ControlSnapshot> {
-        self.partition(root).snapshot()
-    }
-
     fn partition(&self, root: &str) -> Partition {
         Partition::open(&StoreScope::Project(std::path::PathBuf::from(root)), OWNER)
             .expect("open the partition")
@@ -174,25 +162,14 @@ impl Fixture {
     }
 
     /// A project directory: a git repository (what makes it a root since the
-    /// storage design's resolver, §3) carrying a real `.openalpaca` store —
-    /// seeded through `ensure_store`, so its `.layout` records the root it was
-    /// seeded at — and registered under this fixture's home store, as the
-    /// daemon's first turn there would register it.
+    /// storage design's resolver, §3), registered under this fixture's home
+    /// store, as the daemon's first turn there would register it.
     fn project(&self, name: &str) -> String {
         let dir = self.projects.path().join(name);
         std::fs::create_dir_all(dir.join(".git")).expect("project dir");
         let dir = dir.canonicalize().expect("canonicalize project");
-        store::ensure_store(&StoreScope::Project(dir.clone())).expect("seed store");
-        openalpaca_storage::store::projects::register(&dir).expect("register the project");
+        projects::register(&dir).expect("register the project");
         dir.to_string_lossy().into_owned()
-    }
-
-    /// A git repository with no store at all — a re-base destination that is
-    /// a root of its own.
-    fn repo(&self, name: &str) -> String {
-        let dir = self.bare_dir(name);
-        std::fs::create_dir(std::path::Path::new(&dir).join(".git")).expect(".git");
-        dir
     }
 
     /// A project directory with no store at all.
@@ -262,27 +239,6 @@ impl Fixture {
                 old_path: old.to_string(),
                 new_path: new.to_string(),
             },
-        ))
-        .await
-    }
-
-    /// A move that crashes right after `stop_after` — the checkpoint answers
-    /// `false` there — leaving the disk as that step left it.
-    async fn patch_crashing_after(
-        &self,
-        old: &str,
-        new: &str,
-        stop_after: MoveStep,
-    ) -> (StatusCode, serde_json::Value) {
-        split(rebase_workspace_with(
-            &self.db,
-            &self.memory,
-            OWNER,
-            RebaseRequest {
-                old_path: old.to_string(),
-                new_path: new.to_string(),
-            },
-            &mut |step| step != stop_after,
         ))
         .await
     }
@@ -428,13 +384,6 @@ fn snapshots() -> Vec<ControlSnapshot> {
         .collect()
 }
 
-/// What `doctor` would say about the move snapshots, sorted.
-fn move_states() -> Vec<(String, MoveSnapshotState)> {
-    let mut states = classify_move_snapshots(&snapshots());
-    states.sort();
-    states
-}
-
 /// Split a `Response` into its status and its JSON body.
 async fn split(response: Response) -> (StatusCode, serde_json::Value) {
     let status = response.status();
@@ -449,20 +398,19 @@ fn error_code(body: &serde_json::Value) -> &str {
     body["error"]["code"].as_str().unwrap_or("<no code>")
 }
 
-/// The user's `mv`: the whole store travels to the new root, marker and all,
-/// so it still records the root it was seeded at — and the repository with it,
-/// so the new root is a project and the old one a directory with nothing in it.
-/// Nothing in the database moves — which is precisely the state a re-base
-/// exists to fix.
-fn move_the_store_by_hand(old: &str, new: &str) {
-    let from = std::path::Path::new(old).join(store::STORE_DIR_NAME);
-    let to = std::path::Path::new(new).join(store::STORE_DIR_NAME);
-    std::fs::create_dir_all(new).expect("new project dir");
-    std::fs::rename(&from, &to).expect("move the store");
-    let git = std::path::Path::new(old).join(".git");
-    if git.exists() {
-        std::fs::rename(&git, std::path::Path::new(new).join(".git")).expect("move the repository");
-    }
+/// What an earlier build's in-project `.layout` says, written by hand. The
+/// GET still reads it until Stage 1 step (5) removes `store_present`,
+/// `recorded_root` and `moved` (interfaces C8).
+fn earlier_build_marker(root: &str, recorded: &str) {
+    let dir = std::path::Path::new(root).join(store::STORE_DIR_NAME);
+    std::fs::create_dir_all(&dir).expect("store dir");
+    std::fs::write(dir.join(".layout"), format!("1\nproject_root={recorded}\n")).expect("marker");
+}
+
+fn project_at(root: &str) -> projects::Project {
+    projects::lookup(std::path::Path::new(root))
+        .expect("lookup")
+        .expect("a registered project")
 }
 
 // ============================================================================
@@ -488,21 +436,11 @@ async fn the_path_is_required_and_must_be_absolute() {
 async fn a_store_whose_marker_names_another_root_reads_as_moved() {
     let f = Fixture::new();
     let old = f.project("old-project");
-    let new_dir = f.projects.path().join("new-project");
-
-    // Everything is recorded under the root the project had while it was there.
     f.artifact(&old, "Notes");
     f.session("session-1", &old);
     f.task("task-1", &old, "completed");
-
-    let new = {
-        move_the_store_by_hand(&old, &new_dir.to_string_lossy());
-        new_dir
-            .canonicalize()
-            .expect("canonicalize")
-            .to_string_lossy()
-            .into_owned()
-    };
+    let new = f.bare_dir("new-project");
+    earlier_build_marker(&new, &old);
 
     let (status, body) = f.get(Some(&new)).await;
     assert_eq!(status, StatusCode::OK);
@@ -510,15 +448,10 @@ async fn a_store_whose_marker_names_another_root_reads_as_moved() {
     assert_eq!(body["store_present"], true);
     assert_eq!(body["recorded_root"], old);
     assert_eq!(body["moved"], true);
-    // Nothing is recorded at the *new* root yet — that is what a re-base fixes.
     assert_eq!(body["rows"]["artifacts"], 0);
 
-    // And the old root is where the history is.
     let (status, body) = f.get(Some(&old)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["store_present"], false);
-    assert_eq!(body["recorded_root"], serde_json::Value::Null);
-    assert_eq!(body["moved"], false);
     assert_eq!(body["rows"]["artifacts"], 1);
     assert_eq!(body["rows"]["sessions"], 1);
     assert_eq!(body["rows"]["tasks"], 1);
@@ -529,6 +462,7 @@ async fn a_store_whose_marker_names_another_root_reads_as_moved() {
 async fn a_store_standing_where_it_was_seeded_is_not_moved() {
     let f = Fixture::new();
     let root = f.project("project");
+    earlier_build_marker(&root, &root);
 
     let (status, body) = f.get(Some(&root)).await;
     assert_eq!(status, StatusCode::OK);
@@ -570,7 +504,7 @@ async fn re_basing_a_root_nothing_names_is_a_404() {
 }
 
 #[tokio::test]
-async fn re_basing_onto_a_root_that_already_has_rows_is_a_409() {
+async fn re_pointing_onto_a_project_or_a_path_rows_name_is_a_409_naming_both_ways_out() {
     let f = Fixture::new();
     let old = f.project("old-project");
     let new = f.project("new-project");
@@ -578,7 +512,20 @@ async fn re_basing_onto_a_root_that_already_has_rows_is_a_409() {
     f.artifact(&new, "Theirs");
 
     let (status, body) = f.patch(&old, &new).await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_EXISTS");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("delete that project's data first")
+            && message.contains("re-point onto another path"),
+        "ST-20: {message}"
+    );
+
+    // A path only rows name is the same merge.
+    let named = f.bare_dir("named-by-rows");
+    f.session("session-named", &named);
+    let (status, body) = f.patch(&old, &named).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(error_code(&body), "WORKSPACE_EXISTS");
 
     // Refused before a row changed.
@@ -605,50 +552,23 @@ async fn re_basing_out_from_under_a_run_in_flight_is_a_409() {
 }
 
 #[tokio::test]
-async fn two_stores_block_the_re_base_before_the_transaction() {
-    let f = Fixture::new();
-    let old = f.project("old-project");
-    let new = f.project("new-project");
-    f.artifact(&old, "Notes");
-
-    let (status, body) = f.patch(&old, &new).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(error_code(&body), "WORKSPACE_MOVE_BLOCKED");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("two stores"),
-        "{body}"
-    );
-
-    let (_, old_body) = f.get(Some(&old)).await;
-    assert_eq!(
-        old_body["rows"]["artifacts"], 1,
-        "the rows are untouched — the move is decided first"
-    );
-}
-
-#[tokio::test]
-async fn re_basing_to_or_from_the_home_store_is_a_409() {
+async fn re_pointing_onto_the_home_store_is_a_409_and_from_it_a_404() {
     let f = Fixture::new();
     let old = f.project("old-project");
     f.artifact(&old, "Notes");
 
-    // Both shapes of the fold: the home store root itself, and the `$HOME`
-    // whose project store *is* that root.
     for destination in [f.home_store(), f.home()] {
         let (status, body) = f.patch(&old, &destination).await;
         assert_eq!(status, StatusCode::CONFLICT, "{destination}: {body}");
         assert_eq!(error_code(&body), "WORKSPACE_IS_HOME", "{destination}");
     }
 
-    // And as the source, which would record the home store as a project just
-    // as surely.
+    // The home store is never a project (R13): as the source it is a path no
+    // project owns.
     let new = f.bare_dir("new-project");
     let (status, body) = f.patch(&f.home(), &new).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(error_code(&body), "WORKSPACE_IS_HOME");
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_FOUND");
 
     let (_, old_body) = f.get(Some(&old)).await;
     assert_eq!(old_body["rows"]["artifacts"], 1, "nothing moved");
@@ -696,12 +616,36 @@ async fn re_basing_rows_another_owner_holds_is_a_404() {
 }
 
 #[tokio::test]
-async fn a_destination_inside_another_project_is_a_422() {
+async fn a_destination_that_is_not_a_directory_is_a_422_and_is_not_created() {
     let f = Fixture::new();
     let old = f.project("old-project");
     f.artifact(&old, "Notes");
+    let mistyped = f
+        .projects
+        .path()
+        .join("mistyped")
+        .to_string_lossy()
+        .into_owned();
 
-    // A monorepo with its own marker, and a fresh directory inside it.
+    let (status, body) = f.patch(&old, &mistyped).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_A_DIRECTORY");
+    assert!(
+        !std::path::Path::new(&mistyped).exists(),
+        "a mistyped path is not created"
+    );
+    let (_, old_body) = f.get(Some(&old)).await;
+    assert_eq!(old_body["rows"]["artifacts"], 1);
+}
+
+/// The destination is taken as named: a folder inside a repository nobody
+/// chose is re-pointed onto, and the repository above it is not made a
+/// project.
+#[tokio::test]
+async fn a_destination_inside_another_repository_is_taken_as_named() {
+    let f = Fixture::new();
+    let old = f.project("old-project");
+    f.artifact(&old, "Notes");
     let mono = f.bare_dir("mono");
     std::fs::create_dir_all(std::path::Path::new(&mono).join(".git")).expect("marker");
     let inside = std::path::Path::new(&mono).join("sub").join("proj");
@@ -709,26 +653,15 @@ async fn a_destination_inside_another_project_is_a_422() {
     let inside = inside.to_string_lossy().into_owned();
 
     let (status, body) = f.patch(&old, &inside).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert_eq!(error_code(&body), "WORKSPACE_NOT_A_ROOT");
-    let message = body["error"]["message"].as_str().unwrap_or_default();
-    assert!(message.contains(&mono), "the ancestor is named: {message}");
-
-    // Nothing moved, and `/mono/.openalpaca` was not created on the way past.
-    let (_, old_body) = f.get(Some(&old)).await;
-    assert_eq!(old_body["rows"]["artifacts"], 1);
-    assert!(
-        !std::path::Path::new(&mono)
-            .join(store::STORE_DIR_NAME)
-            .exists()
-    );
-
-    // A destination that is a root of its own is taken as given.
-    let sibling = f.bare_dir("sibling");
-    std::fs::create_dir_all(std::path::Path::new(&sibling).join(".git")).expect("marker");
-    let (status, body) = f.patch(&old, &sibling).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["new_path"], sibling);
+    assert_eq!(body["new_path"], inside);
+    assert!(
+        projects::lookup(std::path::Path::new(&mono))
+            .unwrap()
+            .is_none()
+    );
+    let (_, moved) = f.get(Some(&inside)).await;
+    assert_eq!(moved["rows"]["artifacts"], 1);
 }
 
 #[tokio::test]
@@ -744,19 +677,18 @@ async fn re_basing_a_root_onto_itself_is_a_400() {
 // PATCH /v1/workspaces — the re-base
 // ============================================================================
 
-/// P-12's own shape: the user moved the project with `mv`, so the store is
-/// already at the new root and only the rows are behind.
+/// The user moved the project's folder with `mv`: the re-point moves its rows
+/// and renames its folder under `projects/`; the id stays (ST-13).
 #[tokio::test]
-async fn a_project_moved_by_hand_re_bases_its_four_members() {
+async fn a_project_moved_by_hand_is_re_pointed_with_its_rows_and_its_folder() {
     let f = Fixture::new();
     let old = f.project("old-project");
-    let new_dir = f.projects.path().join("new-project");
-
+    let before = project_at(&old);
     f.artifact(&old, "Notes");
     f.session("session-1", &old);
     f.task("task-1", &old, "completed");
-
-    move_the_store_by_hand(&old, &new_dir.to_string_lossy());
+    let new_dir = f.projects.path().join("new-project");
+    std::fs::rename(&old, &new_dir).expect("the user's mv");
     let new = new_dir
         .canonicalize()
         .expect("canonicalize")
@@ -770,66 +702,109 @@ async fn a_project_moved_by_hand_re_bases_its_four_members() {
     assert_eq!(body["moved"]["artifacts"], 1);
     assert_eq!(body["moved"]["sessions"], 1);
     assert_eq!(body["moved"]["tasks"], 1);
-    assert!(
-        body["moved"].get("memories").is_none(),
-        "memory is not a member of the re-base any more: {body}"
-    );
     assert_eq!(
-        body["store_moved"], false,
-        "the directory was already moved by hand"
+        body["store_moved"], true,
+        "the folder under projects/ was renamed"
     );
 
-    // The store now says where it lives, so a second look does not offer the
-    // same re-base all over again.
-    let (_, after) = f.get(Some(&new)).await;
-    assert_eq!(after["recorded_root"], new);
-    assert_eq!(after["moved"], false);
-    assert_eq!(after["rows"]["artifacts"], 1);
-    assert_eq!(after["rows"]["sessions"], 1);
-
-    let (_, old_after) = f.get(Some(&old)).await;
-    assert_eq!(old_after["rows"]["artifacts"], 0);
+    let after = project_at(&new);
+    assert_eq!(after.id, before.id);
+    assert!(!before.dir.exists());
+    assert!(
+        projects::lookup(std::path::Path::new(&old))
+            .unwrap()
+            .is_none()
+    );
+    let (_, at_new) = f.get(Some(&new)).await;
+    assert_eq!(at_new["rows"]["artifacts"], 1);
+    assert_eq!(at_new["rows"]["sessions"], 1);
+    let (_, at_old) = f.get(Some(&old)).await;
+    assert_eq!(at_old["rows"]["artifacts"], 0);
+    let record = ArtifactStore::new(&f.db)
+        .list(&openalpaca_storage::ArtifactQuery::new(OWNER))
+        .expect("list")
+        .0
+        .remove(0);
+    assert!(
+        std::path::Path::new(&record.storage_path).exists(),
+        "{} does not exist",
+        record.storage_path
+    );
 }
 
-/// D5 — the PATCH twin of `a_root_rows_still_name_purges_literally_under_anothers_marker`:
-/// rows are the proof of a root on the **source** side too.
-///
-/// A project moved out from under a monorepo's `.git`, its own `.openalpaca`
-/// gone with it, is nested under a marker the ordinary walk resolves it to. The
-/// walk therefore used to answer `/mono` for `old_path`, and the re-base either
-/// refused ("nothing of yours is recorded under /mono" — the moved project could
-/// not be re-attached by the path it came from) or, with rows under `/mono`,
-/// re-addressed *those*. A row naming the literal path is the proof, so the
-/// literal path is what is re-based.
+/// The caller asks the daemon to re-point a project whose folder is still
+/// where it was: the rows move to the new path and the folder under
+/// `projects/` takes the new path's name.
 #[tokio::test]
-async fn a_recorded_root_under_anothers_marker_re_bases_by_its_literal_path() {
+async fn a_re_point_renames_the_projects_folder_under_projects() {
     let f = Fixture::new();
-    let ancestor = f.projects.path().join("mono-rebase");
-    std::fs::create_dir_all(ancestor.join(".git")).expect(".git marker");
-    // No marker of its own — and no artifact either, because putting one seeds
-    // a store (`.openalpaca`) at the root and the walk would then resolve the
-    // path to itself, which is not the shape under test. Session and task rows
-    // name it exactly; that is the proof R75 is about.
-    let moved_away = f.bare_dir("mono-rebase/moved-away");
-    f.session("session-moved", &moved_away);
-    f.task("task-moved", &moved_away, "completed");
+    let old = f.project("old-project");
+    let before = project_at(&old);
+    let new = f.bare_dir("new-project");
+    f.artifact(&old, "Notes");
 
-    // Its new home, outside the monorepo.
-    let new = f.bare_dir("re-homed");
-
-    let (status, body) = f.patch(&moved_away, &new).await;
+    let (status, body) = f.patch(&old, &new).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["store_moved"], true);
+    let after = project_at(&new);
+    assert_eq!(after.id, before.id);
     assert_eq!(
-        body["old_path"], moved_away,
-        "the literal path the rows name, not the monorepo root",
+        after.name,
+        projects::folder_name(std::path::Path::new(&new))
     );
-    assert_eq!(body["new_path"], new);
-    assert_eq!(body["moved"]["sessions"], 1);
-    assert_eq!(body["moved"]["tasks"], 1);
+    assert!(!before.dir.exists());
+    let (_, moved) = f.get(Some(&new)).await;
+    assert_eq!(moved["rows"]["artifacts"], 1);
+}
 
-    let (_, after) = f.get(Some(&new)).await;
-    assert_eq!(after["rows"]["sessions"], 1);
-    assert_eq!(after["rows"]["tasks"], 1);
+/// A re-point is refused while a memory write for the project is in flight,
+/// and nothing changes; once it lands, the same re-point goes through.
+#[tokio::test]
+async fn a_re_point_while_a_memory_write_is_pending_is_refused() {
+    let f = Fixture::new();
+    let old = f.project("old-project");
+    let before = project_at(&old);
+    let new = f.bare_dir("new-project");
+    f.artifact(&old, "Notes");
+
+    let pending = f
+        .memory
+        .quiesce(std::path::Path::new(&old))
+        .expect("nothing is writing yet");
+    let (status, body) = f.patch(&old, &new).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_BUSY");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("memory"),
+        "{body}"
+    );
+    assert_eq!(project_at(&old), before, "project.json was never marked");
+    let (_, rows) = f.get(Some(&old)).await;
+    assert_eq!(rows["rows"]["artifacts"], 1);
+
+    drop(pending);
+    let (status, body) = f.patch(&old, &new).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// A registered project no row names yet is a project: it re-points.
+#[tokio::test]
+async fn a_registered_project_with_no_rows_can_be_re_pointed() {
+    let f = Fixture::new();
+    let old = f.project("old-project");
+    let new = f.bare_dir("new-project");
+
+    let (status, body) = f.patch(&old, &new).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["moved"]["artifacts"], 0);
+    assert!(
+        projects::lookup(std::path::Path::new(&new))
+            .unwrap()
+            .is_some()
+    );
 }
 
 /// D6 — the `422`'s remediation has to be followable.
@@ -875,48 +850,6 @@ async fn a_marker_created_after_the_422_is_seen_by_the_next_request() {
     let (status, described) = f.get(Some(&inside)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(described["path"], inside);
-}
-
-/// The other shape: the caller is asking the daemon to *do* the move.
-#[tokio::test]
-async fn a_store_still_at_the_old_root_is_moved_after_the_transaction() {
-    let f = Fixture::new();
-    let old = f.project("old-project");
-    let new = f.bare_dir("new-project");
-    f.artifact(&old, "Notes");
-
-    let (status, body) = f.patch(&old, &new).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["store_moved"], true);
-
-    assert!(
-        !std::path::Path::new(&old)
-            .join(store::STORE_DIR_NAME)
-            .exists()
-    );
-    let moved_store = std::path::Path::new(&new).join(store::STORE_DIR_NAME);
-    assert!(moved_store.is_dir());
-    assert_eq!(
-        store::recorded_project_root(&moved_store)
-            .unwrap()
-            .as_deref(),
-        Some(new.as_str())
-    );
-
-    // The bytes are where the rows now say they are.
-    let (_, after) = f.get(Some(&new)).await;
-    assert_eq!(after["rows"]["artifacts"], 1);
-    let record = ArtifactStore::new(&f.db)
-        .list(&openalpaca_storage::ArtifactQuery::new(OWNER))
-        .expect("list")
-        .0
-        .remove(0);
-    assert!(
-        std::path::Path::new(&record.storage_path).exists(),
-        "{} does not exist",
-        record.storage_path
-    );
-    assert!(record.storage_path.starts_with(&new));
 }
 
 // ============================================================================
@@ -1424,324 +1357,6 @@ async fn a_purge_with_no_dry_run_field_is_a_dry_run() {
         serde_json::from_value(serde_json::json!({ "path": "/somewhere" })).expect("parse");
     assert!(request.dry_run);
     assert!(!request.all);
-}
-
-// ============================================================================
-// PATCH /v1/workspaces and the memory partition (design §3, five steps;
-// fixture 17 steps 1–12)
-// ============================================================================
-
-/// Step 1: a move is refused while a memory write for the project is in
-/// flight, and nothing — rows, directory, snapshot — changes. A held quiesce
-/// stands in for the write here: the slot is taken either way, and the
-/// service answers the same `write_pending`. Once it lands, the same move
-/// goes through.
-#[tokio::test]
-async fn a_move_while_a_memory_write_is_pending_is_refused() {
-    let f = Fixture::new();
-    let old = f.project("old-project");
-    let new = f.bare_dir("new-project");
-    f.artifact(&old, "Notes");
-    f.note(&old, "Release step");
-
-    let pending = f
-        .memory
-        .quiesce(std::path::Path::new(&old))
-        .expect("nothing is writing yet");
-    let (status, body) = f.patch(&old, &new).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert_eq!(error_code(&body), "WORKSPACE_BUSY");
-    let message = body["error"]["message"].as_str().unwrap_or_default();
-    assert!(
-        message.contains("memory"),
-        "the refusal names the memory write: {message}"
-    );
-    // Refused before a row or a byte changed.
-    let (_, before) = f.get(Some(&old)).await;
-    assert_eq!(before["rows"]["artifacts"], 1);
-    assert!(
-        std::path::Path::new(&old)
-            .join(store::STORE_DIR_NAME)
-            .is_dir()
-    );
-    assert!(
-        !std::path::Path::new(&new)
-            .join(store::STORE_DIR_NAME)
-            .exists()
-    );
-    assert_eq!(f.project_snapshot(&old).unwrap().moved_from, None);
-    assert!(move_states().is_empty());
-
-    drop(pending);
-    let (status, body) = f.patch(&old, &new).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-}
-
-/// Steps 2–5 in one call, the store still at the old root: afterwards the
-/// old-key snapshot is gone, the new-key snapshot binds the new directory
-/// with `moved_from` cleared, the note reads back at the same revision from
-/// the new root, and `doctor` has nothing to say.
-#[tokio::test]
-async fn a_move_re_keys_the_projects_memory_partition() {
-    let f = Fixture::new();
-    let old = f.project("old-project");
-    let new = f.repo("new-project");
-    f.artifact(&old, "Notes");
-    let note = f.note(&old, "Release step");
-    let old_key = f.project_snapshot(&old).unwrap().partition_key;
-    let old_snapshot_path = openalpaca_storage::memory_files::snapshot_path_for(&old_key).unwrap();
-    assert!(old_snapshot_path.is_file());
-
-    let (status, body) = f.patch(&old, &new).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["store_moved"], true);
-
-    assert!(
-        !old_snapshot_path.exists(),
-        "step 5 deleted the old-key snapshot"
-    );
-    let moved = f
-        .project_snapshot(&new)
-        .expect("the new-key snapshot binds the moved directory");
-    assert_ne!(moved.partition_key, old_key);
-    assert_eq!(moved.moved_from, None, "step 5 cleared moved_from");
-    assert!(moved.notes.contains_key(&note.id));
-    assert_eq!(
-        std::path::Path::new(&moved.root)
-            .ancestors()
-            .nth(4)
-            .map(|p| p.to_string_lossy().into_owned())
-            .as_deref(),
-        Some(new.as_str())
-    );
-    assert!(move_states().is_empty(), "{:?}", move_states());
-    assert_eq!(f.partition(&new).health(), PartitionHealth::Ready);
-
-    let read = f
-        .memory
-        .read(
-            &f.memory_ctx(&new),
-            ReadInput {
-                id: note.id,
-                expected_revision: None,
-                section: None,
-            },
-        )
-        .expect("the note reads from the new root");
-    assert_eq!(read.revision, note.revision);
-    assert_eq!(f.note_files(&new).len(), 1);
-    assert_eq!(
-        f.memory.known_project_roots(OWNER),
-        [std::path::PathBuf::from(&new)]
-    );
-}
-
-/// The ordinary way a project moves: the directory went first, by hand, and
-/// the partition inside it is quarantined at the new root until the re-base
-/// re-keys its snapshot. Step 4 has nothing to rename; steps 2 and 5 still
-/// run.
-#[tokio::test]
-async fn a_project_moved_by_hand_gets_its_snapshot_re_keyed_too() {
-    let f = Fixture::new();
-    let old = f.project("old-project");
-    let new_dir = f.projects.path().join("new-project");
-    f.artifact(&old, "Notes");
-    let note = f.note(&old, "Release step");
-    let old_key = f.project_snapshot(&old).unwrap().partition_key;
-
-    move_the_store_by_hand(&old, &new_dir.to_string_lossy());
-    let new = new_dir
-        .canonicalize()
-        .expect("canonicalize")
-        .to_string_lossy()
-        .into_owned();
-    assert!(
-        matches!(f.partition(&new).health(), PartitionHealth::Quarantined(_)),
-        "notes with no snapshot under the new key: quarantined until re-keyed"
-    );
-
-    let (status, body) = f.patch(&old, &new).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["store_moved"], false);
-
-    assert_eq!(f.partition(&new).health(), PartitionHealth::Ready);
-    let moved = f.project_snapshot(&new).unwrap();
-    assert_ne!(moved.partition_key, old_key);
-    assert_eq!(moved.moved_from, None);
-    assert!(
-        !openalpaca_storage::memory_files::snapshot_path_for(&old_key)
-            .unwrap()
-            .exists()
-    );
-    assert!(move_states().is_empty());
-    let read = f
-        .memory
-        .read(
-            &f.memory_ctx(&new),
-            ReadInput {
-                id: note.id,
-                expected_revision: None,
-                section: None,
-            },
-        )
-        .expect("the note reads from the new root");
-    assert_eq!(read.revision, note.revision);
-}
-
-/// A project known only by its memory partition — no row in any member —
-/// is still a project the re-base takes, as the purge already takes it:
-/// design §3's five steps are the one path that re-keys its notes with
-/// their origin intact, and a `404` here left a hand move plus `doctor
-/// --repair` as the only remedy, which re-records every note as
-/// `external`. Scoped like the row path: another owner asking about the
-/// same root gets the `404`, and nothing moves.
-#[tokio::test]
-async fn a_project_known_only_by_its_memory_can_be_re_based() {
-    let f = Fixture::new();
-    let old = f.project("old-project");
-    let new = f.repo("new-project");
-    let note = f.note(&old, "Release step");
-    let old_key = f.project_snapshot(&old).unwrap().partition_key;
-    let old_snapshot_path = openalpaca_storage::memory_files::snapshot_path_for(&old_key).unwrap();
-    assert_eq!(
-        f.memory.known_project_roots(OWNER),
-        [std::path::PathBuf::from(&old)]
-    );
-    assert_eq!(f.get(Some(&old)).await.1["rows"]["artifacts"], 0);
-
-    // Somebody else's re-base of it is nothing of theirs.
-    let (status, body) = f.patch_as("owner-2", &old, &new).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-    assert_eq!(error_code(&body), "WORKSPACE_NOT_FOUND");
-    assert!(old_snapshot_path.is_file(), "a refusal moves nothing");
-    assert!(
-        std::path::Path::new(&old)
-            .join(store::STORE_DIR_NAME)
-            .is_dir()
-    );
-
-    let (status, body) = f.patch(&old, &new).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["store_moved"], true);
-
-    assert!(
-        !old_snapshot_path.exists(),
-        "step 5 deleted the old-key snapshot"
-    );
-    let moved = f
-        .project_snapshot(&new)
-        .expect("the new-key snapshot binds the moved directory");
-    assert_ne!(moved.partition_key, old_key);
-    assert_eq!(moved.moved_from, None, "step 5 cleared moved_from");
-    assert!(moved.notes.contains_key(&note.id));
-    assert_eq!(f.partition(&new).health(), PartitionHealth::Ready);
-    assert!(move_states().is_empty(), "{:?}", move_states());
-    let read = f
-        .memory
-        .read(
-            &f.memory_ctx(&new),
-            ReadInput {
-                id: note.id,
-                expected_revision: None,
-                section: None,
-            },
-        )
-        .expect("the note reads from the new root");
-    assert_eq!(read.revision, note.revision);
-    assert_eq!(
-        f.memory.known_project_roots(OWNER),
-        [std::path::PathBuf::from(&new)]
-    );
-}
-
-/// A crash injected after each of the five steps (fixture 17 steps 6–11)
-/// leaves the one state `doctor` names for it: nothing after step 1; the
-/// twin *abandoned* after steps 2 and 3 (the directory never moved); the old
-/// snapshot *stale* after step 4 (it did); nothing after step 5. The rows
-/// follow the transaction: untouched through step 2, re-based from step 3.
-#[tokio::test]
-async fn a_crash_after_each_move_step_leaves_a_state_doctor_names() {
-    for stop_after in [
-        MoveStep::Quiesce,
-        MoveStep::NewKeySnapshot,
-        MoveStep::DbTransaction,
-        MoveStep::Rename,
-        MoveStep::OldKeySnapshotDeleted,
-    ] {
-        let f = Fixture::new();
-        let old = f.project("old-project");
-        let new = f.bare_dir("new-project");
-        f.artifact(&old, "Notes");
-        let note = f.note(&old, "Release step");
-        let old_key = f.project_snapshot(&old).unwrap().partition_key;
-        let old_snapshot_path =
-            openalpaca_storage::memory_files::snapshot_path_for(&old_key).unwrap();
-
-        let (status, body) = f.patch_crashing_after(&old, &new, stop_after).await;
-        let old_store = std::path::Path::new(&old).join(store::STORE_DIR_NAME);
-        let new_store = std::path::Path::new(&new).join(store::STORE_DIR_NAME);
-        let twin = snapshots()
-            .into_iter()
-            .find(|s| s.moved_from.as_deref() == Some(old_key.as_str()));
-        let rows_at_new = f.get(Some(&new)).await.1["rows"]["artifacts"].clone();
-
-        match stop_after {
-            MoveStep::Quiesce => {
-                assert_ne!(status, StatusCode::OK, "{stop_after:?}: {body}");
-                assert!(twin.is_none(), "{stop_after:?}: nothing written yet");
-                assert!(old_snapshot_path.is_file());
-                assert!(old_store.is_dir() && !new_store.exists());
-                assert_eq!(rows_at_new, 0, "{stop_after:?}");
-                assert!(move_states().is_empty(), "{stop_after:?}");
-            }
-            MoveStep::NewKeySnapshot | MoveStep::DbTransaction => {
-                assert_ne!(status, StatusCode::OK, "{stop_after:?}: {body}");
-                let twin = twin.unwrap_or_else(|| panic!("{stop_after:?}: the twin exists"));
-                assert!(twin.notes.contains_key(&note.id), "{stop_after:?}");
-                assert!(old_snapshot_path.is_file(), "{stop_after:?}");
-                assert!(old_store.is_dir() && !new_store.exists(), "{stop_after:?}");
-                assert_eq!(
-                    rows_at_new,
-                    if stop_after == MoveStep::DbTransaction {
-                        1
-                    } else {
-                        0
-                    },
-                    "{stop_after:?}"
-                );
-                assert_eq!(
-                    move_states(),
-                    [(twin.partition_key.clone(), MoveSnapshotState::Abandoned)],
-                    "{stop_after:?}: the directory never moved"
-                );
-                // The old root still works as it did.
-                assert_eq!(f.partition(&old).health(), PartitionHealth::Ready);
-            }
-            MoveStep::Rename => {
-                assert_ne!(status, StatusCode::OK, "{stop_after:?}: {body}");
-                assert!(!old_store.exists() && new_store.is_dir(), "{stop_after:?}");
-                assert!(
-                    old_snapshot_path.is_file(),
-                    "{stop_after:?}: step 5 never ran"
-                );
-                assert_eq!(rows_at_new, 1, "{stop_after:?}");
-                assert_eq!(
-                    move_states(),
-                    [(old_key.clone(), MoveSnapshotState::Stale)],
-                    "{stop_after:?}: the directory moved, the old snapshot is bound to nothing"
-                );
-                // The moved partition already opens under its twin.
-                assert_eq!(f.partition(&new).health(), PartitionHealth::Ready);
-            }
-            MoveStep::OldKeySnapshotDeleted => {
-                assert_ne!(status, StatusCode::OK, "{stop_after:?}: {body}");
-                assert!(!old_snapshot_path.exists(), "{stop_after:?}");
-                assert_eq!(f.project_snapshot(&new).unwrap().moved_from, None);
-                assert!(move_states().is_empty(), "{stop_after:?}");
-                assert_eq!(rows_at_new, 1);
-            }
-        }
-    }
 }
 
 // ============================================================================

@@ -62,10 +62,10 @@ pub use note::{
 pub use partition::{
     Actor, CrashPoint, Created, Dedup, ForgetMode, ForgetOutcome, ForgetStatus, LoadedPartition,
     MalformedFile, MoveSnapshotState, NoteView, Partition, PartitionHealth, ReconcileChange,
-    ReconcileChangeKind, RepairReport, ScanEntry, SnapshotMove, UpdateAction, Updated, adopt,
-    begin_project_move, classify_move_snapshots, finish_project_move, list_owner_keys,
-    list_snapshots, note_file_reads_on_this_thread, partition_key_for, scans_on_this_thread,
-    snapshot_copies_on_this_thread, snapshot_path_for, whole_parses_on_this_thread,
+    ReconcileChangeKind, RepairReport, ScanEntry, UpdateAction, Updated, adopt,
+    classify_move_snapshots, list_owner_keys, list_snapshots, note_file_reads_on_this_thread,
+    partition_key_for, scans_on_this_thread, snapshot_copies_on_this_thread, snapshot_path_for,
+    whole_parses_on_this_thread,
 };
 pub use snapshot::{
     ControlSnapshot, NoteRecord, Origin, Pending, SNAPSHOT_SCHEMA, SnapshotError, SnapshotScope,

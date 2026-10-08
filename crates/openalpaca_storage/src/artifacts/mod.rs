@@ -1480,12 +1480,6 @@ impl<'a> ArtifactStore<'a> {
         })
     }
 
-    /// The pre-§6 re-base: [`Self::repoint_rows`] with the project's folder
-    /// taken to be its own path. Removed with its last caller (S3.8).
-    pub fn rebase_project(&self, old_root: &str, new_root: &str) -> Result<RebaseCounts> {
-        self.repoint_rows(old_root, new_root, old_root, new_root)
-    }
-
     /// §6 step 2: one transaction moves every row naming `old_root` in the
     /// five path columns to `new_root`, and rewrites `storage_path` on the
     /// rows whose `project_root` is `old_root` — `old_dir` (the project's
@@ -1807,7 +1801,7 @@ impl<'a> ArtifactStore<'a> {
     /// beforehand.
     ///
     /// **Path-scoped, not owner-scoped**, for the same reason
-    /// [`Self::rebase_project`] is: `session` and `task` carry no `owner_id`, so
+    /// [`Self::repoint_rows`] is: `session` and `task` carry no `owner_id`, so
     /// a half-scoped transaction would delete a project's transcripts and leave
     /// its uploads. The route is what makes it owner-safe — it refuses a root
     /// holding rows the caller does not own ([`WorkspaceRows::other_owners`]).

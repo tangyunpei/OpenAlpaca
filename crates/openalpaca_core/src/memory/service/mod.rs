@@ -155,21 +155,6 @@ thread_local! {
     pub(super) static RECORDS_BUILT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// What a workspace move carries from step 2 to step 5 (design §3): the
-/// snapshots [`MemoryService::begin_project_move`] re-keyed, for
-/// [`MemoryService::finish_project_move`].
-#[derive(Debug)]
-pub struct ProjectMove {
-    moves: Vec<files::SnapshotMove>,
-}
-
-impl ProjectMove {
-    /// How many partitions (one per owner) the move re-keys.
-    pub fn partitions(&self) -> usize {
-        self.moves.len()
-    }
-}
-
 /// One reconciliation's account (`POST /v1/memories/sync`).
 #[derive(Debug, Clone)]
 pub struct SyncReport {
@@ -821,49 +806,14 @@ impl MemoryService {
         }
     }
 
-    /// Design §3, *Workspace move*, step 1: refuses while a memory write for
-    /// that project is pending; otherwise holds new writes until the guard
-    /// drops (step 5).
+    /// Refuses while a memory write for that project is pending; otherwise
+    /// holds new writes until the guard drops. The re-point and (Stage 1
+    /// step (5)) the delete hold it.
     pub fn quiesce(&self, project_root: &Path) -> Result<QuiesceGuard, MemoryError> {
         let key = Self::slot_key(&StoreScope::Project(project_root.to_path_buf()), "");
         self.slots
             .quiesce(&key)
             .map_err(|()| MemoryError::WritePending { key })
-    }
-
-    /// Design §3, *Workspace move*, step 2: before anything is renamed,
-    /// every partition of `old_project` gets its control snapshot written
-    /// under the new partition key — bound to the directory the rename will
-    /// create, `moved_from` naming the old key — with the old snapshot left
-    /// in place ([`files::begin_project_move`]). The caller holds the
-    /// [`QuiesceGuard`] meanwhile.
-    pub fn begin_project_move(
-        &self,
-        old_project: &Path,
-        new_project: &Path,
-    ) -> Result<ProjectMove, MemoryError> {
-        let moves = files::begin_project_move(old_project, new_project, Utc::now())?;
-        Ok(ProjectMove { moves })
-    }
-
-    /// Design §3, *Workspace move*, step 5: deletes the old-key snapshots and
-    /// clears `moved_from` on their twins ([`files::finish_project_move`]),
-    /// then drops the old keys' rows from the index and this process's
-    /// fingerprints, scans and parse cache entries (design 09 §6.3) — the
-    /// moved partition is re-indexed under its new key on its first use,
-    /// like any partition the index has no rows for. The caller releases the
-    /// hold by dropping its guard.
-    pub fn finish_project_move(&self, mv: ProjectMove) -> Result<(), MemoryError> {
-        files::finish_project_move(&mv.moves, Utc::now())?;
-        let mut fingerprints = self.fingerprints.lock().unwrap_or_else(|e| e.into_inner());
-        let mut last_scans = self.last_scans.lock().unwrap_or_else(|e| e.into_inner());
-        for m in &mv.moves {
-            self.indexed(self.index.remove_partition(&m.old_key))?;
-            fingerprints.remove(&m.old_key);
-            last_scans.remove(&m.old_key);
-            self.parse_cache.evict_partition(&m.old_key);
-        }
-        Ok(())
     }
 
     /// The project roots `owner_id`'s control snapshots know (plan 3.7): a

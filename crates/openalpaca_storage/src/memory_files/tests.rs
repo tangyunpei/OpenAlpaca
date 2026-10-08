@@ -3525,218 +3525,6 @@ fn move_snapshots_are_classified_stale_abandoned_or_orphaned() {
 }
 
 // ============================================================================
-// The workspace move's snapshot steps (design §3, five steps; §6 recovery
-// table, row *workspace move*; fixture 17)
-// ============================================================================
-
-/// The design's step 2: before anything is renamed, the twin snapshot exists
-/// under the new key, bound to the directory the partition will have, with
-/// `moved_from` naming the old key and the notes copied; the old snapshot is
-/// untouched. Until step 5 the twin is what `doctor` calls *abandoned* — the
-/// move never happened as far as the disk can tell.
-#[test]
-fn begin_project_move_writes_the_twin_snapshot_under_the_new_key() {
-    let sb = Sandbox::new();
-    let p = sb.open_project(ALICE).unwrap();
-    let created = p
-        .create(
-            new_note(
-                "Release step",
-                "# Release step\n\nTag first.\n",
-                NoteKind::Procedure,
-            ),
-            Actor::UserSurface,
-        )
-        .unwrap();
-    let old_snapshot = p
-        .snapshot()
-        .expect("the first write laid the partition out");
-    let old_key = p.partition_key().to_string();
-    let new_project = tempdir().unwrap();
-    let new_root = new_project.path().canonicalize().unwrap().join("moved");
-
-    let moves =
-        begin_project_move(&sb.project_root(), &new_root, ts(2026, 9, 24, 8, 0, 0)).unwrap();
-    assert_eq!(moves.len(), 1, "one owner, one partition: {moves:?}");
-    let mv = &moves[0];
-    assert_eq!(mv.old_key, old_key);
-    assert!(
-        mv.new_key
-            .starts_with(&format!("proj-{}-", owner_key(ALICE)))
-    );
-    assert_ne!(mv.new_key, mv.old_key);
-    assert_eq!(mv.old_path, snapshot_path_for(&old_key).unwrap());
-    assert_eq!(mv.new_path, snapshot_path_for(&mv.new_key).unwrap());
-
-    // The old snapshot is byte for byte what it was.
-    assert_eq!(
-        ControlSnapshot::load(&mv.old_path).unwrap().unwrap(),
-        old_snapshot
-    );
-    // The twin binds the directory the rename will create, carries the notes,
-    // and says where it came from.
-    let twin = ControlSnapshot::load(&mv.new_path)
-        .unwrap()
-        .expect("the twin exists");
-    assert_eq!(twin.partition_key, mv.new_key);
-    assert_eq!(twin.moved_from.as_deref(), Some(old_key.as_str()));
-    assert_eq!(twin.owner_key, old_snapshot.owner_key);
-    assert_eq!(twin.owner_id, ALICE);
-    assert_eq!(twin.notes, old_snapshot.notes);
-    assert!(twin.notes.contains_key(&created.id));
-    assert_eq!(
-        Path::new(&twin.root),
-        new_root
-            .join(".openalpaca")
-            .join("memory")
-            .join("owners")
-            .join(owner_key(ALICE))
-    );
-    assert!(
-        !new_root.exists(),
-        "step 2 writes a snapshot, never a directory"
-    );
-
-    // What doctor says between step 2 and the rename: the twin is abandoned.
-    let all: Vec<ControlSnapshot> = list_snapshots()
-        .unwrap()
-        .into_iter()
-        .filter_map(|(_, s)| s.ok())
-        .collect();
-    assert_eq!(
-        classify_move_snapshots(&all),
-        [(mv.new_key.clone(), MoveSnapshotState::Abandoned)]
-    );
-}
-
-/// Once the directory has moved (step 4), the old snapshot is *stale*; step 5
-/// deletes it and clears `moved_from`, after which the partition opens at the
-/// new root with the same note at the same revision and doctor has nothing
-/// to say.
-#[test]
-fn finish_project_move_deletes_the_old_snapshot_and_clears_moved_from() {
-    let sb = Sandbox::new();
-    let p = sb.open_project(ALICE).unwrap();
-    let created = p
-        .create(
-            new_note(
-                "Release step",
-                "# Release step\n\nTag first.\n",
-                NoteKind::Procedure,
-            ),
-            Actor::UserSurface,
-        )
-        .unwrap();
-    let old_key = p.partition_key().to_string();
-    let new_project = tempdir().unwrap();
-    let new_root = new_project.path().canonicalize().unwrap().join("moved");
-    let moves =
-        begin_project_move(&sb.project_root(), &new_root, ts(2026, 9, 24, 8, 0, 0)).unwrap();
-
-    // Step 4, by hand: the whole store travels.
-    std::fs::create_dir_all(&new_root).unwrap();
-    std::fs::rename(
-        sb.project_root().join(".openalpaca"),
-        new_root.join(".openalpaca"),
-    )
-    .unwrap();
-    let all = || -> Vec<ControlSnapshot> {
-        list_snapshots()
-            .unwrap()
-            .into_iter()
-            .filter_map(|(_, s)| s.ok())
-            .collect()
-    };
-    assert_eq!(
-        classify_move_snapshots(&all()),
-        [(old_key.clone(), MoveSnapshotState::Stale)],
-        "after the rename the old snapshot is bound to a directory that is gone"
-    );
-
-    finish_project_move(&moves, ts(2026, 9, 24, 8, 0, 1)).unwrap();
-
-    assert!(
-        !moves[0].old_path.exists(),
-        "step 5 deletes the old-key snapshot"
-    );
-    let twin = ControlSnapshot::load(&moves[0].new_path).unwrap().unwrap();
-    assert_eq!(twin.moved_from, None, "step 5 clears moved_from");
-    assert!(classify_move_snapshots(&all()).is_empty());
-
-    let moved = Partition::open(&StoreScope::Project(new_root.clone()), ALICE).unwrap();
-    assert_eq!(moved.partition_key(), moves[0].new_key);
-    assert_eq!(moved.health(), PartitionHealth::Ready);
-    let view = moved.read(&created.id).unwrap();
-    assert_eq!(view.revision, created.revision);
-    assert_eq!(view.derived.origin, Origin::User);
-    assert!(
-        view.derived.recorded,
-        "the twin recorded the revision, so the note is not `external`"
-    );
-
-    // Idempotent: finishing again is a no-op, not an error.
-    finish_project_move(&moves, ts(2026, 9, 24, 8, 0, 2)).unwrap();
-}
-
-/// A project with no memory partition has nothing to re-key: an empty plan,
-/// and no file written. Two owners' partitions are both re-keyed.
-#[test]
-fn begin_project_move_covers_every_owner_and_nothing_else() {
-    let sb = Sandbox::new();
-    let new_project = tempdir().unwrap();
-    let new_root = new_project.path().canonicalize().unwrap().join("moved");
-    let control = sb.home.join("state").join("memory-control");
-
-    let none = begin_project_move(&sb.project_root(), &new_root, ts(2026, 9, 24, 8, 0, 0)).unwrap();
-    assert!(none.is_empty());
-    assert!(!control.exists(), "nothing to move, nothing written");
-
-    for owner in [ALICE, BOB] {
-        sb.open_project(owner)
-            .unwrap()
-            .create(
-                new_note("A note", "# A note\n\nBody.\n", NoteKind::Fact),
-                Actor::UserSurface,
-            )
-            .unwrap();
-    }
-    // The home partition is not the project's: it stays where it is.
-    sb.open_home(ALICE)
-        .create(
-            new_note("Global", "# Global\n\nBody.\n", NoteKind::Preference),
-            Actor::UserSurface,
-        )
-        .unwrap();
-    let before = list_snapshots().unwrap().len();
-    assert_eq!(before, 3);
-
-    let moves =
-        begin_project_move(&sb.project_root(), &new_root, ts(2026, 9, 24, 8, 0, 0)).unwrap();
-    let mut owners: Vec<String> = moves
-        .iter()
-        .map(|m| {
-            ControlSnapshot::load(&m.new_path)
-                .unwrap()
-                .unwrap()
-                .owner_id
-        })
-        .collect();
-    owners.sort();
-    assert_eq!(owners, [ALICE, BOB]);
-    assert_eq!(
-        list_snapshots().unwrap().len(),
-        5,
-        "two twins, three originals"
-    );
-    assert!(
-        moves
-            .iter()
-            .all(|m| !m.old_key.starts_with("home-") && !m.new_key.starts_with("home-")),
-        "{moves:?}"
-    );
-}
-
-// ============================================================================
 // `doctor`, read-only (design §6, *Management operations*; plan 3.8)
 // ============================================================================
 
@@ -3787,10 +3575,27 @@ fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing(
     std::fs::remove_file(carol_home.snapshot_path()).unwrap();
     // A move begun and never finished: the twin binds a directory that does
     // not exist while the old one still stands — abandoned.
-    let new_root = sb.outside.path().join("moved-project");
-    let moves =
-        begin_project_move(&sb.project_root(), &new_root, ts(2026, 9, 24, 9, 0, 0)).unwrap();
-    assert_eq!(moves.len(), 1);
+    // An earlier build's move, begun and never finished: a twin bound to a
+    // directory that does not exist, naming the old key — abandoned. Nothing
+    // in this build writes one any more; the doctor still names it until S4.
+    let old = project.snapshot().unwrap();
+    let mut twin = old.clone();
+    twin.root = sb
+        .outside
+        .path()
+        .join("moved-project")
+        .join("memory")
+        .join("owners")
+        .join(owner_key(ALICE))
+        .to_string_lossy()
+        .into_owned();
+    twin.partition_key = project_partition_key(&owner_key(ALICE), &twin.root);
+    twin.moved_from = Some(old.partition_key.clone());
+    twin.save(
+        &snapshot_path_for(&twin.partition_key).unwrap(),
+        ts(2026, 9, 24, 9, 0, 0),
+    )
+    .unwrap();
     // A cloned repository's force-added ignore file: `Partition::open` would
     // rewrite it, the doctor must not.
     let gitignore = project.memory_dir().join(".gitignore");
@@ -3859,7 +3664,7 @@ fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing(
     );
     assert_eq!(report.move_snapshots.len(), 1);
     assert_eq!(report.move_snapshots[0].state, MoveSnapshotState::Abandoned);
-    assert_eq!(report.move_snapshots[0].partition_key, moves[0].new_key);
+    assert_eq!(report.move_snapshots[0].partition_key, twin.partition_key);
     assert!(report.refused.is_empty(), "{:?}", report.refused);
     assert!(report.unreadable_snapshots.is_empty());
     assert_eq!(

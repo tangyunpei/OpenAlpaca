@@ -1,63 +1,27 @@
-//! `/v1/workspaces` — §4.8's "Project moved", as a route.
+//! `/v1/workspaces` — a project's life (design §6), as routes.
 //!
 //! ```text
 //! GET   /v1/workspaces?path=<abs>          -> what is recorded at that root
-//! PATCH /v1/workspaces {old_path,new_path} -> re-base everything onto the new one
+//! PATCH /v1/workspaces {old_path,new_path} -> re-point a project onto its new folder
 //! POST  /v1/workspaces/purge {path|all}    -> delete one project's history
 //! ```
 //!
-//! A project's path is its identity in three places — `file_assets.project_root`,
-//! `session.workspace_id` and `task.workspace_id` — so moving the directory
-//! strands all three at once. Claude Code's encoded-cwd directories are the
-//! cautionary example the plan cites: a rename there leaves transcripts and
-//! history under the old name for good. A path-derived identity is cheap only
-//! if re-basing is **one transaction**, which is what
-//! `ArtifactStore::rebase_project` is. (A project's memory notes are files
-//! inside the directory that moves, not rows keyed by its path, so they are
-//! not a member of the transaction — but their control snapshot is keyed by
-//! the directory, so the memory service is threaded through the move in
-//! design §3's five-step order: quiesce, the new-key snapshot, the
-//! transaction, the rename, the old-key snapshot deleted. A crash between
-//! any two leaves a state `memory doctor` names.)
+//! A project's canonical path is its identity in five row columns
+//! (`task.workspace_id`, `session.workspace_id`,
+//! `conversation_messages.workspace_root`, `lane_followups.workspace_path`,
+//! `file_assets.project_root`) and in `file_assets.storage_path`'s prefix, so a
+//! folder moved by hand strands them until it is re-pointed. The re-point is
+//! `project_life::repoint`: the project's `project.json` marked, one
+//! transaction, the folder under `projects/` renamed, the marker cleared — and
+//! a crash between two steps is finished at the next boot (R24). The route
+//! owns the checks storage cannot see: the owner (R40), the runs in flight and
+//! the memory service's quiesce.
 //!
-//! **A root a project came *from* is resolved the way a turn's
-//! `x-workspace-path` is** (R22, `request_project_root` — the storage design's
-//! resolver, which keeps no cache): up to the nearest registered project or
-//! `.git`, falling back to the path itself when there is neither — which is the
-//! usual state of a root a project has already been moved *out of*. A re-base
-//! **destination** is taken literally instead
-//! (`resolve_destination`): walking it up would re-address a history onto a
-//! directory nobody named. The resolved values are what comes back, so a caller
-//! can see what was answered about rather than assume.
-//!
-//! The `GET` exists because the picker cannot honestly offer a re-base without
-//! it: it is the only way to learn that the store at a chosen path records a
-//! *different* root (`.layout`'s `project_root=`, written once when the store
-//! was seeded), and what a re-base would actually move.
-//!
-//! Nothing here re-bases on its own. The `PATCH` is the only writer, and it
-//! refuses rather than guesses: `404` when nothing of the caller's — no row,
-//! no memory partition — names the old root (or a row there belongs to
-//! somebody else), `409` when rows already name
-//! the new one (two projects must not merge silently), `409` while a run under
-//! the old root is in flight, `409` when either root is the home store, `409`
-//! when the store directory itself cannot be moved, and `422` when the
-//! destination sits inside another project's root.
-//!
-//! The `POST …/purge` is the other writer, and it answers a plan rather than a
-//! number: one line per store entry, in the retention-class terms the seeded
-//! store README already uses, saying `delete` or `keep` for each. `dry_run`
-//! defaults to **true** on the route as well as on the CLI — the daemon fails
-//! closed, so a caller that forgets the field gets the plan and not the
-//! deletion. Its refusals are the re-base's, for the same reasons — with one
-//! difference: `path` is never walked up to an ancestor the way a re-base's
-//! *old* root is (`resolve_purge_root`, ruling R72), unless nothing of the
-//! caller's is recorded under the literal path at all — rows are the proof of
-//! a root (R75), so a path any of the four members still names exactly is
-//! purgeable by that path outright, marker walk or no. A destructive verb is
-//! the one place that walk must not run silently on a path rows do not back —
-//! `purge /repo/src` is a `422` `WORKSPACE_NOT_A_ROOT` naming `/repo` rather
-//! than a purge of the whole project for a path that named one file of it.
+//! The `GET` and the purge keep their pre-design shapes until Stage 1 step
+//! (5) (interfaces §6, C8): the `GET` still reads an earlier build's in-project
+//! `.layout` for `recorded_root` and `moved`, and the purge still resolves its
+//! path by rows and the marker walk (R72, R75). `dry_run` defaults to **true**
+//! on the purge — the daemon fails closed.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -69,7 +33,9 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use openalpaca_storage::store::{self, project_move};
+use openalpaca_storage::project_life;
+use openalpaca_storage::store::projects::{ProjectError, ResolvedProject};
+use openalpaca_storage::store::{self, projects};
 use openalpaca_storage::{ArtifactStore, Database, PurgePlan, RebaseCounts, WorkspaceRows};
 use serde::Deserialize;
 
@@ -140,18 +106,15 @@ fn canonical_path(input: &str) -> Result<String, Response> {
 }
 
 /// The canonical root string the four members hold, for a path a client named
-/// as somewhere a project **is or was**.
+/// as somewhere a project **is or was** — the `GET`'s resolution.
 ///
 /// **Rows are the proof of a root (R75), here as well as on the purge.** A path
 /// any of the four members still names *exactly* is taken as given, before the
-/// marker walk is consulted: a project moved out from under a monorepo's `.git`,
-/// its own `.openalpaca` gone with it, would otherwise resolve to the monorepo
-/// root — and then `PATCH` answers "nothing of yours is recorded under /mono"
-/// (the moved project cannot be re-attached by the path it came from) or, if
-/// `/mono` has rows of its own, re-addresses *those* onto the new path. The
-/// count is unscoped for the same reason [`resolve_purge_root`]'s is: what is
-/// being established is that this path was a root, not whose rows they are —
-/// the owner check comes after, on the root this returns.
+/// marker walk is consulted: a project moved out from under a monorepo's `.git`
+/// would otherwise resolve to the monorepo root, and the `GET` would describe
+/// `/mono` rather than the path the rows recorded. The count is unscoped for
+/// the same reason [`resolve_purge_root`]'s is: what is being established is
+/// that this path was a root, not whose rows they are.
 ///
 /// Only a path nothing names goes through the walk a turn's `x-workspace-path`
 /// takes (R22), and when *that* finds no marker the canonical path itself
@@ -168,16 +131,11 @@ fn resolve_root(store: &ArtifactStore<'_>, input: &str) -> Result<String, Respon
     Ok(request_project_root(Some(&literal)).unwrap_or(literal))
 }
 
-/// A canonicalized path, refused when the marker walk finds it sits *inside*
-/// another root's project rather than naming a root of its own — the shape
-/// [`resolve_destination`] and [`resolve_purge_root`] share, `describe`
-/// supplying the message that is specific to which of the two callers this is.
-///
-/// A path that resolves to itself — its own `.git`, or a registered project of
-/// its own — or to no project anywhere, is taken as given.
-///
-/// The resolver keeps no cache, so the remediation this refusal names — give
-/// the path a `.git` of its own — is seen by the very next request.
+/// A canonicalized path, refused when it resolves to *another* root above it
+/// rather than naming a root of its own — the purge's guard against deleting
+/// a whole project for a path that named one folder of it (R72). A path that
+/// resolves to itself, or to nothing, is taken as given. Removed with the
+/// purge's path rules in Stage 1 step (5).
 #[allow(clippy::result_large_err)]
 fn refuse_if_inside_another_root(
     literal: String,
@@ -193,30 +151,6 @@ fn refuse_if_inside_another_root(
     }
 }
 
-/// The re-base **destination**, taken literally.
-///
-/// The marker walk is right for a root a project came *from* and wrong for one
-/// it is going to: a fresh directory inside another repository resolves to
-/// *that* repository's root, so `rebase /old/proj /mono/sub/proj` with
-/// `/mono/.git` present would silently re-address a whole history onto `/mono`
-/// and then rename `/old/proj/.openalpaca` to `/mono/.openalpaca`. Echoing the
-/// resolved value back is mitigation, not prevention.
-///
-/// So the destination is canonicalized and then checked: a path that resolves
-/// to an **ancestor** is `422 WORKSPACE_NOT_A_ROOT`, naming the ancestor, and
-/// the caller decides which of the two roots they meant.
-#[allow(clippy::result_large_err)]
-fn resolve_destination(input: &str) -> Result<String, Response> {
-    let literal = canonical_path(input)?;
-    refuse_if_inside_another_root(literal, |literal, ancestor| {
-        format!(
-            "{literal} is inside the project rooted at {ancestor}, so re-basing onto it \
-             would move everything onto {ancestor} instead. Re-base onto {ancestor} if that \
-             is what you meant, or give {literal} a project marker of its own first"
-        )
-    })
-}
-
 /// The purge **target**, taken almost literally — ruling R72, refined by R75.
 ///
 /// A destructive verb is the one place the old-root marker walk
@@ -230,12 +164,11 @@ fn resolve_destination(input: &str) -> Result<String, Response> {
 /// moved out from under a monorepo's `.git`, its own `.openalpaca` gone with
 /// it, stays purgeable by the root its rows recorded even though the walk
 /// would otherwise resolve it to the monorepo root. Only a path *nothing*
-/// names is subjected to the ancestor check, exactly as a re-base destination
-/// is: a path that resolves to an **ancestor** is `422 WORKSPACE_NOT_A_ROOT`,
-/// naming that root, rather than purging it for a subdirectory the caller
-/// gave; a path that resolves to itself, or to no marker at all, is taken as
-/// given — and from there the ordinary `404` follows if nothing is recorded
-/// under it after all.
+/// names is subjected to the ancestor check: a path that resolves to an
+/// **ancestor** is `422 WORKSPACE_NOT_A_ROOT`, naming that root, rather than
+/// purging it for a subdirectory the caller gave; a path that resolves to
+/// itself, or to no marker at all, is taken as given — and from there the
+/// ordinary `404` follows if nothing is recorded under it after all.
 #[allow(clippy::result_large_err)]
 fn resolve_purge_root(store: &ArtifactStore<'_>, input: &str) -> Result<String, Response> {
     let literal = canonical_path(input)?;
@@ -278,13 +211,8 @@ fn owner_mismatch(root: &str, other_owners: usize) -> Response {
 
 /// The home store is not a project and never becomes one (R24, and R13's
 /// `store::projects::overlaps_home_store`, which also refuses a folder inside
-/// it or around it): its artifacts directory is one identity space, and
-/// a project re-based onto it would share that directory with the home scope —
-/// where a later home-scope `put` sees those rows as belonging to no address of
-/// its own and removes the files (§4.2).
-///
-/// Both roots are checked, because a re-base *out of* `$HOME` would record the
-/// home store as a project just as surely.
+/// it or around it): the purge's refusal. The re-point's is
+/// [`ProjectError::IsHome`], from `project_life`.
 #[allow(clippy::result_large_err)]
 fn refuse_the_home_root(field: &str, root: &str) -> Result<(), Response> {
     if !store::projects::overlaps_home_store(Path::new(root)) {
@@ -393,164 +321,94 @@ fn workspace_json(
 
 // ── PATCH /v1/workspaces ─────────────────────────────────────────
 
-/// Re-base one project root onto another: the four members in one transaction,
-/// then the store directory itself when it is still at the old root.
+/// A [`ProjectError`] anywhere in `e`'s chain, as the route answers it, or
+/// `None` for any other failure (interfaces §6.1): not registered `404`, the
+/// home store `409`, not a directory `422`, already a project `409`, the
+/// same path `400` — each with the error's own sentence.
+pub(crate) fn project_error_response(e: &anyhow::Error) -> Option<Response> {
+    let error = e
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ProjectError>())?;
+    let status = match error {
+        ProjectError::NotRegistered { .. } => StatusCode::NOT_FOUND,
+        ProjectError::IsHome { .. } | ProjectError::Exists { .. } => StatusCode::CONFLICT,
+        ProjectError::NotADirectory { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        ProjectError::SamePath { .. } => StatusCode::BAD_REQUEST,
+    };
+    Some(api_error(status, error.code(), error.to_string()))
+}
+
+/// Re-point a project onto the folder it is in now (design §6): the route's
+/// half — the owner check, the in-flight check, the memory quiesce — then
+/// [`project_life::repoint`], which refuses a new path that is not a
+/// directory, overlaps the home store, is the same path, or is already a
+/// project or named by rows (ST-20), and otherwise rewrites the five path
+/// columns and both `storage_path` prefixes in one transaction and renames
+/// the project's folder under `projects/`.
 ///
-/// The order is the plan's: rows first, bytes second. The move is *planned*
-/// before the transaction opens, so the one failure that would leave rows
-/// pointing at a directory nobody moved is refused up front instead.
-///
-/// Owner-scoped like every other injecting write: the rows this rewrites must
-/// belong to `owner_id`, and a root holding somebody else's is a `404` rather
-/// than a transaction over rows the caller cannot see. `session` and `task`
-/// carry no owner column, which is precisely why the answer is a refusal and
-/// not a half-scoped update. A root the caller knows only by a memory
-/// partition of their own — no row anywhere — is re-based all the same: the
-/// transaction rewrites nothing and the five steps re-key the notes.
+/// Owner-scoped like every injecting write (R40): a path no project owns and
+/// a project holding another owner's rows answer the same `404`, in the same
+/// words. Until Stage 1 step (4) keys memory by the project's id, a
+/// re-pointed project's notes stay keyed by its old folder (unreleased
+/// commits only).
 pub(crate) fn rebase_workspace(
     db: &Database,
     memory: &MemoryService,
     owner_id: &str,
     request: RebaseRequest,
 ) -> Response {
-    rebase_workspace_with(db, memory, owner_id, request, &mut |_| true)
-}
-
-/// The five steps of design §3's workspace move, in order. `checkpoint` in
-/// [`rebase_workspace_with`] runs after each one, and a `false` abandons the
-/// move right there with the disk exactly as that step left it — what a
-/// crash between two steps leaves, and what fixture 17 injects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MoveStep {
-    /// 1: the memory service refuses while a write for the project is in
-    /// flight, else holds new writes until the guard drops.
-    Quiesce,
-    /// 2: the control snapshot under the new partition key, `moved_from`
-    /// naming the old one.
-    NewKeySnapshot,
-    /// 3: the four members, one transaction.
-    DbTransaction,
-    /// 4: `rename(2)` of the store directory.
-    Rename,
-    /// 5: the old-key snapshot deleted, `moved_from` cleared, the old key's
-    /// index rows dropped.
-    OldKeySnapshotDeleted,
-}
-
-/// [`rebase_workspace`] with the crash injection hook fixture 17 requires.
-/// Production passes `|_| true`.
-pub(crate) fn rebase_workspace_with(
-    db: &Database,
-    memory: &MemoryService,
-    owner_id: &str,
-    request: RebaseRequest,
-    checkpoint: &mut dyn FnMut(MoveStep) -> bool,
-) -> Response {
-    let store = ArtifactStore::new(db);
-    let old_root = match resolve_root(&store, &request.old_path) {
-        Ok(root) => root,
+    let old_path = match canonical_path(&request.old_path) {
+        Ok(path) => path,
         Err(response) => return response,
     };
-    let new_root = match resolve_destination(&request.new_path) {
-        Ok(root) => root,
+    let new_path = match canonical_path(&request.new_path) {
+        Ok(path) => path,
         Err(response) => return response,
     };
-    for (field, root) in [("old_path", &old_root), ("new_path", &new_root)] {
-        if let Err(response) = refuse_the_home_root(field, root) {
-            return response;
+    let project = match projects::resolve(Path::new(&old_path)) {
+        Ok(Some(ResolvedProject {
+            project: Some(project),
+            ..
+        })) => project,
+        Ok(_) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "WORKSPACE_NOT_FOUND",
+                format!("nothing of yours is recorded under {old_path}"),
+            );
         }
-    }
-    if old_root == new_root {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_PATH",
-            format!("{old_root} is already where it is"),
-        );
-    }
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "WORKSPACE_MOVE_FAILED",
+                format!("{e:#}"),
+            );
+        }
+    };
+    let old_root = project.root_string();
 
-    let old_rows = match store.workspace_rows(&old_root, Some(owner_id)) {
+    let store = ArtifactStore::new(db);
+    let rows = match store.workspace_rows(&old_root, Some(owner_id)) {
         Ok(rows) => rows,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()),
     };
-    if old_rows.other_owners > 0 {
-        return owner_mismatch(&old_root, old_rows.other_owners);
+    if rows.other_owners > 0 {
+        return owner_mismatch(&old_root, rows.other_owners);
     }
-    // A project the caller knows only by its memory partition — no row in
-    // any member — is still a project, exactly as the purge takes it: the
-    // five steps below are the one path that re-keys its notes with their
-    // origin intact, and a `404` here left a hand move plus `doctor
-    // --repair` as the only remedy, which re-records every note as
-    // `external`. The listing is the caller's own (R40).
-    let known_by_memory = memory
-        .known_project_roots(owner_id)
-        .contains(&std::path::PathBuf::from(&old_root));
-    if old_rows.counts.is_empty() && !known_by_memory {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "WORKSPACE_NOT_FOUND",
-            format!("nothing of yours is recorded under {old_root}"),
-        );
-    }
-    if old_rows.active_tasks > 0 {
+    if rows.active_tasks > 0 {
         return api_error(
             StatusCode::CONFLICT,
             "WORKSPACE_BUSY",
             format!(
                 "{} run(s) under {old_root} are still in flight; a running or paused run \
-                 resolved its store when it started, and re-basing the row would not move it",
-                old_rows.active_tasks
+                 resolved its store when it started, and re-pointing the row would not move it",
+                rows.active_tasks
             ),
         );
     }
 
-    // Unscoped on purpose: *anybody's* rows at the destination are the merge
-    // this refusal exists to prevent, and one owner cannot re-base over
-    // another's history by not being able to see it.
-    let new_rows = match store.workspace_rows(&new_root, None) {
-        Ok(rows) => rows,
-        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()),
-    };
-    if !new_rows.counts.is_empty() {
-        return api_error(
-            StatusCode::CONFLICT,
-            "WORKSPACE_EXISTS",
-            format!(
-                "{new_root} already has a store recorded against it; re-basing onto it would \
-                 merge two projects' histories"
-            ),
-        );
-    }
-
-    // Decide the on-disk move before a row changes, so the one outcome that
-    // cannot be undone by re-running this call is refused rather than half done.
-    // Both an error (a cross-volume rename) and `Ambiguous` (a store at each
-    // root) are refusals; only the other two outcomes may proceed.
-    match project_move::plan_project_store_move(Path::new(&old_root), Path::new(&new_root)) {
-        Ok(project_move::StoreMove::Rename | project_move::StoreMove::NothingToMove) => {}
-        Ok(project_move::StoreMove::Ambiguous) => {
-            return api_error(
-                StatusCode::CONFLICT,
-                "WORKSPACE_MOVE_BLOCKED",
-                format!(
-                    "two stores: {old_root}/{dir} and {new_root}/{dir} both exist. Refusing to \
-                     choose between them — keep the one you want, move the other aside, and \
-                     try again",
-                    dir = store::STORE_DIR_NAME
-                ),
-            );
-        }
-        Err(e) => {
-            return api_error(
-                StatusCode::CONFLICT,
-                "WORKSPACE_MOVE_BLOCKED",
-                format!("{e:#}"),
-            );
-        }
-    }
-
-    // Step 1 (design §3): refused while a memory write for the project is in
-    // flight; otherwise every new write waits until this guard drops, which
-    // is when this function returns — after step 5, or after any refusal.
+    // Held until this function returns: every memory write for the project
+    // waits, and one already in flight refuses the re-point.
     let _quiesced = match memory.quiesce(Path::new(&old_root)) {
         Ok(guard) => guard,
         Err(e) => {
@@ -558,110 +416,29 @@ pub(crate) fn rebase_workspace_with(
                 StatusCode::CONFLICT,
                 "WORKSPACE_BUSY",
                 format!(
-                    "a memory write under {old_root} is still in flight ({e}); re-basing now \
-                     would move the directory out from under it. Try again in a moment"
+                    "a memory write under {old_root} is still in flight ({e}); re-pointing now \
+                     would move its folder out from under it. Try again in a moment"
                 ),
             );
         }
     };
-    if !checkpoint(MoveStep::Quiesce) {
-        return interrupted(MoveStep::Quiesce);
-    }
 
-    // Step 2: the snapshot under the new partition key, before a row or a
-    // byte moves. Nothing is re-based if it cannot be written.
-    let partitions = match memory.begin_project_move(Path::new(&old_root), Path::new(&new_root)) {
-        Ok(partitions) => partitions,
-        Err(e) => {
-            return api_error(
+    match project_life::repoint(db, Path::new(&old_root), Path::new(&new_path)) {
+        Ok(done) => Json(serde_json::json!({
+            "old_path": done.before.root_string(),
+            "new_path": done.after.root_string(),
+            "moved": counts_json(&done.rows),
+            "store_moved": done.before.name != done.after.name,
+        }))
+        .into_response(),
+        Err(e) => project_error_response(&e).unwrap_or_else(|| {
+            api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "WORKSPACE_MOVE_FAILED",
-                format!(
-                    "the memory partitions under {old_root} could not be re-keyed onto \
-                     {new_root}: {e}. Nothing was re-based"
-                ),
-            );
-        }
-    };
-    if !checkpoint(MoveStep::NewKeySnapshot) {
-        return interrupted(MoveStep::NewKeySnapshot);
+                format!("{old_root} was not re-pointed onto {new_path}: {e:#}"),
+            )
+        }),
     }
-
-    // Step 3: the four members, one transaction.
-    let counts = match store.rebase_project(&old_root, &new_root) {
-        Ok(counts) => counts,
-        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()),
-    };
-    if !checkpoint(MoveStep::DbTransaction) {
-        return interrupted(MoveStep::DbTransaction);
-    }
-
-    // Step 4: the directory.
-    let store_moved = match project_move::move_project_store(Path::new(&old_root), Path::new(&new_root))
-    {
-        Ok(moved) => moved,
-        // The rows are already re-based. Saying so — with both paths — is the
-        // only useful answer: the directory needs one `mv` and nothing else.
-        Err(e) => {
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "WORKSPACE_MOVE_FAILED",
-                format!(
-                    "the rows were re-based onto {new_root}, but the store directory could not \
-                     be moved: {e:#}"
-                ),
-            );
-        }
-    };
-
-    // The store now lives at the new root and must say so, or the next look
-    // would report it as moved all over again.
-    let new_store_root = Path::new(&new_root).join(store::STORE_DIR_NAME);
-    if new_store_root.is_dir()
-        && let Err(e) = store::set_recorded_project_root(&new_store_root, &new_root)
-    {
-        tracing::warn!(
-            "Re-based onto {new_root} but could not update {}: {e:#}",
-            new_store_root.display()
-        );
-    }
-    if !checkpoint(MoveStep::Rename) {
-        return interrupted(MoveStep::Rename);
-    }
-
-    // Step 5: the old-key snapshot goes, the twin forgets where it came from,
-    // the old key's index rows go. A failure here is the state `memory
-    // doctor` names *stale* and `--repair` deletes: the rows and the
-    // directory are already where they should be, so the move is reported
-    // done and the residue logged, not the move refused.
-    if let Err(e) = memory.finish_project_move(partitions) {
-        tracing::warn!(
-            "Re-based onto {new_root}, but the old memory snapshots could not be retired: {e}; \
-             `openalpaca memory doctor` will name them stale"
-        );
-    }
-    if !checkpoint(MoveStep::OldKeySnapshotDeleted) {
-        return interrupted(MoveStep::OldKeySnapshotDeleted);
-    }
-
-    Json(serde_json::json!({
-        "old_path": old_root,
-        "new_path": new_root,
-        "moved": counts_json(&counts),
-        "store_moved": store_moved,
-    }))
-    .into_response()
-}
-
-/// The answer to a checkpoint that said stop: only a test's crash injection
-/// ever produces it, and it names the step so the caller knows what the disk
-/// holds.
-fn interrupted(after: MoveStep) -> Response {
-    api_error(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "WORKSPACE_MOVE_INTERRUPTED",
-        format!("the move stopped after {after:?}"),
-    )
 }
 
 // ── POST /v1/workspaces/purge ────────────────────────────────────
