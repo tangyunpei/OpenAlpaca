@@ -43,7 +43,7 @@ pub use queue::{
 
 // Task-output extraction shares the item fields' cleaning and the keys'
 // rendering (design 09 §2.7).
-pub(crate) use extractor::{ProjectCheck, check_project, clean_aliases, clean_fact_key};
+pub(crate) use extractor::{ProjectCheck, clean_aliases, clean_fact_key};
 pub(crate) use lookup::{MAX_KEYS_BYTES, render_keys};
 
 // Engineering bounds, not owner-facing choices (design §1.10): only MD-10's
