@@ -346,8 +346,8 @@ fn a_request_that_names_no_workspace_uses_the_global_partition_only() {
     );
 }
 
-/// Fixture 02: a directory with no `.openalpaca` or `.git` above it is
-/// global only; no partition is created there, and an explicit
+/// Fixture 02: a directory with no `.git` above it and no registered project
+/// is global only; no partition is created there, and an explicit
 /// `scope: project` is refused (§7b P1).
 #[test]
 fn a_directory_with_no_marker_is_global_only() {

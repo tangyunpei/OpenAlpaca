@@ -397,8 +397,10 @@ pub(super) fn artifact_write_tool_definition() -> ToolDefinition {
             anything the user is meant to keep or receive: file_write may write a \
             plain file, or save an artifact named after its path with no kind, summary \
             or note of your choosing; artifact_write records an owned, \
-            versioned artifact of the kind you name under the project's \
-            .openalpaca/artifacts directory. Writing the \
+            versioned artifact of the kind you name. The store is OpenAlpaca's own: \
+            the project's folder in OpenAlpaca's home store when the conversation \
+            has a project, the home store's artifacts/ when it has none — never \
+            inside the project's own folder. Writing the \
             same name again supersedes the previous version instead of overwriting it \
             (the old version stays retrievable). Content is limited to 10MB. Returns \
             the artifact id, its path on disk, and the version number just written."
@@ -1395,6 +1397,20 @@ mod tests {
         assert_eq!(
             scope_from_context(&ToolContext::default()),
             StoreScope::Home
+        );
+    }
+
+    /// Storage design ST-1: nothing is written inside a project's folder, so
+    /// the model is not told an artifact lands there — it lands in the
+    /// project's folder under the home store's `projects/`, or in the home
+    /// store's own `artifacts/` with no project.
+    #[test]
+    fn the_description_names_no_store_inside_the_project() {
+        let description = artifact_write_tool_definition().description;
+        assert!(!description.contains(".openalpaca"), "{description}");
+        assert!(
+            description.contains("never inside the project's own folder"),
+            "{description}"
         );
     }
 

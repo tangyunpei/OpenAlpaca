@@ -123,7 +123,7 @@ describe("RepointProjectDialog", () => {
     expect(screen.getByRole("button", { name: "Re-point" })).toBeDisabled();
   });
 
-  it("says a relative folder would be read against the daemon's own directory", () => {
+  it("says a relative folder is never a project", () => {
     renderDialog({ value: "work/repo" });
 
     expect(screen.getByText(RELATIVE_PATH_COPY)).toBeInTheDocument();

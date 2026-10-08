@@ -10,10 +10,11 @@
 //!
 //! Two flags, and they pull in opposite directions on purpose:
 //!   * `--workspace <path>` **narrows** to one project. The path is resolved
-//!     the same way the daemon resolves a turn's `x-workspace-path` — up to the
-//!     nearest `.openalpaca`/`.git` — so `--workspace .` works from anywhere
-//!     inside a repository, and a path under no project marker is an error
-//!     rather than a filter that silently matches nothing.
+//!     the same way the daemon resolves a turn's `x-workspace-path` — to the
+//!     nearest folder at or above it that is a registered project's root or
+//!     holds `.git` — so `--workspace .` works from anywhere inside a
+//!     repository, and a path in no project is an error rather than a filter
+//!     that silently matches nothing.
 //!   * `--all` **widens** past the lane the CLI and the GUI share (both talk on
 //!     `{local_user}:gui`) to every lane the daemon holds, connectors included.
 //!

@@ -550,7 +550,7 @@ describe("SettingsView (§2.5, §5.4)", () => {
     expect(useUiStore.getState().toast).toMatch(/Project set/);
   });
 
-  it("refuses a relative path instead of sending one the daemon misreads", async () => {
+  it("refuses a relative path, which is never a project, instead of sending it", async () => {
     const user = userEvent.setup();
     render(<SettingsView />);
 

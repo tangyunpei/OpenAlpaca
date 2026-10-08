@@ -301,7 +301,8 @@ pub(crate) struct EpisodeJob {
     pub service: Arc<MemoryService>,
     pub ctx: MemoryAccessContext,
     pub session_id: String,
-    /// The window's project directory, checked again right before the write.
+    /// The window's project root, whose registration under `projects/` is
+    /// checked again right before the write ([`check_project`]).
     pub root: Option<PathBuf>,
     /// The project the check before the call found at `root`: one
     /// re-pointed while the model wrote is still listed under this id, so

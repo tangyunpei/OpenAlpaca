@@ -686,7 +686,7 @@ mod tests {
         std::fs::create_dir_all(&nested).expect("create nested");
 
         // A path *inside* the project resolves up to the project root — the same
-        // marker walk a chat turn does, so an upload lands where that turn's
+        // resolution a chat turn's path gets, so an upload lands where that turn's
         // artifacts would.
         let Ok(scope) = upload_scope(&headers_with(nested.to_str())) else {
             panic!("the project is recorded");
@@ -730,9 +730,9 @@ mod tests {
     }
 
     /// `$HOME` is not a project: a header pointing anywhere under it with no
-    /// closer marker resolves to `$HOME`, whose "project store" *is* the home
-    /// store. It must fold to `Home`, or a stray header would claim the whole
-    /// home directory as a project.
+    /// closer project root reaches `$HOME`, which holds the home store, so the
+    /// resolver answers no project (R13). It must fold to `Home`, or a stray
+    /// header would claim the whole home directory as a project.
     #[test]
     fn upload_scope_for_a_path_resolving_to_the_home_store_is_the_home_store() {
         let tmp = tempfile::tempdir().expect("create tempdir");

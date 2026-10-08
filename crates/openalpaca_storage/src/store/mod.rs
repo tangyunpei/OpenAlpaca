@@ -47,7 +47,10 @@ use std::path::{Path, PathBuf};
 /// Environment override for the home root (D4). Absolute paths only.
 pub const HOME_STORE_ENV: &str = "OPENALPACA_HOME_STORE";
 
-/// The store directory name — `~/.openalpaca`.
+/// The home store's directory name under the user's home: `~/.openalpaca`.
+/// No store is made inside a project (storage design ST-1): a project's
+/// content lives in its folder under `projects/` here, and an `.openalpaca/`
+/// an earlier build left in a project is never read (ST-9).
 pub const STORE_DIR_NAME: &str = ".openalpaca";
 
 /// Layout version written to line 1 of `.layout`.

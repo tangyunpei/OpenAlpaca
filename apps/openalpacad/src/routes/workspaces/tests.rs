@@ -220,7 +220,8 @@ impl Fixture {
             .into_owned()
     }
 
-    /// `$HOME`: the directory whose project store *is* the home store.
+    /// `$HOME`: the directory that holds the home store, so never a project
+    /// (R13).
     fn home(&self) -> String {
         self._home
             .path()

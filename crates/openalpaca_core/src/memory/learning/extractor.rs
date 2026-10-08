@@ -783,8 +783,9 @@ pub(crate) struct StoreJob {
     pub service: Arc<MemoryService>,
     pub ctx: MemoryAccessContext,
     pub session_id: String,
-    /// The chunk's project directory (its rows' `workspace_root`), checked
-    /// again right before the first write.
+    /// The chunk's project root (its rows' `workspace_root`), whose
+    /// registration under `projects/` is checked again right before the
+    /// first write ([`check_project`]).
     pub root: Option<PathBuf>,
     /// The project the check before the call found at `root`: one
     /// re-pointed while the model answered is still listed under this id,

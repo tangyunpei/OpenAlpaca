@@ -22,9 +22,9 @@
 //! Every daemon-backed verb takes `--global` (send no project) or `--project
 //! <path>`; the default is the CLI's own working directory, sent as the
 //! `x-workspace-path` header `chat` already sends, which the daemon resolves
-//! to a project root by the same marker walk (design §7a, the CLI row). Ids
-//! may be abbreviated to a unique prefix. A write through these verbs is a
-//! user-directed act and records origin `user` (design §4).
+//! to a project root the same way (`store::projects::resolve`; design §7a,
+//! the CLI row). Ids may be abbreviated to a unique prefix. A write through
+//! these verbs is a user-directed act and records origin `user` (design §4).
 //!
 //! **A revision travels in `If-Match`.** `edit`, `confirm`, `undo` and
 //! `forget` fetch the note first and send the revision they fetched, so a
@@ -129,8 +129,8 @@ impl ScopeArgs {
             .unwrap_or_default())
     }
 
-    /// The project root a local verb scans: the same marker walk the daemon
-    /// runs on the header (design §3 rule 1, MD-5).
+    /// The project root a local verb scans: the same resolution the daemon
+    /// makes of the header (`store::projects::resolve`, storage design §3).
     fn local_project_root(&self) -> Result<Option<PathBuf>> {
         Ok(self
             .directory()?

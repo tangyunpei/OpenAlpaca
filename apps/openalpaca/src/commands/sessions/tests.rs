@@ -142,9 +142,10 @@ fn a_directory_under_no_project_is_an_error_not_an_empty_filter() {
     let loose = tmp.path().canonicalize().unwrap().join("loose");
     std::fs::create_dir(&loose).unwrap();
 
-    // A temp dir has no `.git`/`.openalpaca` above it inside the sandbox root,
-    // so either outcome is possible depending on the machine; what must never
-    // happen is a filter on a path the daemon could not have stored.
+    // A temp dir has no `.git` and no registered project above it inside the
+    // sandbox root, so either outcome is possible depending on the machine;
+    // what must never happen is a filter on a path the daemon could not have
+    // stored.
     if let Ok(resolved) = resolve_workspace_filter(&loose.to_string_lossy()) {
         assert_ne!(
             resolved,

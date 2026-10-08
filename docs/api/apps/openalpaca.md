@@ -28,7 +28,7 @@
 | `openalpaca sessions` | List the conversations a lane holds (plan §5.7) | `apps/openalpaca/src/commands/sessions.rs` |
 | `openalpaca plugin` | Manage plugins (list, approve, deny, enable, disable, config) | `apps/openalpaca/src/commands/plugin.rs` |
 | `openalpaca ext` | Manage extensions — MCP servers and plugins (list, info, enable, disable, reload, approve, deny, remove) | `apps/openalpaca/src/commands/ext.rs` |
-| `openalpaca store` | Manage the content store (rebase a moved project, purge one you are done with) | `apps/openalpaca/src/commands/store.rs` |
+| `openalpaca store` | Manage projects (list them, re-point a moved one, delete one's data) | `apps/openalpaca/src/commands/store.rs` |
 | `openalpaca persona` | Show or edit the persona documents (USER.md) through the daemon | `apps/openalpaca/src/commands/persona.rs` |
 | `openalpaca memory` | Manage memory notes (list, search, show, add, edit, confirm, undo, forget, sync, doctor, adopt) | `apps/openalpaca/src/commands/memory.rs` |
 

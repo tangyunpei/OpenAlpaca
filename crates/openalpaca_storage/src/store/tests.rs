@@ -253,8 +253,8 @@ fn open_home_database_creates_the_state_directory_at_0700() {
 // ensure_store
 // ============================================================================
 
-/// The README is the document this subsystem writes into the user's own
-/// project, and D2 put human-named uploads there. The daemon's asset sweep
+/// The home README is the document a person reads to learn what each entry
+/// keeps, and D2 gave uploads human-readable names. The daemon's asset sweep
 /// deletes an upload that was never attached to a message once the grace period
 /// passes — bytes and row — so no retention row may promise those files are kept
 /// forever. Produced artifacts are genuinely never swept; only uploads are.

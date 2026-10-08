@@ -16,11 +16,11 @@ describe("isAbsolutePath", () => {
     expect(isAbsolutePath("\\\\server\\share")).toBe(true);
   });
 
-  it("rejects a path the daemon would read against its own directory", () => {
+  it("rejects a relative path, which the daemon never takes as a project", () => {
     expect(isAbsolutePath("openalpaca")).toBe(false);
     expect(isAbsolutePath("./openalpaca")).toBe(false);
     expect(isAbsolutePath("../openalpaca")).toBe(false);
-    // The daemon does not expand `~`; sending it would name a literal dir.
+    // The daemon does not expand `~`: to it `~/code/app` is a relative path.
     expect(isAbsolutePath("~/code/app")).toBe(false);
   });
 });

@@ -1355,7 +1355,8 @@ async fn a_quarantined_partition_holds_the_window_before_any_model_call() {
 
 // ── Roots (§1.1, ruling LR1) ─────────────────────────────────────────────
 
-/// A project directory the marker walk recognises, and its canonical root.
+/// A project directory the resolver recognises — it holds `.git` — and its
+/// canonical root.
 fn project() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();

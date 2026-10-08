@@ -735,7 +735,7 @@ pub(super) fn patch_session(deps: &Deps<'_>, id: &str, request: PatchSessionRequ
 
     // Absent leaves the binding alone; an empty string unbinds; a path binds,
     // resolved to its project root the same way a chat turn's header is (R22).
-    // A path under no project marker resolves to `None` — which unbinds rather
+    // A path in no project resolves to `None` — which unbinds rather
     // than storing a root the daemon does not believe in. On an unbound
     // session both of those are the same no-op.
     let workspace = request.workspace_path.as_deref().map(|path| {

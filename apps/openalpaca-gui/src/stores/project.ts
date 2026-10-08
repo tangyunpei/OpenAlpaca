@@ -25,17 +25,19 @@ export const PROJECT_STORAGE_KEY = "oa-project";
 
 /** What a relative path is refused with, wherever a project folder is typed. */
 export const RELATIVE_PATH_COPY =
-  "An absolute path, please — a relative one would be read against the daemon's own directory, not this one.";
+  "An absolute path, please — a relative one is never a project: the daemon refuses it.";
 
 /**
  * Whether a path is one the daemon can resolve.
  *
- * A relative path would be resolved against the *daemon's* current directory,
- * not the GUI's — a different machine-state entirely, and the source of the
+ * A relative path is never a project: the daemon refuses one on `Use` and on a
+ * re-point (`400 INVALID_PATH`) and resolves a turn's relative
+ * `x-workspace-path` to no project, because read against the *daemon's*
+ * current directory rather than the GUI's it would name another folder — the
  * bug ruling R22 fixed. Only an absolute path names the same directory to both
- * sides, so a relative one is refused here rather than sent and silently
- * misread. POSIX (`/…`) and Windows (`C:\…`, `C:/…`, `\\server\share`) shapes
- * both count; the daemon does the real existence check.
+ * sides, so a relative one is refused here rather than sent. POSIX (`/…`) and
+ * Windows (`C:\…`, `C:/…`, `\\server\share`) shapes both count; the daemon
+ * does the real existence check.
  */
 export function isAbsolutePath(path: string): boolean {
   if (path.startsWith("/") || path.startsWith("\\\\")) return true;

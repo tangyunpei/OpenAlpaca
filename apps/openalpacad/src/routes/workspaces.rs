@@ -187,7 +187,8 @@ pub struct DeleteCountsView {
     pub spans: usize,
     pub run_events: usize,
     pub uploads: usize,
-    /// By-products, every version.
+    /// By-products the delete removes: one `file_assets` row per artifact,
+    /// however many versions it has.
     pub artifacts: usize,
     /// Note files of every owner under `projects/<name>/memory/`.
     pub memory_notes: usize,
@@ -223,7 +224,8 @@ pub struct DeleteDataView {
 
 // ── Path resolution ──────────────────────────────────────────────
 
-/// A client's path, canonicalized and nothing more — no marker walk.
+/// A client's path, canonicalized and nothing more — not resolved to a
+/// project's root here.
 ///
 /// A relative path is refused rather than resolved: it would be read against
 /// the *daemon's* working directory, which is the bug ruling R22 fixed.

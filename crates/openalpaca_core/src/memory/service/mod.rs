@@ -7,8 +7,10 @@
 //! `memory_index` owns the disposable lexical cache; this module owns
 //!
 //! - the [`MemoryAccessContext`]: the owner (a `global_user` row, else no
-//!   owner), the MD-5 project root (the marker walk from the request
-//!   workspace, never the daemon's CWD), the surface and the capabilities;
+//!   owner), the project root (what `store::projects::resolve` makes of the
+//!   request workspace — the nearest folder at or above it that is a
+//!   registered project's root or holds `.git`; never the daemon's CWD), the
+//!   surface and the capabilities;
 //! - partition resolution with lazy store creation and the per-component
 //!   link check (design §3 rule 1), the kind-based default scope (rule 2);
 //! - the read path (design §5 steps 1–8): pinned notes, the union-of-terms
@@ -847,9 +849,9 @@ impl MemoryService {
 
     /// The registered projects in which `owner_id` has a partition directory
     /// (design §5: known projects come from `projects::list()`), sorted —
-    /// what the purge's listing and the 30 s reconciliation iterate. Scoped
-    /// to the owner like every workspace answer (R40): another owner's
-    /// partition in a project of its own does not name that root to this one.
+    /// what the 30 s reconciliation iterates. Scoped to the owner like every
+    /// workspace answer (R40): another owner's partition in a project of its
+    /// own does not name that root to this one.
     /// A project whose folder under `projects/` is gone is no project; a
     /// listing failure is logged and lists nothing.
     pub fn known_project_roots(&self, owner_id: &str) -> Vec<PathBuf> {

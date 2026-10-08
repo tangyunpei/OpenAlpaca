@@ -14,8 +14,8 @@
  * deletes nothing and is undone by re-pointing back — and the folder field
  * takes the focus. `Re-point` stays off until the count on screen has been
  * read, while a run under the root is in flight (the daemon answers
- * `409 WORKSPACE_BUSY` and changes nothing), and for a path the daemon would
- * read against its own directory or that is where the project already is.
+ * `409 WORKSPACE_BUSY` and changes nothing), and for a relative path, which
+ * the daemon refuses, or one where the project already is.
  * Every other refusal — `WORKSPACE_EXISTS` above all (ST-20: re-pointing onto
  * another project would merge two) — is the daemon's sentence, shown as
  * written, and the dialog stays open on it.

@@ -684,7 +684,7 @@ pub struct PurgeCounts {
 }
 
 impl PurgeCounts {
-    /// Would a purge of this root remove anything at all?
+    /// Would deleting this project's data remove any row at all?
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }

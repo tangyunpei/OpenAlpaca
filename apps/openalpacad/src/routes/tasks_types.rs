@@ -106,7 +106,7 @@ pub struct SteerTaskRequest {
     /// one resolver every route shares (R22) — the sibling injecting route,
     /// `POST /v1/lanes/{lane}/followups`, already takes it that way and has no
     /// body field at all. Taken from the body it was stored **unresolved**: a
-    /// subdirectory, a relative path or a path under no project marker went
+    /// subdirectory, a relative path or a path in no project went
     /// straight onto the steering message and from there into an
     /// `unprocessed_steering` follow-up, which is a `workspace_id` the daemon
     /// never agreed to.

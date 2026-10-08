@@ -169,9 +169,9 @@ it meets and fail on one it does not know.
 ```
 
 The loader creates the partition the way the library does — `memory/`,
-`owners/<owner-key>/`, `notes/`, `.history/` with `create_private_dir`, the
-project `.gitignore` (`*\n`), `MEMORY.md` — then places the notes and writes the
-control snapshot. A partition that is listed with no `notes` exists and is empty.
+`owners/<owner-key>/`, `notes/`, `.history/` with `create_private_dir`,
+`MEMORY.md` — then places the notes and writes the control snapshot. A
+partition that is listed with no `notes` exists and is empty.
 
 A partition with `"lazy": true` is **not created** by the loader: it only names
 the partition the service is expected to create (or not) during the run, so

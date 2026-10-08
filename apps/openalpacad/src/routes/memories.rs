@@ -5,8 +5,9 @@
 //! Fifteen routes over one [`MemoryService`], every one under the bearer
 //! middleware and in the shared `api_error` envelope. The owner is the
 //! daemon's `local_user_id`; the project is the `x-workspace-path` header
-//! resolved by the same marker walk a chat turn uses (absent → the global
-//! partition only); the surface is `UserSurface`, so a write here records
+//! resolved as a chat turn's is (`store::projects::resolve`; a write route
+//! records the project, a read never does; absent → the global partition
+//! only); the surface is `UserSurface`, so a write here records
 //! origin `user` — the only surface that does (design §4).
 //!
 //! **A revision travels in `If-Match` and nowhere else.** A mutation that
