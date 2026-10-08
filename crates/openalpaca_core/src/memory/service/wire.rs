@@ -438,19 +438,10 @@ pub fn doctor_report_json(report: &DoctorReport) -> Value {
                 })
             })
             .collect::<Vec<_>>(),
-        "move_snapshots": report
-            .move_snapshots
+        "idless_project_snapshots": report
+            .idless_project_snapshots
             .iter()
-            .map(|m| json!({
-                "partition_key": m.partition_key,
-                "state": match m.state {
-                    openalpaca_storage::memory_files::MoveSnapshotState::Stale => "stale",
-                    openalpaca_storage::memory_files::MoveSnapshotState::Abandoned => "abandoned",
-                    openalpaca_storage::memory_files::MoveSnapshotState::Orphaned => "orphaned",
-                },
-                "root": m.root,
-                "moved_from": m.moved_from,
-            }))
+            .map(|s| json!({ "partition_key": s.partition_key, "root": s.root }))
             .collect::<Vec<_>>(),
         "refused": report
             .refused

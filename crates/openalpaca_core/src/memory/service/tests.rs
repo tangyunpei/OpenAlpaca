@@ -6375,3 +6375,31 @@ fn a_rebuild_that_cannot_list_the_projects_still_indexes_the_home_partition() {
         "the project partition is left to its first read"
     );
 }
+
+/// R22 on the wire: the doctor's answer carries
+/// `idless_project_snapshots` — each one's key and recorded directory — and
+/// no `move_snapshots` (nothing writes `moved_from` since the re-point
+/// replaced the move).
+#[test]
+fn the_doctor_wire_lists_idless_project_snapshots_and_no_move_snapshots() {
+    use openalpaca_storage::memory_files::{DoctorReport, IdlessSnapshot};
+    let key = format!("proj-{ALICE_KEY}-0123456789abcdef");
+    let root = format!("/repo/.openalpaca/memory/owners/{ALICE_KEY}");
+    let report = DoctorReport {
+        owner_key: ALICE_KEY.to_string(),
+        partitions: Vec::new(),
+        idless_project_snapshots: vec![IdlessSnapshot {
+            path: PathBuf::from(format!("/home/state/memory-control/{key}.json")),
+            partition_key: key.clone(),
+            root: root.clone(),
+        }],
+        refused: Vec::new(),
+        unreadable_snapshots: Vec::new(),
+    };
+    let json = super::wire::doctor_report_json(&report);
+    assert!(json.get("move_snapshots").is_none(), "{json}");
+    assert_eq!(
+        json["idless_project_snapshots"],
+        serde_json::json!([{ "partition_key": key, "root": root }])
+    );
+}

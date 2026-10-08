@@ -5,16 +5,16 @@
 //! It lists, per partition, what the design names — quarantine (a snapshot
 //! missing or invalid), orphans (an owner key that is not the current
 //! owner's), conflicts (a lower-authority `supersedes` link, two active
-//! same-`fact_key` notes), unverified and malformed files — and the stale,
-//! abandoned and orphaned move snapshots of §6's workspace-move row. It
-//! changes nothing: every partition is opened with
-//! [`Partition::open_readonly`], which re-asserts no `.gitignore` and runs no
-//! recovery, and the snapshots are read where they lie.
+//! same-`fact_key` notes), unverified and malformed files — and the project
+//! snapshots that carry no project id (storage design R22: an earlier
+//! build's, which this build never opens, never adopts and never deletes).
+//! It changes nothing: every partition is opened with
+//! [`Partition::open_readonly`], which runs no recovery, and the snapshots
+//! are read where they lie.
 
 use super::authority::Conflict;
 use super::partition::{
-    MalformedFile, MoveSnapshotState, Partition, PartitionHealth, classify_move_snapshots,
-    list_owner_keys, list_snapshots,
+    MalformedFile, Partition, PartitionHealth, list_owner_keys, list_snapshots,
 };
 use super::snapshot::{ControlSnapshot, SnapshotScope};
 use super::{MemoryFilesError, NoteId, owner_key};
@@ -50,15 +50,16 @@ pub struct PartitionReport {
     pub pending: Option<NoteId>,
 }
 
-/// A snapshot whose bound directory does not exist (design §6, the
-/// workspace-move row; §7b P11).
+/// A project control snapshot that carries no project id (storage design
+/// R22): written by an earlier build, keyed by the directory it was bound
+/// to. No partition opens it and `adopt` skips it; nothing deletes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MoveSnapshotReport {
+pub struct IdlessSnapshot {
+    /// The file under `state/memory-control/`.
+    pub path: PathBuf,
     pub partition_key: String,
-    pub state: MoveSnapshotState,
-    /// The directory the snapshot is bound to, as recorded.
+    /// The directory it was bound to, as recorded.
     pub root: String,
-    pub moved_from: Option<String>,
 }
 
 /// A partition the doctor could not open: a symlink, a junction or a
@@ -77,7 +78,8 @@ pub struct DoctorReport {
     /// The current owner's key, which decides `orphan`.
     pub owner_key: String,
     pub partitions: Vec<PartitionReport>,
-    pub move_snapshots: Vec<MoveSnapshotReport>,
+    /// R22's snapshots, listed and left in place.
+    pub idless_project_snapshots: Vec<IdlessSnapshot>,
     pub refused: Vec<RefusedPartition>,
     /// Snapshot files under `state/memory-control/` that do not parse, with
     /// why; the partition each belongs to is quarantined wherever its
@@ -86,13 +88,15 @@ pub struct DoctorReport {
 }
 
 /// The scan. `current_owner_id` decides which partitions are orphans;
-/// `project` is the request's project root (the marker root, design §3 rule
-/// 1), whose owner directories are scanned beside the home store's — when a
-/// project is registered there (R12). Every project snapshot a registered
-/// project's folder holds is scanned too (`projects::list()`, design §5),
-/// whichever project it belongs to, so a partition is never missed because
-/// the caller stood elsewhere. The current owner's home partition is
-/// reported even when it does not exist yet (`Absent`).
+/// `project` is the request's project root, whose owner directories are
+/// scanned beside the home store's when a folder under `projects/` records
+/// it (a root none records is an empty project, storage design R12). Every
+/// project partition a snapshot knows is scanned too, found by the project
+/// id in its snapshot (R18) — a missing project's included — so a partition
+/// is never missed because the caller stood elsewhere. A project snapshot
+/// with no id (an earlier build's, R22) is listed in
+/// `idless_project_snapshots` and never opened. The current owner's home
+/// partition is reported even when it does not exist yet (`Absent`).
 pub fn doctor(
     current_owner_id: &str,
     project: Option<&Path>,
@@ -101,7 +105,7 @@ pub fn doctor(
     let mut report = DoctorReport {
         owner_key: current_key.clone(),
         partitions: Vec::new(),
-        move_snapshots: Vec::new(),
+        idless_project_snapshots: Vec::new(),
         refused: Vec::new(),
         unreadable_snapshots: Vec::new(),
     };
@@ -109,20 +113,16 @@ pub fn doctor(
     let mut snapshots: Vec<ControlSnapshot> = Vec::new();
     for (path, parsed) in list_snapshots()? {
         match parsed {
+            Ok(s) if s.scope == SnapshotScope::Project && s.project_id.is_none() => {
+                report.idless_project_snapshots.push(IdlessSnapshot {
+                    path,
+                    partition_key: s.partition_key,
+                    root: s.root,
+                });
+            }
             Ok(s) => snapshots.push(s),
             Err(reason) => report.unreadable_snapshots.push((path, reason)),
         }
-    }
-    for (partition_key, state) in classify_move_snapshots(&snapshots) {
-        let Some(s) = snapshots.iter().find(|s| s.partition_key == partition_key) else {
-            continue;
-        };
-        report.move_snapshots.push(MoveSnapshotReport {
-            partition_key,
-            state,
-            root: s.root.clone(),
-            moved_from: s.moved_from.clone(),
-        });
     }
 
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -145,17 +145,19 @@ pub fn doctor(
         }
     }
     // Project partitions the snapshots know that the caller did not name,
-    // through `projects::list()` (design §5, interfaces §4.3 — by folder): the
-    // listed project whose folder holds the snapshot's recorded `root`.
-    // `store_root` names the folder on either side of the flip; S4 matches by
-    // id.
-    let project_dirs: Vec<(PathBuf, PathBuf)> = crate::store::projects::list()?
-        .into_iter()
-        .filter_map(|p| {
-            let dir = crate::store::store_root(&StoreScope::Project(p.root.clone())).ok()?;
-            Some((p.root, dir))
-        })
-        .collect();
+    // found by the project id each carries (storage design R18) — a missing
+    // project's included; a snapshot whose id no folder under `projects/`
+    // records is left out. A listing that fails is logged and scans none of
+    // them: the partitions above are still reported.
+    let listed = match crate::store::projects::list() {
+        Ok(listed) => listed,
+        Err(e) => {
+            tracing::warn!(
+                "memory doctor: the projects under projects/ could not be listed, so only the home store and the named project are scanned: {e:#}"
+            );
+            Vec::new()
+        }
+    };
     for s in snapshots
         .iter()
         .filter(|s| s.scope == SnapshotScope::Project)
@@ -163,16 +165,16 @@ pub fn doctor(
         if seen.contains(&s.partition_key) {
             continue;
         }
-        let Some((root, _)) = project_dirs
-            .iter()
-            .find(|(_, dir)| Path::new(&s.root).starts_with(dir))
+        let Some(project) = s
+            .project_id
+            .and_then(|id| listed.iter().find(|p| p.id == id))
         else {
             continue;
         };
         scan_partition(
             &mut report,
             &mut seen,
-            &StoreScope::Project(root.clone()),
+            &StoreScope::Project(project.root.clone()),
             &s.owner_key,
             &current_key,
         );

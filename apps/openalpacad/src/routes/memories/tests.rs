@@ -1054,7 +1054,8 @@ async fn the_doctor_and_recently_used_answer_their_shapes() {
     assert_eq!(partitions[0]["health"], "ready");
     assert_eq!(partitions[0]["notes"], 2);
     assert_eq!(partitions[0]["orphan"], false);
-    assert_eq!(json["move_snapshots"].as_array().unwrap().len(), 0);
+    assert_eq!(json["idless_project_snapshots"].as_array().unwrap().len(), 0);
+    assert!(json.get("move_snapshots").is_none(), "{json}");
 
     let (status, json) = split(f.api.recently_used(RecentlyUsedQuery::default())).await;
     assert_eq!(status, StatusCode::OK);

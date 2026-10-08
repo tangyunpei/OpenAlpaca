@@ -3858,6 +3858,126 @@ fn a_repoint_interrupted_after_any_step_keeps_the_partition_once_recovered() {
     }
 }
 
+/// R18, R22: the doctor finds a project partition by the id in its
+/// snapshot — after a re-point its recorded `root` names a folder that is
+/// gone — and lists a project snapshot that carries no id (an earlier
+/// build's) by its file, key and recorded directory, opening and deleting
+/// nothing of it.
+#[test]
+fn doctor_finds_a_repointed_partition_by_id_and_lists_an_idless_snapshot() {
+    let sb = Sandbox::new();
+    crate::store::projects::register(&sb.project_root()).unwrap();
+    let p = sb.open_project(ALICE).unwrap();
+    p.create(
+        new_note("Release", "# Release\n\nTag first.\n", NoteKind::Procedure),
+        Actor::UserSurface,
+    )
+    .unwrap();
+    let key = p.partition_key().to_string();
+    drop(p);
+    let earlier_key = format!("proj-{}-0123456789abcdef", owner_key(ALICE));
+    let earlier_path = snapshot_path_for(&earlier_key).unwrap();
+    let earlier_root = sb
+        .project_root()
+        .join(".openalpaca/memory/owners")
+        .join(owner_key(ALICE));
+    ControlSnapshot::new(
+        &earlier_key,
+        SnapshotScope::Project,
+        owner_key(ALICE),
+        ALICE,
+        earlier_root.to_string_lossy(),
+        ts(2026, 9, 20, 0, 0, 0),
+    )
+    .save(&earlier_path, ts(2026, 9, 20, 0, 0, 0))
+    .unwrap();
+    let db = crate::Database::open(&sb.outside.path().join("db.sqlite")).unwrap();
+    let moved = sb.outside.path().join("moved");
+    std::fs::create_dir(&moved).unwrap();
+    let moved = moved.canonicalize().unwrap();
+    crate::project_life::repoint(&db, &sb.project_root(), &moved).unwrap();
+
+    let report = doctor(ALICE, None).unwrap();
+
+    let project = report
+        .partitions
+        .iter()
+        .find(|r| r.partition_key == key)
+        .expect("the re-pointed partition is found by its project id");
+    assert_eq!(project.health, PartitionHealth::Ready);
+    assert_eq!(project.notes, 1);
+    let folder = crate::store::projects::lookup(&moved).unwrap().unwrap().dir;
+    assert!(project.root.starts_with(&folder), "{:?}", project.root);
+    assert_eq!(
+        report.idless_project_snapshots,
+        vec![IdlessSnapshot {
+            path: earlier_path.clone(),
+            partition_key: earlier_key.clone(),
+            root: earlier_root.to_string_lossy().into_owned(),
+        }]
+    );
+    assert!(
+        report
+            .partitions
+            .iter()
+            .all(|r| r.partition_key != earlier_key),
+        "never opened"
+    );
+    assert!(earlier_path.is_file(), "nothing deletes it");
+}
+
+/// The lead's S3 review M2: a `projects/` that cannot be listed does not
+/// fail the whole doctor. The failure is logged and the scan goes on with
+/// no project it was not asked about: the home partition is reported, and
+/// no project partition is reported, refused or otherwise.
+#[cfg(unix)]
+#[test]
+fn a_doctor_that_cannot_list_the_projects_still_reports_the_home_partition() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    sb.open_home(ALICE)
+        .create(
+            new_note("Editor", "# Editor\n\nvim\n", NoteKind::Preference),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    sb.open_project(ALICE)
+        .unwrap()
+        .create(
+            new_note("Release", "# Release\n\nTag first.\n", NoteKind::Procedure),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let projects = sb.home.join("projects");
+    std::fs::set_permissions(&projects, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let listed = crate::store::projects::list();
+    let report = doctor(ALICE, None);
+    std::fs::set_permissions(&projects, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if listed.is_ok() {
+        // A user the mode bits do not bind (root) lists them anyway: there
+        // is no failure to degrade from.
+        return;
+    }
+
+    let report = report.unwrap();
+    let home = report
+        .partitions
+        .iter()
+        .find(|r| r.partition_key == home_partition_key(&owner_key(ALICE)))
+        .expect("the home partition is reported");
+    assert_eq!(home.health, PartitionHealth::Ready);
+    assert_eq!(home.notes, 1);
+    assert!(
+        report
+            .partitions
+            .iter()
+            .all(|r| r.scope == SnapshotScope::Home),
+        "{:?}",
+        report.partitions
+    );
+    assert!(report.refused.is_empty(), "{:?}", report.refused);
+}
+
 /// R22: a project snapshot an earlier build wrote — keyed by its directory,
 /// no project id — is left where it is: `adopt` neither renames it nor
 /// refuses because of it, and adopts everything else.
@@ -3912,71 +4032,17 @@ fn adopt_leaves_an_earlier_builds_idless_project_snapshot_in_place() {
     );
 }
 
-#[test]
-fn move_snapshots_are_classified_stale_abandoned_or_orphaned() {
-    let dir = tempdir().unwrap();
-    let exists = dir.path().join("exists");
-    std::fs::create_dir(&exists).unwrap();
-    let gone = dir.path().join("gone");
-    let at = ts(2026, 9, 23, 0, 0, 0);
-    let mut new_after_move = ControlSnapshot::new(
-        "proj-a-new",
-        SnapshotScope::Project,
-        "a",
-        "u",
-        exists.to_string_lossy(),
-        at,
-    );
-    new_after_move.moved_from = Some("proj-a-old".into());
-    let old_after_move = ControlSnapshot::new(
-        "proj-a-old",
-        SnapshotScope::Project,
-        "a",
-        "u",
-        gone.to_string_lossy(),
-        at,
-    );
-    let mut never_moved = ControlSnapshot::new(
-        "proj-a-planned",
-        SnapshotScope::Project,
-        "a",
-        "u",
-        dir.path().join("planned").to_string_lossy(),
-        at,
-    );
-    never_moved.moved_from = Some("proj-a-new".into());
-    let orphan = ControlSnapshot::new(
-        "proj-a-lost",
-        SnapshotScope::Project,
-        "a",
-        "u",
-        dir.path().join("lost").to_string_lossy(),
-        at,
-    );
-    let all = vec![new_after_move, old_after_move, never_moved, orphan];
-    let mut classified = classify_move_snapshots(&all);
-    classified.sort();
-    assert_eq!(
-        classified,
-        [
-            ("proj-a-lost".to_string(), MoveSnapshotState::Orphaned),
-            ("proj-a-old".to_string(), MoveSnapshotState::Stale),
-            ("proj-a-planned".to_string(), MoveSnapshotState::Abandoned),
-        ]
-    );
-}
-
 // ============================================================================
 // `doctor`, read-only (design §6, *Management operations*; plan 3.8)
 // ============================================================================
 
 /// The read-only scan names, per partition: the owner's own (home and the
 /// named project), every other owner's as an orphan, a partition whose
-/// snapshot is gone as quarantined, the same-`fact_key` conflict, and a
-/// move that never finished as an abandoned snapshot — and it opens nothing
-/// for writing: a forgotten note's file put back stays as it was found.
+/// snapshot is gone as quarantined, the same-`fact_key` conflict — and it
+/// opens nothing for writing: a forgotten note's file put back stays as it
+/// was found.
 #[test]
-fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing() {
+fn doctor_lists_partitions_orphans_and_conflicts_without_writing() {
     let sb = Sandbox::new();
     let home = sb.open_home(ALICE);
     let mut first = new_note("Editor", "# Editor\n\nvim\n", NoteKind::Preference);
@@ -4014,29 +4080,6 @@ fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing(
         .unwrap();
     let carol_key = carol_home.partition_key().to_string();
     std::fs::remove_file(carol_home.snapshot_path()).unwrap();
-    // A move begun and never finished: the twin binds a directory that does
-    // not exist while the old one still stands — abandoned.
-    // An earlier build's move, begun and never finished: a twin bound to a
-    // directory that does not exist, naming the old key — abandoned. Nothing
-    // in this build writes one any more; the doctor still names it until S4.
-    let old = project.snapshot().unwrap();
-    let mut twin = old.clone();
-    twin.root = sb
-        .outside
-        .path()
-        .join("moved-project")
-        .join("memory")
-        .join("owners")
-        .join(owner_key(ALICE))
-        .to_string_lossy()
-        .into_owned();
-    twin.partition_key = project_partition_key(&owner_key(ALICE), &ProjectId::new());
-    twin.moved_from = Some(old.partition_key.clone());
-    twin.save(
-        &snapshot_path_for(&twin.partition_key).unwrap(),
-        ts(2026, 9, 24, 9, 0, 0),
-    )
-    .unwrap();
     // A forgotten note whose file and `.history` came back (scale slice S3):
     // a scan opened for writing deletes them; the doctor's read-only one
     // leaves the note out and deletes nothing.
@@ -4099,9 +4142,7 @@ fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing(
         carol_home.unverified, 1,
         "nothing is verified without a snapshot"
     );
-    assert_eq!(report.move_snapshots.len(), 1);
-    assert_eq!(report.move_snapshots[0].state, MoveSnapshotState::Abandoned);
-    assert_eq!(report.move_snapshots[0].partition_key, twin.partition_key);
+    assert!(report.idless_project_snapshots.is_empty());
     assert!(report.refused.is_empty(), "{:?}", report.refused);
     assert!(report.unreadable_snapshots.is_empty());
     assert!(

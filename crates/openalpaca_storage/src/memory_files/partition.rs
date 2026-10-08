@@ -2690,49 +2690,6 @@ pub fn list_snapshots() -> Result<Vec<(PathBuf, Result<ControlSnapshot, String>)
     Ok(out)
 }
 
-/// What `doctor` says about a snapshot whose bound directory does not exist
-/// (design §6, the workspace-move row; §7b P11).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MoveSnapshotState {
-    /// Another snapshot names it in `moved_from` and that one's directory
-    /// exists: the move completed; `--repair` deletes it.
-    Stale,
-    /// Its own `moved_from` names a snapshot whose directory exists: the move
-    /// never happened; `--repair` deletes it.
-    Abandoned,
-    /// Listed, never deleted.
-    Orphaned,
-}
-
-/// Classifies every snapshot whose `root` is not a directory. Pure over the
-/// listing; the directory checks are the only I/O.
-pub fn classify_move_snapshots(snapshots: &[ControlSnapshot]) -> Vec<(String, MoveSnapshotState)> {
-    let dir_exists = |root: &str| Path::new(root).is_dir();
-    let mut out = Vec::new();
-    for s in snapshots {
-        if dir_exists(&s.root) {
-            continue;
-        }
-        let stale = snapshots.iter().any(|other| {
-            other.moved_from.as_deref() == Some(s.partition_key.as_str()) && dir_exists(&other.root)
-        });
-        let abandoned = s.moved_from.as_deref().is_some_and(|from| {
-            snapshots
-                .iter()
-                .any(|other| other.partition_key == from && dir_exists(&other.root))
-        });
-        let state = if stale {
-            MoveSnapshotState::Stale
-        } else if abandoned {
-            MoveSnapshotState::Abandoned
-        } else {
-            MoveSnapshotState::Orphaned
-        };
-        out.push((s.partition_key.clone(), state));
-    }
-    out
-}
-
 /// `memory adopt <owner-key>` (design §6): re-binds every partition of an
 /// orphaned owner key — the home partition and every `proj-<old>-*` snapshot
 /// — to the current owner in one command. One collision refuses the whole

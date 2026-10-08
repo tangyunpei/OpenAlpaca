@@ -66,8 +66,7 @@ use openalpaca_core::utils::text::{
     escape_hidden, escape_hidden_line, hidden_notice, is_hidden, one_line,
 };
 use openalpaca_storage::memory_files::{
-    self as files, ControlSnapshot, MoveSnapshotState, Note, NoteId, NoteKind, NoteSource,
-    NoteStatus, Partition, SourceType,
+    self as files, Note, NoteId, NoteKind, NoteSource, NoteStatus, Partition, SourceType,
 };
 use openalpaca_storage::store::StoreScope;
 use openalpaca_storage::{ConfigRepository, discovery, store};
@@ -319,7 +318,7 @@ pub enum MemoryCommands {
     },
     /// Report the partitions' health, or repair a lost snapshot (local, daemon stopped)
     Doctor {
-        /// Rebuild missing or invalid snapshots and delete stale move snapshots
+        /// Rebuild missing or invalid snapshots
         #[arg(long)]
         repair: bool,
         #[command(flatten)]
@@ -1704,8 +1703,8 @@ fn open_owner_database() -> Result<(openalpaca_storage::Database, String)> {
 
 /// `doctor --repair` (design §6, *Management operations*): under the store
 /// lock, rebuild the missing or invalid snapshot of the owner's home
-/// partition and of the named project's, then delete stale and abandoned
-/// move snapshots. Never rewrites, moves or deletes a note file.
+/// partition and of the named project's. Never rewrites, moves or deletes a
+/// note file.
 pub(crate) fn repair_locally(at: &ScopeArgs) -> Result<()> {
     let _lock = claim_store()?;
     let (_db, owner_id) = open_owner_database()?;
@@ -1751,42 +1750,14 @@ pub(crate) fn repair_locally(at: &ScopeArgs) -> Result<()> {
             println!("  malformed  {}  {}", m.path.display(), m.reason);
         }
     }
-    let snapshots: Vec<ControlSnapshot> = files::list_snapshots()?
-        .into_iter()
-        .filter_map(|(_, parsed)| parsed.ok())
-        .collect();
-    for (key, state) in files::classify_move_snapshots(&snapshots) {
-        match state {
-            MoveSnapshotState::Stale | MoveSnapshotState::Abandoned => {
-                let path = files::snapshot_path_for(&key)?;
-                std::fs::remove_file(&path)
-                    .with_context(|| format!("could not delete {}", path.display()))?;
-                println!(
-                    "{} {key}: {} move snapshot deleted.",
-                    "✓".green(),
-                    match state {
-                        MoveSnapshotState::Stale => "stale",
-                        _ => "abandoned",
-                    }
-                );
-            }
-            MoveSnapshotState::Orphaned => {
-                println!(
-                    "{} {key}: orphaned (its directory is gone); left in place.",
-                    "!".yellow()
-                );
-            }
-        }
-    }
     Ok(())
 }
 
 /// `adopt <owner-key>` (design §3 *Resets*, §6): under the store lock,
 /// re-bind every partition of an orphaned owner key — the home one and
-/// every `proj-<key>-*` snapshot — to the current owner in one command.
-/// A stale or abandoned move snapshot of that key is `doctor --repair`'s to
-/// settle first (§7c Q6), so it refuses rather than adopt a directory that
-/// does not exist.
+/// every project partition, found by the project id its snapshot carries
+/// (storage design R20) — to the current owner in one command. A project
+/// snapshot with no id (an earlier build's, R22) is left as it is.
 pub(crate) fn adopt_locally(old_owner_key: &str) -> Result<()> {
     let old_owner_key = old_owner_key.trim().to_ascii_lowercase();
     if !files::is_owner_key(&old_owner_key) {
@@ -1796,29 +1767,6 @@ pub(crate) fn adopt_locally(old_owner_key: &str) -> Result<()> {
     }
     let _lock = claim_store()?;
     let (_db, owner_id) = open_owner_database()?;
-    let snapshots: Vec<ControlSnapshot> = files::list_snapshots()?
-        .into_iter()
-        .filter_map(|(_, parsed)| parsed.ok())
-        .collect();
-    let prefix = format!("proj-{old_owner_key}-");
-    let stuck: Vec<String> = files::classify_move_snapshots(&snapshots)
-        .into_iter()
-        .filter(|(key, state)| {
-            key.starts_with(&prefix)
-                && matches!(
-                    state,
-                    MoveSnapshotState::Stale | MoveSnapshotState::Abandoned
-                )
-        })
-        .map(|(key, state)| format!("  {key}  ({state:?})"))
-        .collect();
-    if !stuck.is_empty() {
-        bail!(
-            "{} move snapshot(s) of {old_owner_key} are stale or abandoned; run `openalpaca memory doctor --repair` first:\n{}",
-            stuck.len(),
-            stuck.join("\n")
-        );
-    }
     let adopted = files::adopt(&old_owner_key, &owner_id, Utc::now())?;
     println!(
         "{} Adopted {} partition(s) of {old_owner_key} as the current owner's:",
@@ -2306,18 +2254,12 @@ fn print_doctor(report: &Value) {
             );
         }
     }
-    for m in report["move_snapshots"].as_array().into_iter().flatten() {
-        println!(
-            "{} move snapshot {} is {} (bound to {}{})",
-            "!".yellow(),
-            m["partition_key"].as_str().unwrap_or(""),
-            m["state"].as_str().unwrap_or(""),
-            m["root"].as_str().unwrap_or(""),
-            m["moved_from"]
-                .as_str()
-                .map(|f| format!(", moved from {f}"))
-                .unwrap_or_default()
-        );
+    for s in report["idless_project_snapshots"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        println!("{} {}", "!".yellow(), idless_snapshot_line(s));
     }
     for r in report["refused"].as_array().into_iter().flatten() {
         println!(
@@ -2341,6 +2283,18 @@ fn print_doctor(report: &Value) {
             u["reason"].as_str().unwrap_or("")
         );
     }
+}
+
+/// One `doctor` line for a project control snapshot that carries no project
+/// id (storage design R22): an earlier build's, which this build never
+/// opens or adopts, and which nothing deletes.
+fn idless_snapshot_line(entry: &Value) -> String {
+    format!(
+        "project snapshot {} carries no project id: an earlier build wrote it for {}. \
+         It is never opened or adopted, and nothing deletes it.",
+        entry["partition_key"].as_str().unwrap_or(""),
+        entry["root"].as_str().unwrap_or("")
+    )
 }
 
 /// The unquoted `ETag`, if the response carries one.

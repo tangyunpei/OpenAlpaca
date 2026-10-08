@@ -591,6 +591,24 @@ fn repair_lifts_a_quarantine_and_adopt_rebinds_an_orphan() {
     );
 }
 
+/// R22: `doctor` prints one line per project snapshot that carries no
+/// project id — its key and the directory it was bound to — and says that
+/// nothing opens, adopts or deletes it.
+#[test]
+fn the_doctor_names_an_idless_project_snapshot_and_that_nothing_deletes_it() {
+    let line = idless_snapshot_line(&json!({
+        "partition_key": "proj-32acea7eb739b08afd959db91e46d450-0123456789abcdef",
+        "root": "/repo/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450",
+    }));
+    assert_eq!(
+        line,
+        "project snapshot proj-32acea7eb739b08afd959db91e46d450-0123456789abcdef carries no \
+         project id: an earlier build wrote it for \
+         /repo/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450. It is never opened \
+         or adopted, and nothing deletes it."
+    );
+}
+
 /// R12: `doctor --repair` in a git repository no turn has registered has no
 /// project partition to repair. It answers from the home notes and creates
 /// nothing — no folder under `projects/`, nothing in the repository.

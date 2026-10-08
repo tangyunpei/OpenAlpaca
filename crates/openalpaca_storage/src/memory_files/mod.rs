@@ -53,7 +53,7 @@ pub use authority::{
 pub use cache::{
     NOTE_PARSE_CACHE_BYTES, NoteParseCache, RACY_WINDOW, RACY_WINDOW_COARSE, StatFn, StatKey,
 };
-pub use doctor::{DoctorReport, MoveSnapshotReport, PartitionReport, RefusedPartition, doctor};
+pub use doctor::{DoctorReport, IdlessSnapshot, PartitionReport, RefusedPartition, doctor};
 pub use note::{
     NewNote, Note, NoteId, NoteKind, NoteParseError, NotePatch, NoteScope, NoteSource, NoteStatus,
     ReplacePolicy, SourceType, UnknownField, is_valid_fact_key, knowledge_text,
@@ -61,11 +61,10 @@ pub use note::{
 };
 pub use partition::{
     Actor, CrashPoint, Created, Dedup, ForgetMode, ForgetOutcome, ForgetStatus, LoadedPartition,
-    MalformedFile, MoveSnapshotState, NoteView, Partition, PartitionHealth, ReconcileChange,
-    ReconcileChangeKind, RepairReport, ScanEntry, UpdateAction, Updated, adopt,
-    classify_move_snapshots, list_owner_keys, list_snapshots, note_file_reads_on_this_thread,
-    partition_key_for, scans_on_this_thread, snapshot_copies_on_this_thread, snapshot_path_for,
-    whole_parses_on_this_thread,
+    MalformedFile, NoteView, Partition, PartitionHealth, ReconcileChange, ReconcileChangeKind,
+    RepairReport, ScanEntry, UpdateAction, Updated, adopt, list_owner_keys, list_snapshots,
+    note_file_reads_on_this_thread, partition_key_for, scans_on_this_thread,
+    snapshot_copies_on_this_thread, snapshot_path_for, whole_parses_on_this_thread,
 };
 pub use snapshot::{
     ControlSnapshot, NoteRecord, Origin, Pending, SNAPSHOT_SCHEMA, SnapshotError, SnapshotScope,
