@@ -5,7 +5,13 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -278,6 +284,55 @@ describe("Re-point… (storage design §6, ST-20)", () => {
     expect(useProjectStore.getState().path).toBe(REPO.root);
   });
 
+  it("follows the project and says so when Cancel was pressed while the re-point was out, closing no dialog opened since", async () => {
+    // The press cannot be taken back: the daemon finishes the write whether
+    // or not the dialog is still open, so the window must still follow.
+    const user = userEvent.setup();
+    let answer: (value: unknown) => void = () => {};
+    useProjectStore.setState({ path: REPO.root });
+    api.list.mockResolvedValue([REPO]);
+    api.get.mockResolvedValue(recorded());
+    api.repoint.mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    renderCard(REPO.root);
+
+    await user.click(await screen.findByRole("button", { name: "Re-point…" }));
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByText(/^Recorded there:/);
+    await user.type(
+      within(dialog).getByLabelText("New project folder"),
+      MOVED.root,
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Re-point" }));
+    await within(dialog).findByRole("button", { name: "Re-pointing…" });
+
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // The owner opens the dialog again before the first answer lands.
+    await user.click(screen.getByRole("button", { name: "Re-point…" }));
+    await screen.findByRole("dialog");
+
+    answer({
+      old_path: REPO.root,
+      new_path: MOVED.root,
+      moved: recorded().rows,
+      project: MOVED,
+    });
+
+    await waitFor(() =>
+      expect(useProjectStore.getState().path).toBe(MOVED.root),
+    );
+    expect(useUiStore.getState().toast).toBe(
+      `Re-pointed to ${MOVED.root}: 2 conversations · 40 messages · 3 runs · 4 files.`,
+    );
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+    // The late answer is not the new dialog's to close.
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
   it("fills the folder from the native picker", async () => {
     const user = userEvent.setup();
     picker.pick.mockResolvedValue(MOVED.root);
@@ -354,6 +409,45 @@ describe("Delete data… (storage design §6, ST-19)", () => {
     expect(useUiStore.getState().toast).toBe(
       `Deleted the data of ${REPO.root}.`,
     );
+  });
+
+  it("lets go of the project and says so when Escape closed the dialog while the delete was out", async () => {
+    // Up to 3 s of quiesce plus the delete: an Escape then looks like a
+    // cancel, but the daemon finishes, and a window still sending the root
+    // would register the deleted project again on its next turn.
+    const user = userEvent.setup();
+    let answer: (value: unknown) => void = () => {};
+    useProjectStore.setState({ path: REPO.root });
+    api.list.mockResolvedValue([REPO]);
+    api.remove.mockImplementation((_path: string, dryRun: boolean) =>
+      dryRun
+        ? Promise.resolve(plan(true))
+        : new Promise((resolve) => {
+            answer = resolve;
+          }),
+    );
+    renderCard(REPO.root);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Delete data…" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByText(/^Deletes 2 conversations/);
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete data" }),
+    );
+    await within(dialog).findByRole("button", { name: "Deleting…" });
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    answer(plan(false));
+
+    await waitFor(() => expect(useProjectStore.getState().path).toBeNull());
+    expect(useUiStore.getState().toast).toBe(
+      `Deleted the data of ${REPO.root}. This window has no project now.`,
+    );
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
   });
 
   it("says the folder was kept when the daemon kept it, and the window keeps the project it still is", async () => {

@@ -152,9 +152,47 @@ interface FlowProps {
 }
 
 /**
+ * Whether a flow is still on screen. A write's answer can land after Cancel,
+ * Escape, the veil or a view switch (⌘1–4, ⌘,) unmounted the flow: what the
+ * window does about the write still happens, but closing the dialog is no
+ * longer this flow's to do — the owner may have opened another since.
+ */
+function useOnScreen() {
+  const onScreen = useRef(false);
+  useEffect(() => {
+    onScreen.current = true;
+    return () => {
+      onScreen.current = false;
+    };
+  }, []);
+  return onScreen;
+}
+
+/**
+ * Whether the window follows `project` once a write about it has landed,
+ * read then rather than at the press, since the dialog may be gone by then:
+ * the window's stored path is the project's root, or it is still the path it
+ * held at the press and that path resolved to the project (`current`).
+ */
+function windowFollows(
+  project: Project,
+  current: boolean,
+  pathAtPress: string | null,
+): boolean {
+  const now = useProjectStore.getState().path;
+  return now === project.root || (current && now === pathAtPress);
+}
+
+/**
  * The re-point, mounted only while its dialog is open. The counts are read
  * fresh on open, as `StopDaemonFlow` re-reads `busy`: the count confirmed is
  * the one on screen, not a cached one.
+ *
+ * The answer is taken from `mutateAsync`'s promise, not from `mutate`'s
+ * callbacks: query-core runs those only while the observer has a listener,
+ * so they die with this flow, while the daemon finishes the write whether or
+ * not the dialog is still open. The window follows and the toast says so
+ * either way.
  */
 function RepointFlow({ project, current, onClose }: FlowProps) {
   const counts = useWorkspace(project.root);
@@ -162,6 +200,7 @@ function RepointFlow({ project, current, onClose }: FlowProps) {
   const windowPath = useProjectStore((s) => s.path);
   const setPath = useProjectStore((s) => s.setPath);
   const showToast = useUiStore((s) => s.showToast);
+  const onScreen = useOnScreen();
   const [value, setValue] = useState("");
   const [refusal, setRefusal] = useState<string | null>(null);
   const [reading, setReading] = useState(true);
@@ -181,20 +220,18 @@ function RepointFlow({ project, current, onClose }: FlowProps) {
     const target = repointTarget(value, project);
     if (target === null) return;
     setRefusal(null);
-    repoint.mutate(
-      { from: project.root, to: target },
-      {
-        onSuccess: (result) => {
-          if (current || windowPath === project.root) {
-            setPath(result.project.root);
-          }
-          showToast(
-            `Re-pointed to ${result.project.root}: ${rowsLine(result.moved)}.`,
-          );
-          onClose();
-        },
-        onError: (error) => setRefusal(error.message),
+    const pathAtPress = windowPath;
+    void repoint.mutateAsync({ from: project.root, to: target }).then(
+      (result) => {
+        if (windowFollows(project, current, pathAtPress)) {
+          setPath(result.project.root);
+        }
+        showToast(
+          `Re-pointed to ${result.project.root}: ${rowsLine(result.moved)}.`,
+        );
+        if (onScreen.current) onClose();
       },
+      (error: Error) => setRefusal(error.message),
     );
   }
 
@@ -235,6 +272,10 @@ function RepointFlow({ project, current, onClose }: FlowProps) {
  * the folder itself could not be removed — so the project stays registered
  * and listed, and deleting its data again finishes it. That answer is never drawn as the project being gone — the
  * window keeps the project it still is, and the toast says to run it again.
+ *
+ * As in `RepointFlow`, the delete's answer is taken from `mutateAsync`'s
+ * promise, so a dialog closed while `Deleting…` (up to 3 s of quiesce, then
+ * the delete) still leaves the window without the project and says so.
  */
 function DeleteFlow({ project, current, onClose }: FlowProps) {
   const plan = useDeleteProjectData();
@@ -242,6 +283,7 @@ function DeleteFlow({ project, current, onClose }: FlowProps) {
   const windowPath = useProjectStore((s) => s.path);
   const setPath = useProjectStore((s) => s.setPath);
   const showToast = useUiStore((s) => s.showToast);
+  const onScreen = useOnScreen();
   const [refusal, setRefusal] = useState<string | null>(null);
 
   // One dry run per open: StrictMode runs effects twice in development.
@@ -255,28 +297,25 @@ function DeleteFlow({ project, current, onClose }: FlowProps) {
 
   function confirm() {
     setRefusal(null);
-    apply.mutate(
-      { path: project.root, dryRun: false },
-      {
-        onSuccess: (result) => {
-          if (result.removed?.project_folder === false) {
-            showToast(
-              `Deleted the data of ${project.root}, but not all of it could be removed: its folder under projects/ was kept, so the project is still listed. Delete its data again to finish.`,
-            );
-            onClose();
-            return;
-          }
-          const follows = current || windowPath === project.root;
+    const pathAtPress = windowPath;
+    void apply.mutateAsync({ path: project.root, dryRun: false }).then(
+      (result) => {
+        if (result.removed?.project_folder === false) {
+          showToast(
+            `Deleted the data of ${project.root}, but not all of it could be removed: its folder under projects/ was kept, so the project is still listed. Delete its data again to finish.`,
+          );
+        } else {
+          const follows = windowFollows(project, current, pathAtPress);
           if (follows) setPath(null);
           showToast(
             follows
               ? `Deleted the data of ${project.root}. This window has no project now.`
               : `Deleted the data of ${project.root}.`,
           );
-          onClose();
-        },
-        onError: (error) => setRefusal(error.message),
+        }
+        if (onScreen.current) onClose();
       },
+      (error: Error) => setRefusal(error.message),
     );
   }
 
