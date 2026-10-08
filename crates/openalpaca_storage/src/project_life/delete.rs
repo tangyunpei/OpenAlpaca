@@ -255,16 +255,18 @@ fn kept_rows(conn: &Connection, root: &str) -> Result<Vec<KeptRow>> {
     Ok(rows)
 }
 
-/// Copies one kept file into the root store. The source is read from
-/// `projects/<name>/<kind>/<rel_path>` confined to that directory — never from
-/// `storage_path` — and a link out of it reads as no bytes.
-fn place_one(project: &Project, row: &KeptRow) -> Result<Placed> {
-    let kind = if row.upload {
-        ContentKind::Uploads
-    } else {
-        ContentKind::Artifacts
-    };
-    let home_dir = content_dir(&StoreScope::Home, kind)?;
+/// Where a kept file lands in the root store: its `rel_path` there and the
+/// full path.
+#[derive(Debug, Clone)]
+struct KeptAddress {
+    rel_path: String,
+    target: PathBuf,
+}
+
+/// [`KEPT_DIR`]`/<folder>-<id>/<old rel_path>` under the home store's
+/// uploads or artifacts, canonical and reached through no link.
+fn kept_address(project: &Project, row: &KeptRow) -> Result<KeptAddress> {
+    let home_dir = content_dir(&StoreScope::Home, kind_of(row))?;
     let home_dir = home_dir
         .canonicalize()
         .with_context(|| format!("failed to canonicalize {}", home_dir.display()))?;
@@ -280,6 +282,37 @@ fn place_one(project: &Project, row: &KeptRow) -> Result<Placed> {
             joined.display()
         );
     }
+    Ok(KeptAddress { rel_path, target })
+}
+
+fn kind_of(row: &KeptRow) -> ContentKind {
+    if row.upload {
+        ContentKind::Uploads
+    } else {
+        ContentKind::Artifacts
+    }
+}
+
+/// Copies one kept file to its `address` in the root store. The source is
+/// read from `projects/<name>/<kind>/<rel_path>` confined to that directory —
+/// never from `storage_path` — and a link out of it reads as no bytes. An
+/// address a committed row already `named` is refused before anything is
+/// written: a retried delete never overwrites a kept file an earlier one
+/// committed (its source removed by hand and a new file under the old name).
+fn place_one(
+    project: &Project,
+    row: &KeptRow,
+    address: KeptAddress,
+    named: bool,
+) -> Result<Placed> {
+    let KeptAddress { rel_path, target } = address;
+    if named {
+        bail!(
+            "{} is the address a committed row already names; it was left in place",
+            target.display()
+        );
+    }
+    let kind = kind_of(row);
     let source_root = project.dir.join(kind.dir_name());
     let source = match row.rel_path.as_deref() {
         Some(rel) if source_root.is_dir() => confine_to_root(&source_root, &source_root.join(rel))
@@ -308,10 +341,9 @@ fn place_one(project: &Project, row: &KeptRow) -> Result<Placed> {
 /// `source` to `target`, synced. A regular file already at `target` is a
 /// copy an earlier attempt wrote before the daemon died ahead of its
 /// transaction — whole or cut short — and it is replaced: left, it would make
-/// every later delete of the project fail. Nothing else can be there: no row
-/// names `kept/<folder>-<id>/` until a transaction commits, and one that
-/// committed re-addressed its kept rows away from the project, so no later
-/// attempt copies onto them. Anything but a regular file is refused.
+/// every later delete of the project fail. A file a committed row names is
+/// never reached here: [`place_one`] refuses that address first. Anything
+/// but a regular file is refused.
 fn copy_fresh(source: &Path, target: &Path) -> Result<()> {
     let dir = target
         .parent()
@@ -376,10 +408,27 @@ fn strings(conn: &Connection, sql: &str, root: &str) -> Result<Vec<String>> {
 /// `storage_path`; removes no file of the project (step 3 is the route's).
 pub fn delete_project_data(db: &Database, project: &Project) -> Result<DeleteOutcome> {
     let root = project.root_string();
-    let rows = db.with_connection(|conn| kept_rows(conn, &root))?;
+    // The kept files, where each lands, and whether a committed row already
+    // names that address — read in one access, before any copy.
+    let rows = db.with_connection(|conn| {
+        kept_rows(conn, &root)?
+            .into_iter()
+            .map(|row| {
+                let address = kept_address(project, &row).with_context(|| {
+                    format!("keeping file {} of {root}; nothing was deleted", row.id)
+                })?;
+                let named = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM file_assets WHERE storage_path = ?1)",
+                    rusqlite::params![address.target.to_string_lossy()],
+                    |r| r.get::<_, bool>(0),
+                )?;
+                Ok((row, address, named))
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
     let mut placed: Vec<Placed> = Vec::with_capacity(rows.len());
-    for row in &rows {
-        match place_one(project, row) {
+    for (row, address, named) in rows {
+        match place_one(project, &row, address, named) {
             Ok(p) => placed.push(p),
             Err(e) => {
                 unplace(&placed);

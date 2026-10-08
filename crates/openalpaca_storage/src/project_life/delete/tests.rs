@@ -956,7 +956,7 @@ fn a_kept_by_product_superseded_after_its_copy_refuses_the_transaction() {
         w.db.with_connection(|conn| kept_rows(conn, &root))
             .unwrap()
             .iter()
-            .map(|row| place_one(&s.p, row).unwrap())
+            .map(|row| place_one(&s.p, row, kept_address(&s.p, row).unwrap(), false).unwrap())
             .collect();
     assert_eq!(
         w.by_product(&s.p, "Shared", b"v3\n"),
@@ -982,4 +982,46 @@ fn a_kept_by_product_superseded_after_its_copy_refuses_the_transaction() {
         3,
         "the dropped transaction rolled back"
     );
+}
+
+/// S5a re-review: a retried delete never overwrites a kept file a committed
+/// row already names. After a partial failure kept the folder, an earlier
+/// kept upload's source was removed by hand and a new upload took its old
+/// name; the retry's kept address is then that committed file's. The copy
+/// is refused, nothing is deleted and the committed bytes stay.
+#[test]
+fn a_kept_address_a_committed_row_already_names_is_never_overwritten() {
+    let w = World::new();
+    let s = seed(&w);
+    let rel: String =
+        w.db.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT rel_path FROM file_assets WHERE id = ?1",
+                [&s.u_shared],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    let kept_rel = format!("{KEPT_DIR}/{}-{}/{rel}", s.p.name, s.p.id);
+    let committed = w.home.join("uploads").join(&kept_rel);
+    std::fs::create_dir_all(committed.parent().unwrap()).unwrap();
+    std::fs::write(&committed, b"committed").unwrap();
+    w.exec(
+        "INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes,
+             storage_path, origin, project_root, rel_path)
+         VALUES ('k-earlier', ?1, 'sha', 'earlier.txt', 'text/plain', 9, ?2, 'upload', NULL, ?3)",
+        &[&OWNER, &committed.to_string_lossy().into_owned(), &kept_rel],
+    );
+
+    let err = delete_project_data(&w.db, &s.p).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert_eq!(
+        std::fs::read(&committed).map_err(|e| format!("{e} after: {message}")),
+        Ok(b"committed".to_vec()),
+        "the committed kept file was overwritten"
+    );
+    assert!(message.contains("already names"), "{message}");
+    assert!(message.contains("nothing was deleted"), "{message}");
+    assert_eq!(w.count("SELECT COUNT(*) FROM session"), 3);
 }
