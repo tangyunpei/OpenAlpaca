@@ -1,7 +1,8 @@
 //! `/v1/workspaces` — a project's life (design §6), as routes.
 //!
 //! ```text
-//! GET   /v1/workspaces?path=<abs>          -> what is recorded at that root
+//! GET   /v1/workspaces                     -> every project, as projects/ records it
+//! GET   /v1/workspaces?path=<abs>          -> what the path resolves to, and the rows there
 //! PATCH /v1/workspaces {old_path,new_path} -> re-point a project onto its new folder
 //! POST  /v1/workspaces/purge {path|all}    -> delete one project's history
 //! ```
@@ -17,11 +18,10 @@
 //! owns the checks storage cannot see: the owner (R40), the runs in flight and
 //! the memory service's quiesce.
 //!
-//! The `GET` and the purge keep their pre-design shapes until Stage 1 step
-//! (5) (interfaces §6, C8): the `GET` still reads an earlier build's in-project
-//! `.layout` for `recorded_root` and `moved`, and the purge still resolves its
-//! path by rows and the marker walk (R72, R75). `dry_run` defaults to **true**
-//! on the purge — the daemon fails closed.
+//! The purge keeps its pre-design shape until ST-19's delete replaces it,
+//! later in Stage 1 step (5): it still resolves its path by rows and the
+//! marker walk (R72, R75). `dry_run` defaults to **true** on the purge — the
+//! daemon fails closed.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -34,10 +34,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use openalpaca_storage::project_life;
-use openalpaca_storage::store::projects::{ProjectError, ResolvedProject};
+use openalpaca_storage::store::projects::{Project, ProjectError, ResolvedProject};
 use openalpaca_storage::store::{self, projects};
-use openalpaca_storage::{ArtifactStore, Database, PurgePlan, RebaseCounts, WorkspaceRows};
-use serde::Deserialize;
+use openalpaca_storage::{ArtifactStore, Database, PurgePlan, RebaseCounts};
+use serde::{Deserialize, Serialize};
 
 use openalpaca_core::context::SharedContext;
 use openalpaca_core::memory::service::MemoryService;
@@ -49,8 +49,8 @@ use crate::AppState;
 
 #[derive(Debug, Default, Deserialize)]
 pub struct WorkspaceQuery {
-    /// The project root to describe. Required: this route answers about one
-    /// root, and a missing path is a question, not a filter.
+    /// `?path=` names one path to describe; absent, the route lists every
+    /// project (§9). A path is never read against the daemon's directory.
     pub path: Option<String>,
 }
 
@@ -75,6 +75,73 @@ pub struct PurgeRequest {
 
 fn yes() -> bool {
     true
+}
+
+// ── Answers ──────────────────────────────────────────────────────
+
+/// One project as its folder under `projects/` records it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectView {
+    pub id: String,
+    pub root: String,
+    pub name: String,
+    /// Its root is not a directory (ST-7): its data is kept.
+    pub missing: bool,
+}
+
+impl From<&Project> for ProjectView {
+    fn from(project: &Project) -> Self {
+        Self {
+            id: project.id.to_string(),
+            root: project.root_string(),
+            name: project.name.clone(),
+            missing: project.missing,
+        }
+    }
+}
+
+/// The five path columns' rows under one root (`ArtifactStore::workspace_rows`).
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct RowCountsView {
+    /// `file_assets`, every origin.
+    pub artifacts: usize,
+    pub sessions: usize,
+    pub tasks: usize,
+    /// `conversation_messages.workspace_root`.
+    pub messages: usize,
+    /// `lane_followups.workspace_path`.
+    pub followups: usize,
+}
+
+impl From<&RebaseCounts> for RowCountsView {
+    fn from(counts: &RebaseCounts) -> Self {
+        Self {
+            artifacts: counts.file_assets,
+            sessions: counts.sessions,
+            tasks: counts.tasks,
+            messages: counts.messages,
+            followups: counts.followups,
+        }
+    }
+}
+
+/// `GET /v1/workspaces?path=`: what the path resolves to, and what is recorded there.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceView {
+    /// The path asked about, canonicalized (as written when it does not exist).
+    pub path: String,
+    /// The project root it resolves to; `null` = no project.
+    pub root: Option<String>,
+    /// `null` = a root no folder under `projects/` records yet (R12), or no project.
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub missing: bool,
+    /// Under `root`; zeros when there is none.
+    pub rows: RowCountsView,
+    /// `running` or `paused` — what a re-point waits for.
+    pub active_tasks: usize,
+    /// `queued` — what the delete refuses on as well.
+    pub queued_tasks: usize,
 }
 
 // ── Path resolution ──────────────────────────────────────────────
@@ -105,32 +172,6 @@ fn canonical_path(input: &str) -> Result<String, Response> {
     })
 }
 
-/// The canonical root string the four members hold, for a path a client named
-/// as somewhere a project **is or was** — the `GET`'s resolution.
-///
-/// **Rows are the proof of a root (R75), here as well as on the purge.** A path
-/// any of the four members still names *exactly* is taken as given, before the
-/// marker walk is consulted: a project moved out from under a monorepo's `.git`
-/// would otherwise resolve to the monorepo root, and the `GET` would describe
-/// `/mono` rather than the path the rows recorded. The count is unscoped for
-/// the same reason [`resolve_purge_root`]'s is: what is being established is
-/// that this path was a root, not whose rows they are.
-///
-/// Only a path nothing names goes through the walk a turn's `x-workspace-path`
-/// takes (R22), and when *that* finds no marker the canonical path itself
-/// stands, because that is still exactly what the rows recorded.
-#[allow(clippy::result_large_err)]
-fn resolve_root(store: &ArtifactStore<'_>, input: &str) -> Result<String, Response> {
-    let literal = canonical_path(input)?;
-    let rows = store
-        .workspace_rows(&literal, None)
-        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()))?;
-    if !rows.counts.is_empty() {
-        return Ok(literal);
-    }
-    Ok(request_project_root(Some(&literal)).unwrap_or(literal))
-}
-
 /// A canonicalized path, refused when it resolves to *another* root above it
 /// rather than naming a root of its own — the purge's guard against deleting
 /// a whole project for a path that named one folder of it (R72). A path that
@@ -153,8 +194,8 @@ fn refuse_if_inside_another_root(
 
 /// The purge **target**, taken almost literally — ruling R72, refined by R75.
 ///
-/// A destructive verb is the one place the old-root marker walk
-/// ([`resolve_root`]) must not run silently: `purge /repo/src` walking up to
+/// A destructive verb is the one place the walk a turn's path takes
+/// ([`request_project_root`]) must not run silently: `purge /repo/src` walking up to
 /// `/repo` would delete the whole project for a path that named one file of
 /// it, and the caller would only learn the resolved root from what the
 /// response deleted. So the given path is canonicalized, and then — **rows
@@ -240,83 +281,74 @@ fn counts_json(counts: &RebaseCounts) -> serde_json::Value {
 
 // ── GET /v1/workspaces ───────────────────────────────────────────
 
-/// What is recorded at one root, and whether its store thinks it lives
-/// somewhere else.
-///
-/// `recorded_root` is the store's own `.layout` marker; `moved` is the whole
-/// point — a store present at this path whose marker names a *different* one is
-/// a project that was moved on disk, and the re-base is what re-attaches its
-/// history. A store seeded before the marker existed reports `null` and
-/// `moved: false`, which is "nothing to say", not "not moved".
+/// With no `path`: every project OpenAlpaca knows, as its folder under
+/// `projects/` records it, sorted by folder name — a bare array (§9).
+/// Creates nothing.
+pub(crate) fn list_workspaces() -> Response {
+    match projects::list() {
+        Ok(list) => Json(list.iter().map(ProjectView::from).collect::<Vec<_>>()).into_response(),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "IO_ERROR",
+            format!("the projects folder could not be read: {e:#}"),
+        ),
+    }
+}
+
+/// What a path resolves to — the way a turn's `x-workspace-path` is
+/// resolved, registering nothing (§3) — and the rows recorded under that
+/// root, so a caller sees what a re-point would move and what the delete
+/// would refuse on.
 pub(crate) fn get_workspace(db: &Database, query: WorkspaceQuery) -> Response {
-    let Some(path) = query.path else {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "MISSING_PATH",
-            "?path= is required: this route describes one workspace root",
-        );
+    let Some(raw) = query.path else {
+        return list_workspaces();
     };
-    let store = ArtifactStore::new(db);
-    let root = match resolve_root(&store, &path) {
-        Ok(root) => root,
+    let path = match canonical_path(&raw) {
+        Ok(path) => path,
         Err(response) => return response,
     };
-
-    let store_root = Path::new(&root).join(store::STORE_DIR_NAME);
-    let store_present = store_root.is_dir();
-    let recorded_root = match store::recorded_project_root(&store_root) {
-        Ok(recorded) => recorded,
+    let resolved = match projects::resolve(Path::new(&path)) {
+        Ok(resolved) => resolved,
         Err(e) => {
-            // An unreadable marker is not a reason to refuse the whole answer:
-            // the counts below are the half that decides a re-base.
-            tracing::warn!(
-                "Cannot read the store marker in {}: {e:#}",
-                store_root.display()
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "IO_ERROR",
+                format!("{path} could not be resolved: {e:#}"),
             );
-            None
         }
     };
-    let moved = matches!(&recorded_root, Some(recorded) if recorded != &root);
-
-    let rows = match store.workspace_rows(&root, None) {
+    let Some(resolved) = resolved else {
+        return Json(WorkspaceView {
+            path,
+            root: None,
+            id: None,
+            name: None,
+            missing: false,
+            rows: RowCountsView::default(),
+            active_tasks: 0,
+            queued_tasks: 0,
+        })
+        .into_response();
+    };
+    let root = resolved.root_string();
+    let rows = match ArtifactStore::new(db).workspace_rows(&root, None) {
         Ok(rows) => rows,
         Err(e) => {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string());
         }
     };
-
-    Json(workspace_json(
-        &root,
-        store_present,
-        recorded_root,
-        moved,
-        &rows,
-    ))
-    .into_response()
-}
-
-fn workspace_json(
-    root: &str,
-    store_present: bool,
-    recorded_root: Option<String>,
-    moved: bool,
-    rows: &WorkspaceRows,
-) -> serde_json::Value {
-    serde_json::json!({
-        "path": root,
-        "store_present": store_present,
-        "recorded_root": recorded_root,
-        "moved": moved,
-        "rows": counts_json(&rows.counts),
-        "active_tasks": rows.active_tasks,
-        // Both numbers, because the two writers refuse on different sets: a
-        // re-base waits for `running`/`paused` (live in-process state a row
-        // rewrite cannot reach), a purge refuses on `queued` as well (the run
-        // has already named this root and is about to resolve its store). A
-        // caller shown only `active_tasks` could not tell why its purge was
-        // refused with nothing running.
-        "queued_tasks": rows.queued_tasks,
+    let project = resolved.project.as_ref();
+    Json(WorkspaceView {
+        path,
+        root: Some(root),
+        id: project.map(|p| p.id.to_string()),
+        name: project.map(|p| p.name.clone()),
+        missing: project.is_some_and(|p| p.missing),
+        rows: RowCountsView::from(&rows.counts),
+        active_tasks: rows.active_tasks,
+        queued_tasks: rows.queued_tasks,
     })
+    .into_response()
 }
 
 // ── PATCH /v1/workspaces ─────────────────────────────────────────
@@ -991,3 +1023,6 @@ pub async fn purge_workspace_handler(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod life_tests;

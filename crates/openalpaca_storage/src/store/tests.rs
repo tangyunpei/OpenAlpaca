@@ -572,32 +572,6 @@ fn layout_lines_this_module_does_not_own_are_preserved() {
     assert_eq!(install_id(tmp.path()).unwrap().as_deref(), Some("abc"));
 }
 
-/// `recorded_project_root` reads what an earlier build wrote into an
-/// in-project `.layout` (the GET's `recorded_root` until Stage 1 step (5)):
-/// `None` with no marker or no key.
-#[test]
-fn recorded_project_root_reads_a_marker_an_earlier_build_wrote() {
-    let tmp = tempdir().unwrap();
-    let root = tmp.path().join("store");
-    fs::create_dir_all(&root).unwrap();
-    assert_eq!(recorded_project_root(&root).unwrap(), None);
-    fs::write(root.join(".layout"), "1\n").unwrap();
-    assert_eq!(recorded_project_root(&root).unwrap(), None);
-    fs::write(root.join(".layout"), "1\nproject_root=/somewhere/else\n").unwrap();
-    assert_eq!(
-        recorded_project_root(&root).unwrap().as_deref(),
-        Some("/somewhere/else")
-    );
-}
-
-#[test]
-fn the_home_root_records_no_project_root() {
-    let tmp = tempdir().unwrap();
-    let _guard = HomeStoreGuard::set(&tmp.path().canonicalize().unwrap());
-    let root = ensure_store(&StoreScope::Home).unwrap();
-    assert_eq!(recorded_project_root(&root).unwrap(), None);
-}
-
 #[test]
 fn no_temp_file_survives_a_layout_write() {
     let tmp = tempdir().unwrap();

@@ -65,7 +65,6 @@ const GITIGNORE_FILE: &str = ".gitignore";
 /// reported as a name this store did not create.
 const VERSIONS_DIR: &str = ".versions";
 const INSTALL_ID_KEY: &str = "install_id";
-const PROJECT_ROOT_KEY: &str = "project_root";
 
 // ============================================================================
 // Roots
@@ -610,21 +609,6 @@ pub fn layout_version(root: &Path) -> Result<Option<u32>> {
 /// The install id recorded on line 2 of the home root's `.layout`, if present.
 pub fn install_id(root: &Path) -> Result<Option<String>> {
     Ok(layout_text(root)?.as_deref().and_then(read_install_id))
-}
-
-/// The project root a **project store** recorded for itself when it was first
-/// seeded — §4.8's "Project moved" made answerable.
-///
-/// `root` is the store directory (`<project>/.openalpaca`). The value is the
-/// canonical path of the project the store belonged to *then*, so a store whose
-/// directory has since been moved reports the old path and a re-base has
-/// something exact to offer. `None` means no store, no marker, or a store
-/// seeded before this key existed — all of which read as "nothing to say", not
-/// as "not moved by this much".
-pub fn recorded_project_root(root: &Path) -> Result<Option<String>> {
-    Ok(layout_text(root)?
-        .as_deref()
-        .and_then(|text| read_layout_value(text, PROJECT_ROOT_KEY)))
 }
 
 /// `<root>/.layout`'s contents, or `None` when the root carries no marker.

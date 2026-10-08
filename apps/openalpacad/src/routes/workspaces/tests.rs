@@ -406,94 +406,10 @@ fn error_code(body: &serde_json::Value) -> &str {
     body["error"]["code"].as_str().unwrap_or("<no code>")
 }
 
-/// What an earlier build's in-project `.layout` says, written by hand. The
-/// GET still reads it until Stage 1 step (5) removes `store_present`,
-/// `recorded_root` and `moved` (interfaces C8).
-fn earlier_build_marker(root: &str, recorded: &str) {
-    let dir = std::path::Path::new(root).join(store::STORE_DIR_NAME);
-    std::fs::create_dir_all(&dir).expect("store dir");
-    std::fs::write(dir.join(".layout"), format!("1\nproject_root={recorded}\n")).expect("marker");
-}
-
 fn project_at(root: &str) -> projects::Project {
     projects::lookup(std::path::Path::new(root))
         .expect("lookup")
         .expect("a registered project")
-}
-
-// ============================================================================
-// GET /v1/workspaces
-// ============================================================================
-
-#[tokio::test]
-async fn the_path_is_required_and_must_be_absolute() {
-    let f = Fixture::new();
-
-    let (status, body) = f.get(None).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(error_code(&body), "MISSING_PATH");
-
-    for relative in ["", "   ", "relative/project", "./here"] {
-        let (status, body) = f.get(Some(relative)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{relative:?}");
-        assert_eq!(error_code(&body), "INVALID_PATH", "{relative:?}");
-    }
-}
-
-#[tokio::test]
-async fn a_store_whose_marker_names_another_root_reads_as_moved() {
-    let f = Fixture::new();
-    let old = f.project("old-project");
-    f.artifact(&old, "Notes");
-    f.session("session-1", &old);
-    f.task("task-1", &old, "completed");
-    let new = f.bare_dir("new-project");
-    earlier_build_marker(&new, &old);
-
-    let (status, body) = f.get(Some(&new)).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["path"], new);
-    assert_eq!(body["store_present"], true);
-    assert_eq!(body["recorded_root"], old);
-    assert_eq!(body["moved"], true);
-    assert_eq!(body["rows"]["artifacts"], 0);
-
-    let (status, body) = f.get(Some(&old)).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["rows"]["artifacts"], 1);
-    assert_eq!(body["rows"]["sessions"], 1);
-    assert_eq!(body["rows"]["tasks"], 1);
-    assert_eq!(body["active_tasks"], 0);
-}
-
-#[tokio::test]
-async fn a_store_standing_where_it_was_seeded_is_not_moved() {
-    let f = Fixture::new();
-    let root = f.project("project");
-    earlier_build_marker(&root, &root);
-
-    let (status, body) = f.get(Some(&root)).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["recorded_root"], root);
-    assert_eq!(body["moved"], false, "it is exactly where it was seeded");
-    assert_eq!(body["store_present"], true);
-}
-
-#[tokio::test]
-async fn the_runs_in_flight_are_reported() {
-    let f = Fixture::new();
-    let root = f.project("project");
-    f.task("done", &root, "completed");
-    f.task("queued", &root, "queued");
-    f.task("live", &root, "running");
-
-    let (_, body) = f.get(Some(&root)).await;
-    assert_eq!(body["rows"]["tasks"], 3);
-    assert_eq!(body["active_tasks"], 1);
-    // D7: the purge refuses on `queued` as well, so the read that a client
-    // offers a purge from has to report that set too — otherwise a
-    // `WORKSPACE_BUSY` arrives with `active_tasks: 0` and nothing to explain it.
-    assert_eq!(body["queued_tasks"], 1);
 }
 
 // ============================================================================
