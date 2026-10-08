@@ -470,6 +470,11 @@ name, its size and one of three states:
   chat: files belong to the conversation you attached them in. Re-attach them
   if you meant them for the new one. The text you had typed is *not* cleared —
   it stays with the window.
+- A file is filed under the project of the conversation it is for: a
+  conversation you picked from the list that has a project takes its files
+  there, even when this window's project is another one, because its turns run
+  there; with none picked, or one no turn has bound yet, the window's project
+  takes them.
 - Ten files per turn (the daemon's `[upload] max_files_per_message` default).
   An eleventh pick is refused in the window with the same sentence the daemon
   would have answered with.
@@ -989,13 +994,22 @@ merely found an older daemon's leftover log; the button is inert there, because
 a path to a file this daemon did not write is worse than no path.
 
 **The project.** The Project card holds this window's project. Type a folder
-and press `Use`: the daemon resolves it (`POST /v1/workspaces`) — the git
-repository it lies in, else the folder itself, which is how a folder with no
-git becomes a project — and records it, and the window keeps the root the
-daemon answered, not the text you typed. The card names the root this window's
-turns go to (`GET /v1/status`), and says so when the stored path lies in no
-project (a path an earlier build stored as you typed it, say). The window sends
-that root as `x-workspace-path` on `POST /v1/chat`; runs started here record
+and press `Use`: the daemon resolves it (`POST /v1/workspaces`) — the nearest
+recorded project or git repository at or above it, else the folder itself,
+which is how a folder with no git becomes a project — and records it, and the
+window keeps the root the daemon answered and the project's id, not the text
+you typed. The card names the root this window's turns go to
+(`GET /v1/status`). When the stored path lies in no project, the card says so
+and what to do: "`<path>` is in no project: no git repository holds it and it
+was not chosen with Use. Its folder may have moved: Use its new folder, or
+Re-point… its project in the list below. If the folder is still there, press
+Use to make it one." A project re-pointed from somewhere else — `openalpaca
+store rebase`, or another window — is followed: the window finds its project's
+id listed at the new root, takes that root, and says "This window's project
+was re-pointed to `<root>`: its turns go there now." A path an earlier build
+stored carries no id and is not followed; press `Use` on the new folder. The
+window sends that root as `x-workspace-path` on `POST /v1/chat`; runs started
+here record
 the project, and what they produce is kept in its folder under `projects/` in
 the home store — nothing is written into the project's own folder. `Clear`
 drops the window's project; with none, the GUI sends no header and everything
@@ -1015,32 +1029,48 @@ chat turn records elsewhere appears the next time it is read.
 dialog counts what is recorded at the old path (`GET /v1/workspaces?path=`) —
 conversations, messages, runs, files, queued follow-ups — and says when runs
 there are still in flight; type the new folder or press `Choose…`, then
-`Re-point` (`PATCH /v1/workspaces`), which stays off while a run there is in
-flight. The project's folder under `projects/` is renamed for the new path and
-every record of the old path is rewritten in one transaction; its memory notes
-are keyed by the project's id and come with it untouched. Nothing re-points on
-its own. The daemon refuses rather than merges: while a run there is running
-or paused (`WORKSPACE_BUSY` — retry once it finishes), onto a path that is not
-a directory, onto the home store, and onto a path that is already a project or
-that records name (`WORKSPACE_EXISTS`, which names both ways out); the dialog
-stays open with the daemon's sentence. A window on that project follows it to
-the new path.
+`Re-point` (`PATCH /v1/workspaces`), which stays off while a run there is
+running or paused, and after a count that could not be read — the dialog says
+why. Should the daemon read the project's path as another project, or as
+none, the dialog says so instead of drawing the counts, and `Re-point` stays
+off: it would move the wrong project, or nothing. (The daemon matches a root
+as the list prints it to its own project first, so this is a safeguard.) The project's folder under
+`projects/` is renamed for the new path and every record of the old path is
+rewritten in one transaction; its memory notes are keyed by the project's id
+and come with it untouched. Nothing re-points on its own. The daemon refuses
+rather than merges: while a run there is queued, running or paused, or one
+starts while the re-point waits (`WORKSPACE_BUSY` — retry once it finishes),
+when the project was re-pointed or its data deleted elsewhere while this one
+waited, or its own re-point a crash interrupted has not finished (both
+`WORKSPACE_BUSY`; the second until the daemon's next start), onto a path that
+is not a directory, onto the home store, and onto a path that is already a
+project, that records name, or that another project's unfinished re-point
+holds (`WORKSPACE_EXISTS`, which names both ways out); the dialog stays open
+with the daemon's sentence. A window on that project follows it to the new
+path.
 
 **`Delete data…`** deletes everything OpenAlpaca holds for a project. On open
 the dialog asks for the plan (`POST /v1/workspaces/purge` with
 `dry_run: true`) and draws it as served: each entry marked `delete` or `keep`,
 with what it holds and its retention class, the counts, and what another
-conversation keeps. `Delete data` — there is no word to type — then deletes the
-project's conversations, runs, uploads and by-products, the memory notes of
+conversation keeps — an upload whole, a by-product as its newest version.
+Should the plan the daemon answers be another project's, the dialog draws none
+of it, says whose it is, and keeps `Delete data` off. `Delete data` — there is no word to type —
+then deletes the project's conversations, runs, uploads and by-products, the
+memory notes of
 every owner, and its folder under `projects/`; a file a surviving conversation
 still shows is moved to `uploads/kept/` or `artifacts/kept/` in the home store
 and stays readable. The project's own folder is never touched. While a run
-there is queued, running or paused the daemon refuses even the plan
-(`WORKSPACE_BUSY`), and the dialog says why with `Delete data` off. There is no
-undo. A window on that project is left with none. If not every memory
-partition could be dropped, the rest is still deleted but the project's folder
-under `projects/` is kept: the project stays listed, the window keeps it, and
-the toast asks you to delete its data again, which finishes it.
+there is queued, running or paused, or the project's own re-point has not
+finished, the daemon refuses even the plan (`WORKSPACE_BUSY`), and the dialog
+says why with `Delete data` off; the delete itself is refused the same way
+when a run starts, or the project is re-pointed or deleted elsewhere, while it
+waits. There is no undo. A window on that project is left with none. When the
+daemon answers that it did not remove the project's folder under `projects/`
+— not every memory partition could be dropped, its removal stopped part-way,
+or it was already gone; the answer does not say which — the toast reads
+"OpenAlpaca could not finish removing the data of `<root>`; run Delete data…
+again to finish.", and the window keeps the project.
 
 ### Models & keys
 

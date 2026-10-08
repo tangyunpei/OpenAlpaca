@@ -282,7 +282,7 @@ A **user** row's text is the message's `content`, never `display_text`. For a tu
 - Dev server: port 1420, strict (`tauri.conf.json` `devUrl` points at it); `src-tauri/` is excluded from the watcher.
 - Per-machine `localStorage` keys:
   - `oa-pane-widths` — the resizable column widths.
-  - `oa-project` — the chosen project path.
+  - `oa-project` — the chosen project's root and id, as JSON; the window follows a project re-pointed elsewhere by its id.
   - `oa-pins` — a **cache** of artifact pins. The pin itself is daemon state (`PUT /v1/artifacts/{id}/pin`); every server answer overwrites the cache.
 
 ## Tests
