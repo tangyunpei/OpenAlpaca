@@ -135,9 +135,11 @@ Defaults after install:
 - Runtime DB: `~/.openalpaca/state/openalpaca.db`
 
 Inside the runtime root, `state/` is the machine's (database, logs, lock,
-master key, caches) and everything else is yours to read and edit. The root
-describes itself: the daemon seeds a `README.md` there that explains every
-entry.
+master key, caches) and everything else is yours to read and edit. Each
+project you work in has a folder there too, under `projects/`, with its
+artifacts, uploads and memory notes; nothing is written inside the project's
+own folder. The root describes itself: the daemon seeds a `README.md` there
+that explains every entry.
 
 When the CLI or the desktop app launches the daemon, it sets
 `OPENALPACA_CONFIG_DIR` to the runtime config directory above — that is the
@@ -151,7 +153,7 @@ The whole runtime root can be moved with `OPENALPACA_HOME_STORE`; see
 Memory used to live inside the database, in three tables searched by keyword
 and by a local embedding model. This build replaces all of that. What
 OpenAlpaca remembers is now a set of Markdown files you can read and edit —
-under `~/.openalpaca/memory/` and, for a project, `<project>/.openalpaca/memory/`
+under `~/.openalpaca/memory/` and, for a project, `~/.openalpaca/projects/<name>/memory/`
 — searched by keyword only, with no model and no download. The old tables are
 gone from the schema, and **an existing database is not converted**: it is
 refused, and you start again with a factory reset. This was chosen knowingly
@@ -160,14 +162,14 @@ new build on a store an older one created.
 
 The same holds for a store an earlier build of the Markdown memory created.
 On 2026-09-28 the schema was re-baselined at version 1 (this build's newest is
-2), and every database from before that — 42 from before the memory redesign,
+3), and every database from before that — 42 from before the memory redesign,
 43 to 45 from the Markdown-memory builds before the re-baseline — is at a
 version it does not know. The daemon, and every form of `openalpaca config`
 that opens the database, stops with:
 
 ```text
 Database `<path>` is at schema version 42, which this build does not know (it
-creates schema version 1 and knows versions up to 2). Nothing was changed. If a
+creates schema version 1 and knows versions up to 3). Nothing was changed. If a
 newer OpenAlpaca build created this database, use that build. If it was created
 by a build from before the schema was re-baselined at version 1, it cannot be
 read or upgraded: run `openalpaca config reset --factory` to start again (it
@@ -190,8 +192,9 @@ using with an older build is the second case it names. To switch over:
    confirmation word, `factory-reset`. It deletes the database with its `-wal`
    and `-shm` files, clears `llm.toml` — every provider setting and API key,
    with the keychain entries those keys point at — and returns `daemon.toml` to
-   its defaults. Your artifact, upload and session files stay on disk with
-   nothing pointing at them; `.master_key`, `logs/`, `backups/`, `plugins/`,
+   its defaults. Your artifact, upload and session files, and each project's
+   folder under `projects/`, stay on disk with nothing pointing at them;
+   `.master_key`, `logs/`, `backups/`, `plugins/`,
    `mcp.toml`, `agents/`, `skills/` and `orchestrator/` are not touched. See
    [CLI Manual → `config`](CLI_Manual.md#config) for the full list.
 4. **Start again and reconnect a model.** Every provider is switched off again:
@@ -238,28 +241,112 @@ using with an older build is the second case it names. To switch over:
    that build's `system_agent.md` too: do this step on it as well.
 
 The reset leaves `~/.openalpaca/README.md` as it is, and an older build's text
-there is out of date: delete it, and the next start seeds the current one.
-`.layout`, beside it and in each project's `.openalpaca/`, keeps whatever it
-has: nothing adds the keys a newer build writes into a new marker (a project
-store whose marker records no root is simply never reported as moved).
+there is out of date — it describes no `projects/` folder, and lists `skills/`
+and `cache/` entries that never held anything: delete it, and the next start
+seeds the current one. `.layout`, beside it, keeps whatever it has.
 
 A store from before the memory redesign may also hold
 `~/.openalpaca/state/cache/fastembed` (about 1 GB), the removed embedding
 model's download. Neither the reset nor this build touches it; delete it by
 hand.
 
-**Keep the builds apart.** Once you have switched over, do not start a build
-from before 2026-09-28 against the store. Every build from 2026-09-21 on — the
+**Keep the builds apart.** Once you have switched over, do not start an older
+build against the store. A build from before projects moved into the home
+store knows schema versions up to 1 or 2: it refuses this store, at version 3,
+with the message above, and of the two cases it names the first is yours —
+use this build; the factory reset it offers for the second would delete this
+store. Every build from 2026-09-21 until the re-baseline of 2026-09-28 — the
 pre-redesign builds at schema 42 and the earlier Markdown-memory builds at 43
-to 45 — reads the new store's version 2 as older than its own baseline, refuses
-it as `Unsupported legacy schema version 2`, and tells you to delete the
-database: with `openalpaca config reset --factory` in a build from commit
-`73a0698d` on (the evening of 2026-09-22), by hand in a build before it. Do not
-follow that advice — it deletes the new store. A build from before 2026-09-21
-has no such check: it would take the store for its own version 2 and run its
-migrations 3 to 42 on it, so never run one against a store this build created.
-To go back, stop this build and run the older one against the copy you kept in
-step 1.
+to 45 — reads the new store's version 3 as older than its own baseline,
+refuses it as `Unsupported legacy schema version 3`, and tells you to delete
+the database: with `openalpaca config reset --factory` in a build from commit
+`73a0698d` on (the evening of 2026-09-22), by hand in a build before it. Do
+not follow that advice — it deletes the new store. A build from before
+2026-09-21 has no such check: it would take the store for its own version 3
+and run its migrations 4 to 42 on it, so never run one against a store this
+build created. To go back, stop this build and run the older one against the
+copy you kept in step 1.
+
+### Projects live in the home store
+
+Earlier builds kept a project's files inside the project: a `.openalpaca/`
+folder at its top held the artifacts and uploads of its conversations and, on
+a store an earlier build of the Markdown memory used, that project's memory
+notes. This build writes nothing inside a project. Each project gets a folder
+in the home store instead, `~/.openalpaca/projects/<name>/`, named after the
+project's path — `/Users/you/dev/app` becomes `-Users-you-dev-app` — with a
+`project.json` that holds the project's permanent id and its path, and the
+project's own `artifacts/`, `uploads/` and `memory/`. A project is the git
+repository a conversation runs in — its top folder, wherever inside it you
+are — or a folder you chose: Settings → Connection → `Use` in the app, or
+`openalpaca chat --project <dir>`. A `.openalpaca/` folder no longer marks a
+project, and a folder with neither git nor a choice is no project.
+`openalpaca store list` shows every project; [CLI Manual →
+`store`](CLI_Manual.md#store) says how to re-point one whose folder you moved,
+or delete everything OpenAlpaca holds for one (a file of it that another
+conversation still shows is kept, under `~/.openalpaca/uploads/kept/` or
+`~/.openalpaca/artifacts/kept/`).
+
+**An old `<project>/.openalpaca/` is never read again** — not its artifacts,
+not its uploads, not its notes. Nothing converts it and nothing deletes it.
+What it holds is yours:
+
+- **Artifacts and uploads** (`artifacts/`, `uploads/`) are ordinary files. Keep
+  the ones you want anywhere you like; the app no longer lists them.
+- **Memory notes** (`memory/owners/<owner-key>/notes/*.md`, on a store an
+  earlier build of the Markdown memory used) can be carried over by hand:
+  1. Start a conversation in the project once — any turn from inside it, or
+     `Use` in the app — so that it has its folder under `projects/`.
+  2. Run `openalpaca memory doctor` from inside the project. It prints your
+     owner key and, for the project, the folder of your notes there
+     (`…/projects/<name>/memory/owners/<owner-key>`) — `ready` once it holds
+     a note, `absent` until then.
+  3. Copy the note files (`cp -p` keeps them private) into that folder's
+     `notes/`, creating it, and any folder above it, if it is absent
+     (OpenAlpaca makes its own folders `0700`; `chmod 700` makes yours the
+     same). If `doctor` said `ready`, the running daemon records each copied
+     file as a note edited outside OpenAlpaca — origin `external` — at its
+     next scan, within 30 seconds, or at once with `openalpaca memory sync`.
+     If it said `absent`, stop the daemon (`openalpaca daemon stop`), run
+     `openalpaca memory doctor --repair` from inside the project — it builds
+     the folder's record from the files, every note recorded as `external` —
+     and start the daemon again.
+
+  A note carried over keeps its text, not its history: its origin (whether you
+  wrote it or it was learned) and the record of notes you forgot there do not
+  come with it.
+- **Then delete the folder by hand** (`rm -rf <project>/.openalpaca`) once you
+  have what you want from it. A repository that committed files of the folder
+  (its `.gitignore`, its `README.md`, artifacts) still tracks them: commit
+  their removal too.
+
+`openalpaca memory doctor` also lists the record an earlier build kept in
+`~/.openalpaca/state/memory-control/` for each such project ("project snapshot
+… carries no project id: an earlier build wrote it for …"). It is never opened
+or adopted, and nothing deletes it; it is small and harmless.
+
+On a store an earlier build of this branch already used — one this build opens
+without the message above — the first start also changes four things:
+
+- The records of the files an earlier build stored inside a project's
+  `.openalpaca/` are deleted (the database moves to schema 3). A message that
+  was handed one of those files — in any conversation — keeps its text and
+  shows the file as unavailable.
+- A conversation an earlier build bound to a folder that only an
+  `.openalpaca/` marked keeps its binding. When you continue it, its turns run
+  with no project if no git repository lies above that folder, until you
+  choose the folder with `Use` or `openalpaca chat --project <dir>`; with one
+  above it, its next turn runs in that repository's project and starts a new
+  conversation there, once.
+- A project an earlier build used has no folder under `projects/` until its
+  first turn after the switch, or `Use`, gives it one. Until then
+  `openalpaca store purge` does not know it, and learning that reaches its
+  unread turns — as the catch-up shortly after a start usually does — drops
+  them rather than learn them. A folder only an `.openalpaca/` marked never
+  gets one unless you choose it.
+- The memory search index is rebuilt from the notes in the background (about
+  15 to 17 seconds at 100,000 notes); search answers from the note files
+  meanwhile.
 
 ## Run and Verify
 
