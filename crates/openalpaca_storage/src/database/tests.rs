@@ -1248,3 +1248,90 @@ fn a_version_1_database_migrates_to_the_working_state_in_place() {
     })
     .unwrap();
 }
+
+/// R25 (migration 3): a `file_assets` row whose bytes lie inside a project's
+/// own folder — the in-project store this build never reads again (ST-1,
+/// ST-9) — is deleted with its versions and every attachment link, another
+/// conversation's included; the message keeps its text. A row in the new
+/// layout, a row with no project, and a row whose path only starts like the
+/// project's (`/w/app` beside `/w/app-old/…`) stay. Both separators count.
+#[test]
+fn migration_3_deletes_the_rows_whose_bytes_lie_inside_a_projects_own_folder() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("v2.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(migrations::MIGRATIONS[0].sql).unwrap();
+        conn.execute_batch(migrations::MIGRATIONS[1].sql).unwrap();
+        conn.execute_batch(
+            "INSERT INTO session (id, lane_key, source) VALUES
+                 ('s-a', 'u:gui', 'gui'), ('s-b', 'u:cli', 'cli');
+             INSERT INTO conversation_messages (id, lane_key, role, content, session_id) VALUES
+                 (1, 'u:gui', 'user', 'see the file', 's-a'),
+                 (2, 'u:cli', 'user', 'the same file, another conversation', 's-b');
+             INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes,
+                                      storage_path, origin, project_root, rel_path) VALUES
+                 ('inside', 'u', 'a', 'notes.md', 'text/markdown', 1,
+                  '/w/app/.openalpaca/artifacts/loose/2026-09-01/01-notes.md', 'produced',
+                  '/w/app', 'loose/2026-09-01/01-notes.md'),
+                 ('inside-windows', 'u', 'b', 'a.txt', 'text/plain', 1,
+                  'C:\\w\\app\\.openalpaca\\uploads\\2026-09-01\\01-a.txt', 'upload',
+                  'C:\\w\\app', '2026-09-01/01-a.txt'),
+                 ('new-layout', 'u', 'c', 'notes.md', 'text/markdown', 1,
+                  '/h/.openalpaca/projects/-w-app/artifacts/loose/2026-09-01/02-notes.md',
+                  'produced', '/w/app', 'loose/2026-09-01/02-notes.md'),
+                 ('no-project', 'u', 'd', 'b.txt', 'text/plain', 1,
+                  '/h/.openalpaca/uploads/2026-09-01/01-b.txt', 'upload', NULL,
+                  '2026-09-01/01-b.txt'),
+                 ('lookalike', 'u', 'e', 'c.txt', 'text/plain', 1,
+                  '/w/app-old/notes/c.txt', 'upload', '/w/app', '2026-09-01/01-c.txt');
+             INSERT INTO artifact_versions (artifact_id, version, rel_path, sha256, size_bytes)
+                 VALUES ('inside', 1, 'loose/2026-09-01/.versions/01-notes/v1.md', 'a0', 1);
+             INSERT INTO conversation_message_attachments (message_id, file_id) VALUES
+                 (1, 'inside'), (2, 'inside'), (2, 'no-project');",
+        )
+        .unwrap();
+        let version: i32 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 2, "the fixture is a version-2 store");
+    }
+
+    let db = Database::open(&db_path).unwrap();
+    assert_eq!(db.schema_version().unwrap(), 3);
+    db.with_connection(|conn| {
+        let ids = conn
+            .prepare("SELECT id FROM file_assets ORDER BY id")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(ids, ["lookalike", "new-layout", "no-project"]);
+        let versions: i64 =
+            conn.query_row("SELECT COUNT(*) FROM artifact_versions", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(versions, 0, "the deleted row's versions went by cascade");
+        let links = conn
+            .prepare(
+                "SELECT message_id, file_id FROM conversation_message_attachments
+                  ORDER BY message_id, file_id",
+            )?
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(
+            links,
+            [(2, "no-project".to_string())],
+            "every link to a deleted row went, another conversation's included"
+        );
+        let messages: i64 =
+            conn.query_row("SELECT COUNT(*) FROM conversation_messages", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(messages, 2, "the messages keep their text");
+        Ok(())
+    })
+    .unwrap();
+}
