@@ -1154,6 +1154,84 @@ async fn a_delete_stands_the_writers_down_and_announces_every_conversation() {
     assert_eq!(deleted, vec!["s-a".to_string(), "s-b".to_string()]);
 }
 
+/// A directory nobody may write until this is dropped — then `0700` again,
+/// as `create_private_dir` made it, so a failed assertion never leaves the
+/// test's tempdir unremovable.
+#[cfg(unix)]
+struct ReadOnlyDir(PathBuf);
+
+#[cfg(unix)]
+impl ReadOnlyDir {
+    fn set(dir: PathBuf) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make the directory read-only");
+        Self(dir)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ReadOnlyDir {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// `remove_project` stops at the first partition it cannot drop. The folder
+/// stays then — the project still registered, `project_folder: false` — and
+/// deleting its data again finds no row, drops the partitions left and then
+/// the folder. Removed at once, it would strand those snapshots where nothing
+/// lists them (R-S11) and no delete can reach them.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_partition_that_cannot_be_dropped_keeps_the_folder_and_a_second_delete_finishes() {
+    let w = World::new();
+    let s = w.scene();
+    let control = w
+        .home
+        .join("state")
+        .join(openalpaca_storage::memory_files::CONTROL_DIR);
+
+    // No snapshot can be removed from a directory nobody may write.
+    let read_only = ReadOnlyDir::set(control);
+    let (status, body) = w.delete(&s.p.root, false).await;
+    drop(read_only);
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["applied"], true);
+    assert_eq!(
+        body["removed"],
+        serde_json::json!({"session_dirs": 1, "memory_partitions": 0, "project_folder": false})
+    );
+    assert_eq!(w.count("SELECT COUNT(*) FROM session"), 2, "the rows went");
+    assert!(s.p.dir.is_dir(), "the folder is kept");
+    assert_eq!(
+        projects::lookup(&s.p.root)
+            .expect("lookup")
+            .map(|found| found.id),
+        Some(s.p.id),
+        "the project stays registered"
+    );
+    assert_eq!(project_snapshots(&s.p.id), 2);
+
+    let (status, body) = w.delete(&s.p.root, false).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["counts"]["sessions"], 0, "no row was left");
+    assert_eq!(
+        body["removed"],
+        serde_json::json!({"session_dirs": 0, "memory_partitions": 2, "project_folder": true})
+    );
+    assert!(!s.p.dir.exists());
+    assert_eq!(projects::lookup(&s.p.root).expect("lookup"), None);
+    assert_eq!(project_snapshots(&s.p.id), 0);
+    assert_eq!(
+        crate::test_util::note_titles(&w.memory, OWNER, Some(s.p.root.as_path())),
+        vec!["Kept at home".to_string()]
+    );
+}
+
 /// The delete on a thread of its own with its own runtime, so a hang fails
 /// the test instead of hanging the suite (a stuck thread is left behind when
 /// the process exits). No session writer: the test's runtime is blocked

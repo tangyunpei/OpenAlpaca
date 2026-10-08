@@ -747,7 +747,10 @@ fn announce_deleted_sessions(deps: &PurgeDeps<'_>, plan: &DeletePlan, outcome: &
 /// partition, every owner's partitions
 /// (`MemoryService::remove_project`) and `projects/<name>/`. A failure
 /// after the rows went is logged and reported in `removed`, never a `500`:
-/// the deletion the caller asked for has happened.
+/// the deletion the caller asked for has happened. A partition that could
+/// not be dropped keeps `projects/<name>/` (`project_folder: false`), so the
+/// project stays registered and deleting its data again — which finds no row
+/// left — drops the rest and the folder.
 pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRequest) -> Response {
     let path = match canonical_path(&request.path) {
         Ok(path) => path,
@@ -874,21 +877,41 @@ pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRe
         outcome.message_ids.clone(),
     )
     .await;
-    let memory_partitions = match deps.memory.remove_project(&project.id) {
-        Ok(dropped) => dropped,
+    // `remove_project` stops at the first partition it cannot drop. The folder
+    // then stays, so the project stays registered and the delete run again —
+    // finding no row left — drops the rest and the folder. Removed now, it
+    // would strand the snapshots left: nothing lists one whose project no
+    // folder records (R-S11), and a delete of that root answers `404`.
+    let (memory_partitions, partitions_left) = match deps.memory.remove_project(&project.id) {
+        Ok(dropped) => (dropped, false),
         Err(e) => {
             tracing::warn!(
-                "Deleted the data of {root}, but its memory partitions could not be dropped: \
-                 {e}; `openalpaca memory doctor` names what is left"
+                "Deleted the data of {root}, but not all of its memory partitions could be \
+                 dropped: {e}. Its folder {}/{}/ was kept, so the project stays registered: \
+                 delete its data again to drop the rest and the folder",
+                projects::PROJECTS_DIR,
+                project.name
             );
-            0
+            // What went: the partitions the plan counted, less those a fresh
+            // count still finds — none claimed when it cannot be read, and one
+            // short if an owner's first note there landed while this waited
+            // for the slot.
+            let left = project_life::delete_plan(deps.db, &project)
+                .map_or(plan.memory_partitions, |after| after.memory_partitions);
+            (plan.memory_partitions.saturating_sub(left), true)
         }
     };
-    let project_folder = match project_life::remove_project_folder(&project) {
-        Ok(removed) => removed,
-        Err(e) => {
-            tracing::warn!("Deleted the data of {root}, but its folder was left in place: {e:#}");
-            false
+    let project_folder = if partitions_left {
+        false
+    } else {
+        match project_life::remove_project_folder(&project) {
+            Ok(removed) => removed,
+            Err(e) => {
+                tracing::warn!(
+                    "Deleted the data of {root}, but its folder was left in place: {e:#}"
+                );
+                false
+            }
         }
     };
     announce_deleted_sessions(deps, &plan, &outcome);
