@@ -306,8 +306,10 @@ What it holds is yours:
   the ones you want anywhere you like; the app no longer lists them.
 - **Memory notes** (`memory/owners/<owner-key>/notes/*.md`, on a store an
   earlier build of the Markdown memory used) can be carried over by hand:
-  1. Start a conversation in the project once — any turn from inside it, or
-     `Use` in the app — so that it has its folder under `projects/`.
+  1. Give the project its folder under `projects/`. In a git repository any
+     turn from inside it does; otherwise choose it — `Use` in the app, or
+     `openalpaca chat --project <dir>` — since a turn from inside a folder
+     only an old `.openalpaca/` marked registers nothing.
   2. Run `openalpaca memory doctor` from inside the project. It prints your
      owner key and, for the project, the folder of your notes there
      (`…/projects/<name>/memory/owners/<owner-key>`) — `ready` once it holds
