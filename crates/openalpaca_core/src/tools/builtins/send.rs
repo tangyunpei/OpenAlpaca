@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::repository::TaskRepository;
 use openalpaca_storage::{ArtifactStore, Database};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// The tail of a refusal for an argument only a file send needs.
@@ -67,6 +67,28 @@ fn turn_owner(db: &Database, ctx: &ToolContext) -> Result<String, String> {
         "send cannot send an artifact on this turn: it has no owner context (it was not sent \
          on a person's behalf), and every artifact belongs to an owner."
             .to_string()
+    })
+}
+
+/// A stored file `send` names by an artifact id, resolved the way the
+/// Library's read confines a head: storage's `confine_to_root` canonicalizes
+/// every component, the last included, under the home store, where every
+/// by-product and upload lives since Stage 1. A link put at the file is never
+/// followed out of the store, and the path returned, which the card names and
+/// the connector is handed, is the file the link reaches (interfaces §4.3; S1
+/// review, I2). Read only: nothing is written or stamped.
+fn confine_in_store(id: &str, storage_path: &str) -> Result<String, String> {
+    let home = openalpaca_storage::store::home_root()
+        .map_err(|e| format!("Failed to look up artifact '{id}': {e:#}"))?;
+    let confined = openalpaca_storage::store::confine_to_root(&home, Path::new(storage_path))
+        .map_err(|e| {
+            format!("send: the file of '{id}' is not inside OpenAlpaca's store ({e:#}).")
+        })?;
+    confined.into_os_string().into_string().map_err(|_| {
+        format!(
+            "send: the file of '{id}' resolves to a path that is not UTF-8 text, which no channel \
+             can send."
+        )
     })
 }
 
@@ -163,8 +185,9 @@ impl SendTool {
         })
     }
 
-    /// R23: a by-product of the turn's owner, by its id: its head file as the
-    /// store recorded it, refused when the bytes are gone. Read only. The
+    /// R23: a by-product of the turn's owner, by its id: its head file,
+    /// resolved under the home store (`confine_in_store`), refused when it
+    /// leads out of the store or the bytes are gone. Read only. The
     /// hand-edit check a Library read makes (`resolve_content`) can record a
     /// version, and the card shares this lookup and must write nothing.
     fn artifact(&self, id: &str, ctx: &ToolContext) -> Result<SendFile, String> {
@@ -176,17 +199,13 @@ impl SendTool {
             .get(id, &owner)
             .map_err(|e| format!("Failed to look up artifact '{id}': {e}"))?
             .ok_or_else(|| format!("send: no artifact '{id}' of yours."))?;
-        let metadata = std::fs::metadata(&record.storage_path)
+        let path = confine_in_store(id, &record.storage_path)?;
+        let metadata = std::fs::metadata(&path)
             .ok()
             .filter(std::fs::Metadata::is_file)
-            .ok_or_else(|| {
-                format!(
-                    "send: the bytes of '{id}' are gone ({}).",
-                    record.storage_path
-                )
-            })?;
+            .ok_or_else(|| format!("send: the bytes of '{id}' are gone ({path})."))?;
         Ok(SendFile {
-            path: record.storage_path,
+            path,
             bytes: metadata.len(),
             mime_type: Some(record.mime_type),
         })
@@ -851,6 +870,64 @@ mod tests {
             )
         );
         assert!(sender.files.lock().unwrap().is_empty());
+    }
+
+    /// S1 review I2: a by-product's stored file is resolved the way the
+    /// Library's read confines a head. A link put there that leads out of the
+    /// home store is refused, at the card and in the send, and nothing reaches
+    /// the connector. One that stays inside the store is named on the card by
+    /// the file it reaches, and that file is the one sent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_at_an_artifacts_stored_file_is_named_by_its_target_and_never_followed_out_of_the_store()
+     {
+        let saved = saved();
+        let id = saved.record.id.clone();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.md");
+        std::fs::write(&secret, b"not the store's\n").unwrap();
+        std::fs::remove_file(&saved.record.storage_path).unwrap();
+        std::os::unix::fs::symlink(&secret, &saved.record.storage_path).unwrap();
+        let sender = Arc::new(RecordingSender::default());
+        let tool = artifact_tool(&saved, &sender);
+        let refused = format!("send: the file of '{id}' is not inside OpenAlpaca's store (");
+
+        let card = tool
+            .confirmation_preview(&artifact_args(&id), &owner_ctx(OWNER))
+            .await
+            .unwrap_err();
+        assert!(card.starts_with(&refused), "{card}");
+        let err = tool
+            .execute_with_context(&artifact_args(&id), &owner_ctx(OWNER))
+            .await
+            .unwrap_err();
+        assert!(err.starts_with(&refused), "{err}");
+        assert!(sender.files.lock().unwrap().is_empty(), "nothing was sent");
+
+        let home = saved._home.path().canonicalize().unwrap();
+        let elsewhere = home.join("elsewhere.md");
+        std::fs::write(&elsewhere, b"in the store\n").unwrap();
+        std::fs::remove_file(&saved.record.storage_path).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &saved.record.storage_path).unwrap();
+        let elsewhere = elsewhere.to_str().unwrap().to_string();
+        assert_eq!(
+            tool.confirmation_preview(&artifact_args(&id), &owner_ctx(OWNER))
+                .await,
+            Ok(Some(format!(
+                "Sends {elsewhere} (13 bytes) to telegram recipient default as report.md."
+            )))
+        );
+        tool.execute_with_context(&artifact_args(&id), &owner_ctx(OWNER))
+            .await
+            .unwrap();
+        assert_eq!(
+            *sender.files.lock().unwrap(),
+            vec![(
+                elsewhere,
+                "report.md".to_string(),
+                saved.record.mime_type.clone()
+            )]
+        );
     }
 
     #[tokio::test]
