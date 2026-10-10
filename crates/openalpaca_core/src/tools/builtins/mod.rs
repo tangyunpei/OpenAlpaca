@@ -598,9 +598,10 @@ impl BuiltInTool for ScriptToolBuiltIn {
             }
         };
 
-        // Cap output size to prevent memory pressure from scripts producing
-        // unbounded stdout/stderr, matching the command backend limit.
-        const MAX_SCRIPT_OUTPUT_BYTES: usize = 512 * 1024; // 512 KB
+        // Each stream at most 512 KB, the command backend's limit:
+        // `run_bounded` kept no more than that and one byte while the script
+        // ran (R-T28), and the cut to the cap is here.
+        const MAX_SCRIPT_OUTPUT_BYTES: usize = crate::tools::platform::OUTPUT_CAP;
         if output.status.success() {
             let stdout = String::from_utf8_lossy(
                 &output.stdout[..output.stdout.len().min(MAX_SCRIPT_OUTPUT_BYTES)],

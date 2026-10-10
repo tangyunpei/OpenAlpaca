@@ -23,6 +23,11 @@ pub fn shell_command(cmd: &str) -> tokio::process::Command {
     }
 }
 
+/// The most of each output stream a tool keeps from a command: 512 KB
+/// (R-T28). [`run_bounded`] keeps one byte more of each, which says the
+/// command wrote more than this, and the tool cuts to the cap.
+pub const OUTPUT_CAP: usize = 512 * 1024;
+
 /// Why [`run_bounded`] produced no output.
 #[derive(Debug)]
 pub enum RunFailure {
@@ -39,6 +44,11 @@ pub enum RunFailure {
 /// when `timeout` passes **or the returned future is dropped**. The sandbox's
 /// per-tool timeout and a run cancelled mid-call both drop the tool's
 /// future (R45, storage design §11).
+///
+/// Each stream is kept to its first [`OUTPUT_CAP`] bytes and one more, which
+/// says the command wrote more; the rest is read and dropped while the
+/// command runs, so it never blocks on a full pipe and its output never
+/// fills the daemon's memory (R-T28). The caller cuts to the cap.
 ///
 /// unix: the child is started in a new process group (`process_group(0)`).
 /// A guard owning the `Child` sends `killpg(pgid, SIGKILL)` on every exit
@@ -72,7 +82,7 @@ pub async fn run_bounded(mut cmd: Command, timeout: Duration) -> Result<Output, 
         // the child while a process that left the group (`setsid`) still held
         // a pipe open, and a kill at the timeout or the drop could then reach
         // whatever group was given the freed id.
-        let (stdout, stderr) = tokio::try_join!(read_all(out_pipe), read_all(err_pipe))?;
+        let (stdout, stderr) = tokio::try_join!(read_bounded(out_pipe), read_bounded(err_pipe))?;
         let status = run.child.wait().await?;
         Ok::<Output, std::io::Error>(Output {
             status,
@@ -91,11 +101,16 @@ pub async fn run_bounded(mut cmd: Command, timeout: Duration) -> Result<Output, 
     }
 }
 
-/// Everything a pipe yields until it closes; nothing for a pipe not taken.
-async fn read_all(pipe: Option<impl AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
+/// A pipe read until it closes, keeping its first [`OUTPUT_CAP`] bytes and
+/// one more (R-T28): the rest is read and dropped, so the writer never blocks
+/// on a full pipe and the daemon never holds more than that of one stream.
+/// Nothing for a pipe not taken.
+async fn read_bounded(pipe: Option<impl AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     if let Some(mut pipe) = pipe {
-        pipe.read_to_end(&mut bytes).await?;
+        const KEEP: u64 = OUTPUT_CAP as u64 + 1;
+        (&mut pipe).take(KEEP).read_to_end(&mut bytes).await?;
+        tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await?;
     }
     Ok(bytes)
 }
@@ -202,7 +217,8 @@ mod tests {
         use crate::test_util::{GONE_WITHIN, KillOnFail, pid_from_file, wait_until_gone};
         let dir = tempfile::tempdir().unwrap();
         let pidfile = dir.path().join("pid");
-        let outcome = run_bounded(starts_a_sleep(dir.path(), &pidfile), Duration::from_secs(1)).await;
+        let outcome =
+            run_bounded(starts_a_sleep(dir.path(), &pidfile), Duration::from_secs(1)).await;
         let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
         let _kill = KillOnFail(pid);
         assert!(matches!(outcome, Err(RunFailure::TimedOut)), "{outcome:?}");
@@ -276,6 +292,39 @@ mod tests {
         );
         run.abort();
         let _ = run.await;
+    }
+
+    /// R-T28: each pipe keeps at most the cap and one byte — the byte that
+    /// says the command wrote more — and drains the rest, so the writer never
+    /// blocks and the daemon never holds more than that, however much the
+    /// command writes. Both pipes are still read to their end before the
+    /// shell is reaped (I1).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_writing_far_more_than_the_cap_ends_with_each_stream_kept_to_the_cap() {
+        use crate::test_util::{GuardedProject, pid_from_file, process_is_gone};
+        let gp = GuardedProject::new();
+        let pidfile = gp.root.join("shell.pid");
+        let mut cmd = shell_command(&format!(
+            "echo $$ > '{}'; head -c 50000000 /dev/zero; head -c 50000000 /dev/zero >&2",
+            pidfile.display()
+        ));
+        cmd.current_dir(&gp.root);
+        let outcome = run_bounded(cmd, Duration::from_secs(60)).await;
+        let shell = pid_from_file(&pidfile, Duration::from_secs(1)).await;
+        let output = outcome.expect("the command runs to its end");
+        assert!(output.status.success(), "{:?}", output.status);
+        assert_eq!(output.stdout.len(), OUTPUT_CAP + 1, "the stdout kept");
+        assert_eq!(output.stderr.len(), OUTPUT_CAP + 1, "the stderr kept");
+        assert!(
+            output
+                .stdout
+                .iter()
+                .chain(&output.stderr)
+                .all(|byte| *byte == 0),
+            "what is kept is the start of what was written"
+        );
+        assert!(process_is_gone(shell), "the shell {shell} was reaped");
     }
 
     /// A normal end signals nothing: once a group is empty the system may

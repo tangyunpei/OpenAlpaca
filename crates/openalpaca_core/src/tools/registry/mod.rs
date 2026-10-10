@@ -1473,9 +1473,9 @@ async fn execute_command(
         }
     };
 
-    // Cap output size to prevent memory pressure from commands producing
-    // unbounded stdout/stderr.
-    const MAX_OUTPUT_BYTES: usize = 512 * 1024; // 512 KB
+    // Each stream at most 512 KB: `run_bounded` kept no more than that and
+    // one byte while the command ran (R-T28), and the cut to the cap is here.
+    const MAX_OUTPUT_BYTES: usize = crate::tools::platform::OUTPUT_CAP;
     let stdout_raw = &output.stdout;
     let stderr_raw = &output.stderr;
     let stdout = String::from_utf8_lossy(&stdout_raw[..stdout_raw.len().min(MAX_OUTPUT_BYTES)]);
