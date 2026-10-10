@@ -74,7 +74,7 @@ root is the human's:
 - rotated copies of hand-edited config: `~/.openalpaca/state/backups/`
 - plugins: `~/.openalpaca/plugins/` — one directory per plugin, plus `.permissions.toml` (approvals and the ENABLE bit for all plugins), `.config/<name>.toml` (per-plugin config), `.data/<name>/` (per-plugin durable state, kept across an update) and `.trash/` (where an uninstalled plugin's directory is moved)
 - self-description: `~/.openalpaca/README.md` (what every entry is, with a retention class) and `.layout` (layout version and this install's id), both seeded when the store is created. `README.md` is written only when absent: an existing one, edited or not, is never rewritten — delete it and the next start seeds the current text
-- content, home scope: one directory per content kind under the root, created on first use — `artifacts/`, `uploads/`, `sessions/`, `memory/`, and `scratch/` (reserved: nothing creates it yet). A deleted project's files that another conversation still shows are kept under `artifacts/kept/` and `uploads/kept/`
+- content, home scope: one directory per content kind under the root, created on first use — `artifacts/`, `uploads/`, `sessions/`, `memory/`, and `scratch/` — one working folder per conversation with no project, `scratch/<conversation id>/`, made the first time an agent's tool works there and removed with the conversation ([The Working Folder](#the-working-folder)). A deleted project's files that another conversation still shows are kept under `artifacts/kept/` and `uploads/kept/`
 - memory notes: `~/.openalpaca/memory/owners/<owner-key>/notes/<id>--<slug>.md`,
   one Markdown file per note, with `.history/` (the last five revisions the
   daemon wrote) and a rebuildable `MEMORY.md` index beside them; a project's
@@ -89,7 +89,7 @@ root is the human's:
   disposable SQLite full-text index over the notes. Deleting it costs one
   rebuild from the notes at the next start; nothing in it is authoritative.
   Nothing downloads a model: there is no embedding cache any more
-- projects: `~/.openalpaca/projects/<name>/`, one folder per project, created the first time the daemon accepts work for it — a chat turn, a run, an upload, a memory write, or choosing the folder (`POST /v1/workspaces`); a request that only reads (the status poll, the Memory view) creates none. `<name>` is the project's canonical path, in Unicode NFC, with every character that is not a letter, digit or combining mark turned into `-` (`/Users/me/dev/app` → `-Users-me-dev-app`); a name another project's folder already holds gains `-` and eight hex digits of the path's SHA-256, and a name longer than 200 bytes is cut to at most 200 bytes and gains the same. The folder holds `project.json` — `{version, id, root, created_at}`, the project's permanent id and its path, written `0600` — and the project's `artifacts/`, `uploads/` and `memory/` (its conversations' logs stay in the home store's `sessions/`). A request's path belongs to the nearest folder at or above it that is a recorded project's root or holds `.git` — a git repository's top folder, or a worktree's — and a folder with no git becomes a project only when it is chosen; the home store, a folder inside it and a folder that contains it never are. No store writes inside the project's own folder — only `file_write`, on a turn with a project, still writes a plain file into the daemon's starting directory when that is not the home store (a daemon started by hand in a checkout; the app and `openalpaca daemon start` start it in the home store), as [Where an agent's files land](#files-artifacts-and-workspaces) explains — and an `.openalpaca/` an earlier build left there is never read
+- projects: `~/.openalpaca/projects/<name>/`, one folder per project, created the first time the daemon accepts work for it — a chat turn, a run, an upload, a memory write, or choosing the folder (`POST /v1/workspaces`); a request that only reads (the status poll, the Memory view) creates none. `<name>` is the project's canonical path, in Unicode NFC, with every character that is not a letter, digit or combining mark turned into `-` (`/Users/me/dev/app` → `-Users-me-dev-app`); a name another project's folder already holds gains `-` and eight hex digits of the path's SHA-256, and a name longer than 200 bytes is cut to at most 200 bytes and gains the same. The folder holds `project.json` — `{version, id, root, created_at}`, the project's permanent id and its path, written `0600` — and the project's `artifacts/`, `uploads/` and `memory/` (its conversations' logs stay in the home store's `sessions/`). A request's path belongs to the nearest folder at or above it that is a recorded project's root or holds `.git` — a git repository's top folder, or a worktree's — and a folder with no git becomes a project only when it is chosen; the home store, a folder inside it and a folder that contains it never are. No store writes inside the project's own folder: what is written there an agent writes — a file it writes or edits, a command it runs — with your approval ([The Working Folder](#the-working-folder)); an `.openalpaca/` an earlier build left there is never read, by the stores or by the file tools
 - daemon log (launcher-managed startup): `~/.openalpaca/state/logs/daemon.log` —
   the daemon's stdout and stderr, appended across restarts and rotated by
   whichever launcher starts it when it is past 16 MB (`daemon.log.1` … `.3`,
@@ -482,8 +482,9 @@ this order and before it changes anything: more attachments than
 `[upload] max_files_per_message` (`400 TOO_MANY_ATTACHMENTS`), a `model` that is
 not in the registry (`400 UNKNOWN_MODEL`), an attachment id that does not exist
 or is not the caller's (`404 ATTACHMENT_NOT_FOUND`, `403
-ATTACHMENT_ACCESS_DENIED`), then the session checks (`404 SESSION_NOT_FOUND`,
-`409 SESSION_ARCHIVED` unless `activate` is true).
+ATTACHMENT_ACCESS_DENIED`) or a result file in the project, which is not an
+attachment (`422 ATTACHMENT_IN_PROJECT`), then the session checks (`404
+SESSION_NOT_FOUND`, `409 SESSION_ARCHIVED` unless `activate` is true).
 
 Confirmations are covered under
 [Tool confirmations](#tool-confirmations).
@@ -521,7 +522,9 @@ bookkeeping. `DELETE /v1/sessions/{id}` takes the transcript with the rows:
 - One transaction deletes the messages and the session.
 - Everything that only *pointed* at it survives with its session link cleared:
   its runs, its queued follow-ups and its tool-call audit rows.
-- The session's log directory, `~/.openalpaca/sessions/<id>/`, is removed.
+- The session's log directory, `~/.openalpaca/sessions/<id>/`, is removed, and
+  so is its scratch folder, `~/.openalpaca/scratch/<id>/`, if it has one
+  ([The Working Folder](#the-working-folder)).
 - It answers `204`. A run still writing into the session is `409
   SESSION_HAS_ACTIVE_WORKFLOWS` (cancel it first). Another owner's session is
   `404`.
@@ -566,63 +569,86 @@ lane never posts its completion report or its confirmation prompts there.
 | `POST /v1/files/upload` | Multipart upload (body limit 100 MiB). Answers `{id, filename, mime_type, size_bytes, status}`; the `id` is what a chat turn names in `attachments`. |
 | `GET /v1/files/{id}` | Upload metadata. |
 | `GET /v1/files/{id}/content` | The bytes. Query token or bearer header. |
-| `POST /v1/files/{id}/open` | Open the file with the OS default application. |
-| `GET /v1/artifacts` | List produced artifacts (filters and paging). |
+| `POST /v1/files/{id}/open` | Open the file with the OS default application. A result file in the project is opened only when the artifact store keeps its extension — text, Markdown or PDF, code or config, a table, a raster image, HTML, an archive or an office document; anything else (`.sh`, `.command`, `.svg`, `.exe`, `Makefile`, a dotfile such as `.env`) is `409 OPEN_NOT_OFFERED`: show it in its folder instead. |
+| `GET /v1/artifacts` | List produced artifacts (filters and paging). Each row carries `in_project` — a result file an agent wrote into the project, which points at the real file — and `openable`, whether `Open` is offered for it. `in_project=true` lists only the project's result files, `in_project=false` only by-products; absent, both. |
 | `GET /v1/artifacts/{id}` | One artifact. |
-| `GET /v1/artifacts/{id}/versions` | Its versions. |
-| `GET /v1/artifacts/{id}/diff?from=&to=` | A diff between two versions. |
+| `GET /v1/artifacts/{id}/versions` | Its versions. A result file in the project has none — git keeps its history — and answers an empty list. |
+| `GET /v1/artifacts/{id}/diff?from=&to=` | A diff between two versions; a result file in the project has no versions to compare. |
 | `PUT /v1/artifacts/{id}/pin` | Pin or unpin it. |
 | `GET /v1/artifacts/{id}/content` | The head version's bytes. Query token or bearer header. |
 | `GET /v1/artifacts/{id}/versions/{n}/content` | One version's bytes. Query token or bearer header. |
-| `GET /v1/workspaces` | Every project: `[{id, root, name, missing}]`, by folder name — `name` is its folder under `projects/`, `missing` that its root is no longer a directory (its data is kept). |
-| `GET /v1/workspaces?path=` | What a path resolves to: `{path, root, id, name, missing, rows, active_tasks, queued_tasks}` — a root the projects recorded, sent as written, is that project (as on `PATCH` and the purge below), with `path` as sent; any other path is canonicalized and resolved as a turn's is; `root` `null` when it is in no project, `id` and `name` `null` for a git repository no folder under `projects/` records yet; `rows` counts the artifacts, conversations, runs, messages and follow-ups recorded under the root, `active_tasks` its runs running or paused and `queued_tasks` its queued ones. Reading records nothing. A relative path is `400 INVALID_PATH`; `500 IO_ERROR` while the folder under the store that holds the projects cannot be listed. |
+| `GET /v1/workspaces` | Every project: `[{id, root, name, missing}]`, by folder name — `name` is its folder under `projects/`, `missing` that its root is no longer a directory or no longer leads to its own folder — renamed by case only, or moved with a link left at the old path (its data is kept; re-point it, or delete its data). |
+| `GET /v1/workspaces?path=` | What a path resolves to: `{path, root, id, name, missing, rows, active_tasks, queued_tasks}` — a root the projects recorded, sent as written, is that project (as on `PATCH` and the purge below), with `path` as sent; any other path is resolved as a turn's is — as written first, so a path inside a recorded root that now leads to another folder still names that root's project, then by its canonical form; `path` is then its canonical form; `root` `null` when it is in no project, `id` and `name` `null` for a git repository no folder under `projects/` records yet; `rows` counts the artifacts, conversations, runs, messages and follow-ups recorded under the root, `active_tasks` its runs running or paused and `queued_tasks` its queued ones. Reading records nothing. A relative path is `400 INVALID_PATH`; `500 IO_ERROR` while the folder under the store that holds the projects cannot be listed. |
 | `POST /v1/workspaces` | Choose a folder: `{path}` → the project it resolves to — the nearest recorded project or git repository at or above it, else the folder itself — recorded, as `{id, root, name, missing}`. `409 WORKSPACE_IS_HOME` for the home store, a folder inside it or one containing it — here and for `PATCH`'s new path only: a turn, an upload or a memory write from such a path is no project and goes to the home store; `500 WORKSPACE_REGISTER_FAILED` for an I/O failure, as on the upload and memory-write routes; `422 WORKSPACE_NOT_A_DIRECTORY`; `400 INVALID_PATH` for a relative path. |
 | `PATCH /v1/workspaces` | Re-point a project whose folder moved: `{old_path, new_path}` → `{old_path, new_path, moved, project}`. `old_path` is first matched, as written, against the roots the projects recorded — so the root the list shows names its own project even when it no longer leads to its folder (a folder renamed by case only, or moved with a link left at the old path that now reaches another project) — and otherwise resolves as a turn's path does, so a path inside the project names it; `new_path` must be an existing directory. Its folder under `projects/` is renamed for the new path and every row naming the old path is rewritten in one transaction; its memory notes are keyed by its id and stay as they are. Refused, changing nothing: `404 WORKSPACE_NOT_FOUND` (no project of yours there); `409 WORKSPACE_BUSY` — a run there queued, running or paused (counted again inside the re-point's transaction, so a run that starts while the re-point waits refuses it too), a memory write that holds the project for more than a few seconds, the project re-pointed or its data deleted while this one waited (list the projects again), or a project whose own re-point has not finished (the next start of the daemon finishes it; until then it can be neither re-pointed nor have its data deleted); `422 WORKSPACE_NOT_A_DIRECTORY`; `409 WORKSPACE_EXISTS` (the new path is already a project, rows name it, or it is either path of another project's re-point that has not finished — two projects are never merged); `409 WORKSPACE_IS_HOME` (the new path is the home store, lies inside it or contains it — an old path there is no project of yours, the `404`); `400 INVALID_PATH` (a relative path, or the path the project already has); `500 IO_ERROR` while the folder under the store that holds the projects cannot be listed. |
-| `POST /v1/workspaces/purge` | Delete everything held for one project: `{path, dry_run}` (`dry_run` defaults to **true**) → the plan or what was done, `{dry_run, applied, project, entries, counts, kept, removed}`, `removed` `null` on a dry run. `path` is a project's root exactly — matched, as written, against the roots the projects recorded before anything is resolved, so the root the list shows deletes its own project's data even when it now leads to another project's folder; a project whose folder is missing, or that has nothing recorded, is deleted the same way. It deletes the project's conversations (with their session-log directories) and any message another conversation recorded while it ran there, its runs, uploads and by-products with every version, the memory notes of every owner with their control snapshots, the summaries of the deleted conversations in your global memory, and its folder under `projects/`; a file a surviving conversation still shows is moved to `uploads/kept/` or `artifacts/kept/` and kept. Never touches the project's own folder. A real delete that could not drop every memory partition, or whose removal of the folder stopped part-way, still answers `200`, with `removed.project_folder: false` and `counts.memory_notes` counting only the notes that went: the rows are gone, but its folder under `projects/` stays with its `project.json` (removed last), so the project stays listed, and the same call again — which finds no row left — drops the rest and the folder. `project_folder: false` also answers a folder that was already gone, and the answer does not tell the three apart. Refused, changing nothing (a dry run included): `404 WORKSPACE_NOT_FOUND` (no project of yours there — a path in no project, in the home store, or a root no folder under `projects/` records); `422 WORKSPACE_NOT_A_ROOT` for a path inside a project, the answer naming the project's root; `409 WORKSPACE_BUSY` while a run there is queued, running or paused or a conversation of it has a run in flight, or while the project's own re-point has not finished (the next start of the daemon finishes it), and — on a real run — while a memory write holds the project for more than a few seconds, when a run started while the delete waited for it, or when the project was re-pointed or its data deleted meanwhile; `400 INVALID_PATH`; `500 IO_ERROR` while the folder under the store that holds the projects cannot be listed. A transaction that fails deletes nothing and is `500 DB_ERROR` — among its causes, a file kept for another conversation whose record changed while it was copied (try again). |
+| `POST /v1/workspaces/purge` | Delete everything held for one project: `{path, dry_run}` (`dry_run` defaults to **true**) → the plan or what was done, `{dry_run, applied, project, entries, counts, kept, removed}`, `removed` `null` on a dry run. `path` is a project's root exactly — matched, as written, against the roots the projects recorded before anything is resolved, so the root the list shows deletes its own project's data even when it now leads to another project's folder; a project whose folder is missing, or that has nothing recorded, is deleted the same way. It deletes the project's conversations (with their session-log directories and scratch folders) and any message another conversation recorded while it ran there, its runs, uploads and by-products with every version, the records of the files its agents wrote into the project (never the files), the memory notes of every owner with their control snapshots, the summaries of the deleted conversations in your global memory, and its folder under `projects/`; a file a surviving conversation still shows is moved to `uploads/kept/` or `artifacts/kept/` and kept. Never touches the project's own folder. A real delete that could not drop every memory partition, or whose removal of the folder stopped part-way, still answers `200`, with `removed.project_folder: false` and `counts.memory_notes` counting only the notes that went: the rows are gone, but its folder under `projects/` stays with its `project.json` (removed last), so the project stays listed, and the same call again — which finds no row left — drops the rest and the folder. `project_folder: false` also answers a folder that was already gone, and the answer does not tell the three apart. Refused, changing nothing (a dry run included): `404 WORKSPACE_NOT_FOUND` (no project of yours there — a path in no project, in the home store, or a root no folder under `projects/` records); `422 WORKSPACE_NOT_A_ROOT` for a path inside a project, the answer naming the project's root; `409 WORKSPACE_BUSY` while a run there is queued, running or paused or a conversation of it has a run in flight, or while the project's own re-point has not finished (the next start of the daemon finishes it), and — on a real run — while a memory write holds the project for more than a few seconds, when a run started while the delete waited for it, or when the project was re-pointed or its data deleted meanwhile; `400 INVALID_PATH`; `500 IO_ERROR` while the folder under the store that holds the projects cannot be listed. A transaction that fails deletes nothing and is `500 DB_ERROR` — among its causes, a file kept for another conversation whose record changed while it was copied (try again). |
 
-**Where an agent's files land.** `artifact_write` saves a deliverable in
-the artifact store — the project's folder in the home store
-(`~/.openalpaca/projects/<name>/artifacts/`) when the turn carried a project,
-the home store's own (`~/.openalpaca/artifacts/`) otherwise. `file_write`
-writes a plain file into the daemon's workspace
-directory (the directory it was started in) only when the turn carries a
-project **and** that directory is not the home store. Every other
-`file_write` is saved the same way as an artifact: named after its path
-(`reports/pasta-night.md` becomes `01-reports-pasta-night.md`; a path the
-name cannot carry whole — any character outside ASCII, more than 60 bytes
-of name, an extension no kind keeps, or none — also gets the first eight
-hex digits of its SHA-256, so `文档.md` becomes `01-artifact-<hash>.md` and
-`笔记.md` another artifact, `go.mod` and `go.sum` are two artifacts, and so
-are two files deep in one directory), with the path as written for its
-summary (which `GET /v1/artifacts?q=` searches), its kind taken from the
-extension (text whose extension no kind takes — `build.sh`, `Makefile` — is
-`code`, stored as `.bin`), the same path written again in the same run —
-or, outside a run, on the same UTC day — its next version, announced as
-`artifact_written` and listed in the Library. Two paths the name carries
-whole that differ only in letter case or in characters that are not ASCII
-letters or digits (`Notes.md` and `notes.md`, `a/b.md` and `a-b.md`,
-`__main__.py` and `main.py`) still reach one name, so they are one
-artifact's versions. The tool's result tells the model the
-write is complete: which artifact and version, its absolute path — the path
-to give the user — that the Library lists it, that the file is the
-deliverable and is not to be copied elsewhere with the shell or any other
-tool, and that writing the same path again saves its next version. When the
-artifact's file lies under the daemon's workspace directory, the result also
-names the path, relative to that directory, that `file_read` opens it by
-(`artifacts/loose/<day>/01-notes-plan.md`, or `projects/<name>/artifacts/…`
-in a project) — the case for the app and `openalpaca daemon start`, which
-both start the daemon in the home store; otherwise (a daemon started
-elsewhere) it says that `file_read` cannot open it from that conversation.
-A path that names no file (`''`, `.`, `reports/`, a
-blank name) is refused, and a turn with no owner — `POST /v1/command
-{"command":"process"}` runs as the system — cannot save an artifact, so
-there `file_write` is refused unless it makes the plain write. Both
-launchers start the daemon in the home store, so from the app or
-`openalpaca daemon start` a `file_write` is always an artifact. `file_read`
-is unchanged: it reads relative to the workspace directory, so an agent
-that writes a file and then reads it back by the same path — or runs it
-with `shell_execute` — no longer finds it there; it reads it back by the
-path the result names, where there is one.
+**Where an agent's files land.** It depends on whether the conversation has
+a project ([The Working Folder](#the-working-folder) says which folder a turn
+works in).
+
+- **In a project**, `file_write` writes the real file at its path relative to
+  the project folder (`notes/plan.md` is `<project>/notes/plan.md`), and
+  `file_edit` changes part of one: the exact text to find and the text to put
+  in its place, the rest of the file kept byte for byte, line endings
+  included — in a file whose every line ends in CRLF, the line breaks of both
+  texts are read and written as CRLF. Each asks first, and its card names the
+  project folder and the file. Before either replaces or changes a file that
+  is there, its current content is copied into the conversation's log
+  (`~/.openalpaca/sessions/<id>/snapshots/`), kept until that log is swept; a
+  file larger than `[orchestrator.sessions] snapshot_max_bytes` (10 MiB by
+  default) is refused rather than replaced with no copy, and so is a write
+  whose copy fails. Where no copy can be kept — inside a skill or a plugin
+  agent, which keep no conversation log — `file_write` creates a new file but
+  refuses to replace one, and `file_edit` refuses. A file written this way
+  gets a **pointer row**: the Library lists it with the project's results, by
+  its path relative to the project; it is the real file — no copy, no
+  versions (git keeps its history) — and its record follows an edit you make
+  yourself. The tool's result names the file's absolute path and tells the
+  model to give the user that path; if the row could not be written, it says
+  the file is written and the app could not list it. A run's completion
+  report ends with a line naming the files it wrote into the project, and its
+  file count and chips count its by-products only; a connector is never sent
+  a project's files on its own.
+- **`artifact_write` saves a by-product** — a draft, a picture, something one
+  agent hands another — in the artifact store: the project's folder in the
+  home store (`~/.openalpaca/projects/<name>/artifacts/`) when the
+  conversation has a project, the home store's own
+  (`~/.openalpaca/artifacts/`) otherwise. It never asks: it writes only under
+  `~/.openalpaca`. `workspace_write`, a workflow's shared notes, never asks
+  either. `artifact_read` reads a by-product back by its id — the one
+  `artifact_write`'s result, a workspace entry or `task_status` names — for
+  the turn's owner, from the turn's project or from no project, paged like
+  `read_result`; it never asks, and it refuses a result file in the project,
+  which `file_read` reads.
+- **With no project**, `file_write` saves a by-product the way `artifact_write`
+  does, and still asks: named after its path (`reports/pasta-night.md`
+  becomes `01-reports-pasta-night.md`; a path the name cannot carry whole —
+  any character outside ASCII, more than 60 bytes of name, an extension no
+  kind keeps, or none — also gets the first eight hex digits of its SHA-256,
+  so `文档.md` becomes `01-artifact-<hash>.md` and `笔记.md` another
+  artifact, `go.mod` and `go.sum` are two artifacts, and so are two files deep
+  in one directory), with the path as written for its summary (which
+  `GET /v1/artifacts?q=` searches), its kind taken from the extension (text
+  whose extension no kind takes — `build.sh`, `Makefile` — is `code`, stored
+  as `.bin`), the same path written again in the same run — or, outside a
+  run, on the same UTC day — its next version, announced as
+  `artifact_written` and listed in the Library. Two paths the name carries
+  whole that differ only in letter case or in characters that are not ASCII
+  letters or digits (`Notes.md` and `notes.md`, `a/b.md` and `a-b.md`,
+  `__main__.py` and `main.py`) still reach one name, so they are one
+  artifact's versions. The tool's result tells the model the write is
+  complete: which artifact and version, its absolute path — the path to give
+  the user — that the Library lists it, that the file is the deliverable and
+  is not to be copied elsewhere with the shell or any other tool, that
+  `artifact_read` reads it back by its id, and that writing the same path
+  again saves its next version. `file_edit` is refused with no project; its
+  sentence names `file_write`.
+
+A path that names no file (`''`, `.`, `reports/`, a blank name) is refused,
+and a turn with no owner — `POST /v1/command {"command":"process"}` runs as
+the system — cannot save a by-product; in a project its file is still
+written, and the result says the app could not list it.
 
 An upload is refused with the reason in the error code: `NO_FILE`,
 `FILE_TOO_LARGE`, `STORAGE_QUOTA_EXCEEDED`, `UNSUPPORTED_MIME`,
@@ -1215,6 +1241,89 @@ read as if it did not.
 
 Skills whose frontmatter sets `invoke.cron` (see the Skill Template Reference) are registered with the wake-module cron scheduler at boot and re-synced on skill hot-reload. Each fire injects the skill's slash command as a fresh turn — through the same gateway as user messages — on the local user's `<user>:scheduled` lane, running as that user so memory and preferences apply and results appear in chat history. `scheduled_skills_enabled = false` under `[orchestrator.routing]` disables all skill cron jobs (hot-reloadable).
 
+## The Working Folder
+
+Every file tool and every shell command of a turn acts in one folder, the
+turn's **working folder**:
+
+- **With a project**, the project's own folder — the git repository's top
+  folder, or the folder you chose. `file_read`, `file_list`, `file_write`,
+  `file_edit` and `send` take paths relative to it, and a `shell_execute`
+  command starts in it. A command tool you defined under `config/tools` runs
+  in it too; a skill's own scripts run in the skill's folder.
+- **With no project** — a Telegram, iMessage or Discord conversation, a
+  scheduled skill, a conversation that never named a folder, a run started
+  by `POST /v1/tasks` with no project — it is the conversation's **scratch
+  folder**, `~/.openalpaca/scratch/<conversation id>/`, made (`0700`) the
+  first time a tool works there, so one conversation never sees another's
+  files. It goes with the conversation: deleting the conversation, or deleting
+  the data of the project it was later bound to, removes it. Clearing or
+  archiving the conversation keeps it, the session-log size caps never touch
+  it, and a factory reset leaves it on disk. There `file_write` saves a
+  by-product ([Where an agent's files land](#files-artifacts-and-workspaces))
+  and `file_edit` is refused.
+- A run with no turn behind it — one `POST /v1/tasks` parks, one a scheduled
+  skill starts, a `start` or a `rerun` — on a lane that has no conversation
+  yet is given one when it is dispatched: the lane's, opened then, so with
+  no project its file tools and commands work in that conversation's scratch
+  folder. Only a call with neither a project nor a conversation is refused,
+  with a sentence saying why.
+- A project that is `missing` — its folder gone, renamed by case only, or moved
+  with a link left at its old path — is refused before any tool runs, and the
+  sentence names the two ways out: re-point the project or delete its data
+  ([Files, artifacts and workspaces](#files-artifacts-and-workspaces)).
+  A turn whose project was re-pointed or deleted while the conversation ran
+  is refused too, with a sentence saying no folder under `projects/` records
+  that folder any more.
+- The model is told its working folder in one line of each turn's context —
+  the chat's, a file-based skill's, a workflow lead's and each subagent's (a
+  plugin's skills and agents are not told).
+- The daemon's own working directory stays where its launcher put it; only an
+  MCP server whose entry names no `cwd`, and the CLI model fallback, start
+  there (a plugin runs in its own folder).
+
+**What the file tools refuse.** A path is relative, never holds `..`, and must
+resolve — every link in it followed, the last part included — to a place inside
+the working folder: a link that leads out of it is refused for reading and for
+writing (`Path '<path>' resolves outside the workspace boundary`). In a
+project, writing anything inside its `.git` folder is refused (run git through
+`shell_execute` instead), and an `.openalpaca` folder inside a project — an
+older OpenAlpaca's — is refused for reading and for writing; both names are
+matched in any letter case. Nothing else is: a project may hold a `state/`
+folder or a `SOUL.md` of its own, and the file tools read and write them like
+any other file.
+
+**Reading never asks.** `file_read`, `file_list`, `artifact_read` and
+`read_result` raise no approval card. In a project an agent can read any file
+under the project's top folder, secrets such as `.env` included, and what it
+reads goes to the model that answers — to the provider's servers when that
+model is not local. Keep secrets out of a project you work on with a remote
+model, or use a local one.
+
+**The shell is not confined.** A command starts in the working folder, and that
+is all: an absolute path, `~` or `cd /` reaches anywhere, and an approved
+command runs as you, anywhere you can — it can read
+`~/.openalpaca/state/discovery.json` and answer the approval prompts that
+follow it, edit `daemon.toml` to switch prompting off, and read the master key
+file. So `shell_execute` asks before it runs a command — an approval holds
+only for the rest of the turn or run that gave it, as
+[Tool confirmations](#tool-confirmations) says — its card names the folder the
+command runs in, and the card is the one place to stop it: read the command
+before you approve it. Only an operating-system sandbox would change this, and
+none is used in this version. A command, a command tool or a skill script that
+runs past its time limit, or whose turn or run is cancelled, is killed, with
+the processes it started (on Windows, the command alone; a process that leaves
+its process group, as `setsid` or a program that turns itself into a
+background service does, is out of reach).
+
+**The `../` check.** Before a tool runs, its arguments are checked for `../`.
+OpenAlpaca's own tools are exempt — their path arguments carry their own `..`
+refusal, and their other arguments are content, such as a source file with a
+relative import or a command for the shell — while a skill's script, a command
+or HTTP tool defined under `config/tools`, an MCP tool and a plugin's tool are
+refused any argument holding `../`, since it reaches a shell line or another
+program.
+
 ## Streaming Surfaces
 
 ### WebSocket Events
@@ -1379,7 +1488,18 @@ it is on `done` and nowhere else.
 
 ### Tool confirmations
 
-A tool on the confirm list pauses until somebody answers.
+A tool on the confirm list pauses until somebody answers. The list is every
+tool marked destructive — among OpenAlpaca's own, `shell_execute`,
+`file_write`, `file_edit`, `send`, `update_persona`, `memory_update`,
+`memory_forget` and `memory_confirm` — unless an agent template
+(`require_confirmation_for`) or a skill (`permissions.confirm.tools`) names its
+own list, which then replaces that set exactly as written: a list written
+before `file_edit` existed never asks for it, and one that names
+`artifact_write` or `workspace_write` still asks for them. `artifact_write` and
+`workspace_write` write only under `~/.openalpaca` and otherwise never ask, and
+reading never asks ([The Working Folder](#the-working-folder)). An MCP tool
+asks only when its server marks it destructive, and a plugin's tool never asks
+(an open owner decision, T35 in [`tasks/api-fix-plan.md`](../tasks/api-fix-plan.md) §0).
 
 1. The daemon emits `tool_confirmation_requested` on the WebSocket and, when
    the prompt belongs to a chat stream, `confirmation_requested` on that SSE
@@ -1414,12 +1534,25 @@ is meant for development and testing, and is off by default.
 `memory_confirm` does (see [Memory](#memory) above): its approval covers that
 one call. The daemon always asks for it, whatever `auto_approve_confirmations`
 or an earlier approval says, never records its approval, and ignores an
-`approval_scope`. A request may also carry `preview`: text the daemon composed
-from the tool's own read, never from the call's arguments, which a client shows above the
-literal `tool_arguments` (`null` for an ordinary prompt). A tool can refuse a
-call **before** its card is raised — `memory_confirm` does for a suggestion
-that moved, and `memory_update` for any `confirm` — and then no prompt is
-emitted at all.
+`approval_scope`. A request may also carry `preview`: text the daemon composed, which a client
+shows above the literal `tool_arguments` (`null` for an ordinary prompt).
+`memory_confirm`'s is composed from the notes it names, never from the call's
+arguments. `shell_execute`'s names the folder the command runs in
+(`Runs in the project folder <root>. The command itself can reach files outside it.`);
+`file_write`'s says where the file lands — written, or replaced with its old
+content kept in the conversation's log, in the project folder; or saved as a
+by-product in the artifact store; `file_edit`'s names the file, the number of
+replacements and the line of the first, then quotes the text to find and the
+text to put in its place, each cut after 1,000 bytes with the cut named;
+`send`'s names the file, its size, the channel, the recipient and the name it
+is sent as. A path, a quoted text and a recipient show every hidden character
+as `<U+XXXX>`, with the count on a line under them. A tool can refuse a call
+**before** its card is raised, and then no prompt is emitted at all:
+`memory_confirm` does for a suggestion that moved, `memory_update` for any
+`confirm`, and the file tools, `send` and `shell_execute` for a call they would
+refuse anyway — a working folder that is missing, a path outside it or inside
+`.git` or an `.openalpaca` folder, a file over the size limit, or one whose old
+content cannot be kept.
 
 `GET /v1/chat/confirmations` lists the prompts **still waiting**, oldest first:
 `{request_id, tool_name, tool_arguments, task_id, agent_id, lane_key, preview,
@@ -1448,13 +1581,14 @@ timeout. It is a declaration, never an approval: nothing is pre-allowed by it.
 - The CLI declares it when stdin or stdout is not a terminal.
 - A scheduled skill is unattended by definition.
 - A queued follow-up inherits the declaration of the turn that queued it.
-- A workflow's completion report ends with one runtime-authored line naming the
+- A workflow's completion report carries one runtime-authored line naming the
   tools that were refused this way.
 
 Confirmation prompts also reach connector channels. When the originating lane
 belongs to Telegram, iMessage or Discord, the connector sends the prompt into
 the conversation and the user replies `/yes` (or `/y`) to approve, `/no` (or
-`/n`) to deny. (A connector's `/yes` is keyed by chat, not by sender, so it is
+`/n`) to deny. The prompt shows the daemon's preview above the arguments, as
+the app's card does. (A connector's `/yes` is keyed by chat, not by sender, so it is
 not a user-directed answer: `memory_confirm` is never offered on a connector's
 lane, and a suggestion is never raised there.) Multiple pending confirmations in one conversation are answered
 in FIFO order: a prompt sent while others wait says its place and that a reply
@@ -1503,7 +1637,10 @@ list is the whole union. Every frame also carries `ts` and `instance_id`.
 - `session_changed` (a session's lifecycle transition, or the `interrupted`
   frame, which names the run it belongs to)
 - `artifact_written` (`artifact_id`, `task_id`, `agent_id`, `name`, `kind`,
-  `version`, `path`)
+  `version`, `path`, `in_project` — a result file written into the project,
+  not a by-product — and `openable`, whether `Open` is offered for it; a frame
+  from an older daemon carries neither and is a by-product). The persisted row
+  keeps both in its `detail`
 - `connector_status`, `key_status_changed`
 - `chat_stream_started`, `chat_stream_ended`
 - `orchestrator_config_changed`, `daemon_config_changed`
@@ -1553,16 +1690,17 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 ## Storage Model
 
 - SQLite location is resolved by `openalpaca_storage::store::database_path()` — `~/.openalpaca/state/openalpaca.db`. Every path in the layout comes from that module; no crate joins a literal directory name onto a store root.
-- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`, and a migration's file number is its schema version. The unreleased development chain was re-baselined on 2026-09-28 into one file, `crates/openalpaca_storage/src/migrations/001_baseline.sql`, which initializes schema version **1** directly and needs nothing beyond SQLite itself — no extension is loaded. It carries the whole schema, the turn's id and project root on each stored message (`conversation_messages.request_id`, `workspace_root`) and the `learning_cursor` table included — how far learning, and episode notes, have read each conversation; no cursor row is written in advance — a conversation without one reads as read by neither yet. A second migration, `002_working_state.sql`, registers version 2: it rebuilds the `session` table with each conversation's working state in place of the old summary columns, and whether a new conversation is given the previous one's ([Conversation continuity](#conversation-continuity)). A third, `003_no_project_store_rows.sql`, registers version 3: it deletes the rows of files whose bytes lie inside a project's own folder — the in-project store earlier builds wrote and this build never reads — with their versions and every message's link to them. Those are the three registered migrations: a fresh database runs all three and opens at 3, a database at 1 or 2 runs the ones it is missing in place, and the next migration will be `004_<name>.sql`, registering version 4. A build from before a migration refuses a database that has it, so keep a copy of `state/openalpaca.db` before the first start of a build that migrates it if you may go back. `GET /v1/status` reports the version the open database is actually at.
+- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`, and a migration's file number is its schema version. The unreleased development chain was re-baselined on 2026-09-28 into one file, `crates/openalpaca_storage/src/migrations/001_baseline.sql`, which initializes schema version **1** directly and needs nothing beyond SQLite itself — no extension is loaded. It carries the whole schema, the turn's id and project root on each stored message (`conversation_messages.request_id`, `workspace_root`) and the `learning_cursor` table included — how far learning, and episode notes, have read each conversation; no cursor row is written in advance — a conversation without one reads as read by neither yet. A second migration, `002_working_state.sql`, registers version 2: it rebuilds the `session` table with each conversation's working state in place of the old summary columns, and whether a new conversation is given the previous one's ([Conversation continuity](#conversation-continuity)). A third, `003_no_project_store_rows.sql`, registers version 3: it deletes the rows of files whose bytes lie inside a project's own folder — the in-project store earlier builds wrote and this build never reads — with their versions and every message's link to them. A fourth, `004_project_files.sql`, registers version 4: it adds `file_assets.in_project`, which marks the row of a result file an agent wrote into a project — the real file's address, no copy, no versions — and rebuilds the unique address index with it, so such a row never collides with a by-product's or an upload's. Those are the four registered migrations: a fresh database runs all four and opens at 4, a database at 1, 2 or 3 runs the ones it is missing in place, and the next migration will be `005_<name>.sql`, registering version 5. A build from before a migration refuses a database that has it, so keep a copy of `state/openalpaca.db` before the first start of a build that migrates it if you may go back. `GET /v1/status` reports the version the open database is actually at.
 - Memory is **not** in the database. The notes are Markdown files under `memory/` (see the runtime paths at the top of this manual), each partition's revisions, origins and tombstones are one JSON control snapshot under `state/memory-control/`, and the search index is a separate, disposable SQLite file, `state/cache/memory-index-v1.sqlite`. A backup of your memory is the `memory/` directories **and** `state/memory-control/`; the index can always be rebuilt. A memory write whose index update fails still succeeds — the note is written and announced, the daemon logs a warning, and the next search or the next reconciliation (within 30 s) re-indexes what changed. See [Memory](#memory).
 - **If your database is refused.** No migration runs — the schema and its rows are left exactly as they were — and the message names the absolute path of the file. There is one refusal, for a database at a schema version above the newest this build knows:
-  - ``Database `<path>` is at schema version <n>, which this build does not know (it creates schema version 1 and knows versions up to 3). Nothing was changed.`` The message goes on to name both builds that could have written the file, because it cannot tell them apart. **A newer OpenAlpaca:** that database is fine and this build is the wrong one — use the build that created it, and do not reset. **A build from before the schema was re-baselined at version 1** (2026-09-28): 42, the complete, working database of the build before memory moved to files, or 43 to 45 from an earlier build of the Markdown memory. Such a database cannot be read or upgraded, and it is not converted: the message names `openalpaca config reset --factory`, which deletes it and `llm.toml`'s keys. The whole procedure — keeping a copy first, reconnecting a model, reviewing `USER.md` — is [Installation Manual → Switching to the Markdown Memory Build](Installation_Manual.md#switching-to-the-markdown-memory-build).
+  - ``Database `<path>` is at schema version <n>, which this build does not know (it creates schema version 1 and knows versions up to 4). Nothing was changed.`` The message goes on to name both builds that could have written the file, because it cannot tell them apart. **A newer OpenAlpaca:** that database is fine and this build is the wrong one — use the build that created it, and do not reset. **A build from before the schema was re-baselined at version 1** (2026-09-28): 42, the complete, working database of the build before memory moved to files, or 43 to 45 from an earlier build of the Markdown memory. Such a database cannot be read or upgraded, and it is not converted: the message names `openalpaca config reset --factory`, which deletes it and `llm.toml`'s keys. The whole procedure — keeping a copy first, reconnecting a model, reviewing `USER.md` — is [Installation Manual → Switching to the Markdown Memory Build](Installation_Manual.md#switching-to-the-markdown-memory-build).
 
-  `openalpaca config reset --factory` deletes that file together with its `-wal` and `-shm` siblings and clears `llm.toml` and `daemon.toml`, after which the next start builds a fresh database at version 3, the newest this build knows; the artifact, upload and session *files*, and each project's `artifacts/` and `uploads/` under `projects/<name>/`, stay on disk unreferenced; each project's folder stays registered by its `project.json`; and the memory notes — under `memory/` and in each project's folder — and `state/memory-control/` are not touched (the new owner id leaves them orphaned until `openalpaca memory adopt`, so deleting a project's folder drops its notes). The verb reaches a database in this state precisely because it opens none — it deletes files and asks the schema nothing — and it is the only form of `openalpaca config` that clears one (`set`, `get` and a keyed `reset` on an `ai.*` or `daemon.*` key open no database either, and work meanwhile, but leave it refused); it refuses while a daemon is running, prints the absolute store root, and requires you to type `factory-reset` at a terminal.
+  `openalpaca config reset --factory` deletes that file together with its `-wal` and `-shm` siblings and clears `llm.toml` and `daemon.toml`, after which the next start builds a fresh database at version 4, the newest this build knows; the artifact, upload, session and scratch *files*, and each project's `artifacts/` and `uploads/` under `projects/<name>/`, stay on disk unreferenced; each project's folder stays registered by its `project.json`; and the memory notes — under `memory/` and in each project's folder — and `state/memory-control/` are not touched (the new owner id leaves them orphaned until `openalpaca memory adopt`, so deleting a project's folder drops its notes). The verb reaches a database in this state precisely because it opens none — it deletes files and asks the schema nothing — and it is the only form of `openalpaca config` that clears one (`set`, `get` and a keyed `reset` on an `ai.*` or `daemon.*` key open no database either, and work meanwhile, but leave it refused); it refuses while a daemon is running, prints the absolute store root, and requires you to type `factory-reset` at a terminal.
 - Session logs live at `~/.openalpaca/sessions/<id>/` and are bounded by **size only**:
   - `[orchestrator.sessions] log_max_session_bytes` (default 256 MiB) per session. On exceed the writer drops whole oldest segments, never the live one, and records the `seq` range that went.
   - `log_max_total_bytes` (default 2 GiB) across all of them, swept once at boot, oldest-touched archived session first, never an active one.
   - `log_retention_days` is **reserved and does nothing**. The key is parsed, clamped and reported by `GET /v1/status`, and the daemon warns at boot when it is set to anything but its default (`0`) — but no age-based sweep exists, so setting it to `90` expires nothing. Whether one is built is an open owner decision (T12 in [`tasks/api-fix-plan.md`](../tasks/api-fix-plan.md) §0). Until then a log leaves only by byte cap, by `DELETE /v1/sessions/{id}`, or by a purge.
+  - A session's `snapshots/` holds the content a project file had before an agent replaced or edited it, so a change can be undone by hand; it leaves with the log.
 - A tool result larger than `[orchestrator.sessions] tool_result_inline_bytes` (default 32 KiB) is written whole to the session's `results/` directory, and the model is handed the first 2 KB plus a reference it can page with the `read_result` tool. A loop with no session log cuts the result inline at the same threshold instead. See [Agent Loop](agent-loop.md#tool-results-and-the-spill).
 - The `event_log` table is **never pruned**. Every event but `heartbeat`, `daemon_shutting_down` and `memory_changed` is persisted, plus the sandbox's audit rows (`security_violation`, `tool_auto_approved`, and the refusal an unattended run records). The daily telemetry cleanup removes `skill_execution_log` rows older than 90 days and `tool_execution_log` rows older than 7 days, and nothing else. `event_log` rows go only with a factory reset or with the runs a project purge deletes.
 
