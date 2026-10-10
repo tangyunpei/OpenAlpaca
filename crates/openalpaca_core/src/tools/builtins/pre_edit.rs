@@ -14,8 +14,6 @@ use crate::tools::registry::ToolContext;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EditVerb {
     Overwrite,
-    // Constructed by `file_edit` (S4b), which removes this attribute.
-    #[allow(dead_code)]
     Edit,
 }
 

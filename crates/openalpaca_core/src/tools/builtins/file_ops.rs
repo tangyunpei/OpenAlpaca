@@ -432,7 +432,8 @@ pub(super) fn file_write_tool(
                 (plus a short hash of the path when the name cannot carry it whole), its \
                 extension picking its kind; writing the same path again in one run saves its \
                 next version. Content is limited to 10MB. The result says which happened and \
-                gives the absolute path to tell the user."
+                gives the absolute path to tell the user. To change part of an existing file in \
+                the project, use file_edit."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -462,6 +463,399 @@ pub(super) fn file_write_tool(
         created_at: chrono::Utc::now(),
     }
 }
+
+// --- file_edit (ST-22; storage design §13, R47–R49) ---
+
+/// R48: `file_edit` changes a file in a project, and nowhere else.
+const EDIT_NEEDS_A_PROJECT: &str = "file_edit changes a file in a project, and this \
+     conversation has no project. Use file_write to save a file instead.";
+const EDIT_EMPTY_OLD: &str =
+    "old_string is empty. Give the exact text to replace; to create a file, use file_write.";
+const EDIT_IDENTICAL: &str =
+    "old_string and new_string are the same, so there is nothing to change.";
+
+/// R47: a missing file's refusal names the tool that creates one.
+fn edit_missing(path: &str) -> String {
+    format!(
+        "'{path}' does not exist in the project. file_edit changes an existing file; use \
+         file_write to create it."
+    )
+}
+
+/// Change part of one file in the project (ST-22): the exact text to find and
+/// the text to put in its place, every other byte kept. The same folder,
+/// confinement, card, pre-edit copy and pointer row as `file_write`'s real
+/// write (storage design §13, R47–R49).
+struct FileEditTool {
+    /// Where the pointer row is recorded (R35). Absent (tests, the CLI): the
+    /// edit still lands, and the result says the app could not list it (R36).
+    db: Option<Database>,
+    /// `[orchestrator.sessions] snapshot_max_bytes`, the cap on the pre-edit
+    /// copy (ST-17). Absent: the documented default.
+    daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
+}
+
+/// R47's arguments, read once for the card and the body alike.
+struct EditArgs<'a> {
+    path: &'a str,
+    old_string: &'a str,
+    new_string: &'a str,
+    /// Default false; anything but `true` is false.
+    replace_all: bool,
+}
+
+fn edit_args(arguments: &serde_json::Value) -> Result<EditArgs<'_>, String> {
+    fn required<'a>(arguments: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
+        arguments
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("Missing required parameter: {key}"))
+    }
+    Ok(EditArgs {
+        path: required(arguments, "path")?,
+        old_string: required(arguments, "old_string")?,
+        new_string: required(arguments, "new_string")?,
+        replace_all: arguments
+            .get("replace_all")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+/// What an edit will do, worked out without writing anything — the card's
+/// whole and the body's first half (one plan answers both, interfaces §4.3).
+struct EditPlan {
+    /// The project's canonical root.
+    root: PathBuf,
+    /// The file, as the write resolver returned it.
+    target: PathBuf,
+    /// The whole file after the edit.
+    text: String,
+    replacements: usize,
+    first_line: usize,
+}
+
+/// What R47's match made of a file's text.
+#[derive(Debug, PartialEq, Eq)]
+struct Edited {
+    text: String,
+    replacements: usize,
+    /// 1-based line of the first occurrence.
+    first_line: usize,
+}
+
+/// R47's match: exact, non-overlapping occurrences of `old_string` — exactly
+/// one unless `replace_all` — replaced by `new_string`, every other byte of
+/// `text` kept. A file holding `\r\n`, asked with an `old_string` that holds
+/// `\n` but no `\r\n` and is not found as given, is searched again with every
+/// lone `\n` of both strings written `\r\n`: a model writes LF, and the file
+/// keeps its endings. In a file whose every line break is `\r\n` (no lone
+/// `\n`), both strings' lone `\n` are written `\r\n` even when `old_string`
+/// is found as given (the lead's ruling R-T11) — `new_string`'s so the file
+/// stays all-CRLF, `old_string`'s so one that starts with a line break is
+/// matched with the `\r` before it and no `\r\r\n` is left behind.
+fn apply_edit(
+    path: &str,
+    text: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+) -> Result<Edited, String> {
+    if old_string.is_empty() {
+        return Err(EDIT_EMPTY_OLD.to_string());
+    }
+    let retry = !text.contains(old_string)
+        && text.contains("\r\n")
+        && old_string.contains('\n')
+        && !old_string.contains("\r\n");
+    // The lead's ruling R-T11: a file whose every line break is `\r\n` stays
+    // so — `new_string`'s lone `\n` are written `\r\n` there even when
+    // `old_string` holds no line break. A file that mixes the two keeps what
+    // the model wrote. In such a file every `\n` follows a `\r`, so an
+    // `old_string` found as given can hold a lone `\n` only as its first
+    // character; written `\r\n` it matches the same place, one byte earlier.
+    let all_crlf = text.contains("\r\n") && !has_lone_lf(text);
+    let crlf = retry || all_crlf;
+    let old = if crlf {
+        lf_to_crlf(old_string)
+    } else {
+        old_string.to_string()
+    };
+    let new = if crlf {
+        lf_to_crlf(new_string)
+    } else {
+        new_string.to_string()
+    };
+    if old == new {
+        return Err(EDIT_IDENTICAL.to_string());
+    }
+    let Some(first) = text.find(old.as_str()) else {
+        return Err(format!(
+            "old_string was not found in '{path}'. Read the file with file_read and copy the \
+             exact text, whitespace and line breaks included."
+        ));
+    };
+    let count = text.matches(old.as_str()).count();
+    if count > 1 && !replace_all {
+        return Err(format!(
+            "old_string occurs {count} times in '{path}'. Give more of the surrounding text so \
+             it occurs once, or set replace_all to true to change every one."
+        ));
+    }
+    // A byte slice up to a match's start, never a `str` cut.
+    let first_line = 1 + text.as_bytes()[..first]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count();
+    let (text, replacements) = if replace_all {
+        (text.replace(old.as_str(), &new), count)
+    } else {
+        (text.replacen(old.as_str(), &new, 1), 1)
+    };
+    Ok(Edited {
+        text,
+        replacements,
+        first_line,
+    })
+}
+
+/// Every `\n` that does not already end a `\r\n`, written `\r\n`.
+fn lf_to_crlf(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 8);
+    let mut after_cr = false;
+    for c in text.chars() {
+        if c == '\n' && !after_cr {
+            out.push('\r');
+        }
+        out.push(c);
+        after_cr = c == '\r';
+    }
+    out
+}
+
+/// Whether `text` holds a `\n` that does not end a `\r\n` — a file with none
+/// is all-CRLF (the lead's ruling R-T11).
+fn has_lone_lf(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes
+        .iter()
+        .enumerate()
+        .any(|(i, byte)| *byte == b'\n' && (i == 0 || bytes[i - 1] != b'\r'))
+}
+
+impl FileEditTool {
+    fn snapshot_max_bytes(&self) -> u64 {
+        match self.daemon_config {
+            Some(ref config) => config.load().orchestrator.sessions.snapshot_max_bytes,
+            None => SessionsConfig::default().snapshot_max_bytes,
+        }
+    }
+
+    /// Everything but the copy, the write and the row: the folder (R48), the
+    /// path (R31, R32), the file (it exists, is a regular file — a folder is
+    /// refused here, before any card — is UTF-8, and fits the 10 MB bound
+    /// before and after), the copy's preconditions (ST-17's cap and R46, from
+    /// the size alone, before a byte is read) and the match. Creates nothing,
+    /// so the card can call it.
+    async fn plan(&self, args: &EditArgs<'_>, ctx: &ToolContext) -> Result<EditPlan, String> {
+        let root = match working_folder(ctx) {
+            Ok(WorkingFolder::Project { root }) => root,
+            Ok(WorkingFolder::Scratch { .. }) => return Err(EDIT_NEEDS_A_PROJECT.to_string()),
+            // R26, R27: no context, a missing project (ST-23 included) or a
+            // root that names no project — each its own sentence.
+            Err(refusal) => return Err(refusal.to_string()),
+        };
+        let path = args.path;
+        let target = resolve_workspace_path_for_write(path, &root, FolderRules::Project)?;
+        let metadata = match tokio::fs::metadata(&target).await {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(edit_missing(path)),
+            Err(e) => return Err(format!("Cannot access '{path}': {e}")),
+        };
+        if metadata.is_dir() {
+            return Err(format!("'{path}' is a folder, not a file."));
+        }
+        if !metadata.is_file() {
+            return Err(format!(
+                "'{path}' is not a regular file, so file_edit cannot change it."
+            ));
+        }
+        check_pre_edit(
+            path,
+            &target,
+            ctx,
+            self.snapshot_max_bytes(),
+            EditVerb::Edit,
+        )?;
+        let limit = MAX_FILE_READ_SIZE;
+        if metadata.len() > limit {
+            return Err(format!(
+                "File '{path}' is {} bytes, exceeding the {limit} byte limit",
+                metadata.len()
+            ));
+        }
+        let bytes = tokio::fs::read(&target)
+            .await
+            .map_err(|e| format!("Failed to read file '{path}': {e}"))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| format!("'{path}' is not UTF-8 text, so file_edit cannot change it."))?;
+        let edited = apply_edit(
+            path,
+            &text,
+            args.old_string,
+            args.new_string,
+            args.replace_all,
+        )?;
+        if edited.text.len() as u64 > limit {
+            return Err(format!(
+                "The edited '{path}' would be {} bytes, above the {limit} byte limit file_read \
+                 and file_write keep to. The file is unchanged.",
+                edited.text.len()
+            ));
+        }
+        Ok(EditPlan {
+            root,
+            target,
+            text: edited.text,
+            replacements: edited.replacements,
+            first_line: edited.first_line,
+        })
+    }
+
+    /// R47's order: the plan, the pre-edit copy (ST-17, R46), the file, the
+    /// pointer row (R35; R36 when it cannot be recorded).
+    async fn edit(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        let args = edit_args(arguments)?;
+        let plan = self.plan(&args, ctx).await?;
+        let path = args.path;
+        // The current bytes go into this conversation's log first; `Err` —
+        // R46, the cap, a copy that failed — leaves the file untouched.
+        match keep_pre_edit_copy(
+            path,
+            &plan.target,
+            &plan.root,
+            ctx,
+            self.snapshot_max_bytes(),
+            EditVerb::Edit,
+        )
+        .await?
+        {
+            PreEdit::Kept => {}
+            // The plan read the file a moment ago and it is gone now.
+            PreEdit::NewFile => return Err(edit_missing(path)),
+        }
+        tokio::fs::write(&plan.target, &plan.text)
+            .await
+            .map_err(|e| format!("Failed to write file '{path}': {e}"))?;
+        let listed = match self.db.as_ref() {
+            Some(db) => {
+                record_tool_project_file(db, ctx, &plan.root, &plan.target, &plan.text).map(|_| ())
+            }
+            // `file_write` words this case the same way.
+            None => Err("no database is wired to this tool".to_string()),
+        };
+        let mut result = format!(
+            "Edited {path} in the project: {} replacement{}, the first at line {}; {} bytes at {}. \
+             Its previous content is kept in this conversation's log.",
+            plan.replacements,
+            if plan.replacements == 1 { "" } else { "s" },
+            plan.first_line,
+            plan.text.len(),
+            plan.target.display()
+        );
+        // R36: the file is the result; the row is a view of it.
+        if let Err(e) = listed {
+            tracing::warn!(
+                path,
+                target = %plan.target.display(),
+                "file_edit: the file is written but not listed: {e}"
+            );
+            result.push_str(&format!(
+                " The file is written, but the app could not list it ({e})."
+            ));
+        }
+        Ok(result)
+    }
+}
+
+#[async_trait]
+impl BuiltInTool for FileEditTool {
+    /// R26: with no context there is no folder to edit in.
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err(WorkingFolderRefusal::NoContext.to_string())
+    }
+
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        self.edit(arguments, ctx).await
+    }
+}
+
+pub(super) fn file_edit_tool(
+    db: Option<Database>,
+    daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
+) -> RegisteredTool {
+    RegisteredTool {
+        definition: ToolDefinition {
+            name: "file_edit".to_string(),
+            description: "Change part of one file in the project: give the exact text to find \
+                (old_string) and the text to put in its place (new_string), instead of writing \
+                the whole file back. old_string must occur exactly once unless replace_all is \
+                true. The rest of the file is kept byte for byte, line endings included. Its \
+                current content is kept in the conversation's log first. In a project only — to \
+                create a file, or with no project, use file_write."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The file, relative to the project folder (e.g. 'src/main.rs'). It must exist."
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "The exact text to find, whitespace and line breaks included. It must occur exactly once, unless replace_all is true."
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "The text to put in its place. It must differ from old_string."
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace every occurrence instead of exactly one. Default false."
+                    }
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+            // Not strict: `replace_all` is optional with a default, and strict
+            // mode requires every key (interfaces §7.4; Gotchas, R8).
+            strict: None,
+            input_examples: Some(vec![serde_json::json!({
+                "path": "src/main.rs",
+                "old_string": "let retries = 3;",
+                "new_string": "let retries = 5;"
+            })]),
+        },
+        backend: ToolBackend::BuiltIn(Arc::new(FileEditTool { db, daemon_config })),
+        provides_capabilities: vec!["file_edit".into()],
+        exempt_from_timeout: false,
+        annotations: annotations_for_builtin("file_edit"),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        author: "builtin".to_string(),
+        created_at: chrono::Utc::now(),
+    }
+}
+
+#[cfg(test)]
+#[path = "file_edit_tests.rs"]
+mod file_edit_tests;
 
 #[cfg(test)]
 mod tests {

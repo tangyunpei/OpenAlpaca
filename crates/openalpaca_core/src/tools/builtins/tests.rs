@@ -3,8 +3,8 @@ use super::*;
 #[test]
 fn test_builtin_tools_count_without_db() {
     let tools = builtin_tools(None, None, None);
-    // 7 base tools (incl. artifact_write and read_result) + 2 workspace tools
-    assert_eq!(tools.len(), 9);
+    // 8 base tools (incl. artifact_write, read_result and file_edit) + 2 workspace tools
+    assert_eq!(tools.len(), 10);
 }
 
 #[test]
@@ -13,9 +13,9 @@ fn test_builtin_tools_count_with_db() {
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let tools = builtin_tools(Some(db), Some(dc), None);
-    // 7 base tools + 2 workspace tools: the memory tools are the service's
+    // 8 base tools + 2 workspace tools: the memory tools are the service's
     // (`memory_read_tools`), not this list's.
-    assert_eq!(tools.len(), 9);
+    assert_eq!(tools.len(), 10);
 }
 
 #[test]
@@ -43,8 +43,8 @@ fn test_builtin_tools_with_persona_context_includes_update_persona() {
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let tools = builtin_tools_with_persona_context(Some(db), ctx, Some(dc), None, None);
-    // 9 base (7 + 2 workspace) + 1 update_persona = 10 (no send since connector_send_provider is None)
-    assert_eq!(tools.len(), 10, "Should have 10 tools (9 base + update_persona)");
+    // 10 base (8 + 2 workspace) + 1 update_persona = 11 (no send since connector_send_provider is None)
+    assert_eq!(tools.len(), 11, "Should have 11 tools (10 base + update_persona)");
     assert!(
         tools.iter().any(|t| t.definition.name == "update_persona"),
         "update_persona tool must be present"
@@ -70,10 +70,19 @@ fn test_all_tools_have_strict_enabled() {
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let provider: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
     let tools = builtin_tools_with_persona_context(Some(db), ctx, Some(dc), None, Some(provider));
+    // A tool with an optional parameter is deliberately not strict-marked:
+    // strict mode requires every key, and `strict_mode_compatible` would drop
+    // the flag anyway (R8). `file_edit`'s `replace_all` defaults to false.
+    const NOT_STRICT: &[&str] = &["file_edit"];
     for tool in &tools {
+        let expected = if NOT_STRICT.contains(&tool.definition.name.as_str()) {
+            None
+        } else {
+            Some(true)
+        };
         assert_eq!(
-            tool.definition.strict, Some(true),
-            "Tool '{}' should have strict: Some(true)",
+            tool.definition.strict, expected,
+            "Tool '{}' strict flag",
             tool.definition.name
         );
     }
@@ -170,12 +179,12 @@ async fn test_shell_execute_timeout_is_300s() {
 }
 
 /// S4a: `file_write` acts in each call's working folder, so the registry
-/// captures no startup folder — the base set is the same nine tools.
+/// captures no startup folder — the base set is ten tools since file_edit (S4b).
 #[test]
 fn builtin_tools_register_the_file_tools_with_no_startup_root() {
     let tools = builtin_tools(None, None, None);
-    // 7 base tools (incl. artifact_write and read_result) + 2 workspace tools
-    assert_eq!(tools.len(), 9);
+    // 8 base tools (incl. artifact_write, read_result and file_edit) + 2 workspace tools
+    assert_eq!(tools.len(), 10);
     let names: Vec<&str> = tools.iter().map(|t| t.definition.name.as_str()).collect();
     assert!(names.contains(&"file_read"));
     assert!(names.contains(&"file_write"));
@@ -381,6 +390,45 @@ fn annotations_for_builtin_open_world_correct() {
         let ann = annotations_for_builtin(name).unwrap();
         assert_eq!(ann.open_world_hint, Some(false), "{name} should NOT be open_world");
     }
+}
+
+/// ST-22 / R49: `file_edit` is a builtin, asks exactly as `file_write` does
+/// (destructive, local), is not strict-marked (`replace_all` is optional —
+/// interfaces §7.4), and the sanitizer's `../` rule does not read its strings
+/// (R29: a first-party builtin's arguments are content); and `file_write`'s
+/// description points at it for a change to part of a file (the lead's
+/// ruling R-T13).
+#[test]
+fn file_edit_is_registered_asking_like_file_write() {
+    use crate::security::sanitizer::TraversalRule;
+    use crate::tools::ToolRegistry;
+
+    let registry = ToolRegistry::default();
+    for tool in builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let edit = registry.get("file_edit").expect("file_edit is a builtin");
+    let write = registry.get("file_write").expect("file_write is a builtin");
+    let (edit_ann, write_ann) = (edit.annotations.unwrap(), write.annotations.unwrap());
+    assert_eq!(edit_ann.destructive_hint, Some(true));
+    assert_eq!(edit_ann.destructive_hint, write_ann.destructive_hint);
+    assert_eq!(edit_ann.read_only_hint, write_ann.read_only_hint);
+    assert_eq!(edit_ann.idempotent_hint, write_ann.idempotent_hint);
+    assert_eq!(edit_ann.open_world_hint, write_ann.open_world_hint);
+    assert_eq!(edit.definition.strict, None);
+    assert_eq!(
+        edit.definition.parameters["required"],
+        serde_json::json!(["path", "old_string", "new_string"])
+    );
+    assert_eq!(registry.traversal_rule("file_edit"), TraversalRule::Allow);
+    assert!(
+        write
+            .definition
+            .description
+            .contains("To change part of an existing file in the project, use file_edit."),
+        "{}",
+        write.definition.description
+    );
 }
 
 // ---------------------------------------------------------------------------

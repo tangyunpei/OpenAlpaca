@@ -349,10 +349,11 @@ fn every_shipped_template_grants_read_result() {
 /// subagent spawn walks it: `to_subagent`, then `SandboxPolicy::from_constraints`,
 /// then the effective set over a registry holding the builtins.
 ///
-/// Only `shell_execute` and `file_write` are pinned, plus one read that must
-/// not prompt: ST-15 took `artifact_write` and `workspace_write` out of the
-/// derived set (`annotations_for_builtin_by_product_writers_never_prompt`),
-/// so the whole set is not asserted.
+/// Only `shell_execute`, `file_write` and `file_edit` (ST-22) are pinned,
+/// plus one read that must not prompt: ST-15 took `artifact_write` and
+/// `workspace_write` out of the derived set
+/// (`annotations_for_builtin_by_product_writers_never_prompt`), so the whole
+/// set is not asserted.
 #[test]
 fn the_shipped_system_agent_template_prompts_for_its_shell_and_file_writes() {
     use crate::security::sandbox::{SandboxPolicy, effective_confirmation_set};
@@ -378,7 +379,7 @@ fn the_shipped_system_agent_template_prompts_for_its_shell_and_file_writes() {
     let policy = SandboxPolicy::from_constraints(&agent.id, &agent.constraints);
     let set = effective_confirmation_set(&policy, &registry);
 
-    for name in ["shell_execute", "file_write"] {
+    for name in ["shell_execute", "file_write", "file_edit"] {
         assert!(
             set.contains(&name.to_string()),
             "{name} must prompt for system_agent; the effective set is {set:?}"

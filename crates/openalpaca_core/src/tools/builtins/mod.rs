@@ -51,7 +51,7 @@ use tokio::process::Command;
 pub type ConnectorSendLock = Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>>;
 
 use self::artifact_write::artifact_write_tool;
-use self::file_ops::{file_read_tool, file_write_tool};
+use self::file_ops::{file_edit_tool, file_read_tool, file_write_tool};
 use self::read_result::read_result_tool;
 use self::shell_execute::shell_execute_tool;
 use self::update_persona::update_persona_tool;
@@ -350,6 +350,9 @@ pub fn builtin_tools(
         // — and the artifact caps; the database records a result file's
         // pointer row (R35) and holds a by-product (no project).
         file_write_tool(ws_db.clone(), tool_cfg.clone()),
+        // ST-22: a change inside a project file — the same folder, card,
+        // pre-edit copy and pointer row as file_write's real write.
+        file_edit_tool(ws_db.clone(), tool_cfg.clone()),
         shell_execute_tool(),
         // §5.4's counterpart to the `results/` spill. Registered on every
         // surface because the stub the loop emits names it on every surface —
@@ -612,9 +615,8 @@ pub(crate) fn annotations_for_builtin(name: &str) -> Option<openalpaca_mcp::Tool
         // prompts, and a tool-issued supersede is bounded by authority.
         // Design 09 §4.1: `memory_confirm` prompts on an attended turn and is
         // refused on an unattended one, like the other two.
-        "file_write" | "update_persona" | "memory_forget" | "memory_update" | "memory_confirm" => {
-            Some(destructive_local_annotations())
-        }
+        "file_edit" | "file_write" | "update_persona" | "memory_forget" | "memory_update"
+        | "memory_confirm" => Some(destructive_local_annotations()),
         // ST-15 (storage design §12): the by-product writers write only under
         // ~/.openalpaca and never ask. By name, before the tool runs — so
         // `file_write` saving a by-product with no project still asks.
