@@ -60,6 +60,18 @@ use self::web_search::web_search_tool;
 
 use super::registry::{RegisteredTool, ToolBackend};
 
+/// The lead's ruling R-T14: the one "project turn" predicate — the turn's
+/// request carries a root the store paths read as a project
+/// (`scope_from_context`'s project arm: non-blank and absolute). The main
+/// loop computes it once per turn and hands it to every offer that depends
+/// on it (`file_edit` beside `file_write`, S4b; the file readers, S5).
+pub(crate) fn is_project_turn(ctx: &ToolContext) -> bool {
+    matches!(
+        artifact_write::scope_from_context(ctx),
+        openalpaca_storage::store::StoreScope::Project(_)
+    )
+}
+
 /// Context required by the `update_persona` tool at runtime.
 /// Re-export from the update_persona module.
 pub use update_persona::PersonaToolContext;

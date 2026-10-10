@@ -171,6 +171,20 @@ fn apply_send_keepalive(
     intent_has_send
 }
 
+/// R48 (storage design §13): on a project turn the main chat is offered
+/// `file_edit` beside `file_write`, by the same keywords — a change inside a
+/// file is asked for in the words a write is (`suggest_tools`: a write verb,
+/// `edit` among them, and a file name). With no project `file_edit` refuses
+/// every call, so it is not offered there.
+fn offer_file_edit_beside_file_write(tool_names: &mut Vec<String>, project_turn: bool) {
+    if project_turn
+        && tool_names.iter().any(|name| name == "file_write")
+        && !tool_names.iter().any(|name| name == "file_edit")
+    {
+        tool_names.push("file_edit".to_string());
+    }
+}
+
 impl Orchestrator {
     /// Build a deterministic `<send_context>` block with resolved recipient info.
     /// This removes ambiguity: the LLM sees facts, not hints.

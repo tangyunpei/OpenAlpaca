@@ -129,10 +129,6 @@ impl Orchestrator {
                 }
             }
         }
-        let tool_defs: Vec<_> = tool_names
-            .iter()
-            .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
-            .collect();
 
         // Per-request ToolContext for owner-scoped tools. Built before the
         // loop-override resolution because the tool-mode main loop hands it
@@ -172,6 +168,17 @@ impl Orchestrator {
             // and session handles the sandbox fills in at dispatch (T28).
             ..Default::default()
         };
+
+        // The lead's ruling R-T14: whether this is a project turn is decided
+        // once, from the context the turn's tools read (`scope_from_context`'s
+        // project arm), and handed to every offer that depends on it.
+        let project_turn = crate::tools::builtins::is_project_turn(&tool_ctx);
+        // R48: on a project turn `file_edit` comes with `file_write`.
+        super::offer_file_edit_beside_file_write(&mut tool_names, project_turn);
+        let tool_defs: Vec<_> = tool_names
+            .iter()
+            .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
+            .collect();
 
         // M6: whether the client behind this turn can answer a confirmation
         // at all. Only the main loop carries the declaration — every other

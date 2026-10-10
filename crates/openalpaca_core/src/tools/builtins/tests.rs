@@ -1820,3 +1820,19 @@ async fn a_skill_script_that_times_out_takes_the_processes_it_started_with_it() 
         "the script's background sleep {pid} outlived its timeout"
     );
 }
+
+/// The lead's ruling R-T14: a project turn is one whose request carries a
+/// non-blank, absolute root — `scope_from_context`'s project arm, the reading
+/// every store path makes of it. One predicate for every offer.
+#[test]
+fn a_project_turn_is_a_non_blank_absolute_root() {
+    let with = |root: Option<&str>| ToolContext {
+        request_workspace_root: root.map(str::to_string),
+        ..Default::default()
+    };
+    let absolute = std::env::temp_dir().to_string_lossy().into_owned();
+    assert!(is_project_turn(&with(Some(&absolute))));
+    assert!(!is_project_turn(&with(None)));
+    assert!(!is_project_turn(&with(Some("   "))));
+    assert!(!is_project_turn(&with(Some("relative/path"))));
+}

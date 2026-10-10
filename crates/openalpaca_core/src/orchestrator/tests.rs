@@ -764,6 +764,114 @@ mod request_workspace_threading {
     }
 }
 
+/// Through the front door: the offers that depend on whether a turn is a
+/// project turn (the lead's ruling R-T14: one predicate, computed once).
+/// R48: a project turn whose words suggest `file_write` carries `file_edit`
+/// beside it on the main loop's request; a turn with no project carries
+/// `file_write` alone.
+mod project_turn_offers {
+    use super::*;
+    use openalpaca_llm::{ChatResponse, FinishReason, LlmError, LlmProvider, Usage};
+
+    /// Answers at once and keeps every request it was handed.
+    struct Capturing(Arc<Mutex<Vec<ChatRequest>>>);
+
+    #[async_trait]
+    impl LlmProvider for Capturing {
+        fn name(&self) -> &str {
+            "capturing"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            self.0
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(request);
+            Ok(ChatResponse {
+                content: "ok".to_string(),
+                tool_calls: vec![],
+                model: "mock-model".to_string(),
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    ..Default::default()
+                },
+                finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
+            })
+        }
+    }
+
+    /// The tool names on the main loop's request for one turn whose words
+    /// are `content`, with `tools` registered by name.
+    async fn offered(workspace_path: Option<String>, content: &str, tools: &[&str]) -> Vec<String> {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let router = openalpaca_llm::LlmRouter::single_provider(
+            Arc::new(Capturing(captured.clone())),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+        let orch = make_orchestrator_with_tools_and_llm(Arc::new(router), tools);
+        orch.handle_message(HandleRequest {
+            request_id: Uuid::new_v4(),
+            source: "cli".to_string(),
+            content: content.to_string(),
+            principal: Principal::System,
+            scope: Scope::Global,
+            lane_key: "user1:cli".to_string(),
+            workspace_path,
+            stream_id: None,
+            model_override: None,
+            unattended: false,
+            turn_sink: None,
+        })
+        .await
+        .expect("the turn answers");
+        let requests = captured.lock().unwrap_or_else(|p| p.into_inner());
+        requests
+            .last()
+            .expect("the main loop asked the model")
+            .tools
+            .iter()
+            .map(|t| t.name.clone())
+            .collect()
+    }
+
+    const EDIT_ASK: &str = "edit src/main.rs so the retry count is 5";
+
+    #[tokio::test]
+    async fn a_project_turn_asking_for_a_write_is_offered_file_edit_beside_file_write() {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+
+        let names = offered(
+            Some(project.path().to_string_lossy().to_string()),
+            EDIT_ASK,
+            &["file_write", "file_edit"],
+        )
+        .await;
+
+        assert!(names.contains(&"file_write".to_string()), "{names:?}");
+        assert!(names.contains(&"file_edit".to_string()), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn a_turn_with_no_project_is_offered_file_write_without_file_edit() {
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+
+        let names = offered(None, EDIT_ASK, &["file_write", "file_edit"]).await;
+
+        assert!(names.contains(&"file_write".to_string()), "{names:?}");
+        assert!(!names.contains(&"file_edit".to_string()), "{names:?}");
+    }
+}
+
 #[tokio::test]
 async fn test_tool_intent_detected_and_executes() {
     use openalpaca_llm::{
