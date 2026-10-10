@@ -5860,7 +5860,14 @@ async fn the_main_loop_is_budgeted_against_the_model_that_answers() {
 /// told its conversation's scratch folder, right before the user's message.
 /// The line is read from the turn's own tool context, so naming the
 /// conversation the gateway resolved proves the context carries it — and
-/// nothing is made until a tool acts.
+/// nothing is made until a tool acts. It ends the relay rules' message
+/// rather than standing as a message of its own: one more per-turn message
+/// would take a slot in the compaction's four-message recent floor, so a
+/// first-round compaction would summarise one conversation row more — or,
+/// on a turn with recall and an active workflow, the turn's recall block
+/// (the S3 review's Important 1; the design-11 figures of
+/// `a_compacting_turn_writes_its_state_and_the_next_request_carries_it` pin
+/// the floor).
 #[tokio::test]
 async fn a_main_loop_turn_with_no_project_is_told_its_scratch_folder() {
     let home = tempfile::tempdir().unwrap();
@@ -5913,20 +5920,35 @@ async fn a_main_loop_turn_with_no_project_is_told_its_scratch_folder() {
         folder.display()
     );
     let request = provider.first_request();
-    let at = request
+    let contents: Vec<&str> = request
         .messages
         .iter()
-        .position(|m| m.content == note)
-        .unwrap_or_else(|| {
-            panic!(
-                "no working-folder note: {:?}",
-                request.messages.iter().map(|m| &m.content).collect::<Vec<_>>()
-            )
-        });
+        .map(|m| m.content.as_str())
+        .collect();
+    let carriers: Vec<usize> = contents
+        .iter()
+        .enumerate()
+        .filter(|(_, content)| content.contains("<working_folder>"))
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(
+        carriers.len(),
+        1,
+        "one message carries the working-folder line: {contents:?}"
+    );
+    let at = carriers[0];
+    assert_eq!(
+        contents[at],
+        format!(
+            "{}\n{note}",
+            crate::tools::builtins::main_loop_relay_guidance()
+        ),
+        "the line ends the relay rules' message, not a message of its own"
+    );
     assert_eq!(
         at,
-        request.messages.len() - 2,
-        "the note sits right before the user's message"
+        contents.len() - 2,
+        "the relay rules and the line sit right before the user's message"
     );
     assert!(!home_root.join("scratch").exists(), "a note makes no folder");
 }
@@ -8870,11 +8892,9 @@ fn is_writer_call(request: &ChatRequest) -> bool {
 /// **Design 11 §10.2, the compaction invariant.** On a 4K window, a turn that
 /// compacts makes **exactly one** summariser call, and its state reaches the
 /// session row at turn end with no other call — `through` the last row the
-/// writer read (§3.2: `messages[2..11]` are rows 1–9; the four recent
-/// messages the compaction keeps are row 10, the relay rules, the
-/// working-folder line of storage design R28 and the question). The next
-/// turn's request carries that state's block ahead of the rows, the rows
-/// after `through` with the four-row floor, and nothing trimmed.
+/// writer read (§3.2: `messages[2..10]` are rows 1–8). The next turn's
+/// request carries that state's block ahead of the rows, the rows after
+/// `through` with the four-row floor, and nothing trimmed.
 #[tokio::test]
 async fn a_compacting_turn_writes_its_state_and_the_next_request_carries_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -8915,7 +8935,7 @@ async fn a_compacting_turn_writes_its_state_and_the_next_request_carries_it() {
         serde_json::from_str::<working_state::WorkingState>(&row.working_state).unwrap(),
         written
     );
-    assert_eq!(row.working_state_through, ids[8], "rows 1–9 were read");
+    assert_eq!(row.working_state_through, ids[7], "rows 1–8 were read");
     assert_eq!(row.working_state_version, 2);
     let usage = openalpaca_storage::repository::LlmUsageRepository::new(&db)
         .get_agent_usage(working_state::USAGE_LABEL, 10)
@@ -9238,10 +9258,8 @@ async fn a_compaction_after_the_trim_dropped_rows_leaves_through_where_it_was() 
 /// window that the lag refresh has not covered yet — with a ten-row window
 /// over fourteen rows, rows 1–4, in no prompt and in no state — are read by
 /// the compaction's one writer call ahead of the window's, oldest first, so
-/// `through` passes them with the rows it read (`messages[2..11]` are rows
-/// 5–13; the four recent messages kept are row 14, the relay rules, the
-/// working-folder line of storage design R28 and the question). The next
-/// turn's window starts after it with the four-row floor,
+/// `through` passes them with the rows it read (`messages[2..10]` are rows
+/// 5–12). The next turn's window starts after it with the four-row floor,
 /// and no row lies between the state and the window: a conversation longer
 /// than the window stops re-sending and re-compacting it (CQ-4).
 #[tokio::test]
@@ -9288,8 +9306,8 @@ async fn a_compaction_reads_the_rows_behind_the_window_and_moves_the_window_past
     );
     assert_eq!(
         (row.working_state_version, row.working_state_through),
-        (2, ids[12]),
-        "`through` passes rows 1–4 and the window's rows 5–13"
+        (2, ids[11]),
+        "`through` passes rows 1–4 and the window's rows 5–12"
     );
 
     let ctx = orch.build_context("user1:cli", "and then?");

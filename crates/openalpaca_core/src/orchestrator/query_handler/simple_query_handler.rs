@@ -739,24 +739,24 @@ impl Orchestrator {
             // how to relay start_workflow / steer / cap results in the
             // model's own words. Injected at the same per-turn assembly
             // point as the workflow-context block below.
-            if main_loop_set.is_some() {
-                let insert_at = messages.len().saturating_sub(1);
-                messages.insert(
-                    insert_at,
-                    ChatMessage::user(crate::tools::builtins::main_loop_relay_guidance()),
-                );
-            }
-
+            //
             // R28 (storage design §10): the model is told where its file
             // tools and commands act — the project's folder, or this
-            // conversation's scratch folder — in one line, beside the relay
-            // rules. Read from the turn's own tool context, so the line and
+            // conversation's scratch folder — in one line ending the same
+            // message, not in a message of its own: one more per-turn
+            // message would take a slot in the compaction's recent floor
+            // (`summarize_older`'s `min_recent`), so a first-round compaction
+            // would summarise one conversation row more, or the turn's recall
+            // block. Read from the turn's own tool context, so the line and
             // the tools can never name two folders; it creates nothing.
-            if main_loop_set.is_some()
-                && let Some(note) = crate::tools::working_folder::working_folder_note(&tool_ctx)
-            {
+            if main_loop_set.is_some() {
+                let relay = crate::tools::builtins::main_loop_relay_guidance();
+                let guidance = match crate::tools::working_folder::working_folder_note(&tool_ctx) {
+                    Some(note) => format!("{relay}\n{note}"),
+                    None => relay.to_string(),
+                };
                 let insert_at = messages.len().saturating_sub(1);
-                messages.insert(insert_at, ChatMessage::user(&note));
+                messages.insert(insert_at, ChatMessage::user(&guidance));
             }
 
             // Routing V2: workflow-context block for lanes with active
