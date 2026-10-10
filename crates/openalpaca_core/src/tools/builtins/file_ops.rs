@@ -83,8 +83,8 @@ pub(super) fn file_read_tool() -> RegisteredTool {
             description: "Read a file from the working folder — the project, or this \
                 conversation's scratch folder. Returns its full content as UTF-8; files over \
                 10MB are refused. Paths are relative to the working folder; '..' is refused, \
-                and in a project so is any .openalpaca folder. Reading never asks. For binary \
-                files, use shell_execute."
+                and in a project so is any .openalpaca folder. Reading never asks. For a \
+                by-product, use artifact_read. For binary files, use shell_execute."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -434,6 +434,7 @@ impl FileWriteTool {
     /// string by construction, so an extension no kind admits — `build.sh`,
     /// `Makefile`, `logo.svg` — is `code`, stored as `.bin`. The same path
     /// written again in one run is the same artifact's next version.
+    /// Its result names the id `artifact_read` reads it back by (R41).
     fn save_as_artifact(
         &self,
         path: &str,
@@ -463,10 +464,9 @@ impl FileWriteTool {
              project folder, so its files are kept in OpenAlpaca's artifact store. It is listed \
              in the Library. This file is the deliverable: tell the user it is saved at that \
              absolute path, and do not write another copy with the shell or any other tool. \
-             file_read cannot open it from this conversation; what you passed is what was saved, \
-             so there is nothing to check. To change it, call file_write with \"{path}\" again; \
-             that saves its next version.",
-            record.name, record.version, record.storage_path
+             To read it back, call artifact_read with \"{}\". To change it, call file_write \
+             with \"{path}\" again; that saves its next version.",
+            record.name, record.version, record.storage_path, record.id
         ))
     }
 }
@@ -2415,40 +2415,91 @@ mod tests {
         );
     }
 
-    /// Round G's five parts (FW-1), pinned whole. From Stage 2 (S3) on,
-    /// `file_read` reads the working folder — the project or the
-    /// conversation's scratch folder — and never the artifact store, so part
-    /// 4 says there is nothing to read back (S5 names `artifact_read` there).
+    /// A registered builtin, run with a context.
+    async fn call_registered(
+        tool: &RegisteredTool,
+        args: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        match &tool.backend {
+            ToolBackend::BuiltIn(handler) => handler.execute_with_context(args, ctx).await,
+            _ => panic!("{} is a builtin", tool.definition.name),
+        }
+    }
+
+    /// FW-1's five parts, pinned whole (CLAUDE.md Gotchas): the write is
+    /// done, as which artifact, version and absolute path; where this
+    /// conversation's files are kept; that the Library lists it and it is the
+    /// deliverable; how to read it back — by the id `artifact_read` takes
+    /// (R41); and how to change it. Read back by that id from the same turn
+    /// it is what was written; written again, it is the next version (with no
+    /// task both writes land in `loose/<UTC date>`, so a run straddling UTC
+    /// midnight would see two version-1 artifacts).
     #[tokio::test]
     async fn a_by_product_result_is_pinned_whole_in_five_parts() {
-        let st = Store::new();
-        let home = st.home.root();
+        let gp = crate::test_util::GuardedProject::new();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let write = file_write_tool(Some(db.clone()), None);
+        let read = super::super::artifact_read::artifact_read_tool(Some(db.clone()));
+        let ctx = ToolContext {
+            owner_id: Some("owner-test".to_string()),
+            ..gp.scratch_ctx()
+        };
+        let path = "reports/pasta-night.md";
 
-        let out = st
-            .tool()
-            .write(&pasta("# Pasta night\n"), &st.ctx(None, None))
+        for (i, content) in ["# Pasta night\n", "# Pasta night, again\n"]
+            .into_iter()
+            .enumerate()
+        {
+            let version = i + 1;
+            let out = call_registered(
+                &write,
+                &serde_json::json!({"path": path, "content": content}),
+                &ctx,
+            )
             .await
             .unwrap();
+            let row = openalpaca_storage::ArtifactStore::new(&db)
+                .list(&openalpaca_storage::ArtifactQuery::new("owner-test"))
+                .unwrap()
+                .0
+                .remove(0);
+            assert_eq!(
+                out,
+                format!(
+                    "Saved: {path} is the artifact \"{}\", version {version}, at {}. This \
+                     conversation has no project folder, so its files are kept in \
+                     OpenAlpaca's artifact store. It is listed in the Library. This file is \
+                     the deliverable: tell the user it is saved at that absolute path, and do \
+                     not write another copy with the shell or any other tool. To read it back, \
+                     call artifact_read with \"{}\". To change it, call file_write with \
+                     \"{path}\" again; that saves its next version.",
+                    row.name, row.storage_path, row.id
+                )
+            );
 
-        let row = &st.artifacts()[0];
-        assert_eq!(
-            out,
-            format!(
-                "Saved: {PASTA} is the artifact \"{}\", version 1, at {}. This \
-                 conversation has no project folder, so its files are kept in \
-                 OpenAlpaca's artifact store. It is listed in the Library. This file \
-                 is the deliverable: tell the user it is saved at that absolute \
-                 path, and do not write another copy with the shell or any other \
-                 tool. file_read cannot open it from this conversation; what you \
-                 passed is what was saved, so there is nothing to check. To change \
-                 it, call file_write with \"{PASTA}\" again; that saves its next \
-                 version.",
-                row.name, row.storage_path
-            )
-        );
+            let back = call_registered(&read, &serde_json::json!({"artifact_id": row.id}), &ctx)
+                .await
+                .unwrap_or_else(|e| panic!("artifact_read({}): {e}", row.id));
+            let n = content.len();
+            assert_eq!(
+                back,
+                format!(
+                    "{content}\n\n[artifact_read: bytes 0–{n} of {n} from {}, version {version}]",
+                    row.name
+                )
+            );
+        }
+    }
+
+    /// R41: `file_read` points at `artifact_read` for a by-product.
+    #[test]
+    fn file_read_names_artifact_read_for_a_by_product() {
+        let description = file_read_tool().definition.description;
         assert!(
-            !home.join(PASTA).exists(),
-            "written into the home store's root"
+            description.contains("For a by-product, use artifact_read."),
+            "{description}"
         );
     }
 
