@@ -91,6 +91,132 @@ fn test_lead_agent_registry_contains_coordination_tools() {
     assert!(tools.contains(&"web_search".to_string()));
 }
 
+/// R29's tripwire (storage design §11), the lead's per-request half (S1's
+/// M2): every handler a lead's run registers per request — the four
+/// coordination tools, `invoke_skill`, and `post_update` and
+/// `queue_followup` with steering on — built as the run builds them, says
+/// its arguments reach no program, so the sanitizer's `../` rule stays off
+/// them as it is off every first-party builtin. The run assembles them by
+/// hand, so a new one is added here and to the name list.
+#[test]
+fn every_per_request_lead_tool_says_its_arguments_reach_no_program() {
+    use crate::tools::registry::{RegisteredTool, ToolBackend};
+
+    let router = Arc::new(openalpaca_llm::LlmRouter::new(
+        std::collections::HashMap::new(),
+        openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+        std::collections::HashMap::new(),
+        Arc::new(openalpaca_llm::CostTracker::new(
+            openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+        )),
+        "test-model".to_string(),
+    ));
+    let daemon_config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+    let bus = EventBus::default();
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn_tool = Arc::new(SpawnSubagentTool::new(
+        router.clone(),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        bus.clone(),
+        None,
+        "task-1".to_string(),
+        "user-1".to_string(),
+        "test-lead".to_string(),
+        daemon_config.clone(),
+        None,
+        tracker.clone(),
+        0,
+        DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        MemoryScopeContext::global_only(),
+        None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        false,
+        None,
+    ));
+    let registry = ToolRegistry::default();
+    register_coordination_tools(
+        &registry,
+        spawn_tool.clone(),
+        Some(Arc::new(SpawnSubagentsBatchTool::new(spawn_tool))),
+        Arc::new(CheckSubagentStatusTool {
+            tracker: tracker.clone(),
+        }),
+        Arc::new(WaitForSubagentsTool {
+            tracker,
+            steering: None,
+        }),
+        spawn_subagent_tool_definition_from_templates(&[]),
+        Some(spawn_subagents_batch_tool_definition(&[])),
+        check_subagent_status_tool_definition(),
+        wait_for_subagents_tool_definition(),
+    );
+    registry
+        .register(RegisteredTool {
+            definition: crate::tools::builtins::invoke_skill_tool_definition(),
+            backend: ToolBackend::BuiltIn(Arc::new(crate::tools::builtins::InvokeSkillTool::new(
+                Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+                Arc::new(ToolRegistry::default()),
+                router,
+                bus.clone(),
+                None,
+                daemon_config,
+                1.0,
+            ))),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "builtin".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    register_workflow_tools(
+        &registry,
+        Arc::new(PostUpdateTool::new(
+            None,
+            bus.clone(),
+            "task-1".to_string(),
+            "user-1:gui".to_string(),
+            "gui".to_string(),
+        )),
+        Arc::new(QueueFollowupTool::new(
+            None,
+            bus,
+            "task-1".to_string(),
+            "user-1:gui".to_string(),
+            "user-1".to_string(),
+            false,
+        )),
+    );
+
+    let mut names = registry.registered_tool_names();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec![
+            "check_subagent_status",
+            "invoke_skill",
+            "post_update",
+            "queue_followup",
+            "spawn_subagent",
+            "spawn_subagents_batch",
+            "wait_for_subagents",
+        ]
+    );
+    for name in &names {
+        match registry.get(name).map(|tool| tool.backend) {
+            Some(ToolBackend::BuiltIn(handler)) => assert!(
+                !handler.arguments_reach_a_program(),
+                "{name} keeps the ../ rule"
+            ),
+            _ => panic!("{name} is not a builtin"),
+        }
+    }
+}
+
 // ── SubagentTracker tests ────────────────────────────────────────
 
 #[test]

@@ -908,6 +908,90 @@ mod tests {
         assert!(per_request.get("srv__echo").is_some());
     }
 
+    /// R29's tripwire (storage design §11), the main loop's per-request half
+    /// (S1's M2): every handler the fullest main-loop surface injects per
+    /// request — the memory writers and `memory_confirm` (an attended GUI
+    /// turn), `invoke_skill` (a router), `steer_workflow` and
+    /// `queue_followup` (an active workflow, steering on) — and the memory
+    /// read tools the daemon registers globally beside the builtins say
+    /// their arguments reach no program, so the sanitizer's `../` rule stays
+    /// off them as it is off every first-party builtin. The name list says
+    /// what the walk saw: a new per-request tool lands in it.
+    #[test]
+    fn every_per_request_main_loop_tool_says_its_arguments_reach_no_program() {
+        use crate::tools::registry::ToolBackend;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+        let service = Arc::new(crate::memory::service::MemoryService::new(
+            Some(db.clone()),
+            openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+        ));
+        let (shared, dispatcher, bus, registry) = setup();
+        let lane = format!("user1:{IN_CHAT_SOURCE}");
+        shared.register_workflow_for_lane(&lane, "task-1");
+
+        let set = main_loop_tool_set(
+            dispatcher,
+            shared,
+            bus,
+            &routing(true),
+            Some(db),
+            Some(service.clone()),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            Arc::new(SkillCatalog::new()),
+            Some(stub_router()),
+            1.0,
+            &registry,
+            &lane,
+            &ToolContext {
+                owner_id: Some("user1".to_string()),
+                lane_key: Some(lane.clone()),
+                source: Some(IN_CHAT_SOURCE.to_string()),
+                ..Default::default()
+            },
+            false,
+        );
+
+        let mut seen: Vec<&str> = set
+            .instances
+            .iter()
+            .map(|(definition, _)| definition.name.as_str())
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            vec![
+                "invoke_skill",
+                "memory_confirm",
+                "memory_forget",
+                "memory_store",
+                "memory_update",
+                "queue_followup",
+                "start_workflow",
+                "steer_workflow",
+                "task_status",
+            ]
+        );
+        for (definition, handler) in &set.instances {
+            assert!(
+                !handler.arguments_reach_a_program(),
+                "{} keeps the ../ rule",
+                definition.name
+            );
+        }
+        for tool in crate::tools::builtins::memory_read_tools(service) {
+            match &tool.backend {
+                ToolBackend::BuiltIn(handler) => assert!(
+                    !handler.arguments_reach_a_program(),
+                    "{} keeps the ../ rule",
+                    tool.definition.name
+                ),
+                _ => panic!("{} is not a builtin", tool.definition.name),
+            }
+        }
+    }
+
     #[test]
     fn test_invoke_skill_present_with_router() {
         let (shared, dispatcher, bus, registry) = setup();

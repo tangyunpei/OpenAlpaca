@@ -1866,6 +1866,18 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
 
 // --- R29: which tools keep the `../` rule (storage design §11) ---
 
+/// R29's tripwire over the builtins the daemon registers globally: each says
+/// its arguments reach no program, so the sanitizer's `../` rule is off it
+/// and its own path checks carry the `..` refusal. The per-request builtins
+/// are walked beside the code that builds them (S1's M2): the main loop's
+/// (`main_loop::tests::every_per_request_main_loop_tool_says_its_arguments_reach_no_program`,
+/// with the memory read tools the daemon registers globally) and the lead's
+/// (`runner::lead_agent::tests::every_per_request_lead_tool_says_its_arguments_reach_no_program`).
+/// Not walked by any of them: the `invoke_skill:<id>` adapters a skill's
+/// `depends_on` registers on its own run (`SkillInvocationBuiltInAdapter`,
+/// whose argument is a query for the nested skill) and a skill's script
+/// tools, which keep the rule
+/// (`a_skill_script_says_its_arguments_reach_a_program`).
 #[test]
 fn every_first_party_builtin_says_its_arguments_reach_no_program() {
     use crate::bus::EventBus;
@@ -1886,7 +1898,6 @@ fn every_first_party_builtin_says_its_arguments_reach_no_program() {
         tools.iter().any(|t| t.definition.name == "send"),
         "send is on the list"
     );
-    assert!(tools.iter().any(|t| t.definition.name == "send"), "send is on the list");
     for tool in &tools {
         match &tool.backend {
             ToolBackend::BuiltIn(handler) => assert!(
