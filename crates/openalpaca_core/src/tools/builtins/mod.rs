@@ -319,6 +319,15 @@ impl BuiltInTool for WorkspaceWriteTool {
     }
 }
 
+/// The folder the file tools, and since R23 `send`, resolve a relative path
+/// against until Stage 2 moves them to the turn's working folder: the root
+/// the caller passed, else the process's current directory (tests, the
+/// CLI). S4a removes it with the `workspace_root` parameter.
+fn startup_root(workspace_root: Option<PathBuf>) -> PathBuf {
+    workspace_root
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
 /// Return all built-in tool definitions and implementations.
 ///
 /// The memory tools are not among them: the read surface is
@@ -337,8 +346,7 @@ pub fn builtin_tools(
     let ws_cfg = web_search_config
         .unwrap_or_else(|| Arc::new(ArcSwap::from_pointee(WebSearchConfig::default())));
 
-    let ws_root = workspace_root
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let ws_root = startup_root(workspace_root);
 
     let ws_db = db;
     // The daemon config the file, artifact and workspace tools share.
@@ -405,10 +413,12 @@ pub fn builtin_tools_with_persona_context(
     workspace_root: Option<PathBuf>,
     connector_send_provider: Option<ConnectorSendLock>,
 ) -> Vec<RegisteredTool> {
-    let mut tools = builtin_tools(db, daemon_config, web_search_config, workspace_root);
+    // `send` resolves a relative `file_path` under the file tools' root (R23).
+    let ws_root = startup_root(workspace_root);
+    let mut tools = builtin_tools(db, daemon_config, web_search_config, Some(ws_root.clone()));
     tools.push(update_persona_tool(persona_ctx));
     if let Some(provider) = connector_send_provider {
-        tools.push(send::send_tool(provider));
+        tools.push(send::send_tool(provider, ws_root));
     }
     tools
 }
