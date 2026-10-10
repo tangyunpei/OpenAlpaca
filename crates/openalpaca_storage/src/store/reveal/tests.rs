@@ -11,6 +11,14 @@ fn file_at(dir: &Path, rel: &str) -> PathBuf {
     path
 }
 
+/// The refusal's sentence for the resolved `path`, as the toast shows it.
+fn outside_sentence(path: &Path) -> String {
+    format!(
+        "{} is not in an OpenAlpaca store or one of your projects, so it is not shown in its folder.",
+        path.display()
+    )
+}
+
 #[test]
 fn a_file_in_a_projects_folder_is_revealed_by_its_canonical_path() {
     let tmp = tempdir().unwrap();
@@ -20,7 +28,7 @@ fn a_file_in_a_projects_folder_is_revealed_by_its_canonical_path() {
         "projects/-Users-me-dev-app/artifacts/reports/01-pasta-night.md",
     );
 
-    let revealed = revealable_path_with_home(&file, Some(&home)).unwrap();
+    let revealed = revealable_path_among(&file, Some(&home), &[]).unwrap();
 
     assert_eq!(revealed, file.canonicalize().unwrap());
 }
@@ -46,18 +54,11 @@ fn a_file_outside_every_store_is_refused() {
     fs::create_dir_all(&home).unwrap();
     let file = file_at(tmp.path(), "Documents/notes.md");
 
-    let refusal = revealable_path_with_home(&file, Some(&home)).unwrap_err();
+    let refusal = revealable_path_among(&file, Some(&home), &[]).unwrap_err();
 
-    assert_eq!(
-        refusal,
-        RevealRefusal::OutsideStore(file.canonicalize().unwrap())
-    );
-    assert!(
-        refusal
-            .to_string()
-            .ends_with("is not in an OpenAlpaca store, so it is not shown in its folder."),
-        "{refusal}"
-    );
+    let canonical = file.canonicalize().unwrap();
+    assert_eq!(refusal, RevealRefusal::OutsideStore(canonical.clone()));
+    assert_eq!(refusal.to_string(), outside_sentence(&canonical));
 }
 
 #[test]
@@ -67,7 +68,7 @@ fn a_directory_in_a_store_is_refused() {
     let dir = home.join("projects/-Users-me-dev-app/artifacts/reports");
     fs::create_dir_all(&dir).unwrap();
 
-    let refusal = revealable_path_with_home(&dir, Some(&home)).unwrap_err();
+    let refusal = revealable_path_among(&dir, Some(&home), &[]).unwrap_err();
 
     assert_eq!(
         refusal,
@@ -82,7 +83,7 @@ fn a_missing_file_is_refused_with_the_path_it_was_asked_for() {
     fs::create_dir_all(&home).unwrap();
     let gone = home.join("artifacts/01-gone.md");
 
-    let refusal = revealable_path_with_home(&gone, Some(&home)).unwrap_err();
+    let refusal = revealable_path_among(&gone, Some(&home), &[]).unwrap_err();
 
     assert_eq!(refusal, RevealRefusal::Missing(gone.clone()));
     assert_eq!(
@@ -109,7 +110,7 @@ fn a_file_outside_the_home_root_is_refused_when_a_home_root_is_known() {
 
     for file in [outside, sibling] {
         assert_eq!(
-            revealable_path_with_home(&file, Some(&home)),
+            revealable_path_among(&file, Some(&home), &[]),
             Err(RevealRefusal::OutsideStore(file.canonicalize().unwrap()))
         );
     }
@@ -126,7 +127,7 @@ fn a_symlink_under_the_home_root_that_leads_outside_it_is_refused() {
     std::os::unix::fs::symlink(&outside, &link).unwrap();
 
     assert_eq!(
-        revealable_path_with_home(&link, Some(&home)),
+        revealable_path_among(&link, Some(&home), &[]),
         Err(RevealRefusal::OutsideStore(outside.canonicalize().unwrap()))
     );
 }
@@ -142,13 +143,14 @@ fn a_home_root_that_is_a_symlink_admits_its_files() {
     std::os::unix::fs::symlink(tmp.path().join("volume/store"), &home).unwrap();
 
     assert_eq!(
-        revealable_path_with_home(&home.join("artifacts/01-notes.md"), Some(&home)),
+        revealable_path_among(&home.join("artifacts/01-notes.md"), Some(&home), &[]),
         Ok(file.canonicalize().unwrap())
     );
 }
 
 /// ST-9: an old in-project `.openalpaca/` is no store any more — a file in
-/// one is outside the home root and refused, however its folder is named.
+/// one of a folder no project records is refused, however its folder is
+/// named.
 #[test]
 fn a_file_in_an_old_in_project_store_is_refused() {
     let tmp = tempdir().unwrap();
@@ -157,19 +159,126 @@ fn a_file_in_an_old_in_project_store_is_refused() {
     let file = file_at(tmp.path(), "dev/app/.openalpaca/artifacts/01-notes.md");
 
     assert_eq!(
-        revealable_path_with_home(&file, Some(&home)),
+        revealable_path_among(&file, Some(&home), &[]),
         Err(RevealRefusal::OutsideStore(file.canonicalize().unwrap()))
     );
 }
 
-/// With no home root to compare with, nothing is in a store.
+/// With no home root and no project to compare with, nothing is in a store.
 #[test]
 fn with_no_home_root_nothing_is_revealed() {
     let tmp = tempdir().unwrap();
     let file = file_at(tmp.path(), ".openalpaca/artifacts/01-notes.md");
 
     assert_eq!(
-        revealable_path_with_home(&file, None),
+        revealable_path_among(&file, None, &[]),
         Err(RevealRefusal::OutsideStore(file.canonicalize().unwrap()))
+    );
+}
+
+/// ST-12, ST-18: a file an agent wrote into a project lives under the
+/// project's own root, and the root `projects/` records admits it.
+#[test]
+fn a_file_under_a_registered_projects_root_is_revealed() {
+    let tmp = tempdir().unwrap();
+    let project = tmp.path().join("dev/app");
+    let file = file_at(&project, "src/main.rs");
+    let _env = HomeStoreGuard::set(&tmp.path().join("isolated-store"));
+    crate::store::projects::register(&project).unwrap();
+
+    assert_eq!(revealable_path(&file), Ok(file.canonicalize().unwrap()));
+}
+
+/// A folder `projects/` does not record is no project: its files are refused,
+/// with the sentence the toast shows.
+#[test]
+fn a_file_in_a_folder_no_project_records_is_refused() {
+    let tmp = tempdir().unwrap();
+    let file = file_at(tmp.path(), "dev/app/src/main.rs");
+    let _env = HomeStoreGuard::set(&tmp.path().join("isolated-store"));
+
+    let refusal = revealable_path(&file).unwrap_err();
+
+    let canonical = file.canonicalize().unwrap();
+    assert_eq!(refusal, RevealRefusal::OutsideStore(canonical.clone()));
+    assert_eq!(refusal.to_string(), outside_sentence(&canonical));
+}
+
+#[test]
+fn a_project_root_admits_its_files_and_nothing_beside_it() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("isolated-store");
+    fs::create_dir_all(&home).unwrap();
+    let root = tmp.path().join("dev/app");
+    let inside = file_at(&root, "docs/notes.md");
+    // A sibling whose name only starts like the root is outside it.
+    let sibling = file_at(tmp.path(), "dev/app-evil/notes.md");
+
+    assert_eq!(
+        revealable_path_among(&inside, Some(&home), std::slice::from_ref(&root)),
+        Ok(inside.canonicalize().unwrap())
+    );
+    assert_eq!(
+        revealable_path_among(&sibling, Some(&home), &[root]),
+        Err(RevealRefusal::OutsideStore(sibling.canonicalize().unwrap()))
+    );
+}
+
+/// ST-18: a result file whose kind the store does not keep is offered Reveal
+/// alone, so Reveal must answer for it — whatever its name, and with no home
+/// root to compare with.
+#[test]
+fn a_file_no_artifact_kind_keeps_is_revealed_in_its_project() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("dev/app");
+    for rel in ["Makefile", "scripts/release.sh", ".env", "bin/tool.exe"] {
+        let file = file_at(&root, rel);
+        assert_eq!(
+            revealable_path_among(&file, None, std::slice::from_ref(&root)),
+            Ok(file.canonicalize().unwrap()),
+            "{rel}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_in_a_project_that_leads_outside_every_root_is_refused() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("isolated-store");
+    fs::create_dir_all(&home).unwrap();
+    let root = tmp.path().join("dev/app");
+    let outside = file_at(tmp.path(), "Documents/secret.md");
+    let link = root.join("notes/link.md");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+    assert_eq!(
+        revealable_path_among(&link, Some(&home), &[root]),
+        Err(RevealRefusal::OutsideStore(outside.canonicalize().unwrap()))
+    );
+}
+
+/// The lead's ruling R-T18 (ST-23): a project whose folder moved with a link
+/// left at its old root is missing, and its root admits nothing — a file
+/// asked for through the link resolves to the moved folder, which no project
+/// records, and is refused.
+#[cfg(unix)]
+#[test]
+fn a_project_moved_behind_a_link_admits_no_file_through_its_old_root() {
+    let tmp = tempdir().unwrap();
+    let project = tmp.path().join("dev/app");
+    let file = file_at(&project, "src/main.rs");
+    let _env = HomeStoreGuard::set(&tmp.path().join("isolated-store"));
+    crate::store::projects::register(&project).unwrap();
+    let moved = tmp.path().join("dev/app-moved");
+    fs::rename(&project, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &project).unwrap();
+
+    let canonical = file.canonicalize().unwrap();
+    assert_eq!(canonical, moved.join("src/main.rs").canonicalize().unwrap());
+    assert_eq!(
+        revealable_path(&file),
+        Err(RevealRefusal::OutsideStore(canonical))
     );
 }

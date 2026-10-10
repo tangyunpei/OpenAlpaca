@@ -181,19 +181,25 @@ async fn await_daemon_stopped() -> Result<DaemonStopReport, String> {
 /// The path comes from the webview — an artifact's `path` as the daemon served
 /// it — so the shell does not take it on trust: `store::revealable_path`
 /// resolves it, symlinks included, and admits only a regular file in an
-/// OpenAlpaca store. The platform program gets that resolved path as an
-/// argument of its own, never through a shell. This shows the file; opening it
-/// stays the daemon's route (`POST /v1/files/{id}/open`). An error is one
-/// sentence, which the webview shows as it is.
+/// OpenAlpaca store or under the root of a project `projects/` records, where
+/// a file an agent wrote into the project lives (storage design §13, ST-18:
+/// Reveal answers for such a file whatever its kind). The platform program
+/// gets that resolved path as an argument of its own, never through a shell.
+/// This shows the file; opening it stays the daemon's route
+/// (`POST /v1/files/{id}/open`). An error is one sentence, which the webview
+/// shows as it is.
 ///
-/// The program runs on the blocking pool, so a slow file manager never stalls
-/// another `invoke`.
+/// The check (it reads `projects/`) and the program both run on the blocking
+/// pool, so a slow disk or file manager never stalls another `invoke`.
 #[tauri::command]
 async fn reveal_path(path: String) -> Result<(), String> {
-    let path = store::revealable_path(Path::new(&path)).map_err(|refusal| refusal.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || reveal_in_folder(&path))
-        .await
-        .map_err(|e| format!("Could not show the file in its folder: {e}."))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let path =
+            store::revealable_path(Path::new(&path)).map_err(|refusal| refusal.to_string())?;
+        reveal_in_folder(&path)
+    })
+    .await
+    .map_err(|e| format!("Could not show the file in its folder: {e}."))?
 }
 
 /// Run the platform's reveal for an already admitted path and wait for it.
