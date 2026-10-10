@@ -1096,10 +1096,12 @@ async fn run_agentic_loop_core(
                         .session_log
                         .as_ref()
                         .map(|log| log.session_id().to_string());
-                    // The same handle, for the one tool that writes into the
-                    // log before it acts: `file_write`'s pre-edit image
-                    // (§5.7). Set from `config` so the id and the handle can
-                    // never name two different sessions.
+                    // The same handle, for the tools that write into the log
+                    // before they act: `file_write` and `file_edit` copy a
+                    // project file they replace or edit into
+                    // `sessions/<id>/snapshots/` first (`pre_edit.rs`, R46).
+                    // Set from `config` so the id and the handle can never
+                    // name two different sessions.
                     effective_ctx.session_log = config.session_log.clone();
 
                     // §5.5: the call is announced before dispatch, so a

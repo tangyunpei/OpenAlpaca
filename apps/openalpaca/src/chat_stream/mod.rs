@@ -603,9 +603,12 @@ impl ConfirmationDetails {
 /// name is one line — an MCP `<server>__<tool>` or plugin `<plugin>::<tool>`
 /// name is whatever its third party lists — so it takes `escape_hidden_line`,
 /// which also shows a line break and a tab: a name cannot print a forged
-/// `Arguments:` block above the real one. The preview is left as it comes:
-/// the daemon composed it for reading and took every character the escape
-/// would show out of what it quotes (`utils::text::one_line`).
+/// `Arguments:` block above the real one. The preview is left as it comes,
+/// because no raw hidden character reaches it: `memory_confirm`'s preview has
+/// every character the escape would show taken out of what it quotes
+/// (`utils::text::one_line`), and the previews of `shell_execute`,
+/// `file_write`, `file_edit` and `send` show the ones in what they quote
+/// escaped (`<U+XXXX>`), with their own count line.
 /// Display only — the answer is built from the frame's `request_id`, untouched.
 pub(crate) fn confirmation_details(frame: &serde_json::Value) -> ConfirmationDetails {
     use openalpaca_core::utils::text::{escape_hidden, escape_hidden_line, hidden_notice};

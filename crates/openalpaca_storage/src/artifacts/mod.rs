@@ -1393,6 +1393,12 @@ impl<'a> ArtifactStore<'a> {
     /// recorded as a version with `author_agent_id = NULL` before the path is
     /// resolved. [`Self::resolve_content_with_edit`] is the same call for a
     /// caller that wants to announce that.
+    ///
+    /// A result file in the project (a pointer row, R37) is the user's own
+    /// file: a read that finds it changed refreshes the row's hash and size
+    /// and records no version, and its path is confined under the project
+    /// (`Gone` for a project whose root no longer leads to its own folder,
+    /// R-T18).
     pub fn resolve_content(&self, id: &str, version: Option<u32>) -> Result<PathBuf> {
         self.resolve_content_with_edit(id, version)
             .map(|(path, _)| path)
@@ -1682,10 +1688,11 @@ impl<'a> ArtifactStore<'a> {
     /// §6 step 2: one transaction moves every row naming `old_root` in the
     /// five path columns to `new_root`, and rewrites `storage_path` on the
     /// rows whose `project_root` is `old_root` — `old_dir` (the project's
-    /// folder under `projects/`) becomes `new_dir`, and, for Stage 2's pointer
-    /// rows, `old_root` becomes `new_root`. A prefix counts only when a `/` or
-    /// a `\` follows it, compared with `substr`, never `LIKE` (whose `_` and
-    /// `%` a path may hold). `rel_path` is the address and does not change.
+    /// folder under `projects/`) becomes `new_dir`, and, for a pointer row (a
+    /// result file in the project), `old_root` becomes `new_root`. A prefix
+    /// counts only when a `/` or a `\` follows it, compared with `substr`,
+    /// never `LIKE` (whose `_` and `%` a path may hold). `rel_path` is the
+    /// address and does not change.
     /// (`a_re_point_rewrites_a_pointer_rows_path_and_leaves_the_file`,
     /// `project_life/tests.rs`, pins the second prefix.)
     ///
@@ -1694,11 +1701,12 @@ impl<'a> ArtifactStore<'a> {
     /// No stat pass inside the transaction (R32) — the read path re-stamps.
     ///
     /// `file_assets` goes **last**: `idx_file_assets_addr` is
-    /// (`project_root`, `in_project`, `rel_path`), the one unique key a re-point can
-    /// violate, and the failure that rolls the transaction back must have the
-    /// other four to roll back. Path-scoped, not owner-scoped: `session` and
-    /// `task` carry no `owner_id`; the route refuses a root holding another
-    /// owner's rows ([`WorkspaceRows::other_owners`]) before calling this.
+    /// `(COALESCE(project_root, ''), in_project, rel_path)`, the one unique key
+    /// a re-point can violate, and the failure that rolls the transaction back
+    /// must have the other four to roll back. Path-scoped, not owner-scoped:
+    /// `session` and `task` carry no `owner_id`; the route refuses a root
+    /// holding another owner's rows ([`WorkspaceRows::other_owners`]) before
+    /// calling this.
     /// Idempotent: run again after it committed, it matches nothing.
     ///
     /// [`InFlightRuns::Refuse`] (a re-point someone asked for) first counts

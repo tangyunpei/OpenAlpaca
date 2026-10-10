@@ -375,8 +375,9 @@ pub(super) fn send_tool(provider: ConnectorSendLock, db: Option<Database>) -> Re
                 (Telegram, iMessage, Discord). For messages: provide action='message' \
                 with content text. For files: provide action='file' with file_path (a file \
                 relative to the working folder — the project, or this conversation's scratch \
-                folder) or artifact_id (a by-product you saved, by its \
-                id), filename, and optional mime_type/caption. Use recipient='default' for the \
+                folder) or artifact_id (the id of a by-product, an upload or a result file in \
+                the project; one of another project is refused), filename, and optional \
+                mime_type/caption. Use recipient='default' for the \
                 most recent conversation, or specify a channel-specific identifier (chat_id \
                 for Telegram, phone/email for iMessage, channel_id for Discord). Returns \
                 confirmation on success."
@@ -407,7 +408,7 @@ pub(super) fn send_tool(provider: ConnectorSendLock, db: Option<Database>) -> Re
                     },
                     "artifact_id": {
                         "type": "string",
-                        "description": "A by-product to send, by its id; give this or file_path"
+                        "description": "The id of a file to send: a by-product, an upload or a result file in the project; one of another project is refused. Give this or file_path"
                     },
                     "filename": {
                         "type": "string",
@@ -1375,6 +1376,31 @@ mod tests {
             1,
             "nothing more was sent"
         );
+    }
+
+    /// What an `artifact_id` names, as the model reads it: a by-product, an
+    /// upload (R-T20) and, since a result file in the project has a row of
+    /// its own (S4a.17), that file too — each refused when it belongs to a
+    /// project the turn is not in (R-T3). The text said "a by-product you
+    /// saved" alone.
+    #[test]
+    fn the_description_says_an_artifact_id_names_a_by_product_an_upload_or_a_result_file() {
+        let tool = send_tool(Arc::new(RwLock::new(None)), None);
+        let property = tool.definition.parameters["properties"]["artifact_id"]["description"]
+            .as_str()
+            .expect("artifact_id has a description")
+            .to_string();
+        for text in [tool.definition.description.as_str(), property.as_str()] {
+            for needle in [
+                "a by-product",
+                "an upload",
+                "a result file in the project",
+                "another project",
+            ] {
+                assert!(text.contains(needle), "{needle:?} is missing: {text}");
+            }
+            assert!(!text.contains("a by-product you saved"), "{text}");
+        }
     }
 
     // ── the lead's ruling R-T3: another project's by-product, by its id ──

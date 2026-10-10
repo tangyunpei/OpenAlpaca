@@ -151,9 +151,11 @@ pub(super) async fn open_asset_for_user(
     local_user_id: &str,
     open_file_fn: OpenFileFn,
 ) -> Result<FileOpenResponse, OpenFileApiError> {
-    // The owner-scoped read of `file_assets` that also carries `origin` — the
-    // one column this route needs and `FileAsset` does not have. Both writers
-    // fill the same table, so an upload reads back here exactly as before.
+    // The owner-scoped read of `file_assets` as an `ArtifactRecord`, which
+    // carries what this route reads and `FileAsset` does not: `origin` (a
+    // produced row opens unstaged), `in_project` (a result file opens through
+    // its project) and `openable()` (ST-18). Both writers fill the same
+    // table, so an upload reads back here exactly as before.
     let asset = match openalpaca_storage::ArtifactStore::new(db).get(file_id, local_user_id) {
         Ok(Some(asset)) => asset,
         Ok(None) => {

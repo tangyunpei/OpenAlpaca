@@ -1638,7 +1638,7 @@ fn set_pinned_round_trips_and_rejects_an_unknown_id() {
 
 /// §6 step 2: one transaction moves the five path columns from the old root
 /// to the new one and rewrites both `storage_path` prefixes — the project's
-/// folder under `projects/`, and (Stage 2's pointer rows) the project's own
+/// folder under `projects/`, and (a pointer row's) the project's own
 /// path — each only on rows whose `project_root` is the old root, and only
 /// where the prefix is followed by a separator.
 #[test]
@@ -1852,9 +1852,10 @@ fn a_failing_member_rolls_the_whole_repoint_back() {
     f.session("session-1", &old);
     f.task_in("task-1", &old, "completed");
 
-    // The collision: `idx_file_assets_addr` is (project_root, rel_path), so
-    // re-keying this artifact onto a root that already holds a file at the
-    // same address violates it. That is the failure the one transaction
+    // The collision: `idx_file_assets_addr` is
+    // (COALESCE(project_root, ''), in_project, rel_path), so re-keying this
+    // by-product onto a root that already holds one at the same address
+    // violates it. That is the failure the one transaction
     // exists for — two projects must not silently merge, and the other two
     // members, which the transaction has already rewritten by the time the
     // artifact statement runs, must not stay moved without it.

@@ -722,7 +722,7 @@ mod tests {
     }
 
     /// The whole point of the tool: the scope comes from the *request*, never
-    /// from the daemon's current directory or the startup `workspace_root`.
+    /// from the daemon's current directory.
     #[tokio::test]
     async fn never_writes_under_the_daemon_working_directory() {
         let fx = Fixture::new();

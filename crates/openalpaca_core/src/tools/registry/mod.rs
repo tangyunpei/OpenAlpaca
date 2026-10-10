@@ -48,12 +48,13 @@ pub use capabilities::{
 ///   copy is all that is left of it, and the collapse below removes it.
 /// - `request_workspace_root` — the same resolution, but only on the
 ///   client-sent branch and never the home store (R22), and the only one of
-///   the three that may place bytes on disk. Read by `artifact_write`, its
-///   `workspace_write` spill and `file_write` (which writes into its own
-///   workspace root only on a turn that carries one, G2), by
-///   `tools::working_folder` — the folder `file_read`, `shell_execute`,
-///   command tools and `send` act in (storage design §10, R26) — by the
-///   memory tools, which pick their partition with it
+///   the three that may place bytes on disk. Read by `artifact_write` and its
+///   `workspace_write` spill (a project's by-products), by `artifact_read`
+///   and `send`'s `artifact_id`, which refuse a file of a project the turn
+///   is not in (R-T3), by `tools::working_folder` — the folder the file tools
+///   (`file_read`, `file_list`, `file_write`, `file_edit`),
+///   `shell_execute`, command tools and `send` act in (storage design §10,
+///   R26) — by the memory tools, which pick their partition with it
 ///   (`MemoryService::context_for_tool`), by `start_workflow`, which forwards
 ///   it into the run, and by `steer_workflow` and `queue_followup`, which
 ///   persist it (F4).
@@ -92,15 +93,15 @@ pub struct ToolContext {
     /// none — never CWD-derived (ruling R22).
     ///
     /// The only field that may place content on disk: `artifact_write` and the
-    /// `workspace_write` spill read this and nothing else, so a chat turn's
-    /// deliverable lands in the home store rather than in whatever repository
-    /// the daemon happened to start in. `file_write` (G2) reads it too, to
-    /// choose: on a turn that carries a project, from a daemon not started in
-    /// the home store, its plain write still lands in that startup root.
+    /// `workspace_write` spill read this and nothing else, so a by-product
+    /// lands in the turn's project's folder under `projects/` (with no
+    /// project, in the home store's own), never in whatever repository the
+    /// daemon happened to start in.
     ///
-    /// It is also the turn's working folder (storage design §10, R26):
-    /// `file_read`, `shell_execute`, command tools and `send` act in the
-    /// registered project it names; with none, in the scratch folder of
+    /// It is also the turn's working folder (storage design §10, R26): the
+    /// file tools (`file_read`, `file_list`, `file_write`, `file_edit`),
+    /// `shell_execute`, command tools and `send` act in the registered project
+    /// it names; with none, in the scratch folder of
     /// [`conversation_id`](Self::conversation_id).
     pub request_workspace_root: Option<String>,
     /// Skill invocation chain, oldest first. Empty at top level.
@@ -146,14 +147,16 @@ pub struct ToolContext {
     /// own log handle. Inherited by every context cloned from this one (nested
     /// skills, plugin agents).
     pub conversation_id: Option<String>,
-    /// The session log's emit side, for the one tool that must **write** to it
-    /// before it acts rather than after: `file_write` takes §5.7's pre-edit
-    /// image of a file it is about to overwrite, and has to know the image was
-    /// taken before it destroys the bytes.
+    /// The session log's emit side, for the tools that must **write** to it
+    /// before they act rather than after: `file_write` and `file_edit` copy a
+    /// project file they are about to replace or edit into
+    /// `sessions/<id>/snapshots/` (`tools/builtins/pre_edit.rs`, ST-17, R46),
+    /// and have to know the copy was kept before they change the bytes.
     ///
     /// Set from the same handle as [`session_id`](Self::session_id), so the
-    /// two always name one session. `None` off a session — and then no
-    /// snapshot is taken, because there is nowhere to put one.
+    /// two always name one session. `None` off a session — and then an
+    /// existing file is never replaced or edited, because there is nowhere to
+    /// keep its copy (R46); a new file is still written.
     pub session_log: Option<crate::session_log::SessionLogHandle>,
     /// The bus a tool announces its own side effects on — `artifact_write`'s
     /// `SystemEvent::ArtifactWritten` today (plan §4.9).

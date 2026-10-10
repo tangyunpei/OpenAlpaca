@@ -69,10 +69,12 @@ export interface RunReportData {
  * One `artifact_written` frame, as the transcript shows it.
  *
  * Session-local like the run reports: the frame carries a *version*, which the
- * card prints and no stored link records. A file the run produced comes back
- * after a reload as a chip on the completion report (GAP-23, closed); this
- * card is the moment it was written. The Library is where the file is
- * permanent either way.
+ * card prints and no stored link records. A by-product the run produced comes
+ * back after a reload as a chip on the completion report (GAP-23, closed);
+ * this card is the moment it was written. A result file in the project
+ * (`inProject`) has no version to print, and comes back as no chip: its row is
+ * never linked to the report, which names it in its own text instead. The
+ * Library is where the file is listed either way.
  */
 export interface WrittenArtifact {
   artifactId: string;
