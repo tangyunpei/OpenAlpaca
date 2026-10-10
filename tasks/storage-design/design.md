@@ -1,4 +1,4 @@
-# Storage and project work — design (rev 0.9, approved by the owner with ST-22; Stages 0 and 1 built)
+# Storage and project work — design (rev 0.10, approved by the owner with ST-22, ST-23 taken; Stages 0 and 1 built)
 
 **Status:** approved. The owner read rev 0.5 on 2026-10-05 ("everything in the design file is good") and asked for one
 addition, an edit tool, taken as **ST-22**. Owner decisions **ST-1…ST-13** (2026-10-04) and **ST-14…ST-22** (2026-10-05)
@@ -8,7 +8,8 @@ from `tasks/storage-design/plan-stage0.md`, which the owner approved on 2026-10-
 live check `stage0-live-report.md`, all four fixes PASS). **Stage 1 is built** (2026-10-07…08, `b8b768b6^..44d53783`,
 from `tasks/storage-design/plan-stage1.md`, which the owner approved on 2026-10-07; one gate pass at `00f057fe`; the
 live check `stage1-live-report.md`, `44d53783`). Stage 2 is not built, and is not built before the owner approves its
-plan. Building Stage 1 raised two owner questions, pending (§0.2).
+plan. Building Stage 1 raised two owner questions; the owner answered both on 2026-10-09 (§0.2): T36 keeps the
+re-point as built, and **ST-23** makes a project whose recorded root no longer leads to itself read missing.
 
 **Branch:** `feat/markdown-memory` at approval (2026-10-05), its code that of `032f6ae2`, the last commit before
 the design's own. **Evidence:** two rounds of read-only
@@ -52,22 +53,24 @@ what a beta waits for beyond the stages.
 | ST-20 | (Q7) Re-pointing a project onto a path that is already a project of its own is refused, and the message names both ways out. Merging two projects is later work. |
 | ST-21 | (Q8; supersedes LQ5) A missing project's turns are still learned into its notes. Only a project whose data was deleted drops them. |
 | ST-22 | An edit tool, `file_edit`: in a project, an agent changes part of a file — the exact text to find and the text to put in its place — instead of writing the whole file back. Same confinement, approval card, pre-edit copy and pointer row as `file_write`. (§13) |
+| ST-23 | (2026-10-09, the owner's answer to Stage 1's question on ST-7's `missing`) A project whose recorded root no longer leads to its own folder — the folder renamed by case only, or moved with a link left at the old path — is marked missing, like one whose folder is gone, and the user re-points it. |
 
 ### 0.2 Questions
 
 Q1 was answered on 2026-10-05 and is ST-14. Q2…Q8 were put together at the owner's request and all were taken as
-recommended: ST-15…ST-21. Building Stage 1 raised two, pending and adopted nowhere (rev 0.9; §18):
+recommended: ST-15…ST-21. Building Stage 1 raised two; the owner answered both on 2026-10-09 (rev 0.10):
 
-- **T36.** `PATCH /v1/workspaces` with an `old_path` inside a project re-points the whole project — the route
-  resolves the path up to the project's root — while the delete refuses that shape with `422 WORKSPACE_NOT_A_ROOT`
-  naming the root (the lead's ruling R-S8). §9's `PATCH` row says `WORKSPACE_NOT_A_ROOT` is gone for `PATCH`, so
-  refusing it there would reverse an approved row. Options: refuse a non-root `old_path` on `PATCH` with
-  `422 WORKSPACE_NOT_A_ROOT` naming the root (recommended — an inside path re-points the whole project's record to
-  wherever the subfolder went), or keep. A pending row in `tasks/api-fix-plan.md` §0.
-- **ST-7's `missing`.** Should a project whose recorded root no longer canonicalizes to itself — a folder renamed by
-  case only, or moved with a link left at the old path — read as `missing`? Today `missing` is "the root is not a
-  directory", so such a project is listed present (the whole-stage review's R1; its route half is built, §3's
-  *As built*).
+- **T36 — no change.** `PATCH /v1/workspaces` with an `old_path` inside a project goes on re-pointing the whole
+  project — the route resolves the path up to the project's root — while the delete refuses that shape with
+  `422 WORKSPACE_NOT_A_ROOT` naming the root (the lead's ruling R-S8). §9's `PATCH` row stands. The lead had
+  recommended the refusal; the owner kept the re-point as built.
+- **ST-23 — a root that no longer leads to itself is missing.** A project whose recorded root no longer canonicalizes
+  to itself — a folder renamed by case only, or moved with a link left at the old path — reads `missing`, like one
+  whose folder is gone, and the user re-points it (the whole-stage review's R1; its route half is built, §3's
+  *As built*). To be built in Stage 2, slice S0, before anything resolves a project's working folder: `missing` means
+  "the recorded root is not a directory, or no longer canonicalizes to itself", and a recorded root is matched as
+  written before it is resolved wherever the daemon looks a project up — which also closes §18's *review R1's deeper
+  cross-wiring*.
 
 ### 0.3 Lead's rulings the owner was shown (2026-10-05, no objection)
 
@@ -693,9 +696,9 @@ untracked evidence.
 Research on sandbox methods for shell commands, for a later version (ST-14): what confines a command to the
 project on each platform, and what it costs. Merging two projects on a re-point (ST-20). **T35**: an extension
 tool that does not declare itself harmless prompts — three options (no change; MCP only; MCP and plugins), with the
-consequence that an unattended turn using such a tool is refused. A run-wide "Always allow" (R43). And the two
-owner questions Stage 1 raised (§0.2): **T36**, whether `PATCH /v1/workspaces` refuses an `old_path` inside a project
-as the delete does; and whether a project whose recorded root no longer canonicalizes to itself reads as `missing`.
+consequence that an unattended turn using such a tool is refused. A run-wide "Always allow" (R43). Stage 1's two
+owner questions are answered (§0.2): **T36** keeps the re-point as built, and **ST-23** — a root that no longer leads to
+itself reads missing — is built in Stage 2's S0.
 
 From Stage 0, each found by its review or its live check and left as it is:
 
@@ -740,7 +743,8 @@ review's finding (written *review R1…R33*, apart from this design's own ruling
 - **Review R1's deeper cross-wiring** (R-F7): only the routes match a recorded root as written; `lookup`, `store_root`, the
   dispatch's `register` and memory's resolution still take a root that now leads elsewhere (a case-only rename, a
   link left at the old path) to the project its canonical form names, so that project's follow-ups write into the
-  other's folder and partitions. `missing` stays "the root is not a directory" (the owner's question, §0.2).
+  other's folder and partitions. `missing` stays "the root is not a directory". **Taken by ST-23 (2026-10-09):** a recorded root is matched as written
+  before it is resolved, and one that no longer canonicalizes to itself reads missing — to be built in Stage 2's S0.
 - **Review R4's other variant** (R-F7): with `OPENALPACA_HOME_STORE` outside `$HOME`, a `~/.git` makes `$HOME` a project.
   Older than Stage 1.
 - **A root that is not valid UTF-8** is held through `to_string_lossy` and can alias another (S1 M4; Linux; the shape
@@ -903,6 +907,11 @@ own project needs.
 
 ## Revision log
 
+- **rev 0.10 (2026-10-09).** The owner answered Stage 1's two questions: **T36 — no change** (the re-point of an
+  `old_path` inside a project stays as built; §9's `PATCH` row stands), and **ST-23** (§0.1) — a project whose recorded
+  root no longer leads to its own folder (a case-only rename, a link left at the old path) reads missing and is
+  re-pointed by the user. §0.2 records both; §18's first paragraph and its *review R1's deeper cross-wiring* bullet
+  point at Stage 2's S0, where ST-23 is built. No code changed.
 - **rev 0.9 (2026-10-08).** **Stage 1 built**, from `tasks/storage-design/plan-stage1.md` (approved by the owner on
   2026-10-07), as `b8b768b6^..44d53783` (131 commits): slices S1–S6, each reviewed with one fix round; the whole-stage
   review (eight reviewers by dimension; 33 findings, 1 Critical, 9 Important, cited as *review R1…R33*) and its fix wave `b923c81e..a9ea4864`
