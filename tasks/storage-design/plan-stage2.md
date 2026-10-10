@@ -2,20 +2,20 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build Part II of the storage design: in a project conversation an agent lists, reads, writes and edits the project's real files and runs commands there — each write and each command asking first, the card naming the folder — a file written for the person lands in the project with a pointer row that the chat card, the Library, Open and Reveal show, drafts and hand-offs stay under `~/.openalpaca` as by-products, and a conversation with no project works in its own scratch folder.
+**Goal:** Build Part II of the storage design: in a project conversation an agent lists, reads, writes and edits the project's real files and runs commands there — each write and each command asking first, the card naming the folder — a file written for the person lands in the project with a pointer row that the chat card, the Library, Open and Reveal show, drafts and hand-offs stay under `~/.openalpaca` as by-products, and a conversation with no project works in its own scratch folder. First (S0, ST-23), a project whose folder was renamed by case only, or moved with a link left at its old path, reads `missing` — kept, listed, refused its file tools and commands, and re-pointed by the person — and nothing follows its old root into another project.
 
-**Architecture:** Eight slices built in order, guards before the root moves. S1 tightens confinement before any tool acts on a project (R31's link rule, R32's `.git`/`.openalpaca` rule built and off, `send` confined, the `../` filter narrowed to tools whose arguments reach a program, and the kill of a command that times out or is cancelled). S2 makes the approval card name the folder and stops the by-product writers asking. S3 moves the tools onto the call's working folder — the project's root, or `~/.openalpaca/scratch/<session-id>/` — with the session id on every sandboxed context and the model told its folder. S4a adds the pointer row (migration 004) and lets `file_write` write the real file; S4b adds the pre-edit copy's new home and `file_edit`. S5 adds `file_list` and `artifact_read` and settles who holds which tool. S6a brings the app's surfaces to result files; S6 rewrites the words and documents, runs the one gate, the live check and the records.
+**Architecture:** Nine slices built in order, guards before the root moves. S0 comes first: it makes a project whose recorded root no longer leads to itself — its folder renamed by case only, or moved with a link left at the old path — read `missing` (ST-23; `projects::root_is_missing`, the one place the flag is decided), and has `lookup`, `register` and the workspace routes match a recorded root as written before its canonical form and `resolve` walk a path as written first for a missing project's root, because S3's R27 refuses a missing project's tools and the `missing` it reads must already mean ST-23's (R-T17). S1 tightens confinement before any tool acts on a project (R31's link rule, R32's `.git`/`.openalpaca` rule built and off, `send` confined, the `../` filter narrowed to tools whose arguments reach a program, and the kill of a command that times out or is cancelled). S2 makes the approval card name the folder and stops the by-product writers asking. S3 moves the tools onto the call's working folder — the project's root, or `~/.openalpaca/scratch/<session-id>/` — with the session id on every sandboxed context and the model told its folder. S4a adds the pointer row (migration 004) and lets `file_write` write the real file; S4b adds the pre-edit copy's new home and `file_edit`. S5 adds `file_list` and `artifact_read` and settles who holds which tool. S6a brings the app's surfaces to result files; S6 rewrites the words and documents, runs the one gate, the live check and the records.
 
 **Tech Stack:** Rust 1.93.0 (edition 2024), rusqlite, serde, tokio (process groups via `libc::killpg` on unix), axum; React 19 + TypeScript + Vitest (bun) for the app; `cargo test` per crate; the local Ollama `qwen3.8:27b-mlx` for the live check only.
 
-**Spec:** `tasks/storage-design/design.md` rev 0.9 (approved 2026-10-05; Stages 0 and 1 built) — §0.1 (owner decisions ST-1…ST-22; this stage builds ST-10, ST-11, ST-12, ST-14's card, ST-15, ST-16, ST-17, ST-18, ST-22), §0.4's two Stage 2 items, Part II §10–§15, §16 *Order*, §17 *Records*, §18's Stage 0 item for Stage 2's wording pass. **The lead's rulings on the drafts:** R-T1…R-T16, in *Rulings* below — binding on every implementer; R-T2 and R-T3 are for the owner to confirm with this plan.
+**Spec:** `tasks/storage-design/design.md` rev 0.9 (approved 2026-10-05; Stages 0 and 1 built) — §0.1 (owner decisions ST-1…ST-22; this stage builds ST-10, ST-11, ST-12, ST-14's card, ST-15, ST-16, ST-17, ST-18, ST-22), §0.4's two Stage 2 items, Part II §10–§15, §16 *Order*, §17 *Records*, §18's Stage 0 item for Stage 2's wording pass — and **ST-23** (the owner, 2026-10-09: a project whose recorded root no longer leads to its own folder reads missing, and the person re-points it), which design rev 0.10 records in §0.1 and §0.2 beside T36's answer (no change) and which S0 builds; S0 was drafted against rev 0.10 (§3 and its *As built*, §6 *Missing*, §18's *review R1's deeper cross-wiring* and X6). **The lead's rulings on the drafts:** R-T1…R-T19, in *Rulings* below — binding on every implementer; R-T2 and R-T3 are for the owner to confirm with this plan.
 
-**Where this plan came from:** an interfaces sheet and eight slice drafts, each written against the tree at `d484a56a` by an Opus drafter and corrected in place by an Opus verifier against the code; a cross-slice consistency check (eight mismatches fixed in the drafts, fourteen items ruled as R-T1…R-T14); the lead's rulings applied. Line numbers are of that tree and drift as slices land: **locate code by content**. Inside the slices the drafting stage's references stand: `interfaces.md` §N is *Shared interfaces* §N below; `spec-stage2.md` is the excerpt of design rev 0.9 in `tasks/storage-design/plan-drafts/stage2/`; "the S1…S6 drafts" (`S1.md`…`S6.md`, "in this folder") are this plan's slices of those names, whose sources sit in that folder; and a slice's "draft's *Spec conflicts*" is that slice's *Spec conflicts* section here.
+**Where this plan came from:** an interfaces sheet and eight slice drafts, each written against the tree at `d484a56a` by an Opus drafter and corrected in place by an Opus verifier against the code; a cross-slice consistency check (eight mismatches fixed in the drafts, fourteen items ruled as R-T1…R-T14); the lead's rulings applied. Line numbers are of that tree and drift as slices land: **locate code by content**. Inside the slices the drafting stage's references stand: `interfaces.md` §N is *Shared interfaces* §N below; `spec-stage2.md` is the excerpt of design rev 0.9 in `tasks/storage-design/plan-drafts/stage2/`; "the S1…S6 drafts" (`S1.md`…`S6.md`, "in this folder") are this plan's slices of those names, whose sources sit in that folder; and a slice's "draft's *Spec conflicts*" is that slice's *Spec conflicts* section here. S0 was added after the owner's answer of 2026-10-09 (ST-23): drafted at `fb3bee0f` (whose code is `d484a56a`'s — only documents changed between) and verified against the code the same way, then placed first by the lead's ruling R-T17; its source is `S0.md` in that folder. An independent check of S0 (`s0-check.md` there, items O1–O6) followed, and the lead's rulings on it are applied: R-T17 narrowed (the written walk answers only a missing project), S0.5 added (the CLI and the app say a missing project's folder is "gone or has moved"), and R-T18 (a missing project's result file is never reached through its old root). A check that those rulings were carried out (`s0-rulings-check.md` there) found one more split, ruled as R-T19: a by-product's or an upload's row filed in a turn at a missing project's old root names the project `lookup` finds — its own — and `send` refuses that project's result file.
 
 ## Global Constraints
 
 - **Model policy (owner, 2026-10-06):** Opus 5.5 does every job — implementing, each review, the final review. Fable 5.1 only as the advisor.
-- **Order:** S1 → S2 → S3 → S4a → S4b → S5 → S6a → S6, tasks in their numbered order except S3, whose slice gate S3.12 runs after S3.13 (R-T2's task; numbers kept), and S4a, which lands S4a.11 last (R-T1). Each commit leaves the workspace compiling and its own crate's tests green; a symbol built before its first non-test user carries an `allow` that the user's commit removes.
+- **Order:** S0 → S1 → S2 → S3 → S4a → S4b → S5 → S6a → S6, tasks in their numbered order except S3, whose slice gate S3.12 runs after S3.13 (R-T2's task; numbers kept), and S4a, which lands S4a.11 last (R-T1). Each commit leaves the workspace compiling and its own crate's tests green; a symbol built before its first non-test user carries an `allow` that the user's commit removes.
 - **One cargo process at a time**, always (`pgrep -x cargo` before each). Per task: `cargo test -p <crate> <filter>` as the task gives it. The workspace run happens **once**, at the stage gate (S6), then `pkill -f "sleep 3600"`.
 - **The owner's store is never touched.** `~/.openalpaca` is never read, written, listed or pointed at — not by a command, not by a test, not even read-only. Every test that touches a store uses a tempfile directory and the crate's home-store guard.
 - **From this stage on the tools act on real files.** Every test that writes, edits, lists, reads or runs a command does it in a tempdir project registered under the crate's guard (`GuardedProject`), never in the repository and never in a folder outside a tempdir. A test that spawns a process kills it: no child may outlive its test (each slice gate checks `pgrep -fl '^sleep 30$'` prints nothing).
@@ -32,7 +32,7 @@
 
 Input classes the spec implies that are most likely to bite a person; each is pinned by a test in the owning task.
 
-1. **A path that leaves the project** — a link inside the project pointing outside it, `..`, an absolute path, a `.git` or `.openalpaca` component in any letter case — on a read, a list, a write, an edit or a `send`: refused, and a link is never written through (S1.1–S1.5, R31, R32, R23; S3 switches the project rule on).
+1. **A path that leaves the project** — a link inside the project pointing outside it, `..`, an absolute path, a `.git` or `.openalpaca` component in any letter case — on a read, a list, a write, an edit or a `send`: refused, and a link is never written through (S1.1–S1.5, R31, R32, R23; S3 switches the project rule on). And the project's own folder renamed by case only, or moved with a link left at its old root: the project reads `missing` and is refused before any tool acts, the person re-points it, and nothing — a turn, a follow-up, memory, learning, the dispatch, the row of a by-product or an upload filed there, a result file's read, `send` or Reveal — follows the old root into another project (S0.1–S0.4, ST-23, R-T19; S3.1; S4a.5, S4a.17 and S6a.1, R-T18, R-T19).
 2. **A command that hangs, times out or is cancelled while it has started children** — the whole process group is killed and nothing keeps running in the person's project after the tool reported it stopped (S1.9–S1.12, R45).
 3. **Replacing or editing a person's file** — the old content is copied under `sessions/<id>/snapshots/` before the change; a file over 10 MiB, or one with no session log to copy into, is refused for replacement; `file_edit` keeps every other byte, line endings included (a CRLF file stays CRLF, R-T11), and refuses a non-UTF-8 file, a missing file (naming `file_write`) and an ambiguous `old_string` (S4a.10, S4b, ST-17, R46, R47).
 4. **A result file the person edits, deletes, moves or replaces with a link after the agent wrote it** — a read refreshes the row's hash and size and records no version, a missing file is marked and found again, a link is never followed out of the project, deleting the project's data and re-pointing it never touch the real file (S4a, R37, R39's seven tests).
@@ -40,7 +40,7 @@ Input classes the spec implies that are most likely to bite a person; each is pi
 
 ## Rulings (the lead's; binding on every implementer)
 
-Numbered R-T1… so they never collide with the design's R1–R49, Stage 1's R-S1…R-S18 or the final review's R-F1…R-F8. Source: `consistency.md` §4 (L1–L14), the drafters' and verifiers' notes. Two of them add an enforcement point or move when a row is created (R-T2, R-T3); they are listed for the owner to confirm with the plan.
+Numbered R-T1… so they never collide with the design's R1–R49, Stage 1's R-S1…R-S18 or the final review's R-F1…R-F8. Source: `consistency.md` §4 (L1–L14), the drafters' and verifiers' notes, the S0 check (`s0-check.md`, O1–O6) and the check that the rulings on it were carried out (`s0-rulings-check.md`, P1). Two of them add an enforcement point or move when a row is created (R-T2, R-T3); they are listed for the owner to confirm with the plan. R-T17, R-T18 and R-T19 apply ST-23 and change nothing for a project whose root still leads to itself.
 
 - **R-T1 (L1) — S4a lands S4a.11 last:** order 1–10, 12–17, 18, 11 (task numbers kept — later slices cite "S4a.11"). The slice gate runs after the last task. Reason: no commit offers Open on an agent-written script, or follows a link out of the project, before the readers that guard it exist (§16's "guards before the root moves", inside the slice).
 - **R-T2 (L2) — a run parked by `POST /v1/tasks` on a lane with no session gets one:** the dispatcher's fallback (`dispatcher/lead_agent.rs`, where it reads `active_session_id(lane_key)`) calls `get_or_create_active_session(lane_key, source, None)` — the same call the run's finalisation already makes when it posts the report (`dispatcher/outcome.rs`, the report step), only earlier — so the run has a conversation, a session log and a scratch folder (spec §10). One new task in S3 beside S3.11; S3.4's test then pins the scratch folder instead of the refusal, and `NoConversation`'s sentence stays for a call that has neither. The same fallback serves every dispatch that finds no session yet — a scheduled skill's run, `start` and `rerun` included — so each of those also gets its session at dispatch rather than when its report is posted. *For the owner to confirm with the plan (a session row is created at dispatch rather than at report, for every run dispatched with no session).*
@@ -58,6 +58,9 @@ Numbered R-T1… so they never collide with the design's R1–R49, Stage 1's R-S
 - **R-T14 (L14) — one "project turn" predicate:** computed once in `simple_query_handler.rs` (`scope_from_context`'s project arm) and handed to S4b.4 (`file_edit`) and S5.6 (the readers).
 - **R-T15 — every recorded spec conflict in the drafts stands as drafted** (consistency.md §4 *Accept as drafted*: S1 C1–C8, S2 C1–C3, S3 C1 and C3–C6, S4a C1–C7 and C9–C11, S4b C-S4b-1…6, S5 C-S5-1…7, S6a C1–C6, S6's conflicts), and the sheet rows the drafts departed from (consistency.md §6) are the contract — the plan's *Shared interfaces* carries them.
 - **R-T16 — recorded, not built (S6.6 writes them into design §18):** S4b's stale card between plan and body; the bytes read vs copied; R35's row follows its latest writer; the delete card counts no result rows; plugin agents and plugin skills get no R28 line; R45's residue (a process that leaves its group — `setsid`, a double fork — is out of reach; Windows kills the direct child only; the force-exit path runs no drop; commands in their own process group no longer get a terminal Ctrl-C; a background-group command reading `/dev/tty` stops until its timeout); an `ensure` test-build tripwire; R-T4's window; S2's C8 (the shell card names the project before the shell runs there).
+- **R-T17 — S0 builds ST-23 first, before S1** (the owner's answer of 2026-10-09, recorded in design rev 0.10 §0.1 and §0.2). `missing` means "the recorded root is not a directory, or it no longer canonicalizes to itself" — one helper, `projects::root_is_missing`, the one place the flag is decided (`read_project_dir`, which builds every `Project`, calls it, and S3.1's `ensure` asks it too) — `lookup`, `register` and the workspace routes match a recorded root as written before its canonical form, wherever the daemon looks a project up, and `resolve` — which the routes use for any other path — walks a client path as written first, for a missing project's root. S0 lands first because S3's R27 refuses a missing project's file tools and commands, and the `missing` it reads must already mean ST-23's; S3 consumes `Project::missing` and `root_is_missing` and derives neither (S3.1's `ensure`; the settled table's R-T17 row). **The written walk answers only a missing project** (S0.3, `resolve_as_written`; narrowed after the S0 check's O2): a path that is not its own canonical form and holds no `..` is first walked as written, nearest folder first — a folder that is, lies inside or contains the home store ends that walk (R13 first); a folder whose `project.json` records it exactly as written is the answer when that project is missing; a recorded root found so that still leads to itself ends the walk, and so do a nearer folder that is a registered project only by its canonical form and one that holds `.git`; a written walk that ends with no answer hands the path to today's canonical walk, unchanged. So a missing project's recorded root on the written path wins over everything above and beside it and loses only to a nearer project or repository, and §3's "the nearest match wins" holds (`a_repository_or_a_project_nearer_on_the_written_path_outranks_the_recorded_root`); a project that still leads to itself is resolved exactly as before Stage 2 — a path through a link inside it resolves by its canonical form, to what the link reaches (`a_path_through_a_link_inside_a_present_project_resolves_by_its_canonical_form`; into a folder inside another registered project, that project: `a_link_inside_a_present_project_into_another_projects_folder_names_that_project`) — and a path that is its own canonical form resolves as before. `lookup`'s as-written read (S0.2) is unchanged: for a project that still leads to itself the root as written is its canonical form. **The case-only tests return early on a case-sensitive volume:** `volume_ignores_case` probes the test's own tempdir with a file and a stat of its other-case name and removes the probe; on a case-sensitive volume the test prints a `skipped:` line on stderr and passes — CI's ubuntu never runs their case, the owner's Mac (APFS, case-insensitive) does — and where they run they assert the rename's listed spelling and `canonicalize` themselves, so a volume where either premise fails fails them loudly rather than skipping.
+- **R-T18 — a missing project's result file is never reached through its old root** (R37 with ST-23; the S0 check's O3). R37's resolver for a pointer row answers nothing for a row whose project root is missing (`projects::root_is_missing`). In S4a.5 `project_file_path` returns `None`, so the read-time refresh never hashes the file through a link left at the old path or through the old spelling, and `resolve_version_path` answers `ArtifactError::Gone` before `confine_to_root` runs: the file reads as not available — marked missing as an absent file is, the mark cleared when a read finds the file again once the person has re-pointed the project — so it is never read, refreshed, opened, exported or served (`GET /v1/files/{id}/content`, Open, Export). S6a.1's `revealable_path` admits no file under a missing project's root: `project_roots` leaves such a project out. `send` by `artifact_id` (S4a.17) refuses such a file before it reads it, with a `root_is_missing` check of its own (R-T19): since R-T19, `project_root_of` names a missing project's recorded root as written, and R-T3's comparison alone would pass the file, from a turn at that root, to `confine_to_root`, which follows the link. One test each: `a_result_file_of_a_project_moved_behind_a_link_is_not_read_through_its_old_root` (S4a.5) and `a_project_moved_behind_a_link_admits_no_file_through_its_old_root` (S6a.1).
+- **R-T19 — a missing project's by-products and uploads are filed under its own root, and `send` refuses its result file** (R15 with ST-23; the check of the S0 rulings, `s0-rulings-check.md`, P1). `store::project_root_of` — the one place a scope becomes a row's `project_root` — answers the root of the project `projects::lookup` finds: the root as written when a project records exactly that root (S0.2's as-written match), otherwise the root's canonical form, as before. So a by-product (`artifact_write`, which has no working folder for R27 to refuse) or an upload filed in a turn at the old root of a project whose folder was renamed by case only, or moved with a link left at the old path, records that project's root — the project whose folder under `projects/` holds its bytes (`store_root`, S0.2) — and never the folder the root now reaches: the Library lists it under that project (`?project_root=`), R15's sequence and identity scan in `put` and the upload writer key it by that root, and the project's re-point and delete count it. For a project whose root still leads to itself the answer is its canonical form, unchanged, and R14 holds: a recorded root is canonical when it is recorded. Built in S0.2, with one storage test (`a_write_at_a_missing_projects_old_root_records_that_root_and_never_the_folder_it_reaches`). Because `project_root_of` no longer names the folder such a root reaches, R-T3's comparison in `send` (S4a.17) would pass a missing project's result file from a turn at its old root, and `confine_to_root` would follow the link: `send` by `artifact_id` refuses a pointer row whose project root is missing (`projects::root_is_missing`) before R-T3's check, at the card and in the send, with its own sentence — `send: the file of '{id}' is in a project whose folder is gone or has moved ({root}); re-point the project first.` (`a_result_file_of_a_missing_project_is_never_sent_through_its_old_root`). `artifact_read` (S5.2) reads the turn's project through the same function and needs nothing more: a missing project's own by-products are read from its folder under `projects/`, never through the old root, and its result file is refused before anything is read ("read it with file_read", which R27 refuses).
 
 ## Shared interfaces — the contract every slice uses
 
@@ -65,7 +68,10 @@ Numbered R-T1… so they never collide with the design's R1–R49, Stage 1's R-S
 
 Read at `d484a56a` (`feat/markdown-memory`). Every `file:line` below is from that HEAD; lines drift as slices land, so
 **locate code by content**. The spec is `spec-stage2.md` (design rev 0.9: §0 ST-1…ST-22, Part II §10–§15, §16, §17,
-§18's Stage 0 residue, §21). This sheet fixes the names, types, signatures, texts and ownership the eight slices share;
+§18's Stage 0 residue, §21). This sheet fixes the names, types, signatures, texts and ownership the slices share (eight when it was written;
+S0, added after, shares only `projects::root_is_missing` and `Project::missing` with S3 — the settled table's R-T17
+row — `projects::root_is_missing` with S4a.5, S6a.1 and S4a.17, and `store::project_root_of`'s answer with S4a.17
+and S5.2 — its R-T18 and R-T19 rows);
 it drafts no task. Where it departs from the spec or from the lead's slice list it says so in §10 *Spec conflicts*,
 each the smallest departure that keeps every commit green and every surface honest.
 
@@ -75,6 +81,7 @@ each the smallest departure that keeps every commit green and every surface hone
 
 | Slice | §16 step | Owns, in one line |
 |---|---|---|
+| **S0** | (before 1) | ST-23: `projects::root_is_missing` (the one place `Project::missing` is decided — not a directory, or no longer its own canonical form); `lookup` and `register` match a recorded root as written first, and `resolve` walks a path as written first for a missing project's root (R-T17); the workspace routes resolve a path as written; learning's ST-21 check holds an unfinished re-point's roots as written; `store::project_root_of` records the root `lookup` finds (R-T19); the CLI and the app say a missing project's folder is "gone or has moved" (S0.5). No signature changes (§0.1 gains no row); S3 consumes the flag and the helper (R-T17), S4a.5 and S6a.1 the helper (R-T18), S4a.17 the helper and `project_root_of`'s answer (R-T19). |
 | **S1** | (1) | R31 + R32's resolvers (rules built, off), R29 (the filter), R45 (the kill), R23 (`send`). |
 | **S2** | (2) | `ToolContext.conversation_id` (field only), `tools::working_folder` (the function, pure), the approval-text module and the previews of `file_write` and `shell_execute` (R34), ST-15's annotations, ST-16's test for the read tools that exist, the connector prompt's preview, core's `GuardedProject` test helper. |
 | **S3** | (3) | R26 for `file_read`, `shell_execute`, command tools and `send`; R27; R28; R44 (every setter of `conversation_id`); the scratch folder (`ensure`, removal); R33 (all five rules, both tools); R32 switched on for reads; `read_back_path` removed. |
@@ -84,7 +91,7 @@ each the smallest departure that keeps every commit green and every surface hone
 | **S6a** | (6) | The app: FILE WRITTEN card, Library (badge, relative path, results filter, no History/Diff), Open/Reveal for pointer rows, `revealable_path` widened, the Work view's split, the GUI wire mirrors, the banner's doc comment. |
 | **S6** | (6) | Wording that is not a model-facing string a slice above owns: manuals, `API_MAP.md`, `DESIGN_SPEC.md`, `CLAUDE.md`, the home README's `scratch/` row, the design's records, the switch-over note, §18's Stage 0 wording item; the one gate pass; the live check; the records. |
 
-Order: S1 → S2 → S3 → S4a → S4b → S5 → S6a → S6, tasks in their numbered order. Each commit leaves the workspace
+Order: S0 → S1 → S2 → S3 → S4a → S4b → S5 → S6a → S6, tasks in their numbered order. Each commit leaves the workspace
 compiling and its own crate's tests green. S4a is the heaviest slice (§10 C1, C2 put file_write's root move, the
 pre-edit API and ST-18's refusal there); the lead may split it into a storage half (migration 004, §5.1–§5.5 and
 §5.9's storage readers, R39's storage tests) and a tool half (§5.3's core wrapper onward) with no interface in this
@@ -185,7 +192,8 @@ impl WorkingFolder {
     pub fn is_project(&self) -> bool;
     /// The folder, ready to act in (S3): a scratch folder is created when
     /// absent — `<home>/scratch` and the folder, each 0700 on unix — and a
-    /// project root is required to be a directory (it was found to be one by
+    /// project root is required still to lead to itself
+    /// (`projects::root_is_missing`, S0.1, ST-23; it was found present by
     /// `working_folder`). Errors are `WorkingFolderRefusal::Unavailable`.
     pub fn ensure(&self) -> Result<&Path, WorkingFolderRefusal>;
 }
@@ -196,7 +204,8 @@ impl WorkingFolder {
 pub enum WorkingFolderRefusal {
     /// A tool reached through `execute` (no context) — R26.
     NoContext,
-    /// R27: the project is registered and its folder is gone (ST-7).
+    /// R27: the project is registered and missing — its root is not a
+    /// directory, or no longer leads to itself (ST-7, ST-23; `Project::missing`).
     ProjectMissing { root: String },
     /// The turn's root names no folder under `projects/` any more — re-pointed
     /// or deleted while the conversation ran.
@@ -210,7 +219,8 @@ pub enum WorkingFolderRefusal {
 impl std::fmt::Display for WorkingFolderRefusal { /* §1.3 */ }
 impl std::error::Error for WorkingFolderRefusal {}
 
-/// Pure — reads two small files at most and **creates nothing** (S2).
+/// Pure — reads four small files at most (`lookup`: the root as written, then its
+/// canonical form when that differs, S0.2) and **creates nothing** (S2).
 /// 1. `ctx.request_workspace_root` non-empty and absolute →
 ///    `openalpaca_storage::store::projects::lookup(Path::new(root))`:
 ///    `Ok(Some(p))` with `!p.missing` → `Project { root: p.root }`;
@@ -238,15 +248,17 @@ pub fn scratch_dir(conversation_id: &str) -> anyhow::Result<PathBuf>;
 pub fn remove_scratch(conversation_id: &str) -> std::io::Result<bool>;
 ```
 
-`lookup` is used, not `by_recorded_root`: `request_workspace_root` is the canonical root the gateway resolved and
-recorded (R-F7's residue in design §18 stands as recorded).
+`lookup` is used, not `by_recorded_root`: `request_workspace_root` is the root the gateway resolved and recorded —
+since S0 a recorded root as written, which may no longer be its own canonical form (ST-23) — and `lookup` matches a
+recorded root as written first, then by its canonical form (S0.2), so it names that root's own project, missing or
+not, and never the one its canonical form reaches (design §18's *review R1's deeper cross-wiring*, closed by S0).
 
 #### 1.3 The sentences (S2 writes the refusals; S3 writes the note)
 
 | What | Text (exact) |
 |---|---|
 | `NoContext` | `This tool acts in the conversation's working folder, and this call carries no conversation to name one.` |
-| `ProjectMissing` | `The project folder {root} is missing — its folder is gone: re-point the project to where its folder is now (Settings → Connection → Projects → Re-point…, or openalpaca store rebase {root} <new path>), or delete its data (Delete data…, or openalpaca store purge {root}). No file tool or command runs until then.` (§6's one sentence naming the two actions; its first clause is `store list`'s, `commands/store.rs:309`.) |
+| `ProjectMissing` | `The project folder {root} is missing — its folder is gone or has moved: re-point the project to where its folder is now (Settings → Connection → Projects → Re-point…, or openalpaca store rebase {root} <new path>), or delete its data (Delete data…, or openalpaca store purge {root}). No file tool or command runs until then.` (§6's one sentence naming the two actions; its first clause is `store list`'s, `commands/store.rs:309`, with ST-23's `or has moved` — the CLI's own line keeps `its folder is gone` until its change is placed, S0's *Open points*.) |
 | `NotAProject` | `ProjectError::NotRegistered { root }.to_string()` verbatim — `{root} is not a project OpenAlpaca knows: no folder under projects/ records it` |
 | `NoConversation` | `This call has neither a project nor a conversation, so it has no working folder: file tools and commands run only inside a conversation or a project.` |
 | `Unavailable` | `The working folder could not be read: {reason}` |
@@ -761,6 +773,9 @@ R37, in `ArtifactStore`:
   `confine_to_root(&root, &root.join(rel_path))` — the storage-side resolver of R31 (it canonicalizes an existing
   path whole, the last component included; §10 C9); a found file clears `missing_since`; a version other than the
   head is `VersionNotFound` (there are none); an absent file stamps `missing_since` and is `Gone`, as for a head.
+- A pointer row whose project is missing (`projects::root_is_missing(project_root)`, ST-23) is neither refreshed nor
+  confined: it stamps `missing_since` and is `Gone`, as an absent file is, so nothing is read through a link left at
+  the old root (the lead's ruling R-T18, added after this sheet; the settled table's R-T18 row).
 - `versions(id)` answers `[]` and `diff_paths` `VersionNotFound` for a pointer row with no change of code.
 
 #### 5.6 R36 and `file_write`'s real-write result (S4a)
@@ -1119,7 +1134,8 @@ query and its key), `hooks/useFiles.ts::useArtifactFileActions` (no `open` for a
 `Written in the project`), `lib/api/artifacts.ts`, `lib/events.ts`, `lib/api/run-events.ts` (`textFor`
 `artifact_written` says `in the project`), `components/chat/ToolConfirmationBanner.tsx` (doc comment, §4.6). Storage
 for the app: `store/reveal.rs::revealable_path` also admits a regular file whose canonical path is under the canonical
-root of an entry `projects::list()` returns; `RevealRefusal::OutsideStore`'s sentence becomes `{path} is not in an
+root of an entry `projects::list()` returns that is not `missing` (the lead's ruling R-T18, added after this sheet);
+`RevealRefusal::OutsideStore`'s sentence becomes `{path} is not in an
 OpenAlpaca store or one of your projects, so it is not shown in its folder.` (`src-tauri` compiles unchanged;
 `cargo check -p openalpaca_gui` at the gate).
 
@@ -1248,6 +1264,2713 @@ model-facing text.
 | R-T11 (S4b.1) | `apply_edit` writes `new_string`'s lone `\n` as `\r\n` in a file holding `\r\n` and no lone `\n`; new private `fn has_lone_lf(&str) -> bool` in `file_ops` |
 | R-T13 (S4b.1) | `file_write`'s description ends `To change part of an existing file in the project, use file_edit.` |
 | R-T14 (S4b.4) | `pub(crate) fn crate::tools::builtins::is_project_turn(ctx: &ToolContext) -> bool` (`scope_from_context`'s project arm), computed once in `handle_simple_query` from `tool_ctx`; `tool_defs` is built after it; `offer_file_edit_beside_file_write(tool_names, project_turn)` and `offer_file_readers(tool_names, project_turn)` both take it. Front-door tests live in `orchestrator::tests::project_turn_offers` (`offered(workspace_path, content, tools)`) |
+| R-T17 (S0; S2.1, S3.1) | R27 reads S0's `missing`: `working_folder` maps `lookup`'s `Project::missing` (S0.1's `projects::root_is_missing`, S0.2's as-written match) to `ProjectMissing`, and `WorkingFolder::ensure` asks `projects::root_is_missing(root)` for a project root instead of `root.is_dir()` — refusing `Unavailable { reason: "the project folder {root} is missing: it is no longer a directory, or it no longer leads to itself" }` — so no S3 code decides `missing` itself (S3.1's `a_project_moved_behind_a_link_is_missing_and_never_acted_in_through_it`); `ProjectMissing`'s sentence reads `… is missing — its folder is gone or has moved: …` (§1.3, S2.1); `working_folder` reads four small files at most (§1.2, S2.1) |
+| R-T18 (S4a.5, S6a.1) | `project_file_path(record)` returns `None` when `projects::root_is_missing(project_root)`, before `confine_to_root`; `resolve_version_path`'s `in_project` arm answers `ArtifactError::Gone` for such a row before `confine_to_root` (`in_missing_project`), stamping `missing_since` as for an absent head and cleared by the next read that finds the file; `reveal::project_roots` keeps only `!project.missing`. `send` by `artifact_id` (S4a.17) refuses such a row with a check of its own (the R-T19 row) |
+| R-T19 (S0.2, S4a.17) | `store::project_root_of(&StoreScope) -> anyhow::Result<Option<String>>` (signature unchanged) answers `projects::lookup(root)?`'s `Project::root` when a project is found — as written first (S0.2) — and otherwise `root.canonicalize()`, or the root as written when that fails, as before; an error is now `lookup`'s (a relative root, no home root, a folder that cannot be resolved). `SendTool::artifact` refuses a row with `in_project` whose `projects::root_is_missing(project_root)` before R-T3's check: `send: the file of '{id}' is in a project whose folder is gone or has moved ({root}); re-point the project first.` |
+
+## Stage 2 — slice S0: a root that no longer leads to itself is missing (ST-23)
+
+Draft for the Stage 2 plan. Read at `fb3bee0f` (`feat/markdown-memory`; the code is that of `d484a56a` — only documents
+changed since). Every `file:line` is from that tree and drifts as tasks land: **locate code by content**. The spec is
+design rev 0.10: §0.1 ST-7, ST-20, ST-21, **ST-23** (owner, 2026-10-09), §0.2, §3 and its *As built*, §5 (ST-21's
+*As built*), §6 *Missing*, §18 *review R1's deeper cross-wiring* and X6; the contracts are `plan-stage1.md` §11 *As
+built*. S0 lands **before S1**: S3's R27 refuses a missing project's tools, and the `missing` it reads must already
+mean ST-23's.
+
+### What this slice does
+
+Today a project is `missing` only when its recorded root is not a directory (`read_project_dir`,
+`crates/openalpaca_storage/src/store/projects.rs:509`, `missing: !root.is_dir()`), and every reader but the workspace
+routes takes a recorded root by its **canonical** form (`lookup` canonicalizes first, `projects.rs:406-409`; `resolve`
+canonicalizes before it walks, `:1028`). So a project whose folder was renamed by case only, or moved with a link left
+at the old path, reads **present**, and its own root leads every reader to *another* folder: `lookup`, `store_root`,
+the dispatch's `register` (`dispatcher/lead_agent.rs:239-241`), memory's partition (`memory_files/partition.rs:608`,
+`:630`), the memory context (`memory/service/context.rs:176`), learning's ST-21 check
+(`memory/learning/extractor.rs:1084`), the turn's resolution (`memory/scope_context.rs:107`, `:138`) — which the
+follow-up runner (`apps/openalpacad/src/followup.rs:44`, `:152`, `:227`) and a task's re-launch
+(`orchestrator/task_launch.rs:153`) go through — all answer the project the link or the new spelling reaches, or none.
+Two consequences were confirmed by reading the code: with nothing registered at the new path, learning's check reads
+the project as **`Gone`** and drops its turns (ST-21 violated: `check_project` canonicalizes to the new path, no listed
+entry names it); with a project registered there, every reader files the old project's work into the other one (design
+§18, *review R1's deeper cross-wiring*). S0 builds ST-23 in five tasks. **S0.1** makes `missing` mean "the recorded
+root is not a directory, or it no longer canonicalizes to itself" through one helper, `projects::root_is_missing`,
+which the one place that computes the flag calls; the list, `GET /v1/workspaces[?path=]`, `store list` and the app's
+badge then mark such a project missing, and the re-point (unchanged) brings it back — proven end to end for a link
+left behind and for a case-only rename. **S0.2** makes `lookup` and `register` match a recorded root **as written**
+before its canonical form, so `store_root`, the dispatch's `register`, memory and learning find the project the root
+names (missing) and never the one it now leads to; learning's check also holds a root an unfinished re-point names as
+written; and `store::project_root_of` records the root `lookup` finds, so a by-product or an upload filed in a turn
+at the old root is addressed to that project, whose folder holds its bytes (the lead's ruling R-T19). **S0.3** makes
+`resolve` walk a client path **as written** first, for a missing project's root, so a chat
+turn, a follow-up and a task re-launch at the old path are that project's turns; a project that still leads to itself
+is resolved as before. **S0.4** makes the workspace routes (`GET ?path=`, `PATCH`, the purge, and `POST
+/v1/workspaces`) resolve the path as written too, so a path *inside* such a root names its project on every route as it
+does in a turn. **S0.5** makes the CLI's `store list` and `store rebase --dry-run` and the app's
+Projects list and `Re-point…` dialog say a missing project's folder is "gone or has moved", as S2's `ProjectMissing`
+sentence does. Nothing here adds a route, a field, a refusal code, a migration, a config key or an event; the wire is
+unchanged.
+
+**The written walk's precedence (S0.3; the lead's ruling R-T17, narrowed after the S0 check's O2).** For a path that
+is not its own canonical form — it passes through a link or another case, or its folder is gone — `resolve` first walks
+the path's folders **as written**, nearest first. At each folder: (1) one that is, lies inside or contains the home
+store ends the written walk (R13 first; no recorded root can lie at or above it, `register` refuses one); (2) one whose
+`project.json` records it exactly as written is the answer when that project is **missing** — its root no longer leads
+to its own folder (`root_is_missing`); a recorded root found so that still leads to itself ends the written walk; (3)
+one that is a registered project only by its canonical form (a root a link or another case reaches) ends it; (4) one
+holding `.git` ends it. A written walk that ends without an answer hands the path to today's canonical walk,
+unchanged. So a missing project's recorded root on the written path outranks every folder above it, and whatever the
+canonical walk would find beside it, and loses only to a **nearer** folder on the written path that is a project by
+any reading — "the nearest match wins" (§3) holds, as `the_nearest_registered_root_or_repository_wins` pins. A project
+that still leads to itself is resolved exactly as before: a path through a link inside it resolves by its canonical
+form, to whatever the link reaches — nothing, a repository, or the project whose folder the link leads into. A path
+with a `..` component skips the written walk (its written folders are not the ones it lies in), and so does a path that
+is its own canonical form (the walk would read exactly what the canonical walk reads), so an ordinary path resolves as
+today.
+
+What ST-7 and ST-21 already give such a project holds once S0.2 and S0.3 land: its data is kept (nothing deletes on
+`missing`; S0.1's end-to-end tests read the rows, the folder and the notes after a re-point), its conversations open
+and continue (a turn at the old root is the project's, S0.3's core test; the handler, the follow-up runner and a
+re-launch resolve through the same `resolve`), and its turns are learned into its notes (S0.2's `check_project`
+tests). The dispatch's `register` and `store_root` are pinned by S0.2's first storage test, and the address of a
+by-product or an upload filed at the old root by its third (R-T19).
+
+### Slice gate
+
+Run once, after S0.5, one cargo process at a time (`pgrep -x cargo` prints nothing before each):
+
+```bash
+cd /Users/tangyunpei/dev/OpenAlpaca
+cargo test -p openalpaca_storage 2>&1 | grep -E '^test result|FAILED|panicked'
+cargo test -p openalpaca_core 2>&1 | grep -E '^test result|FAILED|panicked'
+cargo test -p openalpacad 2>&1 | grep -E '^test result|FAILED|panicked'; pkill -f "sleep 3600"
+cargo test -p openalpaca 2>&1 | grep -E '^test result|FAILED|panicked'
+CARGO_TERM_COLOR=never cargo clippy --workspace --exclude openalpaca_gui --all-targets 2>&1 \
+  | grep '^warning' | grep -vc 'generated [0-9]* warning'
+python3 scripts/gen_api_docs.py --check
+pgrep -fl '^sleep 30$'
+cd apps/openalpaca-gui && bun run check && bun run test && bun run format:check && bun run build; cd ../..
+```
+
+Expected: every `test result:` line `ok` with `0 failed` (the pass counts are the run's — UNVERIFIED here); no
+`FAILED` or `panicked` line; the clippy count **≤ 78**; `gen_api_docs.py --check` reports no drift (S0 changes no
+route, request struct, refusal code, migration, storage `lib.rs` re-export or GUI `lib/api` export — S0.5 changes
+doc comments in `lib/api/workspaces.ts` only, which the generator does not read); `pgrep` prints nothing; the four bun
+gates exit 0 (vitest: every file passed, 0 failed — counts UNVERIFIED). On a case-sensitive volume (Linux CI) the
+case-only tests print a `skipped:` line on stderr and pass; they exercise their case only on a case-insensitive volume
+(macOS's default). No `live-eval` check is due: S0 changes
+no type the evaluation harness uses. S0.5 changes files under `apps/openalpaca-gui/src` and none under `src-tauri`, so
+the four bun gates run and `cargo check -p openalpaca_gui` is not due.
+
+---
+
+### Task S0.1: `missing` — a root that no longer leads to itself (ST-7, ST-23)
+
+**Files:**
+- Modify `crates/openalpaca_storage/src/store/projects.rs` — the `missing` field's doc in `pub struct Project`
+  (`/// The root is not a directory, read when this entry was read (ST-7).`); a new `pub fn root_is_missing` after
+  `fn vanished`; `read_project_dir`'s `missing: !root.is_dir(),`.
+- Modify `crates/openalpaca_storage/src/store/tests.rs` — a helper after `impl Drop for HomeStoreGuard`.
+- Test `crates/openalpaca_storage/src/store/projects/tests.rs` — three tests appended at the end of the file.
+- Test `crates/openalpaca_storage/src/project_life/tests.rs` — one test appended at the end of the file.
+- Test `apps/openalpacad/src/routes/workspaces/life_tests.rs` — one assertion added to
+  `a_root_now_linking_to_another_project_names_its_own_for_the_read_and_the_delete`; a helper and two tests inserted
+  after `a_re_point_naming_a_root_that_now_links_to_another_project_moves_that_project`.
+
+**Interfaces:**
+- Consumes: `projects::{register, list, by_id, by_recorded_root, folder_name, projects_dir, PROJECTS_DIR,
+  PROJECT_FILE}`, `project_life::repoint(db: &Database, old_path: &Path, new_path: &Path) -> Result<Repointed>`; the
+  daemon's `get_workspace(db, WorkspaceQuery)`, `World::{project, session, message, note, get, repoint, count}`,
+  `project_snapshots(&ProjectId) -> usize`, `crate::test_util::note_titles(&MemoryService, &str, Option<&Path>) ->
+  Vec<String>`.
+- Produces: `pub fn root_is_missing(root: &Path) -> bool` in `openalpaca_storage::store::projects` — the one place
+  `Project::missing` is decided (S3 consumes it, *Open points*; S4a.5 and S6a.1 too, R-T18; S4a.17, R-T19);
+  `#[cfg(unix)] pub(crate) fn
+  volume_ignores_case(dir: &Path) -> bool` in `crate::store::tests` (storage's test-only helper module), and a private
+  twin in the daemon's `life_tests.rs`.
+
+- [ ] **Step 1: Write the failing tests.**
+
+  In `crates/openalpaca_storage/src/store/tests.rs`, insert after the closing `}` of `impl Drop for HomeStoreGuard`
+  (the block ending `None => unsafe { std::env::remove_var(HOME_STORE_ENV) },\n        }\n    }\n}`):
+
+  ```rust
+
+  /// Whether the volume holding `dir` ignores case: a file made as
+  /// `case-probe-Ab` is found by a stat of `CASE-PROBE-AB`. macOS's default
+  /// volume does; Linux's tmpfs and ext4 do not, so a test of a rename by
+  /// case only returns early there (storage design ST-23). `dir` is a test's
+  /// own temp folder; the probe is removed before this returns. Unix only, as
+  /// every test that calls it.
+  #[cfg(unix)]
+  pub(crate) fn volume_ignores_case(dir: &Path) -> bool {
+      let made = dir.join("case-probe-Ab");
+      std::fs::write(&made, b"").unwrap();
+      let ignores = std::fs::symlink_metadata(dir.join("CASE-PROBE-AB")).is_ok();
+      std::fs::remove_file(&made).unwrap();
+      ignores
+  }
+  ```
+
+  Append to `crates/openalpaca_storage/src/store/projects/tests.rs`:
+
+  ```rust
+
+  // ── ST-23: a root that no longer leads to itself is missing (Stage 2 S0) ───
+
+  #[test]
+  fn a_root_is_missing_when_it_is_not_a_directory_or_no_longer_leads_to_itself() {
+      let w = World::new();
+      let here = w.folder("here");
+      assert!(!root_is_missing(&here), "a folder that is its own canonical form");
+      let file = w.folder("files").join("notes.txt");
+      fs::write(&file, "x").unwrap();
+      assert!(root_is_missing(&file), "a file is no folder");
+      assert!(
+          root_is_missing(&w.folder("parent").join("never-made")),
+          "nothing there"
+      );
+      #[cfg(unix)]
+      {
+          let link = w.folder("links").join("here");
+          std::os::unix::fs::symlink(&here, &link).unwrap();
+          assert!(link.is_dir(), "the link opens the folder");
+          assert!(root_is_missing(&link), "but it leads to another path");
+      }
+  }
+
+  /// ST-23: the folder moved and a link left at the old path — the root still
+  /// opens the folder, but no longer leads to itself — reads missing wherever
+  /// the entry is read.
+  #[cfg(unix)]
+  #[test]
+  fn a_project_moved_with_a_link_left_at_its_root_reads_missing() {
+      let w = World::new();
+      let root = w.folder("app");
+      let project = register(&root).unwrap();
+      assert!(!project.missing);
+      let moved = root.with_file_name("app-moved");
+      fs::rename(&root, &moved).unwrap();
+      std::os::unix::fs::symlink(&moved, &root).unwrap();
+      assert!(root.is_dir(), "the old path still opens the folder");
+
+      let listed = list().unwrap();
+      assert_eq!(listed.len(), 1);
+      assert_eq!(listed[0].id, project.id);
+      assert!(listed[0].missing, "ST-23: its root no longer leads to itself");
+      assert!(by_id(&project.id).unwrap().is_some_and(|p| p.missing));
+      assert!(by_recorded_root(&root).unwrap().is_some_and(|p| p.missing));
+  }
+
+  /// ST-23 on a case-insensitive volume: the folder renamed by case only — the
+  /// old spelling still opens it, and the volume answers the new one — reads
+  /// missing.
+  #[cfg(unix)]
+  #[test]
+  fn a_project_renamed_by_case_only_reads_missing() {
+      let w = World::new();
+      let work = w.folder("cases");
+      if !crate::store::tests::volume_ignores_case(&work) {
+          eprintln!(
+              "skipped: {} is case-sensitive, so no folder can be renamed by case only",
+              work.display()
+          );
+          return;
+      }
+      let root = w.folder("cases/App");
+      let project = register(&root).unwrap();
+      let renamed = work.join("app");
+      fs::rename(&root, &renamed).unwrap();
+      assert!(root.is_dir(), "the old spelling still opens the folder");
+      assert_eq!(
+          root.canonicalize().unwrap(),
+          renamed,
+          "ST-23's premise: the volume answers the spelling on disk"
+      );
+
+      let listed = list().unwrap();
+      assert_eq!(listed.len(), 1);
+      assert_eq!(listed[0].id, project.id);
+      assert!(listed[0].missing, "ST-23: its root no longer canonicalizes to itself");
+  }
+  ```
+
+  Append to `crates/openalpaca_storage/src/project_life/tests.rs`:
+
+  ```rust
+
+  /// ST-23 on a case-insensitive volume (macOS's default): a project whose
+  /// folder was renamed by case only reads missing, and re-pointing it onto the
+  /// new spelling renames its folder under `projects/` to the new case on disk,
+  /// rewrites its five path columns and its by-product's address, and leaves
+  /// one project, present.
+  #[cfg(unix)]
+  #[test]
+  fn a_case_only_rename_reads_missing_and_is_re_pointed_to_the_new_case() {
+      let w = World::new();
+      if !crate::store::tests::volume_ignores_case(&w.work) {
+          eprintln!(
+              "skipped: {} is case-sensitive, so no folder can be renamed by case only",
+              w.work.display()
+          );
+          return;
+      }
+      let p = w.project("App");
+      w.rows_of(&p);
+      let renamed = w.work.join("app");
+      std::fs::rename(&p.root, &renamed).unwrap();
+      assert_eq!(
+          p.root.canonicalize().unwrap(),
+          renamed,
+          "ST-23's premise: the volume answers the spelling on disk"
+      );
+      let listed = projects::list().unwrap();
+      assert_eq!(listed.len(), 1);
+      assert!(listed[0].missing, "ST-23: its root no longer canonicalizes to itself");
+
+      let done = repoint(&w.db, &p.root, &renamed).unwrap();
+
+      assert_eq!(done.after.id, p.id);
+      assert_eq!(done.after.root, renamed);
+      assert!(!done.after.missing);
+      let name = projects::folder_name(&renamed);
+      assert_eq!(done.after.name, name);
+      let on_disk: Vec<String> = std::fs::read_dir(projects::projects_dir().unwrap())
+          .unwrap()
+          .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+          .collect();
+      assert_eq!(on_disk, vec![name.clone()], "the folder takes the new case on disk");
+      assert_eq!(
+          done.after.dir.file_name().and_then(|n| n.to_str()),
+          Some(name.as_str())
+      );
+      assert_eq!(w.named(&renamed), 5);
+      assert_eq!(w.named(&p.root), 0, "no row keeps the old spelling");
+      assert!(
+          w.storage_path()
+              .starts_with(done.after.dir.to_string_lossy().as_ref())
+      );
+      assert_eq!(projects::list().unwrap().len(), 1);
+  }
+  ```
+
+  In `apps/openalpacad/src/routes/workspaces/life_tests.rs`, in
+  `a_root_now_linking_to_another_project_names_its_own_for_the_read_and_the_delete`, after
+
+  ```rust
+      let (status, body) = w.get(&text(&a.root)).await;
+      assert_eq!(status, StatusCode::OK, "{body}");
+      assert_eq!(body["id"], a.id.to_string(), "{body}");
+      assert_eq!(body["root"], text(&a.root), "{body}");
+  ```
+
+  add
+
+  ```rust
+      assert_eq!(body["missing"], true, "ST-23: {body}");
+  ```
+
+  Then insert after the closing `}` of `a_re_point_naming_a_root_that_now_links_to_another_project_moves_that_project`
+  (the function ending `assert_eq!((still.id, still.dir), (b.id, b.dir));\n}`):
+
+  ```rust
+
+  /// Whether the volume holding `dir` ignores case: a file made as
+  /// `case-probe-Ab` is found by a stat of `CASE-PROBE-AB`. macOS's default
+  /// volume does; Linux's tmpfs and ext4 do not, so a test of a rename by
+  /// case only returns early there (storage design ST-23). The probe is
+  /// removed before this returns. Unix only, as every test that calls it.
+  #[cfg(unix)]
+  fn volume_ignores_case(dir: &std::path::Path) -> bool {
+      let made = dir.join("case-probe-Ab");
+      std::fs::write(&made, b"").expect("probe");
+      let ignores = std::fs::symlink_metadata(dir.join("CASE-PROBE-AB")).is_ok();
+      std::fs::remove_file(&made).expect("probe removed");
+      ignores
+  }
+
+  /// ST-23, end to end through the routes: a project whose folder was moved
+  /// with a link left at its old path is listed missing — the old path still
+  /// opens the folder but no longer leads to itself — and `?path=` of its root
+  /// says so; re-pointed onto where the folder is now, it is present there
+  /// with its rows, its folder under `projects/` and its notes, and the link
+  /// is left as the user made it.
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn a_project_moved_behind_a_link_is_listed_missing_and_re_pointed_whole() {
+      let w = World::new();
+      let p = w.project("app");
+      let old = text(&p.root);
+      w.session("s-1", &old);
+      w.message("s-1", &old);
+      w.note(OWNER, Some(p.root.as_path()), "Release step");
+      let moved = p.root.with_file_name("app-moved");
+      std::fs::rename(&p.root, &moved).expect("the user moves the folder");
+      std::os::unix::fs::symlink(&moved, &p.root).expect("and leaves a link at the old path");
+
+      let (status, list) = split(get_workspace(&w.db, WorkspaceQuery::default())).await;
+      assert_eq!(status, StatusCode::OK, "{list}");
+      assert_eq!(list[0]["id"], p.id.to_string(), "{list}");
+      assert_eq!(list[0]["missing"], true, "ST-23: {list}");
+      let (status, body) = w.get(&old).await;
+      assert_eq!(status, StatusCode::OK, "{body}");
+      assert_eq!(body["id"], p.id.to_string(), "{body}");
+      assert_eq!(body["missing"], true, "{body}");
+
+      let (status, body) = w.repoint(&p.root, &moved).await;
+
+      assert_eq!(status, StatusCode::OK, "{body}");
+      assert_eq!(body["project"]["id"], p.id.to_string(), "{body}");
+      assert_eq!(body["project"]["root"], text(&moved), "{body}");
+      assert_eq!(body["project"]["missing"], false, "{body}");
+      assert_eq!(body["moved"]["sessions"], 1, "{body}");
+      assert_eq!(body["moved"]["messages"], 1, "{body}");
+      let name = projects::folder_name(&moved);
+      let (_, list) = split(get_workspace(&w.db, WorkspaceQuery::default())).await;
+      assert_eq!(
+          list,
+          serde_json::json!([{
+              "id": p.id.to_string(),
+              "root": text(&moved),
+              "name": name.clone(),
+              "missing": false,
+          }])
+      );
+      assert_eq!(
+          std::fs::read_link(&p.root).expect("the link is still there"),
+          moved,
+          "the link is the user's: untouched"
+      );
+      assert!(!p.dir.exists(), "its folder under projects/ was renamed");
+      assert!(
+          w.home
+              .join(projects::PROJECTS_DIR)
+              .join(&name)
+              .join(projects::PROJECT_FILE)
+              .is_file()
+      );
+      let new = text(&moved);
+      assert_eq!(
+          w.count(&format!("SELECT COUNT(*) FROM session WHERE workspace_id = '{new}'")),
+          1
+      );
+      assert_eq!(
+          w.count(&format!(
+              "SELECT COUNT(*) FROM conversation_messages WHERE workspace_root = '{new}'"
+          )),
+          1
+      );
+      assert_eq!(
+          w.count(&format!("SELECT COUNT(*) FROM session WHERE workspace_id = '{old}'")),
+          0
+      );
+      assert_eq!(project_snapshots(&p.id), 1, "its control snapshot is the one it had");
+      assert_eq!(
+          crate::test_util::note_titles(&w.memory, OWNER, Some(moved.as_path())),
+          vec!["Release step".to_string()],
+          "its notes are found under the new name"
+      );
+  }
+
+  /// ST-23 on a case-insensitive volume (macOS's default), end to end: a
+  /// project whose folder was renamed by case only is missing at its recorded
+  /// root; re-pointed onto the new spelling it is present, its folder under
+  /// `projects/` renamed to the new case, its rows and its notes with it.
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn a_project_renamed_by_case_only_is_listed_missing_and_re_pointed_to_the_new_case() {
+      let w = World::new();
+      let p = w.project("App");
+      let repos = p.root.parent().expect("repos/").to_path_buf();
+      if !volume_ignores_case(&repos) {
+          eprintln!(
+              "skipped: {} is case-sensitive, so no folder can be renamed by case only",
+              repos.display()
+          );
+          return;
+      }
+      let old = text(&p.root);
+      w.session("s-1", &old);
+      w.note(OWNER, Some(p.root.as_path()), "Release step");
+      let renamed = repos.join("app");
+      std::fs::rename(&p.root, &renamed).expect("the user renames the folder by case");
+      assert_eq!(
+          p.root.canonicalize().expect("the old spelling still opens it"),
+          renamed,
+          "ST-23's premise: the volume answers the spelling on disk"
+      );
+
+      let (status, body) = w.get(&old).await;
+      assert_eq!(status, StatusCode::OK, "{body}");
+      assert_eq!(body["id"], p.id.to_string(), "{body}");
+      assert_eq!(body["missing"], true, "ST-23: {body}");
+
+      let (status, body) = w.repoint(&p.root, &renamed).await;
+
+      assert_eq!(status, StatusCode::OK, "{body}");
+      assert_eq!(body["project"]["id"], p.id.to_string(), "{body}");
+      assert_eq!(body["project"]["root"], text(&renamed), "{body}");
+      assert_eq!(body["project"]["missing"], false, "{body}");
+      let name = projects::folder_name(&renamed);
+      let on_disk: Vec<String> = std::fs::read_dir(w.home.join(projects::PROJECTS_DIR))
+          .expect("projects/")
+          .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+          .collect();
+      assert_eq!(on_disk, vec![name], "its folder under projects/ takes the new case");
+      let new = text(&renamed);
+      assert_eq!(
+          w.count(&format!("SELECT COUNT(*) FROM session WHERE workspace_id = '{new}'")),
+          1
+      );
+      assert_eq!(project_snapshots(&p.id), 1, "its control snapshot is the one it had");
+      assert_eq!(
+          crate::test_util::note_titles(&w.memory, OWNER, Some(renamed.as_path())),
+          vec!["Release step".to_string()]
+      );
+  }
+  ```
+
+- [ ] **Step 2: Run them; expected FAIL.** `pgrep -x cargo` (nothing), then:
+
+  ```bash
+  cargo test -p openalpaca_storage store::projects 2>&1 | grep -E 'error\[|^test result|FAILED|panicked'
+  cargo test -p openalpacad routes::workspaces::life_tests 2>&1 | grep -E '^test result|FAILED|panicked'
+  ```
+
+  Expected: the storage test binary does not compile — rustc's `error[E0425]: cannot find function
+  \`root_is_missing\` in this scope`, at every call in `store/projects/tests.rs`'s first new test — so no
+  storage test runs (the project_life case-only test is in that binary; without Step 3 it would fail at
+  `listed[0].missing`). In the daemon,
+  `a_project_moved_behind_a_link_is_listed_missing_and_re_pointed_whole` and
+  `a_root_now_linking_to_another_project_names_its_own_for_the_read_and_the_delete` FAIL at their first `missing`
+  assertion (`left: Bool(false)`, `right: true`): `missing` is `!root.is_dir()`, and the link is a directory. On
+  macOS `a_project_renamed_by_case_only_is_listed_missing_and_re_pointed_to_the_new_case` FAILS the same way at its
+  `?path=` assertion; on a case-sensitive volume it prints `skipped:` and passes.
+
+- [ ] **Step 3: Minimal implementation.** In `crates/openalpaca_storage/src/store/projects.rs`:
+
+  Replace the `missing` field's doc in `pub struct Project`:
+
+  ```rust
+      /// The root is not a directory, read when this entry was read (ST-7).
+      pub missing: bool,
+  ```
+
+  with
+
+  ```rust
+      /// The root no longer leads to its own folder, read when this entry was
+      /// read: it is not a directory, or it no longer canonicalizes to itself
+      /// ([`root_is_missing`]; ST-7, ST-23).
+      pub missing: bool,
+  ```
+
+  Insert after the closing `}` of `fn vanished` (the function whose body is
+  `matches!(fs::symlink_metadata(dir), Err(e) if e.kind() == std::io::ErrorKind::NotFound)`):
+
+  ```rust
+
+  /// ST-7 and ST-23: whether a project's recorded `root` no longer leads to its
+  /// own folder — what [`Project::missing`] says, decided here and nowhere
+  /// else. Missing when the root is not a directory (its folder is gone, or
+  /// something else took its path), or when it no longer canonicalizes to
+  /// itself: a root is canonical when it is recorded (R4, R14 — `register` and
+  /// the re-point write only a canonical root), so a canonical form that
+  /// differs means the folder moved under it — renamed by case only on a
+  /// case-insensitive volume, where the old spelling still opens the renamed
+  /// folder, or moved with a link left at the old path. A root that cannot be
+  /// canonicalized at all is missing. Reads no file: a `stat` and a `realpath`.
+  pub fn root_is_missing(root: &Path) -> bool {
+      let leads_to_itself = root.is_dir()
+          && fs::canonicalize(root).is_ok_and(|canonical| canonical.as_path() == root);
+      !leads_to_itself
+  }
+  ```
+
+  In `read_project_dir`, replace
+
+  ```rust
+      Ok(Some(Project {
+          id: file.id,
+          missing: !root.is_dir(),
+          root,
+  ```
+
+  with
+
+  ```rust
+      Ok(Some(Project {
+          id: file.id,
+          missing: root_is_missing(&root),
+          root,
+  ```
+
+  `lookup`, `list`, `by_id`, `by_recorded_root`, `unfinished_repoint_at` and `register` all build their entries in
+  `read_project_dir` (checked: the one `missing:` initializer of `Project` in the tree, `projects.rs:509`), so this is
+  every place the flag is computed. `routes/workspaces.rs:115`, `:531` and `apps/openalpaca/src/commands/store.rs`
+  only copy it.
+
+  **The re-point needs no change for a case-only rename (checked).** For `…/App` renamed to `…/app` on a
+  case-insensitive volume holding both the project and the home store: `target_root` canonicalizes `…/app` to itself,
+  which differs byte-wise from the recorded `…/App` (no `SamePath`); `workspace_rows` and every path-column compare
+  are `=`/`substr` under SQLite's default BINARY collation (no `COLLATE` anywhere in the schema), so the old spelling's
+  rows are not counted as the target's; `lookup(…/app)` opens `projects/-…-app`, which the volume answers with the
+  project's own `-…-App` folder, reads a `project.json` recording `…/App`, and finds nothing. In `finish`, `current`
+  (the canonical folder's name, `-…-App`) equals `previous_name`, so `name_for(…/app, Some(id))` runs: its plain name
+  `-…-app` opens the same folder, whose `project.json` step 1 has just marked with the new root (and this id), so it is
+  usable and taken. Step 3's `dir != new_dir` compares paths byte-wise, so `fs::rename(…/-…-App, …/-…-app)` runs, and
+  a case-only `rename(2)` on APFS changes the entry's spelling (probed for this draft in a scratch directory and a
+  `$TMPDIR` tempdir: a folder renamed `App` → `app` is listed as `app`, and `realpath(3)` of `App` answers `…/app`).
+  Step 2 rewrites `storage_path`'s `…/-…-App/` prefix to `…/-…-app/` with `substr`; step 4 writes the file in the
+  renamed folder. A recovery after step 3 reads `current` = `-…-app` ≠ `previous_name` and renames nothing. A new
+  project registered at `…/app` instead (a turn there) takes the hashed name, since the plain one opens the old
+  project's folder (`name_for`'s `usable` reads its file, R6) — S0.2's case test pins it.
+
+- [ ] **Step 4: Run; expected PASS.** One at a time:
+
+  ```bash
+  cargo test -p openalpaca_storage store::projects
+  cargo test -p openalpaca_storage project_life
+  cargo test -p openalpacad routes::workspaces
+  pkill -f "sleep 3600"
+  ```
+
+  Expected: each ends `test result: ok`, `0 failed` (counts UNVERIFIED). The neighbours that must still pass: in
+  `store::projects`, `lookup_finds_a_project_at_its_plain_name` and `register_builds_a_folder_holding_project_json_and_nothing_else`
+  (`!project.missing` for a canonical root), `a_missing_project_is_found_at_the_path_it_was_registered_at` and
+  `list_reads_every_project_by_folder_name_and_marks_the_missing_one` (a gone root is still missing),
+  `lookup_through_a_link_finds_the_root_it_reaches` (lookup through a link to a recorded canonical root: that project,
+  present); in `project_life`, `a_root_that_now_links_to_another_project_re_points_its_own_project`; in
+  `routes::workspaces`, `the_list_names_every_project_and_marks_a_missing_one`,
+  `a_re_point_answers_the_project_under_its_new_root_and_five_counts` (its JSON pins `"missing": false`) and
+  `a_re_point_naming_a_root_that_now_links_to_another_project_moves_that_project`.
+
+  Mutation check (the repo's practice for a behavioural fix): change `missing: root_is_missing(&root),` back to
+  `missing: !root.is_dir(),`, run `cargo test -p openalpacad routes::workspaces::life_tests`, see the two new
+  end-to-end tests (the case-only one on a case-insensitive volume) and the extended review-R1 test fail at their first
+  `missing` assertion, and restore the line.
+
+- [ ] **Step 5: Commit.**
+
+  ```bash
+  git add crates/openalpaca_storage/src/store/projects.rs crates/openalpaca_storage/src/store/tests.rs \
+    crates/openalpaca_storage/src/store/projects/tests.rs crates/openalpaca_storage/src/project_life/tests.rs \
+    apps/openalpacad/src/routes/workspaces/life_tests.rs
+  git commit -F - <<'EOF'
+  fix(storage): a project whose root no longer leads to itself reads missing (storage design ST-23)
+
+  `missing` was "the root is not a directory", so a project whose folder was
+  renamed by case only, or moved with a link left at the old path, read as
+  present. `projects::root_is_missing` is now the one place the flag is
+  decided — not a directory, or no longer its own canonical form (a recorded
+  root is canonical when it is written) — and `read_project_dir`, which builds
+  every entry, calls it. The list, `?path=`, `store list` and the app's badge
+  copy the flag unchanged; the re-point, unchanged, brings such a project back,
+  its folder under projects/ taking the new name (the new case, on a
+  case-insensitive volume).
+
+  Verified: cargo test -p openalpaca_storage store::projects and project_life;
+  cargo test -p openalpacad routes::workspaces — all passed, 0 failed.
+
+  Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+  EOF
+  ```
+
+---
+
+### Task S0.2: `lookup` and `register` match a recorded root as written first; learning holds what an unfinished re-point names as written; a row's address follows `lookup` (ST-23, ST-21, R-T19)
+
+**Files:**
+- Modify `crates/openalpaca_storage/src/store/projects.rs` — `pub fn lookup` and `fn lookup_in` (the block from
+  `/// §3 *lookup*: the project registered at \`root\`, or \`None\`. Two small` to the end of `fn lookup_in`) replaced by
+  `lookup`, `lookup_in` and a new `fn recorded_in`; `pub fn register`'s doc and its first lines.
+- Modify `crates/openalpaca_core/src/memory/learning/extractor.rs` — `pub(crate) fn check_project` (the listing
+  comparison) and `ProjectCheck::Learn`'s doc.
+- Modify `crates/openalpaca_core/src/memory/service/management.rs` — the comment on the `NotRegistered` arm in
+  `reconcile_owner`.
+- Modify `crates/openalpaca_core/src/memory/service/mod.rs` — the last sentence of `known_project_roots`' doc (its
+  reason; the rule stands — the S0 check's O1, the lead's ruling).
+- Modify `crates/openalpaca_storage/src/store/mod.rs` — `pub fn project_root_of` and its doc (the lead's ruling
+  R-T19).
+- Modify `crates/openalpaca_storage/src/artifacts/mod.rs` — the module doc's R15 sentence and the comment above
+  `let project_root = project_root_of(new.scope)?;` in `put` (comments only).
+- Modify `crates/openalpaca_storage/src/uploads/mod.rs` — the module doc's *The address is the turn's project*
+  paragraph (a comment only).
+- Test `crates/openalpaca_storage/src/store/projects/tests.rs` — two tests appended.
+- Test `crates/openalpaca_storage/src/artifacts/tests.rs` — one test inserted after
+  `a_project_artifact_lands_under_projects_and_records_the_turns_root`, and `Fixture::project_root`'s doc; and
+  `crates/openalpaca_storage/src/uploads/tests.rs` — `Fixture::project_root`'s doc (comments only).
+- Test `crates/openalpaca_core/src/memory/learning/tests.rs` — two tests inserted after
+  `root_gone_means_no_longer_a_registered_project`.
+- Test `crates/openalpaca_core/src/memory/service/tests.rs` — one test inserted after
+  `a_project_whose_root_now_leads_elsewhere_is_still_known_by_its_own_folder` (whose doc's last sentence changes),
+  and `the_reconciliation_skips_a_root_that_names_no_project_now_at_debug` rewritten as
+  `the_reconciliation_scans_a_project_whose_root_now_leads_elsewhere`.
+
+**Interfaces:**
+- Consumes: S0.1's `Project::missing`; `projects::canonical_root(&Path) -> Result<PathBuf>`;
+  `openalpaca_storage::project_life::{repoint_with, RepointStep}` (`repoint_with(db, old, new, &mut dyn
+  FnMut(RepointStep) -> bool) -> Result<Repointed>`, `pub`, `#[doc(hidden)]`); `store::{store_root, StoreScope}`;
+  in the R-T19 test, `ArtifactStore::put(NewArtifact)`, `crate::uploads::{UploadStore, NewUpload}` and the
+  artifacts tests' `Fixture`, `OWNER` and `at`.
+- Produces (signatures unchanged, behaviour new): `pub fn project_root_of(scope: &StoreScope) ->
+  Result<Option<String>>` in `openalpaca_storage::store` — the root of the project `projects::lookup` finds (as
+  written first), else the root's canonical form as before; an error is now `lookup`'s (the lead's ruling R-T19);
+  `pub fn lookup(root: &Path) -> Result<Option<Project>>` — `root` as written first, then its canonical form;
+  `pub fn register(root: &Path) -> Result<Project>` — an entry `lookup`
+  finds, as written first, is returned as it is. Private: `fn lookup_in(home: &Path, root: &Path) ->
+  Result<Option<Project>>`, `fn recorded_in(home: &Path, root: &Path) -> Result<Option<Project>>`.
+  `pub(crate) fn check_project(root: Option<&Path>, seen: Option<&ProjectId>) -> ProjectCheck` (unchanged signature).
+
+- [ ] **Step 1: Write the failing tests.**
+
+  Append to `crates/openalpaca_storage/src/store/projects/tests.rs`:
+
+  ```rust
+
+  // ── ST-23: a recorded root is matched as written first (Stage 2 S0) ─────────
+
+  /// A recorded root whose folder moved with a link left at the old path names
+  /// its own project — missing — before and after a turn registers the folder
+  /// the link reaches; `register` answers it as it is and records nothing at
+  /// that folder (the dispatch's `register` of a run's stored root), and
+  /// `store_root` is its own folder.
+  #[cfg(unix)]
+  #[test]
+  fn lookup_and_register_match_a_recorded_root_as_written_before_its_canonical_form() {
+      let w = World::new();
+      let root = w.folder("app");
+      let own = register(&root).unwrap();
+      let moved = root.with_file_name("app-moved");
+      fs::rename(&root, &moved).unwrap();
+      std::os::unix::fs::symlink(&moved, &root).unwrap();
+
+      let found = lookup(&root).unwrap().expect("ST-23: its own project");
+      assert_eq!((found.id, found.missing), (own.id, true));
+      assert_eq!(register(&root).unwrap().id, own.id, "answered as it is (ST-7)");
+      assert_eq!(
+          list().unwrap().len(),
+          1,
+          "nothing registered at the folder the link reaches"
+      );
+      // A turn in the moved folder registers it as a project of its own.
+      let other = register(&moved).unwrap();
+      assert_ne!(other.id, own.id);
+      assert_eq!(
+          lookup(&root).unwrap().map(|p| p.id),
+          Some(own.id),
+          "never the project the link leads to"
+      );
+      assert_eq!(lookup(&moved).unwrap().map(|p| p.id), Some(other.id));
+      let again = register(&root).unwrap();
+      assert_eq!((again.id, again.missing), (own.id, true));
+      assert_eq!(
+          crate::store::store_root(&crate::store::StoreScope::Project(root.clone())).unwrap(),
+          own.dir
+      );
+      assert_eq!(list().unwrap().len(), 2, "nothing more was registered");
+  }
+
+  /// The same on a case-insensitive volume for a folder renamed by case only:
+  /// the new spelling takes the hashed name, since the plain one is the old
+  /// folder's on this volume (R6), and each spelling names its own project.
+  #[cfg(unix)]
+  #[test]
+  fn a_root_renamed_by_case_only_still_looks_up_and_registers_as_its_own_project() {
+      let w = World::new();
+      let work = w.folder("cases");
+      if !crate::store::tests::volume_ignores_case(&work) {
+          eprintln!(
+              "skipped: {} is case-sensitive, so no folder can be renamed by case only",
+              work.display()
+          );
+          return;
+      }
+      let root = w.folder("cases/App");
+      let own = register(&root).unwrap();
+      let renamed = work.join("app");
+      fs::rename(&root, &renamed).unwrap();
+
+      let found = lookup(&root).unwrap().expect("ST-23: its own project");
+      assert_eq!((found.id, found.missing), (own.id, true));
+      let other = register(&renamed).unwrap();
+      assert_ne!(other.id, own.id);
+      assert_eq!(other.name, hashed_folder_name(&renamed));
+      assert_eq!(lookup(&root).unwrap().map(|p| p.id), Some(own.id));
+      assert_eq!(lookup(&renamed).unwrap().map(|p| p.id), Some(other.id));
+      assert_eq!(register(&root).unwrap().id, own.id);
+      assert_eq!(list().unwrap().len(), 2);
+  }
+  ```
+
+  In `crates/openalpaca_storage/src/artifacts/tests.rs`, insert after the closing `}` of
+  `a_project_artifact_lands_under_projects_and_records_the_turns_root` (it ends
+  `assert!(!f.project_root().join(".openalpaca").exists(), "ST-1");\n}`):
+
+  ```rust
+
+  /// The lead's ruling R-T19 (ST-23 with R15): a by-product and an upload
+  /// filed in a turn at the old root of a project whose folder moved with a
+  /// link left there record that root — the project `lookup` finds, whose
+  /// folder under `projects/` holds their bytes — and never the folder the
+  /// link reaches, though a project is registered there. That project's own
+  /// rows keep its canonical root, through another link to it too.
+  #[cfg(unix)]
+  #[test]
+  fn a_write_at_a_missing_projects_old_root_records_that_root_and_never_the_folder_it_reaches() {
+      let f = Fixture::new();
+      // The root as it is recorded, and its folder, taken before the move:
+      // `project_root()` canonicalizes, which after the move would answer the
+      // moved folder.
+      let root = f.project_root();
+      let own = crate::store::projects::lookup(&root).unwrap().unwrap();
+      let aside = tempdir().unwrap();
+      let base = aside.path().canonicalize().unwrap();
+      let moved = base.join("app-moved");
+      fs::rename(&root, &moved).unwrap();
+      std::os::unix::fs::symlink(&moved, &root).unwrap();
+      // A turn in the moved folder registers it as a project of its own.
+      let theirs = crate::store::projects::register(&moved).unwrap();
+      assert_ne!(theirs.id, own.id);
+      let address = |id: &str| -> Option<String> {
+          f.db.with_connection(|conn| {
+              Ok(conn.query_row(
+                  "SELECT project_root FROM file_assets WHERE id = ?1",
+                  rusqlite::params![id],
+                  |row| row.get(0),
+              )?)
+          })
+          .unwrap()
+      };
+      let recorded = root.to_string_lossy().into_owned();
+      let reached = moved.to_string_lossy().into_owned();
+
+      let old = StoreScope::Project(root.clone());
+      let mut new = NewArtifact::new(OWNER, &old, ArtifactKind::Markdown, "Notes", b"a\n");
+      new.created = at(1);
+      let (artifact, _) = f.store().put(new).unwrap();
+      let upload = crate::uploads::UploadStore::new(&f.db)
+          .put(crate::uploads::NewUpload {
+              owner_id: OWNER,
+              filename: "notes.txt",
+              mime_type: "text/plain",
+              data: b"up\n",
+              scope: &old,
+              created: at(1),
+          })
+          .unwrap();
+
+      assert_eq!(artifact.project_root.as_deref(), Some(recorded.as_str()));
+      assert_eq!(
+          address(&upload.asset.id).as_deref(),
+          Some(recorded.as_str())
+      );
+      for path in [&artifact.storage_path, &upload.asset.storage_path] {
+          assert!(
+              Path::new(path).starts_with(&own.dir),
+              "its bytes are in its own folder: {path}"
+          );
+      }
+
+      // The project registered where the link leads keeps its canonical root,
+      // and a write through another link to it records that root too.
+      let alias = base.join("alias");
+      std::os::unix::fs::symlink(&moved, &alias).unwrap();
+      for scope in [StoreScope::Project(moved.clone()), StoreScope::Project(alias)] {
+          let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Plan", b"b\n");
+          new.created = at(1);
+          let (row, _) = f.store().put(new).unwrap();
+          assert_eq!(row.project_root.as_deref(), Some(reached.as_str()));
+          assert!(
+              Path::new(&row.storage_path).starts_with(&theirs.dir),
+              "{}",
+              row.storage_path
+          );
+      }
+  }
+  ```
+
+  (`aside` is dropped before `f`, taking the moved folder and the second link with it; `f`'s own `TempDir` then
+  removes the link left at the old root, not what it led to.)
+
+  In `crates/openalpaca_core/src/memory/learning/tests.rs`, insert after the closing `}` of
+  `root_gone_means_no_longer_a_registered_project` (it ends
+  `assert_eq!(check_project(None, None), ProjectCheck::Learn(None));\n}`):
+
+  ```rust
+
+  /// ST-21 with ST-23: a stored root whose folder moved with a link left at
+  /// the old path is still its own project, missing, and is learned into its
+  /// notes — before the check read it as gone (the canonical form names no
+  /// project) and dropped its turns, and once a turn registered the folder
+  /// the link reaches it filed them there.
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn a_root_that_now_leads_elsewhere_is_learned_into_its_own_project() {
+      use super::extractor::{ProjectCheck, check_project};
+      let _scene = Scene::new(vec![]);
+      let dir = tempfile::tempdir().unwrap();
+      let base = dir.path().canonicalize().unwrap();
+      let root = base.join("app");
+      std::fs::create_dir(&root).unwrap();
+      let own = openalpaca_storage::store::projects::register(&root).unwrap();
+      let moved = base.join("app-moved");
+      std::fs::rename(&root, &moved).unwrap();
+      std::os::unix::fs::symlink(&moved, &root).unwrap();
+
+      assert_eq!(
+          check_project(Some(&root), None),
+          ProjectCheck::Learn(Some(own.id)),
+          "a missing project is learned (ST-21)"
+      );
+      let other = openalpaca_storage::store::projects::register(&moved).unwrap();
+      assert_eq!(
+          check_project(Some(&root), None),
+          ProjectCheck::Learn(Some(own.id)),
+          "never the project the link leads to"
+      );
+      assert_eq!(
+          check_project(Some(&moved), None),
+          ProjectCheck::Learn(Some(other.id))
+      );
+  }
+
+  /// ST-21 across a re-point left unfinished (design §6, R24 — a crash after
+  /// its rows moved) of a project whose root now leads elsewhere: the marked
+  /// folder names that root, as written, as where it was, so the root is held
+  /// until the next start finishes the re-point — never dropped as gone
+  /// because its canonical form names nothing.
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn a_re_point_left_unfinished_holds_a_root_that_now_leads_elsewhere() {
+      use super::extractor::{ProjectCheck, check_project};
+      use openalpaca_storage::project_life::{RepointStep, repoint_with};
+      let scene = Scene::new(vec![]);
+      let dir = tempfile::tempdir().unwrap();
+      let base = dir.path().canonicalize().unwrap();
+      let root = base.join("app");
+      std::fs::create_dir(&root).unwrap();
+      openalpaca_storage::store::projects::register(&root).unwrap();
+      let moved = base.join("app-moved");
+      std::fs::rename(&root, &moved).unwrap();
+      std::os::unix::fs::symlink(&moved, &root).unwrap();
+      let elsewhere = base.join("elsewhere");
+      std::fs::create_dir(&elsewhere).unwrap();
+      repoint_with(&scene.db, &root, &elsewhere, &mut |at| {
+          at != RepointStep::RowsRewritten
+      })
+      .unwrap_err();
+
+      assert_eq!(check_project(Some(&root), None), ProjectCheck::Hold);
+  }
+  ```
+
+  In `crates/openalpaca_core/src/memory/service/tests.rs`, in the doc of
+  `a_project_whose_root_now_leads_elsewhere_is_still_known_by_its_own_folder`, replace
+
+  ```rust
+  /// `known_project_roots`. (Its partition is not reconciled while the root
+  /// leads elsewhere: the scan opens a scope by its root — design §18.)
+  ```
+
+  with
+
+  ```rust
+  /// `known_project_roots`. (Since ST-23 its partition is reconciled too: the
+  /// scan opens a scope by its root, which `lookup` matches as written.)
+  ```
+
+  then insert after that test's closing `}` (it ends `std::slice::from_ref(&repo)\n    );\n}`):
+
+  ```rust
+
+  /// ST-23: a stored root that no longer leads to its own folder — moved with
+  /// a link left at the old path, a project registered where the link leads —
+  /// still scopes its own project's notes. A turn's tools, learning and the
+  /// lead hand memory that root (`WorkspaceHint::Root`).
+  #[cfg(unix)]
+  #[test]
+  fn a_stored_root_that_now_leads_elsewhere_reads_its_own_projects_notes() {
+      let h = Harness::new();
+      let repo = h.workspace("repo", Some(".git"));
+      h.store(
+          &h.user(ALICE, Some(&repo)),
+          "Release step",
+          "# Release step\n\nTag first.\n",
+          NoteKind::Procedure,
+      );
+      let moved = repo.with_file_name("repo-moved");
+      fs::rename(&repo, &moved).unwrap();
+      std::os::unix::fs::symlink(&moved, &repo).unwrap();
+      openalpaca_storage::store::projects::register(&moved).unwrap();
+      h.store(
+          &h.user(ALICE, Some(&moved)),
+          "Other step",
+          "# Other step\n\nShip it.\n",
+          NoteKind::Procedure,
+      );
+
+      let ctx = h
+          .service
+          .context(
+              ALICE,
+              WorkspaceHint::Root(&repo),
+              Surface::UserSurface,
+              Capabilities::ALL,
+              Attribution::default(),
+          )
+          .unwrap();
+
+      assert_eq!(ctx.project_root.as_deref(), Some(repo.as_path()));
+      let titles: Vec<String> = h
+          .service
+          .list(&ctx, ListInput::default())
+          .unwrap()
+          .items
+          .into_iter()
+          .map(|item| item.title)
+          .collect();
+      assert!(titles.contains(&"Release step".to_string()), "{titles:?}");
+      assert!(!titles.contains(&"Other step".to_string()), "{titles:?}");
+  }
+  ```
+
+  and replace the whole of `the_reconciliation_skips_a_root_that_names_no_project_now_at_debug` (from its doc line
+  `/// That project's root opens as no registered project in the 30 s` to its closing `}`) with:
+
+  ```rust
+  /// ST-23: that project's root names its own project again — `lookup`
+  /// matches a recorded root as written first — so the 30 s reconciliation
+  /// scans its partition while the root leads elsewhere, as it scans any
+  /// missing project's (ST-7): no skip, no WARN. (Residual X6's debug skip is
+  /// left for a root no folder records when the scan opens it.)
+  #[cfg(unix)]
+  #[test]
+  #[tracing_test::traced_test]
+  fn the_reconciliation_scans_a_project_whose_root_now_leads_elsewhere() {
+      let h = Harness::new();
+      let repo = h.workspace("repo", Some(".git"));
+      h.store(
+          &h.user(ALICE, Some(&repo)),
+          "Release step",
+          "# Release step\n\nTag first.\n",
+          NoteKind::Procedure,
+      );
+      h.store(
+          &h.user(ALICE, None),
+          "Editor",
+          "# Editor\n\nvim.\n",
+          NoteKind::Preference,
+      );
+      let moved = repo.with_file_name("repo-moved");
+      fs::rename(&repo, &moved).unwrap();
+      std::os::unix::fs::symlink(&moved, &repo).unwrap();
+
+      let report = h.service.reconcile_owner(ALICE).unwrap();
+
+      assert_eq!(
+          report.scanned, 2,
+          "the note files each scan listed: one at home, one in the project"
+      );
+      assert!(!logs_contain("it did not open"), "no WARN");
+      assert!(
+          !logs_contain("names no registered project now"),
+          "no skip: the root names its own project"
+      );
+  }
+  ```
+
+- [ ] **Step 2: Run them; expected FAIL.**
+
+  ```bash
+  cargo test -p openalpaca_storage store::projects::tests 2>&1 | grep -E '^test result|FAILED|panicked'
+  cargo test -p openalpaca_storage a_write_at_a_missing_projects_old_root 2>&1 | grep -E '^test result|FAILED|panicked'
+  cargo test -p openalpaca_core memory::learning::tests::a_r 2>&1 | grep -E '^test result|FAILED|panicked'
+  cargo test -p openalpaca_core memory::service::tests 2>&1 | grep -E '^test result|FAILED|panicked'
+  ```
+
+  Expected: `lookup_and_register_match_a_recorded_root_as_written_before_its_canonical_form` panics at
+  `expect("ST-23: its own project")` — `lookup` canonicalizes the link to `app-moved`, where no folder records a root;
+  on macOS `a_root_renamed_by_case_only_still_looks_up_and_registers_as_its_own_project` panics at the same line
+  (`lookup` canonicalizes `App` to `app`, and the folder it opens records `App`).
+  `a_root_that_now_leads_elsewhere_is_learned_into_its_own_project` fails `left: Gone`, `right: Learn(Some(..))`;
+  `a_re_point_left_unfinished_holds_a_root_that_now_leads_elsewhere` fails `left: Gone`, `right: Hold` (the listing
+  compares the marked entry with the canonical form `app-moved` only).
+  `a_stored_root_that_now_leads_elsewhere_reads_its_own_projects_notes` fails at `ctx.project_root` (it is
+  `repo-moved`) and `the_reconciliation_scans_a_project_whose_root_now_leads_elsewhere` at `left: 1`, `right: 2`
+  (`SyncReport::scanned` sums the note files each partition's scan listed — `reconcile_partition`'s count — so today's
+  1 is the home note alone: the project's partition opens `NotRegistered` and is skipped).
+  `a_write_at_a_missing_projects_old_root_records_that_root_and_never_the_folder_it_reaches` fails at its first
+  `assert_eq!` — `left: Some("…/app-moved")`, `right:` the recorded root: `lookup` canonicalizes the old root to the
+  moved folder, where the test registered another project, so both writes land in that project's folder and
+  `project_root_of` records its root (Step 6 shows the `project_root_of` half fails the same way on its own).
+
+- [ ] **Step 3: Minimal implementation.**
+
+  In `crates/openalpaca_storage/src/store/projects.rs`, replace from `/// §3 *lookup*: the project registered at
+  \`root\`, or \`None\`. Two small` through the closing `}` of `fn lookup_in` with:
+
+  ```rust
+  /// §3 *lookup*: the project registered at `root`, or `None` — `root` as
+  /// written first (ST-23), then its canonical form. A recorded root that no
+  /// longer canonicalizes to itself — its folder renamed by case only on a
+  /// case-insensitive volume, or moved with a link left at the old path —
+  /// still names its own project, missing, never the project its canonical
+  /// form now leads to; any other path that a link or another case leads to a
+  /// registered root finds that root. Each form is two small reads, no scan
+  /// and no lock — `projects/<folder_name>/project.json` and, when that is
+  /// absent, unreadable or records another root,
+  /// `projects/<hashed_folder_name>/project.json` — and the canonical form's
+  /// two are read only when it differs from the root as written. Creates
+  /// nothing. A
+  /// folder with no readable file is passed over with one WARN per folder per
+  /// process (R11). An error is a relative `root`, no home root, or a folder
+  /// that cannot be resolved.
+  pub fn lookup(root: &Path) -> Result<Option<Project>> {
+      lookup_in(&super::home_root()?, root)
+  }
+
+  /// [`lookup`] under the home store `home`, as [`register`] resolved it once.
+  fn lookup_in(home: &Path, root: &Path) -> Result<Option<Project>> {
+      if !root.is_absolute() {
+          bail!(
+              "a project root must be an absolute path, got {}",
+              root.display()
+          );
+      }
+      // Lexically tidied — a trailing `/` or a `.` would change the folder
+      // name — and nothing resolved.
+      let written: PathBuf = root.components().collect();
+      if let Some(project) = recorded_in(home, &written)? {
+          return Ok(Some(project));
+      }
+      let canonical = canonical_root(&written)?;
+      if canonical == written {
+          return Ok(None);
+      }
+      recorded_in(home, &canonical)
+  }
+
+  /// The project whose `project.json` records exactly `root` — compared as
+  /// written, nothing resolved: `projects/<folder_name>/project.json` and, when
+  /// that is absent, unreadable or records another root,
+  /// `projects/<hashed_folder_name>/project.json`.
+  fn recorded_in(home: &Path, root: &Path) -> Result<Option<Project>> {
+      let want = root.to_string_lossy();
+      let projects = projects_dir_in(home);
+      let plain = folder_name(root);
+      let hashed = hashed_folder_name(root);
+      let names = if hashed == plain {
+          vec![plain]
+      } else {
+          vec![plain, hashed]
+      };
+      for name in names {
+          if let Some(project) = read_project_dir(&projects.join(name))?
+              && project.root_string() == want.as_ref()
+          {
+              return Ok(Some(project));
+          }
+      }
+      Ok(None)
+  }
+  ```
+
+  In `pub fn register`'s doc, replace
+
+  ```rust
+  /// and writes under that one store ([`register_home`]); [`canonical_root`];
+  /// an entry [`lookup`] finds is returned as it is, a
+  /// missing project's included (ST-7); a root that overlaps the home store is
+  ```
+
+  with
+
+  ```rust
+  /// and writes under that one store ([`register_home`]); [`canonical_root`];
+  /// an entry [`lookup`] finds — `root` as written first, then its canonical
+  /// form (ST-23) — is returned as it is, a missing project's included (ST-7),
+  /// so a stored root that now leads to another folder is never registered
+  /// again at that folder; a root that overlaps the home store is
+  ```
+
+  and in its body replace
+
+  ```rust
+      let root = canonical_root(root)?;
+      let held = lock();
+      if let Some(existing) = lookup_in(&home, &root)? {
+          return Ok(existing);
+      }
+  ```
+
+  with
+
+  ```rust
+      let written = root;
+      let root = canonical_root(written)?;
+      let held = lock();
+      if let Some(existing) = lookup_in(&home, written)? {
+          return Ok(existing);
+      }
+  ```
+
+  (`lookup_in` has exactly these two callers, `lookup` and `register`; `register`'s later steps keep the canonical
+  `root`.)
+
+  In `crates/openalpaca_core/src/memory/learning/extractor.rs`, in `pub(crate) enum ProjectCheck`, replace
+
+  ```rust
+      /// A missing project, whose folder is gone but whose record stands, is
+      /// learned into its notes, which live in the home store and re-create
+      /// nothing in the user's folder.
+  ```
+
+  with
+
+  ```rust
+      /// A missing project — its folder gone, or its recorded root now leading
+      /// to another folder (ST-23) — whose record stands is learned into its
+      /// notes, which live in the home store and re-create nothing in the
+      /// user's folder.
+  ```
+
+  and in `pub(crate) fn check_project` replace
+
+  ```rust
+      // As `lookup` compares: the canonical form, which the rows and
+      // `project.json` both hold.
+      let want = projects::canonical_root(root).unwrap_or_else(|_| root.to_path_buf());
+      match projects::list() {
+          Ok(listed) => {
+              let named = listed.iter().any(|p| {
+                  seen == Some(&p.id)
+                      || (p.previous_root.is_some()
+                          && (p.root == want || p.previous_root.as_deref() == Some(want.as_path())))
+              });
+  ```
+
+  with
+
+  ```rust
+      // As `lookup` compares: the root as written — a recorded root that now
+      // leads to another folder (ST-23) — and its canonical form.
+      let want = projects::canonical_root(root).unwrap_or_else(|_| root.to_path_buf());
+      let names = |path: &Path| path == root || path == want.as_path();
+      match projects::list() {
+          Ok(listed) => {
+              let named = listed.iter().any(|p| {
+                  seen == Some(&p.id)
+                      || (p.previous_root.is_some()
+                          && (names(p.root.as_path())
+                              || p.previous_root.as_deref().is_some_and(names)))
+              });
+  ```
+
+  In `crates/openalpaca_core/src/memory/service/management.rs`, in `reconcile_owner`'s `NotRegistered` arm, replace
+
+  ```rust
+                  // A listed project whose recorded root now leads elsewhere
+                  // (its folder moved with a link left behind, or renamed by
+                  // case only) opens as no project, every tick for as long as
+                  // that lasts: not a WARN every 30 s (residual X6).
+  ```
+
+  with
+
+  ```rust
+                  // A listed project whose folder under `projects/` went
+                  // between the listing and this open (its data deleted, or
+                  // re-pointed) opens as no project: skipped at debug, not a
+                  // WARN (residual X6). A root that now leads to another
+                  // folder names its own project (ST-23) and is scanned.
+  ```
+
+  In `crates/openalpaca_core/src/memory/service/mod.rs`, in `pub fn known_project_roots`' doc, replace
+
+  ```rust
+      /// listing failure is logged and lists nothing. Each project is read in
+      /// its own folder, the listed entry's `dir` — never by a second lookup of
+      /// its root, which for a root that no longer canonicalizes to itself (a
+      /// folder moved with a link left behind, a case-only rename) would name
+      /// no project, or another one.
+  ```
+
+  with
+
+  ```rust
+      /// listing failure is logged and lists nothing. Each project is read in
+      /// its own folder, the listed entry's `dir`: the listing has just read
+      /// it, and a second lookup of its root would only read the same folder
+      /// again — since ST-23 `lookup` matches a recorded root as written first,
+      /// so even a root that no longer canonicalizes to itself names its own.
+  ```
+
+  (A comment only: the rule — read the listed entry's own `dir` — stands; its old reason, that a lookup by root would
+  name another project, is what S0.2 ends.)
+
+  Every other caller that receives a recorded root now finds its own project through `lookup` with no edit of its
+  own: `store_root` (`store/mod.rs:442`), memory's `scope_root` and `project_id_of` (`memory_files/partition.rs:608`,
+  `:630`), the memory slot (`memory/service/mod.rs:832`), the context's `resolve_hint` for a stored root
+  (`memory/service/context.rs:176`), the doctor (`memory_files/doctor.rs:133`), the CLI's `doctor --repair`
+  (`commands/memory.rs:1733`), the index rebuild (`rebuild_index_inner`, `memory/service/mod.rs:1250`, which opens
+  each listed project's partition as `StoreScope::Project(project.root)`) and the 30 s reconciliation (the same, from
+  `known_project_roots`), and the dispatch's `register` (`dispatcher/lead_agent.rs:240`, whose result is discarded —
+  before S0.2 it registered a **new** project at the folder a re-launched missing project's root now reaches), which
+  the follow-up runner's and a `rerun`'s runs pass through.
+
+  In `crates/openalpaca_storage/src/store/mod.rs`, replace `pub fn project_root_of` and its doc — from
+  `/// The canonical-path string a content row records as its \`project_root\`;` through the function's closing `}` —
+  with:
+
+  ```rust
+  /// The path string a content row records as its `project_root`; `None` is
+  /// the home store, which is the address baseline (§4.8).
+  ///
+  /// The one place a [`StoreScope`] becomes a stored address, so
+  /// `COALESCE(project_root, '')` means the same thing to every writer. R15:
+  /// it is the turn's project, never the directory the bytes reached — under
+  /// ST-1 that is the project's folder under `projects/` for every project.
+  /// It is the root of the project [`projects::lookup`] finds — the project
+  /// whose folder [`store_root`] names, so a row and its bytes name one
+  /// project — and a root no project records is taken by its canonical form.
+  /// A recorded root is canonical when it is recorded (R14), so for a project
+  /// whose root still leads to itself this is that form; a missing project's
+  /// root that no longer canonicalizes to itself (ST-23) is answered as
+  /// written, never as the folder it now reaches (the lead's ruling R-T19).
+  /// An error is [`projects::lookup`]'s: a relative root, no home root, or a
+  /// folder that cannot be resolved.
+  pub fn project_root_of(scope: &StoreScope) -> Result<Option<String>> {
+      match scope {
+          StoreScope::Home => Ok(None),
+          StoreScope::Project(root) => {
+              let address = match projects::lookup(root)? {
+                  Some(project) => project.root,
+                  None => root.canonicalize().unwrap_or_else(|_| root.clone()),
+              };
+              Ok(Some(address.to_string_lossy().to_string()))
+          }
+      }
+  }
+  ```
+
+  In `crates/openalpaca_storage/src/artifacts/mod.rs`, in the module doc, replace
+
+  ```rust
+  //! `project_root` half of the address is the turn's project root
+  //! ([`crate::store::project_root_of`], canonical), never the directory the
+  //! bytes reached — every project's bytes land under the home store's
+  //! `projects/`.
+  ```
+
+  with
+
+  ```rust
+  //! `project_root` half of the address is the turn's project root
+  //! ([`crate::store::project_root_of`]: the root of the project `lookup`
+  //! finds — canonical, but for a missing project's recorded root, R-T19),
+  //! never the directory the bytes reached — every project's bytes land under
+  //! the home store's `projects/`.
+  ```
+
+  and in `put`, replace
+
+  ```rust
+          // under `<home>/projects/`. Both the row and the directory scan below
+          // take it; two scopes naming one project canonicalize to one root, so
+          // they share one sequence space and one identity.
+  ```
+
+  with
+
+  ```rust
+          // under `<home>/projects/`. Both the row and the directory scan below
+          // take it; two scopes naming one project — the project `lookup` finds,
+          // whose folder holds the bytes — record its one root, so they share
+          // one sequence space and one identity (R-T19).
+  ```
+
+  In `crates/openalpaca_storage/src/uploads/mod.rs`, in the module doc, replace
+
+  ```rust
+  //! `project_root` and the sequence lookup both take the turn's project root,
+  //! canonical (`store::project_root_of`, R15) — never the directory the bytes
+  //! reached, which under ST-1 is the project's folder under the home store's
+  //! `projects/` for every project.
+  ```
+
+  with
+
+  ```rust
+  //! `project_root` and the sequence lookup both take the turn's project root
+  //! (`store::project_root_of`, R15): the root of the project `lookup` finds —
+  //! canonical, but for a missing project's recorded root (R-T19) — never the
+  //! directory the bytes reached, which under ST-1 is the project's folder under
+  //! the home store's `projects/` for every project.
+  ```
+
+  In both `crates/openalpaca_storage/src/artifacts/tests.rs` and `crates/openalpaca_storage/src/uploads/tests.rs`, in
+  `Fixture::project_root`'s doc, replace
+
+  ```rust
+      /// The canonical project root — canonical because `project_root` is the
+      /// canonical-path string everywhere (§4.8) and macOS's `/var` is a symlink.
+  ```
+
+  with
+
+  ```rust
+      /// The canonical project root — canonical because the fixture registers
+      /// its project there, so `project_root` records that string (§4.8; R-T19:
+      /// the root `lookup` finds), and macOS's `/var` is a symlink.
+  ```
+
+  `project_root_of`'s callers need no edit. `ArtifactStore::put` and `UploadStore::put` call it after `content_dir`
+  has looked the same root up through `store_root`, so a row and its bytes now name one project — before R-T19 a row
+  filed at a missing project's old root named the folder the root reaches while its bytes went to the missing project's
+  folder. Later, S4a.17's `send` and S5.2's `artifact_read` take the turn's project through it: `artifact_read` then
+  reads a missing project's own by-products from its folder under `projects/` and refuses its result files before
+  reading anything, and `send` gets a check of its own (R-T19, S4a.17). `NewProjectFile.project_root`'s doc
+  (interfaces §5.3, S4a.3: "The project's canonical root (`store::project_root_of`'s string)") stays true: its writers,
+  `file_write` (S4a.11) and `file_edit` (S4b.1) in a project, both through `record_tool_project_file` with the working
+  folder's root, run only in a working folder R27 has found present, whose recorded root is canonical. A relative
+  `StoreScope::Project` root, which `project_root_of` used to canonicalize against the process's
+  directory, is now `lookup`'s error; no caller passes one (`scope_from_context` makes a relative root the home store,
+  and `put` and the upload writer refuse one in `store_root` first). Every test that asserts a row's `project_root`
+  keeps its assertion — `put_creates_the_head_at_the_clean_path`,
+  `a_project_artifact_lands_under_projects_and_records_the_turns_root` and `a_failing_member_rolls_the_whole_repoint_back`
+  (`artifacts/tests.rs`), `a_project_scoped_upload_lands_in_the_project_store`,
+  `a_project_upload_lands_under_projects_and_records_the_turns_root` and `a_duplicate_sha_is_scoped_to_the_turns_project`
+  (`uploads/tests.rs`; the dedup test also asserts the second project it registers, at its canonical root), core's
+  `attributes_the_row_to_the_context`
+  (`tools/builtins/artifact_write.rs`), `a_project_turn_whose_root_is_the_home_store_saves_into_the_projects_store`
+  and `a_workspace_root_that_links_to_the_home_store_counts_as_the_home_store` (`tools/builtins/file_ops.rs`), and the
+  daemon's `the_row_is_a_superset_of_the_client_artifact_type` (`routes/artifacts/tests.rs`, `body["project_root"]`): each
+  registers its project at its canonical root and writes with that root, which `lookup` finds as written, so the
+  address is the same canonical string as before (`a_workspace_root_that_links_to_the_home_store_counts_as_the_home_store`
+  links the tools' root, never the scope); each test a later
+  slice adds that asserts a row's `project_root` does the same. Each reaches `project_root_of` through `put`, whose
+  `store_root` already read the home store, so each holds its crate's home-store guard already.
+
+- [ ] **Step 4: Run; expected PASS.** One at a time:
+
+  ```bash
+  cargo test -p openalpaca_storage store::
+  cargo test -p openalpaca_storage project_life
+  cargo test -p openalpaca_storage memory_files
+  cargo test -p openalpaca_storage artifacts
+  cargo test -p openalpaca_storage uploads
+  cargo test -p openalpaca_core memory::learning
+  cargo test -p openalpaca_core memory::service
+  cargo test -p openalpaca_core memory::scope_context
+  cargo test -p openalpaca_core tools::builtins
+  cargo test -p openalpacad routes::workspaces
+  cargo test -p openalpacad routes::artifacts
+  pkill -f "sleep 3600"
+  ```
+
+  Expected: each `test result: ok`, `0 failed` (counts UNVERIFIED). Neighbours that must still pass:
+  `lookup_refuses_a_relative_root`, `lookup_reads_the_hashed_folder_when_the_plain_one_records_another_root`,
+  `lookup_through_a_link_finds_the_root_it_reaches`, `register_answers_with_the_project_already_recorded` (a link to a
+  recorded root still answers that root — through the canonical half), `when_both_names_are_taken_register_says_so_and_creates_nothing`,
+  `a_hand_made_folder_at_the_plain_name_is_left_alone` (one WARN: a canonical root reads its two folders once);
+  `a_re_point_onto_either_path_of_a_re_point_that_has_not_finished_is_refused` and
+  `a_recorded_root_whose_listing_fails_names_no_project_rather_than_resolving_it` in `project_life`;
+  `a_link_at_projects_or_at_the_projects_folder_refuses_the_partition` in `memory_files` (a link at the project's
+  folder is still a folder `read_project_dir` never opens); `root_gone_means_no_longer_a_registered_project` and
+  `the_project_check_waits_while_a_re_point_or_a_delete_holds_the_projects_lock` in learning; the route tests of
+  S0.1 and review R1; and the row-address tests Step 3 names (`artifacts`, `uploads`, `tools::builtins`,
+  `routes::artifacts`).
+
+- [ ] **Step 5: Commit.**
+
+  ```bash
+  git add crates/openalpaca_storage/src/store/projects.rs crates/openalpaca_storage/src/store/projects/tests.rs \
+    crates/openalpaca_core/src/memory/learning/extractor.rs crates/openalpaca_core/src/memory/learning/tests.rs \
+    crates/openalpaca_core/src/memory/service/management.rs crates/openalpaca_core/src/memory/service/mod.rs \
+    crates/openalpaca_core/src/memory/service/tests.rs \
+    crates/openalpaca_storage/src/store/mod.rs crates/openalpaca_storage/src/artifacts/mod.rs \
+    crates/openalpaca_storage/src/artifacts/tests.rs crates/openalpaca_storage/src/uploads/mod.rs \
+    crates/openalpaca_storage/src/uploads/tests.rs
+  git commit -F - <<'EOF'
+  fix(storage): lookup and register match a recorded root as written first (storage design ST-23)
+
+  `lookup` canonicalized a root before reading the two folders it names, so a
+  root whose folder was renamed by case only, or moved with a link left at the
+  old path, led store_root, memory's partitions and slot, learning's ST-21
+  check and the dispatch's register to the folder it now reaches: no project
+  (learning then dropped the turns as gone) or another one (design §18, review
+  R1's deeper cross-wiring). It now reads the folders of the root as written
+  first and the canonical form's only when that differs; `register` answers
+  such a project as it is. Learning's listing check also matches an unfinished
+  re-point's roots as written, so it holds rather than drops. The 30 s
+  reconciliation now scans such a project's partition (residual X6), and
+  known_project_roots' doc no longer gives the reason S0.2 ends.
+
+  store::project_root_of records the root lookup finds (the lead's ruling
+  R-T19): a by-product or an upload filed in a turn at such a project's old
+  root names that project, whose folder holds its bytes, never the folder
+  the root now reaches; any other root keeps its canonical form.
+
+  Verified: cargo test -p openalpaca_storage store::, project_life, memory_files,
+  artifacts, uploads; cargo test -p openalpaca_core memory::learning,
+  memory::service, memory::scope_context, tools::builtins; cargo test -p
+  openalpacad routes::workspaces, routes::artifacts — all passed, 0 failed.
+
+  Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+  EOF
+  ```
+
+- [ ] **Step 6: Prove the `project_root_of` half bites on its own (after the commit; leaves no change).**
+
+  ```bash
+  perl -0pi -e '$n = s/                Some\(project\) => project\.root,\n/                Some(_) => root.canonicalize().unwrap_or_else(|_| root.clone()),\n/; die "anchor: $n" unless $n == 1' \
+    crates/openalpaca_storage/src/store/mod.rs
+  cargo test -p openalpaca_storage a_write_at_a_missing_projects_old_root 2>&1 | grep -E '^test result|FAILED|panicked'
+  git checkout -- crates/openalpaca_storage/src/store/mod.rs
+  git status --short crates/openalpaca_storage
+  ```
+
+  Expected: the run FAILS at the test's first `assert_eq!` — `left: Some("…/app-moved")`: `lookup` now files both
+  writes' bytes in the missing project's own folder, and only `project_root_of` names the folder the link reaches;
+  `git status --short` prints nothing.
+
+---
+
+### Task S0.3: `resolve` walks a client path as written first, for a missing project's root (ST-23)
+
+**Files:**
+- Modify `crates/openalpaca_storage/src/store/projects.rs` — the `use std::path::{Path, PathBuf};` line; `pub fn
+  resolve` (doc and its first lines) and a new `fn resolve_as_written` after it; `pub fn by_recorded_root`'s doc.
+- Modify `crates/openalpaca_storage/src/project_life.rs` — `fn registered`'s doc.
+- Test `crates/openalpaca_storage/src/store/projects/resolve_tests.rs` — five tests appended.
+- Test `crates/openalpaca_core/src/memory/scope_context.rs` — one test appended inside `mod tests`.
+
+**Interfaces:**
+- Consumes: S0.2's `lookup` (as written first), `overlaps_home_store(&Path) -> bool`, `ResolvedProject::registered`.
+- Produces: `pub fn resolve(path: &Path) -> anyhow::Result<Option<ResolvedProject>>` (signature unchanged; the
+  written walk and its precedence, *What this slice does* — it answers only a missing project, R-T17); private `fn
+  resolve_as_written(path: &Path) -> anyhow::Result<Option<ResolvedProject>>`. `resolve_and_register` and `choose`
+  inherit it.
+
+- [ ] **Step 1: Write the failing tests.** Append to `crates/openalpaca_storage/src/store/projects/resolve_tests.rs`
+  (the last two pin what S0.3 must keep, and pass before it too):
+
+  ```rust
+
+  // ── ST-23: the path as written first (Stage 2 S0) ───────────────────────────
+
+  /// A recorded root whose folder moved with a link left at the old path: the
+  /// old path and a path below it name that project, missing; once a turn in
+  /// the moved folder registers it, the new path names the new project and
+  /// the old one still names the old, and a turn at the old path records
+  /// nothing new.
+  #[cfg(unix)]
+  #[test]
+  fn a_recorded_root_that_now_leads_elsewhere_resolves_to_its_own_project() {
+      let s = Scene::new();
+      let repo = s.repo("app");
+      s.dir("app/src");
+      let own = register(&repo).unwrap();
+      let moved = s.root().join("work").join("app-moved");
+      fs::rename(&repo, &moved).unwrap();
+      std::os::unix::fs::symlink(&moved, &repo).unwrap();
+
+      for path in [repo.clone(), repo.join("src")] {
+          let found = resolve(&path).unwrap().expect("its own project");
+          assert_eq!(found.root, repo, "{}", path.display());
+          assert_eq!(
+              found.project.map(|p| (p.id, p.missing)),
+              Some((own.id, true)),
+              "{}",
+              path.display()
+          );
+      }
+      let other = register(&moved).unwrap();
+      let id_at = |path: &Path| {
+          resolve(path)
+              .unwrap()
+              .and_then(|r| r.project)
+              .map(|p| p.id)
+      };
+      assert_eq!(id_at(&repo.join("src")), Some(own.id));
+      assert_eq!(id_at(&moved.join("src")), Some(other.id));
+      assert_eq!(
+          resolve_and_register(&repo).unwrap().map(|p| p.id),
+          Some(own.id)
+      );
+      assert_eq!(list().unwrap().len(), 2, "nothing new was recorded");
+  }
+
+  /// The same for a folder renamed by case only, on a case-insensitive volume.
+  #[cfg(unix)]
+  #[test]
+  fn a_recorded_root_renamed_by_case_only_resolves_to_its_own_project() {
+      let s = Scene::new();
+      let work = s.dir("cases");
+      if !crate::store::tests::volume_ignores_case(&work) {
+          eprintln!(
+              "skipped: {} is case-sensitive, so no folder can be renamed by case only",
+              work.display()
+          );
+          return;
+      }
+      let repo = s.repo("cases/App");
+      let own = register(&repo).unwrap();
+      let renamed = work.join("app");
+      fs::rename(&repo, &renamed).unwrap();
+
+      let found = resolve(&repo).unwrap().expect("its own project");
+      assert_eq!(found.root, repo);
+      assert_eq!(
+          found.project.map(|p| (p.id, p.missing)),
+          Some((own.id, true))
+      );
+      let other = register(&renamed).unwrap();
+      let id_at = |path: &Path| {
+          resolve(path)
+              .unwrap()
+              .and_then(|r| r.project)
+              .map(|p| p.id)
+      };
+      assert_eq!(id_at(&repo), Some(own.id));
+      assert_eq!(id_at(&renamed), Some(other.id));
+  }
+
+  /// The written walk's precedence: a folder nearer on the written path that
+  /// holds `.git`, or that is a registered root by its canonical form (one a
+  /// link reaches), outranks the recorded root above it, and the canonical
+  /// walk answers it as today; anywhere else under the old path the recorded
+  /// root answers.
+  #[cfg(unix)]
+  #[test]
+  fn a_repository_or_a_project_nearer_on_the_written_path_outranks_the_recorded_root() {
+      let s = Scene::new();
+      let repo = s.repo("app");
+      s.repo("app/vendor/lib");
+      s.dir("app/docs");
+      let own = register(&repo).unwrap();
+      let moved = s.root().join("work").join("app-moved");
+      fs::rename(&repo, &moved).unwrap();
+      std::os::unix::fs::symlink(&moved, &repo).unwrap();
+      let docs = register(&moved.join("docs")).unwrap();
+
+      let nested = resolve(&repo.join("vendor").join("lib"))
+          .unwrap()
+          .expect("the nested repository");
+      assert_eq!(nested.root, moved.join("vendor").join("lib"));
+      assert!(!nested.is_registered());
+      let chosen = resolve(&repo.join("docs"))
+          .unwrap()
+          .expect("the folder registered at the new path");
+      assert_eq!(chosen.project.map(|p| p.id), Some(docs.id));
+      let rest = resolve(&repo.join("vendor"))
+          .unwrap()
+          .expect("the recorded root");
+      assert_eq!(rest.root, repo);
+      assert_eq!(
+          rest.project.map(|p| (p.id, p.missing)),
+          Some((own.id, true))
+      );
+  }
+
+  /// The written walk answers only a missing project (the lead's ruling
+  /// R-T17): for a project that still leads to itself, a path through a link
+  /// inside it, leading out of it to a folder that is no project, resolves by
+  /// its canonical form, as before Stage 2 — here to nothing, as the folder
+  /// itself does.
+  #[cfg(unix)]
+  #[test]
+  fn a_path_through_a_link_inside_a_present_project_resolves_by_its_canonical_form() {
+      let s = Scene::new();
+      let app = s.repo("app");
+      register(&app).unwrap();
+      let outside = s.dir("outside");
+      std::os::unix::fs::symlink(&outside, app.join("vendor")).unwrap();
+
+      assert_eq!(resolve(&app.join("vendor")).unwrap(), None, "what the link reaches");
+      assert_eq!(resolve(&outside).unwrap(), None, "the folder itself is no project");
+  }
+
+  /// R-T17 (the S0 check's O2): a path through a link inside a project that
+  /// still leads to itself, into a folder below another registered project's
+  /// root, names that other project — the canonical walk's answer, as before
+  /// Stage 2 — never the project the link sits in.
+  #[cfg(unix)]
+  #[test]
+  fn a_link_inside_a_present_project_into_another_projects_folder_names_that_project() {
+      let s = Scene::new();
+      let p = s.repo("p");
+      let q = s.repo("q");
+      s.dir("q/sub");
+      register(&p).unwrap();
+      let other = register(&q).unwrap();
+      std::os::unix::fs::symlink(q.join("sub"), p.join("link")).unwrap();
+
+      let found = resolve(&p.join("link"))
+          .unwrap()
+          .expect("the project the link leads into");
+      assert_eq!(found.root, q);
+      assert_eq!(
+          found.project.map(|project| (project.id, project.missing)),
+          Some((other.id, false))
+      );
+  }
+  ```
+
+  In `crates/openalpaca_core/src/memory/scope_context.rs`, replace the end of `mod tests`
+
+  ```rust
+          assert!(MemoryScopeContext::for_turn(repo.to_str()).is_err());
+      }
+  }
+  ```
+
+  with
+
+  ```rust
+          assert!(MemoryScopeContext::for_turn(repo.to_str()).is_err());
+      }
+
+      /// ST-23 (storage design §0.1): a turn whose client sends a root a project
+      /// records — its folder since moved with a link left at the old path, and
+      /// a turn there registered the new path — is a turn of that project,
+      /// missing (ST-7): a read finds it, a turn records nothing new, and a path
+      /// inside the old root names it too. The follow-up runner and a task's
+      /// re-launch hand their stored root to the same two calls.
+      #[cfg(unix)]
+      #[test]
+      fn a_turn_at_a_recorded_root_that_now_leads_elsewhere_is_a_turn_of_its_own_project() {
+          let tmp = tempfile::TempDir::new().unwrap();
+          let root = tmp.path().canonicalize().unwrap();
+          let home_store = root.join("home").join(".openalpaca");
+          std::fs::create_dir_all(&home_store).unwrap();
+          let _guard = crate::test_util::HomeStoreGuard::set(&home_store);
+          let repo = root.join("work").join("app");
+          std::fs::create_dir_all(repo.join(".git")).unwrap();
+          std::fs::create_dir_all(repo.join("src")).unwrap();
+          let own = projects::register(&repo).unwrap();
+          let moved = root.join("work").join("app-moved");
+          std::fs::rename(&repo, &moved).unwrap();
+          std::os::unix::fs::symlink(&moved, &repo).unwrap();
+          projects::register(&moved).unwrap();
+
+          for sent in [repo.clone(), repo.join("src")] {
+              let read = MemoryScopeContext::for_request(sent.to_str());
+              assert_eq!(
+                  read.request_workspace_root.as_deref(),
+                  repo.to_str(),
+                  "{}",
+                  sent.display()
+              );
+              let turn = MemoryScopeContext::for_turn(sent.to_str()).unwrap();
+              assert_eq!(
+                  turn.request_workspace_root.as_deref(),
+                  repo.to_str(),
+                  "{}",
+                  sent.display()
+              );
+              assert_eq!(turn.workspace_id, turn.request_workspace_root);
+          }
+          let found = projects::lookup(&repo).unwrap().expect("still recorded");
+          assert_eq!((found.id, found.missing), (own.id, true));
+          assert_eq!(
+              projects::list().unwrap().len(),
+              2,
+              "the turns recorded nothing new"
+          );
+      }
+  }
+  ```
+
+- [ ] **Step 2: Run them; expected FAIL.**
+
+  ```bash
+  cargo test -p openalpaca_storage store::projects::resolve_tests 2>&1 | grep -E '^test result|FAILED|panicked'
+  cargo test -p openalpaca_core memory::scope_context 2>&1 | grep -E '^test result|FAILED|panicked'
+  ```
+
+  Expected: `a_recorded_root_that_now_leads_elsewhere_resolves_to_its_own_project` fails `assert_eq!(found.root,
+  repo)` — `resolve` canonicalizes to `app-moved`, whose `.git` makes it an unregistered root; on macOS
+  `a_recorded_root_renamed_by_case_only_resolves_to_its_own_project` fails the same way (`app`, not `App`);
+  `a_repository_or_a_project_nearer_on_the_written_path_outranks_the_recorded_root` fails at `rest.root` (its first
+  two assertions already hold — they pin that S0.3 keeps them); the core test fails at the first
+  `read.request_workspace_root` (`…/app-moved`). `a_path_through_a_link_inside_a_present_project_resolves_by_its_canonical_form`
+  and `a_link_inside_a_present_project_into_another_projects_folder_names_that_project` **pass** — the canonical walk
+  already gives their answers (none, and `q`'s project); they pin that S0.3 keeps them (Step 4's mutation check).
+
+- [ ] **Step 3: Minimal implementation.** In `crates/openalpaca_storage/src/store/projects.rs`, replace
+
+  ```rust
+  use std::path::{Path, PathBuf};
+  ```
+
+  with
+
+  ```rust
+  use std::path::{Component, Path, PathBuf};
+  ```
+
+  Replace `pub fn resolve`'s doc and its opening, from `/// §3 *Resolve* — pure: no cache, creates nothing.` through
+
+  ```rust
+      let Ok(canonical) = path.canonicalize() else {
+          return resolve_missing(path);
+      };
+  ```
+
+  with
+
+  ```rust
+  /// §3 *Resolve* — pure: no cache, creates nothing. `Ok(None)` is no project.
+  ///
+  /// A relative path is no project (R22: it would be read against the daemon's
+  /// working directory). A path that is not its own canonical form — it passes
+  /// through a link or another case, or its folder is gone — is first walked
+  /// as written ([`resolve_as_written`], ST-23): a root a project records,
+  /// matched exactly as written, is that project when it is missing — it no
+  /// longer leads to its own folder — unless a folder nearer on the written
+  /// path is a project by any reading; a project that still leads to itself is
+  /// resolved by the walk below, as before. Then the path is canonicalised and
+  /// walked up; at each folder, in this order: a folder that is, lies inside
+  /// or contains the home store ends the walk with no project (R13 — every
+  /// folder above it contains the home store too); a registered project's
+  /// root is that project; a folder holding `.git` is an unregistered root.
+  /// The nearest match wins. A path that cannot be canonicalised — its folder is gone — is
+  /// walked as written ([`canonical_root`]) against registered roots only, so
+  /// a missing project still resolves to itself (ST-7). `.openalpaca` is no
+  /// marker (ST-9).
+  pub fn resolve(path: &Path) -> anyhow::Result<Option<ResolvedProject>> {
+      if !path.is_absolute() {
+          return Ok(None);
+      }
+      let canonical = path.canonicalize();
+      if canonical.as_deref().ok() != Some(path)
+          && let Some(found) = resolve_as_written(path)?
+      {
+          return Ok(Some(found));
+      }
+      let Ok(canonical) = canonical else {
+          return resolve_missing(path);
+      };
+  ```
+
+  (the canonical walk below it — `for folder in canonical.ancestors() { … }` and `Ok(None)` — stays as it is). Insert
+  after `resolve`'s closing `}` (before `/// [\`resolve\`] for a path that cannot be canonicalised: its ancestors as`):
+
+  ```rust
+
+  /// ST-23's first pass of [`resolve`], for a path that is not its own
+  /// canonical form: its folders as written, nearest first — lexically,
+  /// nothing resolved but what [`overlaps_home_store`], [`lookup`] and a stat
+  /// of `.git` read. A folder a project records exactly as written is that
+  /// project when it is missing ([`root_is_missing`], read into
+  /// [`Project::missing`]): a recorded root that no longer leads to its own
+  /// folder names its own project, never the one its canonical form now leads
+  /// to. The pass ends with no answer, and the canonical walk decides, at the
+  /// first folder that is anything else: one that is, lies inside or contains
+  /// the home store (R13; no recorded root can lie at or above it), a recorded
+  /// root that still leads to itself (resolved as before Stage 2, a path
+  /// through a link inside it by its canonical form — the lead's ruling
+  /// R-T17), one that is a registered project only by its canonical form (a
+  /// root a link or another case reaches), or one holding `.git`. A path with
+  /// a `..` component has no such pass: its folders as written are not the
+  /// ones it lies in.
+  fn resolve_as_written(path: &Path) -> anyhow::Result<Option<ResolvedProject>> {
+      if path.components().any(|part| part == Component::ParentDir) {
+          return Ok(None);
+      }
+      let written: PathBuf = path.components().collect();
+      for folder in written.ancestors() {
+          if overlaps_home_store(folder) {
+              return Ok(None);
+          }
+          if let Some(project) = lookup(folder)? {
+              if project.root.as_path() == folder && project.missing {
+                  return Ok(Some(ResolvedProject::registered(project)));
+              }
+              return Ok(None);
+          }
+          if folder.join(GIT_MARKER).exists() {
+              return Ok(None);
+          }
+      }
+      Ok(None)
+  }
+  ```
+
+  In `pub fn by_recorded_root`'s doc, replace
+
+  ```rust
+  /// the old path) still names its own project, never the one its canonical
+  /// form leads to, which [`lookup`] and [`resolve`] would answer. An entry
+  /// mid re-point is never the answer: its root is where it is going.
+  ```
+
+  with
+
+  ```rust
+  /// the old path) still names its own project, never the one its canonical
+  /// form leads to — as [`lookup`] and [`resolve`] also answer since ST-23.
+  /// It reads the listing, so a `projects/` that cannot be listed is an error,
+  /// which the workspace routes answer `500` (residual X1). An entry mid
+  /// re-point is never the answer: its root is where it is going.
+  ```
+
+  In `crates/openalpaca_storage/src/project_life.rs`, in `fn registered`'s doc, replace
+
+  ```rust
+  /// that error, naming the projects folder — never a fall-through to the
+  /// resolution, which for a recorded root that now leads elsewhere would name
+  /// that other project (residual X1).
+  ```
+
+  with
+
+  ```rust
+  /// that error, naming the projects folder — never a fall-through to the
+  /// resolution (residual X1).
+  ```
+
+  No caller changes: the gateway's turn (`gateway/router/mod.rs:345`, `MemoryScopeContext::for_turn` →
+  `projects::resolve_and_register`), the handler and a task's re-launch (`MemoryScopeContext::for_request`,
+  `orchestrator/handlers.rs:86`, `orchestrator/task_launch.rs:153`), the follow-up runner (through the gateway), the
+  upload and memory routes (`routes/mod.rs:382`, `:397`), the memory context for a client path
+  (`memory/service/context.rs:204`) and the CLI's local verbs (`commands/memory.rs:148`) all call `resolve`.
+
+- [ ] **Step 4: Run; expected PASS.** One at a time:
+
+  ```bash
+  cargo test -p openalpaca_storage store::projects
+  cargo test -p openalpaca_storage project_life
+  cargo test -p openalpaca_storage memory_files
+  cargo test -p openalpaca_core memory::scope_context
+  cargo test -p openalpaca_core memory::service
+  cargo test -p openalpacad routes::
+  pkill -f "sleep 3600"
+  cargo test -p openalpaca commands::
+  ```
+
+  Expected: each `test result: ok`, `0 failed` (counts UNVERIFIED). Neighbours that must still pass, in
+  `resolve_tests`: `the_nearest_registered_root_or_repository_wins` (canonical paths skip the written walk),
+  `a_missing_registered_project_still_resolves_to_itself`, `a_missing_path_is_matched_against_registered_roots_only`
+  (an unregistered `.git` above a gone folder ends the written walk; `resolve_missing` still answers none until the
+  repository is registered), `a_home_store_reached_through_a_link_keeps_the_folder_around_its_name_no_project`,
+  `resolving_creates_nothing_under_the_home_store`, `a_relative_path_is_no_project_even_where_the_working_directory_has_one`;
+  the memory fixtures under `memory_files` that resolve through `fixtures.rs:165`; every `scope_context` test; the
+  CLI's `commands::chat` and `commands::memory` tests.
+
+  Mutation check (R-T17's narrowing): in `resolve_as_written` change `if project.root.as_path() == folder &&
+  project.missing {` to `if project.root.as_path() == folder {`, run `cargo test -p openalpaca_storage
+  store::projects::resolve_tests`, see `a_path_through_a_link_inside_a_present_project_resolves_by_its_canonical_form`
+  fail at its first `assert_eq!` (`left: Some(ResolvedProject { root: "…/work/app", … })`, `right: None`) and
+  `a_link_inside_a_present_project_into_another_projects_folder_names_that_project` at `found.root` (`…/work/p`, not
+  `…/work/q`) — a project that still leads to itself would be answered for a path through a link inside it — and
+  restore the line.
+
+- [ ] **Step 5: Commit.**
+
+  ```bash
+  git add crates/openalpaca_storage/src/store/projects.rs crates/openalpaca_storage/src/store/projects/resolve_tests.rs \
+    crates/openalpaca_storage/src/project_life.rs crates/openalpaca_core/src/memory/scope_context.rs
+  git commit -F - <<'EOF'
+  fix(storage): resolve walks a client path as written before canonicalizing it (storage design ST-23)
+
+  A turn, a follow-up or a re-launched task at the old path of a project whose
+  folder was renamed by case only, or moved with a link left behind, resolved
+  through the link to the folder it reaches: a new project there, or another
+  one. For a path that is not its own canonical form `resolve` now walks the
+  path as written first: a root a project records, matched exactly, is that
+  project when it is missing, unless a folder nearer on the written path holds
+  .git or is a registered root by its canonical form — then the canonical walk
+  answers as before. A project that still leads to itself is resolved as
+  before, a path through a link inside it by its canonical form (ruling
+  R-T17). R13 ends the written walk first; a path with `..`, and a path that
+  is its own canonical form, skip it.
+
+  Verified: cargo test -p openalpaca_storage store::projects, project_life,
+  memory_files; cargo test -p openalpaca_core memory::scope_context,
+  memory::service; cargo test -p openalpacad routes::; cargo test -p
+  openalpaca commands:: — all passed, 0 failed.
+
+  Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+  EOF
+  ```
+
+---
+
+### Task S0.4: the workspace routes resolve a path as written (ST-23)
+
+**Files:**
+- Modify `apps/openalpacad/src/routes/workspaces.rs` — `ProjectView`'s `missing` doc; `fn registered_project` (doc and
+  its `projects::resolve(Path::new(path))`); `pub(crate) fn get_workspace` (its comment and its
+  `projects::resolve(Path::new(&path))`); `pub(crate) fn choose_workspace` (its `canonical_path(&request.path)`);
+  `fn still_the_project`'s doc (its reason for reading by id — the S0 check's O1, the lead's ruling).
+- Test `apps/openalpacad/src/routes/workspaces/life_tests.rs` — one test inserted after S0.1's
+  `a_project_renamed_by_case_only_is_listed_missing_and_re_pointed_to_the_new_case`.
+
+**Interfaces:**
+- Consumes: S0.3's `projects::resolve` and `projects::choose` (both walk a path as written first); the module's
+  `written_path(&str) -> Result<String, Response>` (trimmed, absolute, no trailing `/`).
+- Produces: no new item; `GET /v1/workspaces?path=`, `PATCH /v1/workspaces`, `POST /v1/workspaces/purge` and `POST
+  /v1/workspaces` answer a path inside a recorded root that now leads elsewhere — and, for `POST`, that root itself —
+  with the project it names, as a turn's path does. Wire shapes, codes and `WorkspaceView.path` (still the
+  canonical form, or the recorded root as written) are unchanged.
+
+- [ ] **Step 1: Write the failing test.** Insert after the closing `}` of
+  `a_project_renamed_by_case_only_is_listed_missing_and_re_pointed_to_the_new_case` (S0.1):
+
+  ```rust
+
+  /// ST-23 at every workspace route: a path inside a recorded root that now
+  /// leads, through a link, to another project's folder names the root's own
+  /// project — the read, the delete's refusal of a path inside (R-S8), and the
+  /// re-point of the whole project (T36, kept as built) — and `Use` on the
+  /// root itself chooses it; the other project is never touched.
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn a_path_under_a_root_now_linking_to_another_project_names_its_own_at_every_route() {
+      let w = World::new();
+      let (a, b) = w.moved_behind_a_link("a", "b");
+      std::fs::create_dir_all(b.root.join("src")).expect("a folder inside");
+      let inside = a.root.join("src");
+
+      let (status, body) = w.get(&text(&inside)).await;
+      assert_eq!(status, StatusCode::OK, "{body}");
+      assert_eq!(body["id"], a.id.to_string(), "{body}");
+      assert_eq!(body["root"], text(&a.root), "{body}");
+      assert_eq!(body["missing"], true, "{body}");
+
+      let (status, body) = w.delete(&inside, true).await;
+      assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+      assert_eq!(error_code(&body), "WORKSPACE_NOT_A_ROOT");
+      let message = body["error"]["message"].as_str().unwrap_or_default();
+      assert!(message.contains(&text(&a.root)), "names A's root: {message}");
+
+      let (status, body) = choose(&text(&a.root)).await;
+      assert_eq!(status, StatusCode::OK, "{body}");
+      assert_eq!(body["id"], a.id.to_string(), "{body}");
+      assert_eq!(body["missing"], true, "{body}");
+
+      let new = w.dir("a-new-home");
+      let (status, body) = w.repoint(&inside, &new).await;
+      assert_eq!(status, StatusCode::OK, "{body}");
+      assert_eq!(body["project"]["id"], a.id.to_string(), "{body}");
+      assert_eq!(body["project"]["root"], text(&new), "{body}");
+      let still = projects::lookup(&b.root)
+          .expect("lookup")
+          .expect("B is where it was");
+      assert_eq!((still.id, still.dir), (b.id, b.dir));
+      assert_eq!(projects::list().expect("list").len(), 2, "nothing new was registered");
+  }
+  ```
+
+- [ ] **Step 2: Run it; expected FAIL.**
+
+  ```bash
+  cargo test -p openalpacad routes::workspaces::life_tests::a_path_under 2>&1 | grep -E '^test result|FAILED|panicked'
+  ```
+
+  Expected: FAIL at the first `body["id"]` assertion — `get_workspace` hands `resolve` the canonical form
+  (`…/repos/b/src`), which is B's (`left: String("<B's id>")`). Were that line removed, the purge's message names B's
+  root, `choose` answers B (the route canonicalizes the path before `projects::choose`), and the re-point moves B.
+
+- [ ] **Step 3: Minimal implementation.** In `apps/openalpacad/src/routes/workspaces.rs`:
+
+  In `pub struct ProjectView`, replace
+
+  ```rust
+      /// Its root is not a directory (ST-7): its data is kept.
+      pub missing: bool,
+  ```
+
+  with
+
+  ```rust
+      /// Its root no longer leads to its folder — not a directory, or no longer
+      /// its own canonical form (ST-7, ST-23): its data is kept.
+      pub missing: bool,
+  ```
+
+  In `fn registered_project`'s doc, replace
+
+  ```rust
+  /// project's root. Anything else is resolved the way a turn's path is:
+  /// `404 WORKSPACE_NOT_FOUND` for a root no folder under `projects/` records
+  /// (R12's words) or a path in no project. A listing of `projects/` that
+  /// fails is `500 IO_ERROR` naming the projects folder
+  /// ([`projects_unreadable`]) — never a fall-through to the resolution,
+  /// which for a recorded root that now leads elsewhere would name that other
+  /// project.
+  ```
+
+  with
+
+  ```rust
+  /// project's root. Anything else is resolved as written, the way a turn's
+  /// path is ([`projects::resolve`] walks it as written first, ST-23, so a path
+  /// inside such a root names that root's project too):
+  /// `404 WORKSPACE_NOT_FOUND` for a root no folder under `projects/` records
+  /// (R12's words) or a path in no project. A listing of `projects/` that
+  /// fails is `500 IO_ERROR` naming the projects folder
+  /// ([`projects_unreadable`]) — never a fall-through to the resolution
+  /// (residual X1).
+  ```
+
+  and in its body replace
+
+  ```rust
+      match projects::resolve(Path::new(path)) {
+  ```
+
+  with
+
+  ```rust
+      match projects::resolve(Path::new(written)) {
+  ```
+
+  In `pub(crate) fn get_workspace`, replace
+
+  ```rust
+      // `registered_project`). A listing that fails says so rather than
+      // resolving: the canonical form may be another project's root.
+  ```
+
+  with
+
+  ```rust
+      // `registered_project`). A listing that fails says so rather than
+      // resolving (residual X1). Any other path is resolved as written
+      // (ST-23); `path` stays its canonical form, as the answer prints it.
+  ```
+
+  and, in its `Ok(None) =>` arm, replace
+
+  ```rust
+              let path = canonical_of(&written);
+              match projects::resolve(Path::new(&path)) {
+  ```
+
+  with
+
+  ```rust
+              let path = canonical_of(&written);
+              match projects::resolve(Path::new(&written)) {
+  ```
+
+  In `pub(crate) fn choose_workspace`, replace
+
+  ```rust
+      let path = match canonical_path(&request.path) {
+  ```
+
+  with
+
+  ```rust
+      // As written (ST-23): `projects::choose` resolves it and matches a root a
+      // project records before it canonicalizes anything, so `Use` on the root
+      // the list prints chooses that project even when it now leads elsewhere.
+      let path = match written_path(&request.path) {
+  ```
+
+  (`canonical_path` keeps its caller, `rebase_workspace`'s new path.)
+
+  In `fn still_the_project`'s doc, replace
+
+  ```rust
+  /// the same project may hold it meanwhile. Read by id — never by root, which
+  /// for a recorded root that now leads elsewhere would name another project —
+  /// and taken only when its root and its folder are still the ones it was
+  ```
+
+  with
+
+  ```rust
+  /// the same project may hold it meanwhile. Read by id — never by root, which
+  /// would take a project deleted and registered again at that root, under a
+  /// new id, for this one — and taken only when its root and its folder are
+  /// still the ones it was
+  ```
+
+  (A comment only: the rule — read by id — stands; its old reason, that a read by root would name another project
+  for a root that now leads elsewhere, is what S0.2 ends.) The next doc line, `/// read with; once the slot is held no
+  other re-point or delete of this id`, follows on unchanged.
+
+- [ ] **Step 4: Run; expected PASS.**
+
+  ```bash
+  cargo test -p openalpacad routes::workspaces
+  pkill -f "sleep 3600"
+  ```
+
+  Expected: `test result: ok`, `0 failed` (count UNVERIFIED). Neighbours that must still pass:
+  `choosing_a_folder_inside_a_git_repository_registers_the_repository`, `choosing_a_folder_with_no_git_makes_it_a_project_once`,
+  `choosing_the_home_store_or_a_folder_holding_it_is_refused`, `choosing_a_file_or_a_missing_path_is_unprocessable`
+  (`register` canonicalizes the written path itself), `choosing_a_relative_path_is_invalid`,
+  `a_path_inside_a_project_answers_the_project_and_its_five_counts`, `a_path_in_no_project_answers_a_null_root_and_zero_rows`,
+  `a_path_inside_a_project_is_refused_naming_its_root_and_nothing_is_deleted`,
+  `a_recorded_root_whose_listing_fails_answers_500_and_nothing_moves_or_goes` (the listing is still read first), and
+  the `routes::workspaces::tests` module.
+
+- [ ] **Step 5: Commit.**
+
+  ```bash
+  git add apps/openalpacad/src/routes/workspaces.rs apps/openalpacad/src/routes/workspaces/life_tests.rs
+  git commit -F - <<'EOF'
+  fix(daemon): the workspace routes resolve a path as written (storage design ST-23)
+
+  `GET ?path=`, `PATCH` and the purge matched a recorded root as written but
+  resolved any other path by its canonical form, and `POST /v1/workspaces`
+  canonicalized before choosing, so a path inside a root that now leads to
+  another project's folder named that other project — the read, the delete's
+  refusal and the re-point (T36's shape) — where a turn's path names the
+  root's own. They now hand `projects::resolve` and `projects::choose` the path
+  as written. No wire shape, code or field changes. still_the_project's doc
+  gives its rule (read by id) its remaining reason.
+
+  Verified: cargo test -p openalpacad routes::workspaces — all passed, 0 failed.
+
+  Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+  EOF
+  ```
+
+---
+
+### Task S0.5: the CLI and the app say a missing project's folder is "gone or has moved" (ST-23)
+
+S0.1 makes `missing` mean the root is not a directory **or** no longer leads to its own folder, but the CLI and the
+app explain it as a folder that is gone: `store list`'s note and `store rebase --dry-run`'s line, the Projects list's
+sentence under a missing row, the `Re-point…` dialog's opening, and the wire's `missing` docs. This task makes each
+say "gone or has moved", as S2's `ProjectMissing` sentence does (interfaces §1.3), so the person reads one
+explanation everywhere (the S0 check's O1; the lead's ruling). Words only: no logic, no wire field, no refusal code.
+The purge's `422 WORKSPACE_NOT_A_ROOT` sentence (`routes/workspaces.rs`, `{path} is inside the project rooted at
+{root}; …`) never says the folder is gone, so it stays as it is.
+
+**Files:**
+- Modify `apps/openalpaca/src/commands/store.rs` — the module doc's `list` sentence (`//! project and marks one whose
+  folder is gone. …`); `render_list`'s missing note; the `--dry-run` line under `if from.missing`.
+- Test `apps/openalpaca/src/commands/store.rs` (`mod tests`) — `list_prints_every_project_and_marks_a_missing_one`'s
+  expected text and one assertion of `a_rebase_dry_run_reads_both_paths_and_names_what_would_be_refused`.
+- Modify `apps/openalpaca-gui/src/views/settings/ProjectsCard.tsx` — the module doc's `missing` sentence;
+  `MISSING_PROJECT_COPY` and its doc.
+- Modify `apps/openalpaca-gui/src/components/overlays/RepointProjectDialog.tsx` — the paragraph's opening for a
+  missing project.
+- Modify `apps/openalpaca-gui/src/lib/api/workspaces.ts` — the module doc's `missing` sentence, `Project.missing`'s
+  doc and `Workspace.missing`'s doc (doc comments only; `gen_api_docs.py` reads no doc comment of a field, so
+  `docs/api` does not move).
+- Test `apps/openalpaca-gui/src/views/settings/ProjectsCard.test.tsx` — one assertion added.
+- Test `apps/openalpaca-gui/src/components/overlays/RepointProjectDialog.test.tsx` — the missing-folder test.
+
+**Interfaces:**
+- Consumes: S0.1's `missing` (the wire's `missing`, unchanged in shape).
+- Produces: the strings, exact — CLI `store list`: `missing — its folder is gone or has moved: re-point it, or delete
+  its data`; CLI `store rebase --dry-run`: `  its folder is gone or has moved; re-pointing is what re-attaches its
+  data`; app `MISSING_PROJECT_COPY`: `Its folder is gone or has moved. Everything recorded for it is kept until you
+  re-point it or delete its data.`; app `Re-point…` dialog for a missing project: `Its folder is gone or has moved
+  from <root>.` S6.3b, S6.3d and S6.5 quote them.
+
+- [ ] **Step 1: Write the failing tests.**
+
+  In `apps/openalpaca/src/commands/store.rs`'s `mod tests`, in `list_prints_every_project_and_marks_a_missing_one`,
+  replace
+
+  ```rust
+                  "/work/app\n  projects/-work-app · id {APP_ID}\n\
+                   /work/old  missing — its folder is gone: re-point it, or delete its data\n  \
+                   projects/-work-old · id {OLD_ID}\n"
+  ```
+
+  with
+
+  ```rust
+                  "/work/app\n  projects/-work-app · id {APP_ID}\n\
+                   /work/old  missing — its folder is gone or has moved: re-point it, or delete its \
+                   data\n  projects/-work-old · id {OLD_ID}\n"
+  ```
+
+  (A `\` at a line's end skips the newline and the next line's indentation, so the expected text reads
+  `… delete its data\n  projects/-work-old · id …\n`.) In `a_rebase_dry_run_reads_both_paths_and_names_what_would_be_refused`,
+  replace
+
+  ```rust
+          assert!(
+              text.contains("its folder is gone; re-pointing is what re-attaches its data"),
+              "{text}"
+          );
+  ```
+
+  with
+
+  ```rust
+          assert!(
+              text.contains(
+                  "its folder is gone or has moved; re-pointing is what re-attaches its data"
+              ),
+              "{text}"
+          );
+  ```
+
+  In `apps/openalpaca-gui/src/views/settings/ProjectsCard.test.tsx`, in `it("marks a missing project, and only that
+  one, and says its data is kept", …)`, after
+
+  ```tsx
+      expect(screen.getByText(MISSING_PROJECT_COPY)).toBeInTheDocument();
+  ```
+
+  add
+
+  ```tsx
+      expect(MISSING_PROJECT_COPY).toBe(
+        "Its folder is gone or has moved. Everything recorded for it is kept until you re-point it or delete its data.",
+      );
+  ```
+
+  In `apps/openalpaca-gui/src/components/overlays/RepointProjectDialog.test.tsx`, replace
+
+  ```tsx
+    it("says when the project's folder is gone", () => {
+      renderDialog({ project: { ...REPO, missing: true } });
+
+      expect(screen.getByRole("dialog")).toHaveTextContent(
+        `Its folder is gone from ${REPO.root}.`,
+      );
+    });
+  ```
+
+  with
+
+  ```tsx
+    it("says when the project's folder is gone or has moved", () => {
+      renderDialog({ project: { ...REPO, missing: true } });
+
+      expect(screen.getByRole("dialog")).toHaveTextContent(
+        `Its folder is gone or has moved from ${REPO.root}.`,
+      );
+    });
+  ```
+
+- [ ] **Step 2: Run them; expected FAIL.** `pgrep -x cargo` (nothing), then:
+
+  ```bash
+  cd /Users/tangyunpei/dev/OpenAlpaca
+  cargo test -p openalpaca commands::store 2>&1 | grep -E '^test result|FAILED|panicked'
+  cd apps/openalpaca-gui && bun run test -- src/views/settings/ProjectsCard.test.tsx src/components/overlays/RepointProjectDialog.test.tsx; cd ../..
+  ```
+
+  Expected: `list_prints_every_project_and_marks_a_missing_one` FAILS at its `assert_eq!` (`left` holds `missing — its
+  folder is gone: re-point it, or delete its data`, `right` the new line) and
+  `a_rebase_dry_run_reads_both_paths_and_names_what_would_be_refused` at the replaced `assert!`; `test result:
+  FAILED`, `2 failed`. Vitest: two failed — `ProjectsCard.test.tsx`'s `toBe` (expected `Its folder is gone or has
+  moved. …`, received `Its folder is gone. …`) and `RepointProjectDialog.test.tsx`'s `toHaveTextContent` (the dialog
+  reads `Its folder is gone from /Users/me/dev/repo.`). If vitest reports "No test files found", run
+  `bunx vitest run <the two paths>` instead (S6a's note).
+
+- [ ] **Step 3: Minimal implementation.**
+
+  In `apps/openalpaca/src/commands/store.rs`, in the module doc, replace
+
+  ```rust
+  //! project and marks one whose folder is gone. `rebase` re-points a moved
+  //! project — its rows and its folder's name under `projects/` — and its
+  ```
+
+  with
+
+  ```rust
+  //! project and marks one whose folder is gone or has moved (storage design
+  //! ST-23). `rebase` re-points a moved project — its rows and its folder's
+  //! name under `projects/` — and its
+  ```
+
+  In `fn render_list`, replace
+
+  ```rust
+              true => format!(
+                  "  {}",
+                  "missing — its folder is gone: re-point it, or delete its data".yellow()
+              ),
+  ```
+
+  with
+
+  ```rust
+              true => format!(
+                  "  {}",
+                  "missing — its folder is gone or has moved: re-point it, or delete its data"
+                      .yellow()
+              ),
+  ```
+
+  and in the `--dry-run` rendering, replace
+
+  ```rust
+      if from.missing {
+          let _ = writeln!(
+              out,
+              "  its folder is gone; re-pointing is what re-attaches its data"
+          );
+      }
+  ```
+
+  with
+
+  ```rust
+      if from.missing {
+          let _ = writeln!(
+              out,
+              "  its folder is gone or has moved; re-pointing is what re-attaches its data"
+          );
+      }
+  ```
+
+  In `apps/openalpaca-gui/src/views/settings/ProjectsCard.tsx`, in the module doc, replace
+
+  ```tsx
+   * `GET /v1/workspaces` lists it, by folder name. A project whose root is no
+   * longer a directory is marked `missing` and keeps everything recorded for
+   * it (ST-7): nothing detects a move, and nothing is dropped on its own.
+  ```
+
+  with
+
+  ```tsx
+   * `GET /v1/workspaces` lists it, by folder name. A project whose root is no
+   * longer a directory, or no longer leads to its own folder (renamed by case
+   * only, or moved with a link left at the old path), is marked `missing` and
+   * keeps everything recorded for it (ST-7, ST-23): nothing follows a moved
+   * folder, and nothing is dropped on its own.
+  ```
+
+  and replace
+
+  ```tsx
+  /** What a missing project's row says under its root (ST-7). */
+  export const MISSING_PROJECT_COPY =
+    "Its folder is gone. Everything recorded for it is kept until you re-point it or delete its data.";
+  ```
+
+  with
+
+  ```tsx
+  /** What a missing project's row says under its root (ST-7, ST-23). */
+  export const MISSING_PROJECT_COPY =
+    "Its folder is gone or has moved. Everything recorded for it is kept until you re-point it or delete its data.";
+  ```
+
+  In `apps/openalpaca-gui/src/components/overlays/RepointProjectDialog.tsx`, replace
+
+  ```tsx
+            {project.missing ? "Its folder is gone from " : "It is recorded at "}
+  ```
+
+  with (prettier's shape for a ternary over 80 columns)
+
+  ```tsx
+            {project.missing
+              ? "Its folder is gone or has moved from "
+              : "It is recorded at "}
+  ```
+
+  In `apps/openalpaca-gui/src/lib/api/workspaces.ts`, in the module doc, replace
+
+  ```ts
+   * Nothing is written inside a project folder (ST-1), so nothing travels with
+   * a moved folder: a project whose root is gone is `missing` (ST-7) until its
+   * owner re-points it or deletes its data. Every refusal below is an
+  ```
+
+  with
+
+  ```ts
+   * Nothing is written inside a project folder (ST-1), so nothing travels with
+   * a moved folder: a project whose root is gone, or no longer leads to its own
+   * folder (renamed by case only, or moved with a link left at the old path),
+   * is `missing` (ST-7, ST-23) until its owner re-points it or deletes its
+   * data. Every refusal below is an
+  ```
+
+  in `interface Project`, replace
+
+  ```ts
+    /** The root is not a directory any more (ST-7); its data is kept. */
+    missing: boolean;
+  ```
+
+  with
+
+  ```ts
+    /**
+     * The root is not a directory any more, or no longer leads to its own
+     * folder — renamed by case only, or moved with a link left at the old path
+     * (ST-7, ST-23); its data is kept.
+     */
+    missing: boolean;
+  ```
+
+  and in `interface Workspace`, replace
+
+  ```ts
+    /** The root is not a directory (ST-7); `false` when `root` is `null`. */
+    missing: boolean;
+  ```
+
+  with
+
+  ```ts
+    /**
+     * The root is not a directory, or no longer leads to its own folder (ST-7,
+     * ST-23); `false` when `root` is `null`.
+     */
+    missing: boolean;
+  ```
+
+  (`Workspace.path`'s doc, "otherwise canonicalized (as written when it is gone)", is about the path asked about,
+  which S0.4 keeps as it was: it stays.)
+
+- [ ] **Step 4: Run; expected PASS.** One at a time:
+
+  ```bash
+  cd /Users/tangyunpei/dev/OpenAlpaca
+  cargo test -p openalpaca commands::store 2>&1 | grep -E '^test result|FAILED|panicked'
+  python3 scripts/gen_api_docs.py --check
+  cd apps/openalpaca-gui && bun run check && bun run test && bun run format:check && bun run build; cd ../..
+  ```
+
+  Expected: `test result: ok`, `0 failed` (count UNVERIFIED) — `list_with_no_projects_says_how_one_is_made`,
+  `a_rebase_dry_run_from_an_unknown_path_onto_a_missing_one_says_both` and the purge tests unchanged; `gen_api_docs.py
+  --check` reports no drift; the four bun gates exit 0, vitest's every file passing (the Projects card's and the
+  dialog's other tests unchanged — none of them reads the changed words but these two).
+
+- [ ] **Step 5: Commit.**
+
+  ```bash
+  git add apps/openalpaca/src/commands/store.rs apps/openalpaca-gui/src/views/settings/ProjectsCard.tsx \
+    apps/openalpaca-gui/src/views/settings/ProjectsCard.test.tsx \
+    apps/openalpaca-gui/src/components/overlays/RepointProjectDialog.tsx \
+    apps/openalpaca-gui/src/components/overlays/RepointProjectDialog.test.tsx \
+    apps/openalpaca-gui/src/lib/api/workspaces.ts
+  git commit -F - <<'EOF'
+  fix(cli,gui): a missing project's folder is "gone or has moved" (storage design ST-23)
+
+  Since ST-23 a project is missing when its root is not a directory or no
+  longer leads to its own folder — renamed by case only, or moved with a link
+  left at the old path — but store list, store rebase --dry-run, the Projects
+  list and the Re-point dialog still said its folder was gone. They now say
+  "gone or has moved", as the file tools' ProjectMissing sentence does, and the
+  wire's missing docs say what the flag means. Words only.
+
+  Verified: cargo test -p openalpaca commands::store — ok, 0 failed; bun run
+  check, test, format:check, build — all exit 0; gen_api_docs.py --check clean.
+
+  Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+  EOF
+  ```
+
+---
+
+### What the surfaces already do (checked, no task)
+
+- **Every caller of a changed function (grep at `fb3bee0f`, test code aside).** No signature changes, so no caller
+  is edited beyond what the tasks name. `lookup`: `store_root` (`store/mod.rs:442`), `scope_root` and `project_id_of`
+  (`memory_files/partition.rs:608`, `:630`), `MemoryService::slot_key` (`memory/service/mod.rs:832`), `resolve_hint`'s
+  stored root (`memory/service/context.rs:176`), the doctor (`memory_files/doctor.rs:133`), the CLI's
+  `doctor --repair` (`commands/memory.rs:1733`), `check_project` (`memory/learning/extractor.rs:1084`), the
+  re-point's target check (`project_life.rs:257`), and inside `projects.rs` `resolve`, `resolve_missing` and (as
+  `lookup_in`) `register` — all read as written first after S0.2. `resolve`: `MemoryScopeContext::for_request`
+  (`resolved_root`, `scope_context.rs:138`) and `for_turn` (`resolve_and_register`, `:107`) — the gateway's turn, the
+  handler, a task's re-launch, the follow-up runner, `GET /v1/status` and the upload and memory routes go through
+  these — `resolve_hint`'s client path and its stale-root fallback (`context.rs:183`, `:204`), the re-point's
+  `registered` (`project_life.rs:208`), the workspace routes (`routes/workspaces.rs:369`, `:493`, S0.4), `choose`,
+  and the memory fixtures (`memory_files/fixtures.rs:165`). `resolve_missing`: `resolve` only. `read_project_dir`:
+  `lookup_in`/`recorded_in`, `list_in`, `register`, `name_for_in`, the re-point's `finish` (`project_life.rs:351`)
+  and the delete's folder removal (`project_life/delete.rs:675`, which compares ids only). `by_id`: the routes'
+  `still_the_project` and `memory adopt` (`memory_files/partition.rs:2805`, which works in `project.dir`).
+  `by_recorded_root`: the routes, the re-point's `registered` and the CLI's `is_recorded_root`
+  (`commands/memory.rs:157`) — unchanged (it already compares as written). `Project::missing` is read only by
+  `ProjectView` and `WorkspaceView` (`routes/workspaces.rs:115`, `:531`); the CLI and the app read the wire.
+  `project_root_of` (S0.2, the lead's ruling R-T19; its signature unchanged): `ArtifactStore::put`
+  (`artifacts/mod.rs:876`) and `UploadStore::put` (`uploads/mod.rs:220`), each after `content_dir` has looked the
+  same root up through `store_root`, so the row's address and the folder holding its bytes name one project; later
+  S4a.17's `send` (R-T3, with R-T19's own check) and S5.2's `artifact_read` read the turn's project through it.
+
+- **`GET /v1/workspaces`** copies `Project::missing` (`routes/workspaces.rs:115`) — S0.1's route tests pin the flag
+  for both shapes. **`GET ?path=`** copies it too (`:531`). **`openalpaca store list`** prints the wire's `missing`
+  (`commands/store.rs:306-311`) and **the app's Projects list** draws its `missing` tag from it
+  (`views/settings/ProjectsCard.tsx:126`): no logic change; their sentence "its folder is gone", wrong for a moved
+  folder, becomes "gone or has moved" in S0.5. **`Re-point…`** sends the recorded root as
+  `old_path`, which the routes match as written (review R1), and its count and plan safeguards compare the answer's
+  id with the project's (`plan-stage1.md` §11, §6.3): they pass for such a project. `openalpaca store rebase` sends the path as typed to
+  the same `PATCH`.
+- **`GET /v1/status` for a window holding the old path** (`routes/status.rs:357`, `request_project_root` →
+  `MemoryScopeContext::for_request` → `resolve`): after S0.3 its `project_root` is the old root — the missing project
+  — where today it is the folder the link or the new spelling reaches (another project, or an unregistered `.git`
+  root). `useProjectFollow`'s `lost` is `project_root === null`, so it stays off and the window keeps the project; the
+  Projects list marks that row `missing` and `this window`; the window's turns are that project's (Stage 2's R27
+  refuses its tools). After a re-point from this window the `PATCH` answer sets the new root
+  (`ProjectsCard`). After a re-point made elsewhere (the CLI) the held old path resolves — through the link or the
+  other case, by the canonical walk — to the re-pointed project, so `project_root` is non-null, turns land in the
+  right project and only the held path is not rewritten; if the link is later removed, `project_root` reads `null`
+  and `useProjectFollow` follows the project by id. Sensible; nothing changes.
+- **The Connection view's Project card** (`views/settings/ConnectionSection.tsx`, `ProjectCard`, `projectCardRoot`)
+  prints `project_root` when it is a string: after S0.3 the old root, with no "in no project" note and the usual
+  "Runs started here record this project" line; the card itself never says `missing` — the Projects list under it
+  does, on the row tagged `this window` (`ProjectsCard`'s `current` is `project.root === project_root`, true for the
+  old root). Today the card prints the folder the link or the new spelling reaches, and that row is not tagged.
+  `Use` on the old root chooses the missing project after S0.4 (today it registers, or chooses, the folder the root
+  reaches). The chat sidebar and the Memory view read the same `project_root`, so they show the missing project's
+  conversations and notes rather than the other folder's. No GUI change.
+- **A re-point from the app or the CLI onto the new spelling of a case-only rename** passes the client checks:
+  `repointTarget` refuses only a target equal to `project.root`, and `…/app` ≠ `…/App`; `store rebase --dry-run`'s
+  "already a project" flag needs the target resolved as a registered root or holding rows, which the new spelling is
+  not until a turn registers it (then ST-20's refusal is the daemon's, unchanged).
+
+### Spec conflicts
+
+- **The written walk's precedence (S0.3).** The job says "a recorded root found as written wins before the canonical
+  walk". Applied to every folder of the written path, that would let a recorded root beat a nearer repository — a
+  submodule inside the moved folder reached through the link — or a folder registered at the new path, which §3's
+  "the nearest match wins" and `the_nearest_registered_root_or_repository_wins` forbid. S0.3 therefore ends the
+  written walk, handing over to today's canonical walk, at the first folder nearer than the recorded root that holds
+  `.git` or is a registered project by its canonical form; R13 ends it first. And a recorded root found as written
+  answers only when its project is missing (the lead's ruling R-T17, narrowed after the S0 check's O2): one that still
+  leads to itself ends the written walk too, so a project that still leads to itself is resolved exactly as before
+  Stage 2. A missing project's recorded root found as written wins over everything above it and beside it. Pinned by
+  `a_repository_or_a_project_nearer_on_the_written_path_outranks_the_recorded_root`,
+  `a_path_through_a_link_inside_a_present_project_resolves_by_its_canonical_form` and
+  `a_link_inside_a_present_project_into_another_projects_folder_names_that_project`.
+- **The written walk's reads.** The job says "lexically, no I/O beyond a stat per ancestor's folder name". Per written
+  folder S0.3 reads what `overlaps_home_store` reads (it canonicalizes the folder and the home store, as the canonical
+  walk already does per folder), `lookup` (two small reads as written; when the folder's canonical form differs, a
+  `realpath` and two more), and a stat of `.git`. The `realpath` is what tells a registered root reached through a link
+  (rule 3 above). The walk runs only for a path that is not its own canonical form, so an ordinary path pays nothing.
+- **`lookup`'s reads.** §3 says "two small reads"; the job says "two small reads, as lookup is today, then falls back
+  to the canonical lookup". As built in S0.2: two as written, and two more only when the canonical form differs from
+  the root as written. S6.6 records it in design §3.
+- **Callers beyond the job's list.** The job names `store_root`, the dispatch's `register`, memory, learning and the
+  follow-up runner. Two more needed the rule "matched as written wherever the daemon looks a project up": the
+  workspace routes resolved every path but a recorded root by its canonical form and `POST /v1/workspaces`
+  canonicalized before choosing (S0.4, advisor's finding); and learning's `check_project` compared an unfinished
+  re-point's roots with the canonical form only, so such a project's turns read `Gone` across a crash before its
+  rename (S0.2). A third, found while applying R-T18 and ruled as R-T19: `store::project_root_of` canonicalized the
+  root a by-product's or an upload's row records, so a row filed at a missing project's old root named the folder
+  the root now reaches while its bytes went to the missing project's folder (S0.2).
+- **Stage 2's interfaces sheet, §1.2–§1.3, and S2's draft** were written against "missing = the folder is gone":
+  `WorkingFolderRefusal::ProjectMissing`'s doc ("its folder is gone (ST-7)") and its sentence ("The project folder
+  {root} is missing — its folder is gone: …"); the note under §1.2 and S2.md's Step 3 ("`lookup` is used, not
+  `by_recorded_root`: `request_workspace_root` is the canonical root the gateway resolved … R-F7's residue in design
+  §18 stands as recorded") — after S0 the recorded root may no longer be canonical, and `lookup` matches it as written
+  first, which is why `lookup` stays right; and "reads two small files at most" (up to four, S0.2). This plan
+  rewrites them: interfaces §1.2's doc, note and file count, §1.3's sentence, and S2.1's doc, sentence, test literal
+  and file counts (the settled table's R-T17 row); the drafting-stage `interfaces.md` and `S2.md` are not edited.
+- **Design text that S0 makes wrong** (S6.6's records, not S0's): §3's `list()` bullet ("A project is **missing** when
+  its root is not a directory"), §3's `lookup` bullet ("Two small reads"), §3's *As built* ("`lookup`, `store_root`,
+  the dispatch's `register` and memory still take such a root by its canonical form (§18)"), §6 *Missing (ST-7)* ("A
+  project whose root is not a directory is listed as missing"), and §18's *review R1's deeper cross-wiring* and X6
+  (*A project whose recorded root no longer opens is listed, but the 30 s reconciliation skips its partition*), both
+  closed by S0.
+
+### Open points
+
+- **S0 is the ninth slice, first in the order (R-T17) — integrated.** This plan carries it: the header (Goal,
+  Architecture, Spec, where the plan came from, the Global Constraints' *Order*, Review Focus item 1), the *Rulings*
+  (R-T17, R-T18 for the result files S4a and S6a read, and R-T19 for the rows S0.2 addresses and the result files
+  S4a.17 sends), the interfaces sheet's §0 (an S0 row and its order line;
+  §0.1 gains no row, as S0 changes no signature), §1.2 and §1.3, and the settled table's R-T17, R-T18 and R-T19 rows. Design
+  §16's *Order* for Stage 2 (S0 before step (1)) is recorded
+  with the build, by S6.6 Step 1. The drafting-stage sources in `plan-drafts/stage2/` (`header.md`, `interfaces.md`,
+  `S2.md`) are not edited: this plan supersedes them.
+- **The case-only tests' premises — settled by a probe, not by cargo.** On this machine's APFS (case-insensitive)
+  volume, in a scratch directory and in a `$TMPDIR` tempdir (where `tempfile` makes the tests' folders), a folder
+  `App` renamed to `app` with `rename(2)` is then listed as `app` (the entry's spelling changes; POSIX's "same file,
+  do nothing" does not apply), and `realpath(3)` of `…/App` — what Rust's `fs::canonicalize` calls on macOS —
+  answers `…/app`, the spelling on disk; a folder under a `projects/`-like parent renamed `-x-App` → `-x-app` behaves
+  the same. Stage 1's guard test `a_store_that_reaches_the_real_one_by_a_link_a_dot_dot_or_another_case_is_refused`
+  (`projects/tests.rs:1112`) relies on the second as well. The S0 case tests still assert both (the
+  `canonicalize() == renamed` precondition, the `read_dir` spelling), so a volume where either fails fails them loudly
+  rather than skipping. Should the rename's assertion ever fail, stop: the re-point's step 3 would leave the folder
+  under its old spelling while `project.json` records the new root, and the remedy (a rename through a hidden
+  temporary name) opens a crash window `list()` — which passes over dot-names — would not recover; that is a design
+  question for the lead, not an implementer's fix. The case-only tests return early on a case-sensitive volume, so
+  CI (ubuntu) never exercises them; the owner's Mac does. Windows is not covered (no CI runs Rust there).
+- **UNVERIFIED cargo output.** Every compiler message, panic text and pass count quoted in a Step 2 or Step 4, and the
+  clippy count, are expected from reading the code; none was run here.
+- **The written walk answers only a missing project — settled (the lead's ruling R-T17, narrowed after the S0
+  check's O2).** The draft let a recorded root found as written answer whether its project was missing or not, so a
+  path through a link inside a project that still leads to itself named that project — where it named what the link
+  reaches: nothing, or, for a link into a folder below another registered project's root, that other project. As
+  ruled, `resolve_as_written` answers only a missing project and hands any other recorded root to the canonical walk,
+  so a project that still leads to itself resolves exactly as before Stage 2, and nothing here asks the owner to
+  confirm a change of behaviour. S0.3 pins both shapes
+  (`a_path_through_a_link_inside_a_present_project_resolves_by_its_canonical_form`,
+  `a_link_inside_a_present_project_into_another_projects_folder_names_that_project`; both pass before S0.3 too, and its
+  Step 4's mutation check shows they bite). `lookup`'s as-written read (S0.2) is unchanged: for such a project the
+  root as written is its canonical form.
+- **What S3 consumes (R27) — integrated.** S2's `working_folder` (`tools/working_folder.rs`, S2.1) calls
+  `projects::lookup(request_workspace_root)` and maps `Ok(Some(p))` with `p.missing` to `ProjectMissing`: after S0 that
+  same call answers a project whose root was renamed by case or moved behind a link as **missing** (S0.2's
+  as-written match, S0.1's flag), so S3's refusal "before any tool runs, with §6's sentence" covers ST-23 with no code
+  of its own. S3.1's `WorkingFolder::ensure` asks `projects::root_is_missing(root)` for a project root instead of an
+  `is_dir()` test of its own, so a folder moved between the lookup and the act is not followed through a link left
+  behind, and S3.1's `a_project_moved_behind_a_link_is_missing_and_never_acted_in_through_it` pins both halves in its
+  own tempdir scene (not `GuardedProject`'s, whose `TempDir` owns the root). The sentence reads "… is missing — its
+  folder is gone or has moved: re-point the project to where its folder is now (…)": S2.1 and interfaces §1.3 own the
+  text and its test literal, and S3 asserts through `WorkingFolderRefusal::to_string()`. The settled table's R-T17
+  row says so.
+- **Documents and strings that still say `missing` means "not a directory" or "its folder is gone" — placed.** The
+  code strings are S0.5's (the lead's ruling on the S0 check's O1): the CLI's `store list` note and `store rebase
+  --dry-run` line (`apps/openalpaca/src/commands/store.rs`, with their two tests and the module doc) and the app's
+  Projects list sentence (`MISSING_PROJECT_COPY` and the module doc, `views/settings/ProjectsCard.tsx`), the
+  `Re-point…` dialog's opening (`components/overlays/RepointProjectDialog.tsx`, "Its folder is gone or has moved from
+  …"; the draft's "Its folder is no longer at …" is not taken — the ruling's words are "gone or has moved") and the
+  wire's `missing` docs (`lib/api/workspaces.ts`), with the four bun gates — so `store list`'s clause repeats S2's
+  `ProjectMissing` sentence ("… its folder is gone or has moved: …") again. The documents follow: the Daemon Manual's
+  project rows (`:577`, and `:578`'s "any other path is canonicalized", which S0.4 makes false) and its new *The
+  Working Folder* bullet (S6.3a); the CLI Manual's `store list` note (`:616`, its explanation and the line it quotes,
+  as S0.5 prints it) and `memory --project` (`:696`) (S6.3b); `API_MAP.md:282` and `DESIGN_SPEC.md:1316` and `:1317`
+  (the dialog's text, as S0.5 draws it) (S6.3d); S6.5 Step 16's expected `store list` line; and the records (S6.6:
+  design §0.2, §3, §6, §16, §18 and the revision log, with the note that before S0 learning dropped the turns of a
+  project moved behind a link — `check_project` read it `Gone` — found while planning S0 and fixed by S0.2, written
+  into the closed *review R1's deeper cross-wiring* bullet; `CLAUDE.md`'s Stage 1 paragraph, its design row and its
+  *Owner decisions pending* bullet, which `fb3bee0f` already moved to T36's answer and ST-23's to-be-built line;
+  `tasks/api-fix-plan.md` §0, ST-23's row gaining its commits; the vault's ADR-047). `docs/GUI_Manual.md:1024` ("one
+  whose folder is no longer at its path") already reads right.
+- **Two comments with a stale reason — placed.** `still_the_project`'s doc (`routes/workspaces.rs:421-430`) read a
+  project again "by id — never by root, which for a recorded root that now leads elsewhere would name another
+  project", and `MemoryService::known_project_roots`' doc (`memory/service/mod.rs:884-888`) read each listed entry's
+  own `dir` "never by a second lookup of its root, which … would name no project, or another one". After S0 a lookup
+  by such a root names the same project; both rules stand and only their reasons go: S0.4 rewrites the first (in the
+  file it already edits), S0.2 the second.
+- **A sentence S0.4 leaves as it is.** The purge's `422 WORKSPACE_NOT_A_ROOT` names the path asked about by its
+  canonical form (`{path}`, `routes/workspaces.rs:969`), so for a path inside a root that now leads elsewhere it reads
+  "…/repos/b/src is inside the project rooted at …/repos/a" — true of the folders, odd to read. The code, the root it
+  names and S0.4's test (which asserts the root only) are right. The lead's ruling on the S0 check's O1: the
+  sentence changes only if it says the folder is gone, and it does not, so it stays (no refusal text changes in S0).
+- **A by-product or an upload filed in a turn at a missing project's old root names that project — settled (the
+  lead's ruling R-T19, on the check of the S0 rulings' P1, option (a)).** `store::project_root_of`
+  (`store/mod.rs:587`) canonicalized the scope's root before `ArtifactStore::put` (`artifacts/mod.rs:876`) and the
+  upload writer (`uploads/mod.rs:220`) wrote it into `file_assets.project_root`, while their bytes go under
+  `store_root`, which `lookup` answers as written (S0.2) — the missing project's own folder under `projects/`. So an
+  `artifact_write` (no working folder, so R27 does not refuse it) or an upload in a turn at the old root of a project
+  moved behind a link, or renamed by case, would have recorded a row naming the folder the root now reaches — the
+  project registered there, if any — with its bytes in the missing project's folder: listed under the other project,
+  keyed by its root in R15's sequence and identity scan, and left dangling by the missing project's delete. As ruled,
+  S0.2 makes `project_root_of` answer the root of the project `lookup` finds — as written when a project records
+  exactly that root, else the canonical form, as before — so the row names the project whose folder holds its bytes,
+  as the turn's other path columns already do (S0.3's core test; S6.5 Step 16), and a project that still leads to
+  itself records its canonical root, unchanged (R14: a recorded root is canonical when recorded); one storage test
+  pins both (`a_write_at_a_missing_projects_old_root_records_that_root_and_never_the_folder_it_reaches`), and S0.2's
+  mutation step shows the `project_root_of` half bites on its own. The coupling R-T18 recorded is closed in S4a.17:
+  R-T3's check there reads the turn's project through the same function and would now pass such a project's result
+  file to `confine_to_root`, which follows the link, so `send`'s pointer-row branch refuses a missing project's file
+  with `projects::root_is_missing` before R-T3's check, with a sentence of its own and a test
+  (`a_result_file_of_a_missing_project_is_never_sent_through_its_old_root`). The Goal's "nothing follows its old root
+  into another project", Review Focus item 1 and S6.6's `CLAUDE.md` sentence hold with it; the last two name
+  R-T19's part.
+- **Nothing else moves.** No migration, no memory-index `SCHEMA_VERSION` bump (no index row changes), no config key,
+  no event, no `docs/api` change (S0.5 changes words and doc comments only); the `test-home-guard` and every test's
+  home-store guard are as Stage 1 left them — each new test holds its crate's guard through `World`, `Scene`, `Harness`, the artifacts tests' `Fixture` or `HomeStoreGuard::set`, and makes its
+  links and renames inside its own tempdir.
+
+---
 
 ## Stage 2 — slice S1: confinement, the filter and the kill
 
@@ -5530,10 +8253,11 @@ draft already does; no S2 test needs one, and S3's draft reads `scratch_ctx()` t
           assert_eq!(
               refusal.to_string(),
               format!(
-                  "The project folder {root} is missing — its folder is gone: re-point the project \
-                   to where its folder is now (Settings → Connection → Projects → Re-point…, or \
-                   openalpaca store rebase {root} <new path>), or delete its data (Delete data…, or \
-                   openalpaca store purge {root}). No file tool or command runs until then."
+                  "The project folder {root} is missing — its folder is gone or has moved: re-point \
+                   the project to where its folder is now (Settings → Connection → Projects → \
+                   Re-point…, or openalpaca store rebase {root} <new path>), or delete its data \
+                   (Delete data…, or openalpaca store purge {root}). No file tool or command runs \
+                   until then."
               )
           );
       }
@@ -5695,9 +8419,10 @@ draft already does; no S2 test needs one, and S3's draft reads `scratch_ctx()` t
   //! tool that acts on files or runs a command, and for the approval card that
   //! names it (R34).
   //!
-  //! [`working_folder`] is pure. It reads at most two small files (a project's
-  //! `project.json`, through `projects::lookup`) and creates nothing, so asking
-  //! where a call would act, as the card does, never makes a folder.
+  //! [`working_folder`] is pure. It reads at most four small files (a project's
+  //! `project.json`, through `projects::lookup`: as written, then by its
+  //! canonical form when that differs) and creates nothing, so asking where a
+  //! call would act, as the card does, never makes a folder.
 
   use std::fmt;
   use std::path::{Path, PathBuf};
@@ -5740,7 +8465,8 @@ draft already does; no S2 test needs one, and S3's draft reads `scratch_ctx()` t
   pub enum WorkingFolderRefusal {
       /// A tool reached through `execute` (no context) — R26.
       NoContext,
-      /// R27: the project is registered and its folder is gone (ST-7).
+      /// R27: the project is registered and missing — its root is not a
+      /// directory, or no longer leads to itself (ST-7, ST-23).
       ProjectMissing { root: String },
       /// The turn's root names no folder under `projects/` any more — re-pointed
       /// or deleted while the conversation ran.
@@ -5761,10 +8487,11 @@ draft already does; no S2 test needs one, and S3's draft reads `scratch_ctx()` t
               ),
               Self::ProjectMissing { root } => write!(
                   f,
-                  "The project folder {root} is missing — its folder is gone: re-point the project \
-                   to where its folder is now (Settings → Connection → Projects → Re-point…, or \
-                   openalpaca store rebase {root} <new path>), or delete its data (Delete data…, or \
-                   openalpaca store purge {root}). No file tool or command runs until then."
+                  "The project folder {root} is missing — its folder is gone or has moved: re-point \
+                   the project to where its folder is now (Settings → Connection → Projects → \
+                   Re-point…, or openalpaca store rebase {root} <new path>), or delete its data \
+                   (Delete data…, or openalpaca store purge {root}). No file tool or command runs \
+                   until then."
               ),
               Self::NotAProject { root } => write!(
                   f,
@@ -5785,7 +8512,7 @@ draft already does; no S2 test needs one, and S3's draft reads `scratch_ctx()` t
   impl std::error::Error for WorkingFolderRefusal {}
 
   /// The working folder of the call `ctx` describes (design §10). Pure: reads
-  /// two small files at most and creates nothing.
+  /// four small files at most (`projects::lookup`, S0.2) and creates nothing.
   ///
   /// 1. A non-blank `request_workspace_root`: an absolute one is looked up
   ///    under `projects/` — a present project is its root, a missing one
@@ -5843,8 +8570,10 @@ draft already does; no S2 test needs one, and S3's draft reads `scratch_ctx()` t
   }
   ```
 
-  `lookup` is used, not `by_recorded_root`. The reason is that `request_workspace_root` is the canonical root the
-  gateway resolved (interfaces §1.2). The project's root and the scratch path print unescaped: the first is the
+  `lookup` is used, not `by_recorded_root`. The reason is that `request_workspace_root` is the root the gateway
+  resolved — since S0 a recorded root as written, which may no longer be its own canonical form (ST-23) — and
+  `lookup` matches a recorded root as written first (S0.2), so it names that root's own project, missing or not
+  (interfaces §1.2; the settled table's R-T17 row). The project's root and the scratch path print unescaped: the first is the
   owner's own path and the second is OpenAlpaca's (interfaces §1.3, Stage 1's recorded choice). Every item is `pub` in a
   `pub mod` of the library, so the variants and functions S2 does not call yet (`NoContext`; `is_project`'s callers
   are S3's) raise no `dead_code` warning.
@@ -7354,7 +10083,7 @@ context (R26): the registered project the turn carries, or — with no project �
 folder `~/.openalpaca/scratch/<session-id>/`, made private on first use and removed with the conversation, so one
 conversation never sees another's files. `file_read` loses its boot-root field, `shell_execute` and command tools are
 spawned with that folder as their working directory, and `send` resolves `file_path` there; a call with no context
-(`execute`), a call with neither a project nor a conversation (R44), a project whose folder is gone (R27) and a
+(`execute`), a call with neither a project nor a conversation (R44), a project that is missing — its folder gone, or moved away from its recorded root (R27, ST-23) — and a
 root no folder under `projects/` records are each refused with their one sentence before anything is read, made
 or run — and the shell's card is not raised for them. Every path that runs a sandboxed tool now puts the turn's
 conversation on the context (`ToolContext.conversation_id`, R44: main loop, file-skill tier, plugin skill, lead,
@@ -7443,7 +10172,8 @@ that conversation's scratch folder, which needs S3.11's line. The slice gate, S3
 - Consumes: S2's `WorkingFolder`, `WorkingFolderRefusal` (`NoContext`, `ProjectMissing { root }`,
   `NotAProject { root }`, `NoConversation`, `Unavailable { reason }`), `working_folder(&ToolContext) ->
   Result<WorkingFolder, WorkingFolderRefusal>`, `GuardedProject`; `openalpaca_storage::store::{home_root,
-  ContentKind}`; `crate::session_log::session_dir_name(&str) -> String`.
+  ContentKind}`; `crate::session_log::session_dir_name(&str) -> String`; S0.1's
+  `openalpaca_storage::store::projects::root_is_missing(&Path) -> bool`, the one test of `missing` (R-T17).
 - Produces (interfaces §1.2, used by S3.2–S3.11, S4a, S4b, S5):
   `pub fn ensure(&self) -> Result<&Path, WorkingFolderRefusal>`;
   `pub fn scratch_dir(conversation_id: &str) -> anyhow::Result<PathBuf>`;
@@ -7452,8 +10182,11 @@ that conversation's scratch folder, which needs S3.11's line. The slice gate, S3
 
 Choices this task makes: `ensure` creates **one level at a time, never recursively, and checks each level before
 the next** — `std::fs::create_dir_all` would follow a link planted at `<home>/scratch` and make `<id>` inside the
-link's target before any check could run; a project root that stopped being a directory between the lookup and the
-act answers `Unavailable` (interfaces §1.2 says so; the next call's lookup answers `ProjectMissing`).
+link's target before any check could run; a project root that went missing between the lookup and the
+act — no longer a directory, or no longer leading to itself because its folder moved with a link left at the root —
+answers `Unavailable` (interfaces §1.2 says so; the next call's lookup answers `ProjectMissing`). `ensure` asks S0's
+`projects::root_is_missing` and never an `is_dir()` of its own (R-T17), so nothing is acted on through a link left
+behind.
 
 - [ ] **Step 1: Write the failing tests.** Append inside the test module at the end of `working_folder.rs`:
 
@@ -7559,8 +10292,52 @@ act answers `Unavailable` (interfaces §1.2 says so; the next call's lookup answ
         let err = folder.ensure().expect_err("the folder is gone");
         assert!(
             matches!(&err, WorkingFolderRefusal::Unavailable { reason }
-                if reason.contains("is not a directory")),
+                if reason.contains("is missing: it is no longer a directory")),
             "{err:?}"
+        );
+    }
+
+    /// ST-23 (S0, the lead's ruling R-T17): a project whose folder moved with
+    /// a link left at its recorded root is missing — the lookup says so before
+    /// any tool acts (R27) — and a folder `ensure` found before the move is not
+    /// acted in through the link. Its own scene, not `GuardedProject`'s, whose
+    /// `TempDir` owns the root.
+    #[cfg(unix)]
+    #[test]
+    fn a_project_moved_behind_a_link_is_missing_and_never_acted_in_through_it() {
+        let home = tempfile::tempdir().unwrap();
+        let scene = tempfile::tempdir().unwrap();
+        let _guard = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+        let root = scene.path().canonicalize().unwrap().join("app");
+        std::fs::create_dir(&root).unwrap();
+        projects::register(&root).unwrap();
+        let ctx = ToolContext {
+            owner_id: Some("owner-test".to_string()),
+            request_workspace_root: Some(root.display().to_string()),
+            conversation_id: Some("conv-test".to_string()),
+            ..Default::default()
+        };
+        let folder = working_folder(&ctx).unwrap();
+        assert_eq!(folder.ensure().unwrap(), root.as_path());
+
+        let moved = root.with_file_name("app-moved");
+        std::fs::rename(&root, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &root).unwrap();
+
+        let err = folder.ensure().expect_err("the root no longer leads to itself");
+        assert!(
+            matches!(&err, WorkingFolderRefusal::Unavailable { reason }
+                if reason.contains("is missing: it is no longer a directory")),
+            "{err:?}"
+        );
+        let missing = WorkingFolderRefusal::ProjectMissing {
+            root: root.display().to_string(),
+        };
+        assert_eq!(working_folder(&ctx), Err(missing.clone()));
+        assert!(missing.to_string().contains("is missing — its folder is gone or has moved:"));
+        assert_eq!(
+            working_folder_note(&ctx),
+            Some(format!("<working_folder>{missing}</working_folder>"))
         );
     }
 
@@ -7686,9 +10463,12 @@ act answers `Unavailable` (interfaces §1.2 says so; the next call's lookup answ
 
   (a) `working_folder.rs`'s `use` lines need nothing: S2.1 already imports `std::path::{Path, PathBuf}`,
   `openalpaca_storage::store::{self, ContentKind, projects}`, `crate::session_log::session_dir_name` and
-  `crate::tools::registry::ToolContext`, and every name below is among them. (`scratch_dir` calls
-  `store::home_root()` through S2's `store` import: once (b) removes S2's inline call, that is `store`'s only use, and
-  a fully qualified call would leave the import unused — a warning above the clippy baseline.)
+  `crate::tools::registry::ToolContext`, and every name below is among them (`ensure` calls S0.1's
+  `projects::root_is_missing` through S2's `projects` import; the test module's `use super::*;` brings `projects`
+  and `ToolContext` to the new test, and S2.1's `use crate::test_util::{GuardedProject, HomeStoreGuard};` its
+  guard). (`scratch_dir` calls `store::home_root()` through S2's `store` import: once (b) removes S2's inline call,
+  that is `store`'s only use, and a fully qualified call would leave the import unused — a warning above the clippy
+  baseline.)
 
   (b) In `pub fn working_folder`, step 2 builds the scratch path inline (S2.1's text). Replace
 
@@ -7728,18 +10508,27 @@ act answers `Unavailable` (interfaces §1.2 says so; the next call's lookup answ
     /// folder, one level at a time, each private (0700 on unix) and each
     /// checked to be a folder of its own before the next is made, so a link
     /// planted at either name is refused and nothing is made through it. A
-    /// project's root must still be a directory. Every tool that acts in the
-    /// folder calls this first; the approval previews and the R28 note never
-    /// do, so a conversation that never acts gets no folder.
+    /// project's root must still lead to itself — a directory that is its own
+    /// canonical form (`projects::root_is_missing`, ST-23), so a folder moved
+    /// away since the lookup is never acted in through a link left at its
+    /// root. Every tool that acts in the folder calls this first; the approval
+    /// previews and the R28 note never do, so a conversation that never acts
+    /// gets no folder.
     pub fn ensure(&self) -> Result<&Path, WorkingFolderRefusal> {
         match self {
             WorkingFolder::Project { root } => {
-                if root.is_dir() {
-                    Ok(root.as_path())
-                } else {
+                // S0.1's one test of `missing` (ST-23): not a directory, or
+                // no longer its own canonical form.
+                if projects::root_is_missing(root) {
                     Err(WorkingFolderRefusal::Unavailable {
-                        reason: format!("the project folder {} is not a directory", root.display()),
+                        reason: format!(
+                            "the project folder {} is missing: it is no longer a directory, or it no \
+                             longer leads to itself",
+                            root.display()
+                        ),
                     })
+                } else {
+                    Ok(root.as_path())
                 }
             }
             WorkingFolder::Scratch { dir, .. } => {
@@ -7871,8 +10660,8 @@ fn make_private_dir(path: &Path) -> Result<(), String> {
     /// folder is the project's own.
 ```
 
-- [ ] **Step 4: Run, expected PASS.** `cargo test -p openalpaca_core working_folder 2>&1 | tail -n 20` — the ten
-  new tests (two of them `#[cfg(unix)]`) and S2.1's nine in the module pass (`test result: ok … 0 failed`; the filter
+- [ ] **Step 4: Run, expected PASS.** `cargo test -p openalpaca_core working_folder 2>&1 | tail -n 20` — the eleven
+  new tests (three of them `#[cfg(unix)]`) and S2.1's nine in the module pass (`test result: ok … 0 failed`; the filter
   also matches S2.2's `a_shell_call_with_no_working_folder_gets_the_ordinary_card`, which still passes here — S3.4
   deletes it). Neighbours that must still pass:
   `cargo test -p openalpaca_core session_log 2>&1 | tail -n 5` (`session_dir_name`'s own tests) and
@@ -7891,7 +10680,9 @@ refusing a link at either level rather than following it; scratch_dir names
 the folder through session_dir_name and working_folder's step 2 now uses it;
 remove_scratch removes a folder (or a link, unfollowed) by conversation id;
 working_folder_note is the one <working_folder> line R28 gives the model.
-ContentKind::Scratch is no longer reserved.
+ContentKind::Scratch is no longer reserved. A project root ensure acts in
+must still lead to itself (projects::root_is_missing, S0; ST-23), so a
+folder moved away since the lookup is not acted in through a link.
 
 Verified: cargo test -p openalpaca_core working_folder — ok, 0 failed.
 
@@ -11785,8 +14576,9 @@ read by-products only, and the completion report names the result files in one r
 (`409 OPEN_NOT_OFFERED`, ST-18). Open, the file content route and `send` by `artifact_id` read a result file through
 the resolver under its project (R37). R39's seven tests are written against R35's method and assert the user's bytes and
 modification time. `send` by `artifact_id` also refuses another project's by-product with `artifact_read`'s
-sentence (S4a.17, the lead's ruling R-T3), a result file named as a chat attachment is refused with that tool's
-sentence (S4a.18, R-T8), and `GET /v1/status`'s `produced_bytes` counts by-products only (S4a.6, R-T9). S4a.11 lands
+sentence (S4a.17, the lead's ruling R-T3) and, before that, a missing project's result file with a sentence of its
+own (R-T19); a result file named as a chat attachment is refused with that tool's
+sentence (S4a.18, R-T8); and `GET /v1/status`'s `produced_bytes` counts by-products only (S4a.6, R-T9). S4a.11 lands
 last (R-T1): every reader that guards a result file is in place before `file_write` writes one. The app's surfaces are S6a's; nothing under `apps/openalpaca-gui/` changes here.
 
 ### Preconditions — what S1, S2 and S3 leave (checked against slices S1, S2 and S3 of this plan)
@@ -13060,10 +15852,12 @@ reservation steps to `02-notes.md`); `git status --short` prints nothing.
 
 **Interfaces:**
 - Consumes: `confine_to_root(root: &Path, candidate: &Path) -> Result<PathBuf>` (canonicalizes an existing path
-  whole — R31's rule on the storage side, interfaces §10 C9); `stamp_at`, `hash_head`, `metadata_with_stamp`.
+  whole — R31's rule on the storage side, interfaces §10 C9); `stamp_at`, `hash_head`, `metadata_with_stamp`; S0.1's
+  `store::projects::root_is_missing(&Path) -> bool` (the lead's ruling R-T18).
 - Produces: `check_head(id) -> Result<Option<ArtifactRecord>>` unchanged in signature, answering `Ok(None)` for every
   result file; `resolve_content` for a result file resolves under `project_root` and clears `missing_since` when the
-  file is there; `versions(id)` answers `[]` for one.
+  file is there, and answers `ArtifactError::Gone` — marking the head missing — when that project is missing (R-T18);
+  `versions(id)` answers `[]` for one.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -13171,6 +15965,47 @@ fn a_result_file_replaced_by_a_link_out_of_the_project_is_not_read() {
     assert!(f.store().versions(&row.id).unwrap().is_empty());
     assert_eq!(fs::read(&secret).unwrap(), b"not the project's\n");
 }
+
+/// The lead's ruling R-T18 (R37 with ST-23): a result file of a project whose
+/// folder moved with a link left at its old root is not read, refreshed or
+/// served through that link — the project is missing, and the file reads as
+/// gone, marked as an absent file is. Once the folder is back at its root the
+/// next read finds the file again and clears the mark.
+#[cfg(unix)]
+#[test]
+fn a_result_file_of_a_project_moved_behind_a_link_is_not_read_through_its_old_root() {
+    let f = Fixture::new();
+    let (row, path, _) = f.result_file("docs/plan.md", b"# Plan\n");
+    // The root as it is recorded, taken before the move: `project_root()`
+    // canonicalizes, which after the move would answer the moved folder.
+    let root = f.project_root();
+    let aside = tempdir().unwrap();
+    let moved = aside.path().join("app-moved");
+    fs::rename(&root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &root).unwrap();
+    // The user edits the file where it is now.
+    fs::write(moved.join("docs").join("plan.md"), b"# Plan, moved and edited\n").unwrap();
+    assert!(path.is_file(), "the old path still opens the file, through the link");
+
+    let err = f.store().resolve_content(&row.id, None).unwrap_err();
+
+    assert!(
+        matches!(err.downcast_ref::<ArtifactError>(), Some(ArtifactError::Gone { .. })),
+        "{err:#}"
+    );
+    let after = f.store().get(&row.id, OWNER).unwrap().unwrap();
+    assert_eq!(after.sha256, row.sha256, "nothing read through the link was hashed in");
+    assert_eq!(after.size_bytes, row.size_bytes);
+    assert!(after.missing(), "it reads as gone");
+
+    // The folder comes back to its root: found again.
+    fs::remove_file(&root).unwrap();
+    fs::rename(&moved, &root).unwrap();
+    assert_eq!(f.store().resolve_content(&row.id, None).unwrap(), path);
+    let back = f.store().get(&row.id, OWNER).unwrap().unwrap();
+    assert!(!back.missing(), "found again");
+    assert_eq!(back.sha256, sha256_hex(b"# Plan, moved and edited\n"));
+}
 ```
 
 - [ ] **Step 2: Run them — expected FAIL.**
@@ -13184,7 +16019,12 @@ Expected: `a_users_edit_of_a_result_file_records_no_version` fails at its first 
 (and would report the deleted `docs/old.md` as `missing: 1` next);
 `a_result_file_found_again_clears_its_missing_mark` fails at `"found again"` (nothing clears the mark);
 `a_result_file_replaced_by_a_link_out_of_the_project_is_not_read` fails at `after.sha256` (the hand-edit probe follows
-the link and records the outside bytes as a version). `a_result_file_has_no_older_version_to_read_or_diff` passes.
+the link and records the outside bytes as a version); `a_result_file_of_a_project_moved_behind_a_link_is_not_read_through_its_old_root`
+panics at its first `unwrap_err()` — `called \`Result::unwrap_err()\` on an \`Ok\` value`: the read follows the link to
+the moved file (the test's moves are `rename(2)`s between two `tempdir()`s under `$TMPDIR`, one volume, as S0's
+link tests are). `a_result_file_has_no_older_version_to_read_or_diff` passes. Were S4a.5 built without R-T18's two
+checks, the new test would fail the same way at that line, and at `after.sha256` with only `resolve_version_path`'s
+(the refresh hashes the edited file through the link).
 
 - [ ] **Step 3: Minimal implementation.**
 
@@ -13231,8 +16071,8 @@ Add, directly after `check_head`:
     /// its row records ([`project_file_path`]); the hash runs with the
     /// connection free and only when the stamp moved; and the row is updated
     /// compare-and-set on `sha256`, so a write that landed meanwhile wins. An
-    /// absent file, or one that leaves the root, is left to
-    /// [`resolve_version_path`], which answers for it.
+    /// absent file, one that leaves the root, or one of a missing project
+    /// (R-T18) is left to [`resolve_version_path`], which answers for it.
     fn refresh_project_file(&self, record: &ArtifactRecord) -> Result<()> {
         let Some(path) = project_file_path(record) else {
             return Ok(());
@@ -13336,9 +16176,15 @@ Add, directly after `probe_for`:
 /// A result file's bytes, confined under the project root its row records —
 /// `confine_to_root` canonicalizes an existing path whole, the last component
 /// included (R31's rule), so a link out of the root is refused. `None` when
-/// the row carries no address or the path leaves the root.
+/// the row carries no address, when its project is missing — the root no
+/// longer leads to its own folder, so nothing is read through a link left at
+/// the old path or through the old spelling (the lead's ruling R-T18; ST-23)
+/// — or when the path leaves the root.
 fn project_file_path(record: &ArtifactRecord) -> Option<PathBuf> {
     let root = PathBuf::from(record.project_root.as_deref()?);
+    if crate::store::projects::root_is_missing(&root) {
+        return None;
+    }
     let rel = record.rel_path.as_deref()?;
     confine_to_root(&root, &root.join(rel)).ok()
 }
@@ -13363,7 +16209,35 @@ which happens to give the same answer today):
     };
 ```
 
-and, at the end, replace `Ok(path)` with:
+then replace the block from `let candidate = root.join(&rel);` through `if !path.exists() {` with:
+
+```rust
+    let candidate = root.join(&rel);
+    // The lead's ruling R-T18 (R37 with ST-23): a result file of a project
+    // whose root no longer leads to its own folder — gone, renamed by case
+    // only, or moved with a link left at the old path — is not there to read.
+    // It is never reached through that link or the old spelling: it reads as
+    // gone and is marked as an absent head is, until the person re-points the
+    // project and a read finds it again (below).
+    let in_missing_project = record.in_project && crate::store::projects::root_is_missing(&root);
+    // Belt and braces (the rel_path came out of our own grammar). A deleted
+    // project has no root to canonicalize against — that is a gone artifact,
+    // not a confinement failure.
+    let path = if in_missing_project {
+        candidate
+    } else {
+        match confine_to_root(&root, &candidate) {
+            Ok(path) => path,
+            Err(_) if !root.exists() => candidate,
+            Err(e) => return Err(e),
+        }
+    };
+
+    if in_missing_project || !path.exists() {
+```
+
+(the body of that `if` — the `missing_since` stamp for a head and the `ArtifactError::Gone` — stays as it is), and, at
+the end, replace `Ok(path)` with:
 
 ```rust
     // R37: a result file the user put back is found again.
@@ -13399,7 +16273,9 @@ check_head refreshes a pointer row's hash and size compare-and-set and
 records nothing; resolve_version_path resolves it under project_root with
 confine_to_root (a link out is refused) and clears missing_since when the
 file is back; verify skips pointer rows. R39: a user's edit of a result file
-records no version.
+records no version. Ruling R-T18: a result file of a missing project (ST-23)
+is neither refreshed nor read through a link left at its old root — it reads
+as gone until the project is re-pointed.
 
 Verified: cargo test -p openalpaca_storage artifacts, project_life — ok.
 
@@ -17782,7 +20658,7 @@ parameters — the only place `metadata_json,` is followed by `ArtifactOrigin::P
 
 ---
 
-### Task S4a.17: `send` by `artifact_id` reads a result file through the resolver (R37) and refuses another project's by-product (R-T3)
+### Task S4a.17: `send` by `artifact_id` reads a result file through the resolver (R37), refuses a missing project's result file (R-T19) and another project's by-product (R-T3)
 
 S1.4/S1.5's `SendTool::artifact` (kept by S3.6) answers an `artifact_id` of the turn's owner with
 `ArtifactStore::get` and an `fs::metadata` of `storage_path` **as written** — read only, because the card shares the
@@ -17797,6 +20673,14 @@ project only from a turn in that project — so another project's is refused, at
 `artifact_read`'s sentence under `send`'s prefix. The check runs before the pointer-row branch, as in
 `artifact_read`. *For the owner to confirm with the plan: a new refusal on a path that already asks for approval.*
 
+The lead's ruling R-T19 adds one check before R-T3's. Since S0.2, `project_root_of` names a missing project's
+recorded root as written (R-T19): from a turn at the old root of a project whose folder was renamed by case only,
+or moved with a link left at the old path, R-T3's comparison passes that project's result file, and
+`confine_to_root` — which canonicalizes the root too — would then follow the link (R-T18's coupling). So a pointer
+row whose project root is missing (`projects::root_is_missing`, S0.1) is refused first, from any turn, with a
+sentence of its own that names the way out, at the card and in the send. A by-product of a missing project is not
+touched: its bytes are in the project's folder under `projects/`, read as written, never through the old root.
+
 **Files:**
 - Modify: `crates/openalpaca_core/src/tools/builtins/send.rs` — `SendTool::artifact`
 - Test: `crates/openalpaca_core/src/tools/builtins/send.rs` (its tests module)
@@ -17808,12 +20692,14 @@ project only from a turn in that project — so another project's is refused, at
   mime type; S1.3, kept by S3.6, whose verifier dropped the draft's `TakesFiles` for it) and core's `GuardedProject`
   (S2) in the tests. If a sibling landed a different name for one of these, use the sibling's. For R-T3:
   `super::artifact_write::scope_from_context(&ToolContext) -> StoreScope` (`pub(super)`, HEAD) and
-  `openalpaca_storage::store::project_root_of(&StoreScope) -> anyhow::Result<Option<String>>` (HEAD), the rule
-  `artifact_read` applies (S5.2); `openalpaca_storage::store::projects::register`, `NewArtifact`, `StoreScope` and
-  `ArtifactKind` in the test.
-- Produces: no new name; the refusals `send: the file of '{id}' is not inside its project folder ({e:#}).` and
-  `send: '{id}' belongs to another project ({root}); send it from a conversation in that project.` (`artifact_read`'s
-  sentence with `send`'s prefix and verb).
+  `openalpaca_storage::store::project_root_of(&StoreScope) -> anyhow::Result<Option<String>>` (HEAD; since S0.2 the
+  root of the project `lookup` finds, R-T19), the rule `artifact_read` applies (S5.2);
+  `openalpaca_storage::store::projects::register`, `NewArtifact`, `StoreScope` and `ArtifactKind` in the test. For
+  R-T19: `openalpaca_storage::store::projects::root_is_missing(root: &Path) -> bool` (S0.1).
+- Produces: no new name; the refusals `send: the file of '{id}' is not inside its project folder ({e:#}).`,
+  `send: the file of '{id}' is in a project whose folder is gone or has moved ({root}); re-point the project first.`
+  (R-T19) and `send: '{id}' belongs to another project ({root}); send it from a conversation in that project.`
+  (`artifact_read`'s sentence with `send`'s prefix and verb).
 
 - [ ] **Step 1: Write the failing test.** Append to `send.rs`'s `mod tests`:
 
@@ -17953,29 +20839,130 @@ project only from a turn in that project — so another project's is refused, at
             .unwrap();
         assert_eq!(sender.files.lock().unwrap().len(), 2);
     }
+
+    // ── the lead's ruling R-T19: a result file of a missing project, by its id ──
+
+    /// R-T19 (R37 with ST-23): a result file of a project whose folder moved
+    /// with a link left at its old root is refused by its id — from a turn
+    /// at that root too, which `project_root_of` names as the row's project,
+    /// so R-T3's check passes it — at the card and in the send, and nothing
+    /// is read through the link; once the folder is back at its root it goes.
+    /// The project is a folder of its own beside `GuardedProject`'s (which
+    /// holds the home-store guard), whose `TempDir` owns its root.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_result_file_of_a_missing_project_is_never_sent_through_its_old_root() {
+        let gp = crate::test_util::GuardedProject::new();
+        let scene = tempfile::tempdir().unwrap();
+        let root = scene.path().canonicalize().unwrap().join("app");
+        let file = root.join("docs").join("report.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"# Report\n").unwrap();
+        openalpaca_storage::store::projects::register(&root).unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let recorded = root.to_string_lossy().into_owned();
+        let (row, _) = ArtifactStore::new(&db)
+            .record_project_file(openalpaca_storage::NewProjectFile {
+                owner_id: "owner-test",
+                project_root: &recorded,
+                rel_path: "docs/report.md",
+                content: b"# Report\n",
+                task_id: None,
+                agent_id: None,
+            })
+            .unwrap();
+        let sender = Arc::new(RecordingSender::default());
+        let tool = SendTool {
+            provider: Arc::new(RwLock::new(Some(
+                sender.clone() as Arc<dyn crate::orchestrator::ConnectorSendProvider>
+            ))),
+            db: Some(db.clone()),
+        };
+        let ctx = ToolContext {
+            request_workspace_root: Some(recorded.clone()),
+            workspace_id: Some(recorded.clone()),
+            ..gp.ctx()
+        };
+        let moved = root.with_file_name("app-moved");
+        std::fs::rename(&root, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &root).unwrap();
+        let refused = format!(
+            "send: the file of '{}' is in a project whose folder is gone or has moved ({recorded}); \
+             re-point the project first.",
+            row.id
+        );
+
+        assert_eq!(
+            tool.confirmation_preview(&artifact_args(&row.id), &ctx).await,
+            Err(refused.clone())
+        );
+        assert_eq!(
+            tool.execute_with_context(&artifact_args(&row.id), &ctx).await,
+            Err(refused)
+        );
+        assert!(sender.files.lock().unwrap().is_empty(), "nothing was sent");
+
+        // The person moves the folder back: the file goes.
+        std::fs::remove_file(&root).unwrap();
+        std::fs::rename(&moved, &root).unwrap();
+        tool.execute_with_context(&artifact_args(&row.id), &ctx)
+            .await
+            .unwrap();
+        let sent: Vec<String> = sender
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(path, _, _)| path.clone())
+            .collect();
+        assert_eq!(sent, vec![file.to_string_lossy().into_owned()]);
+    }
 ```
 
   (`register` and `put` write under the temp home `GuardedProject` points the store at; `register` needs that guard.
-  S1's by-product tests save in the home store and send from turns with no project, so the scope rule passes them.)
+  S1's by-product tests save in the home store and send from turns with no project, so the scope rule passes them;
+  R-T19's check reads only pointer rows, so it passes every by-product.)
 
 - [ ] **Step 2: Run it — expected FAIL.**
 
 ```bash
 cargo test -p openalpaca_core a_result_file_is_sent_from_inside_its_project_and_never_through_a_link_out
 cargo test -p openalpaca_core a_by_product_of_another_project_is_refused_by_id
+cargo test -p openalpaca_core a_result_file_of_a_missing_project_is_never_sent_through_its_old_root
 ```
 
-Expected: both FAIL. The first at the second call's `unwrap_err()` — `called \`Result::unwrap_err()\` on an \`Ok\`
+Expected: all three FAIL. The first at the second call's `unwrap_err()` — `called \`Result::unwrap_err()\` on an \`Ok\`
 value`: the lookup stats `storage_path` as written, follows the link and sends the outside file. The second at its
 first `assert_eq!` — `left: Ok(Some("Sends …"))`, `right: Err("send: '…' belongs to another project …")`: the
-lookup is owner-scoped only.
+lookup is owner-scoped only. The third at its first `assert_eq!` — `left: Ok(Some("Sends …"))`, `right:
+Err("send: the file of '…' is in a project whose folder is gone or has moved …")`: the lookup stats `storage_path`
+at the old root and follows the link to the moved file. With (b) and only R-T3's half of (a) it fails the same way
+(Step 6): R-T3's comparison passes the row, whose recorded root `project_root_of` now answers as written (S0.2),
+and `confine_to_root` canonicalizes the root through the link.
 
 - [ ] **Step 3: Minimal implementation.** In `send.rs`, `SendTool::artifact`:
 
-  (a) R-T3 — directly after the lookup's last line, `.ok_or_else(|| format!("send: no artifact '{id}' of yours."))?;`,
-  insert:
+  (a) R-T19, then R-T3 — directly after the lookup's last line,
+  `.ok_or_else(|| format!("send: no artifact '{id}' of yours."))?;`, insert:
 
 ```rust
+        // The lead's ruling R-T19 (ST-23): a result file of a project whose
+        // root no longer leads to its own folder — gone, renamed by case
+        // only, or moved with a link left at the old path — is refused
+        // before anything is read, from any turn. R-T3's check below would
+        // pass it from a turn at that root (`project_root_of` names the
+        // recorded root as written), and `confine_to_root` would follow the
+        // link.
+        if record.in_project
+            && let Some(root) = record.project_root.as_deref()
+            && openalpaca_storage::store::projects::root_is_missing(std::path::Path::new(root))
+        {
+            return Err(format!(
+                "send: the file of '{id}' is in a project whose folder is gone or has moved \
+                 ({root}); re-point the project first."
+            ));
+        }
         // The lead's ruling R-T3: a by-product is named by the rule
         // `artifact_read` reads it by (S5) — one of no project is the owner's
         // from any turn, one of a project only from a turn in that project —
@@ -18039,6 +21026,7 @@ reads `send: the bytes of '{id}' are gone ({storage_path}).`)
 ```bash
 cargo test -p openalpaca_core a_result_file_is_sent_from_inside_its_project_and_never_through_a_link_out
 cargo test -p openalpaca_core a_by_product_of_another_project_is_refused_by_id
+cargo test -p openalpaca_core a_result_file_of_a_missing_project_is_never_sent_through_its_old_root
 cargo test -p openalpaca_core send::tests
 ```
 
@@ -18057,7 +21045,11 @@ file would have been followed out of the project. A pointer row's path is
 now confined under its project_root with confine_to_root (R37, R31's rule
 on the storage side), still read only so the card and the send agree.
 And a by-product of another project is refused by artifact_read's rule
-and sentence (ruling R-T3), at the card and in the send.
+and sentence (ruling R-T3), at the card and in the send. Before that, a
+result file of a missing project (ST-23) is refused with a sentence of
+its own (ruling R-T19): project_root_of names its recorded root as
+written, so R-T3 alone would pass it to confine_to_root, which follows a
+link left at the old root.
 
 Verified: cargo test -p openalpaca_core send::tests — ok.
 
@@ -18065,6 +21057,20 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 EOF
 )"
 ```
+
+- [ ] **Step 6: Prove R-T19's check bites (after the commit; leaves no change).**
+
+```bash
+perl -0pi -e '$n = s/            && openalpaca_storage::store::projects::root_is_missing\(std::path::Path::new\(root\)\)\n/            && false\n/; die "anchor: $n" unless $n == 1' \
+  crates/openalpaca_core/src/tools/builtins/send.rs
+cargo test -p openalpaca_core a_result_file_of_a_missing_project_is_never_sent_through_its_old_root
+git checkout -- crates/openalpaca_core/src/tools/builtins/send.rs
+git status --short crates/openalpaca_core
+```
+
+Expected: the run FAILS at the test's first `assert_eq!` — `left: Ok(Some("Sends …"))`: R-T3's comparison passes
+the row from a turn at its recorded root, and `confine_to_root` follows the link to the moved file; `git status
+--short` prints nothing.
 
 ---
 
@@ -18472,8 +21478,10 @@ nothing under `src-tauri`.
 - **`send` by `artifact_id` (R23, S1/S3) is a reader of pointer rows — settled.** S1's draft reads `storage_path` as
   written (`ArtifactStore::get` plus `fs::metadata`, deliberately not `resolve_content`, so the card writes nothing);
   S4a.17 confines a pointer row's path under its `project_root` with `confine_to_root`, which writes nothing either,
-  and refuses another project's by-product with `artifact_read`'s sentence (the lead's ruling R-T3). *For the owner
-  to confirm with the plan: a new refusal on a path that already asks for approval.*
+  and refuses another project's by-product with `artifact_read`'s sentence (the lead's ruling R-T3) — and, before
+  that check, a result file of a missing project with a sentence of its own, since R-T3's comparison passes such a
+  file from a turn at its old root once `project_root_of` answers that root as written (the lead's ruling R-T19).
+  *For the owner to confirm with the plan: a new refusal on a path that already asks for approval.*
 - **`GET /v1/status`'s `produced_bytes` counts by-products only — settled (the lead's ruling R-T9):** S4a.6 adds
   `AND in_project = 0` to `storage_bytes_by_origin`; a result file's bytes are in the user's folder, not the store.
 - **`no_artifact_reason` stays "No artifacts were produced."** (the lead's ruling R-T10) for a run that wrote only
@@ -23656,7 +26664,8 @@ No test here spawns a process, reaches `localhost:11434` or cuts a `str` by byte
 
 **Interfaces:**
 - Consumes: `store::home_root() -> anyhow::Result<PathBuf>`; `store::projects::list() -> anyhow::Result<Vec<Project>>`
-  with `Project { root: PathBuf, .. }` (the canonical root, `store/projects.rs`); in tests
+  with `Project { root: PathBuf, missing: bool, .. }` (the root as recorded, `store/projects.rs`; `missing` is S0.1's
+  `root_is_missing`, which the lead's ruling R-T18 reads here); in tests
   `store::projects::register(root: &Path) -> anyhow::Result<Project>` and `crate::store::tests::HomeStoreGuard::set`.
 - Produces: `pub fn revealable_path(path: &Path) -> Result<PathBuf, RevealRefusal>` — signature unchanged (re-exported
   by `store/mod.rs:42`, `pub use reveal::{RevealRefusal, revealable_path};`). `RevealRefusal::OutsideStore`'s
@@ -23926,6 +26935,30 @@ fn a_symlink_in_a_project_that_leads_outside_every_root_is_refused() {
         Err(RevealRefusal::OutsideStore(outside.canonicalize().unwrap()))
     );
 }
+
+/// The lead's ruling R-T18 (ST-23): a project whose folder moved with a link
+/// left at its old root is missing, and its root admits nothing — a file
+/// asked for through the link resolves to the moved folder, which no project
+/// records, and is refused.
+#[cfg(unix)]
+#[test]
+fn a_project_moved_behind_a_link_admits_no_file_through_its_old_root() {
+    let tmp = tempdir().unwrap();
+    let project = tmp.path().join("dev/app");
+    let file = file_at(&project, "src/main.rs");
+    let _env = HomeStoreGuard::set(&tmp.path().join("isolated-store"));
+    crate::store::projects::register(&project).unwrap();
+    let moved = tmp.path().join("dev/app-moved");
+    fs::rename(&project, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &project).unwrap();
+
+    let canonical = file.canonicalize().unwrap();
+    assert_eq!(canonical, moved.join("src/main.rs").canonicalize().unwrap());
+    assert_eq!(
+        revealable_path(&file),
+        Err(RevealRefusal::OutsideStore(canonical))
+    );
+}
 ```
 
 - [ ] **Step 2: Run, expect FAIL.**
@@ -23945,9 +26978,10 @@ fn a_symlink_in_a_project_that_leads_outside_every_root_is_refused() {
 //! and admits only a regular file under the home store, where every store file
 //! lives — a project's included, in its folder under `projects/` (ST-1) — or
 //! under the root of a project `projects/` records, where a file an agent
-//! wrote into the project lives (ST-12). The shell then passes the answer to
-//! the platform's reveal as an argument, never through a shell. Nothing here
-//! opens, reads or changes the file.
+//! wrote into the project lives (ST-12), unless that project is missing:
+//! a missing project's root admits no file (ST-23, R-T18). The shell then
+//! passes the answer to the platform's reveal as an argument, never through
+//! a shell. Nothing here opens, reads or changes the file.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -23965,12 +26999,14 @@ pub enum RevealRefusal {
     /// resolved path.
     NotAFile(PathBuf),
     /// The resolved file is under neither the home root nor the root of a
-    /// registered project, or there is neither to compare with. A symlink
-    /// inside either whose target is outside both lands here, with the target,
-    /// and so does a file in an old in-project `.openalpaca/` of a folder no
-    /// project records (ST-9). Inside a registered project such a file is
-    /// under its root and is shown: showing a file in its folder reads
-    /// nothing, and the file tools refuse `.openalpaca` themselves (R32).
+    /// registered project that is not missing — a missing project's root
+    /// admits no file (ST-23, R-T18) — or there is neither to compare with.
+    /// A symlink inside either whose target is outside both lands here, with
+    /// the target, and so does a file in an old in-project `.openalpaca/` of
+    /// a folder no project records (ST-9). Inside a registered project such a
+    /// file is under its root and is shown: showing a file in its folder
+    /// reads nothing, and the file tools refuse `.openalpaca` themselves
+    /// (R32).
     OutsideStore(PathBuf),
 }
 
@@ -24012,13 +27048,20 @@ pub fn revealable_path(path: &Path) -> Result<PathBuf, RevealRefusal> {
     revealable_path_among(path, home_root().ok().as_deref(), &project_roots())
 }
 
-/// The roots of the projects `projects/` records — a missing one's included
-/// (nothing under it resolves), one mid re-point by the root it is going to.
-/// A `projects/` that cannot be read records none, with one WARN: a file in
-/// the home store is still shown, and a project's file is refused as outside.
+/// The roots of the projects `projects/` records, one mid re-point by the
+/// root it is going to. A missing one is left out (the lead's ruling R-T18):
+/// its root no longer leads to its own folder (ST-23), and what it reaches —
+/// through a link left at the old path, or by the old spelling — is not its
+/// project's to show; a root that is gone admits nothing anyway. A
+/// `projects/` that cannot be read records none, with one WARN: a file in the
+/// home store is still shown, and a project's file is refused as outside.
 fn project_roots() -> Vec<PathBuf> {
     match projects::list() {
-        Ok(found) => found.into_iter().map(|project| project.root).collect(),
+        Ok(found) => found
+            .into_iter()
+            .filter(|project| !project.missing)
+            .map(|project| project.root)
+            .collect(),
         Err(e) => {
             tracing::warn!("Reveal in Finder reads no project roots: {e:#}");
             Vec::new()
@@ -24096,8 +27139,8 @@ async fn reveal_path(path: String) -> Result<(), String> {
 ```
 
 - [ ] **Step 4: Run, expect PASS.**
-  `cargo test -p openalpaca_storage store::reveal` — expected `test result: ok. 15 passed; 0 failed` on macOS/Linux
-  (12 elsewhere: three of the fifteen are `#[cfg(unix)]`). Neighbours that must still pass:
+  `cargo test -p openalpaca_storage store::reveal` — expected `test result: ok. 16 passed; 0 failed` on macOS/Linux
+  (12 elsewhere: four of the sixteen are `#[cfg(unix)]`). Neighbours that must still pass:
   `cargo test -p openalpaca_storage store::projects` (unchanged; `register` and `list` are only read here). Then
   `cargo check -p openalpaca_gui` — expected `Finished`, no error (CI never compiles `src-tauri`, so this is its
   gate). `cargo clippy -p openalpaca_storage --all-targets 2>&1 | grep -n 'store/reveal'` — expected no output.
@@ -24112,12 +27155,13 @@ git commit -m "feat(storage): Reveal admits a file under a registered project's 
 
 store::revealable_path reads the roots projects::list() records beside the
 home root, so a result file an agent wrote into its project can be shown in
-its folder whatever its kind; the refusal names projects too. A projects/
-that cannot be read admits none, with one WARN. The Tauri reveal_path runs
-the check on the blocking pool with the program, since it now reads
-projects/.
+its folder whatever its kind; the refusal names projects too. A missing
+project's root admits nothing (ruling R-T18: never through a link left at
+its old root). A projects/ that cannot be read admits none, with one WARN.
+The Tauri reveal_path runs the check on the blocking pool with the program,
+since it now reads projects/.
 
-Verified: cargo test -p openalpaca_storage store::reveal (15 passed);
+Verified: cargo test -p openalpaca_storage store::reveal (16 passed);
 cargo check -p openalpaca_gui clean.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -26950,7 +29994,7 @@ wording pass", §21); the shared names are `interfaces.md` (§0's S6 row, §1.3,
 **Every other slice lands before this one; the text below describes the tree after S6a.** One earlier task edits a
 document this slice edits too, and the anchors below are written against the text it leaves: S4a.1 rewrites
 `CLAUDE.md`'s *Storage* migration sentences (four entries, version 4, the recipe moved to `005`, a Migration 4
-sentence; its *Spec conflicts*, 2). No slice S1–S6a edits `docs/*.md`, `docs/tools/*.md`, the repository
+sentence; its *Spec conflicts*, 2). No slice S0–S6a edits `docs/*.md`, `docs/tools/*.md`, the repository
 `README.md`, `apps/openalpaca-gui/API_MAP.md`, `apps/openalpaca-gui/DESIGN_SPEC.md` (S6a.12 records only code-side
 comments, the GUI `README.md`'s `reveal_path` line included; the two app documents are S6.3d's, interfaces §8.4), the
 rest of `CLAUDE.md` or the records under `tasks/`, so an anchor quoted from one of those is HEAD's and holds. An anchor in a code file another slice edits — `store/mod.rs`
@@ -27708,6 +30752,8 @@ stays; `DELETE /v1/sessions/{id}` (`:523`) does not remove the scratch folder; *
 a preview is composed "never from the call's arguments" and that only two tools refuse before a card; the event list
 (`:1507-1508`) lacks `artifact_written`'s two fields; `POST /v1/chat`'s refusals (`:483-485`) lack a result
 file named as an attachment (`422 ATTACHMENT_IN_PROJECT`, the lead's ruling R-T8); *Storage Model* (`:1556`, `:1559`, `:1561`) stops at schema 3.
+S0 (ST-23) makes two more false: the project list's `missing` (`:577`, "its root is no longer a directory") and
+`GET /v1/workspaces?path=`'s "any other path is canonicalized" (`:578`; S0.4 resolves it as written first).
 And nothing says ST-14's and ST-16's statements the owner asked the manual to make: an approved command runs as you,
 anywhere; reading never asks, secrets such as `.env` included, and what is read goes to the answering model. A new
 section, *The Working Folder*, says them, with R26–R33, R44–R46.
@@ -27785,6 +30831,8 @@ check([
          "The prompt shows the daemon's preview above the arguments",
          "is given one when it is dispatched",
          "`422 ATTACHMENT_IN_PROJECT`",
+         "`missing` that its root is no longer a directory or no longer leads to its own folder",
+         "any other path is resolved as a turn's is — as written first",
      ],
      [
          "(reserved: nothing creates it yet)",
@@ -27797,14 +30845,16 @@ check([
          "a fresh database at version 3",
          "from the tool's own read, never from the call's arguments",
          "`artifact_write` saves a deliverable",
+         "`missing` that its root is no longer a directory (its data is kept)",
+         "any other path is canonicalized and resolved as a turn's is",
      ]),
 ])
 EOF
 python3 /tmp/stage2-s6/check_s6_3a.py; echo "exit $?"
 ```
 
-  Expected (FAIL): `exit 1`, every `missing` line printed and every `still says` line printed — 23 + 10 failures at
-  HEAD (`33 failures`).
+  Expected (FAIL): `exit 1`, every `missing` line printed and every `still says` line printed — 25 + 12 failures at
+  HEAD (`37 failures`).
 
 - [ ] **Step 3: Edit.** Save and run the script:
 
@@ -27962,9 +31012,10 @@ turn's **working folder**:
   file tools and commands work in that conversation's scratch folder. Only
   a call with neither a project nor a conversation is refused, with a
   sentence saying why.
-- A project whose folder is gone (`missing`) is refused before any tool runs,
-  and the sentence names the two ways out — re-point the project or delete its
-  data ([Files, artifacts and workspaces](#files-artifacts-and-workspaces)).
+- A project that is `missing` — its folder gone, renamed by case only, or moved
+  with a link left at its old path — is refused before any tool runs, and the
+  sentence names the two ways out: re-point the project or delete its data
+  ([Files, artifacts and workspaces](#files-artifacts-and-workspaces)).
   A turn whose project was re-pointed or deleted while the conversation ran
   is refused too, with a sentence saying no folder under `projects/` records
   that folder any more.
@@ -28087,12 +31138,23 @@ folder, a file over the size limit, or one whose old content cannot be kept.""")
      "ATTACHMENT_ACCESS_DENIED`), then the session checks",
      "ATTACHMENT_ACCESS_DENIED`) or a result file in the project, which is not an\nattachment "
      "(`422 ATTACHMENT_IN_PROJECT`), then the session checks"),
+    # (o) ST-23 (S0.1): a project whose root no longer leads to its own folder is missing
+    ("once",
+     "`missing` that its root is no longer a directory (its data is kept)",
+     "`missing` that its root is no longer a directory or no longer leads to its own folder — renamed by case "
+     "only, or moved with a link left at the old path (its data is kept; re-point it, or delete its data)"),
+    # (p) ST-23 (S0.4): the routes resolve a path as written first
+    ("once",
+     "any other path is canonicalized and resolved as a turn's is",
+     "any other path is resolved as a turn's is — as written first, so a path inside a recorded root that now "
+     "leads to another folder still names that root's project, then by its canonical form; `path` is then its "
+     "canonical form"),
 ])
 EOF
 python3 /tmp/stage2-s6/edit_s6_3a.py
 ```
 
-  Expected: `edited docs/Daemon_Manual.md: 20 edits`. A `sys.exit` naming an anchor means the file is not HEAD's
+  Expected: `edited docs/Daemon_Manual.md: 22 edits`. A `sys.exit` naming an anchor means the file is not HEAD's
   text there: read the passage, fix the anchor in the script, and run it again on a clean copy
   (`git checkout docs/Daemon_Manual.md` first).
 
@@ -28126,9 +31188,10 @@ no-project rules. The files table (in_project, openable,
 409 OPEN_NOT_OFFERED), the purge row, DELETE /v1/sessions/{id}, the
 confirm list and the previews, the connector prompt, artifact_written's two
 fields, migration 004 (schema 4), a parked run's conversation (ruling
-R-T2) and POST /v1/chat's 422 ATTACHMENT_IN_PROJECT (ruling R-T8).
+R-T2) and POST /v1/chat's 422 ATTACHMENT_IN_PROJECT (ruling R-T8). The
+project list's missing and ?path='s as-written resolution (ST-23, S0).
 
-Verified: check_s6_3a.py PASS (33 phrases)
+Verified: check_s6_3a.py PASS (37 phrases)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 EOF
@@ -28145,7 +31208,10 @@ the purge nothing about result files (`:629-630`), and describes previews as `me
 `:1032`); `tail`'s `artifact_written` line now says `in the project` for a result file (S4a, interfaces §5.4). The
 repository `README.md` promises "versioned artifacts" for what agents write (`:15`), describes `artifacts/` as what
 agents wrote (`:172`), names the startup-folder write (`:176`), stops at schema 3 (`:213`) and lists no limit about the
-shell or reading (ST-14, ST-16).
+shell or reading (ST-14, ST-16). S0 (ST-23) makes two CLI Manual sentences false: `store list`'s note (`:616`) explains
+`missing` as a path "no longer a directory", and `memory --project` (`:696`) names only a folder that is gone. The
+line `store list` prints is quoted as the CLI prints it, which S0.5 changed to `missing — its folder is gone or has
+moved: …`; the quote follows it.
 
 **Files:**
 - Modify: `docs/CLI_Manual.md` — the passages above
@@ -28165,13 +31231,16 @@ shell or reading (ST-14, ST-16).
 grep -n 'in the project' apps/openalpaca/src/commands/tail.rs
 grep -n 'scratch' apps/openalpaca/src/commands/config_factory_reset.rs
 grep -n 'preview' apps/openalpaca/src/chat_stream/mod.rs apps/openalpaca/src/commands/confirmations.rs | head
+grep -n 'gone or has moved' apps/openalpaca/src/commands/store.rs
 ```
 
   Expected: `tail.rs` prints `[in the project]` where a by-product's line prints `[markdown v2]` (S4a's
   `artifact_tag(kind, version, in_project)` and its test `a_result_file_is_tagged_in_the_project`); the factory
   reset's preview names `{root}/scratch/` (S3); the CLI prints `preview` in the chat prompt and in
-  `confirmations list|watch` (unchanged since Learning v2). If `tail.rs` prints other words, write in Step 3 (h) the
-  words it prints.
+  `confirmations list|watch` (unchanged since Learning v2); `store.rs` holds `gone or has moved` on five lines (S0.5:
+  the module doc, the `store list` note `missing — its folder is gone or has moved: re-point it, or delete its data`,
+  the `--dry-run` line and the two tests). If `tail.rs` prints other words, write in Step 3 (h) the words it prints;
+  if `store list`'s note differs, write its words in Step 3 (i) and in the check.
 
 - [ ] **Step 2: Write the failing check.**
 
@@ -28192,11 +31261,18 @@ check([
          "the folder a `shell_execute` command runs in",
          "a `shell_execute` card names the folder the command runs in",
          "shows `[in the project]`",
+         "or no longer leads to its own folder — the folder renamed by case only, or moved with a link left at the old "
+         "path — is marked",
+         "`missing — its folder is gone or has moved: re-point it, or delete its data`",
+         "folder is gone or has moved, so a missing project's notes stay reachable",
      ],
      [
          "still writes `file_write`'s plain files",
          "directory it was started in",
          "(`memory_confirm`'s: which note, your text, the new text, why, and when you said it) is printed under the table",
+         "A project whose path is no longer a directory is marked",
+         "`missing — its folder is gone: re-point it, or delete its data`",
+         "folder is gone, so a missing project's notes stay reachable",
      ]),
     (R,
      [
@@ -28217,7 +31293,7 @@ EOF
 python3 /tmp/stage2-s6/check_s6_3b.py; echo "exit $?"
 ```
 
-  Expected (FAIL): `exit 1`, `20 failures` — 8 + 6 phrases missing, 3 + 3 still said (a phrase counts once however
+  Expected (FAIL): `exit 1`, `26 failures` — 11 + 6 phrases missing, 6 + 3 still said (a phrase counts once however
   many times it occurs).
 
 - [ ] **Step 3: Edit.**
@@ -28293,6 +31369,22 @@ edit(C, [
      "and then `Connection closed by server`. An `artifact` line for a file an agent wrote into the project shows "
      "`[in the project]` where a by-product's shows its kind and version (`[markdown v2]`): a file in the project "
      "has no versions."),
+    # (i) store list: missing is also a root that no longer leads to its folder (ST-23, S0), and the line the CLI
+    #     prints says so (S0.5)
+    ("once",
+     "A project whose path is no longer a directory is marked `missing — its folder is gone: re-point it, or delete "
+     "its data`",
+     "A project whose path is no longer a directory, or no longer leads to its own folder — the folder renamed by "
+     "case only, or moved with a link left at the old path — is marked `missing — its folder is gone or has moved: "
+     "re-point it, or delete its data`"),
+    # (j) memory --project: a recorded root names its project when its folder moved too (ST-23, S0)
+    ("once",
+     "folder is gone, so a missing project's notes stay reachable; any other path\n"
+     "must exist, so a mistyped one is refused rather than sending a note meant for a\n"
+     "project to the global partition.",
+     "folder is gone or has moved, so a missing project's notes stay reachable; any\n"
+     "other path must exist, so a mistyped one is refused rather than sending a note\n"
+     "meant for a project to the global partition."),
 ])
 
 R = "README.md"
@@ -28330,7 +31422,7 @@ EOF
 python3 /tmp/stage2-s6/edit_s6_3b.py
 ```
 
-  Expected: `edited docs/CLI_Manual.md: 12 edits` and `edited README.md: 5 edits`. Edit (c)'s span and the `once`
+  Expected: `edited docs/CLI_Manual.md: 14 edits` and `edited README.md: 5 edits`. Edit (c)'s span and the `once`
   after it work as a pair: the span replaces the passage up to (not including) the closing sentence, and the `once`
   rewrites that sentence's link, so the paragraph reads "… under `~/.openalpaca/projects/` — as the Daemon Manual's
   *The Working Folder* explains."
@@ -28357,7 +31449,8 @@ docs(cli,readme): agents work in the project, scratch folders, and the two limit
 CLI Manual: store's and chat's project text (the turn's working folder, no
 startup-folder write), purge (a result file's record goes, the file stays),
 sessions delete and the factory reset (scratch folders), the previews the
-file tools and the shell carry, tail's in-the-project line. README: work in
+file tools and the shell carry, tail's in-the-project line, and store list's
+and memory --project's missing (ST-23, S0). README: work in
 your project, scratch/, schema 4, and two limits — the shell is not confined
 (ST-14) and reading never asks (ST-16).
 
@@ -28622,11 +31715,13 @@ rev 30**, and writes the GUI Manual. No slice before S6 edits these three files,
   lead's ruling R-T8), the shell's `reveal_path` row (HEAD `:67`), §2.1's inline artifact card
   row (`:173`), §2.2's `Files · {{ r.fileCount }}` row (`:203`), §2.3's Library rows (list `:225`, Diff `:229`, History
   `:230`, Export `:232`, Open `:233`, Reveal `:234`), GAP-04's closed note (`:486`), the migration registry sentence
-  (`:1098`), SSE frame 5's `preview` sentence (`:1684-1688`), §4.2's `artifact_written` row (`:1914`)
+  (`:1098`), SSE frame 5's `preview` sentence (`:1684-1688`), §4.2's `artifact_written` row (`:1914`), §2.4's
+  **Projects** list row (`:282`, ST-23)
 - Modify: `apps/openalpaca-gui/DESIGN_SPEC.md` — the revision line (`:6`, rev 29 → rev 30), §3.12 (after `:826`),
   §3.14 (`:861` and a new shipped note before `:863`), §3.23 (after `:1069`), §3.27 (before `:1189`), §3.29 (after
-  `:1217`), §3.30 (after `:1228`), §3.31 (after `:1238`), §5.2 (after `:1607`), §5.3 (`:1614`), the revision log (a
-  rev 30 entry above rev 29's)
+  `:1217`), §3.30 (after `:1228`), §3.31 (after `:1238`), §5.2 (after `:1607`), §5.3 (`:1614`), the Projects list's
+  `missing` tag (`:1316`, ST-23) and `:1317`'s quote of the `Re-point…` dialog (`Its folder is gone from …`, which
+  S0.5 changed to `Its folder is gone or has moved from …`), the revision log (a rev 30 entry above rev 29's)
 - Test: `/tmp/stage2-s6/check_s6_3d.py`; `bun run format:check` in `apps/openalpaca-gui` (the two app documents are in
   its reach)
 
@@ -28650,12 +31745,15 @@ grep -c 'in_project' apps/openalpaca-gui/API_MAP.md apps/openalpaca-gui/DESIGN_S
 grep -c '^\*\*Revision:\*\* rev 29, 2026-10-08 — ' apps/openalpaca-gui/DESIGN_SPEC.md
 grep -c 'Today only `memory_confirm` carries one' apps/openalpaca-gui/DESIGN_SPEC.md
 grep -c "never from the call's arguments — shown above the literal arguments" apps/openalpaca-gui/API_MAP.md
+grep -n 'gone or has moved' apps/openalpaca-gui/src/components/overlays/RepointProjectDialog.tsx apps/openalpaca-gui/src/views/settings/ProjectsCard.tsx
 ```
 
   Expected: the card's eyebrow, Work's card, the event log's text, the Library chip, the header's and the panel's
   `openable`/tabs, the row's tag and `baseName` each print one or more lines; `reveal.rs` prints the refusal sentence;
   `in_project` counts `0` in both documents (nothing recorded yet); the rev 29 revision line and the last two counts
-  are `1`. If a document already holds `in_project`, or its revision line is not rev 29's, another commit edited it:
+  are `1`; the last `grep` prints two lines, the dialog's `? "Its folder is gone or has moved from "` and the text
+  of the card's `MISSING_PROJECT_COPY` (S0.5). If a document already holds `in_project`, or its revision line
+  is not rev 29's, another commit edited it:
   stop and re-anchor before running Step 3. Where S6a's copy differs from the words below (`File written · in the
   project`, `Results in the project`, `Written in the project`, the `project` tag, the empty sentences, `in the
   project` on the panel's meta row), Step 3 writes S6a's.
@@ -28703,9 +31801,11 @@ check([
          "project_root=&in_project=&pinned=",
          "Carries `path`, `in_project` and `openable`",
          "`422 ATTACHMENT_IN_PROJECT` (a result file in a project",
+         "or no longer leads to itself — renamed by case only, or moved with a link left at the old path; ST-7, ST-23)",
      ],
      [
          "composed from the tool's own read (design 09 §4.4) —\n   never from the call's arguments",
+         "`missing` (the root is not a directory, ST-7)",
      ]),
     (S,
      [
@@ -28721,17 +31821,22 @@ check([
          "under its base name (`main.rs`, not `src/main.rs`)",
          "a fourth card, **Written in the project**",
          "behind the `Results in the project` chip (§3.29)",
+         "when the root is not a directory or no longer leads to itself",
+         "(`Its folder is gone or has moved from …` when missing)",
      ],
      [
          "Today only `memory_confirm` carries one",
+         "its data is kept when the root is not a directory (ST-7)",
+         "`Its folder is gone from …`",
      ]),
 ])
 EOF
 python3 /tmp/stage2-s6/check_s6_3d.py; echo "exit $?"
 ```
 
-  Expected (FAIL): `exit 1`, `40 failures` — every `missing` line (10 + 13 + 12) and the five `still says` lines
-  (`GUI_Manual.md` three, `API_MAP.md` one, `DESIGN_SPEC.md`'s `Today only` one).
+  Expected (FAIL): `exit 1`, `46 failures` — every `missing` line (10 + 14 + 14) and the eight `still says` lines
+  (`GUI_Manual.md` three, `API_MAP.md` two, `DESIGN_SPEC.md` three: `Today only`, the Projects list's `not a
+  directory (ST-7)` and the dialog's `Its folder is gone from …`).
 
 - [ ] **Step 3: Edit.**
 
@@ -28901,6 +32006,11 @@ edit(A, [
      "`404 ATTACHMENT_NOT_FOUND` / `403 ATTACHMENT_ACCESS_DENIED` on POST",
      "`404 ATTACHMENT_NOT_FOUND` / `403 ATTACHMENT_ACCESS_DENIED` / `422 ATTACHMENT_IN_PROJECT` (a result file in a "
      "project, read with `file_read`) on POST"),
+    # ST-23 (S0): the Projects list's missing
+    ("once",
+     "`missing` (the root is not a directory, ST-7) draws",
+     "`missing` (the root is not a directory, or no longer leads to itself — renamed by case only, or moved with a "
+     "link left at the old path; ST-7, ST-23) draws"),
 ])
 
 S = "apps/openalpaca-gui/DESIGN_SPEC.md"
@@ -28999,17 +32109,28 @@ edit(S, [
      "tabs, `Open` rule, `Export`'s base name and Reveal's project roots. §3.14: `shell_execute`, `file_write`, "
      "`file_edit` and `send` carry a daemon-authored preview composed from the working folder and the call's own "
      "path and strings — the daemon escapes and cuts it — and its Learning v2 note now says that until rev 30 "
-     "only `memory_confirm`'s card carried a preview.\n"),
+     "only `memory_confirm`'s card carried a preview. The Projects list's `missing` tag also marks a root that "
+     "no longer leads to itself, and the `Re-point…` dialog says such a folder is gone or has moved (storage design "
+     "ST-23, slice S0).\n"),
+    # ST-23 (S0): the Projects list's missing
+    ("once",
+     "its data is kept when the root is not a directory (ST-7)",
+     "its data is kept when the root is not a directory or no longer leads to itself — renamed by case only, or "
+     "moved with a link left at the old path (ST-7, ST-23)"),
+    # ST-23 (S0.5): the Re-point dialog says the folder is gone or has moved
+    ("once",
+     "(`Its folder is gone from …` when missing)",
+     "(`Its folder is gone or has moved from …` when missing)"),
 ])
 EOF
 python3 /tmp/stage2-s6/edit_s6_3d.py
 cd apps/openalpaca-gui && bunx prettier --write API_MAP.md DESIGN_SPEC.md && cd ../..
 ```
 
-  Expected: `edited docs/GUI_Manual.md: 11 edits`, `edited apps/openalpaca-gui/API_MAP.md: 14 edits`,
-  `edited apps/openalpaca-gui/DESIGN_SPEC.md: the revision line`, `edited apps/openalpaca-gui/DESIGN_SPEC.md: 11 edits`;
-  prettier re-pads the API map's three edited tables (§1.1's shell commands, §2.1–§2.3's rows, §4.2's events) to
-  their new widest cells and leaves every other line as it is.
+  Expected: `edited docs/GUI_Manual.md: 11 edits`, `edited apps/openalpaca-gui/API_MAP.md: 15 edits`,
+  `edited apps/openalpaca-gui/DESIGN_SPEC.md: the revision line`, `edited apps/openalpaca-gui/DESIGN_SPEC.md: 13 edits`;
+  prettier re-pads the API map's edited tables (§1.1's shell commands, §2.1–§2.3's rows, §2.4's Projects row, §4.2's
+  events) to their new widest cells and leaves every other line as it is.
 
 - [ ] **Step 4: Run the check and the format gate; expected PASS.**
 
@@ -29040,6 +32161,9 @@ Open rows, ?in_project=, migration 004, the preview's two sources, the
 artifact_written fields and the 422 for a result file named as an
 attachment (ruling R-T8). DESIGN_SPEC rev 30: §3.12, §3.14, §3.23, §3.27,
 §3.29–§3.31, §5.2 and §5.3 record S6a's surfaces and the four new previews.
+Both app documents: the Projects list's missing also marks a root that no
+longer leads to itself, and DESIGN_SPEC quotes the Re-point dialog's
+"gone or has moved" (ST-23, S0).
 
 Verified: check_s6_3d.py PASS; bun run format:check exit 0
 
@@ -29506,7 +32630,7 @@ pgrep -f 'sleep 30$' | wc -l > /tmp/stage2-gate/sleep30-before.txt; cat /tmp/sta
 ```
 
   Expected: `git status` lists only `?? tasks/deps-upgrade/` (another session's); the log counts the stage's commits
-  (`<BASE>` is the commit S1's first task started from, recorded when the stage began — `d484a56a` if nothing landed
+  (`<BASE>` is the commit S0's first task started from, recorded when the stage began — `d484a56a` if nothing landed
   between); the `sleep 30` count before the run is recorded (normally `0`; anything else is not this run's).
 
 - [ ] **Step 2: The workspace tests, one run.**
@@ -29647,8 +32771,11 @@ conversation with no project works in its own scratch folder — the shell start
 `file_write` saves a by-product read back with `artifact_read` — and the folder goes when the conversation is deleted;
 (i) §0.4's stale approval card, only with screen access the owner granted: a prompt answered from the CLI while the
 app shows its card, then the card clicked. Without screen access the report says so and names
-`views/chat/approval-card-returns.test.tsx` (S6.4 Step 9 ran it) as the proof. Last, the repository's own files are
-byte-identical but for the one file the agent was asked to write.
+`views/chat/approval-card-returns.test.tsx` (S6.4 Step 9 ran it) as the proof; (j) ST-23 (S0): a second project whose
+folder is moved with a link left at its old path reads `missing` in `GET /v1/workspaces` and `store list`, a turn sent
+with the old path is that project's — refused its file tools with the missing sentence, nothing registered at the
+folder the link reaches — and `store rebase` re-points it, the link left as it was. Last, the repository's own files
+are byte-identical but for the one file the agent was asked to write.
 
 **Standing rules** (`tasks/lessons.md`, the four 2026-10 entries; Stage 1's S6.5; the owner):
 - `~/.openalpaca` is the owner's real store: never read, list, write or name it in a command. Every command that
@@ -29736,9 +32863,10 @@ cd "$OA"
   `llm.effective_default_model` = `qwen3.8:27b-mlx`; `tail.log` exists. The tail runs for the whole check — it is the
   CLI's record of every `artifact_written` line.
 
-- [ ] **Step 5: The driver.** Stage 1's driver (its S6.5 Step 5) with four additions: each confirmation is recorded
+- [ ] **Step 5: The driver.** Stage 1's driver (its S6.5 Step 5) with five additions: each confirmation is recorded
   with its `preview` and `per_call`; `--hold TOOL` records a prompt and leaves it pending, writing its id to
-  `evidence/<label>.held`; a `delete` subcommand; and `turn` records the session the lane is on afterwards. Save as
+  `evidence/<label>.held`; a `delete` subcommand; Stage 1's `upload` subcommand kept, for step (j)'s R-T19 check; and `turn` records the
+  session the lane is on afterwards. Save as
   `$OA/driver.py` (scratch, not committed):
 
 ```python
@@ -29753,6 +32881,7 @@ evidence/<label>.jsonl beside this file.
   driver.py get    <label> <path> [--workspace P]          prints the JSON answer
   driver.py post   <label> <path> <json> [--workspace P]   prints the JSON answer
   driver.py delete <label> <path>                          prints the status
+  driver.py upload <label> <file> [--workspace P]          prints the JSON answer
 """
 import argparse
 import json
@@ -29762,6 +32891,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 STORE = os.environ["OPENALPACA_HOME_STORE"]
 EVIDENCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evidence")
@@ -29772,11 +32902,11 @@ BASE = f"http://{_discovery['listen']['host']}:{_discovery['listen']['port']}"
 TOKEN = _discovery["auth"]["token"]
 
 
-def call(method, path, body=None, workspace=None, timeout=120):
-    data = json.dumps(body).encode() if body is not None else None
+def call(method, path, body=None, workspace=None, timeout=120, raw=None, ctype="application/json"):
+    data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
     headers = {"Authorization": f"Bearer {TOKEN}"}
     if data is not None:
-        headers["Content-Type"] = "application/json"
+        headers["Content-Type"] = ctype
     if workspace:
         headers["x-workspace-path"] = urllib.parse.quote(workspace, safe="/")
     request = urllib.request.Request(BASE + path, data=data, method=method, headers=headers)
@@ -29907,6 +33037,10 @@ def main():
     p.add_argument("path")
     p.add_argument("body")
     p.add_argument("--workspace")
+    u = sub.add_parser("upload")
+    u.add_argument("label")
+    u.add_argument("file")
+    u.add_argument("--workspace")
     args = parser.parse_args()
     if args.cmd == "turn":
         return turn(args)
@@ -29914,6 +33048,14 @@ def main():
         return show(args, *call("GET", args.path, workspace=args.workspace), "get")
     if args.cmd == "delete":
         return show(args, *call("DELETE", args.path, workspace=args.workspace), "delete")
+    if args.cmd == "upload":
+        boundary = uuid.uuid4().hex
+        with open(args.file, "rb") as f:
+            content = f.read()
+        raw = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{os.path.basename(args.file)}"\r\n'
+               f"Content-Type: text/plain\r\n\r\n").encode() + content + f"\r\n--{boundary}--\r\n".encode()
+        return show(args, *call("POST", "/v1/files/upload", raw=raw, workspace=args.workspace,
+                                ctype=f"multipart/form-data; boundary={boundary}"), "upload")
     return show(args, *call("POST", args.path, json.loads(args.body), workspace=args.workspace), "post")
 
 
@@ -30183,7 +33325,57 @@ git -C "$ROOT" status --porcelain
   `find` prints nothing; `git status` prints `?? notes/` only. Anything else is a write nobody approved: FAIL, with
   the difference quoted.
 
-- [ ] **Step 16: (h) A conversation with no project works in its own scratch folder, which goes with it.** From here
+- [ ] **Step 16: (j) A project whose folder moved with a link left at its old path reads missing, keeps its turn, and is
+  re-pointed** (ST-23, slice S0). A second scratch project beside `$ROOT`, so Step 15's hashes and Step 18's app
+  walk-through keep `$ROOT` as it is; it is chosen through `POST /v1/workspaces`, which needs no model, and it is a git
+  repository, so its moved folder is a project of its own to any reader that follows the link.
+
+```bash
+mkdir -p "$OA/second" && printf '# Second project\n' > "$OA/second/README.md" && git -C "$OA/second" init -q
+export R2="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$OA/second")"; export R2M="$R2-moved"
+python3 "$OA/driver.py" post j-choose /v1/workspaces "{\"path\": \"$R2\"}" | tail -1
+mv "$R2" "$R2M" && ln -s "$R2M" "$R2" && ls -l "$R2"
+J_LIST='import json,sys; ps=json.load(sys.stdin)["body"]; print(len(ps), [(p["root"], p["missing"]) for p in ps if p["root"] in sys.argv[1:]])'
+python3 "$OA/driver.py" get j-list-before /v1/workspaces | tail -1 | python3 -c "$J_LIST" "$R2" "$R2M"
+NO_COLOR=1 "$OA_BIN/openalpaca" store list | sed 's/\x1b\[[0-9;]*m//g' | grep -F "$R2 "
+python3 "$OA/driver.py" turn j-old 'Read file README.md with file_read and quote its first line.' --workspace "$R2"
+grep -c '"kind": "confirmation' "$OA/evidence/j-old.jsonl"
+python3 "$OA/driver.py" get j-status /v1/status --workspace "$R2" | tail -1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["body"]["project_root"])'
+export JSID="$(db "select id from session where workspace_id = '$R2' and status = 'active'")"; echo "$JSID"
+results "$JSID" j | grep '^file_read'
+db "select count(*) from session where workspace_id = '$R2M'"
+printf 'filed at the old root\n' > "$OA/j-upload.txt"
+export JUP="$(python3 "$OA/driver.py" upload j-upload "$OA/j-upload.txt" --workspace "$R2" | tail -1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["body"]["id"])')"; echo "$JUP"
+db "select project_root, storage_path from file_assets where id = '$JUP'"
+python3 "$OA/driver.py" get j-list-turn /v1/workspaces | tail -1 | python3 -c "$J_LIST" "$R2" "$R2M"
+"$OA_BIN/openalpaca" store rebase "$R2" "$R2M"; echo "exit $?"
+db "select project_root, storage_path from file_assets where id = '$JUP'"
+python3 "$OA/driver.py" get j-list-after /v1/workspaces | tail -1 | python3 -c "$J_LIST" "$R2" "$R2M"
+db "select workspace_id, count(*) from session where workspace_id in ('$R2', '$R2M') group by workspace_id"
+test -L "$R2"; echo "link-kept-exit $?"
+```
+
+  Expected: the choose answers `200` with `root` `$R2` and `missing` `false`; `ls -l` shows `$R2 -> $R2M`. Before the
+  turn the list holds `$R2` missing and nothing at `$R2M` (`… [('$R2', True)]`); `store list` prints
+  `$R2  missing — its folder is gone or has moved: re-point it, or delete its data` (the CLI's own line, as S0.5
+  words it; the `grep`'s trailing space is deliberate: `store list` prints two spaces after a missing root, and it
+  keeps any line starting `$R2M` out). The turn raises `0` confirmations; `GET /v1/status` with the old path answers `project_root`
+  `$R2` — the missing project, never the folder the link reaches; the conversation is filed under `$R2` (`JSID`
+  non-empty) and `0` sessions under `$R2M`; the upload made at the old path (no model) answers an id, and its row's
+  `project_root` is `$R2` with its `storage_path` under the missing project's own folder `projects/<$R2's name>/uploads/`
+  — never `$R2M` (R-T19); the list after the turn is the list before it — nothing was registered at
+  the link's target. The `file_read` result, if the model called it, is `False` with `The project folder $R2 is
+  missing — its folder is gone or has moved: re-point the project to where its folder is now (…)`; the turn's
+  `<working_folder>` line already gives the model that sentence, so a model that relays it without calling
+  `file_read` leaves that one call *not exercised* and the other checks stand. `store rebase` exits `0` and prints
+  `Re-pointed $R2 → $R2M` and `its folder is now projects/…`; the list after it holds `$R2M`, not missing, and nothing
+  at `$R2` (`… [('$R2M', False)]`); the session rows name `$R2M` only; the upload's row now names `$R2M` with its `storage_path` under the renamed
+  folder (the re-point's two prefixes); `link-kept-exit 0` — the re-point moves records,
+  never the person's folders or links. (Before S0 the turn resolved the old path by its canonical form — a repository
+  of its own — registered `$R2M` and filed the conversation there, and the rebase was then refused
+  `409 WORKSPACE_EXISTS`.) PASS/FAIL (j).
+
+- [ ] **Step 17: (h) A conversation with no project works in its own scratch folder, which goes with it.** From here
   no turn carries a project header.
 
 ```bash
@@ -30210,7 +33402,7 @@ test -e "$STORE/scratch/$SID"; echo "scratch-exists-exit $?"
   `artifact_read` result holds `scratch summary`; the delete answers `204` and `scratch-exists-exit 1`. The confirmation
   list holds exactly three cards (two `shell_execute`, one `file_write`). PASS/FAIL (h).
 
-- [ ] **Step 17: (i) (Only with screen access the owner granted to this session) the stale approval card, and the
+- [ ] **Step 18: (i) (Only with screen access the owner granted to this session) the stale approval card, and the
   app's result-file surfaces.** Start the app from Step 1 with the same two variables
   (`OPENALPACA_HOME_STORE="$STORE" OPENALPACA_CONFIG_DIR="$OPENALPACA_CONFIG_DIR" <the .app>/Contents/MacOS/openalpaca_gui &`);
   it reads the running daemon's discovery and spawns none — the pid in `discovery.json` is still `$DAEMON_PID` and
@@ -30234,7 +33426,7 @@ test -e "$STORE/scratch/$SID"; echo "scratch-exists-exit $?"
   `views/chat/approval-card-returns.test.tsx` and S6a's suites (`WrittenArtifactCard`, `LibraryRow`,
   `LibraryDetailHeader`, `OutputSection`), which S6.4 Step 9 ran.
 
-- [ ] **Step 18: The log, and stop.**
+- [ ] **Step 19: The log, and stop.**
 
 ```bash
 sed 's/\x1b\[[0-9;]*m//g' "$OA/daemon.out" > "$OA/evidence/daemon.plain.log"
@@ -30252,10 +33444,10 @@ pgrep -f 'sleep 30$' | wc -l
   The `daemon tail` of Step 4 ends with `Connection closed by server`. (No `pgrep` by name for the daemon: the owner's
   own daemon or app may be running, and this check never touches them.)
 
-- [ ] **Step 19: Write the report and commit it.** `tasks/storage-design/stage2-live-report.md`, in
+- [ ] **Step 20: Write the report and commit it.** `tasks/storage-design/stage2-live-report.md`, in
   `stage1-live-report.md`'s shape: date and times, the commit, the model, the setup (scratch root, the build, the
   `strings` count, the daemon's launch line with nothing secret in it), the profile proof, onboarding, one section per
-  check (a)–(i) with PASS/FAIL or *not exercised* and the evidence quoted (each card's preview whole, the file
+  check (a)–(j) with PASS/FAIL or *not exercised* and the evidence quoted (each card's preview whole, the file
   contents, the rows, the CLI's lines, the session log's refusal sentences), every confirmation in order (recorded
   before it was answered, with the decision), every turn, Step 15's diff, the WARN lines, what was left on screen, and
   (b2)'s answer to interfaces §11. Then:
@@ -30266,7 +33458,7 @@ git add tasks/storage-design/stage2-live-report.md
 git commit -F - <<'EOF'
 docs(storage-design): Stage 2 live check report
 
-<one line per check, (a)-(i): its verdict and the evidence in a phrase>
+<one line per check, (a)-(j): its verdict and the evidence in a phrase>
 
 Verified: the profile proven before the first model turn; 0 ERROR lines;
 the repository changed by the one approved file only
@@ -30284,11 +33476,14 @@ EOF
 
 The records say what Stage 2 built, with the figures of the gate (S6.4) and the live check (S6.5): the design (rev
 1.0: status, §0.4's two live items, Part II's *As built* paragraphs carrying the interfaces' corrections C1–C13 as the
-lead's rulings of the build, §16, §18, §21, the revision log), `CLAUDE.md`, `tasks/api-fix-plan.md` §0 (FW-2 moves
-from the pending table to the storage subsection's taken table with its commits; rev 3.23),
+lead's rulings of the build, §0.2, §3, §6 and §16 for ST-23, §18, §21, the revision log), `CLAUDE.md`,
+`tasks/api-fix-plan.md` §0 (FW-2 moves from the pending table to the storage subsection's taken table with its
+commits, and ST-23's row gains its commits; rev 3.24),
 `tasks/memory-redesign/03-design.md` (rev 7.23: its §2 sentence that the generic file tools refuse `state/` and a
 partition's control files is superseded by R33 — Spec conflicts, fourth item), the vault's ADR-047 and its notes,
-`tasks/lessons.md` (only if a correction happened) and `tasks/todo.md` (git-ignored).
+`tasks/lessons.md` (only if a correction happened) and `tasks/todo.md` (git-ignored). The anchors of Steps 1–3 are
+`fb3bee0f`'s, which recorded the owner's answers on T36 and ST-23 after the plan's drafts were written (design rev
+0.10, `CLAUDE.md`, `tasks/api-fix-plan.md` rev 3.23): those three records now say ST-23 is built, as S0.
 
 **The tokens.** The figures do not exist until the tasks above land, so the texts below carry tokens, and Step 0 puts
 each value in an environment variable that the edit scripts substitute — a script stops on an unset one, and Step 8
@@ -30302,16 +33497,18 @@ Step 1 (f) and (g) add. Every `path:line` written into a record is one the write
 - Modify: `tasks/storage-design/design.md` — title (`:1`), status (`:10-11`), §0.4 (`:89-90`), *As built* paragraphs
   after §10–§15 (before `:498`, `:534`, `:549`, `:626`, `:640`, `:653`), §16's Stage 2 clause (`:678-681`, only without
   screen access), §18 (`:701-705`, `:787-788`, a new list before `:834`), §21 (`:870-872`, `:882`, `:895-899`), the
-  revision log (`:906`)
-- Modify: `CLAUDE.md` — *Current Work*'s heading (`:54`), the storage paragraph (`:56`), a new Stage 2 paragraph after
-  Stage 1's (`:58`), Round G's FW-2 sentence (`:68`), the documents table (`:111`, `:120`), the pending-decisions bullet
+  revision log (`:906`) — lines of `d484a56a`; for ST-23, at `fb3bee0f`: the status (`:12`), §0.2 (`:70`), §3
+  (`:206-207`, `:259-260`), §6 (`:346`), §16 (`:680`), §18's R1 and X6 bullets (`:747`, `:763`)
+- Modify: `CLAUDE.md` — *Current Work*'s heading (`:54`), the storage paragraph (`:56`), the Stage 1 paragraph's ST-23
+  sentences and a new Stage 2 paragraph after it (`:58`), Round G's FW-2 sentence (`:68`), the documents table (`:111`, `:120`), the pending-decisions bullet
   (`:128`), *Execution Topology* (`:217`), the main-loop step (`:225`), *Storage* (`:286`: only its line cites — S4a.1
   wrote its migration-4 sentences; `:290`, the data directory's `scratch/`), *Code Navigation*
   (`:334`, new rows after it), *Gotchas* (the strict-mode bullet `:389`, the escaped-surfaces bullet `:401`, the FW-1
   bullet `:402`, a new bullet at the end)
-- Modify: `tasks/api-fix-plan.md` — title (`:1`), status (`:3`), a rev 3.23 changelog line before `:4`, §0's
+- Modify: `tasks/api-fix-plan.md` — title (`:1`), status (`:3`), a rev 3.24 changelog line before `:4`, §0's
   pending-table intro (`:80`, its FW-2 sentence), the FW-2 row (`:110`, removed), FW-1's row (`:231`), the storage
-  subsection (`:233-242`, a FW-2 row added)
+  subsection (`:233-242`: its heading, its paragraph's row count, T36 and Stage 2 sentences, ST-23's Commits, a FW-2
+  row added)
 - Modify: `tasks/memory-redesign/03-design.md` — status (`:3`), §2 (`:133`), the revision log (`:791`)
 - Modify (only if S6.5 or the gate produced a correction): `tasks/lessons.md`
 - Modify, not staged: `tasks/todo.md` (git-ignored)
@@ -30325,7 +33522,7 @@ slice's draft *Spec conflicts* and *Open points*, and interfaces §10 and §10.1
 - [ ] **Step 0: The values, and the token counts the records already hold.** From the repository root:
 
 ```bash
-export BASE=d484a56a   # or the commit S6.4 Step 1 recorded as <BASE>, if anything landed before S1's first task
+export BASE=d484a56a   # or the commit S6.4 Step 1 recorded as <BASE>, if anything landed before S0's first task
 export FIRST="$(git log --reverse --format=%h "$BASE"..HEAD | head -1)"
 export LAST="$(git log -1 --format=%h -- tasks/storage-design/stage2-live-report.md)"
 export T_RANGE="${FIRST}^..${LAST}"
@@ -30338,9 +33535,9 @@ for f in CLAUDE.md tasks/storage-design/design.md tasks/api-fix-plan.md tasks/me
 
   Then set, by hand, from `tasks/todo.md` (S6.4 Step 11) and the report: `T_GATE` (the gate's commit), `T_N` (the
   workspace passed count, `4,8xx` with the comma), `T_M` (`1,4xx tests in 1xx files`), `T_PLAN_APPROVED` (the day the
-  owner approved `plan-stage2.md`), `T_VERDICTS` (one line, e.g. `(a)–(h) PASS, (b2) the preview's line breaks kept`),
+  owner approved `plan-stage2.md`), `T_VERDICTS` (one line, e.g. `(a)–(h) and (j) PASS, (b2) the preview's line breaks kept`),
   `T_R41` (e.g. `a workflow's by-product read back with artifact_read, no card`), `T_STALE` (one of the two sentences
-  in Step 2 (e)), `T_RESIDUE` (the short names of Step 1 (f)–(g)'s bullets, comma-separated), and `T_SCREEN=yes` only if S6.5 Step 17
+  in Step 2 (e)), `T_RESIDUE` (the short names of Step 1 (f)–(g)'s bullets, comma-separated), and `T_SCREEN=yes` only if S6.5 Step 18
   ran with screen access. The first command block
   prints the range and its commit count; the token counts are what the records hold before this task — prose, not
   tokens (Stage 1's Step 0 found `<date>` in prose in three of them); note them, Step 7 compares. Last, the one
@@ -30381,12 +33578,12 @@ import os
 from s6edit import edit
 from s6fill import fill
 
-NO_SCREEN = os.environ.get("T_SCREEN", "") != "yes"   # set T_SCREEN=yes when S6.5 Step 17 ran
+NO_SCREEN = os.environ.get("T_SCREEN", "") != "yes"   # set T_SCREEN=yes when S6.5 Step 18 ran
 D = "tasks/storage-design/design.md"
 ops = [
     # (a) title and status
-    ("once", "(rev 0.9, approved by the owner with ST-22; Stages 0 and 1 built)",
-     "(rev 1.0, approved by the owner with ST-22; Stages 0, 1 and 2 built)"),
+    ("once", "(rev 0.10, approved by the owner with ST-22, ST-23 taken; Stages 0 and 1 built)",
+     "(rev 1.0, approved by the owner with ST-22, ST-23 taken; Stages 0, 1 and 2 built)"),
     ("once", "Stage 2 is not built, and is not built before the owner approves its\nplan.",
      fill("**Stage 2 is built** (<dates>, `<range>`, from `tasks/storage-design/plan-stage2.md`, which the owner\n"
           "approved on <plan-approved>; one gate pass at `<gate>`; the live check `stage2-live-report.md`, `<report>`).")),
@@ -30429,7 +33626,8 @@ its injection checks are unchanged. R31 resolves the last component on the write
 a timeout or a dropped future, `kill_on_drop` (the direct child only) on Windows; `libc` joined core's unix
 dependencies (already in `Cargo.lock`). R23: `send` takes a path resolved like `file_read`'s, or an `artifact_id` of the
 turn's owner — of the turn's project or of none: another project's by-product is refused with `artifact_read`'s
-sentence (the lead's ruling R-T3) — and its card names the resolved file.
+sentence (the lead's ruling R-T3), and a result file of a missing project, first, with a sentence of its own
+(R-T19) — and its card names the resolved file.
 
 """),
     ("before", "## 13. Results and by-products (ST-11, ST-12)", """**As built (rev 1.0).** ST-15 is `local_write_annotations()` for `artifact_write` and `workspace_write`. R34 is
@@ -30480,6 +33678,42 @@ no conversation log cuts a long answer after its first part, and a run parked on
 one since R-T2. `file_read`'s not-found hint names `file_list`, which every surface holding `file_read` holds.
 
 """),
+    # (c2) ST-23, built first as Stage 2's slice S0 (the plan's ruling R-T17)
+    ("once", "and **ST-23** makes a project whose recorded root no longer leads to itself read missing.",
+     "and **ST-23** makes a project whose recorded root no longer leads to itself read missing — built first in "
+     "Stage 2, as its slice S0."),
+    ("once", "To be built in Stage 2, slice S0, before anything resolves a project's working folder:",
+     fill("Built in Stage 2, slice S0 (in `<range>`), before anything resolved a project's working folder:")),
+    ("once", "`projects/<plain>-<hash>/project.json`. Two small reads.",
+     "`projects/<plain>-<hash>/project.json` — for the root as written first and, only when that finds nothing and\n"
+     "  the root's canonical form differs, for that form (ST-23, Stage 2's S0). Two small reads, four at most."),
+    ("once", "A project is **missing** when its root is not a directory.",
+     "A project is **missing** when its root is not a directory or no longer\n"
+     "  canonicalizes to itself — its folder renamed by case only, or moved with a link left at the old path (ST-23;\n"
+     "  `projects::root_is_missing`, the one place the flag is decided)."),
+    ("once",
+     "`lookup`, `store_root`, the dispatch's `register` and memory still take such a\nroot by its canonical form (§18).",
+     "since Stage 2's S0 (ST-23, rev 1.0)\n"
+     "`lookup`, `register` and `resolve` match a recorded root as written before its canonical form too, so `store_root`,\n"
+     "the dispatch's `register`, memory, learning and a turn at the old root take it as its own project — which reads\n"
+     "missing — and never the one its canonical form names; a path that is not its own canonical form is walked as\n"
+     "written first, a missing project's recorded root found so losing only to a nearer project or repository, and a\n"
+     "project that still leads to itself is resolved as before (the plan's ruling R-T17). A by-product's or an upload's\n"
+     "row filed at such a root records that root too — `store::project_root_of` answers the root `lookup` finds, R14's\n"
+     "canonical path as it was recorded — and `send` refuses such a project's result file (the plan's ruling R-T19)."),
+    ("once", "**Missing (ST-7).** A project whose root is not a directory is listed as missing, and its data is kept.",
+     "**Missing (ST-7, ST-23).** A project whose root is not a directory, or no longer canonicalizes to itself — its\n"
+     "folder renamed by case only, or moved with a link left at the old path — is listed as missing, and its data is kept."),
+    ("once", "**Stage 2.** Guards before the root moves: (1) confinement,",
+     "**Stage 2.** Guards before the root moves: (0) a root that no longer leads to itself is missing and a recorded\n"
+     "root is matched as written first (ST-23) — first, since (3) refuses a missing project's tools; (1) confinement,"),
+    ("once", "reads missing — to be built in Stage 2's S0.",
+     fill("reads missing — **built** in Stage 2's S0 (in `<range>`), which closes this bullet.\n"
+          "  Planning S0 found that learning also dropped such a project's turns — `check_project` canonicalized the root\n"
+          "  and read it `Gone`, against ST-21 — which S0.2 fixed.")),
+    ("once", "(logged at debug, X6; A-N2).",
+     "(logged at debug, X6; A-N2). **Closed** by Stage 2's S0 (ST-23): the reconciliation matches such a root as\n"
+     "  written and scans its partition."),
     # (e) §18: Stage 0's wording item, and Stage 1's re-point bullet
     ("once",
      "a run parked by `POST /v1/tasks` on a lane with no session. For\n  Stage 2's wording pass.",
@@ -30539,11 +33773,14 @@ one since R-T2. `file_read`'s not-found hint names `file_list`, which every surf
      "is the factory reset."),
     # (h) the revision log
     ("before", "- **rev 0.9 (2026-10-08).**", fill("""- **rev 1.0 (<date>).** **Stage 2 built**, from `tasks/storage-design/plan-stage2.md` (approved by the owner on
-  <plan-approved>), as `<range>`: slices S1–S6 (S4 as S4a and S4b, S6 as S6a and S6), one gate pass at `<gate>` (<N>
+  <plan-approved>), as `<range>`: slices S0–S6 (S0 for ST-23, S4 as S4a and S4b, S6 as S6a and S6), one gate pass at
+  `<gate>` (<N>
   passed, 0 failed, 16 ignored; clippy 78; the four bun gates green, <M>), the live check `stage2-live-report.md`
   (`<report>`; <verdicts>). The title, the status line, §0.4's two live items and §21 say so (its row 5 built, B3's
   clause about Stage 2 gone); Part II's six sections gain *As built* paragraphs; §18 marks Stage 0's wording item
-  worded and Stage 1's re-point bullet closed by the working folder's refusal, and gains Stage 2's residue (<residue>).
+  worded and Stage 1's re-point bullet closed by the working folder's refusal, closes *review R1's deeper
+  cross-wiring* and X6 (ST-23, built first as S0, which §0.2, §3, §6 and §16 now say), and gains Stage 2's residue
+  (<residue>).
   The lead's rulings that shaped the build — the plan's interfaces corrections, one line each:
   - C1: `file_write`'s root moved in step (4) with the real write, not in (3); production stayed a by-product between.
   - C2: ST-17 and R46 landed in step (4) with `pre_edit.rs`; `file_edit` consumes it.
@@ -30559,7 +33796,7 @@ one since R-T2. `file_read`'s not-found hint names `file_list`, which every surf
   - C11: `409 OPEN_NOT_OFFERED` landed with the rows, the app's hiding with the surfaces.
   - C12: `ArtifactRecord`, not `FileAsset`, carries `in_project`.
   - C13: ST-19's delete keeps no pointer row's file and counts none as a by-product.
-  The lead's rulings on the plan's drafts, R-T1…R-T16 (`plan-stage2.md`, *Rulings*), one line each:
+  The lead's rulings on the plan's drafts, R-T1…R-T19 (`plan-stage2.md`, *Rulings*), one line each:
   - R-T1: S4a's `file_write` real write landed last in its slice, after every reader that guards a result file.
   - R-T2: a run parked by `POST /v1/tasks` on a lane with no session gets the lane's session at dispatch.
   - R-T3: `send` by `artifact_id` refuses another project's by-product with `artifact_read`'s sentence.
@@ -30576,6 +33813,13 @@ one since R-T2. `file_read`'s not-found hint names `file_list`, which every surf
   - R-T14: one project-turn predicate, `builtins::is_project_turn`, computed once per turn.
   - R-T15: every recorded spec conflict in the drafts stands as drafted.
   - R-T16: the residue in §18's *From Stage 2* list is recorded, not built.
+  - R-T17: S0 built ST-23 first; a path that is not its own canonical form is walked as written first, a missing
+    project's recorded root found so losing only to a nearer project or repository, and a project that still leads to
+    itself resolving as before; the case-only tests skip on a case-sensitive volume.
+  - R-T18: a missing project's result file reads as gone and is never read, refreshed, opened or revealed through a
+    link left at its old root.
+  - R-T19: a by-product's or an upload's row filed at a missing project's old root names that project
+    (`project_root_of` answers the root `lookup` finds), and `send` by `artifact_id` refuses its result file.
 """)),
 ]
 if NO_SCREEN:
@@ -30586,7 +33830,7 @@ EOF
 python3 /tmp/stage2-s6/edit_s6_6_design.py
 ```
 
-  Expected: `edited tasks/storage-design/design.md: 17 edits` (`18` without screen access). Then (g), by hand with the
+  Expected: `edited tasks/storage-design/design.md: 26 edits` (`27` without screen access). Then (g), by hand with the
   Edit tool: in §18's *From Stage 2* list add one bullet per point the build parked — each slice's draft *Open points*
   left open, each *Spec conflicts* correction a later slice did not take (S6a's third, `GET /v1/files/{id}/content`
   serving a pointer row's file without R37's resolver, unless S4a took it — read `file_content` in
@@ -30598,7 +33842,7 @@ python3 /tmp/stage2-s6/edit_s6_6_design.py
   plugin surfaces' missing line, R45's edges, the `ensure` tripwire, R-T4's window and S2's C8): do not add them
   twice, and include their short names in `T_RESIDUE`.
 
-- [ ] **Step 2: `CLAUDE.md`.** Re-read each passage first. The anchors are HEAD's (`d484a56a`) except in the
+- [ ] **Step 2: `CLAUDE.md`.** Re-read each passage first. The anchors are `fb3bee0f`'s (which recorded T36's and ST-23's answers) except in the
   *Storage* paragraph, which S4a.1 already moved to migration 004 (four entries, `opens at the newest, 4 today`, the
   recipe for `005`, its Migration 4 sentence); this script leaves that paragraph's migration sentences alone.
   `grep -c '004_project_files.sql' CLAUDE.md` prints at least `1` before the script runs — if it prints `0`, S4a.1's
@@ -30613,7 +33857,15 @@ C = "CLAUDE.md"
 edit(C, [
     ("once", "## Current Work — read first (as of 2026-10-08, branch `feat/markdown-memory`)",
      fill("## Current Work — read first (as of <date>, branch `feat/markdown-memory`)")),
-    ("once", "rev 0.9 since Stage 1 was recorded; ADR-047)", "rev 1.0 since Stage 2 was recorded; ADR-047)"),
+    ("once", "owner decisions **ST-1…ST-22** in its §0.1, rev 0.9 since Stage 1 was recorded; ADR-047)",
+     "owner decisions **ST-1…ST-22** in its §0.1 and **ST-23** since 2026-10-09, rev 1.0 since Stage 2 was recorded; "
+     "ADR-047)"),
+    # ST-23 in the Stage 1 paragraph: answered on 2026-10-09, built as Stage 2's S0
+    ("once", "review R1's deeper cross-wiring (only the routes match a recorded root as written)",
+     "review R1's deeper cross-wiring (only the routes matched a recorded root as written; closed by Stage 2's S0, "
+     "ST-23)"),
+    ("once", "which Stage 2's plan builds first (its slice S0).",
+     "which Stage 2 built first (its slice S0; the paragraph on Stage 2 below)."),
     ("once",
      "the next paragraph). Stage 2 — agents working in the project's own folder — is next, built only after the owner "
      "approves its plan.",
@@ -30621,7 +33873,15 @@ edit(C, [
           "paragraph after it). The design is built; what a beta still waits for is its §21 (B1–B3).")),
     ("before", "**The memory redesign's cutover (slice 3) is landed on `feat/markdown-memory`**", fill(
      "**Stage 2 of the storage design is landed** (`<range>`, <dates>; `tasks/storage-design/plan-stage2.md`, approved by "
-     "the owner on <plan-approved>; design rev 1.0). Agents work in the turn's **working folder** (`tools::working_folder`, "
+     "the owner on <plan-approved>; design rev 1.0). First, **ST-23** (slice S0, the plan's ruling R-T17): a project "
+     "whose recorded root no longer leads to itself — its folder renamed by case only, or moved with a link left at "
+     "the old path — reads `missing` like one whose folder is gone (`projects::root_is_missing`, the one place the "
+     "flag is decided), `lookup`, `register` and the workspace routes match a recorded root as written before its "
+     "canonical form, and `resolve` walks a path as written first for a missing project's root, so nothing — a turn, "
+     "a follow-up, memory, learning, the dispatch, the address of a by-product or an upload filed there — follows the old "
+     "root into another project (design §18's *review R1's deeper cross-wiring*, closed; the address is "
+     "`store::project_root_of`'s, the root `lookup` finds, R-T19); such a project's tools are refused, `send` refuses "
+     "its result files (R-T19), and the user re-points it. Agents work in the turn's **working folder** (`tools::working_folder`, "
      "`crates/openalpaca_core/src/tools/working_folder.rs`): with a project its own folder, with none "
      "`~/.openalpaca/scratch/<conversation id>/`, made at first use and removed with the conversation "
      "(`DELETE /v1/sessions/{id}` and a project's delete; a clear, an archive, the size caps and a factory reset keep it). "
@@ -30671,30 +33931,37 @@ edit(C, [
     ("once", "the round trip is pinned by the unit test only.",
      "the round trip is pinned by the unit test only (since the storage design's Stage 2 the main chat holds "
      "`artifact_read` on every turn, and its live check read a by-product back: the paragraph on Stage 2 above)."),
-    ("once", "| `tasks/api-fix-plan.md` (rev 3.22 —", "| `tasks/api-fix-plan.md` (rev 3.23 —"),
+    ("once", "| `tasks/api-fix-plan.md` (rev 3.22 —", "| `tasks/api-fix-plan.md` (rev 3.24 —"),
     ("once",
      "T31–T33 and T35 (FW-2's row stays in that table, taken as ST-10…ST-12 and to be built in the storage design's "
      "Stage 2), and the decisions taken on this branch (D-A…D-G, T23, T28–T30, and T34, taken, in the storage design's "
      "subsection)",
-     "T31–T33, T35 and T36, and the decisions taken on this branch (D-A…D-G, T23, T28–T30, and T34 and FW-2, taken, in "
-     "the storage design's subsection)"),
+     "T31–T33 and T35, and the decisions taken on this branch (D-A…D-G, T23, T28–T30, and T34, T36, ST-23 and FW-2, "
+     "taken, in the storage design's subsection)"),
     ("once",
-     "(rev 0.9 — **approved 2026-10-05, ST-1…ST-22 taken; Stage 0 built** `931460a4..a9dbed4e`, **Stage 1 built** "
-     "`b8b768b6^..44d53783`; Stage 2 not built)",
-     fill("(rev 1.0 — **approved 2026-10-05, ST-1…ST-22 taken; Stage 0 built** `931460a4..a9dbed4e`, **Stage 1 built** "
-          "`b8b768b6^..44d53783`, **Stage 2 built** `<range>`)")),
+     "(rev 0.10 — **approved 2026-10-05, ST-1…ST-22 taken, ST-23 on 2026-10-09; Stage 0 built** `931460a4..a9dbed4e`, "
+     "**Stage 1 built** `b8b768b6^..44d53783`; Stage 2 not built)",
+     fill("(rev 1.0 — **approved 2026-10-05, ST-1…ST-22 taken, ST-23 on 2026-10-09; Stage 0 built** "
+          "`931460a4..a9dbed4e`, **Stage 1 built** `b8b768b6^..44d53783`, **Stage 2 built** `<range>`)")),
     ("once", "(Stage 0's and Stage 1's residue among it)", "(each stage's residue among it)"),
-    ("once", "(T34 taken as Stage 0's F1, FW-2 as ST-10…ST-12, T35 and T36 pending)",
-     "(T34 taken as Stage 0's F1, FW-2 as ST-10…ST-12 and built as Stage 2, T35 and T36 pending)"),
+    ("once",
+     "(T34 taken as Stage 0's F1, FW-2 as ST-10…ST-12, T35 pending, T36 answered with no change and ST-23 taken on "
+     "2026-10-09)",
+     "(T34 taken as Stage 0's F1, FW-2 as ST-10…ST-12 and built as Stage 2, T35 pending, T36 answered with no change, "
+     "and ST-23 taken on 2026-10-09 and built as Stage 2's S0)"),
     ("once",
      "Stage 1's `plan-stage1.md` and `stage1-live-report.md`; each later stage gets a plan the owner approves before "
      "anything is built.",
      "Stage 1's `plan-stage1.md` and `stage1-live-report.md`, Stage 2's `plan-stage2.md` and `stage2-live-report.md`."),
     ("once",
      "taken as ST-10…ST-12, to be built in the storage design's Stage 2; its row stays in the plan's pending table until "
-     "then) — Stage 0 built `931460a4..a9dbed4e`, Stage 1 `b8b768b6^..44d53783`, Stage 2 pending.",
+     "then) — Stage 0 built `931460a4..a9dbed4e`, Stage 1 `b8b768b6^..44d53783`, Stage 2 pending — and, on 2026-10-09, "
+     "**T36** (no change: the re-point of an `old_path` inside a project stays as built) and **ST-23** (a project "
+     "whose recorded root no longer leads to its own folder reads `missing`; to be built in Stage 2's S0).",
      fill("taken as ST-10…ST-12 and built as the storage design's Stage 2) — Stage 0 built `931460a4..a9dbed4e`, Stage 1 "
-          "`b8b768b6^..44d53783`, Stage 2 `<range>`.")),
+          "`b8b768b6^..44d53783`, Stage 2 `<range>` — and, on 2026-10-09, **T36** (no change: the re-point of an "
+          "`old_path` inside a project stays as built) and **ST-23** (a project whose recorded root no longer leads "
+          "to its own folder reads `missing`; built as Stage 2's S0).")),
     ("once",
      "The lead's own surface also carries the installed MCP/plugin extension tools of every **enabled** extension and a "
      "per-request `invoke_skill`,",
@@ -30733,11 +34000,11 @@ EOF
 python3 /tmp/stage2-s6/edit_s6_6_claude.py
 ```
 
-  `T_STALE` is one of two sentences, by S6.5 Step 17: with screen access, `the stale approval card was tried in the
+  `T_STALE` is one of two sentences, by S6.5 Step 18: with screen access, `the stale approval card was tried in the
   app: <what the report recorded>`; without, `the app's surfaces and the stale approval card are proven by their vitest
   suites, the session having no screen access`.
 
-  Expected: `edited CLAUDE.md: 19 edits`. Then four edits by hand with the Edit tool, each re-read first:
+  Expected: `edited CLAUDE.md: 21 edits`. Then four edits by hand with the Edit tool, each re-read first:
   - *Storage* and the strict-mode Gotcha, the line cites S4a.1 left for this pass (its *Spec conflicts*, 2): find each
     cited item in the tree as it stands and write its line — `run_migrations` and the refusal in `database/mod.rs`
     (cited `:107`, `:138`), the `MIGRATIONS` array and `BASELINE_VERSION` in `migrations/mod.rs` (S4a.1 wrote
@@ -30772,7 +34039,7 @@ python3 /tmp/stage2-s6/edit_s6_6_claude.py
 - **From the storage design's Stage 2 the file tools and the shell act on real files, so no test may run them in the repository or the process's directory.** Every test that writes, edits, lists or runs a command does it in a temporary project registered under its crate's home-store guard — `crate::test_util::GuardedProject` in core and in the daemon (`ctx()` for a project turn, `scratch_ctx()` for a conversation with no project) — and a test that spawns a process kills it: R45's tests record the grandchild's pid and hold a `KillOnFail` whose `Drop` sends `SIGKILL`, so a failed assertion leaves no orphan (the MCP hang tests' `sleep 3600` children are the older exception). The gate checks it: after the workspace run `git status` is unchanged and no `sleep 30` is left.
 ```
 
-- [ ] **Step 3: `tasks/api-fix-plan.md` — rev 3.23.** Save and run:
+- [ ] **Step 3: `tasks/api-fix-plan.md` — rev 3.24.** Save and run:
 
 ```bash
 cat > /tmp/stage2-s6/edit_s6_6_plan.py <<'EOF'
@@ -30781,22 +34048,27 @@ from s6fill import fill
 
 P = "tasks/api-fix-plan.md"
 edit(P, [
-    ("once", "# Daemon Fix Plan — rev 3.22:", "# Daemon Fix Plan — rev 3.23:"),
-    ("once", "**implemented and merged — rev 3.22 is the record of what shipped.**",
-     "**implemented and merged — rev 3.23 is the record of what shipped.**"),
+    ("once", "# Daemon Fix Plan — rev 3.23:", "# Daemon Fix Plan — rev 3.24:"),
+    ("once", "**implemented and merged — rev 3.23 is the record of what shipped.**",
+     "**implemented and merged — rev 3.24 is the record of what shipped.**"),
     ("once",
      "and FW-2, still a row there, was taken on 2026-10-05 as ST-10…ST-12 of the storage design and is to be built in "
      "its Stage 2, not built yet;",
      fill("and FW-2, taken on 2026-10-05 as ST-10…ST-12 of the storage design, was built as its Stage 2 (`<range>`) and "
           "is a row of §0's storage subsection now;")),
-    ("before", "**Rev 3.22 changelog (one line)", fill(
-     "**Rev 3.23 changelog (one line), <date>:** the storage design's Stage 2 (`tasks/storage-design/design.md` rev 1.0) "
+    ("before", "**Rev 3.23 changelog (one line)", fill(
+     "**Rev 3.24 changelog (one line), <date>:** the storage design's Stage 2 (`tasks/storage-design/design.md` rev 1.0) "
      "landed outside this plan as `<range>`; §0's storage subsection says so — its heading, the paragraph's Stage 2 "
-     "sentence (gate at `<gate>`, clippy 78) and the ST row's Commits — and **FW-2** leaves the pending table for that "
-     "subsection's table, built.\n")),
+     "sentence (gate at `<gate>`, clippy 78) and the ST row's Commits — **FW-2** leaves the pending table for that "
+     "subsection's table, built, and **ST-23**'s row names the commits that built it (Stage 2's slice S0).\n")),
     ("span", "\n| **FW-2** (Round G's re-test; made sharper by FW-1) |", "\n", ""),
     ("once", "(the storage design: ST-1…ST-22; T34 taken; Stages 0 and 1 built)",
-     "(the storage design: ST-1…ST-22; T34 and FW-2 taken; Stages 0, 1 and 2 built)"),
+     "(the storage design: ST-1…ST-23; T34, T36 and FW-2 taken; Stages 0, 1 and 2 built)"),
+    ("once", "its §0.1 holds the 22 rows", "its §0.1 holds the 23 rows (ST-23 since 2026-10-09)"),
+    ("once", "It raised **T36**, pending above.",
+     "It raised **T36** and the question **ST-23** answers, both answered on 2026-10-09 (below)."),
+    ("once", "| To be built in the storage design's Stage 2, slice S0 |",
+     fill("| `<range>` (the storage design's Stage 2; its slice S0, first) |")),
     ("once", "(`tasks/storage-design/design.md`, rev 0.9; ADR-047)", "(`tasks/storage-design/design.md`, rev 1.0; ADR-047)"),
     ("once", "**Stage 2 is not built.**", fill(
      "**Stage 2** — agents work in the project's own folder: a working folder per turn (the project, or the "
@@ -30804,14 +34076,14 @@ edit(P, [
      "approval cards naming the folder, the kill of a timed-out command — was built on <dates> as `<range>`, from "
      "`tasks/storage-design/plan-stage2.md` (approved <plan-approved>); gate at `<gate>` (<N> passed, 0 failed, 16 "
      "ignored; clippy 78; the four bun gates green); live check `tasks/storage-design/stage2-live-report.md` (`<report>`; "
-     "<verdicts>). It built FW-2 (below).")),
+     "<verdicts>). It built FW-2 and, first, ST-23 (its slice S0; both below).")),
     ("once", "Stage 1 built `b8b768b6^..44d53783`, Stage 2 pending);",
      fill("Stage 1 built `b8b768b6^..44d53783`, Stage 2 built `<range>`);")),
     ("once", "taken by the storage design as ST-10…ST-12, to be built in its Stage 2)",
-     fill("taken by the storage design as ST-10…ST-12, to be built in its Stage 2; *since rev 3.23* built as that Stage 2, "
+     fill("taken by the storage design as ST-10…ST-12, to be built in its Stage 2; *since rev 3.24* built as that Stage 2, "
           "`<range>`)")),
     ("once", "and FW-2's row stays here, rewritten, until its Stage 2 builds it.",
-     fill("and FW-2's row stayed here, rewritten, until its Stage 2 built it (`<range>`, rev 3.23): it is under *Owner "
+     fill("and FW-2's row stayed here, rewritten, until its Stage 2 built it (`<range>`, rev 3.24): it is under *Owner "
           "decisions taken* below too.")),
     ("once", "Stage 0 `931460a4..a9dbed4e`; Stage 1 `b8b768b6^..44d53783`; Stage 2 not built |",
      fill("Stage 0 `931460a4..a9dbed4e`; Stage 1 `b8b768b6^..44d53783`; Stage 2 `<range>` |")),
@@ -30828,7 +34100,7 @@ EOF
 python3 /tmp/stage2-s6/edit_s6_6_plan.py
 ```
 
-  Expected: `edited tasks/api-fix-plan.md: 13 edits`. The pending table's rows stay contiguous (the span removed the
+  Expected: `edited tasks/api-fix-plan.md: 16 edits`. The pending table's rows stay contiguous (the span removed the
   FW-2 row with the line break before it).
 
 - [ ] **Step 4: `tasks/memory-redesign/03-design.md` — rev 7.23.** Save and run:
@@ -30878,11 +34150,11 @@ for f in tasks/storage-design/design.md CLAUDE.md tasks/api-fix-plan.md tasks/me
 git ls-files --error-unmatch tasks/storage-design/plan-stage2.md tasks/storage-design/stage2-live-report.md; echo "tracked-exit $?"
 TOKENS='<(range|gate|report|date|dates|N|M|plan-approved|verdicts|r41|stale|residue)>'
 for f in CLAUDE.md tasks/storage-design/design.md tasks/api-fix-plan.md tasks/memory-redesign/03-design.md; do printf '%s: ' "$f"; grep -oE "$TOKENS" "$f" | sort | uniq -c | tr -s ' ' | tr '\n' ';'; echo; done
-grep -n "Stage 2 is not built\|Stage 2 not built\|Stage 2 pending\|to be built in its Stage 2\|to be built in the storage design's Stage 2\|until its Stage 2 builds it" CLAUDE.md tasks/storage-design/design.md tasks/api-fix-plan.md
+grep -n "Stage 2 is not built\|Stage 2 not built\|Stage 2 pending\|to be built in its Stage 2\|to be built in the storage design's Stage 2\|until its Stage 2 builds it\|to be built in Stage 2's S0\|To be built in Stage 2, slice S0\|To be built in the storage design's Stage 2, slice S0\|Stage 2's plan builds first" CLAUDE.md tasks/storage-design/design.md tasks/api-fix-plan.md
 grep -c '^| \*\*FW-2\*\*' tasks/api-fix-plan.md
 ```
 
-  Expected: every `ignored-exit 1`; `tracked-exit 0` with both paths (the lead commits `plan-stage2.md` before S1's
+  Expected: every `ignored-exit 1`; `tracked-exit 0` with both paths (the lead commits `plan-stage2.md` before S0's
   first task, as `plan-stage1.md` was; if it is not tracked, `git add` it with this commit and say so); the token counts
   are exactly Step 0's (every token filled; prose like `<date>-<title>` was there before); the `grep -n` prints nothing
   that states the current tree (a line of history — a revision-log entry, a changelog line — is fine; read each);
@@ -30897,11 +34169,13 @@ docs: Stage 2 of the storage design recorded (agents work in the project)
 design.md rev 1.0: Stage 2 built, §0.4's two live items answered, Part II's
 As built paragraphs (the plan's corrections C1-C13 as the build's rulings),
 §18 Stage 2's residue, Stage 0's wording item worded and Stage 1's re-point
-bullet closed, §21. CLAUDE.md: the Stage 2 paragraph, the lead's and the
+bullet closed, §21; ST-23 built as S0 (§0.2, §3, §6, §16, and §18's review-R1
+cross-wiring and X6 bullets closed). CLAUDE.md: the Stage 2 paragraph (ST-23
+first) and the Stage 1 paragraph's ST-23 sentences, the lead's and the
 main loop's surfaces and relay rules, scratch/, the Storage paragraph's line cites (S4a.1
 wrote its migration-4 sentences), Code Navigation, the FW-1, strict-mode and
 escaped-surfaces Gotchas and a new one on tests and real files.
-api-fix-plan rev 3.23 (FW-2 taken and built); 03-design rev 7.23 (§2's
+api-fix-plan rev 3.24 (FW-2 taken and built; ST-23's commits); 03-design rev 7.23 (§2's
 file-tool refusal superseded by R33).
 
 Verified: every record tracked (check-ignore exit 1); no unfilled token;
@@ -30921,7 +34195,9 @@ EOF
   - `10-decision-log.md`, ADR-047: in its status line replace `Stage 2 planned, not built.` with `` **Stage 2 built**
     <dates> as `<range>`, from `tasks/storage-design/plan-stage2.md` (approved by the owner <plan-approved>; design rev
     1.0 records it). ``; in *Consequences*, the *Three stages* bullet gains one sentence for Stage 2 (what it built, the
-    gate at `<gate>`, the live check), and the *beta* bullet reads that the three stages are built and B1–B3 remain.
+    gate at `<gate>`, the live check), and the *beta* bullet reads that the three stages are built and B1–B3 remain. Where ADR-047, its open-decisions
+    table or the roadmap's item 7 says ST-23 is to be built in Stage 2's S0 (written there on 2026-10-09), say it is
+    built: S0, in `<range>`.
   - `04-tools-skills-plugins-mcp.md`: the callout's part still marked *planned, not built* (Stage 2) becomes `` **Stage
     2 built (`<range>`):** the file tools and the shell act in the turn's working folder — the project, or the
     conversation's scratch folder; `file_edit`, `file_list` and `artifact_read` are new; `artifact_write` is for
@@ -31012,6 +34288,11 @@ EOF
   only code-side comments and the GUI `README.md`'s `reveal_path` line (S6a's *Spec conflicts*, 2), and S6.3d writes
   S6a's surfaces and the card previews in both documents as one revision, DESIGN_SPEC rev 30. Smallest correction:
   §8.4's `CLAUDE.md` row reads "S6, after S4a.1's *Storage* sentences".
+- **The records moved under the plan.** `fb3bee0f` (2026-10-09, after S6 was drafted) recorded the owner's answers
+  on T36 and ST-23 in design rev 0.10, `CLAUDE.md` and `tasks/api-fix-plan.md` rev 3.23, and S0 was added for ST-23
+  (R-T17). Smallest correction: S6.6 Steps 1–3 anchor on `fb3bee0f`'s text, write design rev 1.0 and
+  `api-fix-plan.md` rev 3.24, and record ST-23 as built with the stage — the edit counts above are the scripts'
+  as re-anchored.
 
 ### Open points
 
