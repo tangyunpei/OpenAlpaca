@@ -81,6 +81,12 @@ pub(super) type OpenFileFn = fn(&str, &str, &str, bool) -> Result<(), String>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum OpenFileApiError {
     NotFound,
+    /// ST-18: a result file whose name has no extension a kind keeps —
+    /// `.sh`, `.command`, `Makefile` — is shown in its folder, never handed
+    /// to the system's default app, which could run it.
+    NotOffered {
+        name: String,
+    },
     Db(String),
     OpenFailed(String),
 }
@@ -157,8 +163,32 @@ pub(super) async fn open_asset_for_user(
         Err(e) => return Err(OpenFileApiError::Db(e.to_string())),
     };
 
+    if !asset.openable() {
+        return Err(OpenFileApiError::NotOffered { name: asset.name });
+    }
     let stage = asset.origin != openalpaca_storage::ArtifactOrigin::Produced;
-    let storage_path = asset.storage_path;
+    // R37: a result file is opened at the path the resolver gives under its
+    // project — never at `storage_path` as written, which a link put there
+    // could lead out of the project.
+    let storage_path = if asset.in_project {
+        let owned_db = db.clone();
+        let owned_id = asset.id.clone();
+        match tokio::task::spawn_blocking(move || {
+            openalpaca_storage::ArtifactStore::new(&owned_db).resolve_content(&owned_id, None)
+        })
+        .await
+        {
+            Ok(Ok(path)) => path.to_string_lossy().into_owned(),
+            Ok(Err(e)) => return Err(OpenFileApiError::OpenFailed(format!("{e:#}"))),
+            Err(e) => {
+                return Err(OpenFileApiError::OpenFailed(format!(
+                    "Failed to join open task: {e}"
+                )));
+            }
+        }
+    } else {
+        asset.storage_path
+    };
     let filename = asset.name;
     let asset_id = asset.id;
     match tokio::task::spawn_blocking(move || {
@@ -193,6 +223,15 @@ pub(super) fn open_file_error_response(err: OpenFileApiError) -> axum::response:
         OpenFileApiError::NotFound => {
             error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found").into_response()
         }
+        OpenFileApiError::NotOffered { name } => error_response(
+            StatusCode::CONFLICT,
+            "OPEN_NOT_OFFERED",
+            &format!(
+                "{name} is not a kind of file OpenAlpaca opens in another app; show it in its \
+                 folder instead (Reveal in Finder, or Show in folder)."
+            ),
+        )
+        .into_response(),
         OpenFileApiError::Db(e) => {
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e).into_response()
         }

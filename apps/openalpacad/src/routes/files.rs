@@ -765,4 +765,119 @@ mod tests {
         assert_eq!(copied, b"hello");
         let _ = std::fs::remove_file(&target);
     }
+
+    // --- Stage 2: result files (ST-18, R37) ---
+
+    /// A result file of `user1`'s: real bytes in the guarded project, and the
+    /// pointer row R35's method writes.
+    fn result_file(
+        gp: &crate::test_util::GuardedProject,
+        db: &Database,
+        rel: &str,
+        body: &[u8],
+    ) -> openalpaca_storage::ArtifactRecord {
+        let path = gp.root.join(rel);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        std::fs::write(&path, body).expect("write the user's file");
+        let root = gp.root.to_string_lossy().into_owned();
+        openalpaca_storage::ArtifactStore::new(db)
+            .record_project_file(openalpaca_storage::NewProjectFile {
+                owner_id: "user1",
+                project_root: &root,
+                rel_path: rel,
+                content: body,
+                task_id: None,
+                agent_id: None,
+            })
+            .expect("record the result file")
+            .0
+    }
+
+    /// Hands back, through the error, whether the route asked to stage and
+    /// which path it would open — so a test sees both without opening anything.
+    fn report_path(path: &str, _file_id: &str, _filename: &str, stage: bool) -> Result<(), String> {
+        Err(format!("{stage}:{path}"))
+    }
+
+    /// ST-18: a result file whose name no kind keeps — a script — is never
+    /// handed to the system's default app; the refusal names Reveal.
+    #[tokio::test]
+    async fn a_result_file_no_kind_keeps_is_not_opened() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "scripts/build.sh", b"echo hi\n");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("Reveal only");
+        assert_eq!(
+            err,
+            OpenFileApiError::NotOffered {
+                name: "scripts/build.sh".to_string()
+            }
+        );
+
+        let response = open_file_error_response(err);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "OPEN_NOT_OFFERED");
+        assert_eq!(
+            body["error"]["message"],
+            "scripts/build.sh is not a kind of file OpenAlpaca opens in another app; show it in \
+             its folder instead (Reveal in Finder, or Show in folder)."
+        );
+    }
+
+    /// R37: a result file of a kept kind opens in place — unstaged, as every
+    /// produced row — at the path the resolver gives under its project.
+    #[tokio::test]
+    async fn a_result_file_opens_in_place_through_the_resolver() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "docs/plan.md", b"# Plan\n");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("report_path reports");
+
+        let expected = gp.root.join("docs").join("plan.md");
+        assert_eq!(
+            err,
+            OpenFileApiError::OpenFailed(format!("false:{}", expected.display()))
+        );
+        assert!(
+            !expected.starts_with(gp.home_root()),
+            "the user's folder, not the store"
+        );
+    }
+
+    /// R37 with R31's rule: a result file replaced by a link out of the
+    /// project is not opened — the opener is never called.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_result_file_replaced_by_a_link_out_of_the_project_is_not_opened() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "docs/plan.md", b"# Plan\n");
+        let outside = tempfile::tempdir().expect("outside");
+        let secret = outside.path().join("secret.md");
+        std::fs::write(&secret, b"not the project's\n").expect("secret");
+        std::fs::remove_file(gp.root.join("docs").join("plan.md")).expect("remove");
+        std::os::unix::fs::symlink(&secret, gp.root.join("docs").join("plan.md")).expect("link");
+
+        match open_asset_for_user(&db, &row.id, "user1", report_path).await {
+            Err(OpenFileApiError::OpenFailed(message)) => {
+                assert!(message.contains("escapes"), "{message}");
+                assert!(
+                    !message.starts_with("false:"),
+                    "the opener was called: {message}"
+                );
+            }
+            other => panic!("expected OpenFailed, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&secret).unwrap(), b"not the project's\n");
+    }
 }

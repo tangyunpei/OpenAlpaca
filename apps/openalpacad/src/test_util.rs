@@ -71,6 +71,45 @@ impl Drop for HomeStoreGuard {
     }
 }
 
+/// A guarded temp home store and one temp project folder registered under it
+/// — core's `GuardedProject`'s twin (storage design Stage 2): every daemon
+/// test that writes into a project, or records a result file, does it here.
+/// `_guard` is declared first so it drops first (the variable is restored
+/// before the folders go).
+pub(crate) struct GuardedProject {
+    _guard: HomeStoreGuard,
+    pub(crate) home: tempfile::TempDir,
+    /// Held so the project folder lives as long as the test.
+    #[allow(dead_code)]
+    pub(crate) project: tempfile::TempDir,
+    /// The project's canonical root, as `projects::register` recorded it.
+    pub(crate) root: std::path::PathBuf,
+}
+
+impl GuardedProject {
+    pub(crate) fn new() -> Self {
+        let home = tempfile::tempdir().expect("a temp home store");
+        let project = tempfile::tempdir().expect("a temp project folder");
+        let guard = HomeStoreGuard::set(&home.path().canonicalize().expect("canonical home"));
+        let root = openalpaca_storage::store::projects::register(
+            &project.path().canonicalize().expect("canonical project"),
+        )
+        .expect("register the project")
+        .root;
+        Self {
+            _guard: guard,
+            home,
+            project,
+            root,
+        }
+    }
+
+    /// The home store, canonical.
+    pub(crate) fn home_root(&self) -> std::path::PathBuf {
+        self.home.path().canonicalize().expect("canonical home")
+    }
+}
+
 /// A stand-in for a locally installed Ollama, on a loopback port.
 ///
 /// Discovery speaks Ollama's **native** API — `GET /api/tags` for what is
