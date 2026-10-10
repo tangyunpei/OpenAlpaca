@@ -3309,7 +3309,10 @@ mod tests {
     /// R27 (ST-23): a project whose folder is gone, or was moved with a link
     /// left at its old root, is refused with §6's sentence before anything
     /// is listed — never listed through the link — and nothing is made in
-    /// its place.
+    /// its place. The folder is moved into a tempdir of its own (residual
+    /// X4), so a failed assertion leaves nothing behind in the system's temp
+    /// folder: dropping `away` removes it, and dropping the project's own
+    /// tempdir removes a link left at the root without following it.
     #[tokio::test]
     async fn file_list_refuses_a_missing_project_before_listing() {
         let gp = crate::test_util::GuardedProject::new();
@@ -3317,7 +3320,8 @@ mod tests {
             root: gp.root.display().to_string(),
         }
         .to_string();
-        let moved = gp.root.with_extension("moved");
+        let away = tempfile::tempdir().unwrap();
+        let moved = away.path().join("app");
         fs::rename(&gp.root, &moved).unwrap();
         fs::write(moved.join("seen.txt"), "x").unwrap();
 
@@ -3328,9 +3332,7 @@ mod tests {
         {
             std::os::unix::fs::symlink(&moved, &gp.root).unwrap();
             assert_eq!(list(&gp.ctx(), ".").await.unwrap_err(), expected);
-            fs::remove_file(&gp.root).unwrap();
         }
-        fs::rename(&moved, &gp.root).unwrap();
         assert!(!gp.home_root().join("scratch").exists());
     }
 
