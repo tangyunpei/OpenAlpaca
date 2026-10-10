@@ -18,7 +18,7 @@ use arc_swap::ArcSwap;
 use chrono::Utc;
 use openalpaca_api::events::EventSource;
 use openalpaca_storage::{
-    AttachmentRef, ConversationMessage, ConversationRepository, Database, FileAsset,
+    ArtifactStore, AttachmentRef, ConversationMessage, ConversationRepository, Database, FileAsset,
     FileAssetRepository, FileAssetStatus,
 };
 use serde::{Deserialize, Serialize};
@@ -48,8 +48,9 @@ pub struct ChatService {
 /// before anything activates a session (D16), and
 /// [`ChatService::send_message`] runs it for the callers that do not come
 /// through the route. The message wording is part of the contract — the route
-/// maps `Attachment not found` to `404 ATTACHMENT_NOT_FOUND` and `Access denied
-/// to attachment` to `403 ATTACHMENT_ACCESS_DENIED`.
+/// maps `Attachment not found` to `404 ATTACHMENT_NOT_FOUND`, `Access denied
+/// to attachment` to `403 ATTACHMENT_ACCESS_DENIED` and `Not an attachment`
+/// (a result file in the project, ruling R-T8) to `422 ATTACHMENT_IN_PROJECT`.
 pub fn preflight_attachments(
     db: &Database,
     attachment_refs: &[AttachmentRef],
@@ -62,6 +63,7 @@ pub fn preflight_attachments(
                 if asset.owner_id != principal {
                     anyhow::bail!("Access denied to attachment: {}", att_ref.file_id);
                 }
+                refuse_a_project_file(db, &att_ref.file_id, principal)?;
             }
             Ok(None) => {
                 anyhow::bail!("Attachment not found: {}", att_ref.file_id);
@@ -70,6 +72,24 @@ pub fn preflight_attachments(
                 anyhow::bail!("Failed to resolve attachment {}: {}", att_ref.file_id, e);
             }
         }
+    }
+    Ok(())
+}
+
+/// The lead's ruling R-T8 (storage design §13, R37): a result file in the
+/// project — a pointer row, ST-12 — is the user's file where it stands, read
+/// with `file_read`, not an attachment. A turn that names one is refused with
+/// `artifact_read`'s sentence before its `storage_path` is read as written.
+/// `Ok` for every other row, and for an id that is not `principal`'s (the
+/// caller's own check answers that one first).
+fn refuse_a_project_file(db: &Database, file_id: &str, principal: &str) -> Result<()> {
+    if let Some(record) = ArtifactStore::new(db).get(file_id, principal)?
+        && record.in_project
+    {
+        let rel = record.rel_path.as_deref().unwrap_or(&record.name);
+        anyhow::bail!(
+            "Not an attachment: '{file_id}' is a file in the project ({rel}); read it with file_read."
+        );
     }
     Ok(())
 }
@@ -409,6 +429,7 @@ impl ChatService {
                 if asset.owner_id != principal {
                     anyhow::bail!("Access denied to attachment: {}", att_ref.file_id);
                 }
+                refuse_a_project_file(&db, &att_ref.file_id, &principal)?;
                 out.push(asset);
             }
             Ok(out)
@@ -528,6 +549,65 @@ mod tests {
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].file_id, "a-pending");
         assert!(resolved[0].extracted_text.is_none());
+    }
+
+    /// The lead's ruling R-T8 (storage design §13, R37): a result file in
+    /// the project — a pointer row, written by R35's method — is not an
+    /// attachment. The preflight and the loader refuse it with
+    /// `artifact_read`'s sentence, before its `storage_path` is read as
+    /// written; an upload beside it still loads.
+    #[tokio::test]
+    async fn a_result_file_in_the_project_is_refused_as_an_attachment() {
+        let db = setup_db();
+        FileAssetRepository::new(&db)
+            .insert(&build_asset(
+                "a-ready",
+                FileAssetStatus::Ready,
+                Some("hello"),
+            ))
+            .unwrap();
+        let (row, _) = openalpaca_storage::ArtifactStore::new(&db)
+            .record_project_file(openalpaca_storage::NewProjectFile {
+                owner_id: "u1",
+                project_root: "/w/app",
+                rel_path: "src/lib.rs",
+                content: b"pub fn a() {}\n",
+                task_id: None,
+                agent_id: None,
+            })
+            .unwrap();
+        let refused = format!(
+            "Not an attachment: '{}' is a file in the project (src/lib.rs); read it with file_read.",
+            row.id
+        );
+        let refs = vec![AttachmentRef {
+            file_id: row.id.clone(),
+            caption: None,
+        }];
+
+        assert_eq!(
+            preflight_attachments(&db, &refs, "u1")
+                .unwrap_err()
+                .to_string(),
+            refused
+        );
+        assert_eq!(
+            ChatService::resolve_attachments_with_wait(db.clone(), &refs, "u1", 0, 20)
+                .await
+                .unwrap_err()
+                .to_string(),
+            refused
+        );
+
+        let upload = vec![AttachmentRef {
+            file_id: "a-ready".to_string(),
+            caption: None,
+        }];
+        assert!(preflight_attachments(&db, &upload, "u1").is_ok());
+        let resolved = ChatService::resolve_attachments_with_wait(db, &upload, "u1", 0, 20)
+            .await
+            .unwrap();
+        assert_eq!(resolved[0].file_id, "a-ready");
     }
 
     // ── S1: real streaming ────────────────────────────────────────────

@@ -371,12 +371,15 @@ fn plan_turn(
 /// A bad or foreign attachment id is a client error, not a gateway failure — map
 /// it to 4xx so the GUI/CLI can tell report-from-retry instead of treating
 /// everything as a `500`. Shared by the preflight and by the send itself, which
-/// runs the same check a second time for its other callers.
+/// runs the same check a second time for its other callers. A result file in
+/// the project is not an attachment (ruling R-T8): `422 ATTACHMENT_IN_PROJECT`.
 fn attachment_refusal(message: &str) -> Response {
     let (status, code) = if message.starts_with("Attachment not found") {
         (StatusCode::NOT_FOUND, "ATTACHMENT_NOT_FOUND")
     } else if message.starts_with("Access denied to attachment") {
         (StatusCode::FORBIDDEN, "ATTACHMENT_ACCESS_DENIED")
+    } else if message.starts_with("Not an attachment") {
+        (StatusCode::UNPROCESSABLE_ENTITY, "ATTACHMENT_IN_PROJECT")
     } else {
         (StatusCode::INTERNAL_SERVER_ERROR, "GATEWAY_ERROR")
     };
@@ -1111,6 +1114,49 @@ mod tests {
         let (status, payload) = refusal(response).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(payload["error"]["code"], "TOO_MANY_ATTACHMENTS");
+    }
+
+    /// The lead's ruling R-T8: a result file in the project is not an
+    /// attachment — `422 ATTACHMENT_IN_PROJECT` with core's sentence, among
+    /// the pure checks, before the lane is touched.
+    #[tokio::test]
+    async fn a_result_file_named_as_an_attachment_is_a_422() {
+        let (_dir, db) = sessions_db();
+        let bus = openalpaca_core::bus::EventBus::default();
+        let (row, _) = openalpaca_storage::ArtifactStore::new(&db)
+            .record_project_file(openalpaca_storage::NewProjectFile {
+                owner_id: "user1",
+                project_root: "/w/app",
+                rel_path: "src/lib.rs",
+                content: b"pub fn a() {}\n",
+                task_id: None,
+                agent_id: None,
+            })
+            .expect("the pointer row");
+        let body = ChatSendRequest {
+            content: "look at this".to_string(),
+            attachments: vec![openalpaca_storage::AttachmentRef {
+                file_id: row.id.clone(),
+                caption: None,
+            }],
+            session_id: None,
+            activate: false,
+            model: None,
+            unattended: false,
+        };
+        let response = plan_turn(&db, &bus, "user1", None, 10, &body, None)
+            .err()
+            .expect("the result file is refused");
+        let (status, payload) = refusal(response).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(payload["error"]["code"], "ATTACHMENT_IN_PROJECT");
+        assert_eq!(
+            payload["error"]["message"],
+            format!(
+                "Not an attachment: '{}' is a file in the project (src/lib.rs); read it with file_read.",
+                row.id
+            )
+        );
     }
 
     fn make_done(
