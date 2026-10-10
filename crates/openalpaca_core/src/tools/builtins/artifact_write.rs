@@ -1,4 +1,5 @@
-//! `artifact_write` — the producer of durable agent deliverables (plan §4.6).
+//! `artifact_write` — the producer of by-products (plan §4.6; storage design
+//! ST-11): drafts, pictures and hand-offs, never a project's result files.
 //!
 //! The first **per-request** file writer in the codebase: `artifact_write`
 //! resolves its store from [`ToolContext::request_workspace_root`] on every
@@ -12,6 +13,8 @@
 //! turn has no project (a by-product, ST-10); in a project it writes the real
 //! file and records its pointer row through [`record_tool_project_file`]
 //! (ST-12, R35).
+//!
+//! `artifact_read` reads a by-product back by the id this tool returns (R41).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -440,19 +443,18 @@ pub(super) fn spill_workspace_entry(
 pub(super) fn artifact_write_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "artifact_write".to_string(),
-        description: "Save a deliverable — a document, plan, table, snippet or report — \
-            to the artifact store, where it is versioned, listed in the Library and \
-            attached to the task that produced it. Prefer this over file_write for \
-            anything the user is meant to keep or receive: file_write may write a \
-            plain file, or save an artifact named after its path with no kind, summary \
-            or note of your choosing; artifact_write records an owned, \
-            versioned artifact of the kind you name. The store is OpenAlpaca's own: \
-            the project's folder in OpenAlpaca's home store when the conversation \
-            has a project, the home store's artifacts/ when it has none — never \
-            inside the project's own folder. Writing the \
-            same name again supersedes the previous version instead of overwriting it \
-            (the old version stays retrievable). Content is limited to 10MB. Returns \
-            the artifact id, its path on disk, and the version number just written."
+        description: "Save a by-product — a draft, notes, a picture, or a hand-off another \
+            agent picks up — to OpenAlpaca's artifact store, where it is versioned, listed in \
+            the Library and attached to the task that produced it. In a project, the files \
+            the job is asked to produce are not saved here: they are written into the \
+            project with file_write or changed with file_edit. With no project, what you \
+            save here is the saved file. The store is OpenAlpaca's own: the project's folder \
+            in OpenAlpaca's home store when the conversation has a project, the home store's \
+            artifacts/ when it has none — never inside the project's own folder. Writing the \
+            same name again supersedes the previous version instead of overwriting it (the \
+            old version stays retrievable). Saving never asks for approval. Content is \
+            limited to 10MB. Returns the artifact id — read it back with artifact_read — its \
+            path on disk, and the version number just written."
             .to_string(),
         parameters: serde_json::json!({
             "type": "object",
@@ -1443,6 +1445,31 @@ mod tests {
         assert!(!description.contains(".openalpaca"), "{description}");
         assert!(
             description.contains("never inside the project's own folder"),
+            "{description}"
+        );
+    }
+
+    /// ST-11 and §15: `artifact_write` is for by-products — drafts, pictures,
+    /// hand-offs. In a project the files a job is asked for are written into
+    /// the project with file_write or file_edit; with no project what is
+    /// saved here is the saved file. It never asks (ST-15), and its id reads
+    /// back with artifact_read (R41). The old preference for it over
+    /// file_write is gone.
+    #[test]
+    fn the_description_says_it_saves_by_products_and_where_result_files_go() {
+        let description = artifact_write_tool_definition().description;
+        for clause in [
+            "Save a by-product",
+            "written into the project with file_write or changed with file_edit",
+            "With no project, what you save here is the saved file",
+            "Saving never asks for approval",
+            "read it back with artifact_read",
+            "never inside the project's own folder",
+        ] {
+            assert!(description.contains(clause), "{clause:?}:\n{description}");
+        }
+        assert!(
+            !description.contains("Prefer this over file_write"),
             "{description}"
         );
     }
