@@ -7,13 +7,29 @@
  * The subtitle is `agent · run · when`. Any of the three can legitimately be
  * absent on the wire (`agent_id` and `task_title` are nullable in the proposal),
  * so missing parts are dropped rather than filled with a placeholder.
+ *
+ * A file an agent wrote into a project (storage design §13, ST-12) is named by
+ * its path in the project — its stored name — with a `project` tag, and its
+ * subtitle starts with the project's folder name: the Library lists every
+ * project's results, and two projects' `README.md` must not read the same.
+ *
+ * The name is the agent's, so it is drawn through `lib/hidden-chars`: each
+ * hidden character as a `<U+XXXX>` escape, with the count on a line of its
+ * own under the subtitle. A name with no hidden character draws as it is.
  */
 
-import { FileBadge, languageFromName, toFileKind } from "@/components/ui";
+import {
+  EscapedText,
+  FileBadge,
+  Tag,
+  languageFromName,
+  toFileKind,
+} from "@/components/ui";
 import type { Artifact } from "@/lib/api/artifacts";
 import { cn } from "@/lib/cn";
+import { escapeHiddenLine, hiddenNotice } from "@/lib/hidden-chars";
 
-import { relativeTime } from "./format";
+import { projectName, relativeTime } from "./format";
 
 export interface LibraryRowProps {
   artifact: Artifact;
@@ -27,6 +43,7 @@ export function artifactSubtitle(
   now: Date = new Date(),
 ): string {
   const parts = [
+    artifact.in_project ? projectName(artifact.project_root) : null,
     artifact.agent_template_id ?? artifact.agent_id,
     artifact.task_title,
     relativeTime(artifact.updated_at, now),
@@ -43,6 +60,8 @@ export function LibraryRow({
   onSelect,
 }: LibraryRowProps) {
   const kind = toFileKind(artifact.kind);
+  const name = escapeHiddenLine(artifact.name);
+  const notice = hiddenNotice(name.hidden);
   return (
     <button
       type="button"
@@ -63,9 +82,17 @@ export function LibraryRow({
       />
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-[6px]">
-          <span className="truncate text-base-plus font-medium text-ink">
-            {artifact.name}
+          <span
+            className={cn(
+              "text-base-plus font-medium text-ink",
+              // A name holding an escape wraps: an ellipsis could cut off one
+              // the count says is there.
+              name.hidden > 0 ? "wrap-anywhere" : "truncate",
+            )}
+          >
+            <EscapedText escaped={name} />
           </span>
+          {artifact.in_project && <Tag value="project" />}
           {pinned && (
             <span aria-label="Pinned" role="img" className="text-sm text-gold">
               ★
@@ -75,6 +102,11 @@ export function LibraryRow({
         <span className="mt-[3px] block truncate font-mono text-2xs-plus text-muted-fg">
           {artifactSubtitle(artifact)}
         </span>
+        {notice !== null && (
+          <span className="mt-[2px] block text-2xs-plus text-red-ink">
+            {notice}
+          </span>
+        )}
       </span>
     </button>
   );

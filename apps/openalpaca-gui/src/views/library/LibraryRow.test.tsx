@@ -76,3 +76,96 @@ describe("LibraryRow (§3.30)", () => {
     expect(screen.getByLabelText("Pinned")).toBeInTheDocument();
   });
 });
+
+describe("LibraryRow — a file written into a project (storage design §13)", () => {
+  const written: Artifact = {
+    ...artifact,
+    id: "written",
+    name: "src/main.rs",
+    kind: "code",
+    mime_type: "text/plain",
+    path: "/Users/dev/app/src/main.rs",
+    project_root: "/Users/dev/app",
+    rel_path: "src/main.rs",
+    version: 1,
+    version_count: 0,
+    in_project: true,
+    openable: true,
+  };
+
+  it("names the file by its path in the project, with a project tag", () => {
+    render(
+      <LibraryRow
+        artifact={written}
+        active={false}
+        pinned={false}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("src/main.rs")).toBeInTheDocument();
+    expect(screen.getByText("project")).toBeInTheDocument();
+  });
+
+  it("names the project first in the subtitle", () => {
+    const now = new Date("2026-08-31T12:02:00Z");
+    expect(artifactSubtitle(written, now)).toBe(
+      "app · review_agent · connector audit · 2m ago",
+    );
+  });
+
+  it("draws no project tag on a by-product", () => {
+    render(
+      <LibraryRow
+        artifact={artifact}
+        active={false}
+        pinned={false}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText("project")).not.toBeInTheDocument();
+  });
+
+  it("shows the hidden characters an agent put in the path, with their count", () => {
+    // The path is the agent's: a bidi override and a zero-width space in it
+    // would make the row read as a different file.
+    const name = "src/‮evil​.rs";
+    render(
+      <LibraryRow
+        artifact={{ ...written, name, rel_path: name }}
+        active={false}
+        pinned={false}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    const escapes = Array.from(
+      document.querySelectorAll("[data-hidden-char]"),
+      (element) => element.getAttribute("data-hidden-char"),
+    );
+    expect(escapes).toEqual(["U+202E", "U+200B"]);
+    const shown = screen.getByText("evil", { exact: false });
+    expect(shown).toHaveTextContent("src/<U+202E>evil<U+200B>.rs");
+    // An ellipsis could cut off an escape the count says is there.
+    expect(shown).toHaveClass("wrap-anywhere");
+    expect(shown).not.toHaveClass("truncate");
+    expect(
+      screen.getByText(
+        "Note: this request contains 2 hidden characters, shown as <U+…>.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("draws no hidden-character note for a plain path", () => {
+    render(
+      <LibraryRow
+        artifact={written}
+        active={false}
+        pinned={false}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(document.querySelector("[data-hidden-char]")).toBeNull();
+    expect(screen.queryByText(/hidden character/)).toBeNull();
+    expect(screen.getByText("src/main.rs")).toHaveClass("truncate");
+  });
+});

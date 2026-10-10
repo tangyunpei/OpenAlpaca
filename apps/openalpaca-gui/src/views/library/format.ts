@@ -27,3 +27,14 @@ export function relativeTime(iso: string, now: Date = new Date()): string {
   if (delta < DAY) return `${Math.floor(delta / HOUR)}h ago`;
   return `${Math.floor(delta / DAY)}d ago`;
 }
+
+/**
+ * A project's folder name — the last component of its root, either separator
+ * (`/Users/dev/app` → `app`, `C:\dev\app` → `app`) — for a result row's
+ * subtitle and the detail's meta row (storage design §13). `null` for no root.
+ */
+export function projectName(root: string | null): string | null {
+  if (root === null) return null;
+  const parts = root.split(/[\\/]/).filter((part) => part !== "");
+  return parts.at(-1) ?? null;
+}
