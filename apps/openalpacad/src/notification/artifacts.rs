@@ -549,6 +549,31 @@ mod tests {
         );
     }
 
+    /// Residual X23: a by-product whose stored file was replaced by
+    /// something that is not a regular file — here a folder — is never
+    /// handed to the connector (`deliverable_path`'s regular-file arm).
+    #[tokio::test]
+    async fn a_by_product_whose_file_is_not_a_regular_file_is_never_delivered() {
+        let gp = crate::test_util::GuardedProject::new();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        task_row(&db, Some(&gp.root));
+        let id = produce(&db, &gp.root, "final-report", "# Report\n");
+        let head = ArtifactStore::new(&db)
+            .get(&id, OWNER)
+            .unwrap()
+            .unwrap()
+            .storage_path;
+        std::fs::remove_file(&head).unwrap();
+        std::fs::create_dir(&head).unwrap();
+
+        let send = RecordingSender::default();
+        deliver(&db, &send, &id).await;
+
+        let files = send.files.lock().unwrap();
+        assert!(files.is_empty(), "a folder was delivered: {files:?}");
+    }
+
     /// The rule `send` names a by-product by: one of no project is the
     /// owner's from any run, so a home-store by-product still goes out at the
     /// end of a run in a project.
