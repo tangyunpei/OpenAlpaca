@@ -634,11 +634,17 @@ export function useChatSession(): ChatSession {
   useServerEvent(ARTIFACT_EVENTS, (event) => {
     if (event.type !== "artifact_written") return;
     if (event.task_id !== null && !started.current.has(event.task_id)) return;
+    // A daemon older than storage design Stage 2 sends neither field: its
+    // frame is a by-product, which opens (the Rust side's serde defaults).
+    const inProject = event.in_project === true;
+    const openable = event.openable !== false;
     setArtifacts((current) =>
       current.some(
         (entry) =>
           entry.artifactId === event.artifact_id &&
-          entry.version === event.version,
+          // A project file is always version 1, so a rewrite of it is told
+          // apart by its stamp; a by-product by its version.
+          (inProject ? entry.at === event.ts : entry.version === event.version),
       )
         ? current
         : [
@@ -651,6 +657,8 @@ export function useChatSession(): ChatSession {
               path: event.path,
               taskId: event.task_id,
               at: event.ts,
+              inProject,
+              openable,
             },
           ],
     );

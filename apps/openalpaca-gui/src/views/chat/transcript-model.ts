@@ -85,6 +85,14 @@ export interface WrittenArtifact {
   path: string;
   /** `null` for a loose artifact — a chat turn that ran no workflow. */
   taskId: string | null;
+  /**
+   * A result file in the project (storage design §13, ST-12), off the frame's
+   * `in_project`: the project's own file, always version 1, so each write of
+   * it is told apart by `at` rather than by its version.
+   */
+  inProject: boolean;
+  /** ST-18: whether the card draws `Open` — the frame's `openable`. */
+  openable: boolean;
   at: string;
 }
 
@@ -546,10 +554,13 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
 
   for (const entry of artifacts) {
     // The version is part of the key: superseding a file is a second event and
-    // deserves its own card, not a silently mutated one.
+    // deserves its own card, not a silently mutated one. A project file has no
+    // versions (R37), so each write of it is keyed by its stamp.
     push(timestamp(entry.at), {
       kind: "artifact",
-      key: `a-${entry.artifactId}-${entry.version}`,
+      key: entry.inProject
+        ? `a-${entry.artifactId}-at-${entry.at}`
+        : `a-${entry.artifactId}-${entry.version}`,
       entry,
     });
   }

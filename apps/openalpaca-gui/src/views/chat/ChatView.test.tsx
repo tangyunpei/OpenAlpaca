@@ -4936,3 +4936,52 @@ describe("ChatView — a written file's Reveal in Finder (Round G, G4)", () => {
     );
   });
 });
+
+describe("ChatView — a file written into the project (storage design §13)", () => {
+  it("draws a card for each write of the same project file, with no version", async () => {
+    renderChat();
+
+    for (const ts of ["2026-10-08T13:41:00Z", "2026-10-08T13:44:00Z"]) {
+      await act(async () => {
+        emitServerEvent({
+          type: "artifact_written",
+          artifact_id: "art-7",
+          task_id: null,
+          agent_id: null,
+          name: "src/main.rs",
+          kind: "code",
+          version: 1,
+          path: "/Users/dev/app/src/main.rs",
+          in_project: true,
+          openable: true,
+          ts,
+        });
+      });
+    }
+
+    expect(
+      await screen.findAllByText(/File written · in the project/),
+    ).toHaveLength(2);
+    expect(screen.queryByText("v1")).not.toBeInTheDocument();
+  });
+
+  it("reads an older daemon's frame, with neither field, as a by-product that opens", async () => {
+    renderChat();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "artifact_written",
+        artifact_id: "art-8",
+        task_id: null,
+        agent_id: null,
+        name: "01-notes.md",
+        kind: "markdown",
+        version: 1,
+        path: "/Users/dev/.openalpaca/artifacts/loose/01-notes.md",
+      });
+    });
+
+    expect(await screen.findByText("v1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open" })).toBeInTheDocument();
+  });
+});

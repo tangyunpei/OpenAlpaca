@@ -128,6 +128,8 @@ export function Transcript({ items, dense }: TranscriptProps) {
                 kind={toFileKind(item.entry.kind as ArtifactKind)}
                 language={languageFromName(item.entry.name)}
                 version={item.entry.version}
+                inProject={item.entry.inProject}
+                openable={item.entry.openable}
                 time={formatClock(item.entry.at)}
                 onOpen={() =>
                   fileActions.open({
@@ -136,7 +138,9 @@ export function Transcript({ items, dense }: TranscriptProps) {
                   })
                 }
                 onReveal={() => fileActions.reveal(item.entry.path)}
-                onOpenInLibrary={() => openArtifact(item.entry.artifactId)}
+                onOpenInLibrary={() =>
+                  openArtifact(item.entry.artifactId, item.entry.inProject)
+                }
               />
             );
 
