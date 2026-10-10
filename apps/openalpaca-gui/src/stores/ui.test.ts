@@ -223,4 +223,36 @@ describe("the Library's two sides (storage design §13)", () => {
     useUiStore.getState().setLibraryResults(false);
     expect(useUiStore.getState().libraryResults).toBe(false);
   });
+
+  it("opens a project file on the results side and a by-product on the other", () => {
+    useUiStore.getState().openArtifact("written", true);
+    expect(useUiStore.getState()).toMatchObject({
+      view: "library",
+      openArtifactId: "written",
+      libraryResults: true,
+    });
+
+    useUiStore.getState().openArtifact("findings", false);
+    expect(useUiStore.getState().libraryResults).toBe(false);
+  });
+
+  it("leaves the side as it was when the caller does not know the row's", () => {
+    useUiStore.getState().setLibraryResults(true);
+    useUiStore.getState().openArtifact("written");
+    expect(useUiStore.getState().libraryResults).toBe(true);
+  });
+
+  it("carries a project file from the side panel onto the results side, on Preview", () => {
+    useUiStore.getState().openSidePanel("written");
+    useUiStore.getState().setPanelTab("history");
+    useUiStore.getState().openInLibrary(true);
+
+    expect(useUiStore.getState()).toMatchObject({
+      view: "library",
+      openArtifactId: "written",
+      libraryResults: true,
+      libraryTab: "preview",
+      panelArtifactId: null,
+    });
+  });
 });

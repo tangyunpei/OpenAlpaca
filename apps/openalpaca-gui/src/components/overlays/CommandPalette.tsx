@@ -79,8 +79,9 @@ function PaletteDialog({ pendingConfirmation }: CommandPaletteProps) {
         label: artifact.name,
         run: () => {
           setPaletteOpen(false);
-          // Sets the view, the selection and the Preview tab in one action.
-          openArtifact(artifact.id);
+          // Sets the view, the selection, the Preview tab and the Library's
+          // side — a project file's results, else by-products — in one action.
+          openArtifact(artifact.id, artifact.in_project);
         },
       }),
     );

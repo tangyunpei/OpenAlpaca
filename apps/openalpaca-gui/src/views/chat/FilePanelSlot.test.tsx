@@ -45,12 +45,35 @@ const row: Artifact = {
   openable: true,
 };
 
+/** A file an agent wrote into its project (storage design §13): a pointer row. */
+const projectScript: Artifact = {
+  ...row,
+  name: "scripts/release.sh",
+  kind: "code",
+  mime_type: "text/plain",
+  path: "/Users/dev/app/scripts/release.sh",
+  project_root: "/Users/dev/app",
+  rel_path: "scripts/release.sh",
+  version_count: 0,
+  in_project: true,
+  openable: false,
+};
+
+/** The row `GET /v1/artifacts/art-1` answers with; `row` unless a test sets it. */
+let served: Artifact = row;
+
 let requests: string[] = [];
 
 beforeEach(() => {
+  served = row;
   requests = [];
   resetConnection();
-  useUiStore.setState({ toast: null, pins: {} });
+  useUiStore.setState({
+    toast: null,
+    pins: {},
+    panelTab: "preview",
+    libraryResults: false,
+  });
   vi.mocked(invoke).mockImplementation(async (command: string) =>
     command === "reveal_path"
       ? null
@@ -70,7 +93,7 @@ beforeEach(() => {
         return new Response(JSON.stringify({ id: "art-1", status: "opened" }));
       }
       if (url.endsWith("/v1/artifacts/art-1")) {
-        return new Response(JSON.stringify(row));
+        return new Response(JSON.stringify(served));
       }
       return new Response(JSON.stringify({ error: "not found" }), {
         status: 404,
@@ -127,5 +150,28 @@ describe("FilePanelSlot — Open and Reveal", () => {
     // nothing was toasted.
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(useUiStore.getState().toast).toBeNull();
+  });
+});
+
+describe("FilePanelSlot — Library ↗ for a file written into the project", () => {
+  it("opens the Library on the results side, on Preview", async () => {
+    served = projectScript;
+    useUiStore.setState({
+      view: "chat",
+      panelArtifactId: "art-1",
+      panelTab: "history",
+    });
+    const user = userEvent.setup();
+    renderSlot();
+    await screen.findByRole("button", { name: /scripts\/release\.sh/ });
+
+    await user.click(screen.getByRole("button", { name: "Library ↗" }));
+
+    expect(useUiStore.getState()).toMatchObject({
+      view: "library",
+      openArtifactId: "art-1",
+      libraryResults: true,
+      libraryTab: "preview",
+    });
   });
 });

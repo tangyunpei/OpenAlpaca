@@ -125,7 +125,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
       onPickArtifact={pickPanelArtifact}
       onBackToWork={backToWork}
       onClose={closePanel}
-      onOpenInLibrary={openInLibrary}
+      onOpenInLibrary={() => openInLibrary(model?.in_project)}
       onJumpRun={
         model?.task_id == null
           ? undefined

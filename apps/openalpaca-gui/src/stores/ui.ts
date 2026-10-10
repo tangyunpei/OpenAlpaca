@@ -136,7 +136,12 @@ export interface UiState {
   // ── actions ───────────────────────────────────────────────────────────────
   setView: (view: View) => void;
   focusRun: (runId: string) => void;
-  openArtifact: (artifactId: string) => void;
+  /**
+   * Into the Library on this row, on Preview. `inProject`, when the caller
+   * knows the row's side, shows that side's list too (storage design §13);
+   * absent, the side stays as the reader left it.
+   */
+  openArtifact: (artifactId: string, inProject?: boolean) => void;
   setLibraryTab: (tab: ArtifactTab) => void;
   setLibraryKind: (kind: string) => void;
   setLibraryResults: (results: boolean) => void;
@@ -163,8 +168,11 @@ export interface UiState {
   togglePicker: () => void;
   closePicker: () => void;
   pickPanelArtifact: (artifactId: string) => void;
-  /** Carries the current tab across into the Library view. */
-  openInLibrary: () => void;
+  /**
+   * Carries the current tab across into the Library view. `inProject` is the
+   * panel row's side: a project file has Preview alone, so it lands there.
+   */
+  openInLibrary: (inProject?: boolean) => void;
 
   setModel: (model: string | null) => void;
   toggleModelPicker: () => void;
@@ -231,8 +239,13 @@ export const useUiStore = create<UiState>((set, get) => ({
 
   setView: (view) => set({ view }),
   focusRun: (runId) => set({ view: "work", selectedRunId: runId }),
-  openArtifact: (artifactId) =>
-    set({ view: "library", openArtifactId: artifactId, libraryTab: "preview" }),
+  openArtifact: (artifactId, inProject) =>
+    set({
+      view: "library",
+      openArtifactId: artifactId,
+      libraryTab: "preview",
+      ...(inProject === undefined ? {} : { libraryResults: inProject }),
+    }),
   setLibraryTab: (libraryTab) => set({ libraryTab }),
   setLibraryKind: (libraryKind) => set({ libraryKind }),
   setLibraryResults: (libraryResults) => set({ libraryResults }),
@@ -268,13 +281,15 @@ export const useUiStore = create<UiState>((set, get) => ({
       panelTab: "preview",
       pickerOpen: false,
     }),
-  openInLibrary: () =>
+  openInLibrary: (inProject) =>
     set((s) => ({
       view: "library",
       openArtifactId: s.panelArtifactId ?? s.openArtifactId,
-      libraryTab: s.panelTab,
+      // A project file has no Diff or History (R37): it opens on Preview.
+      libraryTab: inProject === true ? "preview" : s.panelTab,
       panelArtifactId: null,
       pickerOpen: false,
+      ...(inProject === undefined ? {} : { libraryResults: inProject }),
     })),
 
   setModel: (model) => set({ model, modelPickerOpen: false }),

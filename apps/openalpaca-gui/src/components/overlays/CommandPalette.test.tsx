@@ -273,4 +273,22 @@ describe("CommandPalette (§3.33)", () => {
     expect(state.openArtifactId).toBe("art-1");
     expect(state.libraryTab).toBe("preview");
   });
+
+  it("opens a found project file on the Library's results side", async () => {
+    hits = [{ id: "art-9", name: "src/main.rs", in_project: true }];
+    useUiStore.setState({ libraryResults: false });
+    const user = userEvent.setup();
+    render(<CommandPalette />);
+
+    await user.type(screen.getByRole("combobox"), "main");
+    await user.click(
+      await screen.findByRole("option", { name: /src\/main\.rs/ }),
+    );
+
+    expect(useUiStore.getState()).toMatchObject({
+      view: "library",
+      openArtifactId: "art-9",
+      libraryResults: true,
+    });
+  });
 });
