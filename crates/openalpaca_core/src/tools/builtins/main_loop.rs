@@ -112,10 +112,11 @@ pub fn main_loop_relay_guidance() -> &'static str {
      - A workflow starts ONLY through a start_workflow call in THIS turn. Never say one was \
      started, and never state a task id, unless a start_workflow call in this turn returned \
      it — task ids in earlier messages belong to earlier runs.\n\
-     - You have no file- or artifact-writing tool of your own. When the user asks for a \
-     workflow or a background run, or asks you to write or save an artifact or a file, call \
-     start_workflow instead of answering inline or saying you cannot. Small questions are \
-     still answered directly.\n\
+     - Writing a file, editing one or running a command in the project you do yourself \
+     when those tools are on your surface; start_workflow is for a substantial multi-step \
+     task, an explicit request for a workflow or a background run. When no tool that \
+     writes a file is on your surface, a file the user asks for is `start_workflow`'s. \
+     Small questions are still answered directly.\n\
      </workflow_relay_rules>"
 }
 
@@ -463,9 +464,13 @@ mod tests {
         )
     }
 
-    /// H2 — the relay rules say what the model may claim and when to delegate.
-    /// Snapshot-style: the block is a contract with the model, so the clauses
-    /// are pinned rather than eyeballed.
+    /// H2, and §15: the relay rules say what the model may claim and when to
+    /// delegate — and no longer that only a workflow can write a file: on a
+    /// project turn the main chat writes, edits and runs commands itself when
+    /// those tools are on its surface, and a file asked for with no writing
+    /// tool on the surface is still start_workflow's (the lead's ruling
+    /// R-T7). Snapshot-style: the block is a contract with the model, so the
+    /// clauses are pinned.
     #[test]
     fn the_relay_rules_forbid_an_unearned_claim_and_name_the_delegate_cases() {
         let rules = main_loop_relay_guidance();
@@ -473,8 +478,14 @@ mod tests {
             "starts ONLY through a start_workflow call in THIS turn",
             "never state a task id",
             "task ids in earlier messages belong to earlier runs",
-            "no file- or artifact-writing tool of your own",
-            "write or save an artifact or a file, call start_workflow",
+            "Writing a file, editing one or running a command in the project you do yourself \
+             when those tools are on your surface",
+            "start_workflow is for a substantial multi-step task, an explicit request for a \
+             workflow or a background run",
+            // The lead's ruling R-T7: where chat cannot write, round 13's
+            // routing stays.
+            "When no tool that writes a file is on your surface, a file the user asks for is \
+             `start_workflow`'s.",
             "Small questions are still answered directly",
         ] {
             assert!(
@@ -482,26 +493,38 @@ mod tests {
                 "the relay rules must carry {clause:?}:\n{rules}"
             );
         }
+        for gone in [
+            "no file- or artifact-writing tool of your own",
+            "write or save an artifact or a file, call start_workflow",
+        ] {
+            assert!(!rules.contains(gone), "{gone:?} is no longer true:\n{rules}");
+        }
         // One block, still closed — the guidance is injected as a single
         // user message and a stray tag would reach the model as prose.
         assert!(rules.starts_with("<workflow_relay_rules>"));
         assert!(rules.ends_with("</workflow_relay_rules>"));
     }
 
-    /// H2's other half: `start_workflow`'s own description must agree with the
-    /// rules, or the model reads two different contracts in one prompt.
+    /// H2's other half: `start_workflow`'s own description agrees with the
+    /// rules — an explicit request and a substantial task, and no longer
+    /// "only a workflow can write a file" (§15).
     #[test]
-    fn start_workflow_describes_the_explicit_request_and_the_artifact_case() {
+    fn start_workflow_describes_the_explicit_request_and_claims_no_file_monopoly() {
         let description = start_workflow_tool_definition().description;
         for clause in [
             "substantial, multi-step task",
             "explicitly asks for a workflow or a background run",
-            "asks to write or save an artifact or a file",
             "ONLY way to start a run",
         ] {
             assert!(
                 description.contains(clause),
                 "start_workflow's description must carry {clause:?}:\n{description}"
+            );
+        }
+        for gone in ["which only a workflow can do", "write or save an artifact or a file"] {
+            assert!(
+                !description.contains(gone),
+                "{gone:?} is no longer true:\n{description}"
             );
         }
     }
