@@ -1545,8 +1545,9 @@ content kept in the conversation's log, in the project folder; or saved as a
 by-product in the artifact store; `file_edit`'s names the file, the number of
 replacements and the line of the first, then quotes the text to find and the
 text to put in its place, each cut after 1,000 bytes with the cut named;
-`send`'s names the file, its size, the channel, the recipient and the name it
-is sent as. A path, a quoted text and a recipient show every hidden character
+a file `send`'s names the file, its size, the channel, the recipient and the
+name it is sent as (a message `send` carries no preview: its card is the
+arguments alone). A path, a quoted text and a recipient show every hidden character
 as `<U+XXXX>`, with the count on a line under them. A tool can refuse a call
 **before** its card is raised, and then no prompt is emitted at all:
 `memory_confirm` does for a suggestion that moved, `memory_update` for any

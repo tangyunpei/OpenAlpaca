@@ -578,8 +578,8 @@ content is kept in the conversation's log), or saved as a by-product in
 OpenAlpaca's artifact store. A `file_edit` card names the file, the number of
 replacements and the line of the first, and quotes the text to find and the text
 to put in its place, each cut after 1,000 bytes with the cut named.
-A `send` card names the file, its size, the channel, the recipient and the
-name it is sent as. Hidden characters in a path, a quoted text or a recipient
+A file `send`'s card names the file, its size, the channel, the recipient
+and the name it is sent as; a message `send`'s card shows its arguments alone. Hidden characters in a path, a quoted text or a recipient
 are written as `<U+XXXX>`, with their count under them. A call the daemon
 would refuse anyway — a project folder that is gone or has moved, a path
 outside the working folder or inside `.git`, a file too large to keep a copy
