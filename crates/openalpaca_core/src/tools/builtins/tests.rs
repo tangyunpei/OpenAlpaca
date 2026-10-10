@@ -148,18 +148,24 @@ async fn test_shell_execute_timeout_is_300s() {
     // The shell_execute tool has a 300s defense-in-depth timeout.
     // We verify this by running a quick command through the tool and
     // checking the tool produces correct output (it wouldn't if the
-    // timeout were misconfigured to 0).
+    // timeout were misconfigured to 0). Stage 2 (R26): a command runs in
+    // its conversation's working folder, so the call carries one — a
+    // guarded project made for the test.
     use crate::tools::registry::ToolBackend;
 
+    let gp = crate::test_util::GuardedProject::new();
     let tool = shell_execute::shell_execute_tool();
     match &tool.backend {
         ToolBackend::BuiltIn(handler) => {
             let result: Result<String, String> = handler
-                .execute(&serde_json::json!({"command": "echo test_timeout"}))
+                .execute_with_context(
+                    &serde_json::json!({"command": "echo test_timeout"}),
+                    &gp.ctx(),
+                )
                 .await;
             assert!(
                 result.is_ok(),
-                "shell_execute should succeed for quick commands"
+                "shell_execute should succeed for quick commands: {result:?}"
             );
             assert!(result.unwrap().contains("test_timeout"));
         }
