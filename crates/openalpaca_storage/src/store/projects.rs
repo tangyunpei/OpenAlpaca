@@ -402,16 +402,19 @@ fn projects_dir_in(home: &Path) -> PathBuf {
 }
 
 /// §3 *lookup*: the project registered at `root`, or `None` — `root` as
-/// written first (ST-23), then its canonical form. A recorded root that no
-/// longer canonicalizes to itself — its folder renamed by case only on a
-/// case-insensitive volume, or moved with a link left at the old path —
+/// written first (ST-23), then as named — its parent resolved, its last
+/// component not followed (R-T29) — then its canonical form. A recorded root
+/// that no longer canonicalizes to itself — its folder renamed by case only
+/// on a case-insensitive volume, or moved with a link left at the old path —
 /// still names its own project, missing, never the project its canonical
-/// form now leads to; any other path that a link or another case leads to a
-/// registered root finds that root. Each form is two small reads, no scan
-/// and no lock — `projects/<folder_name>/project.json` and, when that is
-/// absent, unreadable or records another root,
-/// `projects/<hashed_folder_name>/project.json` — and the canonical form's
-/// two are read only when it differs from the root as written. Creates
+/// form now leads to, also when a link in an ancestor spells it otherwise;
+/// any other path that a link or another case leads to a registered root
+/// finds that root. Each form is two small reads, no scan and no lock —
+/// `projects/<folder_name>/project.json` and, when that is absent,
+/// unreadable or records another root,
+/// `projects/<hashed_folder_name>/project.json` — and the named and
+/// canonical forms' two are read only when they differ from the root as
+/// written. Creates
 /// nothing. A folder with no readable file is passed over with one WARN per
 /// folder per process (R11). An error is a relative `root`, no home root, or
 /// a folder that cannot be resolved.
@@ -440,11 +443,40 @@ fn lookup_in(home: &Path, root: &Path) -> Result<Option<Project>> {
     recorded_in(home, &canonical)
 }
 
+/// The project whose `project.json` records exactly `root`, compared as
+/// written and then [`as_named`] — its parent resolved, its last component
+/// not followed (the lead's ruling R-T29): a missing project's root spelled
+/// through a link in an ancestor (macOS's `/var/…` for a root recorded under
+/// `/private/var/…`) still names it, while a link left at the root itself is
+/// never followed. Each form is [`recorded_exactly_in`]'s two reads.
+fn recorded_in(home: &Path, root: &Path) -> Result<Option<Project>> {
+    if let Some(project) = recorded_exactly_in(home, root)? {
+        return Ok(Some(project));
+    }
+    match as_named(root) {
+        Some(named) if named != root => recorded_exactly_in(home, &named),
+        _ => Ok(None),
+    }
+}
+
+/// `path` as named (the lead's ruling R-T29): its parent canonicalized
+/// ([`canonical_root`]) and its last component kept as written, not
+/// followed — the shape [`overlaps_home_store_in`] judges the store by. A
+/// recorded root is canonical when it is recorded (R4, R14), so it is its
+/// own name, and so is any spelling of it through a link in an ancestor.
+/// Letter case and Unicode normalization are not reconciled here (design
+/// §18). `None` for a path with no parent or no last component, or one
+/// whose parent cannot be resolved.
+fn as_named(path: &Path) -> Option<PathBuf> {
+    let (parent, name) = (path.parent()?, path.file_name()?);
+    canonical_root(parent).ok().map(|parent| parent.join(name))
+}
+
 /// The project whose `project.json` records exactly `root` — compared as
 /// written, nothing resolved: `projects/<folder_name>/project.json` and, when
 /// that is absent, unreadable or records another root,
 /// `projects/<hashed_folder_name>/project.json`.
-fn recorded_in(home: &Path, root: &Path) -> Result<Option<Project>> {
+fn recorded_exactly_in(home: &Path, root: &Path) -> Result<Option<Project>> {
     let want = root.to_string_lossy();
     let projects = projects_dir_in(home);
     let plain = folder_name(root);
@@ -1073,10 +1105,11 @@ const GIT_MARKER: &str = ".git";
 /// working directory). A path that is not its own canonical form — it passes
 /// through a link or another case, or its folder is gone — is first walked
 /// as written ([`resolve_as_written`], ST-23): a root a project records,
-/// matched exactly as written, is that project when it is missing — it no
-/// longer leads to its own folder — unless a folder nearer on the written
-/// path is a project by any reading; a project that still leads to itself is
-/// resolved by the walk below, as before. Then the path is canonicalised and
+/// matched exactly as written or as named (R-T29), is that project when it
+/// is missing — it no longer leads to its own folder — unless a folder
+/// nearer on the written path is a project by any reading; a project that
+/// still leads to itself is resolved by the walk below, as before. Then the
+/// path is canonicalised and
 /// walked up; at each folder, in this order: a folder that is, lies inside
 /// or contains the home store ends the walk with no project (R13 — every
 /// folder above it contains the home store too); a registered project's
@@ -1118,8 +1151,10 @@ pub fn resolve(path: &Path) -> anyhow::Result<Option<ResolvedProject>> {
 /// ST-23's first pass of [`resolve`], for a path that is not its own
 /// canonical form: its folders as written, nearest first — lexically,
 /// nothing resolved but what [`overlaps_home_store`], [`lookup`] and a stat
-/// of `.git` read. A folder a project records exactly as written is that
-/// project when it is missing ([`root_is_missing`], read into
+/// of `.git` read. A folder a project records exactly as written — or as
+/// named, its parent resolved and its last component not followed, so a
+/// spelling through a link in an ancestor counts (the lead's ruling R-T29)
+/// — is that project when it is missing ([`root_is_missing`], read into
 /// [`Project::missing`]): a recorded root that no longer leads to its own
 /// folder names its own project, never the one its canonical form now leads
 /// to. The pass ends with no answer, and the canonical walk decides, at the
@@ -1141,7 +1176,9 @@ fn resolve_as_written(path: &Path) -> anyhow::Result<Option<ResolvedProject>> {
             return Ok(None);
         }
         if let Some(project) = lookup(folder)? {
-            if project.root.as_path() == folder && project.missing {
+            let names_it = project.root.as_path() == folder
+                || as_named(folder).as_deref() == Some(project.root.as_path());
+            if names_it && project.missing {
                 return Ok(Some(ResolvedProject::registered(project)));
             }
             return Ok(None);

@@ -469,6 +469,54 @@ fn a_recorded_root_renamed_by_case_only_resolves_to_its_own_project() {
     assert_eq!(id_at(&renamed), Some(other.id));
 }
 
+/// The lead's ruling R-T29 (d0-st23-2): a recorded root is also matched as
+/// named — its parent resolved, its last component not followed — so a
+/// missing project's root spelled through a link in an ancestor (macOS's
+/// `/var/…` for a root recorded under `/private/var/…`; Linux's `/home` →
+/// `/var/home`) names that project, missing, as the recorded spelling does.
+/// Before it, `lookup` found nothing as written and the canonical form — the
+/// folder the link left at the root reaches — was registered as a new
+/// project, where every turn of a `chat --project` then ran.
+#[cfg(unix)]
+#[test]
+fn a_missing_root_spelled_through_a_link_in_an_ancestor_names_its_own_project() {
+    let s = Scene::new();
+    let repo = s.repo("app");
+    s.dir("app/src");
+    let aliased = s.tmp.path().join("work").join("app");
+    if aliased == repo {
+        eprintln!(
+            "skipped: {} is its own canonical form, so no ancestor link spells it otherwise",
+            s.tmp.path().display()
+        );
+        return;
+    }
+    let own = register(&repo).unwrap();
+    let moved = s.root().join("work").join("app-moved");
+    fs::rename(&repo, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &repo).unwrap();
+
+    let found = lookup(&aliased).unwrap().expect("its own project");
+    assert_eq!((found.id, found.missing), (own.id, true));
+    for path in [aliased.clone(), aliased.join("src")] {
+        let found = resolve(&path).unwrap().expect("its own project");
+        assert_eq!(found.root, repo, "{}", path.display());
+        assert_eq!(
+            found.project.map(|p| (p.id, p.missing)),
+            Some((own.id, true)),
+            "{}",
+            path.display()
+        );
+    }
+    assert_eq!(choose(&aliased).unwrap().id, own.id);
+    assert_eq!(register(&aliased).unwrap().id, own.id);
+    assert_eq!(
+        list().unwrap().len(),
+        1,
+        "nothing registered at the folder the link reaches"
+    );
+}
+
 /// The written walk's precedence: a folder nearer on the written path that
 /// holds `.git`, or that is a registered root by its canonical form (one a
 /// link reaches), outranks the recorded root above it, and the canonical
