@@ -205,7 +205,7 @@ describe("FilePanelSlot — a file written into the project", () => {
   it("shows the hidden characters an agent put in the path, with their count", async () => {
     // The path is the agent's: a bidi override and a zero-width space in it
     // would make the panel name a different file.
-    const name = "scripts/‮release​.sh";
+    const name = "scripts/\u{202E}release\u{200B}.sh";
     served = { ...projectScript, name, rel_path: name };
     renderSlot();
 

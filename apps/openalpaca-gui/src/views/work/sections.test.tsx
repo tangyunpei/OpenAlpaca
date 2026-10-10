@@ -161,6 +161,25 @@ describe("OutputSection", () => {
     expect(screen.getByText("1 file")).toBeInTheDocument();
   });
 
+  it("says how many more the Library holds in the singular for one (S6a M5)", () => {
+    render(
+      <OutputSection
+        artifacts={[]}
+        count={0}
+        onOpen={vi.fn()}
+        projectFiles={[
+          artifact({ id: "p-1", name: "src/main.rs", kind: "code" }),
+        ]}
+        projectTotal={2}
+      />,
+    );
+    expect(
+      screen.getByText(
+        "1 more is listed in the Library, under Results in the project.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("says Output is empty because the run's files are in its project", () => {
     render(
       <OutputSection

@@ -255,7 +255,7 @@ describe("the written-artifact card for a file in the project", () => {
     // would make the card name a different file.
     renderTranscript({
       ...projectFile,
-      name: "scripts/‮release​.sh",
+      name: "scripts/\u{202E}release\u{200B}.sh",
     });
 
     const escapes = Array.from(

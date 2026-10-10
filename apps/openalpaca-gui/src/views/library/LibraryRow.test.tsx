@@ -150,7 +150,7 @@ describe("LibraryRow — a file written into a project (storage design §13)", (
   it("shows the hidden characters an agent put in the path, with their count", () => {
     // The path is the agent's: a bidi override and a zero-width space in it
     // would make the row read as a different file.
-    const name = "src/‮evil​.rs";
+    const name = "src/\u{202E}evil\u{200B}.rs";
     render(
       <LibraryRow
         artifact={{ ...written, name, rel_path: name }}

@@ -202,7 +202,7 @@ export function OutputSection({
               <CardNote
                 text={
                   more > 0
-                    ? `${more} more are listed in the Library, under Results in the project.`
+                    ? `${more} more ${more === 1 ? "is" : "are"} listed in the Library, under Results in the project.`
                     : null
                 }
               />

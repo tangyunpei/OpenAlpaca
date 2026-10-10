@@ -81,7 +81,11 @@ describe("FilePanel — the picker's names", () => {
     renderPanel({
       pickerOpen: true,
       pickerItems: [
-        { id: "art-2", name: "scripts/‮release​.sh", kind: "code" },
+        {
+          id: "art-2",
+          name: "scripts/\u{202E}release\u{200B}.sh",
+          kind: "code",
+        },
       ],
     });
 

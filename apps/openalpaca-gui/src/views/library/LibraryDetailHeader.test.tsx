@@ -170,7 +170,7 @@ describe("LibraryDetailHeader — a file written into a project", () => {
   });
 
   it("shows the hidden characters an agent put in the path, with their count", () => {
-    const name = "scripts/‮release​.sh";
+    const name = "scripts/\u{202E}release\u{200B}.sh";
     renderWritten({ name, rel_path: name });
 
     const heading = screen.getByRole("heading", { level: 2 });
@@ -189,7 +189,7 @@ describe("LibraryDetailHeader — a file written into a project", () => {
 
 describe("LibraryDetailHeader — hidden characters in the summary", () => {
   it("escapes the summary, on its tooltip too, and counts it with the name", () => {
-    renderHeader("notes/‮tea.md");
+    renderHeader("notes/\u{202E}tea.md");
 
     const line = screen.getByText("tea.md", { exact: false });
     expect(line).toHaveTextContent("notes/<U+202E>tea.md");
