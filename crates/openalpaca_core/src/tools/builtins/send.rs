@@ -864,6 +864,34 @@ mod tests {
         );
     }
 
+    /// S5's M3, send's half: a by-product of no project is sent without
+    /// looking the turn's project up, so a turn whose project cannot be
+    /// looked up (a root `projects::lookup` cannot resolve: a folder that is
+    /// not there, then `..`) still sends it — `artifact_read`'s rule.
+    #[tokio::test]
+    async fn a_by_product_of_no_project_is_sent_even_when_the_turns_project_cannot_be_looked_up() {
+        let saved = saved();
+        let somewhere = tempfile::tempdir().unwrap();
+        let unresolvable = somewhere.path().join("no-such-folder").join("..");
+        let ctx = ToolContext {
+            request_workspace_root: Some(unresolvable.to_string_lossy().into_owned()),
+            ..owner_ctx(OWNER)
+        };
+        let scope = super::super::artifact_write::scope_from_context(&ctx);
+        assert!(
+            openalpaca_storage::store::project_root_of(&scope).is_err(),
+            "the turn's project cannot be looked up"
+        );
+        let sender = Arc::new(RecordingSender::default());
+
+        let out = artifact_tool(&saved, &sender)
+            .execute_with_context(&artifact_args(&saved.record.id), &ctx)
+            .await;
+
+        assert_eq!(out.as_deref(), Ok("Sent file 'report.md'"));
+        assert_eq!(sender.files.lock().unwrap().len(), 1);
+    }
+
     /// A run's context that threaded no owner: the run's creator is the
     /// owner, as `artifact_write` attributes what it saves.
     #[tokio::test]

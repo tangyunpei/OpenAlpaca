@@ -58,18 +58,19 @@ impl BuiltInTool for ArtifactReadTool {
             .map_err(|e| unreadable(format!("{e:#}")))?
             .ok_or_else(|| format!("artifact_read: no artifact '{id}' of yours."))?;
 
-        // The turn's project, as the address artifact_write records for it
-        // (`project_root_of`), or none. A by-product of no project is the
-        // owner's from any turn; one of a project only from that project.
-        let turn_project = project_root_of(&scope_from_context(ctx))
-            .map_err(|e| unreadable(format!("{e:#}")))?;
-        if let Some(root) = record.project_root.as_deref()
-            && turn_project.as_deref() != Some(root)
-        {
-            return Err(format!(
-                "artifact_read: '{id}' belongs to another project ({root}); read it from a \
-                 conversation in that project."
-            ));
+        // A by-product of no project is the owner's from any turn, so the
+        // turn's project is looked up only for one of a project (S5's M3, as
+        // `send` does): that one reads only from a turn whose project — the
+        // address artifact_write records for it, `project_root_of` — is its.
+        if let Some(root) = record.project_root.as_deref() {
+            let turn_project = project_root_of(&scope_from_context(ctx))
+                .map_err(|e| unreadable(format!("{e:#}")))?;
+            if turn_project.as_deref() != Some(root) {
+                return Err(format!(
+                    "artifact_read: '{id}' belongs to another project ({root}); read it from a \
+                     conversation in that project."
+                ));
+            }
         }
         if record.in_project {
             let rel = record.rel_path.as_deref().unwrap_or(&record.name);
@@ -333,6 +334,53 @@ mod tests {
             let out = fx.read(&ctx, json!({"artifact_id": id})).await.unwrap();
             assert!(out.starts_with("loose notes\n\n\n[artifact_read: "), "{out}");
         }
+    }
+
+    /// S5's M3: a by-product of no project is read without looking the
+    /// turn's project up — from a turn whose project cannot be looked up
+    /// (here a root `projects::lookup` cannot resolve: a folder that is not
+    /// there, then `..`), it still reads, where it was refused "could not be
+    /// read" for a lookup it does not need.
+    #[tokio::test]
+    async fn a_by_product_of_no_project_is_read_even_when_the_turns_project_cannot_be_looked_up() {
+        let fx = Fixture::new();
+        let id = fx.save(&fx.scratch_ctx(), "notes.md", "markdown", "loose notes\n").await;
+        let unresolvable = fx.gp.root.join("no-such-folder").join("..");
+        let ctx = ToolContext {
+            request_workspace_root: Some(unresolvable.to_string_lossy().into_owned()),
+            ..fx.project_ctx()
+        };
+        assert!(
+            project_root_of(&scope_from_context(&ctx)).is_err(),
+            "the turn's project cannot be looked up"
+        );
+
+        let out = fx.read(&ctx, json!({"artifact_id": id})).await.unwrap();
+
+        assert!(out.starts_with("loose notes\n\n\n[artifact_read: "), "{out}");
+    }
+
+    /// C-S5-3 (S5's M1): a by-product edited by hand reads back as it is on
+    /// disk, and the footer names the version the read recorded for the
+    /// edit — the rotated record's, not the one looked up before the read.
+    #[tokio::test]
+    async fn a_by_product_edited_by_hand_reads_back_its_new_bytes_as_version_2() {
+        let fx = Fixture::new();
+        let id = fx.save(&fx.project_ctx(), "draft.md", "markdown", "first cut\n").await;
+        let path = fx.record(&id).storage_path;
+        let edited = "second cut, edited by hand\n";
+        std::fs::write(&path, edited).unwrap();
+
+        let out = fx.read(&fx.project_ctx(), json!({"artifact_id": id})).await.unwrap();
+
+        let n = edited.len();
+        assert_eq!(
+            out,
+            format!(
+                "{edited}\n\n[artifact_read: bytes 0–{n} of {n} from {}, version 2]",
+                fx.record(&id).name
+            )
+        );
     }
 
     /// Owner-scoped: another owner's id, like an id nobody has, is not found.
