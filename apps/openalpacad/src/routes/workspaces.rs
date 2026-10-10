@@ -1134,6 +1134,12 @@ pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRe
             })
     };
     let session_dirs = remove_session_dirs(deps, &outcome.session_ids).await;
+    // Storage design §10: and each one's scratch folder — a conversation
+    // bound to the project after it began may have worked in one. Not
+    // counted in `removed.session_dirs`, which counts logs.
+    for id in &outcome.session_ids {
+        crate::routes::sessions::remove_scratch_folder(id);
+    }
     if let Some(queue) = deps.learning.as_deref() {
         for id in &outcome.session_ids {
             queue.forget_session(id);

@@ -930,6 +930,34 @@ async fn a_real_delete_removes_rows_logs_every_owners_notes_and_the_folder_and_n
     assert!(s.p.root.join(".git").is_dir());
 }
 
+/// Storage design §10: the delete removes the scratch folder of every
+/// conversation it deletes — one bound to the project after it began may
+/// have worked in one first — and leaves every other conversation's. A dry
+/// run removes nothing, and the folders are not counted as logs.
+#[tokio::test]
+async fn a_real_delete_removes_its_conversations_scratch_folders_and_no_other() {
+    let w = World::new();
+    let s = w.scene();
+    let scratch = w.home.join("scratch");
+    for id in ["s-p", "s-h"] {
+        std::fs::create_dir_all(scratch.join(id)).expect("scratch folder");
+        std::fs::write(scratch.join(id).join("notes.txt"), id).expect("a file");
+    }
+
+    let (status, body) = w.delete(&s.p.root, true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(scratch.join("s-p/notes.txt").exists(), "a dry run removes nothing");
+
+    let (status, body) = w.delete(&s.p.root, false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!scratch.join("s-p").exists(), "the deleted conversation's folder went");
+    assert_eq!(
+        std::fs::read_to_string(scratch.join("s-h/notes.txt")).expect("kept"),
+        "s-h"
+    );
+    assert_eq!(body["removed"]["session_dirs"], 1, "logs only");
+}
+
 #[tokio::test]
 async fn a_queued_run_or_a_live_lane_refuses_the_delete_before_anything_moves() {
     let w = World::new();

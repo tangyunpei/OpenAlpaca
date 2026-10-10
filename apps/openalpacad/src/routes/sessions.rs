@@ -809,6 +809,8 @@ pub(super) async fn delete_session(deps: &Deps<'_>, id: &str) -> Response {
     match deps.repo().delete_session(id) {
         Ok(true) => {
             remove_session_log(deps, id).await;
+            // Storage design §10: and its scratch folder.
+            remove_scratch_folder(id);
             // LQ4: the conversation's unlearned turns went with its
             // messages; the learning queue forgets it too (a flush in flight
             // writes nothing).
@@ -890,6 +892,25 @@ pub(super) async fn remove_session_log(deps: &Deps<'_>, id: &str) {
             session_id = id,
             "Deleted the conversation but could not remove {}: {e}",
             dir.display()
+        );
+    }
+}
+
+/// Remove a deleted conversation's scratch folder — `~/.openalpaca/scratch/<id>/`,
+/// its working folder when it had no project (storage design §10) — so no
+/// later conversation can see its files. Shared with the project delete
+/// (`POST /v1/workspaces/purge`). Best effort, like the log: the rows are
+/// gone and the caller's answer stands, so a failure is one WARN naming the
+/// folder; a conversation that never ran a file tool or a command has none.
+/// Clearing a conversation (`routes/chat.rs`) and archiving one keep it.
+pub(crate) fn remove_scratch_folder(id: &str) {
+    use openalpaca_core::tools::working_folder::{remove_scratch, scratch_dir};
+    if let Err(e) = remove_scratch(id) {
+        let folder = scratch_dir(id)
+            .map_or_else(|_| format!("scratch/{id}"), |dir| dir.display().to_string());
+        tracing::warn!(
+            session_id = id,
+            "Deleted the conversation but could not remove {folder}: {e}"
         );
     }
 }

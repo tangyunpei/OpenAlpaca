@@ -1051,6 +1051,10 @@ async fn the_event_log_clamps_its_page_size() {
 #[tokio::test]
 async fn deleting_answers_204_and_takes_the_transcript_with_it() {
     use openalpaca_core::session_log::{Record, RecordType};
+    // The delete removes the conversation's scratch folder under the home
+    // store (storage design §10): a guarded temp store, never the real one.
+    let home = tempfile::tempdir().expect("home store");
+    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
 
     let h = Harness::new();
     let session = h
@@ -1107,10 +1111,44 @@ async fn deleting_answers_204_and_takes_the_transcript_with_it() {
     ));
 }
 
+/// Storage design §10: a conversation's scratch folder — its working folder
+/// when it has no project — goes with it, and no other conversation's.
+#[tokio::test]
+async fn deleting_a_conversation_removes_its_scratch_folder_and_no_other() {
+    let home = tempfile::tempdir().expect("home store");
+    let store = home.path().join(".openalpaca");
+    let _env = crate::test_util::HomeStoreGuard::set(&store);
+    let h = Harness::new();
+    let doomed = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+    let scratch = store.join("scratch");
+    for id in [doomed.id.as_str(), "another-conversation"] {
+        std::fs::create_dir_all(scratch.join(id)).expect("scratch folder");
+        std::fs::write(scratch.join(id).join("notes.txt"), id).expect("a file");
+    }
+
+    let response = delete_session(&h.deps(), &doomed.id).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        !scratch.join(&doomed.id).exists(),
+        "the scratch folder went with the conversation"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.join("another-conversation/notes.txt")).expect("kept"),
+        "another-conversation"
+    );
+}
+
 /// LQ4: a deleted conversation's turns not yet learned go with its messages —
 /// the learning queue forgets the session, so nothing is flushed for it.
 #[tokio::test]
 async fn deleting_drops_the_conversations_unlearned_turns() {
+    // The delete removes the conversation's scratch folder under the home
+    // store (storage design §10): a guarded temp store, never the real one.
+    let home = tempfile::tempdir().expect("home store");
+    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
     let h = Harness::new();
     let session = h
         .repo()
@@ -1206,6 +1244,10 @@ async fn deleting_a_session_with_a_run_in_flight_is_409() {
 /// block this one: sessions are the unit, lanes are not.
 #[tokio::test]
 async fn a_run_in_another_conversation_on_the_lane_does_not_block_the_delete() {
+    // The delete removes the conversation's scratch folder under the home
+    // store (storage design §10): a guarded temp store, never the real one.
+    let home = tempfile::tempdir().expect("home store");
+    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
     let h = Harness::new();
     let busy = h
         .repo()
