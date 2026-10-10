@@ -269,12 +269,15 @@ impl Orchestrator {
             tool_names
         };
 
-        // §5.5: a main-loop turn narrates into the lane's active session, with
+        // §5.5: a main-loop turn narrates into its conversation's log, with
         // `task_id` absent — that absence is what tells a reader a record came
-        // from chat rather than from a run. The gateway resolved (and, on a
-        // project switch, created) this session moments ago for the same turn;
-        // this reads the answer back rather than re-deriving it, and a lane
-        // with no session simply has no log.
+        // from chat rather than from a run. The conversation is the one the
+        // gateway resolved (and, on a project switch, created) for this turn
+        // and carried on the request (R-T27, `conversation_id` above), so the
+        // narration lands where the turn's rows and its tools do even when
+        // another window has made a new conversation active meanwhile; only a
+        // handler reached with no gateway reads the lane's active session, and
+        // a turn with no conversation simply has no log.
         let session_log = match (
             self.shared_context.session_log(),
             conversation_id.as_deref(),

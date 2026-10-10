@@ -701,8 +701,10 @@ impl BuiltInTool for SpawnSubagentTool {
             // instead of the LLM loop. Tool calls are proxied through the
             // same sandbox as internal subagents; depth/concurrency/
             // cancellation semantics are unchanged (the permit is held for
-            // the loop's lifetime and the child token is checked between
-            // steps).
+            // the loop's lifetime; the child token is checked between steps,
+            // and each proxied tool call and each poll's sleep is raced
+            // against it — a cancel drops the call, which kills a running
+            // command with its processes and withdraws a waiting card).
             if let Some((executor, objective_full, scope)) = plugin_execution {
                 tracing::info!(
                     agent_id = %agent_id_owned,
@@ -761,7 +763,8 @@ impl BuiltInTool for SpawnSubagentTool {
                 busy_guard.restore();
 
                 // Close the lane (GAP-09). A plugin loop has no
-                // `LoopFinishReason` of its own — a cancellation between steps
+                // `LoopFinishReason` of its own — a cancellation between
+                // steps, during a proxied tool call or during a poll's sleep
                 // comes back as `Failed { error: "Cancelled" }` — so the
                 // cancel token is what separates a cancelled lane from a
                 // failed one, keeping this path's vocabulary identical to the
