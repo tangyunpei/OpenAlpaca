@@ -361,9 +361,9 @@ fn the_home_readme_describes_markdown_memory() {
 /// project, the user's like everything at the root but `state/` — and the
 /// CLI's `repl_history` in `state/`. The two reserved kinds that never held
 /// content are gone from it (`skills`: the live one is `config/skills/`;
-/// `cache`: the live one is `state/cache/`), and `scratch/` alone stays
-/// reserved until Stage 2. A deleted project's files that another
-/// conversation still shows are kept under `kept/` in the root's
+/// `cache`: the live one is `state/cache/`), and `scratch/` alone stays:
+/// since Stage 2 a conversation's working folder. A deleted project's files
+/// that another conversation still shows are kept under `kept/` in the root's
 /// `artifacts/` and `uploads/`, and those two rows say so.
 #[test]
 fn the_home_readme_lists_projects_and_repl_history_and_only_live_kinds() {
@@ -391,7 +391,7 @@ fn the_home_readme_lists_projects_and_repl_history_and_only_live_kinds() {
     }
     assert!(
         row("scratch/").is_some(),
-        "scratch/ stays reserved until Stage 2"
+        "scratch/ is listed: a conversation with no project works there"
     );
     for kept in ["artifacts/", "uploads/"] {
         let line = row(kept).unwrap_or_else(|| panic!("the home README has a {kept} row"));
@@ -399,30 +399,70 @@ fn the_home_readme_lists_projects_and_repl_history_and_only_live_kinds() {
     }
 }
 
-/// Final review R27: the stores write nothing inside a project's own folder,
-/// but on a turn with a project `file_write` still writes a plain file into
-/// the daemon's starting directory whenever that is not the home store
-/// (`tools/builtins/file_ops.rs`) — a daemon started by hand inside a
-/// repository writes into it. So the `projects/` row may not say nothing is
-/// ever written there; it names the one daemon that still does.
+/// Storage design Stage 2 (ST-10, ST-12): in a project an agent writes and
+/// edits the project's own files — real files, each write asking first — and
+/// OpenAlpaca's stores still write nothing there. Final review R27's row named
+/// a daemon started outside the home store as the one writer inside a project;
+/// Stage 2 removed that startup-folder write (`file_write` acts in the turn's
+/// working folder), so the row names the approved agent instead.
 #[test]
-fn the_home_readme_projects_row_names_the_write_a_daemon_started_elsewhere_still_makes() {
+fn the_home_readme_projects_row_says_agents_write_the_projects_own_files_only_with_approval() {
     let projects = HOME_README
         .lines()
         .find(|line| line.starts_with("| `projects/` |"))
         .expect("the home README has a projects/ row");
-    assert!(
-        !projects.contains("Nothing is ever written inside"),
-        "the projects/ row must not promise that nothing is ever written in a project: {projects}"
-    );
     for needle in [
-        "`file_write`",
-        "`openalpaca daemon start`",
-        "on a turn with a project",
+        "project.json",
+        "by-products",
+        "real files",
+        "asking you first",
+        "never the project's own files",
     ] {
         assert!(
             projects.contains(needle),
-            "the projects/ row must name {needle:?}: {projects}"
+            "the projects/ row must say {needle:?}: {projects}"
+        );
+    }
+    for stale in [
+        "`openalpaca daemon start`",
+        "the directory it was started in",
+        "plain files",
+        "Nothing is ever written inside",
+    ] {
+        assert!(
+            !projects.contains(stale),
+            "the projects/ row must not say {stale:?}: {projects}"
+        );
+    }
+}
+
+/// Storage design Stage 2 (ST-10, R44): a conversation with no project works
+/// in a folder of its own, `scratch/<conversation id>/`, made the first time a
+/// tool works there and removed with the conversation — clearing or archiving
+/// it keeps the folder, and nothing else sweeps it.
+#[test]
+fn the_home_readme_scratch_row_says_a_conversation_with_no_project_works_there_and_it_goes_with_it()
+{
+    let scratch = HOME_README
+        .lines()
+        .find(|line| line.starts_with("| `scratch/` |"))
+        .expect("the home README has a scratch/ row");
+    for needle in [
+        "no project",
+        "`scratch/<conversation id>/`",
+        "shell commands",
+        "removed with its conversation",
+        "nothing else sweeps it",
+    ] {
+        assert!(
+            scratch.contains(needle),
+            "the scratch/ row must say {needle:?}: {scratch}"
+        );
+    }
+    for stale in ["reserved", "swept freely"] {
+        assert!(
+            !scratch.contains(stale),
+            "the scratch/ row must not say {stale:?}: {scratch}"
         );
     }
 }

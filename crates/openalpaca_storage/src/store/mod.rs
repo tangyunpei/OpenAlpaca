@@ -4,11 +4,11 @@
 //! `OPENALPACA_HOME_STORE`). App state and content with no project live there,
 //! and each project's content lives in its own folder under it,
 //! `projects/<name>/` (owner decision ST-1; [`projects`] names and finds the
-//! folders). No store writes inside a project's own folder (a daemon started
-//! outside the home store still writes `file_write`'s plain files into its
-//! own directory on a turn with a project — `openalpaca_core`'s `tools/builtins/file_ops.rs`, until
-//! the storage design's Stage 2). Both stores have the same shape for
-//! content, so `content_dir(scope, kind)` is `root/<kind>` in both cases.
+//! folders). No store writes inside a project's own folder: what is written
+//! there is written by an agent's file tool or shell command, each asking
+//! first (`openalpaca_core`'s `tools/working_folder.rs` names the folder a
+//! turn works in). Both stores have the same shape for content, so
+//! `content_dir(scope, kind)` is `root/<kind>` in both cases.
 //!
 //! ```text
 //! ~/.openalpaca/
@@ -22,6 +22,7 @@
 //!   config/            USER-EDITED runtime config (GUI/CLI-managed daemons)
 //!   plugins/           user-dropped plugin dirs + .permissions.toml
 //!   projects/<name>/   one folder per project: project.json, artifacts/, uploads/, memory/
+//!   scratch/<id>/      the working folder of a conversation with no project
 //!   artifacts/ uploads/ sessions/ …   content store, home scope
 //! ```
 //!
@@ -774,12 +775,12 @@ directory loses those files only.
 | `state/cache/` | derived data the machine can rebuild — `memory-index-v1.sqlite`, the memory search index | regenerable — deleting it costs one rebuild from the notes on the next start |
 | `config/` | your runtime config: `llm.toml`, `daemon.toml`, `mcp.toml`, `agents/`, `skills/`, `orchestrator/`, `tools/` | yours — never swept |
 | `plugins/` | plugin directories you dropped in, `.permissions.toml`, `.config/<name>.toml`, `.data/<name>/` | yours — never swept |
-| `projects/` | one folder per project you work in, named after the project's path: `project.json` (the project's id and the path of its own folder) and that project's `artifacts/`, `uploads/` and `memory/`, laid out like the entries below. OpenAlpaca's stores write nothing inside the project's own folder; only a daemon started somewhere other than this store — the app and `openalpaca daemon start` start it here — still writes `file_write`'s plain files, on a turn with a project, into the directory it was started in | yours — never swept; a factory reset leaves it; `openalpaca store purge <project>` deletes one project's folder with the rest of its data |
+| `projects/` | one folder per project you work in, named after the project's path: `project.json` (the project's id and the path of its own folder) and that project's `artifacts/` (its by-products: drafts, pictures, things handed between agents), `uploads/` and `memory/`, laid out like the entries below. OpenAlpaca's stores write nothing inside the project's own folder: the files an agent writes or edits there are real files of the project, each write asking you first, and git keeps their history | yours — never swept; a factory reset leaves it; `openalpaca store purge <project>` deletes one project's folder with the rest of its data, and never the project's own files |
 | `artifacts/` | files produced by tasks that had no project; under `kept/`, a deleted project's files that another conversation still shows | never garbage-collected |
 | `uploads/` | files you uploaded that carried no project signal; under `kept/`, a deleted project's uploads that another conversation still shows | swept: an upload attached to no message is deleted once past the grace period |
 | `sessions/` | session event logs — all sessions live here, never in a project | size-capped; no age sweep yet (owner decision T12) |
 | `memory/` | your memory notes outside any project, per owner: `owners/<owner-key>/notes/*.md`, with `.history/` (the last five service-written revisions) and `MEMORY.md` (a rebuildable index) beside them | yours — never swept; a factory reset leaves them, orphaned until the new owner adopts them |
-| `scratch/` | reserved; agent working space | swept freely |
+| `scratch/` | one working folder per conversation with no project, `scratch/<conversation id>/`: where its agents read and list files and run shell commands, made the first time a tool works there (a file they save with `file_write` is a by-product under `artifacts/`) | removed with its conversation — deleting it, or deleting the data of the project it was later bound to; clearing or archiving it keeps the folder, and nothing else sweeps it |
 
 Directories OpenAlpaca did not create are never touched and never swept.
 
