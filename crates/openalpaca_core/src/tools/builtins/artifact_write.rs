@@ -23,7 +23,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_llm::ToolDefinition;
-use openalpaca_storage::store::StoreScope;
+use openalpaca_storage::store::{StoreScope, projects};
 use openalpaca_storage::{
     ArtifactKind, ArtifactRecord, ArtifactStore, Database, NewArtifact, NewProjectFile,
 };
@@ -255,8 +255,9 @@ pub(super) fn put_tool_artifact(
 /// caller's because storage has no bus (interfaces §10 C5). `project_root` is
 /// the turn's `WorkingFolder::Project` root (canonical) and `resolved` the
 /// path the write resolver returned under it, so a write through a link
-/// inside the root records where it landed. `Err` is the sentence R36's
-/// result quotes: the file is written either way.
+/// inside the root records where it landed. A root `projects/` no longer
+/// records, or whose folder is missing, gets no row (R-T30). `Err` is the
+/// sentence R36's result quotes: the file is written either way.
 pub(super) fn record_tool_project_file(
     db: &Database,
     ctx: &ToolContext,
@@ -279,6 +280,25 @@ pub(super) fn record_tool_project_file(
         })?;
     let rel_path = openalpaca_storage::store::relative_to(project_root, resolved)
         .map_err(|e| format!("{e:#}"))?;
+    // R-T30 (d5-results-2): asked again just before the row, since the
+    // write's plan read it — a project deleted, re-pointed or moved away
+    // meanwhile gets no row naming a root that no Delete data reaches.
+    match projects::lookup(project_root) {
+        Ok(Some(project)) if !project.missing => {}
+        Ok(Some(_)) => {
+            return Err(format!(
+                "the project folder {} is gone or has moved",
+                project_root.display()
+            ));
+        }
+        Ok(None) => {
+            return Err(projects::ProjectError::NotRegistered {
+                root: project_root.to_string_lossy().into_owned(),
+            }
+            .to_string());
+        }
+        Err(e) => return Err(format!("the project could not be read: {e:#}")),
+    }
     let root = project_root.to_string_lossy();
     let (record, _inserted) = ArtifactStore::new(db)
         .record_project_file(NewProjectFile {
@@ -1559,5 +1579,61 @@ mod tests {
                 .0
                 .is_empty()
         );
+    }
+
+    /// The owner's rows, pointer rows and by-products alike.
+    fn owner_rows(db: &Database) -> Vec<ArtifactRecord> {
+        ArtifactStore::new(db)
+            .list(&openalpaca_storage::ArtifactQuery::new("owner-test"))
+            .unwrap()
+            .0
+    }
+
+    /// R-T30 (d5-results-2): a project whose data was deleted while a write
+    /// was in flight (its folder under `projects/` removed, as Delete data
+    /// does) gets no row for the file: `Err`, the sentence R36's result
+    /// quotes — no row names a root that no Delete data can reach.
+    #[test]
+    fn a_tool_written_result_file_of_a_deleted_project_is_not_listed() {
+        let gp = crate::test_util::GuardedProject::new();
+        let db_dir = TempDir::new().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let file = gp.root.join("notes.md");
+        std::fs::write(&file, "n\n").unwrap();
+        let project = openalpaca_storage::store::projects::lookup(&gp.root)
+            .unwrap()
+            .expect("registered");
+        std::fs::remove_dir_all(&project.dir).unwrap();
+
+        assert_eq!(
+            record_tool_project_file(&db, &gp.ctx(), &gp.root, &file, "n\n").unwrap_err(),
+            format!(
+                "{} is not a project OpenAlpaca knows: no folder under projects/ records it",
+                gp.root.display()
+            )
+        );
+        assert!(owner_rows(&db).is_empty(), "no row was recorded");
+    }
+
+    /// The same for a project whose folder moved away since the write's
+    /// plan (ST-23's `missing`): it is not listed under its old root.
+    #[test]
+    fn a_tool_written_result_file_of_a_missing_project_is_not_listed() {
+        let gp = crate::test_util::GuardedProject::new();
+        let db_dir = TempDir::new().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let file = gp.root.join("notes.md");
+        std::fs::write(&file, "n\n").unwrap();
+        let away = TempDir::new().unwrap();
+        std::fs::rename(&gp.root, away.path().join("app")).unwrap();
+
+        assert_eq!(
+            record_tool_project_file(&db, &gp.ctx(), &gp.root, &file, "n\n").unwrap_err(),
+            format!(
+                "the project folder {} is gone or has moved",
+                gp.root.display()
+            )
+        );
+        assert!(owner_rows(&db).is_empty(), "no row was recorded");
     }
 }
