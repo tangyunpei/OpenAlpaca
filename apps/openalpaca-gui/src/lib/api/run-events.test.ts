@@ -121,6 +121,42 @@ describe("runEventsFromLog — sentences", () => {
     ).toBe("review·1 · done");
   });
 
+  it("says a file written into the project is there, with no version", () => {
+    expect(
+      one(
+        row(8, "artifact_written", {
+          name: "src/main.rs",
+          version: 1,
+          in_project: true,
+          openable: true,
+        }),
+      )?.text,
+    ).toBe("src/main.rs · in the project");
+  });
+
+  /**
+   * A file's name is the agent's — a project file's is the path it chose —
+   * so the row shows it as the Library does, a bidi override or a zero-width
+   * space as `<U+XXXX>` (plain text — the row is a string), on either side.
+   */
+  it("names a written file with its hidden characters as escapes", () => {
+    const name = "scripts/\u{202E}release\u{200B}.sh";
+    const shown = "scripts/<U+202E>release<U+200B>.sh";
+    expect(
+      one(
+        row(9, "artifact_written", {
+          name,
+          version: 1,
+          in_project: true,
+          openable: false,
+        }),
+      )?.text,
+    ).toBe(`${shown} · in the project`);
+    expect(one(row(10, "artifact_written", { name, version: 3 }))?.text).toBe(
+      `${shown} · v3`,
+    );
+  });
+
   it("marks a failed tool call and leaves a successful one bare", () => {
     expect(
       one(

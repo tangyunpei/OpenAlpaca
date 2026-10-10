@@ -19,8 +19,10 @@
  *   (`lib/hidden-chars`), in plain text since a row is a string. The CLI's
  *   `tasks log` escapes the same rows, as JSON `\u` escapes in its detail. A
  *   `security_violation`'s reason repeats the name, so it is escaped the same
- *   way; the rows' other fields (a span's label, progress narration, titles,
- *   model ids) are as they came.
+ *   way, and so is a written file's name, which is the agent's (a file
+ *   written into the project is named by the path it chose); the rows' other
+ *   fields (a span's label, progress narration, titles, model ids) are as
+ *   they came.
  * - **Nothing is silently dropped, except a known duplicate.** No daemon emits
  *   `dag_node_status` any more — P9 deleted the variant in Phase 8 (T53) — but
  *   rows an older one wrote still read back from `event_log`, and each mirrors
@@ -161,10 +163,16 @@ function textFor(record: EventLogRecord): string {
       return str(detail, "message") ?? record.event_type;
     case "workflow_steered":
       return "steering message delivered";
+    // The name is the agent's — a file written into the project is named by
+    // the path it chose — so it is escaped as a tool's name is.
     case "artifact_written": {
-      const name = str(detail, "name");
+      const raw = str(detail, "name");
       const version = num(detail, "version");
-      if (name === null) return record.event_type;
+      if (raw === null) return record.event_type;
+      const name = escapeHiddenLine(raw).text;
+      // A file written into the project (storage design §13) has no versions:
+      // the row says where it is instead.
+      if (detail["in_project"] === true) return `${name} · in the project`;
       return version === null ? name : `${name} · v${version}`;
     }
     case "subagent_span": {
