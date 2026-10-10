@@ -131,7 +131,10 @@ export function fileAbbr(kind: FileKind, language?: string | null): string {
   const known = LANGUAGE_ABBR[key];
   if (known !== undefined) return known;
   const derived = key.slice(0, 3).toUpperCase();
-  return derived === "" ? KIND_ABBR.code : derived;
+  // The extension may be an agent's (a result file's own name): anything but
+  // letters and digits — a bidi override, a zero-width space — is never drawn
+  // on the badge (d7-app-3).
+  return /^[A-Z0-9]+$/.test(derived) ? derived : KIND_ABBR.code;
 }
 
 /** `findings.md` → `md`; used when only a filename is known. */

@@ -26,6 +26,7 @@ import {
 } from "@/hooks/useArtifacts";
 import { useArtifactFileActions, useDownloadFile } from "@/hooks/useFiles";
 import { artifactContentUrl, type Artifact } from "@/lib/api/artifacts";
+import { escapeHiddenLine } from "@/lib/hidden-chars";
 import { ApiError } from "@/lib/http";
 import { useUiStore, type ArtifactTab } from "@/stores/ui";
 
@@ -98,6 +99,9 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
   // A file written into the project has Preview alone (R37: no versions), so
   // a tab kept from another row falls back to it.
   const shownTab: ArtifactTab = model.in_project ? "preview" : tab;
+  // A toast quotes the name an agent chose: each hidden character as
+  // `<U+XXXX>` (S6a M2).
+  const toastName = escapeHiddenLine(model.name).text;
 
   const onExport = () => {
     download.mutate(model.id, {
@@ -108,9 +112,10 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
         anchor.download = baseName(model.name);
         anchor.click();
         URL.revokeObjectURL(url);
-        showToast(`${model.name} exported`);
+        showToast(`${toastName} exported`);
       },
-      onError: (error) => showToast(`Export failed — ${error.message}`),
+      onError: (error) =>
+        showToast(`Export failed — ${escapeHiddenLine(error.message).text}`),
     });
   };
 
@@ -128,7 +133,7 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
               {
                 onSuccess: (state) =>
                   showToast(
-                    `${model.name} ${state.pinned ? "pinned" : "unpinned"}`,
+                    `${toastName} ${state.pinned ? "pinned" : "unpinned"}`,
                   ),
                 onError: (error) =>
                   showToast(`Could not pin — ${error.message}`),

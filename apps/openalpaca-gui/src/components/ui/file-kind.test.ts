@@ -34,6 +34,15 @@ describe("file kinds", () => {
     expect(fileAbbr("code", "kotlin")).toBe("KOT");
   });
 
+  it("says SRC when the extension holds anything but letters and digits (d7-app-3)", () => {
+    // A result file's name is the agent's, and its extension is drawn on the
+    // badge: a bidi override or a zero-width space there is never drawn.
+    expect(fileAbbr("code", "\u{202E}xyz")).toBe("SRC");
+    expect(fileAbbr("code", "x\u{200B}y")).toBe("SRC");
+    expect(fileAbbr("code", "a-b")).toBe("SRC");
+    expect(fileAbbr("code", "kt2")).toBe("KT2");
+  });
+
   it("says SRC rather than guessing when the language is unknown", () => {
     expect(fileAbbr("code")).toBe("SRC");
     expect(fileAbbr("code", null)).toBe("SRC");

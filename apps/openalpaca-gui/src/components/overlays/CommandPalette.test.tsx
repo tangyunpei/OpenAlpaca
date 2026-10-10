@@ -274,6 +274,22 @@ describe("CommandPalette (§3.33)", () => {
     expect(state.libraryTab).toBe("preview");
   });
 
+  it("names a found file escaped, never raw (S6a M2)", async () => {
+    hits = [{ id: "art-7", name: "docs/\u{202E}notes\u{200B}.md" }];
+    const user = userEvent.setup();
+    render(<CommandPalette />);
+
+    await user.type(screen.getByRole("combobox"), "notes");
+
+    expect(
+      await screen.findByRole("option", {
+        name: /docs\/<U\+202E>notes<U\+200B>\.md/,
+      }),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("\u{202E}");
+    expect(document.body.textContent).not.toContain("\u{200B}");
+  });
+
   it("opens a found project file on the Library's results side", async () => {
     hits = [{ id: "art-9", name: "src/main.rs", in_project: true }];
     useUiStore.setState({ libraryResults: false });

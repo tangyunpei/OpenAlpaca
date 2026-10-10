@@ -19,6 +19,7 @@ import {
   openFileWithSystemDefault,
 } from "@/lib/api/files";
 import type { FileAsset, FileOpenResponse } from "@/lib/api/types";
+import { escapeHiddenLine } from "@/lib/hidden-chars";
 import { qk } from "@/lib/query-keys";
 import { revealInFolder } from "@/lib/reveal";
 import { useUiStore } from "@/stores/ui";
@@ -54,7 +55,9 @@ export function useOpenFile(): UseMutationResult<
  * `open` is the daemon's route, so the file opens in its default app on the
  * daemon's host. `reveal` is the Tauri shell's `reveal_path` (`lib/reveal.ts`):
  * Finder comes forward with the file selected, so success needs no toast, and
- * a refusal is the shell's own sentence, shown as it is.
+ * a refusal is the shell's own sentence. Every toast quotes a path an agent
+ * may have chosen, so the name and each refusal are escaped — each hidden
+ * character as `<U+XXXX>` (d7-app-3).
  */
 export function useArtifactFileActions(): {
   open: (artifact: { id: string; name: string }) => void;
@@ -65,13 +68,19 @@ export function useArtifactFileActions(): {
   return {
     open: ({ id, name }) => {
       openFile.mutate(id, {
-        onSuccess: () => showToast(`${name} opened in its default app`),
-        onError: (error) => showToast(`Could not open — ${error.message}`),
+        onSuccess: () =>
+          showToast(`${escapeHiddenLine(name).text} opened in its default app`),
+        onError: (error) =>
+          showToast(`Could not open — ${escapeHiddenLine(error.message).text}`),
       });
     },
     reveal: (path) => {
       revealInFolder(path).catch((error: unknown) =>
-        showToast(error instanceof Error ? error.message : String(error)),
+        showToast(
+          escapeHiddenLine(
+            error instanceof Error ? error.message : String(error),
+          ).text,
+        ),
       );
     },
   };

@@ -27,6 +27,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Scrim } from "@/components/ui";
 import { useArtifacts } from "@/hooks/useArtifacts";
 import { cn } from "@/lib/cn";
+import { escapeHiddenLine } from "@/lib/hidden-chars";
 import { useUiStore } from "@/stores/ui";
 
 import { filterCommands, shortcutLabel, type Command } from "./commands";
@@ -76,7 +77,8 @@ function PaletteDialog({ pendingConfirmation }: CommandPaletteProps) {
       (artifact) => ({
         id: `find.${artifact.id}`,
         group: "Find",
-        label: artifact.name,
+        // An agent's file name: each hidden character as `<U+XXXX>`.
+        label: escapeHiddenLine(artifact.name).text,
         run: () => {
           setPaletteOpen(false);
           // Sets the view, the selection, the Preview tab and the Library's

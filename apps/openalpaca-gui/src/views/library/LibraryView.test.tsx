@@ -732,6 +732,134 @@ describe("LibraryDetail — Open and Reveal", () => {
   });
 });
 
+describe("LibraryDetail — toasts name an agent's file escaped (d7-app-3, S6a M2)", () => {
+  const connection = {
+    baseUrl: "http://127.0.0.1:9999",
+    token: "test-token",
+    instanceId: "7f3a1122",
+  };
+  const hidden: Artifact = {
+    ...findings,
+    id: "art-h",
+    name: "\u{202E}notes\u{200B}.md",
+  };
+  const shown = "<U+202E>notes<U+200B>.md";
+
+  beforeEach(() => {
+    listing([hidden], 1);
+    route("/v1/artifacts/art-h/versions", () => json({ versions: [] }));
+    route("/v1/artifacts/art-h/content", () => text("# Notes\n"));
+    route("/v1/artifacts/art-h", () => json(hidden));
+    useUiStore.setState({ openArtifactId: "art-h" });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.mocked(invoke).mockImplementation(async () => connection);
+  });
+
+  it("says the file opened", async () => {
+    route("/v1/files/art-h/open", () =>
+      json({ id: "art-h", status: "opened" }),
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "Open" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        `${shown} opened in its default app`,
+      ),
+    );
+  });
+
+  it("quotes the open route's refusal", async () => {
+    route("/v1/files/art-h/open", () =>
+      json(
+        {
+          error: {
+            code: "OPEN_NOT_OFFERED",
+            message:
+              "docs/\u{202E}run\u{200B}.sh is not a kind of file OpenAlpaca opens in another app",
+          },
+        },
+        409,
+      ),
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "Open" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        "Could not open — docs/<U+202E>run<U+200B>.sh is not a kind of file OpenAlpaca opens in another app",
+      ),
+    );
+  });
+
+  it("quotes the shell's Reveal refusal", async () => {
+    vi.stubGlobal("isTauri", true);
+    vi.mocked(invoke).mockImplementation(async (command: string) =>
+      command === "reveal_path"
+        ? Promise.reject(
+            "/w/docs/\u{202E}notes\u{200B}.md is not there any more, so it cannot be shown in its folder.",
+          )
+        : connection,
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(
+      await screen.findByRole("button", { name: revealLabel() }),
+    );
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        "/w/docs/<U+202E>notes<U+200B>.md is not there any more, so it cannot be shown in its folder.",
+      ),
+    );
+  });
+
+  it("says the file was pinned", async () => {
+    route("/v1/artifacts/art-h/pin", () => json({ id: "art-h", pinned: true }));
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "☆ Pin" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(`${shown} pinned`),
+    );
+  });
+
+  it("quotes Export's failure", async () => {
+    route("/v1/files/art-h/content", () =>
+      json(
+        {
+          error: {
+            code: "ARTIFACT_GONE",
+            message:
+              "artifact art-h is gone: /w/\u{202E}notes\u{200B}.md no longer exists",
+          },
+        },
+        410,
+      ),
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "Export" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        "Export failed — artifact art-h is gone: /w/<U+202E>notes<U+200B>.md no longer exists",
+      ),
+    );
+  });
+});
+
 describe("LibraryDetail — Export", () => {
   const projectFile: Artifact = {
     ...findings,
@@ -795,6 +923,22 @@ describe("LibraryDetail — Export", () => {
     if (revokeDescriptor === undefined)
       Reflect.deleteProperty(URL, "revokeObjectURL");
     else Object.defineProperty(URL, "revokeObjectURL", revokeDescriptor);
+  });
+
+  it("says an agent's file was exported with its name escaped (S6a M2)", async () => {
+    const hidden = { ...projectFile, name: "docs/\u{202E}notes\u{200B}.md" };
+    route("in_project=true", () => json({ artifacts: [hidden], total: 1 }));
+    route("/v1/artifacts/art-9", () => json(hidden));
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "Export" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        "docs/<U+202E>notes<U+200B>.md exported",
+      ),
+    );
   });
 
   it("saves a file written into the project under its own name, with no folder", async () => {
