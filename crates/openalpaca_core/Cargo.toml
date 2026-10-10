@@ -48,6 +48,11 @@ openalpaca_llm.workspace = true
 openalpaca_mcp = { path = "../openalpaca_mcp" }
 openalpaca_storage.workspace = true
 
+# R45 (storage design §11): `tools::platform::run_bounded` kills a timed-out
+# or dropped command's whole process group (`killpg`).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 # test-utils exposes McpClient::disconnected_for_tests for the MCP bridge tests.
 openalpaca_mcp = { path = "../openalpaca_mcp", features = ["test-utils"] }

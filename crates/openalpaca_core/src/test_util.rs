@@ -236,3 +236,78 @@ pub(crate) const RECORDED_MODEL: &str = "claude-sonnet-4-6";
 fn the_storage_test_home_guard_is_armed_in_this_test_build() {
     assert!(openalpaca_storage::store::projects::test_home_guard_armed());
 }
+
+/// R45 tests (storage design §11): a process a test's own command started,
+/// sent SIGKILL when this guard drops, so an assertion that fails before the
+/// code under test killed it leaves no orphan behind.
+#[cfg(unix)]
+pub(crate) struct KillOnFail(pub(crate) i32);
+
+#[cfg(unix)]
+impl Drop for KillOnFail {
+    fn drop(&mut self) {
+        // SAFETY: `kill` only sends a signal, to the pid this test read from
+        // the file its own command wrote; one already gone answers ESRCH.
+        unsafe {
+            libc::kill(self.0, libc::SIGKILL);
+        }
+    }
+}
+
+/// How long an R45 test waits for a killed process to be gone. The kill is
+/// immediate, but the system reaps an orphan asynchronously, and a loaded CI
+/// machine is slow.
+#[cfg(unix)]
+pub(crate) const GONE_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The pid a test's command wrote to `path`, waiting up to `within` for it.
+#[cfg(unix)]
+pub(crate) async fn pid_from_file(path: &std::path::Path, within: std::time::Duration) -> i32 {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && let Ok(pid) = text.trim().parse::<i32>()
+        {
+            return pid;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no pid in {} after {within:?}",
+            path.display()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Whether `pid` has ended: `kill(pid, 0)` answers ESRCH or, on Linux, the
+/// process is a zombie nobody has reaped yet (`kill` still finds one).
+#[cfg(unix)]
+pub(crate) fn process_is_gone(pid: i32) -> bool {
+    // SAFETY: signal 0 sends nothing; it only asks whether `pid` exists.
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // `pid (comm) S …`: the state follows the last `)`.
+            return stat
+                .rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'));
+        }
+    }
+    false
+}
+
+/// Polls [`process_is_gone`] for up to `within`.
+#[cfg(unix)]
+pub(crate) async fn wait_until_gone(pid: i32, within: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        if process_is_gone(pid) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    process_is_gone(pid)
+}
