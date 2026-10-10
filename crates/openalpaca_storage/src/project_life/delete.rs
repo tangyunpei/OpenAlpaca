@@ -9,6 +9,11 @@
 //! leaves still links it — so the plan, the kept set and the transaction
 //! read one predicate ([`DOOMED_MESSAGE`], [`kept_ids`]), and a dry run and
 //! the real call cannot disagree.
+//!
+//! A result file's pointer row (`in_project = 1`, ST-12) belongs to the
+//! project like every row naming its root, and goes with them; its file is
+//! the user's, in their own folder, and is never kept, copied or removed. It
+//! is neither an upload nor a by-product, so no count names it.
 
 use std::fmt;
 use std::fs;
@@ -159,7 +164,8 @@ pub fn delete_plan(db: &Database, project: &Project) -> Result<DeletePlan> {
             ))?,
             artifacts: count(&format!(
                 "SELECT COUNT(*) FROM file_assets
-                  WHERE project_root = ?1 AND origin <> 'upload' AND id IN ({linked})"
+                  WHERE project_root = ?1 AND origin <> 'upload' AND in_project = 0
+                    AND id IN ({linked})"
             ))?,
         };
         let counts = PurgeCounts {
@@ -188,7 +194,8 @@ pub fn delete_plan(db: &Database, project: &Project) -> Result<DeletePlan> {
             ))?,
             artifacts: count(&format!(
                 "SELECT COUNT(*) FROM file_assets
-                  WHERE project_root = ?1 AND origin <> 'upload' AND id NOT IN ({linked})"
+                  WHERE project_root = ?1 AND origin <> 'upload' AND in_project = 0
+                    AND id NOT IN ({linked})"
             ))?,
         };
         Ok((counts, kept, sessions))
@@ -238,7 +245,7 @@ fn note_files(dir: &Path) -> usize {
 fn kept_rows(conn: &Connection, root: &str) -> Result<Vec<KeptRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT id, origin, rel_path, version FROM file_assets
-          WHERE project_root = ?1 AND id IN ({}) ORDER BY id",
+          WHERE project_root = ?1 AND in_project = 0 AND id IN ({}) ORDER BY id",
         kept_ids()
     ))?;
     let rows = stmt
@@ -618,6 +625,13 @@ fn delete_within(tx: &Connection, root: &str, placed: &[Placed]) -> Result<Delet
     )?;
     let tasks = tx.execute("DELETE FROM task WHERE workspace_id = ?1", bind)?;
 
+    // A result file's pointer row goes with the project's rows; its file is
+    // the user's and stays (R39). Uncounted — neither an upload nor a
+    // by-product — so the plan's counts and these agree.
+    tx.execute(
+        "DELETE FROM file_assets WHERE project_root = ?1 AND in_project = 1",
+        bind,
+    )?;
     // The project's files the kept set did not take (their versions cascade).
     let uploads = tx.execute(
         "DELETE FROM file_assets WHERE project_root = ?1 AND origin = 'upload'",

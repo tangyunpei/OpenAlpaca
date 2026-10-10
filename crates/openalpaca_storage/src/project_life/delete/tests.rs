@@ -14,8 +14,8 @@ use crate::store::StoreScope;
 use crate::store::projects::{self, Project};
 use crate::store::tests::HomeStoreGuard;
 use crate::{
-    ArtifactKind, ArtifactStore, Database, FileAssetRepository, NewArtifact, NewUpload,
-    PurgeCounts, PurgeSession, UploadStore,
+    ArtifactKind, ArtifactStore, Database, FileAssetRepository, NewArtifact, NewProjectFile,
+    NewUpload, PurgeCounts, PurgeSession, UploadStore,
 };
 use chrono::{DateTime, TimeZone, Utc};
 use std::path::{Path, PathBuf};
@@ -1108,5 +1108,70 @@ fn a_kept_file_whose_bytes_are_gone_is_re_addressed_and_marked_missing() {
         w.count("SELECT COUNT(*) FROM session"),
         2,
         "the delete went through"
+    );
+}
+
+/// R39: deleting a project's data takes its result files' rows and leaves
+/// their files — the user's bytes and modification time — where they are. A
+/// result file a surviving message links is never kept (copied into the root
+/// store), and its row is no by-product in the counts. (Fails when the delete
+/// iterates `storage_path`, or keeps a pointer row as a by-product.)
+#[test]
+fn deleting_a_projects_data_leaves_its_real_files() {
+    let w = World::new();
+    let s = seed(&w);
+    let file = s.p.root.join("src").join("lib.rs");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"pub fn answer() -> u32 { 42 }\n").unwrap();
+    let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+    let root = s.p.root_string();
+    let (row, _) = ArtifactStore::new(&w.db)
+        .record_project_file(NewProjectFile {
+            owner_id: OWNER,
+            project_root: &root,
+            rel_path: "src/lib.rs",
+            content: b"pub fn answer() -> u32 { 42 }\n",
+            task_id: Some("t-p"),
+            agent_id: Some("code_agent::a1"),
+        })
+        .unwrap();
+    // A home message the delete leaves links it, as it links a file to keep.
+    w.link(s.m_h, &row.id, ATTACHMENT_ROLE);
+
+    let plan = delete_plan(&w.db, &s.p).unwrap();
+    assert_eq!(
+        plan.kept,
+        KeptFiles {
+            uploads: 1,
+            artifacts: 1
+        },
+        "the seed's two kept files, and not the result file"
+    );
+    assert_eq!(plan.counts.artifacts, 1, "the seed's one by-product only");
+
+    let outcome = delete_project_data(&w.db, &s.p).unwrap();
+    assert_eq!(
+        outcome.counts, plan.counts,
+        "the dry run and the real call agree"
+    );
+    assert_eq!(outcome.kept, plan.kept);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT COUNT(*) FROM file_assets WHERE id = '{}'",
+            row.id
+        )),
+        0,
+        "its row went with the project's rows"
+    );
+    assert!(remove_project_folder(&s.p).unwrap());
+
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        b"pub fn answer() -> u32 { 42 }\n"
+    );
+    assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), mtime);
+    assert!(
+        s.p.root.join(".git").is_dir(),
+        "the project's own folder is untouched"
     );
 }

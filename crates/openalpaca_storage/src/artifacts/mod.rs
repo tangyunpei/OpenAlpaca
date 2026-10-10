@@ -724,6 +724,7 @@ pub struct PurgeCounts {
     pub uploads: usize,
     /// `file_assets` rows that are not uploads — the project's by-products —
     /// addressed under this root and linked by no message the delete leaves.
+    /// A result file's pointer row is not one (it goes uncounted).
     pub artifacts: usize,
 }
 
