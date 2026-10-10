@@ -384,4 +384,53 @@ mod tests {
 
         assert!(MemoryScopeContext::for_turn(repo.to_str()).is_err());
     }
+
+    /// ST-23 (storage design §0.1): a turn whose client sends a root a project
+    /// records — its folder since moved with a link left at the old path, and
+    /// a turn there registered the new path — is a turn of that project,
+    /// missing (ST-7): a read finds it, a turn records nothing new, and a path
+    /// inside the old root names it too. The follow-up runner and a task's
+    /// re-launch hand their stored root to the same two calls.
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_at_a_recorded_root_that_now_leads_elsewhere_is_a_turn_of_its_own_project() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let home_store = root.join("home").join(".openalpaca");
+        std::fs::create_dir_all(&home_store).unwrap();
+        let _guard = crate::test_util::HomeStoreGuard::set(&home_store);
+        let repo = root.join("work").join("app");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let own = projects::register(&repo).unwrap();
+        let moved = root.join("work").join("app-moved");
+        std::fs::rename(&repo, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &repo).unwrap();
+        projects::register(&moved).unwrap();
+
+        for sent in [repo.clone(), repo.join("src")] {
+            let read = MemoryScopeContext::for_request(sent.to_str());
+            assert_eq!(
+                read.request_workspace_root.as_deref(),
+                repo.to_str(),
+                "{}",
+                sent.display()
+            );
+            let turn = MemoryScopeContext::for_turn(sent.to_str()).unwrap();
+            assert_eq!(
+                turn.request_workspace_root.as_deref(),
+                repo.to_str(),
+                "{}",
+                sent.display()
+            );
+            assert_eq!(turn.workspace_id, turn.request_workspace_root);
+        }
+        let found = projects::lookup(&repo).unwrap().expect("still recorded");
+        assert_eq!((found.id, found.missing), (own.id, true));
+        assert_eq!(
+            projects::list().unwrap().len(),
+            2,
+            "the turns recorded nothing new"
+        );
+    }
 }

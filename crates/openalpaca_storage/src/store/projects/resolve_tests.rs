@@ -399,3 +399,160 @@ fn choosing_a_relative_path_is_refused_and_records_nothing() {
     );
     assert!(list().unwrap().is_empty());
 }
+
+// ── ST-23: the path as written first (Stage 2 S0) ───────────────────────────
+
+/// A recorded root whose folder moved with a link left at the old path: the
+/// old path and a path below it name that project, missing; once a turn in
+/// the moved folder registers it, the new path names the new project and
+/// the old one still names the old, and a turn at the old path records
+/// nothing new.
+#[cfg(unix)]
+#[test]
+fn a_recorded_root_that_now_leads_elsewhere_resolves_to_its_own_project() {
+    let s = Scene::new();
+    let repo = s.repo("app");
+    s.dir("app/src");
+    let own = register(&repo).unwrap();
+    let moved = s.root().join("work").join("app-moved");
+    fs::rename(&repo, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &repo).unwrap();
+
+    for path in [repo.clone(), repo.join("src")] {
+        let found = resolve(&path).unwrap().expect("its own project");
+        assert_eq!(found.root, repo, "{}", path.display());
+        assert_eq!(
+            found.project.map(|p| (p.id, p.missing)),
+            Some((own.id, true)),
+            "{}",
+            path.display()
+        );
+    }
+    let other = register(&moved).unwrap();
+    let id_at = |path: &Path| resolve(path).unwrap().and_then(|r| r.project).map(|p| p.id);
+    assert_eq!(id_at(&repo.join("src")), Some(own.id));
+    assert_eq!(id_at(&moved.join("src")), Some(other.id));
+    assert_eq!(
+        resolve_and_register(&repo).unwrap().map(|p| p.id),
+        Some(own.id)
+    );
+    assert_eq!(list().unwrap().len(), 2, "nothing new was recorded");
+}
+
+/// The same for a folder renamed by case only, on a case-insensitive volume.
+#[cfg(unix)]
+#[test]
+fn a_recorded_root_renamed_by_case_only_resolves_to_its_own_project() {
+    let s = Scene::new();
+    let work = s.dir("cases");
+    if !crate::store::tests::volume_ignores_case(&work) {
+        eprintln!(
+            "skipped: {} is case-sensitive, so no folder can be renamed by case only",
+            work.display()
+        );
+        return;
+    }
+    let repo = s.repo("cases/App");
+    let own = register(&repo).unwrap();
+    let renamed = work.join("app");
+    fs::rename(&repo, &renamed).unwrap();
+
+    let found = resolve(&repo).unwrap().expect("its own project");
+    assert_eq!(found.root, repo);
+    assert_eq!(
+        found.project.map(|p| (p.id, p.missing)),
+        Some((own.id, true))
+    );
+    let other = register(&renamed).unwrap();
+    let id_at = |path: &Path| resolve(path).unwrap().and_then(|r| r.project).map(|p| p.id);
+    assert_eq!(id_at(&repo), Some(own.id));
+    assert_eq!(id_at(&renamed), Some(other.id));
+}
+
+/// The written walk's precedence: a folder nearer on the written path that
+/// holds `.git`, or that is a registered root by its canonical form (one a
+/// link reaches), outranks the recorded root above it, and the canonical
+/// walk answers it as today; anywhere else under the old path the recorded
+/// root answers.
+#[cfg(unix)]
+#[test]
+fn a_repository_or_a_project_nearer_on_the_written_path_outranks_the_recorded_root() {
+    let s = Scene::new();
+    let repo = s.repo("app");
+    s.repo("app/vendor/lib");
+    s.dir("app/docs");
+    let own = register(&repo).unwrap();
+    let moved = s.root().join("work").join("app-moved");
+    fs::rename(&repo, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &repo).unwrap();
+    let docs = register(&moved.join("docs")).unwrap();
+
+    let nested = resolve(&repo.join("vendor").join("lib"))
+        .unwrap()
+        .expect("the nested repository");
+    assert_eq!(nested.root, moved.join("vendor").join("lib"));
+    assert!(!nested.is_registered());
+    let chosen = resolve(&repo.join("docs"))
+        .unwrap()
+        .expect("the folder registered at the new path");
+    assert_eq!(chosen.project.map(|p| p.id), Some(docs.id));
+    let rest = resolve(&repo.join("vendor"))
+        .unwrap()
+        .expect("the recorded root");
+    assert_eq!(rest.root, repo);
+    assert_eq!(
+        rest.project.map(|p| (p.id, p.missing)),
+        Some((own.id, true))
+    );
+}
+
+/// The written walk answers only a missing project (the lead's ruling
+/// R-T17): for a project that still leads to itself, a path through a link
+/// inside it, leading out of it to a folder that is no project, resolves by
+/// its canonical form, as before Stage 2 — here to nothing, as the folder
+/// itself does.
+#[cfg(unix)]
+#[test]
+fn a_path_through_a_link_inside_a_present_project_resolves_by_its_canonical_form() {
+    let s = Scene::new();
+    let app = s.repo("app");
+    register(&app).unwrap();
+    let outside = s.dir("outside");
+    std::os::unix::fs::symlink(&outside, app.join("vendor")).unwrap();
+
+    assert_eq!(
+        resolve(&app.join("vendor")).unwrap(),
+        None,
+        "what the link reaches"
+    );
+    assert_eq!(
+        resolve(&outside).unwrap(),
+        None,
+        "the folder itself is no project"
+    );
+}
+
+/// R-T17 (the S0 check's O2): a path through a link inside a project that
+/// still leads to itself, into a folder below another registered project's
+/// root, names that other project — the canonical walk's answer, as before
+/// Stage 2 — never the project the link sits in.
+#[cfg(unix)]
+#[test]
+fn a_link_inside_a_present_project_into_another_projects_folder_names_that_project() {
+    let s = Scene::new();
+    let p = s.repo("p");
+    let q = s.repo("q");
+    s.dir("q/sub");
+    register(&p).unwrap();
+    let other = register(&q).unwrap();
+    std::os::unix::fs::symlink(q.join("sub"), p.join("link")).unwrap();
+
+    let found = resolve(&p.join("link"))
+        .unwrap()
+        .expect("the project the link leads into");
+    assert_eq!(found.root, q);
+    assert_eq!(
+        found.project.map(|project| (project.id, project.missing)),
+        Some((other.id, false))
+    );
+}

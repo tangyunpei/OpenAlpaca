@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard};
 
@@ -719,8 +719,10 @@ pub fn by_id(id: &ProjectId) -> Result<Option<Project>> {
 /// recorded root that no longer canonicalizes to itself (its folder renamed
 /// by case only on a case-insensitive volume, or moved with a link left at
 /// the old path) still names its own project, never the one its canonical
-/// form leads to, which [`lookup`] and [`resolve`] would answer. An entry
-/// mid re-point is never the answer: its root is where it is going.
+/// form leads to — as [`lookup`] and [`resolve`] also answer since ST-23.
+/// It reads the listing, so a `projects/` that cannot be listed is an error,
+/// which the workspace routes answer `500` (residual X1). An entry mid
+/// re-point is never the answer: its root is where it is going.
 pub fn by_recorded_root(root: &Path) -> Result<Option<Project>> {
     Ok(list()?
         .into_iter()
@@ -1063,19 +1065,32 @@ const GIT_MARKER: &str = ".git";
 /// §3 *Resolve* — pure: no cache, creates nothing. `Ok(None)` is no project.
 ///
 /// A relative path is no project (R22: it would be read against the daemon's
-/// working directory). An existing path is canonicalised and walked up; at
-/// each folder, in this order: a folder that is, lies inside or contains the
-/// home store ends the walk with no project (R13 — every folder above it
-/// contains the home store too); a registered project's root is that project;
-/// a folder holding `.git` is an unregistered root. The nearest match wins. A
-/// path that cannot be canonicalised — its folder is gone — is walked as
-/// written ([`canonical_root`]) against registered roots only, so a missing
-/// project still resolves to itself (ST-7). `.openalpaca` is no marker (ST-9).
+/// working directory). A path that is not its own canonical form — it passes
+/// through a link or another case, or its folder is gone — is first walked
+/// as written ([`resolve_as_written`], ST-23): a root a project records,
+/// matched exactly as written, is that project when it is missing — it no
+/// longer leads to its own folder — unless a folder nearer on the written
+/// path is a project by any reading; a project that still leads to itself is
+/// resolved by the walk below, as before. Then the path is canonicalised and
+/// walked up; at each folder, in this order: a folder that is, lies inside
+/// or contains the home store ends the walk with no project (R13 — every
+/// folder above it contains the home store too); a registered project's
+/// root is that project; a folder holding `.git` is an unregistered root.
+/// The nearest match wins. A path that cannot be canonicalised — its
+/// folder is gone — is walked as written ([`canonical_root`]) against
+/// registered roots only, so a missing project still resolves to itself
+/// (ST-7). `.openalpaca` is no marker (ST-9).
 pub fn resolve(path: &Path) -> anyhow::Result<Option<ResolvedProject>> {
     if !path.is_absolute() {
         return Ok(None);
     }
-    let Ok(canonical) = path.canonicalize() else {
+    let canonical = path.canonicalize();
+    if canonical.as_deref().ok() != Some(path)
+        && let Some(found) = resolve_as_written(path)?
+    {
+        return Ok(Some(found));
+    }
+    let Ok(canonical) = canonical else {
         return resolve_missing(path);
     };
     for folder in canonical.ancestors() {
@@ -1090,6 +1105,44 @@ pub fn resolve(path: &Path) -> anyhow::Result<Option<ResolvedProject>> {
                 root: folder.to_path_buf(),
                 project: None,
             }));
+        }
+    }
+    Ok(None)
+}
+
+/// ST-23's first pass of [`resolve`], for a path that is not its own
+/// canonical form: its folders as written, nearest first — lexically,
+/// nothing resolved but what [`overlaps_home_store`], [`lookup`] and a stat
+/// of `.git` read. A folder a project records exactly as written is that
+/// project when it is missing ([`root_is_missing`], read into
+/// [`Project::missing`]): a recorded root that no longer leads to its own
+/// folder names its own project, never the one its canonical form now leads
+/// to. The pass ends with no answer, and the canonical walk decides, at the
+/// first folder that is anything else: one that is, lies inside or contains
+/// the home store (R13; no recorded root can lie at or above it), a recorded
+/// root that still leads to itself (resolved as before Stage 2, a path
+/// through a link inside it by its canonical form — the lead's ruling
+/// R-T17), one that is a registered project only by its canonical form (a
+/// root a link or another case reaches), or one holding `.git`. A path with
+/// a `..` component has no such pass: its folders as written are not the
+/// ones it lies in.
+fn resolve_as_written(path: &Path) -> anyhow::Result<Option<ResolvedProject>> {
+    if path.components().any(|part| part == Component::ParentDir) {
+        return Ok(None);
+    }
+    let written: PathBuf = path.components().collect();
+    for folder in written.ancestors() {
+        if overlaps_home_store(folder) {
+            return Ok(None);
+        }
+        if let Some(project) = lookup(folder)? {
+            if project.root.as_path() == folder && project.missing {
+                return Ok(Some(ResolvedProject::registered(project)));
+            }
+            return Ok(None);
+        }
+        if folder.join(GIT_MARKER).exists() {
+            return Ok(None);
         }
     }
     Ok(None)
