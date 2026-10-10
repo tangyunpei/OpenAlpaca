@@ -8,7 +8,8 @@
 //! lives — a project's included, in its folder under `projects/` (ST-1) — or
 //! under the root of a project `projects/` records, where a file an agent
 //! wrote into the project lives (ST-12), unless that project is missing:
-//! a missing project's root admits no file (ST-23, R-T18). The shell then
+//! a missing project's root admits no file (ST-23, R-T18), and a file asked
+//! for under it is refused naming the project (R-T26). The shell then
 //! passes the answer to the platform's reveal as an argument, never through
 //! a shell. Nothing here opens, reads or changes the file.
 
@@ -37,6 +38,13 @@ pub enum RevealRefusal {
     /// reads nothing, and the file tools refuse `.openalpaca` themselves
     /// (R32).
     OutsideStore(PathBuf),
+    /// The path, as asked for, lies under the recorded root of a project
+    /// that is missing (ST-23) — its folder gone, renamed by case only, or
+    /// moved with a link left at the old path — and no present root admits
+    /// it (S6a M6, the lead's ruling R-T26). Carries that root; the sentence
+    /// is the one every reader of such a file shows
+    /// ([`projects::missing_project_sentence`]).
+    ProjectMissing(PathBuf),
 }
 
 impl fmt::Display for RevealRefusal {
@@ -58,6 +66,9 @@ impl fmt::Display for RevealRefusal {
                  its folder.",
                 path.display()
             ),
+            RevealRefusal::ProjectMissing(root) => {
+                f.write_str(&projects::missing_project_sentence(root))
+            }
         }
     }
 }
@@ -71,30 +82,68 @@ impl std::error::Error for RevealRefusal {}
 /// written into the project is offered whatever its kind). Refused: a path
 /// that does not resolve, anything that is not a regular file, and a file
 /// under neither. The canonical path decides, so a symlink is judged by where
-/// it leads. Reads `projects/` — one `project.json` per project — so a caller
-/// on an async runtime asks it on the blocking pool.
+/// it leads. A path that is not admitted and lies, as asked for, under a
+/// missing project's recorded root is refused naming that project
+/// ([`RevealRefusal::ProjectMissing`], R-T26). Reads `projects/` — one
+/// `project.json` per project — so a caller on an async runtime asks it on
+/// the blocking pool.
 pub fn revealable_path(path: &Path) -> Result<PathBuf, RevealRefusal> {
-    revealable_path_among(path, home_root().ok().as_deref(), &project_roots())
+    let roots = project_roots();
+    revealable_path_among(path, home_root().ok().as_deref(), &roots.present)
+        .map_err(|refusal| in_a_missing_project(path, refusal, &roots.missing))
+}
+
+/// The roots `projects/` records, as [`project_roots`] reads them.
+#[derive(Debug, Default)]
+struct ProjectRoots {
+    /// The roots that admit their files.
+    present: Vec<PathBuf>,
+    /// The recorded roots of the missing projects, which admit nothing and
+    /// name the refusal of a file asked for under them.
+    missing: Vec<PathBuf>,
 }
 
 /// The roots of the projects `projects/` records, one mid re-point by the
-/// root it is going to. A missing one is left out (the lead's ruling R-T18):
-/// its root no longer leads to its own folder (ST-23), and what it reaches —
-/// through a link left at the old path, or by the old spelling — is not its
-/// project's to show; a root that is gone admits nothing anyway. A
-/// `projects/` that cannot be read records none, with one WARN: a file in the
-/// home store is still shown, and a project's file is refused as outside.
-fn project_roots() -> Vec<PathBuf> {
+/// root it is going to. A missing one admits nothing (the lead's ruling
+/// R-T18): its root no longer leads to its own folder (ST-23), and what it
+/// reaches — through a link left at the old path, or by the old spelling —
+/// is not its project's to show; a root that is gone admits nothing anyway.
+/// It is kept apart, to name a refusal (R-T26). A `projects/` that cannot be
+/// read records none, with one WARN: a file in the home store is still
+/// shown, and a project's file is refused as outside.
+fn project_roots() -> ProjectRoots {
     match projects::list() {
-        Ok(found) => found
-            .into_iter()
-            .filter(|project| !project.missing)
-            .map(|project| project.root)
-            .collect(),
+        Ok(found) => {
+            let (missing, present): (Vec<_>, Vec<_>) =
+                found.into_iter().partition(|project| project.missing);
+            ProjectRoots {
+                present: present.into_iter().map(|project| project.root).collect(),
+                missing: missing.into_iter().map(|project| project.root).collect(),
+            }
+        }
         Err(e) => {
             tracing::warn!("Reveal in Finder reads no project roots: {e:#}");
-            Vec::new()
+            ProjectRoots::default()
         }
+    }
+}
+
+/// S6a M6 (the lead's ruling R-T26): a refusal for a path that does not
+/// resolve, or resolves outside every store and present project, becomes
+/// [`RevealRefusal::ProjectMissing`] when the path as asked for lies under
+/// a missing project's recorded root — compared component by component,
+/// nothing resolved, since what such a root reaches is not its project's.
+/// The app asks with the path a row records, which carries that root. What a
+/// present root admits is never refused here, and neither is a path that is
+/// not a file.
+fn in_a_missing_project(path: &Path, refusal: RevealRefusal, missing: &[PathBuf]) -> RevealRefusal {
+    match refusal {
+        RevealRefusal::Missing(_) | RevealRefusal::OutsideStore(_) => missing
+            .iter()
+            .find(|root| path.starts_with(root))
+            .map(|root| RevealRefusal::ProjectMissing(root.clone()))
+            .unwrap_or(refusal),
+        other => other,
     }
 }
 

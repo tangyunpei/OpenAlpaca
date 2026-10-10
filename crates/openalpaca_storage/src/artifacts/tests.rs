@@ -3452,9 +3452,12 @@ fn a_result_file_replaced_by_a_link_out_of_the_project_is_not_read() {
 
 /// The lead's ruling R-T18 (R37 with ST-23): a result file of a project whose
 /// folder moved with a link left at its old root is not read, refreshed or
-/// served through that link — the project is missing, and the file reads as
-/// gone, marked as an absent file is. Once the folder is back at its root the
-/// next read finds the file again and clears the mark.
+/// served through that link — the project is missing, and the file is
+/// marked as an absent file is. The refusal is the project's (R-T26):
+/// `ProjectMissing`, naming the root and the re-point — never `Gone`, whose
+/// "no longer exists" is false here, the file being right there through the
+/// link. Once the folder is back at its root the next read finds the file
+/// again and clears the mark.
 #[cfg(unix)]
 #[test]
 fn a_result_file_of_a_project_moved_behind_a_link_is_not_read_through_its_old_root() {
@@ -3480,12 +3483,23 @@ fn a_result_file_of_a_project_moved_behind_a_link_is_not_read_through_its_old_ro
 
     let err = f.store().resolve_content(&row.id, None).unwrap_err();
 
-    assert!(
-        matches!(
-            err.downcast_ref::<ArtifactError>(),
-            Some(ArtifactError::Gone { .. })
-        ),
+    let recorded = root.to_string_lossy().into_owned();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>(),
+        Some(&ArtifactError::ProjectMissing {
+            id: row.id.clone(),
+            root: recorded.clone(),
+        }),
         "{err:#}"
+    );
+    let typed = err.downcast_ref::<ArtifactError>().unwrap();
+    assert_eq!(typed.code(), "ARTIFACT_PROJECT_MISSING");
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "{recorded}: this project's folder is gone or has moved; re-point the project to \
+             read its files."
+        )
     );
     let after = f.store().get(&row.id, OWNER).unwrap().unwrap();
     assert_eq!(

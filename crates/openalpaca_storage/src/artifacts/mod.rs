@@ -248,6 +248,14 @@ pub enum ArtifactError {
     NotFound { id: String },
     /// The row exists but its bytes are gone — §4.9's **410** `ARTIFACT_GONE`.
     Gone { id: String, path: String },
+    /// A result file of a project whose recorded root no longer leads to its
+    /// own folder — gone, renamed by case only, or moved with a link left at
+    /// the old path (ST-23) — is never read through that root (R-T18), and
+    /// the refusal is the project's, not the file's (the lead's ruling
+    /// R-T26): **410** `ARTIFACT_PROJECT_MISSING`, naming the root as
+    /// recorded and the re-point. The row is marked missing, as an absent
+    /// head is.
+    ProjectMissing { id: String, root: String },
     /// The artifact exists but has no such version.
     VersionNotFound { id: String, version: u32 },
     /// §4.9: `kind ∈ {image, binary}` → **409** `NOT_DIFFABLE`.
@@ -278,6 +286,7 @@ impl ArtifactError {
         match self {
             Self::NotFound { .. } => "ARTIFACT_NOT_FOUND",
             Self::Gone { .. } => "ARTIFACT_GONE",
+            Self::ProjectMissing { .. } => "ARTIFACT_PROJECT_MISSING",
             Self::VersionNotFound { .. } => "ARTIFACT_VERSION_NOT_FOUND",
             Self::NotDiffable { .. } => "NOT_DIFFABLE",
             Self::DiffTooLarge { .. } => "DIFF_TOO_LARGE",
@@ -293,6 +302,9 @@ impl fmt::Display for ArtifactError {
             Self::Gone { id, path } => {
                 write!(f, "artifact {id} is gone: {path} no longer exists")
             }
+            Self::ProjectMissing { root, .. } => f.write_str(
+                &crate::store::projects::missing_project_sentence(Path::new(root)),
+            ),
             Self::VersionNotFound { id, version } => {
                 write!(f, "artifact {id} has no version {version}")
             }
@@ -1402,8 +1414,8 @@ impl<'a> ArtifactStore<'a> {
     /// A result file in the project (a pointer row, R37) is the user's own
     /// file: a read that finds it changed refreshes the row's hash and size
     /// and records no version, and its path is confined under the project
-    /// (`Gone` for a project whose root no longer leads to its own folder,
-    /// R-T18).
+    /// ([`ArtifactError::ProjectMissing`] for a project whose root no longer
+    /// leads to its own folder, R-T18 and R-T26).
     pub fn resolve_content(&self, id: &str, version: Option<u32>) -> Result<PathBuf> {
         self.resolve_content_with_edit(id, version)
             .map(|(path, _)| path)
@@ -2073,9 +2085,11 @@ fn resolve_version_path(
     // The lead's ruling R-T18 (R37 with ST-23): a result file of a project
     // whose root no longer leads to its own folder — gone, renamed by case
     // only, or moved with a link left at the old path — is not there to read.
-    // It is never reached through that link or the old spelling: it reads as
-    // gone and is marked as an absent head is, until the person re-points the
-    // project and a read finds it again (below).
+    // It is never reached through that link or the old spelling: it is
+    // refused with the project's own error (R-T26, `ProjectMissing` — never
+    // `Gone`, whose "no longer exists" is false for both ST-23 shapes) and
+    // marked as an absent head is, until the person re-points the project and
+    // a read finds it again (below).
     let in_missing_project = record.in_project && crate::store::projects::root_is_missing(&root);
     // Belt and braces (the rel_path came out of our own grammar). A deleted
     // project has no root to canonicalize against — that is a gone artifact,
@@ -2097,6 +2111,12 @@ fn resolve_version_path(
                     updated_at = datetime('now') WHERE id = ?1",
                 rusqlite::params![id],
             )?;
+        }
+        if in_missing_project {
+            return Err(anyhow::Error::new(ArtifactError::ProjectMissing {
+                id: id.to_string(),
+                root: root.to_string_lossy().into_owned(),
+            }));
         }
         return Err(anyhow::Error::new(ArtifactError::Gone {
             id: id.to_string(),

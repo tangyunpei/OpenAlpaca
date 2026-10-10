@@ -1181,6 +1181,86 @@ async fn the_file_content_route_reads_a_result_file_through_the_resolver() {
     assert_eq!(bytes, b"fn main() {}\n");
 }
 
+/// The fixture's project folder moved with a link left at its recorded root
+/// (ST-23): the project is missing, and its files are still there through
+/// the link. Returns the folder holding the moved project, so it lives as
+/// long as the test.
+#[cfg(unix)]
+fn move_the_project_behind_a_link(f: &Fixture) -> TempDir {
+    let root = f.project.path().canonicalize().expect("canonicalize");
+    let aside = tempfile::tempdir().expect("aside");
+    let moved = aside.path().join("moved");
+    std::fs::rename(&root, &moved).expect("move the project");
+    std::os::unix::fs::symlink(&moved, &root).expect("leave a link");
+    aside
+}
+
+/// R-T26's sentence, for the fixture's recorded root.
+fn project_missing_sentence(f: &Fixture) -> String {
+    format!(
+        "{}: this project's folder is gone or has moved; re-point the project to read its files.",
+        f.project
+            .path()
+            .canonicalize()
+            .expect("canonicalize")
+            .display()
+    )
+}
+
+/// The lead's ruling R-T26: a result file of a missing project is `410`
+/// `ARTIFACT_PROJECT_MISSING` on the artifact content route — what the
+/// preview and Export read — with the sentence naming the root and the
+/// re-point, never `ARTIFACT_GONE`'s "no longer exists": the file is there,
+/// through the link, and is not read through it (R-T18).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_result_file_of_a_missing_project_is_a_410_naming_the_project() {
+    let f = Fixture::new();
+    let row = f.result_file(OWNER, "docs/plan.md", "# Plan\n");
+    let sentence = project_missing_sentence(&f);
+    let _aside = move_the_project_behind_a_link(&f);
+
+    let (status, body) = split(
+        artifact_content(
+            &f.db,
+            OWNER,
+            TOKEN,
+            &bearer(TOKEN),
+            None,
+            &row.id,
+            None,
+            None,
+        )
+        .await,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::GONE);
+    assert_eq!(error_code(&body), "ARTIFACT_PROJECT_MISSING");
+    assert_eq!(body["error"]["message"], sentence);
+    assert!(f.record(&row.id, OWNER).missing_since.is_some());
+}
+
+/// R-T26 on the file content route.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_file_content_route_answers_a_missing_projects_result_file_with_a_410() {
+    let f = Fixture::new();
+    let row = f.result_file(OWNER, "docs/plan.md", "# Plan\n");
+    let sentence = project_missing_sentence(&f);
+    let _aside = move_the_project_behind_a_link(&f);
+
+    let (status, body) = split(
+        crate::routes::files::file_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id)
+            .await,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::GONE);
+    assert_eq!(error_code(&body), "ARTIFACT_PROJECT_MISSING");
+    assert_eq!(body["error"]["message"], sentence);
+}
+
 /// R37 with R31's rule: a result file replaced by a link out of the project
 /// is not served by the file route.
 #[cfg(unix)]

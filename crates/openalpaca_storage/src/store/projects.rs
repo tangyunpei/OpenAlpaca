@@ -588,6 +588,21 @@ fn vanished(dir: &Path) -> bool {
     matches!(fs::symlink_metadata(dir), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
+/// What a reader of a missing project's file says (the lead's ruling R-T26,
+/// ST-23): one sentence whichever reader refuses — the content routes, Open,
+/// Export and the preview ([`crate::ArtifactError::ProjectMissing`]) and
+/// Reveal ([`super::RevealRefusal::ProjectMissing`]) — naming the root as
+/// recorded and the remedy. It never says the file is gone: a project
+/// renamed by case only, or moved with a link left at its root, still has
+/// it, reached through the old spelling or the link, which is exactly why
+/// it is not read.
+pub fn missing_project_sentence(root: &Path) -> String {
+    format!(
+        "{}: this project's folder is gone or has moved; re-point the project to read its files.",
+        root.display()
+    )
+}
+
 /// ST-7 and ST-23: whether a project's recorded `root` no longer leads to its
 /// own folder — what [`Project::missing`] says, decided here and nowhere
 /// else. Missing when the root is not a directory (its folder is gone, or

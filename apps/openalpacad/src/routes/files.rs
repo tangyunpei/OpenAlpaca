@@ -317,10 +317,14 @@ pub(crate) async fn file_content(
         {
             Ok(Ok(path)) => path,
             Ok(Err(e)) => {
+                // A missing project's result file (R-T18) is `410` with the
+                // project's own code and sentence (R-T26), as an absent one
+                // is `410` `ARTIFACT_GONE`.
                 let (status, code) = match e.downcast_ref::<openalpaca_storage::ArtifactError>() {
-                    Some(openalpaca_storage::ArtifactError::Gone { .. }) => {
-                        (StatusCode::GONE, "ARTIFACT_GONE")
-                    }
+                    Some(
+                        gone @ (openalpaca_storage::ArtifactError::Gone { .. }
+                        | openalpaca_storage::ArtifactError::ProjectMissing { .. }),
+                    ) => (StatusCode::GONE, gone.code()),
                     _ => (StatusCode::INTERNAL_SERVER_ERROR, "CONTENT_FAILED"),
                 };
                 return error_response(status, code, &format!("{e:#}")).into_response();
@@ -879,6 +883,42 @@ mod tests {
             !expected.starts_with(gp.home_root()),
             "the user's folder, not the store"
         );
+    }
+
+    /// The lead's ruling R-T26: Open of a result file whose project is
+    /// missing — moved with a link left at its root (ST-23) — is `410`
+    /// `ARTIFACT_PROJECT_MISSING` with the sentence naming the root and the
+    /// re-point; the opener is never called, and nothing is opened through
+    /// the link (R-T18).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_of_a_missing_projects_result_file_is_a_410_naming_the_project() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "docs/plan.md", b"# Plan\n");
+        let aside = tempfile::tempdir().expect("aside");
+        let moved = aside.path().join("moved");
+        std::fs::rename(&gp.root, &moved).expect("move the project");
+        std::os::unix::fs::symlink(&moved, &gp.root).expect("leave a link");
+        let sentence = format!(
+            "{}: this project's folder is gone or has moved; re-point the project to read its \
+             files.",
+            gp.root.display()
+        );
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("refused before the opener");
+        assert_eq!(err, OpenFileApiError::ProjectMissing(sentence.clone()));
+
+        let response = open_file_error_response(err);
+        assert_eq!(response.status(), StatusCode::GONE);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "ARTIFACT_PROJECT_MISSING");
+        assert_eq!(body["error"]["message"], sentence);
     }
 
     /// R37 with R31's rule: a result file replaced by a link out of the

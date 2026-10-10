@@ -119,7 +119,9 @@ fn artifact_error_status(error: &ArtifactError) -> StatusCode {
         ArtifactError::NotFound { .. } | ArtifactError::VersionNotFound { .. } => {
             StatusCode::NOT_FOUND
         }
-        ArtifactError::Gone { .. } => StatusCode::GONE,
+        // A result file of a missing project (R-T18) is refused with the
+        // project's own sentence (R-T26), as gone as an absent file is.
+        ArtifactError::Gone { .. } | ArtifactError::ProjectMissing { .. } => StatusCode::GONE,
         // All three are a well-formed request the store refuses on the state of
         // the address: an image is not diffable, a version above the diff cap
         // will not be read, and a title whose every candidate name is held by a
