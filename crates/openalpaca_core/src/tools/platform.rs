@@ -271,9 +271,11 @@ mod tests {
         ));
         cmd.current_dir(dir.path());
         let run = tokio::spawn(run_bounded(cmd, Duration::from_secs(60)));
-        let leader = pid_from_file(&leader_file, Duration::from_secs(5)).await;
+        // The detached process is out of the run's reach, so it is guarded
+        // the moment its pid is known, before anything else can fail.
         let detached = pid_from_file(&detached_file, Duration::from_secs(5)).await;
         let _kill = KillOnFail(detached);
+        let leader = pid_from_file(&leader_file, Duration::from_secs(5)).await;
         // The shell ends at once; the detached process keeps both pipes open.
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -333,7 +335,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_normal_end_leaves_a_process_the_command_detached() {
-        use crate::test_util::{KillOnFail, pid_from_file, process_is_gone};
+        use crate::test_util::{GONE_WITHIN, KillOnFail, pid_from_file, wait_until_gone};
         let dir = tempfile::tempdir().unwrap();
         let pidfile = dir.path().join("pid");
         let mut cmd = shell_command(&format!(
@@ -341,13 +343,19 @@ mod tests {
             pidfile.display()
         ));
         cmd.current_dir(dir.path());
-        let output = run_bounded(cmd, Duration::from_secs(5))
-            .await
-            .expect("the shell ends at once");
-        assert!(output.status.success());
+        let outcome = run_bounded(cmd, Duration::from_secs(5)).await;
+        // This test's own cleanup, before anything is asserted: a normal end
+        // leaves the sleep running, so the guard kills it.
         let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
-        // This test's own cleanup: the guard kills the sleep it left.
         let _kill = KillOnFail(pid);
-        assert!(!process_is_gone(pid), "a normal end signalled the group");
+        let output = outcome.expect("the shell ends at once");
+        assert!(output.status.success());
+        // A killed process takes a moment to read as gone (the system reaps
+        // an orphan asynchronously), so the sleep is watched for as long as
+        // the kill tests give a killed process to go.
+        assert!(
+            !wait_until_gone(pid, GONE_WITHIN).await,
+            "a normal end signalled the group"
+        );
     }
 }
