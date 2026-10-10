@@ -93,6 +93,11 @@ pub(super) enum OpenFileApiError {
     /// is never opened through its recorded root (R-T18). Carries the
     /// store's sentence, which names the root and the re-point.
     ProjectMissing(String),
+    /// The lead's ruling R-T33: the row's file is not on disk — a result file
+    /// gone from its present project, or a by-product gone from the store —
+    /// `410 ARTIFACT_GONE` as the content routes answer it, never a `500`.
+    /// Carries the store's sentence.
+    Gone(String),
     Db(String),
     OpenFailed(String),
 }
@@ -210,6 +215,16 @@ pub(super) async fn open_asset_for_user(
             {
                 return Err(OpenFileApiError::ProjectMissing(e.to_string()));
             }
+            // R-T33: a file gone from its present project is `410`, as the
+            // content routes answer it.
+            Ok(Err(e))
+                if matches!(
+                    e.downcast_ref::<openalpaca_storage::ArtifactError>(),
+                    Some(openalpaca_storage::ArtifactError::Gone { .. })
+                ) =>
+            {
+                return Err(OpenFileApiError::Gone(e.to_string()));
+            }
             Ok(Err(e)) => return Err(OpenFileApiError::OpenFailed(format!("{e:#}"))),
             Err(e) => {
                 return Err(OpenFileApiError::OpenFailed(format!(
@@ -217,8 +232,20 @@ pub(super) async fn open_asset_for_user(
                 )));
             }
         }
-    } else {
+    } else if stage {
+        // An upload is opened through a copy staged in `$TMPDIR`, as before.
         asset.storage_path
+    } else {
+        let record = asset.clone();
+        match tokio::task::spawn_blocking(move || by_product_path(&record)).await {
+            Ok(Ok(path)) => path.to_string_lossy().into_owned(),
+            Ok(Err(refusal)) => return Err(refusal),
+            Err(e) => {
+                return Err(OpenFileApiError::OpenFailed(format!(
+                    "Failed to join open task: {e}"
+                )));
+            }
+        }
     };
     let filename = asset.name;
     let asset_id = asset.id;
@@ -240,6 +267,53 @@ pub(super) async fn open_asset_for_user(
         id: file_id.to_string(),
         status: "opened".to_string(),
     })
+}
+
+/// The lead's ruling R-T33 (R-T20 at Open): a by-product's file as Open
+/// hands it to the default app — resolved under its row's own folder in the
+/// store (`ArtifactRecord::content_root`, as `send` and the Library's reads
+/// confine it), so a link put at the file is never followed out of that
+/// folder, and offered only when it is a regular file. A file that is not
+/// there is `Gone` — `410 ARTIFACT_GONE`, as the content routes answer —
+/// a link out of the folder is refused, and anything but a regular file is
+/// `NotOffered`. Read only: nothing is written or stamped.
+fn by_product_path(
+    record: &openalpaca_storage::ArtifactRecord,
+) -> Result<PathBuf, OpenFileApiError> {
+    let stored = FsPath::new(&record.storage_path);
+    let gone = || {
+        OpenFileApiError::Gone(
+            openalpaca_storage::ArtifactError::Gone {
+                id: record.id.clone(),
+                path: record.storage_path.clone(),
+            }
+            .to_string(),
+        )
+    };
+    let folder = record
+        .content_root()
+        .map_err(|e| OpenFileApiError::OpenFailed(format!("{e:#}")))?;
+    if !folder.exists() {
+        return Err(gone());
+    }
+    let path = openalpaca_storage::store::confine_to_root(&folder, stored).map_err(|e| {
+        OpenFileApiError::OpenFailed(format!(
+            "{}: its stored file is not inside its folder in OpenAlpaca's store, so it is not \
+             opened ({e:#})",
+            record.name
+        ))
+    })?;
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => Ok(path),
+        Ok(_) => Err(OpenFileApiError::NotOffered {
+            name: record.name.clone(),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(gone()),
+        Err(e) => Err(OpenFileApiError::OpenFailed(format!(
+            "Cannot access {}: {e}",
+            path.display()
+        ))),
+    }
 }
 
 /// Delegates to the shared `{"error":{"code","message"}}` envelope in
@@ -265,6 +339,9 @@ pub(super) fn open_file_error_response(err: OpenFileApiError) -> axum::response:
         .into_response(),
         OpenFileApiError::ProjectMissing(sentence) => {
             error_response(StatusCode::GONE, "ARTIFACT_PROJECT_MISSING", &sentence).into_response()
+        }
+        OpenFileApiError::Gone(sentence) => {
+            error_response(StatusCode::GONE, "ARTIFACT_GONE", &sentence).into_response()
         }
         OpenFileApiError::Db(e) => {
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e).into_response()

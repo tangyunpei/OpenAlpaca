@@ -977,6 +977,146 @@ mod tests {
         );
     }
 
+    /// The lead's ruling R-T33: Open of a result file whose file is gone,
+    /// its project present, is `410 ARTIFACT_GONE` with the store's
+    /// sentence, as the content routes answer it — never a `500` — and the
+    /// opener is never called.
+    #[tokio::test]
+    async fn open_of_a_result_file_gone_from_its_present_project_is_a_410() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "docs/plan.md", b"# Plan\n");
+        let at = gp.root.join("docs").join("plan.md");
+        std::fs::remove_file(&at).expect("the user deletes the file");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("refused before the opener");
+        let sentence = format!(
+            "artifact {} is gone: {} no longer exists",
+            row.id,
+            at.display()
+        );
+        assert_eq!(err, OpenFileApiError::Gone(sentence.clone()));
+
+        let response = open_file_error_response(err);
+        assert_eq!(response.status(), StatusCode::GONE);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "ARTIFACT_GONE");
+        assert_eq!(body["error"]["message"], sentence);
+    }
+
+    /// A by-product of `user1`'s in the home store's artifact store.
+    fn by_product(db: &Database, name: &str) -> openalpaca_storage::ArtifactRecord {
+        use openalpaca_storage::{ArtifactKind, ArtifactStore, NewArtifact};
+
+        ArtifactStore::new(db)
+            .put(NewArtifact::new(
+                "user1",
+                &StoreScope::Home,
+                ArtifactKind::Markdown,
+                name,
+                b"# Notes\n".as_slice(),
+            ))
+            .expect("put the by-product")
+            .0
+    }
+
+    /// A by-product opens in place, unstaged, at its file in the store — the
+    /// path its own folder there confines it to (R-T33).
+    #[tokio::test]
+    async fn a_by_product_opens_in_place_at_its_file_in_the_store() {
+        let _gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = by_product(&db, "Notes");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("report_path reports");
+
+        assert_eq!(
+            err,
+            OpenFileApiError::OpenFailed(format!("false:{}", row.storage_path))
+        );
+    }
+
+    /// The lead's ruling R-T33 (R-T20 at Open): a by-product whose stored
+    /// file was replaced by a link out of its folder in the store — here to a
+    /// script in the project, the kind of link an approved command started in
+    /// a scratch folder could make — is refused, and the opener is never
+    /// handed the script.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_by_product_replaced_by_a_link_out_of_its_folder_is_not_opened() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = by_product(&db, "Notes");
+        let script = gp.root.join("run.command");
+        std::fs::write(&script, b"#!/bin/sh\necho ran\n").expect("script");
+        std::fs::remove_file(&row.storage_path).expect("remove");
+        std::os::unix::fs::symlink(&script, &row.storage_path).expect("link");
+
+        match open_asset_for_user(&db, &row.id, "user1", report_path).await {
+            Err(OpenFileApiError::OpenFailed(message)) => {
+                let refusal = format!(
+                    "{}: its stored file is not inside its folder in OpenAlpaca's store, so it \
+                     is not opened",
+                    row.name
+                );
+                assert!(message.starts_with(&refusal), "{message}");
+            }
+            other => panic!("expected OpenFailed before the opener, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&script).unwrap(), b"#!/bin/sh\necho ran\n");
+    }
+
+    /// R-T33: a by-product whose stored file was replaced by a folder is
+    /// refused `NotOffered` — a folder is not a file the default app opens.
+    #[tokio::test]
+    async fn a_by_product_replaced_by_a_folder_is_not_opened() {
+        let _gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = by_product(&db, "Notes");
+        std::fs::remove_file(&row.storage_path).expect("remove");
+        std::fs::create_dir(&row.storage_path).expect("a folder in its place");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("not a file");
+        assert_eq!(
+            err,
+            OpenFileApiError::NotOffered {
+                name: row.name.clone()
+            },
+            "the opener was never called"
+        );
+    }
+
+    /// R-T33: a by-product whose file is gone from the store is `410
+    /// ARTIFACT_GONE` with the store's sentence, as the content routes
+    /// answer it, and the opener is never called.
+    #[tokio::test]
+    async fn open_of_a_by_product_gone_from_the_store_is_a_410() {
+        let _gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = by_product(&db, "Notes");
+        std::fs::remove_file(&row.storage_path).expect("remove");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("refused before the opener");
+        assert_eq!(
+            err,
+            OpenFileApiError::Gone(format!(
+                "artifact {} is gone: {} no longer exists",
+                row.id, row.storage_path
+            ))
+        );
+    }
+
     /// R-T25: a result file `docs/plan.md` replaced by a folder of that name
     /// is refused `NotOffered` — the name's kind is kept, but a folder is not
     /// a file the default app opens.
