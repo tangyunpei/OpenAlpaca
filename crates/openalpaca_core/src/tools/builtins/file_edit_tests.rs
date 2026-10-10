@@ -157,6 +157,23 @@ fn an_old_string_that_starts_with_a_line_break_keeps_an_all_crlf_file_all_crlf()
     );
 }
 
+/// The lead's ruling R-T21: in an all-CRLF file both strings' lone `\n` are
+/// written `\r\n`, so an `old_string` that mixes a `\r\n` with a lone `\n`
+/// still matches — every `\n` of such a file follows a `\r` — and the file
+/// stays all-CRLF.
+#[test]
+fn an_old_string_mixing_crlf_and_a_lone_lf_matches_an_all_crlf_file() {
+    let edited = apply_edit("a.txt", "a\r\nb\r\nc\r\n", "a\r\nb\nc", "x", false).unwrap();
+    assert_eq!(
+        edited,
+        Edited {
+            text: "x\r\n".to_string(),
+            replacements: 1,
+            first_line: 1,
+        }
+    );
+}
+
 // ── The tool, in a guarded project ──────────────────────────────────────
 
 /// A guarded project, this conversation's log and a database for its
@@ -471,11 +488,14 @@ async fn without_a_session_log_an_existing_file_is_not_edited() {
     assert_eq!(b.bytes("notes.md"), b"draft\n");
 }
 
-/// ST-17's cap, asked before the file is read.
+/// ST-17's cap, asked before the file is read: the bytes above the cap are
+/// not UTF-8, so a plan that read the file first would answer the UTF-8
+/// refusal instead of the cap's (S4b's deferred minor).
 #[tokio::test]
 async fn a_file_above_the_snapshot_cap_is_refused() {
     let b = Bench::new();
-    b.put("big.txt", b"far more than eight bytes");
+    let bytes = [0xffu8; 25];
+    b.put("big.txt", &bytes);
 
     let refused = b
         .tool(Some(8))
@@ -489,7 +509,7 @@ async fn a_file_above_the_snapshot_cap_is_refused() {
          snapshot_max_bytes limit, so no pre-edit snapshot can be kept for it. The file is \
          unchanged. Raise snapshot_max_bytes, or copy the file aside yourself first."
     );
-    assert_eq!(b.bytes("big.txt"), b"far more than eight bytes");
+    assert_eq!(b.bytes("big.txt"), bytes);
 }
 
 /// R48: in a project only, and the refusal names file_write.
@@ -512,6 +532,34 @@ async fn with_no_project_file_edit_is_refused_naming_file_write() {
         refused,
         "file_edit changes a file in a project, and this conversation has no project. Use \
          file_write to save a file instead."
+    );
+}
+
+/// R48 with neither a project nor a conversation (S4b's deferred minor): the
+/// same sentence as a scratch-folder turn's — file_edit needs a project, and
+/// naming file_write is the way on — for the card and the body alike.
+#[tokio::test]
+async fn with_neither_a_project_nor_a_conversation_file_edit_is_refused_naming_file_write() {
+    let b = Bench::new();
+    let ctx = ToolContext {
+        owner_id: Some(OWNER.to_string()),
+        ..Default::default()
+    };
+    let tool = b.tool(None);
+    let expected = "file_edit changes a file in a project, and this conversation has no \
+                    project. Use file_write to save a file instead.";
+
+    assert_eq!(
+        tool.execute_with_context(&args("notes.md", "a", "b"), &ctx)
+            .await
+            .unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        tool.confirmation_preview(&args("notes.md", "a", "b"), &ctx)
+            .await
+            .unwrap_err(),
+        expected
     );
 }
 
@@ -565,6 +613,47 @@ async fn a_folder_is_refused() {
         .unwrap_err();
 
     assert_eq!(refused, "'src' is a folder, not a file.");
+}
+
+/// C-S4b-5: anything but a regular file — here a named pipe, which an open
+/// for reading would block on — is refused by the plan from its `stat`
+/// alone, before any open: no card, no copy, no row, the pipe left as it is.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_named_pipe_is_refused_as_not_a_regular_file_before_it_is_opened() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::FileTypeExt;
+
+    let b = Bench::new();
+    let fifo = b.gp.root.join("pipe");
+    let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `c_path` is a NUL-terminated path that outlives the call, and
+    // `mkfifo` only creates a node there; it reads no other memory.
+    let made = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+    assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    let ctx = b.ctx();
+    let tool = b.tool(None);
+    let expected = "'pipe' is not a regular file, so file_edit cannot change it.";
+
+    assert_eq!(
+        tool.confirmation_preview(&args("pipe", "a", "b"), &ctx)
+            .await
+            .unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        tool.execute_with_context(&args("pipe", "a", "b"), &ctx)
+            .await
+            .unwrap_err(),
+        expected
+    );
+    assert!(
+        fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo(),
+        "the pipe is left as it was"
+    );
+    assert!(ctx.session_log.as_ref().unwrap().flush().await);
+    assert!(b.images().is_empty(), "a refusal keeps no copy");
+    assert!(b.rows().is_empty(), "a refusal records no row");
 }
 
 /// R31 (Review Focus 1, d1-confine-3): a link at the leaf pointing outside

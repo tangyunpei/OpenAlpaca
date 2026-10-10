@@ -833,7 +833,12 @@ impl FileEditTool {
     async fn plan(&self, args: &EditArgs<'_>, ctx: &ToolContext) -> Result<EditPlan, String> {
         let root = match working_folder(ctx) {
             Ok(WorkingFolder::Project { root }) => root,
-            Ok(WorkingFolder::Scratch { .. }) => return Err(EDIT_NEEDS_A_PROJECT.to_string()),
+            // R48: a conversation with no project, or a call with neither,
+            // has no project to edit in — `file_write` is the way on, as
+            // `FileWriteTool::plan` answers both with a by-product.
+            Ok(WorkingFolder::Scratch { .. }) | Err(WorkingFolderRefusal::NoConversation) => {
+                return Err(EDIT_NEEDS_A_PROJECT.to_string());
+            }
             // R26, R27: no context, a missing project (ST-23 included) or a
             // root that names no project — each its own sentence.
             Err(refusal) => return Err(refusal.to_string()),
