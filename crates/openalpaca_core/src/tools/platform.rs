@@ -43,10 +43,14 @@ pub enum RunFailure {
 /// unix: the child is started in a new process group (`process_group(0)`).
 /// A guard owning the `Child` sends `killpg(pgid, SIGKILL)` on every exit
 /// that is not a normal end, before it lets the `Child` drop, so the
-/// processes the command started go too. A normal end disarms the guard. A
-/// process that leaves the group on its own (`setsid`) is out of reach.
-/// Windows: `kill_on_drop(true)` kills the direct child only, and processes
-/// it started survive ("where the platform allows", R45).
+/// processes the command started go too. A normal end disarms the guard. The
+/// child is waited for only after both pipes closed, so the group id the guard
+/// signals stays the child's own, alive or an unreaped zombie, until the run
+/// ends and can never be one the system reused. A process that leaves the
+/// group on its own (`setsid`) is out of reach; while it holds the output open
+/// the run reads on until its timeout. Windows: `kill_on_drop(true)` kills the
+/// direct child only, and processes it started survive ("where the platform
+/// allows", R45).
 pub async fn run_bounded(mut cmd: Command, timeout: Duration) -> Result<Output, RunFailure> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -60,8 +64,16 @@ pub async fn run_bounded(mut cmd: Command, timeout: Duration) -> Result<Output, 
     let out_pipe = run.child.stdout.take();
     let err_pipe = run.child.stderr.take();
     let ended = tokio::time::timeout(timeout, async {
-        let (status, stdout, stderr) =
-            tokio::try_join!(run.child.wait(), read_all(out_pipe), read_all(err_pipe))?;
+        // Both pipes to their end first, together (so neither fills), and
+        // only then the wait, as std's `Command::output` does. Until a normal
+        // end the child is alive or an unreaped zombie, so it keeps its pid,
+        // which is the group id `KillGuard` signals: the system cannot give
+        // that id to another group. Waiting alongside the reads would reap
+        // the child while a process that left the group (`setsid`) still held
+        // a pipe open, and a kill at the timeout or the drop could then reach
+        // whatever group was given the freed id.
+        let (stdout, stderr) = tokio::try_join!(read_all(out_pipe), read_all(err_pipe))?;
+        let status = run.child.wait().await?;
         Ok::<Output, std::io::Error>(Output {
             status,
             stdout,
@@ -126,8 +138,12 @@ impl Drop for KillGuard {
         if let Some(group) = self.group.take() {
             // SAFETY: `killpg` only sends a signal. `group` is the positive id
             // of the group this run's child leads, signalled only while the
-            // run has not ended normally, so the child or a process it started
-            // still holds it.
+            // run has not ended normally. The child is reaped only by
+            // `run_bounded`'s own wait, which starts after both pipes closed,
+            // and a wait that reaped it disarms the guard (nothing else in the
+            // process reaps a child). So here it is alive or an unreaped
+            // zombie: it still holds its pid, and with it the group id, which
+            // the system therefore cannot have given to another group.
             unsafe {
                 libc::killpg(group, libc::SIGKILL);
             }
@@ -217,6 +233,49 @@ mod tests {
             wait_until_gone(pid, GONE_WITHIN).await,
             "the background sleep {pid} outlived the dropped run"
         );
+    }
+
+    /// A process that leaves the group (`setsid`) and keeps the output pipes
+    /// open holds the run past the shell's end. Until the run ends the shell
+    /// is not reaped: it keeps its pid, which is the group id the guard
+    /// signals, so the system cannot give that id to another group and a kill
+    /// at the timeout or the drop never reaches a stranger's group (S1 review,
+    /// I1). The detached process itself is out of reach: this test kills it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_process_that_left_the_group_cannot_free_the_group_id_before_the_run_ends() {
+        use crate::test_util::{KillOnFail, pid_from_file};
+        let dir = tempfile::tempdir().unwrap();
+        let leader_file = dir.path().join("leader");
+        let detached_file = dir.path().join("detached");
+        let mut cmd = shell_command(&format!(
+            "echo $$ > '{}'; perl -MPOSIX -e 'POSIX::setsid(); sleep 30' & echo $! > '{}'; exit 0",
+            leader_file.display(),
+            detached_file.display()
+        ));
+        cmd.current_dir(dir.path());
+        let run = tokio::spawn(run_bounded(cmd, Duration::from_secs(60)));
+        let leader = pid_from_file(&leader_file, Duration::from_secs(5)).await;
+        let detached = pid_from_file(&detached_file, Duration::from_secs(5)).await;
+        let _kill = KillOnFail(detached);
+        // The shell ends at once; the detached process keeps both pipes open.
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            // SAFETY: signal 0 sends nothing; it only asks whether `leader`
+            // still holds its pid (a process or an unreaped zombie).
+            let held = unsafe { libc::kill(leader, 0) } == 0;
+            assert!(
+                held,
+                "the shell {leader} was reaped while the run still read its output, \
+                 so its group id was free for the system to reuse"
+            );
+        }
+        assert!(
+            !run.is_finished(),
+            "the detached process {detached} holds the output open"
+        );
+        run.abort();
+        let _ = run.await;
     }
 
     /// A normal end signals nothing: once a group is empty the system may
