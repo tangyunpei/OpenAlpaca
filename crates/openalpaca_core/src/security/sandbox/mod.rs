@@ -217,7 +217,7 @@ impl SandboxManager {
     ///
     /// Flow:
     /// 1. Capability check (deny/allow lists)
-    /// 2. Input sanitization (path traversal, command injection)
+    /// 2. Input sanitization (null bytes, command injection, and `../` for a tool whose arguments reach a program — R29)
     /// 3. Confirmation check (fail-closed if tool requires confirmation)
     /// 4. Circuit breaker check (block if tool has too many recent failures)
     /// 5. Timeout-wrapped execution
@@ -249,14 +249,18 @@ impl SandboxManager {
             return Err(violation.to_string());
         }
 
-        // 2. Input sanitization
+        // 2. Input sanitization. R29 (storage design §11): the `../` rule
+        //    follows the tool's backend: a first-party builtin's path
+        //    arguments refuse `..` themselves and its other arguments are
+        //    content; anything whose arguments reach a program keeps it.
         let registered = self.registry.registered_tool_names();
         let shell_like = self.registry.command_backend_tool_names();
-        if let Err(violation) = InputSanitizer::sanitize_tool_args(
+        if let Err(violation) = InputSanitizer::sanitize_tool_args_with(
             &tool_call.name,
             &tool_call.arguments,
             &registered,
             &shell_like,
+            self.registry.traversal_rule(&tool_call.name),
         ) {
             self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string(), task_id);
             return Err(violation.to_string());

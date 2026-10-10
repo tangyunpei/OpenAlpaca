@@ -1706,3 +1706,133 @@ async fn the_card_carries_the_preview_and_per_call() {
         other => panic!("Expected ToolConfirmationRequested, got {other:?}"),
     }
 }
+
+// ── R29: the `../` rule follows the backend (storage design §11) ────────
+
+/// A builtin, a command tool, an MCP tool and a skill script side by side.
+fn traversal_sandbox(skill_dir: &std::path::Path) -> SandboxManager {
+    let tool = |name: &str, backend: ToolBackend| RegisteredTool {
+        definition: openalpaca_llm::ToolDefinition {
+            name: name.to_string(),
+            description: name.to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
+        },
+        backend,
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
+        annotations: None,
+        version: "test-0.0.0".into(),
+        author: "test".into(),
+        created_at: chrono::Utc::now(),
+    };
+    let registry = ToolRegistry::default();
+    registry
+        .register(tool("note_tool", ToolBackend::BuiltIn(Arc::new(MockTool))))
+        .unwrap();
+    registry
+        .register(tool(
+            "cmd_tool",
+            ToolBackend::Command {
+                command: "true".to_string(),
+                args_template: Some("{path}".to_string()),
+                timeout_secs: 5,
+            },
+        ))
+        .unwrap();
+    registry
+        .register(tool(
+            "srv__echo",
+            ToolBackend::Mcp {
+                client: Arc::new(openalpaca_mcp::McpClient::disconnected_for_tests("srv")),
+                remote_name: "echo".to_string(),
+                server_name: "srv".to_string(),
+                generation: 0,
+            },
+        ))
+        .unwrap();
+    std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+    std::fs::write(skill_dir.join("scripts/noop.sh"), "exit 0\n").unwrap();
+    let script = crate::tools::builtins::ScriptToolBuiltIn::new(
+        skill_dir,
+        &crate::middleware::skill::ScriptConfig {
+            file: "noop.sh".to_string(),
+            name: "noop".to_string(),
+            description: "Does nothing".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            interpreter: Some("sh".to_string()),
+            timeout_secs: 5,
+        },
+    )
+    .unwrap();
+    registry
+        .register(tool("skill_script:noop", ToolBackend::BuiltIn(Arc::new(script))))
+        .unwrap();
+    SandboxManager::new(
+        Arc::new(registry),
+        EventBus::default(),
+        &CircuitBreakerConfig::default(),
+    )
+}
+
+fn traversal_call(name: &str, arguments: serde_json::Value) -> ToolCall {
+    ToolCall {
+        id: "tc_r29".to_string(),
+        name: name.to_string(),
+        arguments,
+    }
+}
+
+#[tokio::test]
+async fn a_builtins_content_may_hold_a_relative_path() {
+    let skill = tempfile::tempdir().unwrap();
+    let sandbox = traversal_sandbox(skill.path());
+    let out = sandbox
+        .execute_tool(
+            &traversal_call(
+                "note_tool",
+                serde_json::json!({"content": "import { x } from '../lib/x';"}),
+            ),
+            &make_policy("agent1"),
+            &make_ctx("agent1"),
+        )
+        .await;
+    assert_eq!(out.as_deref(), Ok("search results"));
+}
+
+#[tokio::test]
+async fn a_command_tool_an_mcp_tool_and_a_skill_script_keep_the_traversal_rule() {
+    let skill = tempfile::tempdir().unwrap();
+    let sandbox = traversal_sandbox(skill.path());
+    for (name, arguments) in [
+        ("cmd_tool", serde_json::json!({"path": "../secret"})),
+        ("srv__echo", serde_json::json!({"text": "../secret"})),
+        ("skill_script:noop", serde_json::json!({"id": "../../escape"})),
+    ] {
+        let err = sandbox
+            .execute_tool(
+                &traversal_call(name, arguments),
+                &make_policy("agent1"),
+                &make_ctx("agent1"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, "Input blocked: Path traversal pattern detected", "{name}");
+    }
+}
+
+#[tokio::test]
+async fn a_builtins_null_byte_is_still_refused() {
+    let skill = tempfile::tempdir().unwrap();
+    let sandbox = traversal_sandbox(skill.path());
+    let err = sandbox
+        .execute_tool(
+            &traversal_call("note_tool", serde_json::json!({"content": "a\u{0}b"})),
+            &make_policy("agent1"),
+            &make_ctx("agent1"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, "Input blocked: Argument contains null bytes");
+}
