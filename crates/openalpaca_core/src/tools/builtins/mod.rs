@@ -5,6 +5,7 @@ mod helpers;
 mod invoke_skill;
 mod main_loop;
 mod memory_tools;
+mod pre_edit;
 mod read_result;
 mod send;
 mod shell_execute;

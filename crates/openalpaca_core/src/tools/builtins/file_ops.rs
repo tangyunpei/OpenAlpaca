@@ -1,5 +1,4 @@
 use crate::daemon_config::{DaemonConfig, SessionsConfig};
-use crate::session_log::SnapshotSpec;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use crate::tools::working_folder::WorkingFolderRefusal;
 use arc_swap::ArcSwap;
@@ -10,7 +9,7 @@ use openalpaca_storage::store::{
 };
 use openalpaca_storage::{ArtifactKind, Database};
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::annotations_for_builtin;
@@ -20,6 +19,7 @@ use super::helpers::{
     FolderRules, MAX_FILE_READ_SIZE, acting_folder, resolve_workspace_path,
     resolve_workspace_path_for_write, validate_workspace_path,
 };
+use super::pre_edit::{EditVerb, keep_pre_edit_copy};
 
 // --- file_read ---
 
@@ -130,109 +130,6 @@ impl FileWriteTool {
             None => SessionsConfig::default().snapshot_max_bytes,
         }
     }
-
-    /// Take §5.7's pre-edit image of `full_path`, or explain why the write
-    /// must not happen.
-    ///
-    /// **Fail closed.** `Ok(())` means either that an image now exists in the
-    /// session's `snapshots/`, committed by a `file_snapshot` record, or that
-    /// this write has nothing to image — there is no session log, or the
-    /// target does not exist, or it is not a regular file inside the
-    /// workspace. `Err` means an image was owed and could not be taken, and
-    /// the caller must not write: overwriting a file whose only copy this was
-    /// is exactly what the tier exists to prevent, and doing it quietly is
-    /// worse than refusing loudly.
-    async fn snapshot_before_overwrite(
-        &self,
-        path: &str,
-        full_path: &Path,
-        ctx: &ToolContext,
-    ) -> Result<(), String> {
-        let Some(log) = ctx.session_log.as_ref() else {
-            tracing::debug!(path, "file_write: no session log, so no pre-edit image");
-            return Ok(());
-        };
-        // Only an existing regular file has a pre-edit state. A new file, a
-        // directory, a device — nothing to image, and nothing to refuse.
-        let Ok(metadata) = tokio::fs::metadata(full_path).await else {
-            return Ok(());
-        };
-        if !metadata.is_file() {
-            return Ok(());
-        }
-        // Through any symlink, and only then judged. Since R31 the write
-        // resolver refuses a leaf that links out of the workspace, so this is
-        // the tier's own check of where the bytes it would copy are.
-        let Ok(target) = tokio::fs::canonicalize(full_path).await else {
-            return Ok(());
-        };
-        if !is_snapshotable(&target, &self.workspace_root, store_root().as_deref()) {
-            tracing::debug!(
-                path,
-                target = %target.display(),
-                "file_write: the target is not a workspace file, so no pre-edit image"
-            );
-            return Ok(());
-        }
-
-        let cap = self.snapshot_max_bytes();
-        if metadata.len() > cap {
-            return Err(format!(
-                "Refusing to overwrite '{}': it is {} bytes, above the {} byte \
-                 [orchestrator.sessions] snapshot_max_bytes limit, so no pre-edit \
-                 snapshot can be kept for it. The file is unchanged. Raise \
-                 snapshot_max_bytes, or copy the file aside yourself first.",
-                path,
-                metadata.len(),
-                cap
-            ));
-        }
-
-        let spec = SnapshotSpec {
-            source: target,
-            path: path.to_string(),
-            task_id: ctx.task_id.clone(),
-            span_id: None,
-            agent: ctx
-                .agent_instance_id
-                .clone()
-                .or_else(|| ctx.agent_id.clone()),
-        };
-        match log.snapshot(spec).await {
-            Ok(_) => Ok(()),
-            Err(e) => Err(format!(
-                "Refusing to overwrite '{}': its pre-edit snapshot could not be \
-                 taken ({}). The file is unchanged.",
-                path, e
-            )),
-        }
-    }
-}
-
-/// The home store, so a file inside it is never imaged.
-///
-/// `snapshots/` and `results/` live there; a session that imaged its own log
-/// would grow the very bytes the caps are about. Unresolvable means there is
-/// no store, and therefore no session log to have got here with.
-fn store_root() -> Option<PathBuf> {
-    openalpaca_storage::store::home_root()
-        .ok()
-        .map(|root| root.canonicalize().unwrap_or(root))
-}
-
-/// Whether a resolved write target is a workspace file worth imaging.
-///
-/// Two conditions, both after symlink resolution: inside the workspace root —
-/// a link out of it points at a file this tool has no claim to copy — and
-/// outside the home store, which is where the images themselves live.
-fn is_snapshotable(target: &Path, workspace_root: &Path, store: Option<&Path>) -> bool {
-    let Ok(root) = workspace_root.canonicalize() else {
-        return false;
-    };
-    if !target.starts_with(&root) {
-        return false;
-    }
-    !store.is_some_and(|store| target.starts_with(store))
 }
 
 #[async_trait]
@@ -319,11 +216,19 @@ impl FileWriteTool {
         let full_path =
             resolve_workspace_path_for_write(path, &self.workspace_root, FolderRules::Plain)?;
 
-        // §5.7: the bytes this write is about to destroy are imaged first, and
-        // the write does not happen unless that succeeded. Everything above is
-        // a refusal that never touched the file; from here on the file changes,
-        // so this is the last point at which nothing has been lost yet.
-        self.snapshot_before_overwrite(path, &full_path, ctx).await?;
+        // ST-17 + R46: the bytes this write is about to replace are kept in
+        // the conversation's log first, and the write does not happen unless
+        // that succeeded; where no log can keep them, an existing file is not
+        // replaced at all.
+        keep_pre_edit_copy(
+            path,
+            &full_path,
+            &self.workspace_root,
+            ctx,
+            self.snapshot_max_bytes(),
+            EditVerb::Overwrite,
+        )
+        .await?;
 
         // Create parent directories AFTER boundary validation
         if let Some(parent) = full_path.parent() {
@@ -533,6 +438,7 @@ mod tests {
     use super::*;
     use crate::session_log::{RecordType, SNAPSHOTS_DIR, SessionLogLimits, SessionLogService};
     use std::fs;
+    use std::path::Path;
     use std::time::Duration;
 
     // ── §5.7: the pre-edit image `file_write` takes ─────────────────
@@ -715,28 +621,42 @@ mod tests {
         );
     }
 
-    /// Off a session there is nowhere to put an image, so the write proceeds
-    /// as it always did — the tier is a session facility, not a gate.
+    /// R46: off a conversation log there is nowhere to keep a copy, so an
+    /// existing file is not replaced — and a new one is still written.
     #[tokio::test]
-    async fn without_a_session_log_no_image_is_taken() {
+    async fn without_a_session_log_an_existing_file_is_not_replaced() {
         let bench = bench();
         let tool = bench.tool(None);
         fs::write(bench.work.path().join("notes.txt"), "old").unwrap();
 
-        let result = tool
+        let refused = tool
             .execute_with_context(
                 &serde_json::json!({"path": "notes.txt", "content": "new"}),
                 &bench.project_ctx(),
             )
-            .await;
-        assert!(result.is_ok(), "{result:?}");
+            .await
+            .expect_err("R46");
+        assert_eq!(
+            refused,
+            "Refusing to overwrite 'notes.txt': it already exists, and no copy of its current \
+             content can be kept here — a skill or a plugin agent keeps no conversation log. The \
+             file is unchanged. Write the result to a new file, or ask for the change in the \
+             conversation itself."
+        );
         assert_eq!(
             fs::read_to_string(bench.work.path().join("notes.txt")).unwrap(),
-            "new"
+            "old"
         );
-        assert!(
-            !bench.sessions.path().join("sess-none").exists(),
-            "no session, no session directory"
+
+        tool.execute_with_context(
+            &serde_json::json!({"path": "fresh.txt", "content": "hello"}),
+            &bench.project_ctx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(bench.work.path().join("fresh.txt")).unwrap(),
+            "hello"
         );
     }
 
@@ -934,35 +854,6 @@ mod tests {
         assert!(
             !bench.session_dir("sess-e").join(SNAPSHOTS_DIR).exists(),
             "nothing was imaged"
-        );
-    }
-
-    /// The store holds the images themselves. A file inside it is never one,
-    /// whatever the workspace root happens to be.
-    #[test]
-    fn a_file_inside_the_store_is_never_imaged() {
-        let work = tempfile::tempdir().unwrap();
-        let store = work.path().join(".openalpaca");
-        fs::create_dir_all(store.join("sessions/s/results")).unwrap();
-        let spill = store.join("sessions/s/results/000001-t-dump.txt");
-        fs::write(&spill, "a spilled result").unwrap();
-        let plain = work.path().join("ordinary.txt");
-        fs::write(&plain, "a workspace file").unwrap();
-        // Both roots come to the check resolved, as `store_root` hands them
-        // over: on macOS `/var` is itself a link to `/private/var`.
-        let store = store.canonicalize().unwrap();
-
-        assert!(
-            is_snapshotable(&plain.canonicalize().unwrap(), work.path(), Some(&store)),
-            "an ordinary workspace file is imaged"
-        );
-        assert!(
-            !is_snapshotable(&spill.canonicalize().unwrap(), work.path(), Some(&store)),
-            "the store's own bytes are never imaged"
-        );
-        assert!(
-            !is_snapshotable(Path::new("/etc/hosts"), work.path(), Some(&store)),
-            "and nothing outside the workspace is"
         );
     }
 
