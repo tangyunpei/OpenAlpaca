@@ -23,6 +23,69 @@ pub(super) fn validate_workspace_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// What R32 adds to confinement (storage design §11): the rules a folder
+/// carries beyond "relative, no `..`, resolved under the root".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FolderRules {
+    /// The folder is a project (ST-10): a component named `.git` is refused
+    /// for writing — git keeps that folder, and reading it stays allowed
+    /// (ST-16) — and one named `.openalpaca` for reading and for writing, an
+    /// older OpenAlpaca's folder nothing reads any more (ST-9). Any
+    /// component, compared without case, of the path relative to the
+    /// canonical root **after** resolution, so a link into either folder is
+    /// judged by where it lands.
+    // Built in Stage 2's S1 and passed by no caller until S3 (reads) and
+    // S4a (writes); S3 removes this attribute with the first caller.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Project,
+    /// No rule beyond confinement: a conversation's scratch folder, and until
+    /// S3 and S4a every caller whose root is the daemon's starting directory.
+    Plain,
+}
+
+impl FolderRules {
+    /// R32 over `resolved`, the path a resolver landed on. The resolvers
+    /// refused anything outside `canonical_root` first, so the fallback below
+    /// only keeps this fail-closed.
+    fn check(
+        self,
+        relative_path: &str,
+        resolved: &Path,
+        canonical_root: &Path,
+        access: StoreAccess,
+    ) -> Result<(), String> {
+        if self == FolderRules::Plain {
+            return Ok(());
+        }
+        let Ok(inside) = resolved.strip_prefix(canonical_root) else {
+            return Err(format!(
+                "Path '{relative_path}' resolves outside the workspace boundary"
+            ));
+        };
+        let has = |name: &str| {
+            inside.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::Normal(part) if part.eq_ignore_ascii_case(name)
+                )
+            })
+        };
+        if has(".openalpaca") {
+            return Err(format!(
+                "'{relative_path}' is refused: a .openalpaca folder inside a project is an older \
+                 OpenAlpaca's, and nothing in it is read or written any more."
+            ));
+        }
+        if access == StoreAccess::Write && has(".git") {
+            return Err(format!(
+                "Writing '{relative_path}' is refused: it is inside the project's .git folder, \
+                 which git keeps. Run git through shell_execute instead."
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Resolve a relative path within the workspace and verify it doesn't escape
 /// the workspace boundary via symlinks or normalization.
 ///
@@ -30,10 +93,13 @@ pub(super) fn validate_workspace_path(path: &str) -> Result<(), String> {
 /// startup). This avoids depending on the process-global `current_dir()`,
 /// which can change or be unavailable.
 ///
-/// Returns the canonicalized absolute path on success.
+/// Returns the canonicalized absolute path on success — every component, the
+/// last included, resolved (R31's read side) — after R32's read rule when
+/// `rules` is [`FolderRules::Project`].
 pub(super) fn resolve_workspace_path(
     relative_path: &str,
     workspace_root: &Path,
+    rules: FolderRules,
 ) -> Result<PathBuf, String> {
     validate_workspace_path(relative_path)?;
 
@@ -55,6 +121,7 @@ pub(super) fn resolve_workspace_path(
             relative_path
         ));
     }
+    rules.check(relative_path, &canonical, &canonical_root, StoreAccess::Read)?;
 
     Ok(canonical)
 }
@@ -82,6 +149,7 @@ pub(super) fn resolve_workspace_path(
 pub(super) fn resolve_workspace_path_for_write(
     relative_path: &str,
     workspace_root: &Path,
+    rules: FolderRules,
 ) -> Result<PathBuf, String> {
     validate_workspace_path(relative_path)?;
 
@@ -129,7 +197,9 @@ pub(super) fn resolve_workspace_path_for_write(
             relative_path
         ));
     }
-    Ok(resolved_parent.join(file_name))
+    let target = resolved_parent.join(file_name);
+    rules.check(relative_path, &target, &canonical_root, StoreAccess::Write)?;
+    Ok(target)
 }
 
 /// Check if a path refers to SOUL.md (case-insensitive filename check).

@@ -15,8 +15,8 @@ use std::sync::Arc;
 use super::annotations_for_builtin;
 use super::artifact_write::{ToolArtifact, put_tool_artifact, scope_from_context, split_name};
 use super::helpers::{
-    MAX_FILE_READ_SIZE, StoreAccess, is_identity_path, is_soul_path, is_store_owned_path,
-    is_store_owned_resolved, is_user_path, resolve_workspace_path,
+    FolderRules, MAX_FILE_READ_SIZE, StoreAccess, is_identity_path, is_soul_path,
+    is_store_owned_path, is_store_owned_resolved, is_user_path, resolve_workspace_path,
     resolve_workspace_path_for_write, validate_workspace_path,
 };
 
@@ -47,7 +47,7 @@ impl BuiltInTool for FileReadTool {
         }
 
         // Security: resolve path, reject traversal and symlink escapes
-        let full_path = resolve_workspace_path(path, &self.workspace_root)?;
+        let full_path = resolve_workspace_path(path, &self.workspace_root, FolderRules::Plain)?;
         // Again on the resolved path: a symlink inside the workspace that
         // points at `state/` passes the string check above.
         if let Some(what) =
@@ -338,7 +338,8 @@ impl FileWriteTool {
 
         // Security: resolve path, reject symlink escapes BEFORE creating directories.
         // This prevents out-of-workspace directory creation via symlinked intermediates.
-        let full_path = resolve_workspace_path_for_write(path, &self.workspace_root)?;
+        let full_path =
+            resolve_workspace_path_for_write(path, &self.workspace_root, FolderRules::Plain)?;
         // Again on the resolved path: a symlink inside the workspace that
         // points at `state/` or a partition's control files passes the
         // string check above.
