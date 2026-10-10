@@ -85,8 +85,13 @@ const PROMPT_ARGUMENTS_BYTES: usize = 500;
 /// design R34: the folder a command starts in, where a write lands), printed
 /// under `From OpenAlpaca:` between the tool's name and its arguments, as the
 /// app and `openalpaca chat` print it. It is OpenAlpaca's prose; whatever it
-/// quotes from the call is already escaped (`utils::text`), so it is printed
-/// as written. Absent or empty, the prompt is the ordinary one.
+/// quotes from the call is already escaped (`utils::text`), so its characters
+/// are printed as written — but every line of it is indented two spaces
+/// under its label, as the CLI indents it: `file_edit`'s card quotes the
+/// model's `old_string` and `new_string` with their line breaks kept as
+/// layout, and a line of theirs at the margin would read as the prompt's own
+/// `Arguments:` block or `/yes` line. Absent or empty, the prompt is the
+/// ordinary one.
 ///
 /// A cut says how much it left out — `... (31 more characters not shown)` —
 /// because what it leaves out still runs: a model can pad a shell command
@@ -142,10 +147,20 @@ pub fn format_confirmation_prompt(
     };
 
     // The daemon's own text for the card (R34: the folder a command starts
-    // in, where a write lands), above the arguments as it wrote it.
+    // in, where a write lands), above the arguments, every line of it
+    // indented under its label: `file_edit`'s card quotes the model's two
+    // strings with their line breaks, and a line at the margin could pass
+    // for the prompt's own `Arguments:` or `/yes` line (d3-approvals-1).
     let from_openalpaca = preview
         .filter(|text| !text.is_empty())
-        .map(|text| format!("From OpenAlpaca:\n{text}\n"))
+        .map(|text| {
+            let indented = text
+                .lines()
+                .map(|line| format!("  {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("From OpenAlpaca:\n{indented}\n")
+        })
         .unwrap_or_default();
 
     format!(

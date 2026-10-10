@@ -820,7 +820,10 @@ mod tests {
         let (shown, markup) = discord_reads(&sent);
         assert!(markup.is_empty(), "unescaped markup {markup:?} in {sent}");
         assert_eq!(shown, written);
-        assert!(shown.contains(&format!("From OpenAlpaca:\n{preview}\n")), "{shown}");
+        assert!(
+            shown.contains(&format!("From OpenAlpaca:\n  {preview}\n")),
+            "{shown}"
+        );
     }
 
     /// Discord draws an embed under every URL in a message: the linked
