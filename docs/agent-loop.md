@@ -597,8 +597,11 @@ started:
 2. **The rules** — `<workflow_relay_rules>` and `start_workflow`'s own
    description agree that a run starts ONLY through a call in this turn,
    that a task id may be stated only when that call returned it, and that
-   an explicit workflow request or an ask to write or save an artifact IS
-   that call.
+   an explicit workflow request IS that call. Since the storage design's
+   Stage 2 the rules also say that writing a file, editing one or running
+   a command in the project is the chat's own when those tools are on its
+   surface, and that a file asked for with no writing tool on the surface
+   is `start_workflow`'s (R-T7).
 3. **The guard** — because prompting is not a guarantee.
 
 The guard's trigger is three **facts**, not a reading of the sentence. It
