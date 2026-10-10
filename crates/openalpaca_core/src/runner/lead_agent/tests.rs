@@ -1916,6 +1916,37 @@ async fn test_lead_loop_request_carries_extension_defs_and_invoke_skill() {
     assert!(system.content.contains("invoke_skill"));
 }
 
+/// R48, §15: the lead holds no file-writing or editing tool. Its surface is
+/// assembled by hand, never resolved from a capability, so a registry that
+/// carries both leaves both off it.
+#[tokio::test]
+async fn the_lead_is_never_handed_file_edit_or_file_write() {
+    let registry = Arc::new(ToolRegistry::default());
+    for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+
+    let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
+    let result = run_lead_for_test(
+        provider.clone(),
+        registry,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        EventBus::default(),
+    )
+    .await;
+
+    assert!(result.success, "finish: {:?}", result.loop_result.finish_reason);
+    let names = provider.tool_names(0);
+    assert!(names.iter().any(|n| n == "spawn_subagent"), "{names:?}");
+    for absent in ["file_edit", "file_write"] {
+        assert!(
+            !names.iter().any(|n| n == absent),
+            "the lead must not hold {absent}: {names:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_lead_executes_extension_tool_through_sandbox() {
     let registry = Arc::new(ToolRegistry::default());

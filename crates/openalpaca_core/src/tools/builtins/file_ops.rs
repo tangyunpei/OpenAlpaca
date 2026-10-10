@@ -864,7 +864,11 @@ pub(super) fn file_edit_tool(
             })]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(FileEditTool { db, daemon_config })),
-        provides_capabilities: vec!["file_edit".into()],
+        // R48: it comes with the file_write capability — a template that
+        // grants file_write holds it, and one that denies file_write denies
+        // it (`resolve_capabilities` leaves a tool off a surface when any
+        // capability it provides is denied).
+        provides_capabilities: vec!["file_write".into(), "file_edit".into()],
         exempt_from_timeout: false,
         annotations: annotations_for_builtin("file_edit"),
         version: env!("CARGO_PKG_VERSION").to_string(),

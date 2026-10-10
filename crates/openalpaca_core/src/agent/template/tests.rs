@@ -391,6 +391,73 @@ fn the_shipped_system_agent_template_prompts_for_its_shell_and_file_writes() {
     );
 }
 
+/// R48 (storage design §13): `file_edit` comes with the `file_write`
+/// capability. Every shipped template that grants `file_write` is handed
+/// `file_edit` beside it and its sandbox admits the call; every one that
+/// denies `file_write` — and the lead's, which grants neither — is handed
+/// neither, and its sandbox refuses `file_edit` by name. Each template is
+/// walked exactly as the subagent spawn walks it: `to_subagent`,
+/// `resolve_agent_tools`, `SandboxPolicy::from_constraints`,
+/// `admit_tool_surface`.
+#[test]
+fn file_edit_comes_with_the_file_write_capability_in_every_shipped_template() {
+    use crate::security::capabilities::CapabilityManager;
+    use crate::security::sandbox::SandboxPolicy;
+    use crate::tools::ToolRegistry;
+    use crate::tools::builtins::builtin_tools;
+
+    let registry = std::sync::Arc::new(ToolRegistry::default());
+    for tool in builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents");
+    for (id, writes) in [
+        ("code_agent", true),
+        ("general_agent", true),
+        ("system_agent", true),
+        ("writing_agent", true),
+        ("explore_agent", false),
+        ("planning_agent", false),
+        ("research_agent", false),
+        ("review_agent", false),
+        ("lead_agent", false),
+    ] {
+        let path = agents.join(format!("{id}.md"));
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let doc = parse_agent_markdown(&body)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+        let agent = doc.to_subagent(&format!("{id}::r48"), "task-1");
+
+        let surface = crate::tools::resolve_agent_tools(&agent, &registry, None);
+        let names: Vec<&str> = surface.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names.contains(&"file_write"),
+            writes,
+            "{id}: file_write on {names:?}"
+        );
+        assert_eq!(
+            names.contains(&"file_edit"),
+            writes,
+            "{id}: file_edit on {names:?}"
+        );
+
+        let mut policy = SandboxPolicy::from_constraints(&agent.id, &agent.constraints);
+        policy.admit_tool_surface(&surface);
+        assert_eq!(
+            CapabilityManager::check_agent_capability(
+                &agent.id,
+                "file_edit",
+                &policy.allowed_capabilities,
+                &policy.denied_capabilities,
+            )
+            .is_ok(),
+            writes,
+            "{id}: the sandbox admits file_edit"
+        );
+    }
+}
+
 // ── Design 09 §5 (LQ3): memory search for every built-in agent ──────────
 
 /// Whether the gate admits `memory_read` for `agent`, from the resolved
