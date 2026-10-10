@@ -643,9 +643,13 @@ fn project_refuses_an_absolute_path_that_is_not_there_and_no_project_records() {
 }
 
 /// A relative `--project` that is not there is still refused here: read
-/// against the daemon's directory it would name another folder (R22).
+/// against the daemon's directory it would name another folder (R22). The
+/// path is asked about as a recorded root first, so the store it reads is a
+/// sandboxed one.
 #[test]
 fn project_refuses_a_relative_path_that_is_not_there() {
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
     let at = ScopeArgs {
         project: Some(PathBuf::from("no/such/folder-r23")),
         ..Default::default()
@@ -656,6 +660,250 @@ fn project_refuses_a_relative_path_that_is_not_there() {
         format!("{err:#}").contains("not a directory I can read"),
         "{err:#}"
     );
+}
+
+// ── ST-23: a project whose root no longer leads to itself (d0-st23-1) ──
+
+/// The project folder at `root`, moved to `<root>-moved` with a link left at
+/// `root`: the old path still opens the folder, but no longer leads to itself.
+#[cfg(unix)]
+fn move_behind_a_link(root: &Path) -> PathBuf {
+    let mut name = root.file_name().unwrap().to_os_string();
+    name.push("-moved");
+    let moved = root.with_file_name(name);
+    std::fs::rename(root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, root).unwrap();
+    moved
+}
+
+/// The one `x-workspace-path` a scope sends (every path here is ASCII, so
+/// the header is the path as written).
+fn sent_path(at: &ScopeArgs) -> String {
+    let headers = at.headers().unwrap();
+    assert_eq!(headers.len(), 1, "{headers:?}");
+    headers[0].1.clone()
+}
+
+/// What the daemon makes of a memory write's header: exactly the call
+/// `register_request_project` makes (`MemoryScopeContext::for_turn`), whose
+/// root becomes the write's `WorkspaceHint::Root`.
+fn daemon_write_root(header: &str) -> Option<String> {
+    openalpaca_core::memory::scope_context::MemoryScopeContext::for_turn(Some(header))
+        .unwrap()
+        .request_workspace_root
+}
+
+/// Every project `projects/` lists, as (id, missing).
+fn listed_projects() -> Vec<(store::projects::ProjectId, bool)> {
+    store::projects::list()
+        .unwrap()
+        .into_iter()
+        .map(|p| (p.id, p.missing))
+        .collect()
+}
+
+/// d0-st23-1 (ST-23): a chosen folder — no `.git` — moved with a link left
+/// at its old root is named by that root as written. Canonicalizing first
+/// sent the folder the link reaches, which no project records: the daemon
+/// resolved no project, and a decision — project-scoped by kind — landed in
+/// the global partition, recalled everywhere. Now the header is the old
+/// root, the daemon's resolution of a write's header answers the old
+/// project, and the note the memory service stores under that answer, as
+/// the memory route builds its context, lands in the old project's
+/// partition; `doctor --repair --project` reads the same root.
+#[cfg(unix)]
+#[test]
+fn project_names_a_chosen_folder_moved_behind_a_link_by_its_old_root() {
+    use openalpaca_core::memory::service::{
+        Attribution, Capabilities, MemoryService, StoreInput, Surface,
+    };
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let owner = "u_example_alice";
+    let root = tmp.path().canonicalize().unwrap().join("notes");
+    std::fs::create_dir_all(&root).unwrap();
+    let own = store::projects::choose(&root).unwrap();
+    move_behind_a_link(&root);
+    let at = ScopeArgs {
+        project: Some(root.clone()),
+        ..Default::default()
+    };
+
+    let sent = sent_path(&at);
+    let answered = daemon_write_root(&sent);
+    let db_path = store::database_path().unwrap();
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let db = Database::open(&db_path).unwrap();
+    openalpaca_storage::IdentityRepository::new(&db)
+        .create_global_user(owner, None)
+        .unwrap();
+    let service = MemoryService::open_default(Some(db));
+    let hint = match &answered {
+        Some(root) => WorkspaceHint::Root(Path::new(root)),
+        None => WorkspaceHint::None,
+    };
+    let ctx = service
+        .context(
+            owner,
+            hint,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    service
+        .store(
+            &ctx,
+            StoreInput {
+                title: "Release step".into(),
+                body: "Tag the release, then push the tag.".into(),
+                kind: Some(NoteKind::Decision),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let titles = |scope: &StoreScope| -> Vec<String> {
+        Partition::open(scope, owner)
+            .unwrap()
+            .load()
+            .unwrap()
+            .views
+            .into_iter()
+            .map(|view| view.note.title)
+            .collect()
+    };
+
+    assert!(
+        titles(&StoreScope::Home).is_empty(),
+        "never the global partition"
+    );
+    assert_eq!(
+        titles(&StoreScope::Project(root.clone())),
+        vec!["Release step".to_string()],
+        "the old project's partition"
+    );
+    assert_eq!(sent, root.to_string_lossy());
+    assert_eq!(answered.as_deref(), Some(sent.as_str()));
+    assert_eq!(at.local_project_root().unwrap(), Some(root.clone()));
+    assert_eq!(listed_projects(), vec![(own.id, true)]);
+}
+
+/// d0-st23-1: the same `--project` from `doctor --repair` repairs the old
+/// project's partition — canonicalizing first answered the folder the link
+/// reaches, no project, and repaired the home notes alone.
+#[cfg(unix)]
+#[test]
+fn repair_of_a_chosen_folder_moved_behind_a_link_repairs_its_old_project() {
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let owner = "u_example_alice";
+    seed_owner(owner);
+    let root = tmp.path().canonicalize().unwrap().join("notes");
+    std::fs::create_dir_all(&root).unwrap();
+    store::projects::choose(&root).unwrap();
+    let scope = StoreScope::Project(root.clone());
+    let notes = Partition::open(&scope, owner).unwrap();
+    notes
+        .create(
+            NewNote {
+                title: "Release step".into(),
+                body: "# Release step\n\nTag, then push.\n".into(),
+                kind: Some(NoteKind::Decision),
+                ..Default::default()
+            },
+            Actor::UserSurface,
+        )
+        .unwrap();
+    std::fs::remove_file(notes.snapshot_path()).unwrap();
+    drop(notes);
+    move_behind_a_link(&root);
+
+    repair_locally(&ScopeArgs {
+        project: Some(root.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let repaired = Partition::open(&scope, owner).unwrap();
+    assert_eq!(repaired.health(), PartitionHealth::Ready);
+    assert_eq!(repaired.snapshot().unwrap().notes.len(), 1);
+}
+
+/// d0-st23-1: a git repository moved with a link left at its old root.
+/// Canonicalizing first sent the folder the link reaches, which holds
+/// `.git`, and the daemon registered it as a second project — which then
+/// refused the old project's re-point onto it (ST-20). Now the old root is
+/// sent and nothing is registered at the moved folder.
+#[cfg(unix)]
+#[test]
+fn project_names_a_repository_moved_behind_a_link_and_nothing_is_registered_where_it_went() {
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let root = tmp.path().canonicalize().unwrap().join("app");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let own = store::projects::register(&root).unwrap();
+    let moved = move_behind_a_link(&root);
+    let at = ScopeArgs {
+        project: Some(root.clone()),
+        ..Default::default()
+    };
+
+    let sent = sent_path(&at);
+    let answered = daemon_write_root(&sent);
+
+    assert_eq!(
+        listed_projects(),
+        vec![(own.id, true)],
+        "nothing registered at the moved folder"
+    );
+    assert_eq!(store::projects::lookup(&moved).unwrap(), None);
+    assert_eq!(sent, root.to_string_lossy());
+    assert_eq!(answered.as_deref(), Some(sent.as_str()));
+}
+
+/// d0-st23-1 on a case-insensitive volume: a repository renamed by case only
+/// is named by its recorded root as written — canonicalizing first sent the
+/// spelling on disk, and the daemon registered it as a second project.
+#[cfg(unix)]
+#[test]
+fn project_names_a_repository_renamed_by_case_only_by_its_recorded_root() {
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let work = tmp.path().canonicalize().unwrap().join("cases");
+    std::fs::create_dir_all(&work).unwrap();
+    if !crate::test_util::volume_ignores_case(&work) {
+        eprintln!(
+            "skipped: {} is case-sensitive, so no folder can be renamed by case only",
+            work.display()
+        );
+        return;
+    }
+    let root = work.join("App");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let own = store::projects::register(&root).unwrap();
+    let renamed = work.join("app");
+    std::fs::rename(&root, &renamed).unwrap();
+    assert_eq!(
+        root.canonicalize().unwrap(),
+        renamed,
+        "ST-23's premise: the volume answers the spelling on disk"
+    );
+    let at = ScopeArgs {
+        project: Some(root.clone()),
+        ..Default::default()
+    };
+
+    let sent = sent_path(&at);
+    let answered = daemon_write_root(&sent);
+
+    assert_eq!(
+        listed_projects(),
+        vec![(own.id, true)],
+        "nothing registered at the new spelling"
+    );
+    assert_eq!(sent, root.to_string_lossy());
+    assert_eq!(answered.as_deref(), Some(sent.as_str()));
+    assert_eq!(at.local_project_root().unwrap(), Some(root.clone()));
 }
 
 /// R22: `doctor` prints one line per project snapshot that carries no

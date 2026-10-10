@@ -153,6 +153,26 @@ fn a_missing_projects_root_resolves_to_that_project() {
     assert_eq!(inside, root.to_string_lossy());
 }
 
+/// d0-st23-1 (ST-23): a chosen folder — no `.git` — moved with a link left
+/// at its old root filters by that root as written, the `workspace_id` its
+/// conversations hold. Canonicalizing first followed the link to a folder
+/// no project records and answered "not inside a project".
+#[cfg(unix)]
+#[test]
+fn a_chosen_folder_moved_behind_a_link_filters_by_its_old_root() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = crate::test_util::EnvSandbox::enter(tmp.path());
+    let root = tmp.path().canonicalize().unwrap().join("notes");
+    std::fs::create_dir_all(&root).unwrap();
+    openalpaca_storage::store::projects::choose(&root).unwrap();
+    let moved = root.with_file_name("notes-moved");
+    std::fs::rename(&root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &root).unwrap();
+
+    let resolved = resolve_workspace_filter(&root.to_string_lossy()).unwrap();
+    assert_eq!(resolved, root.to_string_lossy());
+}
+
 /// A relative path is read against this shell's directory; one that is not
 /// there names nothing the daemon could resolve either.
 #[test]

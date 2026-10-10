@@ -190,14 +190,18 @@ pub(crate) fn lane_source(lane_key: &str) -> Option<&str> {
 /// no project — no git repository, no chosen folder, or the home store — has no project
 /// root, and saying so beats filtering on a path nothing can match.
 ///
-/// An absolute path that is not there any more is handed to the resolver as
-/// written (R23): a missing project's root, or a path inside it, still
-/// resolves to that project (ST-7). A relative one that is not there names
-/// nothing.
+/// A root a project records is handed to the resolver as written
+/// (`memory::named_directory`, ST-23): a project whose folder is gone,
+/// renamed by case only or moved with a link left at its old path still
+/// resolves to that project, never to what the root now reaches. Any other
+/// path is canonicalized first; an absolute one that is not there any more
+/// is handed over as written (R23) — a path inside a missing project's root
+/// still resolves to that project (ST-7). A relative one that is not there
+/// names nothing.
 pub(crate) fn resolve_workspace_filter(path: &str) -> Result<String> {
     let written = std::path::Path::new(path);
-    let absolute = match written.canonicalize() {
-        Ok(canonical) => canonical,
+    let absolute = match super::memory::named_directory(written) {
+        Ok(named) => named,
         Err(_) if written.is_absolute() => written.to_path_buf(),
         Err(e) => return Err(e).with_context(|| format!("No such directory: {path}")),
     };

@@ -99,28 +99,23 @@ pub struct ScopeArgs {
 
 impl ScopeArgs {
     /// The directory the request stands in: `None` for `--global`, the named
-    /// path for `--project`, else the CLI's working directory. Canonical and
-    /// absolute, because the daemon resolves it against *its* directory
-    /// otherwise (R22) — except an absolute `--project` that is not there any
-    /// more and is a root a project records, which is sent as written (R23):
-    /// the daemon, and the local verbs' `resolve_project_root`, still resolve
-    /// a missing project's root to it. Any other path that is not there — a
-    /// typo — is refused: sent, it would name no project, and a note meant
+    /// path for `--project`, else the CLI's working directory. Absolute,
+    /// because the daemon resolves it against *its* directory otherwise
+    /// (R22). A `--project` is [`named_directory`]'s answer: a root a project
+    /// records, as written — whether its folder is gone (R23), renamed by
+    /// case only or moved with a link left at the old path (ST-23), the
+    /// daemon and the local verbs' `resolve_project_root` resolve it to that
+    /// project — else its canonical form. Any other path that is not there —
+    /// a typo — is refused: sent, it would name no project, and a note meant
     /// for one would be filed in the global partition (residual X9).
     fn directory(&self) -> Result<Option<PathBuf>> {
         if self.global {
             return Ok(None);
         }
         let dir = match &self.project {
-            Some(p) => match std::fs::canonicalize(p) {
-                Ok(canonical) => canonical,
-                Err(_) if p.is_absolute() && is_recorded_root(p) => p.clone(),
-                Err(e) => {
-                    return Err(e).with_context(|| {
-                        format!("--project {}: not a directory I can read", p.display())
-                    });
-                }
-            },
+            Some(p) => named_directory(p).with_context(|| {
+                format!("--project {}: not a directory I can read", p.display())
+            })?,
             None => std::env::current_dir().context("the current directory is unreadable")?,
         };
         Ok(Some(dir))
@@ -149,10 +144,28 @@ impl ScopeArgs {
     }
 }
 
+/// A path a person typed for a project (`memory --project`, `sessions
+/// --workspace`), as the daemon should be handed it (ST-23, the lead's
+/// ruling R-T17): made absolute against this shell's directory, nothing
+/// resolved, and sent as written when a project records exactly that root
+/// ([`is_recorded_root`]) — a project whose folder is gone, renamed by case
+/// only, or moved with a link left at its old path is named by that root and
+/// never by what its canonical form now reaches, another project or none.
+/// Any other path is its canonical form; `Err` is `canonicalize`'s: nothing
+/// is there.
+pub(crate) fn named_directory(path: &Path) -> std::io::Result<PathBuf> {
+    if let Ok(absolute) = std::path::absolute(path)
+        && is_recorded_root(&absolute)
+    {
+        return Ok(absolute);
+    }
+    std::fs::canonicalize(path)
+}
+
 /// Whether a project's `project.json` records `path` as its root, as
 /// written (`store::projects::by_recorded_root` — the home store's registry,
 /// which this machine's daemon reads too). A registry that cannot be read is
-/// no: the path is then refused, never sent to name no project.
+/// no: the path is then resolved as any other.
 fn is_recorded_root(path: &Path) -> bool {
     matches!(store::projects::by_recorded_root(path), Ok(Some(_)))
 }
