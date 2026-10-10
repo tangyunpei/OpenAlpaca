@@ -2800,8 +2800,9 @@ fn test_golden_lead_agent_byte_identical() {
          and reduces round-trips.\n\
          check_subagent_status: Poll a single subagent by run_id. Shows whether the subagent is \
          queued, running, completed, or failed. Completed: returns the whole answer — a long one \
-         arrives as a stub to page with read_result. Failed: returns the error and the last \
-         output, as head and tail when long.\n\
+         arrives as a stub to page with read_result, or, in a run that keeps no conversation log, \
+         cut after its first part with a note of how much it shows. Failed: returns the error and \
+         the last output, as head and tail when long.\n\
          wait_for_subagents: Block until ALL spawned subagents finish, including any that are \
          queued for execution. Returns a summary of all results: each answer's head and tail, \
          with a notice of what lies between — read one in full with check_subagent_status. \

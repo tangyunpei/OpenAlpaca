@@ -1158,10 +1158,11 @@ pub fn check_subagent_status_tool_definition() -> ToolDefinition {
         name: "check_subagent_status".to_string(),
         description: "Check one spawned subagent by its run_id. Queued or running: says so. \
                       Completed: returns the subagent's whole answer — a long one arrives as a stub \
-                      naming a result_ref; page it with read_result. Failed: returns the error and the \
-                      subagent's whole last output, as its head and tail when long. wait_for_subagents \
-                      shows only the head and the tail of each answer; call this for the one you need \
-                      in full."
+                      naming a result_ref; page it with read_result. A run that keeps no conversation \
+                      log has no stub to give: there a long answer is cut after its first part, and \
+                      the cut says how much it shows. Failed: returns the error and the subagent's \
+                      whole last output, as its head and tail when long. wait_for_subagents shows only \
+                      the head and the tail of each answer; call this for the one you need in full."
             .to_string(),
         parameters: serde_json::json!({
             "type": "object",

@@ -548,10 +548,11 @@ fn check_subagent_status_description_says_it_returns_the_whole_answer() {
         check_subagent_status_tool_definition().description,
         "Check one spawned subagent by its run_id. Queued or running: says so. \
          Completed: returns the subagent's whole answer — a long one arrives as a stub \
-         naming a result_ref; page it with read_result. Failed: returns the error and the \
-         subagent's whole last output, as its head and tail when long. wait_for_subagents \
-         shows only the head and the tail of each answer; call this for the one you need \
-         in full."
+         naming a result_ref; page it with read_result. A run that keeps no conversation \
+         log has no stub to give: there a long answer is cut after its first part, and \
+         the cut says how much it shows. Failed: returns the error and the subagent's \
+         whole last output, as its head and tail when long. wait_for_subagents shows only \
+         the head and the tail of each answer; call this for the one you need in full."
     );
 }
 
@@ -577,8 +578,9 @@ fn the_lead_prompt_says_check_subagent_status_returns_the_whole_answer() {
         prompt.contains(
             "check_subagent_status: Poll a single subagent by run_id. Shows whether the subagent is \
              queued, running, completed, or failed. Completed: returns the whole answer — a long one \
-             arrives as a stub to page with read_result. Failed: returns the error and the last \
-             output, as head and tail when long."
+             arrives as a stub to page with read_result, or, in a run that keeps no conversation log, \
+             cut after its first part with a note of how much it shows. Failed: returns the error and \
+             the last output, as head and tail when long."
         ),
         "{prompt}"
     );
