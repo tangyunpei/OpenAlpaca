@@ -68,6 +68,7 @@ const artifact = {
 
 let artifactsReply: () => Response;
 let eventsReply: () => Response;
+let writtenReply: () => Response;
 let requested: string[] = [];
 
 /** One persisted row, as `GET /v1/events/history` serves it. */
@@ -96,6 +97,7 @@ beforeEach(() => {
   resetConnection();
   useUiStore.setState({ view: "work", panelArtifactId: null });
   artifactsReply = () => json({ artifacts: [artifact], total: 1 });
+  writtenReply = () => json({ artifacts: [], total: 0 });
   eventsReply = () => json({ events: [], next_before: null });
   vi.stubGlobal(
     "fetch",
@@ -103,6 +105,8 @@ beforeEach(() => {
       const url = String(input);
       requested.push(url);
       if (url.includes("/v1/events/history")) return eventsReply();
+      if (url.includes("/v1/artifacts") && url.includes("in_project=true"))
+        return writtenReply();
       if (url.includes("/v1/artifacts")) return artifactsReply();
       if (url.includes("/timeline")) {
         return json({
@@ -168,6 +172,71 @@ describe("RunDetail — Output", () => {
       expect(screen.getByText(/database is locked/)).toBeInTheDocument(),
     );
     expect(screen.getByText(/reported 1 file/)).toBeInTheDocument();
+  });
+});
+
+describe("RunDetail — written in the project (storage design §13, R38)", () => {
+  const projectFile = (n: number) => {
+    const rel = `src/file-${String(n).padStart(2, "0")}.rs`;
+    return {
+      ...artifact,
+      id: `file-${n}`,
+      name: rel,
+      kind: "code",
+      mime_type: "text/plain",
+      path: `/Users/dev/app/${rel}`,
+      project_root: "/Users/dev/app",
+      rel_path: rel,
+      version_count: 0,
+      in_project: true,
+    };
+  };
+
+  it("draws one row for each of forty files a run wrote into its project", async () => {
+    const forty = Array.from({ length: 40 }, (_, i) => projectFile(i + 1));
+    writtenReply = () => json({ artifacts: forty, total: 40 });
+    renderDetail();
+
+    expect(
+      await screen.findByText("Written in the project"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", { name: /src\/file-\d\d\.rs/ }),
+    ).toHaveLength(40);
+    // The by-product stays in Output, apart from them.
+    expect(
+      screen.getByRole("button", { name: /findings\.md/ }),
+    ).toBeInTheDocument();
+    expect(
+      requested.some(
+        (url) => url.includes("in_project=true") && url.includes("limit=500"),
+      ),
+    ).toBe(true);
+    expect(requested.some((url) => url.includes("in_project=false"))).toBe(
+      true,
+    );
+  });
+
+  it("opens a project file in the side panel", async () => {
+    writtenReply = () => json({ artifacts: [projectFile(1)], total: 1 });
+    const user = userEvent.setup();
+    renderDetail();
+
+    await user.click(
+      await screen.findByRole("button", { name: /src\/file-01\.rs/ }),
+    );
+    expect(useUiStore.getState().panelArtifactId).toBe("file-1");
+  });
+
+  it("says how many more the Library holds past the page", async () => {
+    writtenReply = () => json({ artifacts: [projectFile(1)], total: 501 });
+    renderDetail();
+
+    expect(
+      await screen.findByText(
+        "500 more are listed in the Library, under Results in the project.",
+      ),
+    ).toBeInTheDocument();
   });
 });
 

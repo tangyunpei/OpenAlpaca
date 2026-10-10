@@ -43,6 +43,7 @@ import {
 } from "@/components/work/run-model";
 import { toFileKind } from "@/components/ui";
 import { useArtifacts } from "@/hooks/useArtifacts";
+import type { Artifact } from "@/lib/api/artifacts";
 import { useResumeEnabled } from "@/hooks/useConnection";
 import { useRunEventLog } from "@/hooks/useEventHistory";
 import { useTask, useTaskTimeline } from "@/hooks/useTasks";
@@ -54,6 +55,23 @@ import { formatClock } from "@/components/work/run-model";
 import { EventLogSection } from "./EventLogSection";
 import { OutputSection } from "./OutputSection";
 import { TimelineSection } from "./TimelineSection";
+
+/**
+ * One page of the files a run wrote into its project (R38): the list route's
+ * own cap, so a run that writes forty files draws forty rows; past it the
+ * card says how many more the Library holds.
+ */
+const PROJECT_FILES_LIMIT = 500;
+
+/** A `GET /v1/artifacts` row as the Output and project cards draw it. */
+function outcomeRow(artifact: Artifact): OutcomeArtifact {
+  return {
+    id: artifact.id,
+    name: artifact.name,
+    kind: toFileKind(artifact.kind),
+    stamp: formatClock(artifact.updated_at),
+  };
+}
 
 export interface RunDetailProps {
   runId: string | null;
@@ -102,23 +120,26 @@ export function RunDetail({
     [eventLog.data],
   );
 
-  // The run's own files, with ids that open. `run.outcome.artifacts` stays the
+  // The run's by-products, with ids that open — what its count, its chips and
+  // a connector's delivery count (R38). `run.outcome.artifacts` stays the
   // fallback for a run the list cannot answer for.
   const files = useArtifacts(
-    { taskId: runId ?? "" },
+    { taskId: runId ?? "", inProject: false },
+    { enabled: runId !== null },
+  );
+  // The files it wrote into its project, listed apart.
+  const written = useArtifacts(
+    { taskId: runId ?? "", inProject: true, limit: PROJECT_FILES_LIMIT },
     { enabled: runId !== null },
   );
   const outputs = useMemo<OutcomeArtifact[] | null>(
     () =>
-      files.data === undefined
-        ? null
-        : files.data.artifacts.map((artifact) => ({
-            id: artifact.id,
-            name: artifact.name,
-            kind: toFileKind(artifact.kind),
-            stamp: formatClock(artifact.updated_at),
-          })),
+      files.data === undefined ? null : files.data.artifacts.map(outcomeRow),
     [files.data],
+  );
+  const projectFiles = useMemo<OutcomeArtifact[]>(
+    () => (written.data?.artifacts ?? []).map(outcomeRow),
+    [written.data],
   );
 
   if (runId === null || run === null) {
@@ -217,6 +238,13 @@ export function RunDetail({
         note={
           files.error !== null
             ? `The run's files could not be listed — ${files.error.message}`
+            : null
+        }
+        projectFiles={projectFiles}
+        projectTotal={written.data?.total ?? projectFiles.length}
+        projectNote={
+          written.error !== null
+            ? `The files written in the project could not be listed — ${written.error.message}`
             : null
         }
       />

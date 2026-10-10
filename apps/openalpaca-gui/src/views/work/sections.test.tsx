@@ -4,7 +4,7 @@
  * route is missing instead of drawing rows that look like data.
  */
 
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { OutcomeArtifact } from "@/components/work/run-model";
@@ -16,7 +16,13 @@ import {
   EVENT_LOG_EMPTY,
   EVENT_LOG_ERROR,
 } from "./EventLogSection";
-import { OutputSection, OUTPUT_EMPTY } from "./OutputSection";
+import {
+  OutputSection,
+  OUTPUT_EMPTY,
+  OUTPUT_EMPTY_BESIDE_PROJECT,
+  PROJECT_FILES_TITLE,
+  PROJECT_FILES_UNREADABLE,
+} from "./OutputSection";
 import {
   TimelineSection,
   TIMELINE_EMPTY,
@@ -134,6 +140,104 @@ describe("OutputSection", () => {
     expect(
       screen.getByRole("button", { name: /findings\.md/ }),
     ).toBeInTheDocument();
+  });
+
+  it("lists the files a run wrote into its project under their own title", () => {
+    render(
+      <OutputSection
+        artifacts={[artifact({ id: "art-1" })]}
+        count={1}
+        onOpen={vi.fn()}
+        projectFiles={[
+          artifact({ id: "p-1", name: "src/main.rs", kind: "code" }),
+        ]}
+        projectTotal={1}
+      />,
+    );
+    expect(screen.getByText(PROJECT_FILES_TITLE)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /src\/main\.rs/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 file")).toBeInTheDocument();
+  });
+
+  it("says Output is empty because the run's files are in its project", () => {
+    render(
+      <OutputSection
+        artifacts={[]}
+        count={0}
+        projectFiles={[artifact({ id: "p-1", name: "src/main.rs" })]}
+      />,
+    );
+    expect(screen.getByText(OUTPUT_EMPTY_BESIDE_PROJECT)).toBeInTheDocument();
+    expect(screen.queryByText(OUTPUT_EMPTY)).not.toBeInTheDocument();
+  });
+
+  it("draws no project card for a run that wrote nothing there", () => {
+    render(<OutputSection artifacts={[]} count={0} />);
+    expect(screen.queryByText(PROJECT_FILES_TITLE)).not.toBeInTheDocument();
+  });
+
+  it("says the project files could not be listed rather than dropping them", () => {
+    render(
+      <OutputSection
+        artifacts={[]}
+        count={0}
+        projectNote="The files written in the project could not be listed — database is locked"
+      />,
+    );
+    expect(screen.getByText(PROJECT_FILES_UNREADABLE)).toBeInTheDocument();
+    expect(screen.getByText(/database is locked/)).toBeInTheDocument();
+  });
+
+  // The path is the agent's: a bidi override or a zero-width space in it is
+  // shown as `<U+XXXX>`, with the count under the row (lib/hidden-chars).
+  it("shows the hidden characters an agent put in a project file's path, with their count", () => {
+    render(
+      <OutputSection
+        artifacts={[]}
+        count={0}
+        onOpen={vi.fn()}
+        projectFiles={[
+          artifact({
+            id: "p-1",
+            name: "scripts/\u{202E}release\u{200B}.sh",
+            kind: "code",
+          }),
+        ]}
+      />,
+    );
+    const row = screen.getByRole("button", { name: /scripts\// });
+    expect(
+      Array.from(row.querySelectorAll("[data-hidden-char]")).map((span) =>
+        span.getAttribute("data-hidden-char"),
+      ),
+    ).toEqual(["U+202E", "U+200B"]);
+    const name = within(row).getByText(/^scripts\//);
+    expect(name.textContent).toBe("scripts/<U+202E>release<U+200B>.sh");
+    expect(name.className).toContain("wrap-anywhere");
+    expect(name.className).not.toContain("truncate");
+    expect(
+      within(row).getByText(
+        "Note: this request contains 2 hidden characters, shown as <U+…>.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("draws no hidden-character note for a plain path", () => {
+    render(
+      <OutputSection
+        artifacts={[artifact({ id: "art-1" })]}
+        count={1}
+        onOpen={vi.fn()}
+        projectFiles={[
+          artifact({ id: "p-1", name: "src/main.rs", kind: "code" }),
+        ]}
+      />,
+    );
+    const name = screen.getByText("src/main.rs");
+    expect(name.className).toContain("truncate");
+    expect(screen.queryByText(/hidden character/)).not.toBeInTheDocument();
   });
 });
 
