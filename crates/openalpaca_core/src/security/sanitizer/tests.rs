@@ -408,3 +408,87 @@ fn test_null_byte_in_tool_args_path_blocked() {
     let result = InputSanitizer::sanitize_tool_args("file_read", &args, &[], &[]);
     assert!(result.is_err());
 }
+
+// --- R29: TraversalRule (storage design §11) ---
+
+#[test]
+fn sanitize_tool_args_keeps_refusing_a_relative_path() {
+    let args = serde_json::json!({"content": "import x from '../lib/x';"});
+    for result in [
+        InputSanitizer::sanitize_tool_args("file_write", &args, &[], &[]),
+        InputSanitizer::sanitize_tool_args_with("file_write", &args, &[], &[], TraversalRule::Refuse),
+    ] {
+        match result {
+            Err(SecurityViolation::InputBlocked { reason }) => {
+                assert_eq!(reason, "Path traversal pattern detected");
+            }
+            other => panic!("Expected the traversal refusal, got: {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn allow_lets_a_relative_path_through() {
+    let args = serde_json::json!({
+        "path": "src/app.ts",
+        "content": "import x from '../lib/x';\nexport {};"
+    });
+    assert!(
+        InputSanitizer::sanitize_tool_args_with("file_write", &args, &[], &[], TraversalRule::Allow)
+            .is_ok()
+    );
+    let windows = serde_json::json!({"content": "..\\lib\\x"});
+    assert!(
+        InputSanitizer::sanitize_tool_args_with("file_write", &windows, &[], &[], TraversalRule::Allow)
+            .is_ok()
+    );
+}
+
+#[test]
+fn allow_still_refuses_null_bytes_and_a_tool_off_the_list() {
+    let args = serde_json::json!({"content": "a\0b"});
+    match InputSanitizer::sanitize_tool_args_with("file_write", &args, &[], &[], TraversalRule::Allow) {
+        Err(SecurityViolation::InputBlocked { reason }) => {
+            assert_eq!(reason, "Argument contains null bytes");
+        }
+        other => panic!("Expected the null-byte refusal, got: {:?}", other),
+    }
+    let allowed = vec!["file_read".to_string()];
+    assert!(
+        InputSanitizer::sanitize_tool_args_with(
+            "file_write",
+            &serde_json::json!({}),
+            &allowed,
+            &[],
+            TraversalRule::Allow
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn allow_still_checks_a_shell_tool_for_injection() {
+    assert!(
+        InputSanitizer::sanitize_tool_args_with(
+            "shell_execute",
+            &serde_json::json!({"command": "cat ../README.md"}),
+            &[],
+            &[],
+            TraversalRule::Allow
+        )
+        .is_ok(),
+        "ST-14: the shell is a working directory, not a confinement"
+    );
+    let err = InputSanitizer::sanitize_tool_args_with(
+        "shell_execute",
+        &serde_json::json!({"command": "cat ../$(id)"}),
+        &[],
+        &[],
+        TraversalRule::Allow,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Input blocked: Potential command injection: command substitution ($()"
+    );
+}

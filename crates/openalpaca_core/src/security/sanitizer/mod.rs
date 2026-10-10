@@ -8,6 +8,21 @@ use super::capabilities::SecurityViolation;
 /// Default maximum input length in bytes (32 KB).
 const MAX_INPUT_LENGTH: usize = 32 * 1024;
 
+/// R29 (storage design §11): whether the `../` check applies to a tool's
+/// arguments. The registry decides it from the tool's backend
+/// (`ToolRegistry::traversal_rule`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraversalRule {
+    /// A string argument holding `../` or `..\` is refused: a skill script,
+    /// a command, HTTP, MCP or plugin tool, whose arguments reach a shell
+    /// line or another program.
+    Refuse,
+    /// The check is skipped: a first-party builtin, whose path arguments
+    /// carry their own `..` refusal and whose other arguments are content (a
+    /// source file's relative import, a workflow goal).
+    Allow,
+}
+
 /// Sanitizes user input and tool arguments.
 pub struct InputSanitizer;
 
@@ -54,11 +69,29 @@ impl InputSanitizer {
     /// legitimately contain semicolons, newlines, backticks, and pipes.
     const SHELL_TOOLS: &'static [&'static str] = &["shell_execute"];
 
+    /// Sanitize tool call arguments, with the `../` check on for every tool:
+    /// [`Self::sanitize_tool_args_with`] and [`TraversalRule::Refuse`].
+    pub fn sanitize_tool_args(
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        allowed_tools: &[String],
+        extra_shell_tools: &[String],
+    ) -> Result<(), SecurityViolation> {
+        Self::sanitize_tool_args_with(
+            tool_name,
+            arguments,
+            allowed_tools,
+            extra_shell_tools,
+            TraversalRule::Refuse,
+        )
+    }
+
     /// Sanitize tool call arguments.
     ///
     /// Checks:
     /// - Tool name is in the allowed list (if non-empty)
-    /// - All string values are checked for path traversal and null bytes
+    /// - All string values are checked for null bytes, and for path traversal
+    ///   unless `traversal` is [`TraversalRule::Allow`] (R29)
     /// - Shell-related tool arguments are additionally checked for hidden
     ///   command injection patterns (backticks, `$(`, newlines). Normal shell
     ///   operators (pipes, redirections, chaining) are allowed because the
@@ -69,11 +102,12 @@ impl InputSanitizer {
     /// `extra_shell_tools` lists additional tool names (e.g., command-backend
     /// tools loaded from TOML config) that should receive shell injection checks
     /// alongside the hardcoded `SHELL_TOOLS` list.
-    pub fn sanitize_tool_args(
+    pub fn sanitize_tool_args_with(
         tool_name: &str,
         arguments: &serde_json::Value,
         allowed_tools: &[String],
         extra_shell_tools: &[String],
+        traversal: TraversalRule,
     ) -> Result<(), SecurityViolation> {
         // Check tool is in allowed list
         if !allowed_tools.is_empty() && !allowed_tools.iter().any(|t| t == tool_name) {
@@ -86,7 +120,7 @@ impl InputSanitizer {
             || extra_shell_tools.iter().any(|t| t == tool_name);
 
         // Recursively check string values in arguments
-        Self::check_value_safety(arguments, is_shell_tool)?;
+        Self::check_value_safety(arguments, is_shell_tool, traversal)?;
 
         Ok(())
     }
@@ -94,18 +128,21 @@ impl InputSanitizer {
     fn check_value_safety(
         value: &serde_json::Value,
         check_injection: bool,
+        traversal: TraversalRule,
     ) -> Result<(), SecurityViolation> {
         match value {
-            serde_json::Value::String(s) => Self::check_string_safety(s, check_injection),
+            serde_json::Value::String(s) => {
+                Self::check_string_safety(s, check_injection, traversal)
+            }
             serde_json::Value::Array(arr) => {
                 for v in arr {
-                    Self::check_value_safety(v, check_injection)?;
+                    Self::check_value_safety(v, check_injection, traversal)?;
                 }
                 Ok(())
             }
             serde_json::Value::Object(obj) => {
                 for v in obj.values() {
-                    Self::check_value_safety(v, check_injection)?;
+                    Self::check_value_safety(v, check_injection, traversal)?;
                 }
                 Ok(())
             }
@@ -113,9 +150,13 @@ impl InputSanitizer {
         }
     }
 
-    fn check_string_safety(s: &str, check_injection: bool) -> Result<(), SecurityViolation> {
-        // Path traversal — always checked for all tools
-        if s.contains("../") || s.contains("..\\") {
+    fn check_string_safety(
+        s: &str,
+        check_injection: bool,
+        traversal: TraversalRule,
+    ) -> Result<(), SecurityViolation> {
+        // Path traversal — for a tool whose arguments reach a program (R29)
+        if traversal == TraversalRule::Refuse && (s.contains("../") || s.contains("..\\")) {
             return Err(SecurityViolation::InputBlocked {
                 reason: "Path traversal pattern detected".to_string(),
             });
