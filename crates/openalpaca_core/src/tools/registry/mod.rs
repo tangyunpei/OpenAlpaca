@@ -83,9 +83,16 @@ pub struct ToolContext {
     pub agent_instance_id: Option<String>,
     pub task_id: Option<String>,
     pub owner_id: Option<String>,
-    /// Workspace root for **memory scoping**: the root the request's path
-    /// resolved to, `None` when it carried none — never the daemon's current
-    /// directory (R-S13). Content placement reads `request_workspace_root`.
+    /// The root the request's path resolved to — the same value as
+    /// `request_workspace_root` — and `None` when it carried none; never the
+    /// daemon's current directory (R-S13). Named for memory scoping, but no
+    /// memory path reads it: the memory tools and the per-turn recall take
+    /// `request_workspace_root` (MD-5), and so does everything that places
+    /// content or names a working folder. Its one reader is `start_workflow`,
+    /// which forwards it into the run it starts
+    /// (`MemoryScopeContext::from_tool_context`), where it is copied into the
+    /// lead's and each subagent's context and read by nothing (the type's
+    /// own doc, above).
     pub workspace_id: Option<String>,
     /// The project root the originating *request* supplied (`x-workspace-path`
     /// on `/v1/chat`, `workspace_path` on `/v1/command`), resolved to its root.
