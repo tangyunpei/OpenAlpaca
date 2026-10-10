@@ -5856,6 +5856,81 @@ async fn the_main_loop_is_budgeted_against_the_model_that_answers() {
     }
 }
 
+/// R44 + R28 (storage design §10), the main loop: a turn with no project is
+/// told its conversation's scratch folder, right before the user's message.
+/// The line is read from the turn's own tool context, so naming the
+/// conversation the gateway resolved proves the context carries it — and
+/// nothing is made until a tool acts.
+#[tokio::test]
+async fn a_main_loop_turn_with_no_project_is_told_its_scratch_folder() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    // The lane's session, as the gateway would have opened it for this turn.
+    let session = openalpaca_storage::ConversationRepository::new(&db)
+        .get_or_create_active_session("test:cli", "cli", None)
+        .unwrap();
+    let provider = crate::test_util::RecordingProvider::new("Noted.");
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        EventBus::default(),
+        SystemPersona::default(),
+        Some(ollama_only_router(provider.clone())),
+        LoopConfig::default(),
+        make_security_gate(&EventBus::default()),
+        make_tool_registry(),
+        Some(db.clone()),
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+
+    orch.handle_message(HandleRequest {
+        request_id: Uuid::new_v4(),
+        source: "cli".to_string(),
+        content: "Where do my files go?".to_string(),
+        principal: Principal::System,
+        scope: Scope::Global,
+        lane_key: "test:cli".to_string(),
+        workspace_path: None,
+        stream_id: None,
+        model_override: None,
+        unattended: false,
+        turn_sink: None,
+    })
+    .await
+    .expect("the turn is answered");
+
+    let folder = home_root.join("scratch").join(&session.id);
+    let note = format!(
+        "<working_folder>This conversation has no project. Your working folder is its scratch \
+         folder {}: paths in file_read, file_list and send are relative to it, and a shell \
+         command starts in it. file_write saves a by-product in OpenAlpaca's artifact store \
+         instead.</working_folder>",
+        folder.display()
+    );
+    let request = provider.first_request();
+    let at = request
+        .messages
+        .iter()
+        .position(|m| m.content == note)
+        .unwrap_or_else(|| {
+            panic!(
+                "no working-folder note: {:?}",
+                request.messages.iter().map(|m| &m.content).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        at,
+        request.messages.len() - 2,
+        "the note sits right before the user's message"
+    );
+    assert!(!home_root.join("scratch").exists(), "a note makes no folder");
+}
+
 /// **U1 on the skill tier.**
 ///
 /// The deterministic skill tier handed the lane's history to the model exactly
@@ -8701,9 +8776,11 @@ fn is_writer_call(request: &ChatRequest) -> bool {
 /// **Design 11 §10.2, the compaction invariant.** On a 4K window, a turn that
 /// compacts makes **exactly one** summariser call, and its state reaches the
 /// session row at turn end with no other call — `through` the last row the
-/// writer read (§3.2: `messages[2..10]` are rows 1–8). The next turn's
-/// request carries that state's block ahead of the rows, the rows after
-/// `through` with the four-row floor, and nothing trimmed.
+/// writer read (§3.2: `messages[2..11]` are rows 1–9; the four recent
+/// messages the compaction keeps are row 10, the relay rules, the
+/// working-folder line of storage design R28 and the question). The next
+/// turn's request carries that state's block ahead of the rows, the rows
+/// after `through` with the four-row floor, and nothing trimmed.
 #[tokio::test]
 async fn a_compacting_turn_writes_its_state_and_the_next_request_carries_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -8744,7 +8821,7 @@ async fn a_compacting_turn_writes_its_state_and_the_next_request_carries_it() {
         serde_json::from_str::<working_state::WorkingState>(&row.working_state).unwrap(),
         written
     );
-    assert_eq!(row.working_state_through, ids[7], "rows 1–8 were read");
+    assert_eq!(row.working_state_through, ids[8], "rows 1–9 were read");
     assert_eq!(row.working_state_version, 2);
     let usage = openalpaca_storage::repository::LlmUsageRepository::new(&db)
         .get_agent_usage(working_state::USAGE_LABEL, 10)
@@ -9067,8 +9144,10 @@ async fn a_compaction_after_the_trim_dropped_rows_leaves_through_where_it_was() 
 /// window that the lag refresh has not covered yet — with a ten-row window
 /// over fourteen rows, rows 1–4, in no prompt and in no state — are read by
 /// the compaction's one writer call ahead of the window's, oldest first, so
-/// `through` passes them with the rows it read (`messages[2..10]` are rows
-/// 5–12). The next turn's window starts after it with the four-row floor,
+/// `through` passes them with the rows it read (`messages[2..11]` are rows
+/// 5–13; the four recent messages kept are row 14, the relay rules, the
+/// working-folder line of storage design R28 and the question). The next
+/// turn's window starts after it with the four-row floor,
 /// and no row lies between the state and the window: a conversation longer
 /// than the window stops re-sending and re-compacting it (CQ-4).
 #[tokio::test]
@@ -9115,8 +9194,8 @@ async fn a_compaction_reads_the_rows_behind_the_window_and_moves_the_window_past
     );
     assert_eq!(
         (row.working_state_version, row.working_state_through),
-        (2, ids[11]),
-        "`through` passes rows 1–4 and the window's rows 5–12"
+        (2, ids[12]),
+        "`through` passes rows 1–4 and the window's rows 5–13"
     );
 
     let ctx = orch.build_context("user1:cli", "and then?");

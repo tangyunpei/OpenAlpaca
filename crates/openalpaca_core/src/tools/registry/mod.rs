@@ -50,8 +50,10 @@ pub use capabilities::{
 ///   client-sent branch and never the home store (R22), and the only one of
 ///   the three that may place bytes on disk. Read by `artifact_write`, its
 ///   `workspace_write` spill and `file_write` (which writes into its own
-///   workspace root only on a turn that carries one, G2), by the memory
-///   tools, which pick their partition with it
+///   workspace root only on a turn that carries one, G2), by
+///   `tools::working_folder` — the folder `file_read`, `shell_execute`,
+///   command tools and `send` act in (storage design §10, R26) — by the
+///   memory tools, which pick their partition with it
 ///   (`MemoryService::context_for_tool`), by `start_workflow`, which forwards
 ///   it into the run, and by `steer_workflow` and `queue_followup`, which
 ///   persist it (F4).
@@ -95,6 +97,11 @@ pub struct ToolContext {
     /// the daemon happened to start in. `file_write` (G2) reads it too, to
     /// choose: on a turn that carries a project, from a daemon not started in
     /// the home store, its plain write still lands in that startup root.
+    ///
+    /// It is also the turn's working folder (storage design §10, R26):
+    /// `file_read`, `shell_execute`, command tools and `send` act in the
+    /// registered project it names; with none, in the scratch folder of
+    /// [`conversation_id`](Self::conversation_id).
     pub request_workspace_root: Option<String>,
     /// Skill invocation chain, oldest first. Empty at top level.
     pub skill_stack: Vec<String>,

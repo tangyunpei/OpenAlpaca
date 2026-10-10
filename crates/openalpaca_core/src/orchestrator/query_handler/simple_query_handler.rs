@@ -137,6 +137,10 @@ impl Orchestrator {
         // Per-request ToolContext for owner-scoped tools. Built before the
         // loop-override resolution because the tool-mode main loop hands it
         // to `main_loop_tool_set` (identity for steer/followup re-entry).
+        // R44 (storage design §10): the conversation this turn belongs to,
+        // read once — it names the turn's scratch folder when there is no
+        // project, and it is the session this turn narrates into (§5.5).
+        let conversation_id = self.turn_conversation_id(lane_key);
         let tool_ctx = ToolContext {
             // T4: the main loop is not an agent template, but it *is*
             // somebody, and a confirmation card that reads "unknown is blocked
@@ -148,6 +152,7 @@ impl Orchestrator {
             owner_id: owner_id.map(|s| s.to_string()),
             workspace_id: scope_ctx.workspace_id.clone(),
             request_workspace_root: scope_ctx.request_workspace_root.clone(),
+            conversation_id: conversation_id.clone(),
             lane_key: Some(lane_key.to_string()),
             source: Some(source.to_string()),
             request_id: Some(request_id),
@@ -255,14 +260,11 @@ impl Orchestrator {
         // project switch, created) this session moments ago for the same turn;
         // this reads the answer back rather than re-deriving it, and a lane
         // with no session simply has no log.
-        let session_log = match (self.shared_context.session_log(), self.db.as_ref()) {
-            (Some(service), Some(db)) => openalpaca_storage::ConversationRepository::new(db)
-                .active_session_id(lane_key)
-                .unwrap_or_else(|e| {
-                    tracing::warn!(lane_key, "Failed to resolve the lane's session log: {e}");
-                    None
-                })
-                .map(|id| service.open(&id, Some(lane_key), Some(source), None)),
+        let session_log = match (
+            self.shared_context.session_log(),
+            conversation_id.as_deref(),
+        ) {
+            (Some(service), Some(id)) => Some(service.open(id, Some(lane_key), Some(source), None)),
             _ => None,
         };
 
@@ -743,6 +745,18 @@ impl Orchestrator {
                     insert_at,
                     ChatMessage::user(crate::tools::builtins::main_loop_relay_guidance()),
                 );
+            }
+
+            // R28 (storage design §10): the model is told where its file
+            // tools and commands act — the project's folder, or this
+            // conversation's scratch folder — in one line, beside the relay
+            // rules. Read from the turn's own tool context, so the line and
+            // the tools can never name two folders; it creates nothing.
+            if main_loop_set.is_some()
+                && let Some(note) = crate::tools::working_folder::working_folder_note(&tool_ctx)
+            {
+                let insert_at = messages.len().saturating_sub(1);
+                messages.insert(insert_at, ChatMessage::user(&note));
             }
 
             // Routing V2: workflow-context block for lanes with active

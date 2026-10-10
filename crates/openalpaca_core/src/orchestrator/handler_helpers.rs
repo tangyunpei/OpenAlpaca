@@ -48,6 +48,23 @@ impl Orchestrator {
         ))
     }
 
+    /// R44 (storage design §10): the conversation a turn on `lane_key`
+    /// belongs to — the lane's active session, which the gateway resolved (or
+    /// opened) for this very turn before handing it here
+    /// (`GatewayPersistence::resolve_turn_session`). It names the scratch
+    /// folder a turn with no project works in. `None` with no database or no
+    /// session; a read that fails is one WARN and `None`, and a tool that then
+    /// needs a folder refuses with `WorkingFolderRefusal::NoConversation`.
+    pub(in crate::orchestrator) fn turn_conversation_id(&self, lane_key: &str) -> Option<String> {
+        let db = self.db.as_ref()?;
+        openalpaca_storage::ConversationRepository::new(db)
+            .active_session_id(lane_key)
+            .unwrap_or_else(|e| {
+                tracing::warn!(lane_key, "Failed to resolve the lane's conversation: {e}");
+                None
+            })
+    }
+
     /// Invoke a skill with route-telemetry capture and IntentClassified emission.
     ///
     /// Used by the deterministic skill tier in `handle_message_internal`.
