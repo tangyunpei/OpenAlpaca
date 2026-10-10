@@ -1312,10 +1312,13 @@ only for the rest of the turn or run that gave it, as
 command runs in, and the card is the one place to stop it: read the command
 before you approve it. Only an operating-system sandbox would change this, and
 none is used in this version. A command, a command tool or a skill script that
-runs past its time limit, or whose turn or run is cancelled, is killed, with
+runs past its time limit, or whose run is cancelled, is killed at once, with
 the processes it started (on Windows, the command alone; a process that leaves
 its process group, as `setsid` or a program that turns itself into a
-background service does, is out of reach).
+background service does, is out of reach). A chat turn cannot be cancelled: a
+command it runs ends at its time limit. A command killed mid-way gets no
+chance to clean up and may leave its own lock files behind — `.git/index.lock`
+after a git command, for example — which you remove by hand.
 
 **The `../` check.** Before a tool runs, its arguments are checked for `../`.
 OpenAlpaca's own tools are exempt — their path arguments carry their own `..`
