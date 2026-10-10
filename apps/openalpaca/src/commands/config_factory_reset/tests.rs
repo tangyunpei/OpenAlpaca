@@ -260,6 +260,10 @@ fn the_memory_snapshots_the_index_and_the_master_key_survive_a_factory_reset() {
         ("artifacts/report.md", b"# report".as_slice()),
         ("uploads/photo.png", b"\x89PNG".as_slice()),
         ("sessions/s1/log.jsonl", b"{}".as_slice()),
+        (
+            "scratch/0b6f1c2e-5a7d-4e2b-9c1a-3f4e5d6c7b8a/notes.txt",
+            b"a conversation's scratch work".as_slice(),
+        ),
         ("plugins/demo/plugin.toml", b"name = \"demo\"".as_slice()),
         (
             "projects/-tmp-app/project.json",
@@ -312,6 +316,7 @@ fn the_confirmation_names_the_root_and_what_survives() {
         "artifacts/",
         "uploads/",
         "sessions/",
+        "/tmp/oa-test-root/scratch/",
         // Design §2: a factory reset does not touch memory, and the preview
         // names the two `state/` entries it leaves and the notes it orphans.
         "/tmp/oa-test-root/memory/",

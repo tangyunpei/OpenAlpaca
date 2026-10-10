@@ -206,6 +206,7 @@ Left on disk, and from now on unreferenced:
   - {root}/artifacts/
   - {root}/uploads/
   - {root}/sessions/
+  - {root}/scratch/
 The files stay exactly where they are; nothing in the new database points at
 them any more. Delete them yourself if you want the space back.
 
