@@ -160,6 +160,29 @@ fn artifact_tag(kind: &str, version: u32, in_project: bool) -> String {
     }
 }
 
+/// What `tail` prints for a written file: its name, the [`artifact_tag`] and
+/// its path, uncoloured. The name and the path are the agent's choice — a
+/// result file's name is its path in the project — and `tail` prints them at
+/// a terminal, where a raw ESC rewrites the line and a bidi override
+/// reorders it, so each goes through `utils::text::escape_hidden_line`:
+/// every hidden character, a line break among them, as `<U+XXXX>` (S4a's
+/// deferred (1)). No count line: `tail` is not an approval surface.
+fn artifact_parts(
+    name: &str,
+    kind: &str,
+    version: u32,
+    path: &str,
+    in_project: bool,
+) -> (String, String, String) {
+    use openalpaca_core::utils::text::escape_hidden_line;
+
+    (
+        escape_hidden_line(name).text,
+        artifact_tag(kind, version, in_project),
+        escape_hidden_line(path).text,
+    )
+}
+
 pub async fn run(count: usize) -> Result<()> {
     // Read discovery file
     let disc = discovery::read_discovery()?.context("Daemon is not running (no discovery file)")?;
@@ -273,12 +296,13 @@ fn print_event(event: &ServerEvent) {
             ..
         } => {
             let time = ts.format("%H:%M:%S").to_string();
+            let (name, tag, path) = artifact_parts(name, kind, *version, path, *in_project);
             println!(
                 "{} 📄 {} {} {} {}",
                 time.dimmed(),
                 "artifact".green(),
                 name.bold(),
-                artifact_tag(kind, *version, *in_project).cyan(),
+                tag.cyan(),
                 path.dimmed()
             );
         }
@@ -544,6 +568,32 @@ mod tests {
             }
         ));
         print_event(&event);
+    }
+
+    /// A written file's name and path are the agent's choice, printed at a
+    /// terminal, where a raw ESC rewrites the line and a bidi override
+    /// reorders it (S4a's deferred (1)): every hidden character in them, a
+    /// line break among them, is shown as `<U+XXXX>`. The tag is the
+    /// daemon's own.
+    #[test]
+    fn a_written_files_name_and_path_show_hidden_characters_escaped() {
+        use openalpaca_core::utils::text::needs_escape;
+
+        let (name, tag, path) = artifact_parts(
+            "src/\u{202E}gnp.exe\u{1b}[2K",
+            "code",
+            1,
+            "/w/app/src/\u{202E}gnp.exe\u{200B}\nnotes.md",
+            true,
+        );
+
+        assert_eq!(name, "src/<U+202E>gnp.exe<U+001B>[2K");
+        assert_eq!(tag, "[in the project]");
+        assert_eq!(path, "/w/app/src/<U+202E>gnp.exe<U+200B><U+000A>notes.md");
+        for shown in [&name, &path] {
+            assert!(!shown.chars().any(needs_escape), "{shown:?}");
+            assert!(!shown.contains('\n'), "{shown:?}");
+        }
     }
 
     /// A frame from an older daemon has no `in_project`: a by-product.
