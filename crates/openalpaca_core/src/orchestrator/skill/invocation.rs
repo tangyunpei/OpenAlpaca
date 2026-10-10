@@ -233,22 +233,21 @@ impl Orchestrator {
                         );
                     }
                 }
-                // R42 / R-T6 on this tier (d6-surfaces-3): a name is a tool,
-                // not a capability, so `file_read` alone would leave out the
-                // `file_list` that comes with it — the tool file_read's
-                // not-found hint sends the model to. A skill that denies
-                // `file_read` is handed neither, as a template that does.
-                if resolved.iter().any(|d| d.name == "file_read")
-                    && !resolved.iter().any(|d| d.name == "file_list")
-                    && !skill_doc
-                        .frontmatter
-                        .tools
-                        .deny
-                        .iter()
-                        .any(|denied| denied == "file_read")
-                    && let Some(list) = self.tool_registry.get("file_list")
-                {
-                    resolved.push(list.definition.clone());
+                // R42 / R-T6 on this tier (d6-surfaces-3, residual X5): a
+                // name is a tool, not a capability, so `file_read` alone
+                // would leave out the `file_list` that comes with it — the
+                // tool file_read's not-found hint sends the model to — and
+                // `file_write` and `read_result` their partners likewise. A
+                // skill that denies either half of a pair is not handed the
+                // partner, as a template that denies the capability is not.
+                let partners = super::constraints::paired_tools(
+                    resolved.iter().map(|d| d.name.as_str()),
+                    &skill_doc.frontmatter.tools.deny,
+                );
+                for partner in partners {
+                    if let Some(tool) = self.tool_registry.get(partner) {
+                        resolved.push(tool.definition.clone());
+                    }
                 }
                 resolved
             } else {

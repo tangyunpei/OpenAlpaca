@@ -152,6 +152,9 @@ impl SkillInvocationToolExecutor {
         // disappeared here in total silence, with `sandbox_policy = None`
         // beneath it. The refusal on total loss is C5's.
         let ctx = self.parent_tool_context.as_ref();
+        // The partners the legacy `tools.allow` branch adds (residual X5),
+        // which the composed allow set below admits beside the listed names.
+        let mut partners: Vec<&'static str> = Vec::new();
         let mut tool_defs: Vec<ToolDefinition> =
             if !skill_doc.frontmatter.requires_capabilities.is_empty() {
                 let deny = &skill_doc.frontmatter.tools.deny;
@@ -164,7 +167,7 @@ impl SkillInvocationToolExecutor {
                 defs
             } else if !skill_doc.frontmatter.tools.allow.is_empty() {
                 let names = &skill_doc.frontmatter.tools.allow;
-                let resolved: Vec<ToolDefinition> = names
+                let mut resolved: Vec<ToolDefinition> = names
                     .iter()
                     .filter_map(|name| {
                         self.tool_registry.get(name).map(|t| t.definition.clone())
@@ -186,6 +189,19 @@ impl SkillInvocationToolExecutor {
                             skill_id,
                             unattributed
                         );
+                    }
+                }
+                // R42 / R-T6 on the nested path (residual X5), as the
+                // top-level skill tier pairs them: a name is a tool, not a
+                // capability, so each listed tool's partner comes with it
+                // unless the skill denies either half.
+                partners = super::constraints::paired_tools(
+                    resolved.iter().map(|d| d.name.as_str()),
+                    &skill_doc.frontmatter.tools.deny,
+                );
+                for partner in &partners {
+                    if let Some(tool) = self.tool_registry.get(partner) {
+                        resolved.push(tool.definition.clone());
                     }
                 }
                 resolved
@@ -241,10 +257,18 @@ impl SkillInvocationToolExecutor {
             .unwrap_or_default();
 
         let child_requires: Vec<String> = skill_doc.frontmatter.requires_capabilities.clone();
-        let child_allow = if skill_doc.frontmatter.tools.allow.is_empty() {
+        let allow_with_partners: Vec<String> = skill_doc
+            .frontmatter
+            .tools
+            .allow
+            .iter()
+            .cloned()
+            .chain(partners.iter().map(|partner| partner.to_string()))
+            .collect();
+        let child_allow = if allow_with_partners.is_empty() {
             None
         } else {
-            Some(skill_doc.frontmatter.tools.allow.as_slice())
+            Some(allow_with_partners.as_slice())
         };
         let child_constraints = compose_constraints(
             &parent_constraints,
@@ -699,8 +723,9 @@ Use echo_tool to answer.
     /// whole-stage review's d4-folder-3): the nested loop's context is a
     /// clone of its parent's, so its file tools act in the parent's working
     /// folder — and its model is told that folder, right before its query,
-    /// as the file-skill tier's is. A skill holding `file_read` alone is told
-    /// no write or shell clause, and that it writes no file in the project.
+    /// as the file-skill tier's is. A skill allowed `file_read` by name holds
+    /// it and the `file_list` that comes with it (residual X5), and is told no
+    /// write or shell clause, and that it writes no file in the project.
     #[tokio::test]
     async fn a_nested_skill_is_told_its_working_folder_naming_only_what_it_holds() {
         let gp = crate::test_util::GuardedProject::new();
@@ -769,11 +794,89 @@ Read the file.
             contents[1],
             format!(
                 "<working_folder>Your working folder is the project folder {}. Paths in \
-                 file_read are relative to it. You hold no tool that writes a file in the \
-                 project.</working_folder>",
+                 file_read and file_list are relative to it. You hold no tool that writes a \
+                 file in the project.</working_folder>",
                 gp.root.display()
             )
         );
         assert_eq!(contents[2], "read notes.md");
+    }
+
+    /// Residual X5, the nested path: a nested skill's legacy `tools.allow`
+    /// pairs every name its capability pairs (`PAIRED_TOOLS`), after the
+    /// names it listed, and its composed allow set admits each partner — so
+    /// the partner survives `filter_tools_by_constraints` and is offered.
+    #[tokio::test]
+    async fn a_nested_skill_allowed_tools_by_name_is_handed_their_partners() {
+        let gp = crate::test_util::GuardedProject::new();
+        let tmp = TempDir::new().unwrap();
+        write_skill(
+            tmp.path(),
+            "worker-skill",
+            r#"---
+name: "Worker Skill"
+description: "Reads and writes files"
+tools:
+  allow:
+    - file_read
+    - file_write
+    - read_result
+---
+Work on the file.
+"#,
+        );
+        let catalog = Arc::new(SkillCatalog::new());
+        catalog.scan_directory(tmp.path(), SkillScope::Project);
+        let registry = Arc::new(ToolRegistry::new().unwrap());
+        for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+            registry.register(tool).unwrap();
+        }
+        let provider = crate::test_util::RecordingProvider::new("done");
+        let router = Arc::new(LlmRouter::single_provider(
+            provider.clone(),
+            ProviderType::Anthropic,
+            "claude-sonnet-4-20250514".to_string(),
+        ));
+        let executor = SkillInvocationToolExecutor::new(
+            catalog,
+            registry,
+            router,
+            EventBus::new(16),
+            vec!["parent-skill".to_string()],
+            3,
+            None,
+            None,
+            Some(gp.ctx()),
+            1.0,
+            false,
+            crate::daemon_config::CircuitBreakerConfig::default(),
+            300,
+        );
+
+        executor
+            .execute(
+                "invoke_skill:worker-skill",
+                &serde_json::json!({"query": "edit notes.md"}),
+            )
+            .await
+            .unwrap();
+
+        let offered: Vec<String> = provider
+            .first_request()
+            .tools
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(
+            offered,
+            vec![
+                "file_read",
+                "file_write",
+                "read_result",
+                "file_list",
+                "file_edit",
+                "artifact_read"
+            ]
+        );
     }
 }

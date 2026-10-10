@@ -6424,12 +6424,10 @@ Look.
     );
 }
 
-/// R42 / R-T6 on the skill tier (d6-surfaces-3): a file-based skill whose
-/// legacy `tools.allow` names `file_read` is handed `file_list` with it —
-/// the tool `file_read`'s not-found hint sends the model to — and one that
-/// also denies `file_read` is handed neither.
-#[tokio::test]
-async fn a_skill_allowed_file_read_by_name_is_handed_file_list_with_it() {
+/// The tools each file-based skill's model is offered, in the order given:
+/// each `(name, tools)` is written as a skill with that `tools:` block,
+/// invoked once by name over the builtins, under a home-store guard.
+async fn tools_offered_to_skills(skills: &[(&str, &str)]) -> Vec<Vec<String>> {
     let home = tempfile::tempdir().unwrap();
     let home_root = home.path().canonicalize().unwrap();
     let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
@@ -6439,17 +6437,15 @@ async fn a_skill_allowed_file_read_by_name_is_handed_file_list_with_it() {
     }
     let registry = Arc::new(registry);
     let tmp = tempfile::tempdir().unwrap();
-    for (dir, name, slash, deny) in [
-        ("reader", "Reader", "/read-it", ""),
-        ("denier", "Denier", "/deny-it", "  deny:\n    - file_read\n"),
-    ] {
-        std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+    for (index, (name, tools)) in skills.iter().enumerate() {
+        let dir = tmp.path().join(format!("skill-{index}"));
+        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
-            tmp.path().join(dir).join("SKILL.md"),
+            dir.join("SKILL.md"),
             format!(
-                "---\nname: \"{name}\"\ndescription: \"Reads files\"\ninvoke:\n  slash: \
-                 \"{slash}\"\n  mode: \"auto\"\ntools:\n  allow:\n    - file_read\n{deny}---\n\n\
-                 ## Instructions\n\nRead.\n"
+                "---\nname: \"{name}\"\ndescription: \"Works with files\"\ninvoke:\n  slash: \
+                 \"/skill-{index}\"\n  mode: \"auto\"\ntools:\n{tools}---\n\n## Instructions\n\n\
+                 Work.\n"
             ),
         )
         .unwrap();
@@ -6458,7 +6454,7 @@ async fn a_skill_allowed_file_read_by_name_is_handed_file_list_with_it() {
     catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
     catalog.set_availability_oracle(registry.clone());
 
-    let provider = crate::test_util::RecordingProvider::new("Read.");
+    let provider = crate::test_util::RecordingProvider::new("Done.");
     let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
     let bus = EventBus::default();
     let gate = make_security_gate_with_registry(&bus, registry.clone());
@@ -6478,11 +6474,11 @@ async fn a_skill_allowed_file_read_by_name_is_handed_file_list_with_it() {
     );
     let scope = crate::memory::scope_context::MemoryScopeContext::new(None);
 
-    for skill in ["Reader", "Denier"] {
+    for (name, _) in skills {
         orch.handle_skill_invocation(
             Uuid::new_v4(),
             "cli",
-            skill,
+            name,
             "read src/main.rs",
             "test:cli",
             None,
@@ -6500,14 +6496,59 @@ async fn a_skill_allowed_file_read_by_name_is_handed_file_list_with_it() {
         .expect("the skill runs");
     }
 
-    let offered: Vec<Vec<String>> = provider
+    provider
         .requests()
         .iter()
         .map(|request| request.tools.iter().map(|t| t.name.clone()).collect())
-        .collect();
+        .collect()
+}
+
+/// R42 / R-T6 on the skill tier (d6-surfaces-3): a file-based skill whose
+/// legacy `tools.allow` names `file_read` is handed `file_list` with it —
+/// the tool `file_read`'s not-found hint sends the model to — and one that
+/// also denies `file_read` is handed neither.
+#[tokio::test]
+async fn a_skill_allowed_file_read_by_name_is_handed_file_list_with_it() {
+    let offered = tools_offered_to_skills(&[
+        ("Reader", "  allow:\n    - file_read\n"),
+        (
+            "Denier",
+            "  allow:\n    - file_read\n  deny:\n    - file_read\n",
+        ),
+    ])
+    .await;
+
     assert_eq!(offered.len(), 2, "{offered:?}");
     assert_eq!(offered[0], vec!["file_read", "file_list"]);
     assert!(offered[1].is_empty(), "{offered:?}");
+}
+
+/// Residual X5, the skill tier: the legacy `tools.allow` branch pairs every
+/// name its capability pairs (`constraints::PAIRED_TOOLS`) — `file_write`
+/// brings `file_edit` and `read_result` brings `artifact_read`, after the
+/// names the skill listed — and a skill whose `tools.deny` names either half
+/// of a pair is not handed the partner.
+#[tokio::test]
+async fn a_skill_allowed_file_write_or_read_result_by_name_is_handed_its_partner() {
+    let offered = tools_offered_to_skills(&[
+        (
+            "Writer",
+            "  allow:\n    - file_write\n    - read_result\n",
+        ),
+        (
+            "Careful",
+            "  allow:\n    - file_write\n    - read_result\n  deny:\n    - file_edit\n    - \
+             read_result\n",
+        ),
+    ])
+    .await;
+
+    assert_eq!(offered.len(), 2, "{offered:?}");
+    assert_eq!(
+        offered[0],
+        vec!["file_write", "read_result", "file_edit", "artifact_read"]
+    );
+    assert_eq!(offered[1], vec!["file_write"]);
 }
 
 /// R44 + R28 (storage design §10), the file-skill tier: a `/slash` skill's
