@@ -137,11 +137,10 @@ Defaults after install:
 Inside the runtime root, `state/` is the machine's (database, logs, lock,
 master key, caches) and everything else is yours to read and edit. Each
 project you work in has a folder there too, under `projects/`, with its
-artifacts, uploads and memory notes; nothing is written inside the project's
-own folder by a daemon the app or `openalpaca daemon start` launched — both
-start it in this root. A daemon started somewhere else still writes
-`file_write`'s plain files into the directory it was started in on a turn
-with a project (Daemon Manual → *Where an agent's files land*). The root
+artifacts, uploads and memory notes. Nothing OpenAlpaca stores is written
+inside the project's own folder: an agent writes there only the files you ask
+for, each write asking first. A conversation with no project works in a folder
+of its own under `scratch/`, removed with the conversation. The root
 describes itself: the daemon seeds a `README.md` there
 that explains every entry.
 
@@ -166,14 +165,14 @@ new build on a store an older one created.
 
 The same holds for a store an earlier build of the Markdown memory created.
 On 2026-09-28 the schema was re-baselined at version 1 (this build's newest is
-3), and every database from before that — 42 from before the memory redesign,
+4), and every database from before that — 42 from before the memory redesign,
 43 to 45 from the Markdown-memory builds before the re-baseline — is at a
 version it does not know. The daemon, and every form of `openalpaca config`
 that opens the database, stops with:
 
 ```text
 Database `<path>` is at schema version 42, which this build does not know (it
-creates schema version 1 and knows versions up to 3). Nothing was changed. If a
+creates schema version 1 and knows versions up to 4). Nothing was changed. If a
 newer OpenAlpaca build created this database, use that build. If it was created
 by a build from before the schema was re-baselined at version 1, it cannot be
 read or upgraded: run `openalpaca config reset --factory` to start again (it
@@ -196,9 +195,9 @@ using with an older build is the second case it names. To switch over:
    confirmation word, `factory-reset`. It deletes the database with its `-wal`
    and `-shm` files, clears `llm.toml` — every provider setting and API key,
    with the keychain entries those keys point at — and returns `daemon.toml` to
-   its defaults. Your artifact, upload and session files, and the `artifacts/`
-   and `uploads/` in each project's folder under `projects/`, stay on disk with
-   nothing pointing at them; each project's folder itself stays registered by
+   its defaults. Your artifact, upload, session and scratch files, and the
+   `artifacts/` and `uploads/` in each project's folder under `projects/`, stay
+   on disk with nothing pointing at them; each project's folder itself stays registered by
    its `project.json` and keeps the project's memory notes, which
    `openalpaca memory adopt` re-binds, so deleting it drops them;
    `.master_key`, `logs/`, `backups/`, `plugins/`,
@@ -247,10 +246,31 @@ using with an older build is the second case it names. To switch over:
    earlier build — one this build opens without the message above — keeps
    that build's `system_agent.md` too: do this step on it as well.
 
+8. **Give `agents/writing_agent.md` its `file_read` line.** The shipped
+   writing agent now reads the files it is asked to work on, and a store an
+   earlier build set up keeps the template that build wrote, without it. Open
+   `~/.openalpaca/config/agents/writing_agent.md` and add one line under
+   `capabilities:`:
+
+   ```yaml
+     - "file_read"
+   ```
+
+   With it the agent also lists folders (`file_list` comes with `file_read`). A
+   running daemon reads the change on its own. One more thing holds for any
+   template — yours, or one an earlier build wrote — that names tools in
+   `require_confirmation_for`: that list is used exactly as written, so it never
+   asks for `file_edit`, the tool that changes part of a file, unless it names
+   it, and it keeps asking for `artifact_write` or `workspace_write` when it
+   names them, though they no longer ask by default. Add `file_edit` beside
+   `file_write` in such a list. A skill's `permissions.confirm.tools` list works
+   the same way. The templates this build ships carry no such list.
+
 The reset leaves `~/.openalpaca/README.md` as it is, and an older build's text
-there is out of date — it describes no `projects/` folder, and lists `skills/`
-and `cache/` entries that never held anything: delete it, and the next start
-seeds the current one. `.layout`, beside it, keeps whatever it has.
+there is out of date — it may describe no `projects/` folder, list `skills/`
+and `cache/` entries that never held anything, or call `scratch/` reserved:
+delete it, and the next start seeds the current one. `.layout`, beside it,
+keeps whatever it has.
 
 A store from before the memory redesign may also hold
 `~/.openalpaca/state/cache/fastembed` (about 1 GB), the removed embedding
@@ -258,20 +278,20 @@ model's download. Neither the reset nor this build touches it; delete it by
 hand.
 
 **Keep the builds apart.** Once you have switched over, do not start an older
-build against the store. A build from before projects moved into the home
-store knows schema versions up to 1 or 2: it refuses this store, at version 3,
+build against the store. A build from before agents worked in the project's
+folder knows schema versions up to 1, 2 or 3: it refuses this store, at version 4,
 with the same refusal, naming its own newest version, and of the two cases it
 names the first is yours —
 use this build; the factory reset it offers for the second would delete this
 store. Every build from 2026-09-21 until the re-baseline of 2026-09-28 — the
 pre-redesign builds at schema 42 and the earlier Markdown-memory builds at 43
-to 45 — reads the new store's version 3 as older than its own baseline,
-refuses it as `Unsupported legacy schema version 3`, and tells you to delete
+to 45 — reads the new store's version 4 as older than its own baseline,
+refuses it as `Unsupported legacy schema version 4`, and tells you to delete
 the database: with `openalpaca config reset --factory` in a build from commit
 `73a0698d` on (the evening of 2026-09-22), by hand in a build before it. Do
 not follow that advice — it deletes the new store. A build from before
-2026-09-21 has no such check: it would take the store for its own version 3
-and run its migrations 4 to 42 on it, so never run one against a store this
+2026-09-21 has no such check: it would take the store for its own version 4
+and run its migrations 5 to 42 on it, so never run one against a store this
 build created. To go back, stop this build and run the older one against the
 copy you kept in step 1.
 
@@ -280,12 +300,11 @@ copy you kept in step 1.
 Earlier builds kept a project's files inside the project: a `.openalpaca/`
 folder at its top held the artifacts and uploads of its conversations and, on
 a store an earlier build of the Markdown memory used, that project's memory
-notes. This build keeps nothing inside a project — with the daemon the app or
-`openalpaca daemon start` launches in the home store; one started elsewhere
-still writes `file_write`'s plain files into its own directory on a turn with
-a project, as the Daemon Manual's *Where an agent's files land* explains. Each project gets a folder
-in the home store instead, `~/.openalpaca/projects/<name>/`, named after the
-project's path — `/Users/you/dev/app` becomes `-Users-you-dev-app` — with a
+notes. This build keeps nothing of its own inside a project: the files written
+there are the ones an agent writes for you, each write asking first. Each
+project gets a folder in the home store instead, `~/.openalpaca/projects/<name>/`,
+named after the project's path — `/Users/you/dev/app` becomes
+`-Users-you-dev-app` — with a
 `project.json` that holds the project's permanent id and its path, and the
 project's own `artifacts/`, `uploads/` and `memory/`. A project is the git
 repository a conversation runs in — its top folder, wherever inside it you
@@ -299,7 +318,9 @@ conversation still shows is kept, under `~/.openalpaca/uploads/kept/` or
 `~/.openalpaca/artifacts/kept/`).
 
 **An old `<project>/.openalpaca/` is never read again** — not its artifacts,
-not its uploads, not its notes. Nothing converts it and nothing deletes it.
+not its uploads, not its notes. Nothing converts it and nothing deletes it,
+and an agent's file tools refuse to read or write inside it (a shell command
+can, as it can anywhere).
 What it holds is yours:
 
 - **Artifacts and uploads** (`artifacts/`, `uploads/`) are ordinary files. Keep
@@ -342,9 +363,9 @@ On a store an earlier build of this branch already used — one this build opens
 without the message above — the first start also changes four things:
 
 - The records of the files an earlier build stored inside a project's
-  `.openalpaca/` are deleted (the database moves to schema 3). A message that
-  was handed one of those files — in any conversation — keeps its text and
-  shows the file as unavailable.
+  `.openalpaca/` are deleted (the database moves through schema 3 to 4). A
+  message that was handed one of those files — in any conversation — keeps
+  its text and shows the file as unavailable.
 - A conversation an earlier build bound to a folder that only an
   `.openalpaca/` marked keeps its binding. When you continue it, its turns run
   with no project if no git repository lies above that folder, until you
@@ -364,6 +385,35 @@ without the message above — the first start also changes four things:
 - The memory search index is rebuilt from the notes in the background (about
   15 to 17 seconds at 100,000 notes); search answers from the note files
   meanwhile.
+
+### Agents work in the project
+
+From this build on, a conversation's agents work in its project's own folder:
+they read and list its files, write and edit them, and run commands there.
+Each write, each edit and each command asks you first, and its card names the
+folder; reading never asks — any file in the project, `.env` included, can be
+read, and what is read goes to the model that answers. A file an agent writes
+is a real file of the project, listed in the app's Library with the project's
+results; drafts and hand-offs stay in `~/.openalpaca/projects/<name>/artifacts/`.
+A conversation with no project works in its own folder,
+`~/.openalpaca/scratch/<conversation id>/`, which goes with the conversation.
+An approved shell command still runs as you and can reach any file you can: read
+it before you approve it. The Daemon Manual's
+[The Working Folder](Daemon_Manual.md#the-working-folder) has the rules.
+
+On a store an earlier build already used — one this build opens without the
+message above — the first start of this build:
+
+- moves the database to schema 4 (`004_project_files.sql` marks the records of
+  the files agents write into a project); an earlier build then refuses the
+  store, as *Keep the builds apart* above says;
+- keeps the agent templates that build wrote: step 8 gives the writing agent
+  its `file_read` line and says what a list in `require_confirmation_for` does
+  with `file_edit`;
+- changes none of the files earlier builds saved: an artifact `file_write`
+  saved before stays an artifact in the Library, and a file a daemon started
+  by hand inside a project wrote there stays a file of the project, with no
+  record listing it.
 
 ## Run and Verify
 
