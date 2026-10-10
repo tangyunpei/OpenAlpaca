@@ -3,8 +3,8 @@ use super::*;
 #[test]
 fn test_builtin_tools_count_without_db() {
     let tools = builtin_tools(None, None, None);
-    // 8 base tools (incl. artifact_write, read_result and file_edit) + 2 workspace tools
-    assert_eq!(tools.len(), 10);
+    // 9 base tools (incl. artifact_write, read_result, file_edit and file_list) + 2 workspace tools
+    assert_eq!(tools.len(), 11);
 }
 
 #[test]
@@ -13,9 +13,9 @@ fn test_builtin_tools_count_with_db() {
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let tools = builtin_tools(Some(db), Some(dc), None);
-    // 8 base tools + 2 workspace tools: the memory tools are the service's
+    // 9 base tools + 2 workspace tools: the memory tools are the service's
     // (`memory_read_tools`), not this list's.
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 11);
 }
 
 #[test]
@@ -43,8 +43,8 @@ fn test_builtin_tools_with_persona_context_includes_update_persona() {
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let tools = builtin_tools_with_persona_context(Some(db), ctx, Some(dc), None, None);
-    // 10 base (8 + 2 workspace) + 1 update_persona = 11 (no send since connector_send_provider is None)
-    assert_eq!(tools.len(), 11, "Should have 11 tools (10 base + update_persona)");
+    // 11 base (9 + 2 workspace) + 1 update_persona = 12 (no send since connector_send_provider is None)
+    assert_eq!(tools.len(), 12, "Should have 12 tools (11 base + update_persona)");
     assert!(
         tools.iter().any(|t| t.definition.name == "update_persona"),
         "update_persona tool must be present"
@@ -179,12 +179,12 @@ async fn test_shell_execute_timeout_is_300s() {
 }
 
 /// S4a: `file_write` acts in each call's working folder, so the registry
-/// captures no startup folder — the base set is ten tools since file_edit (S4b).
+/// captures no startup folder — the base set is eleven tools since file_list (S5).
 #[test]
 fn builtin_tools_register_the_file_tools_with_no_startup_root() {
     let tools = builtin_tools(None, None, None);
-    // 8 base tools (incl. artifact_write, read_result and file_edit) + 2 workspace tools
-    assert_eq!(tools.len(), 10);
+    // 9 base tools (incl. artifact_write, read_result, file_edit and file_list) + 2 workspace tools
+    assert_eq!(tools.len(), 11);
     let names: Vec<&str> = tools.iter().map(|t| t.definition.name.as_str()).collect();
     assert!(names.contains(&"file_read"));
     assert!(names.contains(&"file_write"));
@@ -374,7 +374,7 @@ async fn reading_tools_raise_no_card_under_a_broker() {
 
 #[test]
 fn annotations_for_builtin_readonly_tools_tagged() {
-    for name in ["file_read", "workspace_read", "memory_search", "web_fetch", "web_search"] {
+    for name in ["file_read", "file_list", "workspace_read", "memory_search", "web_fetch", "web_search"] {
         let ann = annotations_for_builtin(name).unwrap();
         assert_eq!(ann.read_only_hint, Some(true), "{name} should be read_only");
     }
@@ -390,6 +390,25 @@ fn annotations_for_builtin_open_world_correct() {
         let ann = annotations_for_builtin(name).unwrap();
         assert_eq!(ann.open_world_hint, Some(false), "{name} should NOT be open_world");
     }
+}
+
+/// R42: `file_list` comes with the `file_read` capability — a template that
+/// names `file_read` resolves both — and, read-only, it never asks (ST-16).
+#[test]
+fn file_list_comes_with_the_file_read_capability_and_is_read_only() {
+    let tools = builtin_tools(None, None, None);
+    let found = tools
+        .iter()
+        .find(|t| t.definition.name == "file_list")
+        .expect("file_list is a builtin");
+    assert_eq!(
+        found.provides_capabilities,
+        vec!["file_read".to_string(), "file_list".to_string()]
+    );
+    let annotations = found.annotations.as_ref().expect("annotated");
+    assert_eq!(annotations.read_only_hint, Some(true));
+    assert_eq!(annotations.destructive_hint, Some(false));
+    assert_eq!(found.definition.strict, Some(true));
 }
 
 /// ST-22 / R49: `file_edit` is a builtin, asks exactly as `file_write` does
@@ -1649,10 +1668,12 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
             ),
         }
     }
-    // The walk saw what it is meant to: all 21 strict-marked builtins, and
-    // the one schema already written in strict mode's shape keeps its flag.
-    assert_eq!(marked, 21, "strict-marked builtins seen");
+    // The walk saw what it is meant to: all 22 strict-marked builtins, and
+    // the two schemas already written in strict mode's shape (memory_confirm's and
+    // file_list's) keep their flag.
+    assert_eq!(marked, 22, "strict-marked builtins seen");
     assert!(kept.contains(&"memory_confirm".to_string()), "{kept:?}");
+    assert!(kept.contains(&"file_list".to_string()), "{kept:?}");
 
     // The serializer and this restatement agree beyond today's builtins:
     // closed, fully required schemas carrying a keyword strict mode refuses

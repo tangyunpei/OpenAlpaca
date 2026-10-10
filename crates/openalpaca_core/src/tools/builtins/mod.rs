@@ -51,7 +51,7 @@ use tokio::process::Command;
 pub type ConnectorSendLock = Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>>;
 
 use self::artifact_write::artifact_write_tool;
-use self::file_ops::{file_edit_tool, file_read_tool, file_write_tool};
+use self::file_ops::{file_edit_tool, file_list_tool, file_read_tool, file_write_tool};
 use self::read_result::read_result_tool;
 use self::shell_execute::shell_execute_tool;
 use self::update_persona::update_persona_tool;
@@ -357,6 +357,10 @@ pub fn builtin_tools(
         web_search_tool(ws_cfg),
         web_fetch_tool(),
         file_read_tool(),
+        // R40: one folder of the working folder, read-only. It comes with the
+        // `file_read` capability (R42), so every template that reads files
+        // lists them with no template edit.
+        file_list_tool(),
         // The config carries ST-17's `snapshot_max_bytes` — the cap on the
         // pre-edit copy `file_write` keeps before it replaces a project file
         // — and the artifact caps; the database records a result file's
@@ -619,8 +623,8 @@ impl BuiltInTool for ScriptToolBuiltIn {
 /// Returns `None` for unknown names; callers default to `None` (no special treatment).
 pub(crate) fn annotations_for_builtin(name: &str) -> Option<openalpaca_mcp::ToolAnnotations> {
     match name {
-        "file_read" | "workspace_read" | "read_result" | "memory_search" | "memory_read"
-        | "memory_list" | "memory_timeline" => Some(read_only_annotations()),
+        "file_read" | "file_list" | "workspace_read" | "read_result" | "memory_search"
+        | "memory_read" | "memory_list" | "memory_timeline" => Some(read_only_annotations()),
         "web_fetch" | "web_search" => Some(read_only_open_world_annotations()),
         // Design §7, *Capabilities*: the two memory tools that prompt;
         // `memory_store` deliberately carries none — a plain save never

@@ -111,6 +111,137 @@ pub(super) fn file_read_tool() -> RegisteredTool {
     }
 }
 
+// --- file_list ---
+
+/// The most entries one `file_list` call shows (R40). Past it the listing
+/// ends with one line saying how many more there are: a folder of thousands
+/// of files is listed a subfolder at a time, not poured into the context.
+const FILE_LIST_MAX_ENTRIES: usize = 500;
+
+/// `file_list` (R40): one folder of the working folder — the project, or the
+/// conversation's scratch folder — never recursive and never asking (ST-16).
+/// Resolved like `file_read`'s path: relative, no `..`, under the canonical
+/// root, and in a project `.openalpaca` refused (R32).
+struct FileListTool;
+
+#[async_trait]
+impl BuiltInTool for FileListTool {
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err(WorkingFolderRefusal::NoContext.to_string())
+    }
+
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        let path = arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Missing required parameter: path".to_string())?;
+        // R26, R27, R44: the project's folder, or the conversation's scratch
+        // folder (made on first use), and R32's rules for it — the resolution
+        // `file_read` makes; a refusal is its own sentence, before anything
+        // is listed.
+        let (root, rules) = acting_folder(ctx)?;
+        let dir = resolve_workspace_path(path, &root, rules)?;
+        let metadata = tokio::fs::metadata(&dir)
+            .await
+            .map_err(|e| format!("Cannot access '{path}': {e}"))?;
+        if !metadata.is_dir() {
+            return Err(format!(
+                "'{path}' is a file, not a folder; read it with file_read."
+            ));
+        }
+        list_folder(path, &dir).await
+    }
+}
+
+/// Read `dir`'s entries and lay them out. `DirEntry::metadata` does not
+/// follow a link, so a link is shown as one (`@`) rather than as what it
+/// points at; a directory gets a trailing `/`, a file its size, anything
+/// else (a socket, a pipe) its bare name.
+async fn list_folder(path: &str, dir: &Path) -> Result<String, String> {
+    let cannot = |e: std::io::Error| format!("Cannot list '{path}': {e}");
+    let mut reader = tokio::fs::read_dir(dir).await.map_err(cannot)?;
+    let mut entries: Vec<(String, String)> = Vec::new();
+    while let Some(entry) = reader.next_entry().await.map_err(cannot)? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let shown = match entry.metadata().await {
+            Ok(meta) if meta.file_type().is_symlink() => format!("{name}@"),
+            Ok(meta) if meta.is_dir() => format!("{name}/"),
+            Ok(meta) if meta.is_file() => format!("{name}  {} bytes", meta.len()),
+            _ => name.clone(),
+        };
+        entries.push((name, shown));
+    }
+    Ok(format_listing(path, dir, entries))
+}
+
+/// The listing's text: `{path} ({abs}): {n} entries`, then one line per
+/// entry sorted by name in byte order, at most [`FILE_LIST_MAX_ENTRIES`] of
+/// them, then — past that — how many were left out. Names are not escaped:
+/// this is a tool result, not an approval surface.
+fn format_listing(path: &str, dir: &Path, mut entries: Vec<(String, String)>) -> String {
+    // By name in byte order: the tuple sorts on its first field, and names in
+    // one folder are unique (and `sort()` keeps clippy's sort lints quiet).
+    entries.sort();
+    let total = entries.len();
+    let mut out = format!("{path} ({}): {total} entries", dir.display());
+    for (_, shown) in entries.iter().take(FILE_LIST_MAX_ENTRIES) {
+        out.push('\n');
+        out.push_str(shown);
+    }
+    if total > FILE_LIST_MAX_ENTRIES {
+        out.push_str(&format!(
+            "\n... and {} more entries not shown — list a subfolder",
+            total - FILE_LIST_MAX_ENTRIES
+        ));
+    }
+    out
+}
+
+pub(super) fn file_list_tool() -> RegisteredTool {
+    RegisteredTool {
+        definition: ToolDefinition {
+            name: "file_list".to_string(),
+            description: "List one folder under the working folder (the project, or this \
+                conversation's scratch folder): its files with their sizes, its folders \
+                marked with a trailing /, links with @. Not recursive — list a subfolder to \
+                go deeper. Read a file with file_read."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The folder to list, relative to the working folder; '.' is the working folder itself."
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            // Closed and fully required: `strict_mode_compatible` accepts it,
+            // so it is one of the two builtins that keep the flag on the wire.
+            strict: Some(true),
+            input_examples: Some(vec![
+                serde_json::json!({"path": "."}),
+                serde_json::json!({"path": "src"}),
+            ]),
+        },
+        backend: ToolBackend::BuiltIn(Arc::new(FileListTool)),
+        // R42: comes with `file_read`, so a template that reads files lists
+        // them with no template edit — and one that denies `file_read` is
+        // handed neither (`resolve_capabilities`' provided-capability filter).
+        provides_capabilities: vec!["file_read".into(), "file_list".into()],
+        exempt_from_timeout: false,
+        annotations: annotations_for_builtin("file_list"),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        author: "builtin".to_string(),
+        created_at: chrono::Utc::now(),
+    }
+}
+
 // --- file_write ---
 
 /// The most one `file_write` call writes (10 MB).
@@ -2630,6 +2761,144 @@ mod tests {
                  context, and every listed file belongs to an owner)."
             ),
             "{out}"
+        );
+    }
+
+    // ── R40: file_list ──────────────────────────────────────────────
+
+    async fn list(ctx: &ToolContext, path: &str) -> Result<String, String> {
+        FileListTool
+            .execute_with_context(&serde_json::json!({ "path": path }), ctx)
+            .await
+    }
+
+    /// One folder of the project, sorted by name in byte order, dotfiles
+    /// included: a file with its size, a folder with a trailing `/`.
+    #[tokio::test]
+    async fn file_list_lists_a_project_folder_sorted_with_sizes_and_folders() {
+        let gp = crate::test_util::GuardedProject::new();
+        fs::write(gp.root.join("b.txt"), "hello").unwrap();
+        fs::write(gp.root.join(".env"), "K=1").unwrap();
+        fs::create_dir(gp.root.join("a")).unwrap();
+
+        let out = list(&gp.ctx(), ".").await.unwrap();
+
+        assert_eq!(
+            out,
+            format!(
+                ". ({}): 3 entries\n.env  3 bytes\na/\nb.txt  5 bytes",
+                gp.root.display()
+            )
+        );
+    }
+
+    /// A link is shown as a link (`@`), never followed in the listing it
+    /// appears in; listing the link's own path follows it, and a link out of
+    /// the project is refused like any path that leaves it (R31).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_list_marks_a_link_and_refuses_one_out_of_the_project() {
+        let gp = crate::test_util::GuardedProject::new();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(outside.path(), gp.root.join("out")).unwrap();
+        fs::create_dir(gp.root.join("docs")).unwrap();
+        std::os::unix::fs::symlink(gp.root.join("docs"), gp.root.join("in")).unwrap();
+
+        let out = list(&gp.ctx(), ".").await.unwrap();
+        assert_eq!(
+            out,
+            format!(". ({}): 3 entries\ndocs/\nin@\nout@", gp.root.display())
+        );
+
+        let err = list(&gp.ctx(), "out").await.unwrap_err();
+        assert!(err.contains("resolves outside the workspace boundary"), "{err}");
+        assert_eq!(
+            list(&gp.ctx(), "in").await.unwrap(),
+            format!("in ({}): 0 entries", gp.root.join("docs").display())
+        );
+    }
+
+    /// A subfolder lists; a file, a `..`, an old in-project `.openalpaca`
+    /// (R32, ST-9) and a folder that is not there are each refused, naming why.
+    #[tokio::test]
+    async fn file_list_refuses_a_file_a_parent_path_and_an_old_openalpaca_folder() {
+        let gp = crate::test_util::GuardedProject::new();
+        fs::create_dir_all(gp.root.join("src")).unwrap();
+        fs::write(gp.root.join("src/main.rs"), "fn main() {}").unwrap();
+        fs::create_dir(gp.root.join(".openalpaca")).unwrap();
+
+        assert_eq!(
+            list(&gp.ctx(), "src").await.unwrap(),
+            format!(
+                "src ({}): 1 entries\nmain.rs  12 bytes",
+                gp.root.join("src").display()
+            )
+        );
+        assert_eq!(
+            list(&gp.ctx(), "src/main.rs").await.unwrap_err(),
+            "'src/main.rs' is a file, not a folder; read it with file_read."
+        );
+        let err = list(&gp.ctx(), "../").await.unwrap_err();
+        assert!(err.contains("Path traversal ('..') is not allowed."), "{err}");
+        let err = list(&gp.ctx(), ".openalpaca").await.unwrap_err();
+        assert!(
+            err.contains("a .openalpaca folder inside a project is an older OpenAlpaca's"),
+            "{err}"
+        );
+        let err = list(&gp.ctx(), "nowhere").await.unwrap_err();
+        assert!(err.contains("Path resolution failed for 'nowhere'"), "{err}");
+    }
+
+    /// With no project the working folder is the conversation's scratch
+    /// folder; listing it is the first use that makes it (`ensure`).
+    #[tokio::test]
+    async fn file_list_in_a_conversation_with_no_project_lists_its_scratch_folder() {
+        let gp = crate::test_util::GuardedProject::new();
+        let dir = gp
+            .home_root()
+            .join("scratch")
+            .join(crate::session_log::session_dir_name("conv-test"));
+        assert!(!dir.exists(), "nothing has made the scratch folder yet");
+
+        let out = list(&gp.scratch_ctx(), ".").await.unwrap();
+
+        assert_eq!(out, format!(". ({}): 0 entries", dir.display()));
+        assert!(dir.is_dir(), "listing made the folder, as every acting tool does");
+    }
+
+    /// R26: reached with no context there is no conversation to name a
+    /// folder, so the call is refused with the working folder's own sentence.
+    #[tokio::test]
+    async fn file_list_with_no_context_is_refused() {
+        let err = FileListTool
+            .execute(&serde_json::json!({"path": "."}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            crate::tools::working_folder::WorkingFolderRefusal::NoContext.to_string()
+        );
+    }
+
+    /// At most 500 entries, then one line saying how many more there are.
+    #[tokio::test]
+    async fn file_list_shows_500_entries_and_says_how_many_more() {
+        let gp = crate::test_util::GuardedProject::new();
+        for i in 0..502 {
+            fs::write(gp.root.join(format!("f{i:03}.txt")), "").unwrap();
+        }
+
+        let out = list(&gp.ctx(), ".").await.unwrap();
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 502, "the header, 500 entries and the closing line");
+        assert_eq!(lines[0], format!(". ({}): 502 entries", gp.root.display()));
+        assert_eq!(lines[1], "f000.txt  0 bytes");
+        assert_eq!(lines[500], "f499.txt  0 bytes");
+        assert_eq!(
+            lines[501],
+            "... and 2 more entries not shown — list a subfolder"
         );
     }
 }
