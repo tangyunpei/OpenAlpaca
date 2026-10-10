@@ -964,9 +964,10 @@ impl TaskDispatcher {
                 // (that refusal is its tool result) but a model may bury it,
                 // paraphrase it away, or run out of room; the reader of the
                 // report is owed it verbatim, once, at the end.
-                let content = match super::outcome::unapprovable_note(
-                    &super::outcome::unapprovable_tools(db, &task_id),
-                ) {
+                // **R38** — then the files the run wrote into the project,
+                // listed by the runtime: never linked to the report as
+                // artifacts (interfaces §10 C10).
+                let content = match super::outcome::runtime_notes(db, &task_id) {
                     Some(note) => format!("{content}\n\n{note}"),
                     None => content,
                 };

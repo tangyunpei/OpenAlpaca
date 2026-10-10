@@ -207,6 +207,59 @@ pub(super) fn unapprovable_note(tools: &[String]) -> Option<String> {
     ))
 }
 
+/// How many paths [`project_files_note`] names before it counts the rest.
+const PROJECT_FILES_SHOWN: usize = 20;
+
+/// **R38.** The runtime-authored line naming what a run wrote into its
+/// project — `None` when it wrote nothing there. Result files are the user's
+/// files, not the run's artifacts: the run's count, its chips and connector
+/// delivery read by-products only, and this line is how the report lists the
+/// rest. At most [`PROJECT_FILES_SHOWN`] paths, then "and N more".
+pub(super) fn project_files_note(rel_paths: &[String]) -> Option<String> {
+    if rel_paths.is_empty() {
+        return None;
+    }
+    let shown = rel_paths
+        .iter()
+        .take(PROJECT_FILES_SHOWN)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = rel_paths.len().saturating_sub(PROJECT_FILES_SHOWN);
+    Some(if more == 0 {
+        format!("Written in the project: {shown}.")
+    } else {
+        format!("Written in the project: {shown}, and {more} more.")
+    })
+}
+
+/// The files a run wrote into its project, oldest first — none when they
+/// cannot be read: a failed read costs the line, never the finalisation.
+fn project_files(db: &openalpaca_storage::Database, task_id: &str) -> Vec<String> {
+    openalpaca_storage::FileAssetRepository::new(db)
+        .project_files_for_task(task_id)
+        .map(|files| files.into_iter().map(|file| file.filename).collect())
+        .unwrap_or_else(|e| {
+            tracing::warn!(task_id, "Failed to read the run's result files: {e}");
+            Vec::new()
+        })
+}
+
+/// The runtime's own lines a run's report and its summary end with — what
+/// nobody could approve (S4), then what it wrote into the project (R38) —
+/// joined by a blank line, or `None` when there is neither. One function for
+/// the report message and the summary's cut, so both keep the same lines.
+pub(super) fn runtime_notes(db: &openalpaca_storage::Database, task_id: &str) -> Option<String> {
+    let notes: Vec<String> = [
+        unapprovable_note(&unapprovable_tools(db, task_id)),
+        project_files_note(&project_files(db, task_id)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!notes.is_empty()).then(|| notes.join("\n\n"))
+}
+
 /// Cut `summary` to `max` characters, keeping a runtime-authored `note` at
 /// the end whole (S4).
 ///
@@ -367,11 +420,10 @@ pub(super) fn finalize_task_with_outcome(
 ) -> TaskOutcome {
     let mut outcome = build_task_outcome(db, task_id, final_content, success);
 
-    // S4: what nobody could approve, in the runtime's own words, appended to
-    // the summary so it reaches `outcome_json` as well as `result_summary`.
-    let note = db
-        .map(|db| unapprovable_tools(db, task_id))
-        .and_then(|tools| unapprovable_note(&tools));
+    // S4 and R38: what nobody could approve and what the run wrote into the
+    // project, in the runtime's own words, appended to the summary so they
+    // reach `outcome_json` as well as `result_summary`.
+    let note = db.and_then(|db| runtime_notes(db, task_id));
     if let Some(ref note) = note {
         outcome.summary = if outcome.summary.trim().is_empty() {
             note.clone()

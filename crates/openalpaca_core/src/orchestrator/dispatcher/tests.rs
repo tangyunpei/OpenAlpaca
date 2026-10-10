@@ -2803,3 +2803,100 @@ async fn a_subagents_refusal_reaches_the_runs_report() {
         message.content
     );
 }
+
+// ── R38: what a run wrote into its project ─────────────────────────────
+
+/// The runtime's line names at most twenty paths, then counts the rest.
+#[test]
+fn the_project_files_note_names_twenty_paths_then_counts_the_rest() {
+    use super::outcome::project_files_note;
+
+    assert_eq!(project_files_note(&[]), None, "nothing written, no line");
+    assert_eq!(
+        project_files_note(&["src/main.rs".to_string(), "README.md".to_string()]).as_deref(),
+        Some("Written in the project: src/main.rs, README.md.")
+    );
+    let paths: Vec<String> = (1..=22).map(|n| format!("src/f{n}.rs")).collect();
+    let note = project_files_note(&paths).unwrap();
+    assert!(
+        note.starts_with("Written in the project: src/f1.rs, src/f2.rs, "),
+        "{note}"
+    );
+    assert!(note.ends_with("src/f20.rs, and 2 more."), "{note}");
+    assert!(!note.contains("src/f21.rs"), "{note}");
+}
+
+/// **R38** end to end through finalisation: a result file is never one of
+/// the run's artifacts (so neither its count, its chips nor connector
+/// delivery see it), and the stored summary ends with the refusal and then
+/// the project's files — both whole through the 2 000-character cut.
+#[test]
+fn a_finalised_run_names_its_result_files_after_its_refusals() {
+    use super::outcome::{MAX_SUMMARY_LENGTH, finalize_task_with_outcome, runtime_notes};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO task (id, title, created_by, source_lane)
+             VALUES ('task-1', 'A run', 'user1', 'user1:cli')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    openalpaca_storage::repository::EventLogRepository::new(&db)
+        .log_for_task(
+            crate::security::sandbox::UNAPPROVABLE_EVENT_TYPE,
+            Some("lead_agent"),
+            Some("task-1"),
+            Some(&serde_json::json!({"tool_name": "shell_execute"})),
+            Some(&serde_json::json!({"outcome": "denied"})),
+        )
+        .unwrap();
+    let store = openalpaca_storage::ArtifactStore::new(&db);
+    for rel in ["src/main.rs", "README.md"] {
+        store
+            .record_project_file(openalpaca_storage::NewProjectFile {
+                owner_id: "user1",
+                project_root: "/w/app",
+                rel_path: rel,
+                content: rel.as_bytes(),
+                task_id: Some("task-1"),
+                agent_id: Some("code_agent::b2"),
+            })
+            .unwrap();
+    }
+
+    let notes = runtime_notes(&db, "task-1").expect("two lines");
+    let (refusal, files) = notes.split_once("\n\n").expect("joined by a blank line");
+    assert!(refusal.contains("shell_execute"), "{notes}");
+    assert_eq!(files, "Written in the project: src/main.rs, README.md.");
+
+    let ctx = std::sync::Arc::new(crate::context::SharedContext::new());
+    ctx.task_registry
+        .register("task-1".to_string(), "A run".to_string());
+    let bus = crate::bus::EventBus::default();
+    let report = format!("Done: {}", "detail. ".repeat(400));
+    assert!(report.chars().count() > MAX_SUMMARY_LENGTH);
+
+    let outcome = finalize_task_with_outcome(&ctx, &bus, Some(&db), "task-1", &report, true);
+
+    assert!(
+        outcome.artifacts.is_empty(),
+        "a result file is never one of the run's artifacts: {outcome:?}"
+    );
+    let stored = openalpaca_storage::TaskRepository::new(&db)
+        .get("task-1")
+        .unwrap()
+        .unwrap()
+        .result_summary
+        .expect("a finished run has a summary");
+    assert!(stored.chars().count() <= MAX_SUMMARY_LENGTH);
+    assert!(
+        stored.ends_with("\n\nWritten in the project: src/main.rs, README.md."),
+        "{stored}"
+    );
+    assert!(stored.contains("shell_execute"), "{stored}");
+    assert!(stored.starts_with("Done: "), "{stored}");
+}
