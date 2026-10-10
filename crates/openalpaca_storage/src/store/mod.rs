@@ -405,8 +405,11 @@ pub enum ContentKind {
     Uploads,
     Sessions,
     Memory,
-    /// Reserved: nothing creates it until Stage 2 of the storage design gives
-    /// a conversation with no project its working folder here.
+    /// The working folder of a conversation with no project (storage design
+    /// §10, ST-10): `scratch/<session-id>/`, made private on first use by a
+    /// file tool or a command (`openalpaca_core::tools::working_folder`) and
+    /// removed with the conversation. Home store only: a project's working
+    /// folder is the project's own.
     Scratch,
 }
 
