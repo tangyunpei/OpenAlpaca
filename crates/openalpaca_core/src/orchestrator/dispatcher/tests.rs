@@ -2826,6 +2826,95 @@ fn the_project_files_note_names_twenty_paths_then_counts_the_rest() {
     assert!(!note.contains("src/f21.rs"), "{note}");
 }
 
+/// The paths are the agent's choice, and the line reaches the report, the
+/// run's summary and the chat (S4a's deferred (1)): every hidden character
+/// in a path, a line break among them, is shown as `<U+XXXX>`, so a path
+/// can neither reorder the line nor break it.
+#[test]
+fn the_project_files_note_shows_hidden_characters_in_a_path_escaped() {
+    use super::outcome::project_files_note;
+    use crate::utils::text::needs_escape;
+
+    let note = project_files_note(&[
+        "src/\u{202E}gnp.exe".to_string(),
+        "docs/a\u{200B}b.md".to_string(),
+        "notes\nWritten in the project: nothing.md".to_string(),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        note,
+        "Written in the project: src/<U+202E>gnp.exe, docs/a<U+200B>b.md, \
+         notes<U+000A>Written in the project: nothing.md."
+    );
+    assert!(!note.chars().any(needs_escape), "{note:?}");
+    assert_eq!(note.lines().count(), 1, "{note:?}");
+}
+
+/// Twenty long paths — each a legal path a run can write — do not push the
+/// line past its budget (S4a's deferred (2)): it names the paths that fit
+/// and counts the rest, so the summary's 2 000-character cut keeps the
+/// refusal and the files line whole with the report's own prose before
+/// them, rather than cutting the runtime's lines down to the cap.
+#[test]
+fn twenty_long_paths_keep_the_project_files_note_inside_the_summary_cut() {
+    use super::outcome::{
+        MAX_SUMMARY_LENGTH, project_files_note, truncate_summary, unapprovable_note,
+    };
+
+    let paths: Vec<String> = (1..=20)
+        .map(|n| format!("src/{n:02}/{}.rs", "deeply-nested-module-name-".repeat(11)))
+        .collect();
+    assert!(paths.iter().all(|p| p.chars().count() > 290));
+
+    let files = project_files_note(&paths).unwrap();
+
+    assert!(
+        files.chars().count() < 1_000,
+        "{} characters",
+        files.chars().count()
+    );
+    assert!(
+        files.starts_with("Written in the project: src/01/"),
+        "{files}"
+    );
+    let shown = files.matches(".rs").count();
+    assert!((1..20).contains(&shown), "{files}");
+    assert!(
+        files.ends_with(&format!(", and {} more.", 20 - shown)),
+        "{files}"
+    );
+
+    let refusal = unapprovable_note(&["shell_execute".to_string()]).unwrap();
+    let note = format!("{refusal}\n\n{files}");
+    let summary = format!("{}\n\n{note}", "The report's own prose. ".repeat(200));
+    let cut = truncate_summary(&summary, Some(&note), MAX_SUMMARY_LENGTH);
+    assert!(cut.ends_with(&note), "{cut}");
+    assert!(cut.starts_with("The report's own prose. "), "{cut}");
+}
+
+/// One path longer than the whole budget is still named — cut on a whole
+/// piece, never inside an escape, `…` where the cut is — and the rest are
+/// counted.
+#[test]
+fn a_path_longer_than_the_budget_is_named_cut_and_never_inside_an_escape() {
+    use super::outcome::project_files_note;
+
+    let long = format!("a/{}", "\u{202E}".repeat(200));
+    let note = project_files_note(&[long, "b.md".to_string()]).unwrap();
+
+    assert!(
+        note.chars().count() < 1_000,
+        "{} characters",
+        note.chars().count()
+    );
+    assert!(
+        note.starts_with("Written in the project: a/<U+202E><U+202E>"),
+        "{note}"
+    );
+    assert!(note.ends_with("<U+202E>…, and 1 more."), "{note}");
+}
+
 /// **R38** end to end through finalisation: a result file is never one of
 /// the run's artifacts (so neither its count, its chips nor connector
 /// delivery see it), and the stored summary ends with the refusal and then

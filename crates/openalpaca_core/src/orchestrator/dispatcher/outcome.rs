@@ -210,27 +210,75 @@ pub(super) fn unapprovable_note(tools: &[String]) -> Option<String> {
 /// How many paths [`project_files_note`] names before it counts the rest.
 const PROJECT_FILES_SHOWN: usize = 20;
 
+/// How many characters the paths [`project_files_note`] names may take
+/// together, `, ` between them included: the line stays under 1,000
+/// characters, so the summary's [`MAX_SUMMARY_LENGTH`] cut
+/// ([`truncate_summary`]) keeps it and the refusal line whole with the
+/// report's own prose before them (S4a's deferred (2): twenty paths a run can
+/// write ran to thousands of characters).
+const PROJECT_FILES_LIST_CHARS: usize = 900;
+
 /// **R38.** The runtime-authored line naming what a run wrote into its
 /// project — `None` when it wrote nothing there. Result files are the user's
 /// files, not the run's artifacts: the run's count, its chips and connector
 /// delivery read by-products only, and this line is how the report lists the
-/// rest. At most [`PROJECT_FILES_SHOWN`] paths, then "and N more".
+/// rest. At most [`PROJECT_FILES_SHOWN`] paths, and only as many as fit in
+/// [`PROJECT_FILES_LIST_CHARS`], then "and N more"; a first path longer than
+/// that alone is named cut, `…` where the cut is.
+///
+/// A path is the agent's choice, so each is shown through
+/// `utils::text::escape_hidden_line`: every hidden character, a line break
+/// among them, as `<U+XXXX>` (S4a's deferred (1)). No count line follows:
+/// the report is not an approval surface (the lead's ruling on S6a's M4 for
+/// the event log's written-file row, the same text).
 pub(super) fn project_files_note(rel_paths: &[String]) -> Option<String> {
+    use crate::utils::text::escape_hidden_line;
+
     if rel_paths.is_empty() {
         return None;
     }
-    let shown = rel_paths
-        .iter()
-        .take(PROJECT_FILES_SHOWN)
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let more = rel_paths.len().saturating_sub(PROJECT_FILES_SHOWN);
+    let mut shown: Vec<String> = Vec::new();
+    let mut used = 0;
+    for path in rel_paths.iter().take(PROJECT_FILES_SHOWN) {
+        let escaped = escape_hidden_line(path).text;
+        let cost = escaped.chars().count() + if shown.is_empty() { 0 } else { 2 };
+        if used + cost > PROJECT_FILES_LIST_CHARS {
+            if shown.is_empty() {
+                shown.push(escaped_path_within(path, PROJECT_FILES_LIST_CHARS));
+            }
+            break;
+        }
+        used += cost;
+        shown.push(escaped);
+    }
+    let more = rel_paths.len() - shown.len();
+    let shown = shown.join(", ");
     Some(if more == 0 {
         format!("Written in the project: {shown}.")
     } else {
         format!("Written in the project: {shown}, and {more} more.")
     })
+}
+
+/// `path` as [`project_files_note`] shows it, cut to at most `max`
+/// characters on a whole piece — a character, or its whole `<U+XXXX>`
+/// escape, never part of one — with `…` where the cut is.
+fn escaped_path_within(path: &str, max: usize) -> String {
+    use crate::utils::text::escape_hidden_line;
+
+    let mut out = String::new();
+    let mut used = 0;
+    for c in path.chars() {
+        let piece = escape_hidden_line(c.encode_utf8(&mut [0; 4])).text;
+        let len = piece.chars().count();
+        if used + len + 1 > max {
+            out.push('…');
+            break;
+        }
+        used += len;
+        out.push_str(&piece);
+    }
+    out
 }
 
 /// The files a run wrote into its project, oldest first — none when they
@@ -266,8 +314,10 @@ pub(super) fn runtime_notes(db: &openalpaca_storage::Database, task_id: &str) ->
 /// The note is the point of the cut: a summary long enough to be truncated is
 /// exactly the one whose last line would otherwise be lost, and the last line
 /// is the only part the runtime wrote. When the note alone is longer than
-/// `max` — it cannot be, at 2 000, but the function must still be total — the
-/// note wins and the prose goes.
+/// `max` the note wins and the prose goes. At [`MAX_SUMMARY_LENGTH`] that
+/// takes a refusal line naming an unusual number of long tool names: the
+/// files line stays under 1,000 characters ([`project_files_note`]). The
+/// function must still be total.
 pub(super) fn truncate_summary(summary: &str, note: Option<&str>, max: usize) -> String {
     if summary.chars().count() <= max {
         return summary.to_string();
