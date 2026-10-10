@@ -136,4 +136,80 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["error"], "not_found");
     }
+
+    /// R41: `task_status` names each artifact of a finished run by the id
+    /// `artifact_read` takes — `file_asset_id`, in the single-task record and
+    /// in the list of recent runs. Pinned, not built: the dispatcher already
+    /// stores the store's id on every artifact pointer
+    /// (`merge_produced_artifacts`, pinned by the dispatcher's own tests).
+    #[tokio::test]
+    async fn task_status_names_each_artifacts_id_for_artifact_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+        let id = "0b6f3c2a-6d1e-4c5b-9a8f-2e7d4c1b0a93";
+        let outcome = serde_json::json!({
+            "summary": "Wrote the notes.",
+            "artifacts": [{
+                "key": "01-notes.md",
+                "label": "01-notes.md",
+                "agent_id": "writing_agent::a1",
+                "step_order": -1,
+                "file_asset_id": id
+            }]
+        });
+        let now = chrono::Utc::now();
+        openalpaca_storage::repository::TaskRepository::new(&db)
+            .create(&openalpaca_storage::Task {
+                id: "task-notes".to_string(),
+                title: "Notes".to_string(),
+                description: None,
+                status: openalpaca_storage::TaskStatus::Completed,
+                priority: 0,
+                progress_current: None,
+                progress_total: None,
+                result_summary: Some("Wrote the notes.".to_string()),
+                created_by: "user1".to_string(),
+                source_lane: "gui".to_string(),
+                created_at: now,
+                updated_at: now,
+                completed_at: Some(now),
+                state_json: None,
+                state_version: 0,
+                outcome_json: Some(outcome.to_string()),
+                outcome_kind: None,
+                artifact_count: 1,
+                workspace_id: None,
+                source_task_id: None,
+                session_id: None,
+                unattended: false,
+            })
+            .unwrap();
+        let tool = TaskStatusTool::new(Some(db), Arc::new(SharedContext::new()));
+        let ctx = ToolContext {
+            owner_id: Some("user1".to_string()),
+            principal: Some(crate::security::policy::Principal::User {
+                global_id: "user1".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let one: serde_json::Value = serde_json::from_str(
+            &tool
+                .execute_with_context(&serde_json::json!({"task_id": "task-notes"}), &ctx)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(one["artifacts"][0]["file_asset_id"], id, "{one}");
+
+        let list: serde_json::Value = serde_json::from_str(
+            &tool
+                .execute_with_context(&serde_json::json!({}), &ctx)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(list["scope"], "recent_terminal", "{list}");
+        assert_eq!(list["tasks"][0]["artifacts"][0]["file_asset_id"], id, "{list}");
+    }
 }
