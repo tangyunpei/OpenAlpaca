@@ -978,7 +978,55 @@ mod attachments {
 
 #[cfg(any(feature = "telegram", feature = "discord"))]
 mod chunking {
-    use super::super::chunk_message;
+    use super::super::{chunk_approval_prompt, chunk_message};
+
+    /// The lead's ruling R-T32, the chunker's own contract: an approval
+    /// prompt is split only between lines — a sentence end inside a line is
+    /// never a split — and a line longer than the limit is cut at a character
+    /// boundary with every continuation indented two spaces, so the only
+    /// lines at the margin in any message are the ones the text put there.
+    /// No message is empty, longer than the limit, or begins or ends with a
+    /// blank line.
+    #[test]
+    fn an_approval_prompt_is_split_only_between_lines_and_a_cut_line_stays_indented() {
+        let max = 40;
+        let long = format!("  {}", "\u{4e16}x. y".repeat(30));
+        let text = format!("Header:\n\n  one. two\n{long}\n  three. four\n\nReply /yes");
+
+        let chunks = chunk_approval_prompt(&text, max);
+
+        assert!(chunks.len() > 3, "{chunks:#?}");
+        for chunk in &chunks {
+            assert!(!chunk.is_empty() && chunk.len() <= max, "{chunk:?}");
+            assert!(
+                !chunk.starts_with('\n') && !chunk.ends_with('\n'),
+                "{chunk:?}"
+            );
+        }
+        let lines: Vec<&str> = chunks.iter().flat_map(|c| c.lines()).collect();
+        let at_margin: Vec<&str> = lines
+            .iter()
+            .copied()
+            .filter(|l| !l.is_empty() && !l.starts_with("  "))
+            .collect();
+        assert_eq!(at_margin, ["Header:", "Reply /yes"], "{chunks:#?}");
+        assert!(lines.contains(&"  one. two") && lines.contains(&"  three. four"));
+        // The long line's pieces, their indents taken off, are the line.
+        let rebuilt: String = lines
+            .iter()
+            .filter(|l| l.contains('x'))
+            .map(|l| l.strip_prefix("  ").unwrap())
+            .collect();
+        assert_eq!(rebuilt, long.strip_prefix("  ").unwrap());
+    }
+
+    /// Below room for the continuation's indent and one character, a cut
+    /// could not advance, so such a limit is refused outright.
+    #[test]
+    #[should_panic(expected = "a chunk must fit an indented UTF-8 character")]
+    fn an_approval_limit_below_an_indented_character_is_refused() {
+        chunk_approval_prompt("abc", 5);
+    }
 
     /// Every property the two platform copies had, asserted at one limit.
     fn assert_contract(max: usize) {

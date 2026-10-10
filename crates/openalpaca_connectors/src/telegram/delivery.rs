@@ -21,17 +21,29 @@ pub(super) async fn send_with_retry(
     chat_id: ChatId,
     text: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    send_chunks_with_retry(text, |chunk| bot.send_message(chat_id, chunk)).await
+    send_chunks_with_retry(&chunk_message(text), |chunk| {
+        bot.send_message(chat_id, chunk)
+    })
+    .await
 }
 
 /// [`send_with_retry`] for an approval prompt: every chunk is an
-/// [`approval_message`].
+/// [`approval_message`], split by [`approval_chunks`].
 pub(super) async fn send_approval_with_retry(
     bot: &Bot,
     chat_id: ChatId,
     text: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    send_chunks_with_retry(text, |chunk| approval_message(bot, chat_id, chunk)).await
+    send_chunks_with_retry(&approval_chunks(text), |chunk| {
+        approval_message(bot, chat_id, chunk)
+    })
+    .await
+}
+
+/// An approval prompt split into Telegram messages, only between lines
+/// (`common::chunk_approval_prompt`, the lead's ruling R-T32).
+pub(super) fn approval_chunks(text: &str) -> Vec<String> {
+    crate::common::chunk_approval_prompt(text, TELEGRAM_MAX_LENGTH)
 }
 
 /// An approval prompt, or the acknowledgement of a reply to one, as a
@@ -54,14 +66,12 @@ pub(super) fn approval_message(bot: &Bot, chat_id: ChatId, text: &str) -> JsonRe
         })
 }
 
-/// Each chunk of `text` sent as `message` builds it, with the retries.
+/// Each of `chunks` sent as `message` builds it, with the retries.
 async fn send_chunks_with_retry(
-    text: &str,
+    chunks: &[String],
     message: impl Fn(&str) -> JsonRequest<SendMessage>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let chunks = chunk_message(text);
-
-    for chunk in &chunks {
+    for chunk in chunks {
         let mut attempts = 0;
         let max_retries = 3;
 

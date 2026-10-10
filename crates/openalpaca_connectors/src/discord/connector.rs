@@ -49,17 +49,23 @@ pub async fn send_with_retry(
     channel_id: ChannelId,
     text: &str,
 ) -> Result<(), String> {
-    send_chunks_with_retry(http, channel_id, text, plain_message).await
+    send_chunks_with_retry(http, channel_id, &chunk_message(text), plain_message).await
 }
 
 /// [`send_with_retry`] for an approval prompt or its acknowledgement: every
-/// chunk is an [`approval_message`].
+/// chunk is an [`approval_message`], split by [`approval_chunks`].
 async fn send_approval_with_retry(
     http: &twilight_http::Client,
     channel_id: ChannelId,
     text: &str,
 ) -> Result<(), String> {
-    send_chunks_with_retry(http, channel_id, text, approval_message).await
+    send_chunks_with_retry(http, channel_id, &approval_chunks(text), approval_message).await
+}
+
+/// An approval prompt split into Discord messages, only between lines
+/// (`common::chunk_approval_prompt`, the lead's ruling R-T32).
+fn approval_chunks(text: &str) -> Vec<String> {
+    crate::common::chunk_approval_prompt(text, DISCORD_MAX_LENGTH)
 }
 
 type ChannelId = twilight_model::id::Id<twilight_model::id::marker::ChannelMarker>;
@@ -90,16 +96,14 @@ fn approval_message<'a>(
     plain_message(http, channel_id, text).flags(MessageFlags::SUPPRESS_EMBEDS)
 }
 
-/// Each chunk of `text` sent as `message` builds it, with the retries.
+/// Each of `chunks` sent as `message` builds it, with the retries.
 async fn send_chunks_with_retry(
     http: &twilight_http::Client,
     channel_id: ChannelId,
-    text: &str,
+    chunks: &[String],
     message: for<'a> fn(&'a twilight_http::Client, ChannelId, &'a str) -> CreateMessage<'a>,
 ) -> Result<(), String> {
-    let chunks = chunk_message(text);
-
-    for chunk in &chunks {
+    for chunk in chunks {
         let mut attempts = 0;
         let max_retries = 3;
 
@@ -740,6 +744,33 @@ mod tests {
             .map(String::len)
             .collect();
         assert_eq!(lens, [2000, 1]);
+    }
+
+    /// The lead's ruling R-T32 at Discord's 2,000 bytes: an approval prompt
+    /// sent in several messages keeps every preview line indented, so no
+    /// message starts a line at the margin with the model's text — across
+    /// every chunk one line starts `Arguments:` and one `Reply /yes`, the
+    /// prompt's own — and every chunk fits a message.
+    #[test]
+    fn a_chunked_approval_prompt_keeps_every_preview_line_indented() {
+        let (args, preview) = crate::common::forging_edit_prompt(DISCORD_MAX_LENGTH);
+        let chunks = approval_chunks(&approval_prompt("file_edit", &args, Some(&preview), 1));
+
+        assert!(chunks.len() > 1, "the prompt is long enough to be split");
+        let starting = |head: &str| {
+            chunks
+                .iter()
+                .flat_map(|chunk| chunk.lines())
+                .filter(|line| line.starts_with(head))
+                .count()
+        };
+        assert_eq!(starting("Arguments:"), 1, "{chunks:#?}");
+        assert_eq!(starting("Reply /yes"), 1, "{chunks:#?}");
+        assert!(
+            chunks
+                .iter()
+                .all(|c| !c.is_empty() && c.len() <= DISCORD_MAX_LENGTH)
+        );
     }
 
     /// Discord keys the shared limiter by u64 channel snowflake; the limiter

@@ -1,4 +1,4 @@
-use super::delivery::{TELEGRAM_MAX_LENGTH, chunk_message};
+use super::delivery::{TELEGRAM_MAX_LENGTH, approval_chunks, chunk_message};
 use crate::common::KeyedRateLimiter;
 use std::time::Duration;
 
@@ -13,6 +13,34 @@ fn chunk_message_uses_the_telegram_limit() {
         .map(String::len)
         .collect();
     assert_eq!(lens, [4096, 1]);
+}
+
+/// The lead's ruling R-T32 at Telegram's 4,096 bytes: an approval prompt
+/// sent in several messages keeps every preview line indented, so no message
+/// starts a line at the margin with the model's text — across every chunk
+/// one line starts `Arguments:` and one `Reply /yes`, the prompt's own — and
+/// every chunk fits a message.
+#[test]
+fn a_chunked_approval_prompt_keeps_every_preview_line_indented() {
+    let (args, preview) = crate::common::forging_edit_prompt(TELEGRAM_MAX_LENGTH);
+    let prompt = crate::common::format_confirmation_prompt("file_edit", &args, Some(&preview), 1);
+    let chunks = approval_chunks(&prompt);
+
+    assert!(chunks.len() > 1, "the prompt is long enough to be split");
+    let starting = |head: &str| {
+        chunks
+            .iter()
+            .flat_map(|chunk| chunk.lines())
+            .filter(|line| line.starts_with(head))
+            .count()
+    };
+    assert_eq!(starting("Arguments:"), 1, "{chunks:#?}");
+    assert_eq!(starting("Reply /yes"), 1, "{chunks:#?}");
+    assert!(
+        chunks
+            .iter()
+            .all(|c| !c.is_empty() && c.len() <= TELEGRAM_MAX_LENGTH)
+    );
 }
 
 /// Telegram keys the shared limiter by i64 chat id, negative for groups; the
