@@ -6219,6 +6219,91 @@ Look.
     );
 }
 
+/// R42 / R-T6 on the skill tier (d6-surfaces-3): a file-based skill whose
+/// legacy `tools.allow` names `file_read` is handed `file_list` with it —
+/// the tool `file_read`'s not-found hint sends the model to — and one that
+/// also denies `file_read` is handed neither.
+#[tokio::test]
+async fn a_skill_allowed_file_read_by_name_is_handed_file_list_with_it() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let registry = ToolRegistry::default();
+    for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let registry = Arc::new(registry);
+    let tmp = tempfile::tempdir().unwrap();
+    for (dir, name, slash, deny) in [
+        ("reader", "Reader", "/read-it", ""),
+        ("denier", "Denier", "/deny-it", "  deny:\n    - file_read\n"),
+    ] {
+        std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+        std::fs::write(
+            tmp.path().join(dir).join("SKILL.md"),
+            format!(
+                "---\nname: \"{name}\"\ndescription: \"Reads files\"\ninvoke:\n  slash: \
+                 \"{slash}\"\n  mode: \"auto\"\ntools:\n  allow:\n    - file_read\n{deny}---\n\n\
+                 ## Instructions\n\nRead.\n"
+            ),
+        )
+        .unwrap();
+    }
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    catalog.set_availability_oracle(registry.clone());
+
+    let provider = crate::test_util::RecordingProvider::new("Read.");
+    let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
+    let bus = EventBus::default();
+    let gate = make_security_gate_with_registry(&bus, registry.clone());
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        Arc::new(catalog),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    let scope = crate::memory::scope_context::MemoryScopeContext::new(None);
+
+    for skill in ["Reader", "Denier"] {
+        orch.handle_skill_invocation(
+            Uuid::new_v4(),
+            "cli",
+            skill,
+            "read src/main.rs",
+            "test:cli",
+            &ConversationContext::default(),
+            None,
+            &scope,
+            None,
+            false,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .expect("the skill runs");
+    }
+
+    let offered: Vec<Vec<String>> = provider
+        .requests()
+        .iter()
+        .map(|request| request.tools.iter().map(|t| t.name.clone()).collect())
+        .collect();
+    assert_eq!(offered.len(), 2, "{offered:?}");
+    assert_eq!(offered[0], vec!["file_read", "file_list"]);
+    assert!(offered[1].is_empty(), "{offered:?}");
+}
+
 /// R44 + R28 (storage design §10), the file-skill tier: a `/slash` skill's
 /// model is told the conversation's scratch folder — named from the turn's
 /// conversation, which its tool context now carries — right before the

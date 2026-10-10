@@ -197,7 +197,7 @@ impl Orchestrator {
             } else if !skill_doc.frontmatter.tools.allow.is_empty() {
                 // Legacy fallback: direct tool name matching
                 let names = &skill_doc.frontmatter.tools.allow;
-                let resolved: Vec<openalpaca_llm::ToolDefinition> = names
+                let mut resolved: Vec<openalpaca_llm::ToolDefinition> = names
                     .iter()
                     .filter_map(|name| {
                         self.tool_registry.get(name).map(|t| t.definition.clone())
@@ -227,6 +227,23 @@ impl Orchestrator {
                             unattributed
                         );
                     }
+                }
+                // R42 / R-T6 on this tier (d6-surfaces-3): a name is a tool,
+                // not a capability, so `file_read` alone would leave out the
+                // `file_list` that comes with it — the tool file_read's
+                // not-found hint sends the model to. A skill that denies
+                // `file_read` is handed neither, as a template that does.
+                if resolved.iter().any(|d| d.name == "file_read")
+                    && !resolved.iter().any(|d| d.name == "file_list")
+                    && !skill_doc
+                        .frontmatter
+                        .tools
+                        .deny
+                        .iter()
+                        .any(|denied| denied == "file_read")
+                    && let Some(list) = self.tool_registry.get("file_list")
+                {
+                    resolved.push(list.definition.clone());
                 }
                 resolved
             } else {
