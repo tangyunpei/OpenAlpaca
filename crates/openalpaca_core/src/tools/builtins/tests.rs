@@ -3,7 +3,8 @@ use super::*;
 #[test]
 fn test_builtin_tools_count_without_db() {
     let tools = builtin_tools(None, None, None);
-    // 10 base tools (incl. artifact_write, read_result, file_edit, file_list and artifact_read) + 2 workspace tools
+    // 10 base tools (incl. artifact_write, read_result, file_edit, file_list
+    // and artifact_read) + 2 workspace tools
     assert_eq!(tools.len(), 12);
 }
 
@@ -184,7 +185,8 @@ async fn test_shell_execute_timeout_is_300s() {
 #[test]
 fn builtin_tools_register_the_file_tools_with_no_startup_root() {
     let tools = builtin_tools(None, None, None);
-    // 10 base tools (incl. artifact_write, read_result, file_edit, file_list and artifact_read) + 2 workspace tools
+    // 10 base tools (incl. artifact_write, read_result, file_edit, file_list
+    // and artifact_read) + 2 workspace tools
     assert_eq!(tools.len(), 12);
     let names: Vec<&str> = tools.iter().map(|t| t.definition.name.as_str()).collect();
     assert!(names.contains(&"file_read"));
@@ -375,7 +377,15 @@ async fn reading_tools_raise_no_card_under_a_broker() {
 
 #[test]
 fn annotations_for_builtin_readonly_tools_tagged() {
-    for name in ["file_read", "file_list", "artifact_read", "workspace_read", "memory_search", "web_fetch", "web_search"] {
+    for name in [
+        "file_read",
+        "file_list",
+        "artifact_read",
+        "workspace_read",
+        "memory_search",
+        "web_fetch",
+        "web_search",
+    ] {
         let ann = annotations_for_builtin(name).unwrap();
         assert_eq!(ann.read_only_hint, Some(true), "{name} should be read_only");
     }
