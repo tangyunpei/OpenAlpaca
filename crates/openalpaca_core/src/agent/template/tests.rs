@@ -337,6 +337,54 @@ fn every_shipped_template_grants_read_result() {
     assert!(seen >= 9, "every shipped template was checked, not {seen}");
 }
 
+/// Storage design §15 and R42. `writing_agent` gains `file_read` in the
+/// shipped template — it is asked to change documents, so it reads them
+/// first. And `file_list` comes with `file_read`, `artifact_read` with
+/// `read_result`: every shipped template that names `file_read` is handed
+/// both file readers and every one (all nine name `read_result`) is handed
+/// `artifact_read`, with no other template edit. Walked as the subagent spawn
+/// walks a template: `to_subagent`, then `resolve_agent_tools` over the
+/// builtins.
+#[test]
+fn shipped_templates_are_handed_the_stage_2_readers_by_the_capabilities_they_name() {
+    use crate::tools::ToolRegistry;
+    use crate::tools::builtins::builtin_tools;
+
+    let registry = ToolRegistry::default();
+    for tool in builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let registry = std::sync::Arc::new(registry);
+
+    let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents");
+    let mut seen = 0;
+    for entry in std::fs::read_dir(&agents).expect("the shipped templates are in the checkout") {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_agent_markdown(&body)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+        let agent = doc.to_subagent("a1", "task-1");
+        let surface: Vec<String> = crate::tools::resolve_agent_tools(&agent, &registry, None)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        let has = |name: &str| surface.iter().any(|n| n == name);
+        let names_file_read = doc.frontmatter.capabilities.iter().any(|c| c == "file_read");
+
+        assert_eq!(has("file_read"), names_file_read, "{}: {surface:?}", path.display());
+        assert_eq!(has("file_list"), names_file_read, "{}: {surface:?}", path.display());
+        assert!(has("artifact_read"), "{}: {surface:?}", path.display());
+        if doc.frontmatter.id == "writing_agent" {
+            assert!(names_file_read, "writing_agent reads files (§15)");
+        }
+        seen += 1;
+    }
+    assert!(seen >= 9, "every shipped template was checked, not {seen}");
+}
+
 /// Owner decision T34 (`tasks/api-fix-plan.md` §0; storage design §12 R30,
 /// Stage 0 fix F1). The shipped `system_agent` template used to end its
 /// frontmatter with `require_confirmation_for: ["file_delete"]`. An explicit,

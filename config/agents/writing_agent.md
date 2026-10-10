@@ -3,6 +3,7 @@ id: "writing_agent"
 name: "Writing Agent"
 description: "Focused on content writing, document generation, and text refinement"
 capabilities:
+  - "file_read"
   - "file_write"
   - "artifact_write"
   - "memory_read"
