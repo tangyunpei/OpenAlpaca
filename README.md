@@ -12,7 +12,8 @@ It runs on a local Ollama model with no API key, or on Anthropic and OpenAI mode
 - **Use a local model.** A local Ollama needs no API key and costs nothing.
 - **Hand off bigger jobs.** Ask for a workflow: a lead agent runs it in the background with subagents, then reports back in the chat.
 - **Steer work in flight.** Check, pause, resume, cancel or redirect a running workflow from the same conversation.
-- **Attach files** to a message, and keep what agents write as versioned artifacts.
+- **Work in your project.** In a project an agent reads, lists, writes and edits its files and runs commands there. Each write and each command asks you first, and what it writes is a real file of the project. Drafts and hand-offs are kept as versioned artifacts.
+- **Attach files** to a message.
 - **Keep a memory.** What you ask it to remember, and what it learns from what you say, are Markdown notes on your own disk — searched by keyword, with no model or download, and readable, editable and forgettable in the app, the CLI or any text editor.
 - **Add tools** with skills (markdown files), MCP servers and plugins. Each extension has an on/off switch.
 - **Reach it from chat apps:** Telegram, Discord, and iMessage on macOS.
@@ -169,11 +170,12 @@ Data always lives under `~/.openalpaca/`, on every platform:
 |---|---|
 | `state/` | The database, `discovery.json`, the lock, the master key, logs, backups, the memory control snapshots and the memory search index |
 | `config/`, `plugins/` | Runtime config and installed plugins |
-| `artifacts/`, `uploads/`, `sessions/` | What agents wrote, what you attached, and conversation logs |
+| `artifacts/`, `uploads/`, `sessions/` | By-products agents saved with no project, what you attached, and conversation logs |
+| `scratch/` | One working folder per conversation with no project, removed with the conversation |
 | `memory/` | Memory notes, one Markdown file each, per owner |
 | `projects/` | One folder per project — a git repository you chat in, or a folder you chose — with its `project.json`, artifacts, uploads and memory notes |
 
-Set `OPENALPACA_HOME_STORE=/absolute/path` to move the whole root, for example to try things in a sandbox. A project's files and notes live in its folder under `projects/`, named after its path, and nothing is written inside the project's own folder — with the daemon the app or `openalpaca daemon start` launches, which they start in the home store. A daemon started somewhere else (`cargo run -p openalpacad` in a checkout, say) still writes `file_write`'s plain files into the directory it was started in on a turn with a project, as the Daemon Manual's *Where an agent's files land* explains.
+Set `OPENALPACA_HOME_STORE=/absolute/path` to move the whole root, for example to try things in a sandbox. A project's files and notes live in its folder under `projects/`, named after its path. Nothing OpenAlpaca stores is written inside the project's own folder: an agent writes there only the files you ask for, each write asking first (Daemon Manual → *The Working Folder*).
 
 ## Documentation
 
@@ -210,7 +212,9 @@ bun run check && bun run test && bun run format:check && bun run build
 
 ## Status and limitations
 
-- **Moving target.** Config keys, API routes and the database schema change between commits. `001_baseline.sql` initializes schema version 1, `002_working_state.sql` upgrades it to 2 and `003_no_project_store_rows.sql` to 3, so a fresh database opens at 3, and the next migration will be `004`. A database from before that re-baseline (2026-09-28) — 42, the last schema with memory inside the database, or 43 to 45 — is refused rather than upgraded; see [Switching to the Markdown Memory Build](docs/Installation_Manual.md#switching-to-the-markdown-memory-build).
+- **Moving target.** Config keys, API routes and the database schema change between commits. `001_baseline.sql` initializes schema version 1, `002_working_state.sql` upgrades it to 2, `003_no_project_store_rows.sql` to 3 and `004_project_files.sql` to 4, so a fresh database opens at 4, and the next migration will be `005`. A database from before that re-baseline (2026-09-28) — 42, the last schema with memory inside the database, or 43 to 45 — is refused rather than upgraded; see [Switching to the Markdown Memory Build](docs/Installation_Manual.md#switching-to-the-markdown-memory-build).
+- **The shell is not confined to the project.** A command an agent runs starts in the project's folder, but an approved command runs as you and can reach any file you can. Every command asks first: read it before you approve it.
+- **Reading never asks.** In a project an agent can read any file there, `.env` included, and what it reads goes to the model that answers — a remote provider's when that model is not local.
 - **Platforms.** Developed on macOS. CI builds and tests on Linux. Windows has packaging scripts, but CI does not build the Rust workspace there.
 - **Plugins** can add tools, skills and agent templates. Plugin connectors and plugin LLM providers are declared in the manifest format but not wired. They do not work.
 - **MCP** is client-side and tools only. MCP resources and prompts are not implemented: the client has no resource or prompt methods. Serving MCP is not a goal.
