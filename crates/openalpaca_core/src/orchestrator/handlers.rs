@@ -56,6 +56,7 @@ impl Orchestrator {
             model_override,
             unattended,
             turn_sink,
+            session_id,
         } = request;
         let ack_start = Instant::now();
 
@@ -228,6 +229,7 @@ impl Orchestrator {
                 skill_name,
                 query,
                 &lane_key,
+                session_id.as_deref(),
                 &ctx,
                 owner_id,
                 &scope_ctx,
@@ -270,6 +272,7 @@ impl Orchestrator {
                 &principal,
                 &scope,
                 &lane_key,
+                session_id.as_deref(),
                 &ctx,
                 owner_id,
                 &scope_ctx,
@@ -291,6 +294,7 @@ impl Orchestrator {
                 &principal,
                 &scope,
                 &lane_key,
+                session_id.as_deref(),
                 &ctx,
                 owner_id,
                 &scope_ctx,
@@ -345,6 +349,7 @@ impl Orchestrator {
                 &principal,
                 &scope,
                 &lane_key,
+                session_id.as_deref(),
                 &ctx,
                 owner_id,
                 &scope_ctx,

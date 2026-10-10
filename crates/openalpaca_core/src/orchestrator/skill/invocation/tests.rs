@@ -216,6 +216,7 @@ async fn run_plugin_skill_as(
         "go",
         "test:cli",
         None,
+        None,
         &MemoryScopeContext::new(None),
         None,
         &doc,

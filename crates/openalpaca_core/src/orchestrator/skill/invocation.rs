@@ -43,6 +43,10 @@ impl Orchestrator {
         skill_name: &str,
         query: &str,
         lane_key: &str,
+        // R-T27 — the session the gateway resolved this turn into
+        // (`HandleRequest::session_id`): the conversation the turn's tools act
+        // for. `None` for a handler reached with no gateway.
+        turn_session: Option<&str>,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
@@ -99,6 +103,7 @@ impl Orchestrator {
                     executor.clone(),
                     query,
                     lane_key,
+                    turn_session,
                     owner_id,
                     scope_ctx,
                     stream_id,
@@ -791,8 +796,9 @@ impl Orchestrator {
                 source: Some(source.to_string()),
                 request_id: Some(request_id),
                 // R44 (storage design §10): the turn's conversation, which
-                // names its scratch folder when it has no project.
-                conversation_id: self.turn_conversation_id(lane_key),
+                // names its scratch folder when it has no project — the one
+                // the gateway resolved for this turn (R-T27), else the lane's.
+                conversation_id: self.turn_conversation_id(turn_session, lane_key),
                 // No run, no principal or scope, no workspace path, no agent
                 // instance (this path is not a subagent lane); the bus and
                 // session handles are the sandbox's to fill in at dispatch
@@ -1215,6 +1221,10 @@ impl Orchestrator {
         executor: Arc<dyn openalpaca_api::plugin_traits::PluginSkillExecutor>,
         query: &str,
         lane_key: &str,
+        // R-T27 — the session the gateway resolved this turn into
+        // (`HandleRequest::session_id`): the conversation the turn's tools act
+        // for. `None` for a handler reached with no gateway.
+        turn_session: Option<&str>,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
         stream_id: Option<&str>,
@@ -1298,7 +1308,7 @@ impl Orchestrator {
             // R44 (storage design §10): as on the file-skill tier — the
             // turn's conversation, for its scratch folder. A plugin skill
             // takes a query string, not messages, so no R28 line reaches it.
-            conversation_id: self.turn_conversation_id(lane_key),
+            conversation_id: self.turn_conversation_id(turn_session, lane_key),
             // As on the file-skill tier above: everything else unset, and
             // the bus and session handles filled in by the sandbox (T28).
             ..Default::default()

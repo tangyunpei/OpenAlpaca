@@ -40,6 +40,10 @@ impl Orchestrator {
         principal: &crate::security::policy::Principal,
         scope: &crate::security::policy::Scope,
         lane_key: &str,
+        // R-T27 — the session the gateway resolved this turn into
+        // (`HandleRequest::session_id`): the conversation the turn's tools act
+        // for. `None` for a handler reached with no gateway.
+        turn_session: Option<&str>,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
@@ -136,7 +140,8 @@ impl Orchestrator {
         // R44 (storage design §10): the conversation this turn belongs to,
         // read once — it names the turn's scratch folder when there is no
         // project, and it is the session this turn narrates into (§5.5).
-        let conversation_id = self.turn_conversation_id(lane_key);
+        // The one the gateway resolved for this turn (R-T27), else the lane's.
+        let conversation_id = self.turn_conversation_id(turn_session, lane_key);
         let tool_ctx = ToolContext {
             // T4: the main loop is not an agent template, but it *is*
             // somebody, and a confirmation card that reads "unknown is blocked

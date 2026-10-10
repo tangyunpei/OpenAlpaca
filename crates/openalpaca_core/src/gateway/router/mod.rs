@@ -148,6 +148,15 @@ pub struct HandleRequest {
     /// S1 — see [`GatewayRequest::turn_sink`]. `None` for every caller that
     /// has nowhere to put a live delta.
     pub turn_sink: Option<crate::chat::TurnSinkHandle>,
+    /// The conversation this turn belongs to: the session the gateway
+    /// resolved (or opened) for it when it persisted the user's message, and
+    /// pinned the assistant's answer to (§5.1). The turn's tools act for it
+    /// — its scratch folder when the turn has no project, R44 — so a
+    /// conversation opened or activated on the same lane while the turn runs
+    /// never takes the turn's files (the lead's ruling R-T27). `None` for a
+    /// handler reached with no gateway, which falls back to the lane's active
+    /// session.
+    pub session_id: Option<String>,
 }
 
 impl HandleRequest {
@@ -174,6 +183,7 @@ impl HandleRequest {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         }
     }
 }
@@ -496,6 +506,10 @@ impl Gateway {
             model_override: req.model_override,
             unattended: req.unattended,
             turn_sink: req.turn_sink,
+            // R-T27: the session this turn resolved when it began, so its
+            // tools act for this conversation, not whichever the lane points
+            // at by the time they run.
+            session_id: turn_session.clone(),
         };
         let handler_result = if req.attachments.is_empty() {
             self.handler.handle(handle_request).await

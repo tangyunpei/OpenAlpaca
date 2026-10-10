@@ -309,6 +309,7 @@ fn turn(content: &str) -> HandleRequest {
         model_override: None,
         unattended: false,
         turn_sink: None,
+        session_id: None,
     }
 }
 

@@ -175,6 +175,7 @@ async fn test_simple_query_echo() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
     assert!(result.is_ok());
@@ -199,6 +200,7 @@ async fn test_task_query_empty() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
     assert!(result.is_ok());
@@ -227,6 +229,7 @@ async fn test_task_control_cancel() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
     assert!(result.is_ok());
@@ -253,6 +256,7 @@ async fn test_permission_denied_external() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
     assert!(result.is_err());
@@ -332,6 +336,7 @@ async fn test_simple_query_with_mock_llm() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
     assert!(result.is_ok());
@@ -356,6 +361,7 @@ async fn test_input_sanitization_blocks_null_bytes() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
     assert!(result.is_err());
@@ -382,6 +388,7 @@ async fn test_security_gate_replaces_trust_gate() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
     assert!(result.is_err());
@@ -510,6 +517,7 @@ async fn test_slash_commands_bypass_llm() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -719,6 +727,7 @@ mod request_workspace_threading {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await
         .expect("turn should succeed");
@@ -827,6 +836,7 @@ mod project_turn_offers {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await
         .expect("the turn answers");
@@ -992,6 +1002,7 @@ async fn test_tool_intent_detected_and_executes() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -1078,6 +1089,7 @@ async fn test_tool_max_rounds_enforcement() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -1110,6 +1122,7 @@ async fn test_tool_intent_but_not_in_registry() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -1151,6 +1164,7 @@ async fn test_attachment_text_does_not_change_intent_classification() {
                 model_override: None,
                 unattended: false,
                 turn_sink: None,
+                session_id: None,
             },
             attachments,
         )
@@ -1186,6 +1200,7 @@ async fn test_empty_content_with_attachments_forces_simple_query() {
                 model_override: None,
                 unattended: false,
                 turn_sink: None,
+                session_id: None,
             },
             attachments,
         )
@@ -1286,6 +1301,7 @@ fn attachment_request(request_id: Uuid, content: &str) -> HandleRequest {
         model_override: None,
         unattended: false,
         turn_sink: None,
+        session_id: None,
     }
 }
 
@@ -1611,6 +1627,7 @@ async fn test_attachment_image_is_converted_to_base64_part() {
                 model_override: None,
                 unattended: false,
                 turn_sink: None,
+                session_id: None,
             },
             attachments,
         )
@@ -1672,6 +1689,7 @@ async fn test_attachment_image_read_failure_inserts_placeholder_text() {
                 model_override: None,
                 unattended: false,
                 turn_sink: None,
+                session_id: None,
             },
             attachments,
         )
@@ -1724,6 +1742,7 @@ async fn test_attachment_document_pending_adds_pending_text_part() {
                 model_override: None,
                 unattended: false,
                 turn_sink: None,
+                session_id: None,
             },
             attachments,
         )
@@ -1821,6 +1840,7 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
                 model_override: None,
                 unattended: false,
                 turn_sink: None,
+                session_id: None,
             },
             attachments,
         )
@@ -2348,6 +2368,7 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -2415,6 +2436,7 @@ async fn test_slash_skill_no_router_still_invokes_skill() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -2565,6 +2587,7 @@ async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -2630,6 +2653,7 @@ async fn send_steer(orch: &Orchestrator, content: &str) -> String {
         model_override: None,
         unattended: false,
         turn_sink: None,
+        session_id: None,
     })
     .await
     .unwrap()
@@ -2729,6 +2753,7 @@ async fn a_steer_command_carries_the_turns_resolved_project_root() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await
         .unwrap();
@@ -2988,6 +3013,7 @@ async fn send_tool_mode(orch: &Orchestrator, request_id: Uuid, content: &str) ->
         model_override: None,
         unattended: false,
         turn_sink: None,
+        session_id: None,
     })
     .await
     .unwrap()
@@ -3587,6 +3613,7 @@ async fn a_legacy_tools_allow_skill_is_attributed_on_both_the_top_level_and_the_
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -3898,6 +3925,7 @@ async fn an_explicit_slash_for_a_withheld_skill_returns_the_named_error_as_ok() 
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await
         .expect("the refusal is the reply, returned as Ok — never as Err");
@@ -3930,6 +3958,7 @@ async fn an_explicit_slash_for_a_withheld_skill_returns_the_named_error_as_ok() 
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await
         .expect("the legacy branch refuses as Ok(reply) too");
@@ -4097,6 +4126,7 @@ Dump.
         "Dumper",
         "dump it",
         "test:cli",
+        None,
         &ctx,
         None,
         &scope,
@@ -4150,6 +4180,7 @@ async fn the_top_level_invocation_site_refuses_on_the_same_predicate() {
                 skill,
                 "go",
                 "test:cli",
+                None,
                 &ctx,
                 None,
                 &scope,
@@ -4360,6 +4391,7 @@ async fn a_withdrawn_plugin_skill_is_attributed_to_its_plugin_on_slash() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await
         .expect("the tombstone answer is the reply");
@@ -5984,6 +6016,7 @@ async fn the_main_loop_is_budgeted_against_the_model_that_answers() {
         model_override: None,
         unattended: false,
         turn_sink: None,
+        session_id: None,
     })
     .await
     .expect("the turn is answered");
@@ -6051,6 +6084,7 @@ async fn a_main_loop_turn_with_no_project_is_told_its_scratch_folder() {
         model_override: None,
         unattended: false,
         turn_sink: None,
+        session_id: None,
     })
     .await
     .expect("the turn is answered");
@@ -6095,6 +6129,107 @@ async fn a_main_loop_turn_with_no_project_is_told_its_scratch_folder() {
         "the relay rules and the line sit right before the user's message"
     );
     assert!(!home_root.join("scratch").exists(), "a note makes no folder");
+}
+
+/// An orchestrator over `db` whose registry holds the builtins — so a
+/// scripted file tool really runs — answering from `steps`.
+fn scripted_turn_orchestrator_with_builtins(
+    steps: Vec<ScriptStep>,
+    db: openalpaca_storage::Database,
+) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(ScriptedTurnLlm::new(steps, requests.clone())),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let registry = Arc::new(ToolRegistry::default());
+    for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let bus = EventBus::default();
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus.clone(),
+        SystemPersona::default(),
+        Some(Arc::new(router)),
+        LoopConfig::default(),
+        make_security_gate(&bus),
+        registry,
+        Some(db),
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    (orch, requests)
+}
+
+/// The lead's ruling R-T27 (the whole-stage review's d4-folder-2): a turn's
+/// tools act for the conversation the gateway resolved the turn into —
+/// carried on `HandleRequest::session_id` — never for whichever session the
+/// lane points at by the time the handler reads it. Two windows on one lane
+/// race exactly so: the turn was persisted into S1, then another window's
+/// turn (or a New conversation click) opened S2 and made it the lane's
+/// active session. The turn's `file_list` acts in `scratch/<S1>/`, it is
+/// told that folder, and nothing of S2's is made.
+#[tokio::test]
+async fn a_turns_tools_act_in_the_conversation_its_request_carries_not_the_lanes_active_one() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let s1 = repo
+        .get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+    let s2 = repo.create_session("user1:cli", "cli", None, None).unwrap();
+    assert_eq!(
+        repo.active_session_id("user1:cli").unwrap().as_deref(),
+        Some(s2.id.as_str()),
+        "the lane has moved on to S2"
+    );
+    let (orch, requests) = scripted_turn_orchestrator_with_builtins(
+        vec![
+            ScriptStep::Call("file_list", serde_json::json!({"path": "."})),
+            ScriptStep::Say("Listed."),
+        ],
+        db,
+    );
+
+    orch.handle_message(HandleRequest {
+        session_id: Some(s1.id.clone()),
+        ..HandleRequest::new(
+            Uuid::new_v4(),
+            "cli",
+            "read file notes.md",
+            Principal::User {
+                global_id: "user1".to_string(),
+            },
+            Scope::Global,
+            "user1:cli",
+        )
+    })
+    .await
+    .expect("the turn is answered");
+
+    let scratch = home_root.join("scratch");
+    assert!(
+        scratch.join(&s1.id).is_dir(),
+        "file_list acted in the turn's own conversation's scratch folder"
+    );
+    assert!(
+        !scratch.join(&s2.id).exists(),
+        "nothing of the lane's active conversation was made"
+    );
+    let first = requests.lock().unwrap()[0].clone();
+    assert!(
+        first.messages.iter().any(|m| m
+            .content
+            .contains(&scratch.join(&s1.id).display().to_string())),
+        "the turn is told its own conversation's scratch folder"
+    );
 }
 
 /// **U1 on the skill tier.**
@@ -6176,6 +6311,7 @@ Look.
         "Looker",
         "look at it",
         "test:cli",
+        None,
         &ctx,
         None,
         &scope,
@@ -6280,6 +6416,7 @@ async fn a_skill_allowed_file_read_by_name_is_handed_file_list_with_it() {
             skill,
             "read src/main.rs",
             "test:cli",
+            None,
             &ConversationContext::default(),
             None,
             &scope,
@@ -6366,6 +6503,7 @@ Look.
         "Looker",
         "look at it",
         "test:cli",
+        None,
         &ConversationContext::default(),
         None,
         &scope,
@@ -7870,6 +8008,7 @@ async fn memory_suggestions_reach_only_an_attended_gui_turn() {
                 model_override: None,
                 unattended,
                 turn_sink: None,
+                session_id: None,
             })
             .await
             .unwrap()
@@ -10202,6 +10341,7 @@ mod memory_store_on_a_turn_with_no_project {
                 model_override: None,
                 unattended: false,
                 turn_sink: None,
+                session_id: None,
             })
             .await
             .unwrap();

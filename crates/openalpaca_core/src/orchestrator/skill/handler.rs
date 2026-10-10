@@ -36,6 +36,10 @@ impl Orchestrator {
         skill_name: &str,
         query: &str,
         lane_key: &str,
+        // R-T27 — the session the gateway resolved this turn into
+        // (`HandleRequest::session_id`): the conversation the turn's tools act
+        // for. `None` for a handler reached with no gateway.
+        turn_session: Option<&str>,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
@@ -65,6 +69,7 @@ impl Orchestrator {
                 skill_name,
                 query,
                 lane_key,
+                turn_session,
                 ctx,
                 owner_id,
                 scope_ctx,
