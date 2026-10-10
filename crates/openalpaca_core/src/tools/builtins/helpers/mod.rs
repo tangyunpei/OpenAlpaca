@@ -38,8 +38,7 @@ pub(super) enum FolderRules {
     /// canonical root **after** resolution, so a link into either folder is
     /// judged by where it lands.
     Project,
-    /// No rule beyond confinement: a conversation's scratch folder, and until
-    /// S3 and S4a every caller whose root is the daemon's starting directory.
+    /// No rule beyond confinement: a conversation's scratch folder.
     Plain,
 }
 
@@ -121,9 +120,9 @@ pub(super) fn named_folder(ctx: &ToolContext) -> Result<(PathBuf, FolderRules), 
 /// Resolve a relative path within the workspace and verify it doesn't escape
 /// the workspace boundary via symlinks or normalization.
 ///
-/// `workspace_root` is the explicit workspace directory (captured once at
-/// startup). This avoids depending on the process-global `current_dir()`,
-/// which can change or be unavailable.
+/// `workspace_root` is the call's working folder — the project's root, or
+/// the conversation's scratch folder (design §10, [`acting_folder`]) — never
+/// the process-global `current_dir()`.
 ///
 /// Returns the canonicalized absolute path on success — every component, the
 /// last included, resolved (R31's read side) — after R32's read rule when

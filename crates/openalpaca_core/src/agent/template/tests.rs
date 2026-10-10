@@ -370,7 +370,7 @@ fn the_shipped_system_agent_template_prompts_for_its_shell_and_file_writes() {
     // The registry the spawn checks against: the builtins, with the
     // annotations `builtin_tools` registers them with.
     let registry = ToolRegistry::default();
-    for tool in builtin_tools(None, None, None, None) {
+    for tool in builtin_tools(None, None, None) {
         registry.register(tool).unwrap();
     }
 

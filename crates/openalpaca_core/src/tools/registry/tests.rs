@@ -788,7 +788,7 @@ async fn test_workspace_read_requires_task_id() {
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
 
     let registry = ToolRegistry::default();
-    for tool in builtin_tools(Some(db), None, None, None) {
+    for tool in builtin_tools(Some(db), None, None) {
         registry.register(tool).unwrap();
     }
 

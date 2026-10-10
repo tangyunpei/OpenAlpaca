@@ -321,38 +321,21 @@ impl BuiltInTool for WorkspaceWriteTool {
     }
 }
 
-/// The folder `file_write`'s plain write resolves a relative path against
-/// (Round G's FW-1) until S4a moves it into the project: the root the caller
-/// passed, else the process's current directory (tests, the CLI). Every other
-/// file tool, the shell and `send` act in the call's working folder
-/// (`tools::working_folder`). S4a removes it with the `workspace_root`
-/// parameter.
-fn startup_root(workspace_root: Option<PathBuf>) -> PathBuf {
-    workspace_root
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-}
-
 /// Return all built-in tool definitions and implementations.
 ///
 /// The memory tools are not among them: the read surface is
 /// [`memory_read_tools`] over the daemon's `MemoryService`, and the writers
 /// are per-request (`main_loop_tool_set`).
 ///
-/// `workspace_root` is the directory `file_write`'s plain write lands in, on
-/// a project turn whose daemon was not started in the home store (Round G's
-/// FW-1; it goes with that write in Stage 2's pointer-row slice). If `None`,
-/// falls back to `std::env::current_dir()`. Every other file tool and the
-/// shell act in the call's working folder (`tools::working_folder`).
+/// No startup folder is captured: the file tools and the shell act in each
+/// call's working folder (design §10, `tools::working_folder`).
 pub fn builtin_tools(
     db: Option<openalpaca_storage::Database>,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
     web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
-    workspace_root: Option<PathBuf>,
 ) -> Vec<RegisteredTool> {
     let ws_cfg = web_search_config
         .unwrap_or_else(|| Arc::new(ArcSwap::from_pointee(WebSearchConfig::default())));
-
-    let ws_root = startup_root(workspace_root);
 
     let ws_db = db;
     // The daemon config the file, artifact and workspace tools share.
@@ -362,11 +345,11 @@ pub fn builtin_tools(
         web_search_tool(ws_cfg),
         web_fetch_tool(),
         file_read_tool(),
-        // The config carries §5.7's `snapshot_max_bytes` — the bound on the
-        // pre-edit image `file_write` takes before it overwrites a file — and
-        // the artifact caps; the database is the store a file not written
-        // into a project folder is saved to (G2).
-        file_write_tool(ws_root, ws_db.clone(), tool_cfg.clone()),
+        // The config carries ST-17's `snapshot_max_bytes` — the cap on the
+        // pre-edit copy `file_write` keeps before it replaces a project file
+        // — and the artifact caps; the database records a result file's
+        // pointer row (R35) and holds a by-product (no project).
+        file_write_tool(ws_db.clone(), tool_cfg.clone()),
         shell_execute_tool(),
         // §5.4's counterpart to the `results/` spill. Registered on every
         // surface because the stub the loop emits names it on every surface —
@@ -416,12 +399,11 @@ pub fn builtin_tools_with_persona_context(
     persona_ctx: PersonaToolContext,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
     web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
-    workspace_root: Option<PathBuf>,
     connector_send_provider: Option<ConnectorSendLock>,
 ) -> Vec<RegisteredTool> {
     // `send` resolves a file in the call's working folder (R26) and looks an
     // artifact id up in the store (R23): it takes the database, not a root.
-    let mut tools = builtin_tools(db.clone(), daemon_config, web_search_config, workspace_root);
+    let mut tools = builtin_tools(db.clone(), daemon_config, web_search_config);
     tools.push(update_persona_tool(persona_ctx));
     if let Some(provider) = connector_send_provider {
         tools.push(send::send_tool(provider, db));

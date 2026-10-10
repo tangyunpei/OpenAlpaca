@@ -28,13 +28,12 @@ pub(super) fn command_card(folder: &WorkingFolder) -> String {
 
 /// Where a write lands, for its card (R34).
 pub(super) enum WriteLanding<'a> {
+    /// A real file in the project (ST-10, ST-12). `replaces`: a file is there
+    /// now, and its content is kept in the conversation's log first (ST-17).
+    Project { root: &'a Path, replaces: bool },
     /// A by-product in `store`, the artifact store directory
     /// (`store_root(scope)?.join("artifacts")` — creates nothing).
     ByProduct { store: &'a Path },
-    /// The plain write at a startup root that is not the home store: a daemon
-    /// started by hand in a folder (Round G's exception, until the write
-    /// moves into the project).
-    StartupFolder { dir: &'a Path },
 }
 
 /// The card of a file write: the file, where it lands, and — when the path
@@ -48,10 +47,22 @@ pub(super) fn write_card(path: &str, landing: WriteLanding<'_>) -> String {
             shown.text,
             store.display()
         ),
-        WriteLanding::StartupFolder { dir } => format!(
-            "Writes {} in {}, the folder the daemon was started in.",
+        WriteLanding::Project {
+            root,
+            replaces: false,
+        } => format!(
+            "Writes {} in the project folder {}.",
             shown.text,
-            dir.display()
+            root.display()
+        ),
+        WriteLanding::Project {
+            root,
+            replaces: true,
+        } => format!(
+            "Replaces {} in the project folder {}; its current content is kept in this \
+             conversation's log.",
+            shown.text,
+            root.display()
         ),
     };
     match hidden_notice(shown.hidden) {
@@ -106,15 +117,28 @@ mod tests {
     }
 
     #[test]
-    fn a_startup_folder_write_card_names_the_folder_the_daemon_was_started_in() {
+    fn a_project_write_card_names_the_folder_and_whether_a_file_is_replaced() {
+        let root = Path::new("/Users/me/dev/app");
         assert_eq!(
             write_card(
-                "out/result.txt",
-                WriteLanding::StartupFolder {
-                    dir: Path::new("/srv/work")
+                "src/main.rs",
+                WriteLanding::Project {
+                    root,
+                    replaces: false
                 }
             ),
-            "Writes out/result.txt in /srv/work, the folder the daemon was started in."
+            "Writes src/main.rs in the project folder /Users/me/dev/app."
+        );
+        assert_eq!(
+            write_card(
+                "src/main.rs",
+                WriteLanding::Project {
+                    root,
+                    replaces: true
+                }
+            ),
+            "Replaces src/main.rs in the project folder /Users/me/dev/app; its current content is \
+             kept in this conversation's log."
         );
     }
 

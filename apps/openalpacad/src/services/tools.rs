@@ -47,9 +47,8 @@ pub(super) async fn build_tool_registry(
         bus: bus.clone(),
         max_backups: Some(crate::bootstrap::PERSONA_MAX_BACKUPS),
     };
-    // Capture workspace root once at startup for file tools, avoiding
-    // reliance on the process-global current_dir() at tool execution time.
-    let workspace_root = std::env::current_dir().ok();
+    // The file tools and the shell act in each call's working folder
+    // (design §10), so nothing here captures the daemon's directory.
     // Create the shared lock for the send tool's connector send provider.
     // The actual provider is set post-construction in main.rs after ConnectorSendBridge is created.
     let connector_send_lock: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
@@ -58,7 +57,6 @@ pub(super) async fn build_tool_registry(
         persona_ctx,
         Some(daemon_config.clone()),
         Some(web_search_config.clone()),
-        workspace_root,
         Some(connector_send_lock.clone()),
     ) {
         // Built-in tools have known-good names — unwrap is safe.

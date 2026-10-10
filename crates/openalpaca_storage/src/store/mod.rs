@@ -475,18 +475,6 @@ pub fn ensure_store(scope: &StoreScope) -> Result<PathBuf> {
     Ok(root)
 }
 
-/// Whether a store root *is* the home root — canonicalized, so a link to it
-/// answers for the store it reaches. Paths that cannot be canonicalized are
-/// compared as written; with no home directory to compare against the answer
-/// is `false`. `file_write` asks the same question of its workspace root (G2).
-pub fn is_the_home_root(root: &Path) -> bool {
-    let Ok(home) = home_root() else {
-        return false;
-    };
-    let resolve = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    resolve(root) == resolve(&home)
-}
-
 /// `store_root(scope)/<kind>` — created on use (reserved names stay absent
 /// until something needs them). A project's folder exists from its
 /// registration, so nothing is seeded first; a root with no folder is

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn test_builtin_tools_count_without_db() {
-    let tools = builtin_tools(None, None, None, None);
+    let tools = builtin_tools(None, None, None);
     // 7 base tools (incl. artifact_write and read_result) + 2 workspace tools
     assert_eq!(tools.len(), 9);
 }
@@ -12,7 +12,7 @@ fn test_builtin_tools_count_with_db() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-    let tools = builtin_tools(Some(db), Some(dc), None, None);
+    let tools = builtin_tools(Some(db), Some(dc), None);
     // 7 base tools + 2 workspace tools: the memory tools are the service's
     // (`memory_read_tools`), not this list's.
     assert_eq!(tools.len(), 9);
@@ -20,7 +20,7 @@ fn test_builtin_tools_count_with_db() {
 
 #[test]
 fn test_all_tools_have_valid_definitions() {
-    for tool in builtin_tools(None, None, None, None) {
+    for tool in builtin_tools(None, None, None) {
         assert!(!tool.definition.name.is_empty());
         assert!(!tool.definition.description.is_empty());
         assert!(tool.definition.parameters.is_object());
@@ -42,7 +42,7 @@ fn test_builtin_tools_with_persona_context_includes_update_persona() {
         max_backups: None,
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-    let tools = builtin_tools_with_persona_context(Some(db), ctx, Some(dc), None, None, None);
+    let tools = builtin_tools_with_persona_context(Some(db), ctx, Some(dc), None, None);
     // 9 base (7 + 2 workspace) + 1 update_persona = 10 (no send since connector_send_provider is None)
     assert_eq!(tools.len(), 10, "Should have 10 tools (9 base + update_persona)");
     assert!(
@@ -69,9 +69,7 @@ fn test_all_tools_have_strict_enabled() {
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let provider: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
-    let tools = builtin_tools_with_persona_context(
-        Some(db), ctx, Some(dc), None, None, Some(provider),
-    );
+    let tools = builtin_tools_with_persona_context(Some(db), ctx, Some(dc), None, Some(provider));
     for tool in &tools {
         assert_eq!(
             tool.definition.strict, Some(true),
@@ -91,7 +89,7 @@ fn test_all_tools_have_strict_enabled() {
 
 #[test]
 fn test_all_tool_descriptions_are_detailed() {
-    let tools = builtin_tools(None, None, None, None);
+    let tools = builtin_tools(None, None, None);
     for tool in &tools {
         assert!(
             tool.definition.description.len() > 100,
@@ -119,9 +117,7 @@ fn test_complex_tools_have_input_examples() {
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let provider: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
-    let tools = builtin_tools_with_persona_context(
-        Some(db), ctx, Some(dc), None, None, Some(provider),
-    );
+    let tools = builtin_tools_with_persona_context(Some(db), ctx, Some(dc), None, Some(provider));
 
     let tools_needing_examples = ["update_persona", "send"];
     for tool in &tools {
@@ -173,32 +169,16 @@ async fn test_shell_execute_timeout_is_300s() {
     }
 }
 
-// --- Issue 5: Workspace root override vs current_dir() ---
-
+/// S4a: `file_write` acts in each call's working folder, so the registry
+/// captures no startup folder — the base set is the same nine tools.
 #[test]
-fn test_builtin_tools_uses_explicit_workspace_root() {
-    let dir = tempfile::tempdir().unwrap();
-    let ws_root = dir.path().to_path_buf();
-
-    // Pass an explicit workspace root — should not fall back to current_dir()
-    let tools = builtin_tools(None, None, None, Some(ws_root.clone()));
+fn builtin_tools_register_the_file_tools_with_no_startup_root() {
+    let tools = builtin_tools(None, None, None);
     // 7 base tools (incl. artifact_write and read_result) + 2 workspace tools
     assert_eq!(tools.len(), 9);
-
-    // Verify tools were created (they compile and register without error
-    // when given an explicit workspace root).
-    let tool_names: Vec<&str> = tools.iter().map(|t| t.definition.name.as_str()).collect();
-    assert!(tool_names.contains(&"file_read"));
-    assert!(tool_names.contains(&"file_write"));
-}
-
-#[test]
-fn test_builtin_tools_falls_back_to_current_dir_when_none() {
-    // When workspace_root is None, should fall back to current_dir()
-    // This must not panic even if current_dir() is available.
-    let tools = builtin_tools(None, None, None, None);
-    // 7 base tools (incl. artifact_write and read_result) + 2 workspace tools
-    assert_eq!(tools.len(), 9);
+    let names: Vec<&str> = tools.iter().map(|t| t.definition.name.as_str()).collect();
+    assert!(names.contains(&"file_read"));
+    assert!(names.contains(&"file_write"));
 }
 
 // --- json_to_cli_args ---
@@ -272,7 +252,7 @@ fn annotations_for_builtin_by_product_writers_never_prompt() {
     }
 
     let registry = ToolRegistry::default();
-    for tool in builtin_tools(None, None, None, None) {
+    for tool in builtin_tools(None, None, None) {
         registry.register(tool).unwrap();
     }
     let policy = SandboxPolicy::from_constraints("writing_agent", &AgentConstraints::default());
@@ -308,7 +288,7 @@ async fn reading_tools_raise_no_card_under_a_broker() {
     let gp = GuardedProject::new();
     std::fs::write(gp.root.join("notes.txt"), "read me\n").unwrap();
     let registry = ToolRegistry::default();
-    for tool in builtin_tools(None, None, None, Some(gp.root.clone())) {
+    for tool in builtin_tools(None, None, None) {
         registry.register(tool).unwrap();
     }
     let bus = EventBus::default();
@@ -919,7 +899,7 @@ mod workspace_artifact_spill {
     #[tokio::test]
     async fn workspace_write_refuses_store_owned_keys() {
         let fx = Fixture::new();
-        let tool = builtin_tools(Some(fx.db.clone()), None, None, None)
+        let tool = builtin_tools(Some(fx.db.clone()), None, None)
             .into_iter()
             .find(|t| t.definition.name == "workspace_write")
             .unwrap();
@@ -1326,7 +1306,7 @@ mod read_result {
     /// tool that has to exist on every surface, decided allowlist or not.
     #[test]
     fn it_is_registered_with_the_builtins() {
-        let tools = builtin_tools(None, None, None, None);
+        let tools = builtin_tools(None, None, None);
         let found = tools
             .iter()
             .find(|t| t.definition.name == "read_result")
@@ -1571,17 +1551,11 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let provider: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
-    let mut definitions: Vec<ToolDefinition> = builtin_tools_with_persona_context(
-        Some(db.clone()),
-        ctx,
-        Some(dc),
-        None,
-        None,
-        Some(provider),
-    )
-    .into_iter()
-    .map(|t| t.definition)
-    .collect();
+    let mut definitions: Vec<ToolDefinition> =
+        builtin_tools_with_persona_context(Some(db.clone()), ctx, Some(dc), None, Some(provider))
+            .into_iter()
+            .map(|t| t.definition)
+            .collect();
     let service = std::sync::Arc::new(crate::memory::service::MemoryService::new(
         Some(db),
         openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
@@ -1716,13 +1690,10 @@ fn every_first_party_builtin_says_its_arguments_reach_no_program() {
         max_backups: None,
     };
     let provider: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
-    let tools = builtin_tools_with_persona_context(
-        None,
-        ctx,
-        None,
-        None,
-        Some(dir.path().to_path_buf()),
-        Some(provider),
+    let tools = builtin_tools_with_persona_context(None, ctx, None, None, Some(provider));
+    assert!(
+        tools.iter().any(|t| t.definition.name == "send"),
+        "send is on the list"
     );
     assert!(tools.iter().any(|t| t.definition.name == "send"), "send is on the list");
     for tool in &tools {
