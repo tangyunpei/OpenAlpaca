@@ -1,4 +1,4 @@
-use crate::tools::platform::{RunFailure, run_bounded, shell_command};
+use crate::tools::platform::{RunFailure, run_bounded, shell_command, shown_output};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use crate::tools::working_folder::{WorkingFolderRefusal, working_folder};
 use async_trait::async_trait;
@@ -42,12 +42,9 @@ impl ShellExecuteTool {
 
         // Each stream at most 512 KB: `run_bounded` kept no more than that
         // and one byte while the command ran (`find /` or `yes` included,
-        // R-T28), and the cut to the cap is here.
-        const MAX_OUTPUT_BYTES: usize = crate::tools::platform::OUTPUT_CAP;
-        let stdout_raw = &output.stdout;
-        let stderr_raw = &output.stderr;
-        let stdout = String::from_utf8_lossy(&stdout_raw[..stdout_raw.len().min(MAX_OUTPUT_BYTES)]);
-        let stderr = String::from_utf8_lossy(&stderr_raw[..stderr_raw.len().min(MAX_OUTPUT_BYTES)]);
+        // R-T28), and the cut to the cap, with its line, is here.
+        let stdout = shown_output(&output.stdout, "stdout");
+        let stderr = shown_output(&output.stderr, "stderr");
 
         if output.status.success() {
             let mut result = String::new();
@@ -381,6 +378,44 @@ mod preview_tests {
     // imports it only from Step 3 on, and Step 2 must compile.
     fn command_args(command: &str) -> serde_json::Value {
         serde_json::json!({ "command": command })
+    }
+
+    /// Residual X7: a command that wrote more than the 512 KB a stream keeps
+    /// is told so — the kept text, then one line naming the cut — where a
+    /// command that wrote exactly the cap shows no such line; the model can
+    /// tell the two apart.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cut_output_says_it_was_cut() {
+        let gp = crate::test_util::GuardedProject::new();
+        let cap = crate::tools::platform::OUTPUT_CAP;
+        let run = |bytes: usize| {
+            let ctx = gp.ctx();
+            async move {
+                ShellExecuteTool
+                    .execute_with_context(
+                        &command_args(&format!("head -c {bytes} /dev/zero | tr '\\0' a")),
+                        &ctx,
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let cut = run(cap + 100_000).await;
+        let marker = "\n[stdout cut at 512 KB; the rest was not kept]";
+        assert!(
+            cut.ends_with(marker),
+            "{} bytes, the last 60 reversed: {:?}",
+            cut.len(),
+            cut.chars().rev().take(60).collect::<String>()
+        );
+        assert_eq!(cut.len(), cap + marker.len());
+        assert!(cut.as_bytes()[..cap].iter().all(|b| *b == b'a'));
+
+        let whole = run(cap).await;
+        assert_eq!(whole.len(), cap, "exactly the cap is shown whole");
+        assert!(!whole.contains("cut at"));
     }
 
     #[cfg(unix)]

@@ -600,17 +600,12 @@ impl BuiltInTool for ScriptToolBuiltIn {
 
         // Each stream at most 512 KB, the command backend's limit:
         // `run_bounded` kept no more than that and one byte while the script
-        // ran (R-T28), and the cut to the cap is here.
-        const MAX_SCRIPT_OUTPUT_BYTES: usize = crate::tools::platform::OUTPUT_CAP;
+        // ran (R-T28), and the cut to the cap, with its line (residual X7),
+        // is here. A failure shows only the first 500 characters of stderr.
         if output.status.success() {
-            let stdout = String::from_utf8_lossy(
-                &output.stdout[..output.stdout.len().min(MAX_SCRIPT_OUTPUT_BYTES)],
-            );
-            Ok(stdout.to_string())
+            Ok(crate::tools::platform::shown_output(&output.stdout, "stdout"))
         } else {
-            let stderr = String::from_utf8_lossy(
-                &output.stderr[..output.stderr.len().min(MAX_SCRIPT_OUTPUT_BYTES)],
-            );
+            let stderr = crate::tools::platform::shown_output(&output.stderr, "stderr");
             Err(format!(
                 "Script failed (exit {}): {}",
                 output.status.code().unwrap_or(-1),

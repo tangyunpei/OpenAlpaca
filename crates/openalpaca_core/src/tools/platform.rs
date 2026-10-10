@@ -28,6 +28,22 @@ pub fn shell_command(cmd: &str) -> tokio::process::Command {
 /// command wrote more than this, and the tool cuts to the cap.
 pub const OUTPUT_CAP: usize = 512 * 1024;
 
+/// One output stream as a tool shows it (residual X7): its first
+/// [`OUTPUT_CAP`] bytes as text (an invalid sequence, or a character the cap
+/// splits, read as U+FFFD), and — when [`run_bounded`] kept the byte past the
+/// cap, which says the command wrote more — one more line naming the cut, so
+/// the model can tell output that was cut from output that was exactly the
+/// cap. `stream` names it: `stdout` or `stderr`.
+pub fn shown_output(kept: &[u8], stream: &str) -> String {
+    let mut text = String::from_utf8_lossy(&kept[..kept.len().min(OUTPUT_CAP)]).into_owned();
+    if kept.len() > OUTPUT_CAP {
+        text.push_str(&format!(
+            "\n[{stream} cut at 512 KB; the rest was not kept]"
+        ));
+    }
+    text
+}
+
 /// Why [`run_bounded`] produced no output.
 #[derive(Debug)]
 pub enum RunFailure {
@@ -48,7 +64,8 @@ pub enum RunFailure {
 /// Each stream is kept to its first [`OUTPUT_CAP`] bytes and one more, which
 /// says the command wrote more; the rest is read and dropped while the
 /// command runs, so it never blocks on a full pipe and its output never
-/// fills the daemon's memory (R-T28). The caller cuts to the cap.
+/// fills the daemon's memory (R-T28). The caller cuts to the cap and says
+/// so ([`shown_output`]).
 ///
 /// unix: the child is started in a new process group (`process_group(0)`).
 /// A guard owning the `Child` sends `killpg(pgid, SIGKILL)` on every exit
@@ -106,12 +123,18 @@ pub async fn run_bounded(mut cmd: Command, timeout: Duration) -> Result<Output, 
 /// on a full pipe and the daemon never holds more than that of one stream.
 /// Nothing for a pipe not taken.
 async fn read_bounded(pipe: Option<impl AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    if let Some(mut pipe) = pipe {
-        const KEEP: u64 = OUTPUT_CAP as u64 + 1;
-        (&mut pipe).take(KEEP).read_to_end(&mut bytes).await?;
-        tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await?;
-    }
+    const KEEP: usize = OUTPUT_CAP + 1;
+    let Some(mut pipe) = pipe else {
+        return Ok(Vec::new());
+    };
+    // Sized once to what is kept: a buffer grown by doubling from empty
+    // would end at twice the cap when its last byte arrived (residual X7).
+    let mut bytes = Vec::with_capacity(KEEP);
+    (&mut pipe)
+        .take(KEEP as u64)
+        .read_to_end(&mut bytes)
+        .await?;
+    tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await?;
     Ok(bytes)
 }
 

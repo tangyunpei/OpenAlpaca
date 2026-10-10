@@ -1474,15 +1474,13 @@ async fn execute_command(
     };
 
     // Each stream at most 512 KB: `run_bounded` kept no more than that and
-    // one byte while the command ran (R-T28), and the cut to the cap is here.
-    const MAX_OUTPUT_BYTES: usize = crate::tools::platform::OUTPUT_CAP;
-    let stdout_raw = &output.stdout;
-    let stderr_raw = &output.stderr;
-    let stdout = String::from_utf8_lossy(&stdout_raw[..stdout_raw.len().min(MAX_OUTPUT_BYTES)]);
-    let stderr = String::from_utf8_lossy(&stderr_raw[..stderr_raw.len().min(MAX_OUTPUT_BYTES)]);
+    // one byte while the command ran (R-T28), and the cut to the cap, with
+    // its line (residual X7), is here.
+    let stdout = crate::tools::platform::shown_output(&output.stdout, "stdout");
+    let stderr = crate::tools::platform::shown_output(&output.stderr, "stderr");
 
     if output.status.success() {
-        Ok(stdout.to_string())
+        Ok(stdout)
     } else {
         Err(format!(
             "Command failed (exit {}): {}{}",
