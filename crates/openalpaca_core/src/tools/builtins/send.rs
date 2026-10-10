@@ -4,12 +4,16 @@ use super::helpers::{
     FolderRules, StoreAccess, is_store_owned_path, is_store_owned_resolved, resolve_workspace_path,
 };
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
+use crate::utils::text::{escape_hidden_line, hidden_notice};
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::repository::TaskRepository;
 use openalpaca_storage::{ArtifactStore, Database};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// The tail of a refusal for an argument only a file send needs.
+const FILE_ONLY: &str = " (required for action=\"file\")";
 
 struct SendTool {
     provider: ConnectorSendLock,
@@ -24,10 +28,26 @@ struct SendTool {
 
 /// The file a `send` with action `file` delivers (R23).
 struct SendFile {
-    /// Its resolved absolute path: what the connector is handed.
+    /// Its resolved absolute path: what the card names and the connector is
+    /// handed.
     path: String,
+    /// Its size, for the card.
+    bytes: u64,
     /// A by-product's own MIME type, used when the call names none.
     mime_type: Option<String>,
+}
+
+/// A string argument the call cannot go without, refused in one wording for
+/// the card and for the send.
+fn required<'a>(
+    arguments: &'a serde_json::Value,
+    key: &str,
+    note: &str,
+) -> Result<&'a str, String> {
+    arguments
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("Missing required parameter: {key}{note}"))
 }
 
 /// Whose by-products a call may send: the turn's owner, else, on a run's
@@ -50,6 +70,28 @@ fn turn_owner(db: &Database, ctx: &ToolContext) -> Result<String, String> {
     })
 }
 
+/// R23's card (interfaces §4.3): the file as resolved, its size, where it
+/// goes and under what name. Each value is shown escaped, because a model or
+/// a file on disk chose it (Gotchas). The count of what was escaped goes on
+/// its own line.
+fn file_card(file: &SendFile, channel: &str, recipient: &str, filename: &str) -> String {
+    let path = escape_hidden_line(&file.path);
+    let channel = escape_hidden_line(channel);
+    let recipient = escape_hidden_line(recipient);
+    let filename = escape_hidden_line(filename);
+    let mut card = format!(
+        "Sends {} ({} bytes) to {} recipient {} as {}.",
+        path.text, file.bytes, channel.text, recipient.text, filename.text
+    );
+    if let Some(notice) =
+        hidden_notice(path.hidden + channel.hidden + recipient.hidden + filename.hidden)
+    {
+        card.push('\n');
+        card.push_str(&notice);
+    }
+    card
+}
+
 impl SendTool {
     fn acquire_provider(
         &self,
@@ -64,7 +106,8 @@ impl SendTool {
     }
 
     /// R23: the file a `send` with action `file` delivers, named by
-    /// `file_path` or by `artifact_id` (exactly one).
+    /// `file_path` or by `artifact_id` (exactly one). The card and the send
+    /// locate it the same way, so the card names what is sent.
     fn locate(
         &self,
         arguments: &serde_json::Value,
@@ -74,25 +117,20 @@ impl SendTool {
         let artifact_id = arguments.get("artifact_id").and_then(|v| v.as_str());
         match (file_path, artifact_id) {
             (Some(_), Some(_)) => Err("Give file_path or artifact_id, not both.".to_string()),
-            (None, None) => Err(
-                "Missing required parameter: file_path or artifact_id (required for action=\"file\")"
-                    .to_string(),
-            ),
-            (Some(file_path), None) => Ok(SendFile {
-                path: self.resolve(file_path)?,
-                mime_type: None,
-            }),
+            (None, None) => Err(format!(
+                "Missing required parameter: file_path or artifact_id{FILE_ONLY}"
+            )),
+            (Some(file_path), None) => self.resolve(file_path),
             (None, Some(id)) => self.artifact(id, ctx),
         }
     }
 
-    /// R23: the absolute path of the file `file_path` names, resolved as
-    /// `file_read` resolves one — relative, no `..`, every component (the
-    /// last included) canonicalized and under the root — and refused, before
-    /// and after resolution, inside the store's `state/`, as `file_read`
-    /// refuses it until S3 takes both tools' store rules away with the root
-    /// (R33). This path, not the argument, is what the connector is handed.
-    fn resolve(&self, file_path: &str) -> Result<String, String> {
+    /// R23: the file `file_path` names, resolved as `file_read` resolves one
+    /// — relative, no `..`, every component (the last included) canonicalized
+    /// and under the root — and refused, before and after resolution, inside
+    /// the store's `state/`, as `file_read` refuses it until S3 takes both
+    /// tools' store rules away with the root (R33).
+    fn resolve(&self, file_path: &str) -> Result<SendFile, String> {
         let refuse = |what: &str| {
             format!(
                 "Sending '{file_path}' is refused: it is inside {what}, which belongs to the \
@@ -113,17 +151,22 @@ impl SendTool {
         if !metadata.is_file() {
             return Err(format!("'{file_path}' is not a file."));
         }
-        resolved.into_os_string().into_string().map_err(|_| {
+        let path = resolved.into_os_string().into_string().map_err(|_| {
             format!(
                 "'{file_path}' resolves to a path that is not UTF-8 text, which no channel can send."
             )
+        })?;
+        Ok(SendFile {
+            path,
+            bytes: metadata.len(),
+            mime_type: None,
         })
     }
 
     /// R23: a by-product of the turn's owner, by its id: its head file as the
     /// store recorded it, refused when the bytes are gone. Read only. The
     /// hand-edit check a Library read makes (`resolve_content`) can record a
-    /// version, and the card (S1.5) shares this lookup and must write nothing.
+    /// version, and the card shares this lookup and must write nothing.
     fn artifact(&self, id: &str, ctx: &ToolContext) -> Result<SendFile, String> {
         let db = self.db.as_ref().ok_or_else(|| {
             format!("send cannot look up artifact '{id}' here: there is no database.")
@@ -133,14 +176,18 @@ impl SendTool {
             .get(id, &owner)
             .map_err(|e| format!("Failed to look up artifact '{id}': {e}"))?
             .ok_or_else(|| format!("send: no artifact '{id}' of yours."))?;
-        if !std::path::Path::new(&record.storage_path).is_file() {
-            return Err(format!(
-                "send: the bytes of '{id}' are gone ({}).",
-                record.storage_path
-            ));
-        }
+        let metadata = std::fs::metadata(&record.storage_path)
+            .ok()
+            .filter(std::fs::Metadata::is_file)
+            .ok_or_else(|| {
+                format!(
+                    "send: the bytes of '{id}' are gone ({}).",
+                    record.storage_path
+                )
+            })?;
         Ok(SendFile {
             path: record.storage_path,
+            bytes: metadata.len(),
             mime_type: Some(record.mime_type),
         })
     }
@@ -158,43 +205,20 @@ impl BuiltInTool for SendTool {
         arguments: &serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<String, String> {
-        let action = arguments
-            .get("action")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "Missing required parameter: action".to_string())?;
-
-        let channel = arguments
-            .get("channel")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "Missing required parameter: channel".to_string())?;
-
-        let recipient = arguments
-            .get("recipient")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "Missing required parameter: recipient".to_string())?;
+        let action = required(arguments, "action", "")?;
+        let channel = required(arguments, "channel", "")?;
+        let recipient = required(arguments, "recipient", "")?;
 
         // Validate action-specific parameters before acquiring the provider.
         match action {
             "message" => {
-                let content = arguments
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        "Missing required parameter: content (required for action=\"message\")"
-                            .to_string()
-                    })?;
-
+                let content =
+                    required(arguments, "content", " (required for action=\"message\")")?;
                 let provider = self.acquire_provider()?;
                 provider.send_message(channel, recipient, content).await
             }
             "file" => {
-                let filename = arguments
-                    .get("filename")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        "Missing required parameter: filename (required for action=\"file\")"
-                            .to_string()
-                    })?;
+                let filename = required(arguments, "filename", FILE_ONLY)?;
                 let caption = arguments
                     .get("caption")
                     .and_then(|v| v.as_str())
@@ -236,6 +260,24 @@ impl BuiltInTool for SendTool {
                 other
             )),
         }
+    }
+
+    /// R23 (interfaces §4.3): a file send's card names the resolved file, its
+    /// size and where it goes. A send that would be refused raises no card. A
+    /// message keeps the ordinary card, its text shown as written.
+    async fn confirmation_preview(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<Option<String>, String> {
+        if arguments.get("action").and_then(|v| v.as_str()) != Some("file") {
+            return Ok(None);
+        }
+        let channel = required(arguments, "channel", "")?;
+        let recipient = required(arguments, "recipient", "")?;
+        let filename = required(arguments, "filename", FILE_ONLY)?;
+        let file = self.locate(arguments, ctx)?;
+        Ok(Some(file_card(&file, channel, recipient, filename)))
     }
 }
 
@@ -833,6 +875,109 @@ mod tests {
             err,
             "send cannot send an artifact on this turn: it has no owner context (it was not \
              sent on a person's behalf), and every artifact belongs to an owner."
+        );
+    }
+
+    // ── R23: the card names what is sent (storage design §11, interfaces §4.3) ──
+
+    #[tokio::test]
+    async fn a_file_card_names_the_resolved_path_its_size_and_where_it_goes() {
+        let root = root_with_report();
+        let sender = Arc::new(RecordingSender::default());
+        let card = tool_at(root.path(), &sender)
+            .confirmation_preview(&file_args("reports/q3.pdf"), &ToolContext::default())
+            .await;
+        let canonical = root.path().canonicalize().unwrap();
+        assert_eq!(
+            card,
+            Ok(Some(format!(
+                "Sends {}/reports/q3.pdf (5 bytes) to telegram recipient default as q3.pdf.",
+                canonical.display()
+            )))
+        );
+        assert!(sender.files.lock().unwrap().is_empty(), "a card sends nothing");
+    }
+
+    #[tokio::test]
+    async fn an_artifact_card_names_the_stored_file() {
+        let saved = saved();
+        let sender = Arc::new(RecordingSender::default());
+        let card = artifact_tool(&saved, &sender)
+            .confirmation_preview(&artifact_args(&saved.record.id), &owner_ctx(OWNER))
+            .await;
+        assert_eq!(
+            card,
+            Ok(Some(format!(
+                "Sends {} (9 bytes) to telegram recipient default as report.md.",
+                saved.record.storage_path
+            )))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_raises_the_ordinary_card() {
+        let card = make_tool()
+            .confirmation_preview(
+                &serde_json::json!({
+                    "action": "message",
+                    "channel": "telegram",
+                    "recipient": "default",
+                    "content": "hello"
+                }),
+                &ToolContext::default(),
+            )
+            .await;
+        assert_eq!(card, Ok(None));
+    }
+
+    /// A call the send would refuse raises no card: nobody is asked about it.
+    #[tokio::test]
+    async fn a_send_that_would_be_refused_raises_no_card() {
+        let root = root_with_report();
+        let sender = Arc::new(RecordingSender::default());
+        let tool = tool_at(root.path(), &sender);
+        let ctx = ToolContext::default();
+        assert_eq!(
+            tool.confirmation_preview(&file_args("../secret.txt"), &ctx).await,
+            Err("Path traversal ('..') is not allowed.".to_string())
+        );
+        let mut nameless = file_args("reports/q3.pdf");
+        nameless.as_object_mut().unwrap().remove("filename");
+        assert_eq!(
+            tool.confirmation_preview(&nameless, &ctx).await,
+            Err("Missing required parameter: filename (required for action=\"file\")".to_string())
+        );
+        let saved = saved();
+        assert_eq!(
+            artifact_tool(&saved, &sender)
+                .confirmation_preview(&artifact_args(&saved.record.id), &owner_ctx("someone-else"))
+                .await,
+            Err(format!("send: no artifact '{}' of yours.", saved.record.id))
+        );
+    }
+
+    /// Gotchas: an approval surface plants a U+202E and a U+200B. The file's
+    /// name on disk carries one, the display name the other.
+    #[tokio::test]
+    async fn hidden_characters_on_a_send_card_are_escaped_and_counted() {
+        let root = root_with_report();
+        std::fs::write(root.path().join("reports/q3\u{202E}fdp.exe"), b"%PDF-").unwrap();
+        let sender = Arc::new(RecordingSender::default());
+        let mut args = file_args("reports/q3\u{202E}fdp.exe");
+        args["filename"] = serde_json::json!("report\u{200B}.pdf");
+        let card = tool_at(root.path(), &sender)
+            .confirmation_preview(&args, &ToolContext::default())
+            .await
+            .unwrap()
+            .expect("a file send has a card");
+        let canonical = root.path().canonicalize().unwrap();
+        assert_eq!(
+            card,
+            format!(
+                "Sends {}/reports/q3<U+202E>fdp.exe (5 bytes) to telegram recipient default as \
+                 report<U+200B>.pdf.\nNote: this request contains 2 hidden characters, shown as <U+…>.",
+                canonical.display()
+            )
         );
     }
 }
