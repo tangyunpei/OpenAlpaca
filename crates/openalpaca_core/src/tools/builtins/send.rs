@@ -3,18 +3,51 @@ use super::annotations_for_builtin;
 use super::helpers::{
     FolderRules, StoreAccess, is_store_owned_path, is_store_owned_resolved, resolve_workspace_path,
 };
-use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
+use openalpaca_storage::repository::TaskRepository;
+use openalpaca_storage::{ArtifactStore, Database};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 struct SendTool {
     provider: ConnectorSendLock,
+    /// The artifact store an `artifact_id` is looked up in (R23). Absent
+    /// (tests, the CLI) refuses an artifact id at call time.
+    db: Option<Database>,
     /// The folder a relative `file_path` is resolved under (R23, storage
     /// design §11): the file tools' root, the daemon's starting directory,
     /// until S3 moves both to the turn's working folder.
     workspace_root: PathBuf,
+}
+
+/// The file a `send` with action `file` delivers (R23).
+struct SendFile {
+    /// Its resolved absolute path: what the connector is handed.
+    path: String,
+    /// A by-product's own MIME type, used when the call names none.
+    mime_type: Option<String>,
+}
+
+/// Whose by-products a call may send: the turn's owner, else, on a run's
+/// context that threaded none, the run's `created_by`, as `artifact_write`
+/// attributes what it saves (`put_tool_artifact`).
+fn turn_owner(db: &Database, ctx: &ToolContext) -> Result<String, String> {
+    if let Some(owner) = ctx.owner_id.as_deref() {
+        return Ok(owner.to_string());
+    }
+    let task = match ctx.task_id.as_deref() {
+        Some(task_id) => TaskRepository::new(db)
+            .get(task_id)
+            .map_err(|e| format!("Failed to load task: {e}"))?,
+        None => None,
+    };
+    task.map(|task| task.created_by).ok_or_else(|| {
+        "send cannot send an artifact on this turn: it has no owner context (it was not sent \
+         on a person's behalf), and every artifact belongs to an owner."
+            .to_string()
+    })
 }
 
 impl SendTool {
@@ -28,6 +61,29 @@ impl SendTool {
         guard.clone().ok_or_else(|| {
             "No connector send provider configured. External messaging is not available.".to_string()
         })
+    }
+
+    /// R23: the file a `send` with action `file` delivers, named by
+    /// `file_path` or by `artifact_id` (exactly one).
+    fn locate(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<SendFile, String> {
+        let file_path = arguments.get("file_path").and_then(|v| v.as_str());
+        let artifact_id = arguments.get("artifact_id").and_then(|v| v.as_str());
+        match (file_path, artifact_id) {
+            (Some(_), Some(_)) => Err("Give file_path or artifact_id, not both.".to_string()),
+            (None, None) => Err(
+                "Missing required parameter: file_path or artifact_id (required for action=\"file\")"
+                    .to_string(),
+            ),
+            (Some(file_path), None) => Ok(SendFile {
+                path: self.resolve(file_path)?,
+                mime_type: None,
+            }),
+            (None, Some(id)) => self.artifact(id, ctx),
+        }
     }
 
     /// R23: the absolute path of the file `file_path` names, resolved as
@@ -63,11 +119,45 @@ impl SendTool {
             )
         })
     }
+
+    /// R23: a by-product of the turn's owner, by its id: its head file as the
+    /// store recorded it, refused when the bytes are gone. Read only. The
+    /// hand-edit check a Library read makes (`resolve_content`) can record a
+    /// version, and the card (S1.5) shares this lookup and must write nothing.
+    fn artifact(&self, id: &str, ctx: &ToolContext) -> Result<SendFile, String> {
+        let db = self.db.as_ref().ok_or_else(|| {
+            format!("send cannot look up artifact '{id}' here: there is no database.")
+        })?;
+        let owner = turn_owner(db, ctx)?;
+        let record = ArtifactStore::new(db)
+            .get(id, &owner)
+            .map_err(|e| format!("Failed to look up artifact '{id}': {e}"))?
+            .ok_or_else(|| format!("send: no artifact '{id}' of yours."))?;
+        if !std::path::Path::new(&record.storage_path).is_file() {
+            return Err(format!(
+                "send: the bytes of '{id}' are gone ({}).",
+                record.storage_path
+            ));
+        }
+        Ok(SendFile {
+            path: record.storage_path,
+            mime_type: Some(record.mime_type),
+        })
+    }
 }
 
 #[async_trait]
 impl BuiltInTool for SendTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        self.execute_with_context(arguments, &ToolContext::default())
+            .await
+    }
+
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
         let action = arguments
             .get("action")
             .and_then(|v| v.as_str())
@@ -98,13 +188,6 @@ impl BuiltInTool for SendTool {
                 provider.send_message(channel, recipient, content).await
             }
             "file" => {
-                let file_path = arguments
-                    .get("file_path")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        "Missing required parameter: file_path (required for action=\"file\")"
-                            .to_string()
-                    })?;
                 let filename = arguments
                     .get("filename")
                     .and_then(|v| v.as_str())
@@ -112,17 +195,19 @@ impl BuiltInTool for SendTool {
                         "Missing required parameter: filename (required for action=\"file\")"
                             .to_string()
                     })?;
-                let mime_type = arguments
-                    .get("mime_type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("application/octet-stream");
                 let caption = arguments
                     .get("caption")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                // R23: resolved before anything is handed on, so a path that
-                // leaves the folder is refused before the provider is asked.
-                let file = self.resolve(file_path)?;
+                // R23: located before anything is handed on, so a path that
+                // leaves the folder, or another owner's artifact, is refused
+                // before the provider is asked.
+                let file = self.locate(arguments, ctx)?;
+                let mime_type = arguments
+                    .get("mime_type")
+                    .and_then(|v| v.as_str())
+                    .or(file.mime_type.as_deref())
+                    .unwrap_or("application/octet-stream");
 
                 let provider = self.acquire_provider()?;
                 if !provider
@@ -139,7 +224,7 @@ impl BuiltInTool for SendTool {
                     .send_file(
                         channel,
                         recipient,
-                        &file,
+                        &file.path,
                         filename,
                         mime_type,
                         caption.as_deref(),
@@ -154,17 +239,22 @@ impl BuiltInTool for SendTool {
     }
 }
 
-pub(super) fn send_tool(provider: ConnectorSendLock, workspace_root: PathBuf) -> RegisteredTool {
+pub(super) fn send_tool(
+    provider: ConnectorSendLock,
+    db: Option<Database>,
+    workspace_root: PathBuf,
+) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "send".to_string(),
             description: "Send a message or file to a contact via a connected external channel \
                 (Telegram, iMessage, Discord). For messages: provide action='message' \
                 with content text. For files: provide action='file' with file_path (a file \
-                relative to OpenAlpaca's folder), filename, and optional mime_type/caption. \
-                Use recipient='default' for the most recent conversation, or specify a \
-                channel-specific identifier (chat_id for Telegram, phone/email for iMessage, \
-                channel_id for Discord). Returns confirmation on success."
+                relative to OpenAlpaca's folder) or artifact_id (a by-product you saved, by its \
+                id), filename, and optional mime_type/caption. Use recipient='default' for the \
+                most recent conversation, or specify a channel-specific identifier (chat_id \
+                for Telegram, phone/email for iMessage, channel_id for Discord). Returns \
+                confirmation on success."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -188,7 +278,11 @@ pub(super) fn send_tool(provider: ConnectorSendLock, workspace_root: PathBuf) ->
                     },
                     "file_path": {
                         "type": "string",
-                        "description": "A file to send, relative to OpenAlpaca's folder (e.g. 'reports/q3.pdf'); absolute paths and '..' are refused (required for action='file')"
+                        "description": "A file to send, relative to OpenAlpaca's folder (e.g. 'reports/q3.pdf'); absolute paths and '..' are refused. Give this or artifact_id (action='file')"
+                    },
+                    "artifact_id": {
+                        "type": "string",
+                        "description": "A by-product to send, by its id; give this or file_path"
                     },
                     "filename": {
                         "type": "string",
@@ -196,7 +290,7 @@ pub(super) fn send_tool(provider: ConnectorSendLock, workspace_root: PathBuf) ->
                     },
                     "mime_type": {
                         "type": "string",
-                        "description": "MIME type of the file, e.g. 'application/pdf' (defaults to 'application/octet-stream')"
+                        "description": "MIME type of the file, e.g. 'application/pdf' (defaults to the artifact's own type, else 'application/octet-stream')"
                     },
                     "caption": {
                         "type": "string",
@@ -226,6 +320,7 @@ pub(super) fn send_tool(provider: ConnectorSendLock, workspace_root: PathBuf) ->
         },
         backend: ToolBackend::BuiltIn(Arc::new(SendTool {
             provider,
+            db,
             workspace_root,
         })),
         provides_capabilities: vec!["messaging".into()],
@@ -241,6 +336,8 @@ pub(super) fn send_tool(provider: ConnectorSendLock, workspace_root: PathBuf) ->
 mod tests {
     use super::*;
     use crate::orchestrator::ConnectorSendProvider;
+    use openalpaca_storage::store::StoreScope;
+    use openalpaca_storage::{ArtifactKind, ArtifactRecord, NewArtifact};
     use std::path::Path;
     use std::sync::{Mutex, RwLock};
 
@@ -251,6 +348,7 @@ mod tests {
     fn make_tool() -> SendTool {
         SendTool {
             provider: Arc::new(RwLock::new(None)),
+            db: None,
             workspace_root: PathBuf::from(NO_ROOT),
         }
     }
@@ -296,6 +394,7 @@ mod tests {
         let provider: Arc<dyn ConnectorSendProvider> = sender.clone();
         SendTool {
             provider: Arc::new(RwLock::new(Some(provider))),
+            db: None,
             workspace_root: root.to_path_buf(),
         }
     }
@@ -342,6 +441,7 @@ mod tests {
         let root = root_with_report();
         let tool = SendTool {
             provider: Arc::new(RwLock::new(None)),
+            db: None,
             workspace_root: root.path().to_path_buf(),
         };
         let err = tool.execute(&file_args("reports/q3.pdf")).await.unwrap_err();
@@ -405,7 +505,10 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("file_path"));
+        assert_eq!(
+            result.unwrap_err(),
+            "Missing required parameter: file_path or artifact_id (required for action=\"file\")"
+        );
     }
 
     #[tokio::test]
@@ -549,5 +652,187 @@ mod tests {
              directory, which belongs to the daemon's own state/ and is not workspace content."
         );
         assert!(sender.files.lock().unwrap().is_empty());
+    }
+
+    // ── R23: a by-product by its id (storage design §11) ──
+
+    const OWNER: &str = "owner-send";
+
+    /// A home store of its own, a database, and one markdown artifact of
+    /// `OWNER` in it (`# Report\n`, 9 bytes). `_guard` drops first.
+    struct Saved {
+        _guard: crate::test_util::HomeStoreGuard,
+        _home: tempfile::TempDir,
+        _db_dir: tempfile::TempDir,
+        db: Database,
+        record: ArtifactRecord,
+    }
+
+    fn saved() -> Saved {
+        let home = tempfile::tempdir().unwrap();
+        let guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let scope = StoreScope::Home;
+        let (record, _) = ArtifactStore::new(&db)
+            .put(NewArtifact::new(
+                OWNER,
+                &scope,
+                ArtifactKind::Markdown,
+                "report",
+                b"# Report\n",
+            ))
+            .unwrap();
+        Saved {
+            _guard: guard,
+            _home: home,
+            _db_dir: db_dir,
+            db,
+            record,
+        }
+    }
+
+    fn artifact_tool(saved: &Saved, sender: &Arc<RecordingSender>) -> SendTool {
+        let provider: Arc<dyn ConnectorSendProvider> = sender.clone();
+        SendTool {
+            provider: Arc::new(RwLock::new(Some(provider))),
+            db: Some(saved.db.clone()),
+            workspace_root: PathBuf::from(NO_ROOT),
+        }
+    }
+
+    fn artifact_args(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "action": "file",
+            "channel": "telegram",
+            "recipient": "default",
+            "artifact_id": id,
+            "filename": "report.md"
+        })
+    }
+
+    fn owner_ctx(owner: &str) -> ToolContext {
+        ToolContext {
+            owner_id: Some(owner.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_artifact_of_the_turns_owner_is_sent_from_its_stored_file() {
+        let saved = saved();
+        let sender = Arc::new(RecordingSender::default());
+        let out = artifact_tool(&saved, &sender)
+            .execute_with_context(&artifact_args(&saved.record.id), &owner_ctx(OWNER))
+            .await;
+        assert_eq!(out.as_deref(), Ok("Sent file 'report.md'"));
+        assert_eq!(
+            *sender.files.lock().unwrap(),
+            vec![(
+                saved.record.storage_path.clone(),
+                "report.md".to_string(),
+                saved.record.mime_type.clone()
+            )],
+            "the stored file, with the artifact's own type when the call names none"
+        );
+    }
+
+    /// A run's context that threaded no owner: the run's creator is the
+    /// owner, as `artifact_write` attributes what it saves.
+    #[tokio::test]
+    async fn a_runs_artifact_is_sent_for_the_person_who_started_it() {
+        let saved = saved();
+        let now = chrono::Utc::now();
+        openalpaca_storage::repository::TaskRepository::new(&saved.db)
+            .create(&openalpaca_storage::Task {
+                id: "t-send-0001".to_string(),
+                title: "Send run".to_string(),
+                description: None,
+                status: openalpaca_storage::TaskStatus::Queued,
+                priority: 0,
+                progress_current: None,
+                progress_total: None,
+                result_summary: None,
+                created_by: OWNER.to_string(),
+                source_lane: "gui".to_string(),
+                created_at: now,
+                updated_at: now,
+                completed_at: None,
+                state_json: None,
+                state_version: 0,
+                outcome_json: None,
+                outcome_kind: None,
+                artifact_count: 0,
+                workspace_id: None,
+                source_task_id: None,
+                session_id: None,
+                unattended: false,
+            })
+            .unwrap();
+        let sender = Arc::new(RecordingSender::default());
+        let ctx = ToolContext {
+            task_id: Some("t-send-0001".to_string()),
+            ..Default::default()
+        };
+        let out = artifact_tool(&saved, &sender)
+            .execute_with_context(&artifact_args(&saved.record.id), &ctx)
+            .await;
+        assert_eq!(out.as_deref(), Ok("Sent file 'report.md'"));
+    }
+
+    #[tokio::test]
+    async fn an_artifact_of_another_owner_is_refused() {
+        let saved = saved();
+        let sender = Arc::new(RecordingSender::default());
+        let err = artifact_tool(&saved, &sender)
+            .execute_with_context(&artifact_args(&saved.record.id), &owner_ctx("someone-else"))
+            .await
+            .unwrap_err();
+        assert_eq!(err, format!("send: no artifact '{}' of yours.", saved.record.id));
+        assert!(sender.files.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_artifact_whose_bytes_are_gone_is_refused() {
+        let saved = saved();
+        std::fs::remove_file(&saved.record.storage_path).unwrap();
+        let sender = Arc::new(RecordingSender::default());
+        let err = artifact_tool(&saved, &sender)
+            .execute_with_context(&artifact_args(&saved.record.id), &owner_ctx(OWNER))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "send: the bytes of '{}' are gone ({}).",
+                saved.record.id, saved.record.storage_path
+            )
+        );
+        assert!(sender.files.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn file_path_and_artifact_id_together_are_refused() {
+        let mut args = file_args("reports/q3.pdf");
+        args["artifact_id"] = serde_json::json!("a-1");
+        assert_eq!(
+            make_tool().execute(&args).await.unwrap_err(),
+            "Give file_path or artifact_id, not both."
+        );
+    }
+
+    #[tokio::test]
+    async fn an_artifact_on_a_turn_with_no_owner_is_refused() {
+        let saved = saved();
+        let sender = Arc::new(RecordingSender::default());
+        let err = artifact_tool(&saved, &sender)
+            .execute(&artifact_args(&saved.record.id))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "send cannot send an artifact on this turn: it has no owner context (it was not \
+             sent on a person's behalf), and every artifact belongs to an owner."
+        );
     }
 }

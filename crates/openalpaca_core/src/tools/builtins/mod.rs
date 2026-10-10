@@ -415,10 +415,15 @@ pub fn builtin_tools_with_persona_context(
 ) -> Vec<RegisteredTool> {
     // `send` resolves a relative `file_path` under the file tools' root (R23).
     let ws_root = startup_root(workspace_root);
-    let mut tools = builtin_tools(db, daemon_config, web_search_config, Some(ws_root.clone()));
+    let mut tools = builtin_tools(
+        db.clone(),
+        daemon_config,
+        web_search_config,
+        Some(ws_root.clone()),
+    );
     tools.push(update_persona_tool(persona_ctx));
     if let Some(provider) = connector_send_provider {
-        tools.push(send::send_tool(provider, ws_root));
+        tools.push(send::send_tool(provider, db, ws_root));
     }
     tools
 }
