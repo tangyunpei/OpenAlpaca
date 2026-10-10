@@ -572,7 +572,7 @@ lane never posts its completion report or its confirmation prompts there.
 | `POST /v1/files/{id}/open` | Open the file with the OS default application. A result file in the project is opened only when the artifact store keeps its extension — text, Markdown or PDF, code or config, a table, a raster image, HTML, an archive or an office document; anything else (`.sh`, `.command`, `.svg`, `.exe`, `Makefile`, a dotfile such as `.env`) is `409 OPEN_NOT_OFFERED`: show it in its folder instead. |
 | `GET /v1/artifacts` | List produced artifacts (filters and paging). Each row carries `in_project` — a result file an agent wrote into the project, which points at the real file — and `openable`, whether `Open` is offered for it. `in_project=true` lists only the project's result files, `in_project=false` only by-products; absent, both. |
 | `GET /v1/artifacts/{id}` | One artifact. |
-| `GET /v1/artifacts/{id}/versions` | Its versions. A result file in the project has none — git keeps its history — and answers an empty list. |
+| `GET /v1/artifacts/{id}/versions` | Its versions. A result file in the project has none and answers an empty list: what OpenAlpaca keeps of it is the content it had before an agent replaced or edited it, in the conversation's log (`~/.openalpaca/sessions/<id>/snapshots/`), and any longer history is the project's own — git's, where the project is a repository. |
 | `GET /v1/artifacts/{id}/diff?from=&to=` | A diff between two versions; a result file in the project has no versions to compare. |
 | `PUT /v1/artifacts/{id}/pin` | Pin or unpin it. |
 | `GET /v1/artifacts/{id}/content` | The head version's bytes. Query token or bearer header. |
@@ -602,14 +602,15 @@ works in).
   agent, which keep no conversation log — `file_write` creates a new file but
   refuses to replace one, and `file_edit` refuses. A file written this way
   gets a **pointer row**: the Library lists it with the project's results, by
-  its path relative to the project; it is the real file — no copy, no
-  versions (git keeps its history) — and its record follows an edit you make
-  yourself. The tool's result names the file's absolute path and tells the
-  model to give the user that path; if the row could not be written, it says
-  the file is written and the app could not list it. A run's completion
-  report ends with a line naming the files it wrote into the project, and its
-  file count and chips count its by-products only; a connector is never sent
-  a project's files on its own.
+  its path relative to the project; it is the real file, with no copy and no
+  versions — OpenAlpaca keeps only the pre-edit copies above, and any longer
+  history is the project's own, git's where the project is a repository — and
+  its record follows an edit you make yourself. The tool's result names the
+  file's absolute path and tells the model to give the user that path; if the
+  row could not be written, it says the file is written and the app could not
+  list it. A run's completion report ends with a line naming the files it
+  wrote into the project, and its file count and chips count its by-products
+  only; a connector is never sent a project's files on its own.
 - **`artifact_write` saves a by-product** — a draft, a picture, something one
   agent hands another — in the artifact store: the project's folder in the
   home store (`~/.openalpaca/projects/<name>/artifacts/`) when the

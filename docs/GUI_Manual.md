@@ -775,10 +775,13 @@ saved, your uploads, and every file saved in a conversation with no project.
 The `Results in the project` chip shows instead the files agents wrote into
 your projects (`?in_project=true`): each row is named by the file's path in its
 project, carries a `project` tag, and its subtitle starts with the project's
-folder name; it points at the real file. Such a file has no versions, since
-git keeps its history: its detail has no History or Diff, only Preview, and
-its row follows the file when you edit it yourself. The header's count is the
-shown side's own.
+folder name; it points at the real file. Such a file has no versions: what
+OpenAlpaca keeps of it is the content it had before an agent replaced or
+edited it, in the conversation's log
+(`~/.openalpaca/sessions/<id>/snapshots/`), and any longer history is the
+project's own — git's, where the project is a repository. Its detail
+has no History or Diff, only Preview, and its row follows the file when you
+edit it yourself. The header's count is the shown side's own.
 
 Pins are server state (`PUT /v1/artifacts/{id}/pin`). The client keeps a
 `localStorage` mirror so the star flips instantly, and every server answer
