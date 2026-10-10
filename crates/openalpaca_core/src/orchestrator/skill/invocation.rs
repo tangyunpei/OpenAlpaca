@@ -773,12 +773,22 @@ impl Orchestrator {
                 lane_key: Some(lane_key.to_string()),
                 source: Some(source.to_string()),
                 request_id: Some(request_id),
+                // R44 (storage design §10): the turn's conversation, which
+                // names its scratch folder when it has no project.
+                conversation_id: self.turn_conversation_id(lane_key),
                 // No run, no principal or scope, no workspace path, no agent
                 // instance (this path is not a subagent lane); the bus and
                 // session handles are the sandbox's to fill in at dispatch
                 // (T28).
                 ..Default::default()
             };
+            // R28 (storage design §10): the skill's model is told its working
+            // folder, right before the current user turn like the memory
+            // block above. Read from the tool context the skill's tools get.
+            if let Some(note) = crate::tools::working_folder::working_folder_note(&tool_ctx) {
+                let insert_at = messages.len().saturating_sub(1);
+                messages.insert(insert_at, ChatMessage::user(&note));
+            }
             let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
                 || !skill_doc.frontmatter.depends_on.is_empty();
             let registry = if needs_clone {
@@ -1268,6 +1278,10 @@ impl Orchestrator {
             lane_key: Some(lane_key.to_string()),
             source: Some(source.to_string()),
             request_id: Some(request_id),
+            // R44 (storage design §10): as on the file-skill tier — the
+            // turn's conversation, for its scratch folder. A plugin skill
+            // takes a query string, not messages, so no R28 line reaches it.
+            conversation_id: self.turn_conversation_id(lane_key),
             // As on the file-skill tier above: everything else unset, and
             // the bus and session handles filled in by the sandbox (T28).
             ..Default::default()

@@ -6053,6 +6053,100 @@ Look.
     );
 }
 
+/// R44 + R28 (storage design §10), the file-skill tier: a `/slash` skill's
+/// model is told the conversation's scratch folder — named from the turn's
+/// conversation, which its tool context now carries — right before the
+/// question, and nothing is made.
+#[tokio::test]
+async fn a_file_skill_with_no_project_is_told_its_scratch_folder() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let tmp = tempfile::tempdir().unwrap();
+    let skill_dir = tmp.path().join("looker");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: "Looker"
+description: "Looks at things"
+invoke:
+  slash: "/look"
+  mode: "auto"
+---
+
+## Instructions
+
+Look.
+"#,
+    )
+    .unwrap();
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let session = openalpaca_storage::ConversationRepository::new(&db)
+        .get_or_create_active_session("test:cli", "cli", None)
+        .unwrap();
+
+    let provider = crate::test_util::RecordingProvider::new("Looked.");
+    let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        Some(db.clone()),
+        Arc::new(catalog),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    let scope = crate::memory::scope_context::MemoryScopeContext::new(None);
+
+    orch.handle_skill_invocation(
+        Uuid::new_v4(),
+        "cli",
+        "Looker",
+        "look at it",
+        "test:cli",
+        &ConversationContext::default(),
+        None,
+        &scope,
+        None,
+        false,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await
+    .expect("the skill runs");
+
+    let folder = home_root.join("scratch").join(&session.id);
+    let request = provider.first_request();
+    let at = request
+        .messages
+        .iter()
+        .position(|m| {
+            m.content.starts_with("<working_folder>This conversation has no project.")
+                && m.content.contains(&folder.display().to_string())
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no working-folder note: {:?}",
+                request.messages.iter().map(|m| &m.content).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(at, request.messages.len() - 2, "right before the question");
+    assert!(!home_root.join("scratch").exists(), "a note makes no folder");
+}
+
 // ── A1: the skill tier takes the turn's own attachments ─────────────────
 //
 // Round 8 adapted the tier's *history*. The turn's own files still stopped at
