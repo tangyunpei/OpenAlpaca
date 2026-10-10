@@ -31,6 +31,7 @@ import { useUiStore, type ArtifactTab } from "@/stores/ui";
 import { HistoryTab } from "./HistoryTab";
 import { LibraryDetailHeader } from "./LibraryDetailHeader";
 import { diffPair, previewPlan } from "./preview";
+import { baseName } from "./format";
 
 export interface LibraryDetailProps {
   artifactId: string | null;
@@ -103,7 +104,7 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement("a");
         anchor.href = url;
-        anchor.download = model.name;
+        anchor.download = baseName(model.name);
         anchor.click();
         URL.revokeObjectURL(url);
         showToast(`${model.name} exported`);

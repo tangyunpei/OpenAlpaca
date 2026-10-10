@@ -38,3 +38,14 @@ export function projectName(root: string | null): string | null {
   const parts = root.split(/[\\/]/).filter((part) => part !== "");
   return parts.at(-1) ?? null;
 }
+
+/**
+ * The name `Export` saves under: the last component of a row's name, either
+ * separator — a file written into the project, `src/main.rs`, saves as
+ * `main.rs`, since a saved file's name holds no folder; any other row's name
+ * is already one component and is kept as it is.
+ */
+export function baseName(name: string): string {
+  const parts = name.split(/[\\/]/).filter((part) => part !== "");
+  return parts.at(-1) ?? name;
+}

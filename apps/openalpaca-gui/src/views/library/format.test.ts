@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { projectName } from "./format";
+import { baseName, projectName } from "./format";
 
 describe("projectName", () => {
   it.each([
@@ -15,5 +15,15 @@ describe("projectName", () => {
 
   it("names no project for a row with none", () => {
     expect(projectName(null)).toBeNull();
+  });
+});
+
+describe("baseName", () => {
+  it.each([
+    ["src/main.rs", "main.rs"],
+    ["docs\\notes.md", "notes.md"],
+    ["01-connector-audit-findings.md", "01-connector-audit-findings.md"],
+  ] as const)("saves %s as %s", (name, base) => {
+    expect(baseName(name)).toBe(base);
   });
 });

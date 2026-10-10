@@ -612,3 +612,82 @@ describe("LibraryDetail — Open and Reveal", () => {
     expect(requests.some((r) => r.url.includes("/open"))).toBe(false);
   });
 });
+
+describe("LibraryDetail — Export", () => {
+  const projectFile: Artifact = {
+    ...findings,
+    id: "art-9",
+    name: "docs/notes.md",
+    task_id: null,
+    task_title: null,
+    path: "/Users/dev/app/docs/notes.md",
+    project_root: "/Users/dev/app",
+    rel_path: "docs/notes.md",
+    version: 1,
+    version_count: 0,
+    in_project: true,
+    openable: true,
+  };
+  /** The `download` name of every anchor the view clicked. */
+  let saved: string[] = [];
+  let click: { mockRestore: () => void } | null = null;
+  /** What the environment had before the test defined the two statics. */
+  let createDescriptor: PropertyDescriptor | undefined;
+  let revokeDescriptor: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    saved = [];
+    route("in_project=true", () =>
+      json({ artifacts: [projectFile], total: 1 }),
+    );
+    route("/v1/artifacts/art-9/versions", () => json({ versions: [] }));
+    route("/v1/artifacts/art-9/content", () => text("# Notes\n"));
+    route("/v1/artifacts/art-9", () => json(projectFile));
+    // Export's bytes: the files route, which S4a.15 reads through the resolver.
+    route("/v1/files/art-9/content", () => text("# Notes\n"));
+    useUiStore.setState({ openArtifactId: "art-9", libraryResults: true });
+    createDescriptor = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    revokeDescriptor = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    // jsdom has no object URLs; the two statics are defined for the test only.
+    Object.defineProperty(URL, "createObjectURL", {
+      value: vi.fn(() => "blob:notes"),
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      value: vi.fn(),
+      configurable: true,
+      writable: true,
+    });
+    click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        saved.push(this.download);
+      });
+  });
+
+  afterEach(() => {
+    // Only this block's spy: the module's `invoke` double keeps its answer.
+    click?.mockRestore();
+    // Put back what was there, or nothing when nothing was.
+    if (createDescriptor === undefined)
+      Reflect.deleteProperty(URL, "createObjectURL");
+    else Object.defineProperty(URL, "createObjectURL", createDescriptor);
+    if (revokeDescriptor === undefined)
+      Reflect.deleteProperty(URL, "revokeObjectURL");
+    else Object.defineProperty(URL, "revokeObjectURL", revokeDescriptor);
+  });
+
+  it("saves a file written into the project under its own name, with no folder", async () => {
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "Export" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe("docs/notes.md exported"),
+    );
+    expect(saved).toEqual(["notes.md"]);
+    expect(urlsFor("/v1/files/art-9/content")).toHaveLength(1);
+  });
+});
