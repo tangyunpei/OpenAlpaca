@@ -1,3 +1,4 @@
+use crate::tools::platform::{RunFailure, run_bounded, shell_command};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
@@ -25,12 +26,16 @@ impl BuiltInTool for ShellExecuteTool {
         // bypassed (e.g. ToolRegistry used directly).
         let timeout = std::time::Duration::from_secs(300);
 
-        let output = tokio::time::timeout(timeout, {
-            crate::tools::platform::shell_command(command).output()
-        })
-        .await
-        .map_err(|_| "Command timed out after 300s".to_string())?
-        .map_err(|e| format!("Failed to execute command: {}", e))?;
+        // R45 (storage design §11): a command that runs out its time, or
+        // whose call is dropped (the sandbox's own per-tool timeout, a run
+        // cancelled mid-call), is killed with the processes it started.
+        let output = match run_bounded(shell_command(command), timeout).await {
+            Ok(output) => output,
+            Err(RunFailure::TimedOut) => return Err("Command timed out after 300s".to_string()),
+            Err(RunFailure::Spawn(e) | RunFailure::Io(e)) => {
+                return Err(format!("Failed to execute command: {}", e));
+            }
+        };
 
         // Cap output size to prevent memory pressure from commands producing
         // unbounded stdout/stderr (e.g. `find /` or `yes`).
@@ -102,5 +107,88 @@ pub(super) fn shell_execute_tool() -> RegisteredTool {
         version: env!("CARGO_PKG_VERSION").to_string(),
         author: "builtin".to_string(),
         created_at: chrono::Utc::now(),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::test_util::{GONE_WITHIN, KillOnFail, pid_from_file, wait_until_gone};
+    use std::time::Duration;
+
+    /// A command, run in `dir`, that starts a background `sleep`, writes its
+    /// pid to `pidfile` and waits on it (R45).
+    fn starts_a_sleep(dir: &std::path::Path, pidfile: &std::path::Path) -> String {
+        format!(
+            "cd '{}'; sleep 30 & echo $! > '{}'; wait",
+            dir.display(),
+            pidfile.display()
+        )
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_shell_command_takes_the_processes_it_started_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let arguments = serde_json::json!({"command": starts_a_sleep(dir.path(), &pidfile)});
+        let call = tokio::spawn(async move {
+            let tool = ShellExecuteTool;
+            tool.execute(&arguments).await
+        });
+        let pid = pid_from_file(&pidfile, Duration::from_secs(5)).await;
+        let _kill = KillOnFail(pid);
+        call.abort();
+        let _ = call.await;
+        assert!(
+            wait_until_gone(pid, GONE_WITHIN).await,
+            "the background sleep {pid} outlived the cancelled command"
+        );
+    }
+
+    /// The path that matters in production: the sandbox's per-tool timeout
+    /// (60 s by default) is far shorter than the tool's own 300 s.
+    #[tokio::test]
+    async fn a_shell_command_the_sandbox_times_out_takes_the_processes_it_started_with_it() {
+        use crate::bus::EventBus;
+        use crate::security::capabilities::Allowlist;
+        use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+        use crate::tools::ToolRegistry;
+        use crate::tools::registry::ToolContext;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let registry = ToolRegistry::default();
+        registry.register(shell_execute_tool()).unwrap();
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        let policy = SandboxPolicy {
+            agent_id: "agent1".to_string(),
+            allowed_capabilities: Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 1,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            // shell_execute is destructive: the policy answers its card here.
+            auto_approve: true,
+            unattended: false,
+        };
+        let call = openalpaca_llm::ToolCall {
+            id: "tc_r45".to_string(),
+            name: "shell_execute".to_string(),
+            arguments: serde_json::json!({"command": starts_a_sleep(dir.path(), &pidfile)}),
+        };
+        let err = sandbox
+            .execute_tool(&call, &policy, &ToolContext::default())
+            .await
+            .unwrap_err();
+        let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
+        let _kill = KillOnFail(pid);
+        assert_eq!(err, "Tool 'shell_execute' timed out after 1s");
+        assert!(
+            wait_until_gone(pid, GONE_WITHIN).await,
+            "the background sleep {pid} outlived the sandbox's timeout"
+        );
     }
 }
