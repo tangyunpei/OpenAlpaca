@@ -114,6 +114,76 @@ impl Drop for HomeStoreGuard {
     }
 }
 
+/// A guarded temp home store and one temp project folder registered under
+/// it (storage design, Stage 2): every test that writes, edits, lists or
+/// runs a command does it here — never in the repository, never in the
+/// process's current directory, never in `~/.openalpaca`. `_guard` is
+/// declared first so it drops first: the variable is restored before the
+/// folders go.
+pub(crate) struct GuardedProject {
+    _guard: HomeStoreGuard,
+    pub(crate) home: tempfile::TempDir,
+    pub(crate) project: tempfile::TempDir,
+    /// The project's canonical root, as `projects::register` recorded it.
+    pub(crate) root: std::path::PathBuf,
+}
+
+impl GuardedProject {
+    /// Two tempdirs: the home store pointed at the first, the second
+    /// registered as a project under it.
+    pub(crate) fn new() -> Self {
+        let home = tempfile::tempdir().expect("a temp home store");
+        let project = tempfile::tempdir().expect("a temp project folder");
+        let guard =
+            HomeStoreGuard::set(&home.path().canonicalize().expect("the temp home resolves"));
+        let root = openalpaca_storage::store::projects::register(
+            &project
+                .path()
+                .canonicalize()
+                .expect("the temp project resolves"),
+        )
+        .expect("the temp project registers under the temp home")
+        .root;
+        Self {
+            _guard: guard,
+            home,
+            project,
+            root,
+        }
+    }
+
+    /// A project turn: its owner, the project as the request's root (and as
+    /// memory's), and a conversation.
+    pub(crate) fn ctx(&self) -> crate::tools::registry::ToolContext {
+        let root = self.root.to_string_lossy().into_owned();
+        crate::tools::registry::ToolContext {
+            owner_id: Some("owner-test".to_string()),
+            workspace_id: Some(root.clone()),
+            request_workspace_root: Some(root),
+            conversation_id: Some("conv-test".to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// A turn with no project: its conversation, and nothing else. A test
+    /// that needs an owner sets `owner_id` over it.
+    pub(crate) fn scratch_ctx(&self) -> crate::tools::registry::ToolContext {
+        crate::tools::registry::ToolContext {
+            conversation_id: Some("conv-test".to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// The home store's root, canonical: what `store::home_root()` answers
+    /// while the guard holds.
+    pub(crate) fn home_root(&self) -> std::path::PathBuf {
+        self.home
+            .path()
+            .canonicalize()
+            .expect("the temp home resolves")
+    }
+}
+
 /// A provider that answers from a canned script and keeps every request it
 /// was handed — the offline seam the M2 utility-call tests assert against.
 ///

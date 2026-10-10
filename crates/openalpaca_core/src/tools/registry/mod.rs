@@ -129,6 +129,14 @@ pub struct ToolContext {
     /// produced it (`read_result`, T42) — a `results/` reference is scoped to
     /// this id and nothing wider.
     pub session_id: Option<String>,
+    /// The conversation (the `session` row) this call belongs to, whether or not
+    /// its loop writes a session log — what names a conversation's scratch folder
+    /// when the turn has no project (design §10, R44). Distinct from
+    /// [`session_id`](Self::session_id), whose `Some` means exactly "the session
+    /// writer indexes this call" and which the agentic loop overwrites from its
+    /// own log handle. Inherited by every context cloned from this one (nested
+    /// skills, plugin agents).
+    pub conversation_id: Option<String>,
     /// The session log's emit side, for the one tool that must **write** to it
     /// before it acts rather than after: `file_write` takes §5.7's pre-edit
     /// image of a file it is about to overwrite, and has to know the image was

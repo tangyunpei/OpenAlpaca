@@ -5,6 +5,7 @@ pub mod mcp;
 pub mod platform;
 pub mod registry;
 pub mod url_validation;
+pub mod working_folder;
 
 pub use registry::ToolContext;
 pub use registry::ToolRegistry;
