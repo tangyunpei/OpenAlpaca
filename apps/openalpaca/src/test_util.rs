@@ -120,7 +120,8 @@ pub(crate) fn serve(
 /// folder renamed by case only (ST-23) needs before it can rename one. Probes
 /// with a file and a stat of its other-case name, and removes the probe. A
 /// copy of storage's own probe (`store::tests::volume_ignores_case`), which is
-/// test-only there and not exported across crates.
+/// test-only there and not exported across crates. Unix only, as its caller.
+#[cfg(unix)]
 pub(crate) fn volume_ignores_case(dir: &Path) -> bool {
     let made = dir.join("case-probe-Ab");
     std::fs::write(&made, b"").unwrap();
