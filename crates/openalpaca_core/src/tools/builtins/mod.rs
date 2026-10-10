@@ -320,10 +320,12 @@ impl BuiltInTool for WorkspaceWriteTool {
     }
 }
 
-/// The folder the file tools, and since R23 `send`, resolve a relative path
-/// against until Stage 2 moves them to the turn's working folder: the root
-/// the caller passed, else the process's current directory (tests, the
-/// CLI). S4a removes it with the `workspace_root` parameter.
+/// The folder `file_write`'s plain write resolves a relative path against
+/// (Round G's FW-1) until S4a moves it into the project: the root the caller
+/// passed, else the process's current directory (tests, the CLI). Every other
+/// file tool, the shell and `send` act in the call's working folder
+/// (`tools::working_folder`). S4a removes it with the `workspace_root`
+/// parameter.
 fn startup_root(workspace_root: Option<PathBuf>) -> PathBuf {
     workspace_root
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
@@ -416,17 +418,12 @@ pub fn builtin_tools_with_persona_context(
     workspace_root: Option<PathBuf>,
     connector_send_provider: Option<ConnectorSendLock>,
 ) -> Vec<RegisteredTool> {
-    // `send` resolves a relative `file_path` under the file tools' root (R23).
-    let ws_root = startup_root(workspace_root);
-    let mut tools = builtin_tools(
-        db.clone(),
-        daemon_config,
-        web_search_config,
-        Some(ws_root.clone()),
-    );
+    // `send` resolves a file in the call's working folder (R26) and looks an
+    // artifact id up in the store (R23): it takes the database, not a root.
+    let mut tools = builtin_tools(db.clone(), daemon_config, web_search_config, workspace_root);
     tools.push(update_persona_tool(persona_ctx));
     if let Some(provider) = connector_send_provider {
-        tools.push(send::send_tool(provider, db, ws_root));
+        tools.push(send::send_tool(provider, db));
     }
     tools
 }

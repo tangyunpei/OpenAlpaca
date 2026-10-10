@@ -251,7 +251,7 @@ fn write_resolution_root() -> (tempfile::TempDir, PathBuf) {
 
 /// The nearest existing ancestor is what gets resolved: a link into
 /// `state/` followed by directories that do not exist yet resolves under
-/// `state/`, where the store check can see it.
+/// `state/`, where the write actually lands.
 #[cfg(unix)]
 #[test]
 fn a_new_directory_behind_a_link_resolves_through_the_link() {
@@ -261,10 +261,6 @@ fn a_new_directory_behind_a_link_resolves_through_the_link() {
     let resolved = resolve_workspace_path_for_write("link/newdir/deeper/x.json", dir.path(), FolderRules::Plain)
         .expect("a link inside the workspace stays inside it");
     assert_eq!(resolved, root.join("state/newdir/deeper/x.json"));
-    assert!(
-        is_store_owned_resolved(&resolved, dir.path(), StoreAccess::Write).is_some(),
-        "the resolved path is the store's"
-    );
 }
 
 /// The same walk refuses a link out of the workspace before a new

@@ -1,15 +1,13 @@
 use super::ConnectorSendLock;
 use super::annotations_for_builtin;
-use super::helpers::{
-    FolderRules, StoreAccess, is_store_owned_path, is_store_owned_resolved, resolve_workspace_path,
-};
+use super::helpers::{acting_folder, named_folder, resolve_workspace_path};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use crate::utils::text::{escape_hidden_line, hidden_notice};
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::repository::TaskRepository;
 use openalpaca_storage::{ArtifactStore, Database};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 /// The tail of a refusal for an argument only a file send needs.
@@ -20,10 +18,6 @@ struct SendTool {
     /// The artifact store an `artifact_id` is looked up in (R23). Absent
     /// (tests, the CLI) refuses an artifact id at call time.
     db: Option<Database>,
-    /// The folder a relative `file_path` is resolved under (R23, storage
-    /// design §11): the file tools' root, the daemon's starting directory,
-    /// until S3 moves both to the turn's working folder.
-    workspace_root: PathBuf,
 }
 
 /// The file a `send` with action `file` delivers (R23).
@@ -129,11 +123,13 @@ impl SendTool {
 
     /// R23: the file a `send` with action `file` delivers, named by
     /// `file_path` or by `artifact_id` (exactly one). The card and the send
-    /// locate it the same way, so the card names what is sent.
+    /// locate it the same way, so the card names what is sent; only the send
+    /// makes a scratch folder (`make_folder`), the card names it (R34).
     fn locate(
         &self,
         arguments: &serde_json::Value,
         ctx: &ToolContext,
+        make_folder: bool,
     ) -> Result<SendFile, String> {
         let file_path = arguments.get("file_path").and_then(|v| v.as_str());
         let artifact_id = arguments.get("artifact_id").and_then(|v| v.as_str());
@@ -142,32 +138,31 @@ impl SendTool {
             (None, None) => Err(format!(
                 "Missing required parameter: file_path or artifact_id{FILE_ONLY}"
             )),
-            (Some(file_path), None) => self.resolve(file_path),
+            (Some(file_path), None) => self.resolve(file_path, ctx, make_folder),
             (None, Some(id)) => self.artifact(id, ctx),
         }
     }
 
-    /// R23: the file `file_path` names, resolved as `file_read` resolves one
-    /// — relative, no `..`, every component (the last included) canonicalized
-    /// and under the root — and refused, before and after resolution, inside
-    /// the store's `state/`, as `file_read` refuses it until S3 takes both
-    /// tools' store rules away with the root (R33).
-    fn resolve(&self, file_path: &str) -> Result<SendFile, String> {
-        let refuse = |what: &str| {
-            format!(
-                "Sending '{file_path}' is refused: it is inside {what}, which belongs to the \
-                 daemon's own state/ and is not workspace content."
-            )
+    /// R23 and R26 (storage design §10–§11): the file `file_path` names in the
+    /// call's working folder — the project, or the conversation's scratch
+    /// folder — resolved as `file_read` resolves one: relative, no `..`, every
+    /// component (the last included) canonicalized and under the folder, and
+    /// in a project nothing under a `.openalpaca` folder (R32). No home-store
+    /// rule binds it (R33): the store lies under no working folder. A call the
+    /// folder refuses (no context, no conversation, a missing project) gets
+    /// that refusal's sentence, and nothing is sent.
+    fn resolve(
+        &self,
+        file_path: &str,
+        ctx: &ToolContext,
+        make_folder: bool,
+    ) -> Result<SendFile, String> {
+        let (root, rules) = if make_folder {
+            acting_folder(ctx)?
+        } else {
+            named_folder(ctx)?
         };
-        if let Some(what) = is_store_owned_path(file_path, StoreAccess::Read) {
-            return Err(refuse(what));
-        }
-        let resolved = resolve_workspace_path(file_path, &self.workspace_root, FolderRules::Plain)?;
-        if let Some(what) =
-            is_store_owned_resolved(&resolved, &self.workspace_root, StoreAccess::Read)
-        {
-            return Err(refuse(what));
-        }
+        let resolved = resolve_workspace_path(file_path, &root, rules)?;
         let metadata = std::fs::metadata(&resolved)
             .map_err(|e| format!("Cannot access file '{file_path}': {e}"))?;
         if !metadata.is_file() {
@@ -245,7 +240,7 @@ impl BuiltInTool for SendTool {
                 // R23: located before anything is handed on, so a path that
                 // leaves the folder, or another owner's artifact, is refused
                 // before the provider is asked.
-                let file = self.locate(arguments, ctx)?;
+                let file = self.locate(arguments, ctx, true)?;
                 let mime_type = arguments
                     .get("mime_type")
                     .and_then(|v| v.as_str())
@@ -295,23 +290,20 @@ impl BuiltInTool for SendTool {
         let channel = required(arguments, "channel", "")?;
         let recipient = required(arguments, "recipient", "")?;
         let filename = required(arguments, "filename", FILE_ONLY)?;
-        let file = self.locate(arguments, ctx)?;
+        let file = self.locate(arguments, ctx, false)?;
         Ok(Some(file_card(&file, channel, recipient, filename)))
     }
 }
 
-pub(super) fn send_tool(
-    provider: ConnectorSendLock,
-    db: Option<Database>,
-    workspace_root: PathBuf,
-) -> RegisteredTool {
+pub(super) fn send_tool(provider: ConnectorSendLock, db: Option<Database>) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "send".to_string(),
             description: "Send a message or file to a contact via a connected external channel \
                 (Telegram, iMessage, Discord). For messages: provide action='message' \
                 with content text. For files: provide action='file' with file_path (a file \
-                relative to OpenAlpaca's folder) or artifact_id (a by-product you saved, by its \
+                relative to the working folder — the project, or this conversation's scratch \
+                folder) or artifact_id (a by-product you saved, by its \
                 id), filename, and optional mime_type/caption. Use recipient='default' for the \
                 most recent conversation, or specify a channel-specific identifier (chat_id \
                 for Telegram, phone/email for iMessage, channel_id for Discord). Returns \
@@ -339,7 +331,7 @@ pub(super) fn send_tool(
                     },
                     "file_path": {
                         "type": "string",
-                        "description": "A file to send, relative to OpenAlpaca's folder (e.g. 'reports/q3.pdf'); absolute paths and '..' are refused. Give this or artifact_id (action='file')"
+                        "description": "A file to send, relative to the working folder (e.g. 'reports/q3.pdf'); absolute paths and '..' are refused. Give this or artifact_id (action='file')"
                     },
                     "artifact_id": {
                         "type": "string",
@@ -379,11 +371,7 @@ pub(super) fn send_tool(
                 }),
             ]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(SendTool {
-            provider,
-            db,
-            workspace_root,
-        })),
+        backend: ToolBackend::BuiltIn(Arc::new(SendTool { provider, db })),
         provides_capabilities: vec!["messaging".into()],
         exempt_from_timeout: false,
         annotations: annotations_for_builtin("send"),
@@ -399,18 +387,14 @@ mod tests {
     use crate::orchestrator::ConnectorSendProvider;
     use openalpaca_storage::store::StoreScope;
     use openalpaca_storage::{ArtifactKind, ArtifactRecord, NewArtifact};
-    use std::path::Path;
     use std::sync::{Mutex, RwLock};
 
-    /// A root nothing resolves under: the validation tests never reach a
-    /// file, and no test may touch the repository.
-    const NO_ROOT: &str = "/nonexistent/openalpaca-send-tests";
-
+    /// `send` with no connector: the validation tests never reach one. A
+    /// file it is handed is resolved in the call's working folder.
     fn make_tool() -> SendTool {
         SendTool {
             provider: Arc::new(RwLock::new(None)),
             db: None,
-            workspace_root: PathBuf::from(NO_ROOT),
         }
     }
 
@@ -450,13 +434,13 @@ mod tests {
         }
     }
 
-    /// `send` over `root`, with `sender` as its connector.
-    fn tool_at(root: &Path, sender: &Arc<RecordingSender>) -> SendTool {
+    /// `send` with `sender` as its connector. It acts in the call's working
+    /// folder (storage design §10, R26).
+    fn tool_with(sender: &Arc<RecordingSender>) -> SendTool {
         let provider: Arc<dyn ConnectorSendProvider> = sender.clone();
         SendTool {
             provider: Arc::new(RwLock::new(Some(provider))),
             db: None,
-            workspace_root: root.to_path_buf(),
         }
     }
 
@@ -470,12 +454,13 @@ mod tests {
         })
     }
 
-    /// A folder holding `reports/q3.pdf` (5 bytes).
-    fn root_with_report() -> tempfile::TempDir {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("reports")).unwrap();
-        std::fs::write(root.path().join("reports/q3.pdf"), b"%PDF-").unwrap();
-        root
+    /// A guarded temp project holding `reports/q3.pdf` (5 bytes): the working
+    /// folder of `gp.ctx()`.
+    fn project_with_report() -> crate::test_util::GuardedProject {
+        let gp = crate::test_util::GuardedProject::new();
+        std::fs::create_dir_all(gp.root.join("reports")).unwrap();
+        std::fs::write(gp.root.join("reports/q3.pdf"), b"%PDF-").unwrap();
+        gp
     }
 
     #[tokio::test]
@@ -499,13 +484,11 @@ mod tests {
 
     #[tokio::test]
     async fn file_no_provider_returns_clear_error() {
-        let root = root_with_report();
-        let tool = SendTool {
-            provider: Arc::new(RwLock::new(None)),
-            db: None,
-            workspace_root: root.path().to_path_buf(),
-        };
-        let err = tool.execute(&file_args("reports/q3.pdf")).await.unwrap_err();
+        let gp = project_with_report();
+        let err = make_tool()
+            .execute_with_context(&file_args("reports/q3.pdf"), &gp.ctx())
+            .await
+            .unwrap_err();
         assert!(
             err.contains("No connector send provider"),
             "Should reach provider check: {err}"
@@ -629,13 +612,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_file_is_sent_by_its_path_resolved_under_the_root() {
-        let root = root_with_report();
+        let gp = project_with_report();
         let sender = Arc::new(RecordingSender::default());
-        let out = tool_at(root.path(), &sender)
-            .execute(&file_args("reports/q3.pdf"))
+        let out = tool_with(&sender)
+            .execute_with_context(&file_args("reports/q3.pdf"), &gp.ctx())
             .await;
         assert_eq!(out.as_deref(), Ok("Sent file 'q3.pdf'"));
-        let sent = root.path().canonicalize().unwrap().join("reports/q3.pdf");
+        let sent = gp.root.join("reports/q3.pdf");
         assert_eq!(
             *sender.files.lock().unwrap(),
             vec![(
@@ -648,69 +631,80 @@ mod tests {
 
     #[tokio::test]
     async fn a_path_that_leaves_the_folder_is_refused_before_the_provider() {
-        let root = root_with_report();
+        let gp = project_with_report();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.txt"), "not yours").unwrap();
         let absolute = outside.path().join("secret.txt");
         let sender = Arc::new(RecordingSender::default());
-        let tool = tool_at(root.path(), &sender);
+        let tool = tool_with(&sender);
         for (path, refusal) in [
             (
                 absolute.to_str().unwrap(),
                 "Absolute paths are not allowed. Use relative paths within the workspace.",
             ),
             ("../secret.txt", "Path traversal ('..') is not allowed."),
-            ("reports/../../secret.txt", "Path traversal ('..') is not allowed."),
+            (
+                "reports/../../secret.txt",
+                "Path traversal ('..') is not allowed.",
+            ),
         ] {
-            assert_eq!(tool.execute(&file_args(path)).await.unwrap_err(), refusal, "{path}");
+            assert_eq!(
+                tool.execute_with_context(&file_args(path), &gp.ctx())
+                    .await
+                    .unwrap_err(),
+                refusal,
+                "{path}"
+            );
         }
-        assert!(sender.files.lock().unwrap().is_empty(), "nothing reached the connector");
+        assert!(
+            sender.files.lock().unwrap().is_empty(),
+            "nothing reached the connector"
+        );
     }
 
+    /// R33 (storage design §11): no home-store rule binds `send` any more. A
+    /// project's own `state/` folder is the user's — the daemon's `state/`
+    /// lies under no working folder. A folder is still not a file.
     #[tokio::test]
-    async fn the_stores_state_folder_is_refused_and_a_folder_is_not_a_file() {
-        let root = root_with_report();
-        std::fs::create_dir_all(root.path().join("state")).unwrap();
-        std::fs::write(root.path().join("state/discovery.json"), "{\"token\":\"t\"}").unwrap();
+    async fn a_projects_own_state_folder_is_sent_and_a_folder_is_not_a_file() {
+        let gp = project_with_report();
+        std::fs::create_dir_all(gp.root.join("state")).unwrap();
+        std::fs::write(gp.root.join("state/notes.json"), "{}").unwrap();
         let sender = Arc::new(RecordingSender::default());
-        let tool = tool_at(root.path(), &sender);
+        let tool = tool_with(&sender);
         assert_eq!(
-            tool.execute(&file_args("state/discovery.json")).await.unwrap_err(),
-            "Sending 'state/discovery.json' is refused: it is inside the store's `state/` \
-             directory, which belongs to the daemon's own state/ and is not workspace content."
+            tool.execute_with_context(&file_args("state/notes.json"), &gp.ctx())
+                .await
+                .as_deref(),
+            Ok("Sent file 'q3.pdf'")
         );
         assert_eq!(
-            tool.execute(&file_args("reports")).await.unwrap_err(),
+            tool.execute_with_context(&file_args("reports"), &gp.ctx())
+                .await
+                .unwrap_err(),
             "'reports' is not a file."
         );
-        assert!(sender.files.lock().unwrap().is_empty());
+        assert_eq!(sender.files.lock().unwrap().len(), 1, "the file only");
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn links_out_of_the_folder_or_into_state_are_refused_after_resolution() {
-        let root = root_with_report();
-        std::fs::create_dir_all(root.path().join("state")).unwrap();
-        std::fs::write(root.path().join("state/discovery.json"), "{}").unwrap();
+    async fn a_link_out_of_the_folder_is_refused_after_resolution() {
+        let gp = project_with_report();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.txt"), "not yours").unwrap();
         std::os::unix::fs::symlink(
             outside.path().join("secret.txt"),
-            root.path().join("reports/link.pdf"),
+            gp.root.join("reports/link.pdf"),
         )
         .unwrap();
-        std::os::unix::fs::symlink(root.path().join("state"), root.path().join("reports/s"))
-            .unwrap();
         let sender = Arc::new(RecordingSender::default());
-        let tool = tool_at(root.path(), &sender);
         assert_eq!(
-            tool.execute(&file_args("reports/link.pdf")).await.unwrap_err(),
+            tool_with(&sender)
+                .execute_with_context(&file_args("reports/link.pdf"), &gp.ctx())
+                .await
+                .unwrap_err(),
             "Path 'reports/link.pdf' resolves outside the workspace boundary"
-        );
-        assert_eq!(
-            tool.execute(&file_args("reports/s/discovery.json")).await.unwrap_err(),
-            "Sending 'reports/s/discovery.json' is refused: it is inside the store's `state/` \
-             directory, which belongs to the daemon's own state/ and is not workspace content."
         );
         assert!(sender.files.lock().unwrap().is_empty());
     }
@@ -758,7 +752,6 @@ mod tests {
         SendTool {
             provider: Arc::new(RwLock::new(Some(provider))),
             db: Some(saved.db.clone()),
-            workspace_root: PathBuf::from(NO_ROOT),
         }
     }
 
@@ -959,20 +952,22 @@ mod tests {
 
     #[tokio::test]
     async fn a_file_card_names_the_resolved_path_its_size_and_where_it_goes() {
-        let root = root_with_report();
+        let gp = project_with_report();
         let sender = Arc::new(RecordingSender::default());
-        let card = tool_at(root.path(), &sender)
-            .confirmation_preview(&file_args("reports/q3.pdf"), &ToolContext::default())
+        let card = tool_with(&sender)
+            .confirmation_preview(&file_args("reports/q3.pdf"), &gp.ctx())
             .await;
-        let canonical = root.path().canonicalize().unwrap();
         assert_eq!(
             card,
             Ok(Some(format!(
                 "Sends {}/reports/q3.pdf (5 bytes) to telegram recipient default as q3.pdf.",
-                canonical.display()
+                gp.root.display()
             )))
         );
-        assert!(sender.files.lock().unwrap().is_empty(), "a card sends nothing");
+        assert!(
+            sender.files.lock().unwrap().is_empty(),
+            "a card sends nothing"
+        );
     }
 
     #[tokio::test]
@@ -1010,20 +1005,25 @@ mod tests {
     /// A call the send would refuse raises no card: nobody is asked about it.
     #[tokio::test]
     async fn a_send_that_would_be_refused_raises_no_card() {
-        let root = root_with_report();
         let sender = Arc::new(RecordingSender::default());
-        let tool = tool_at(root.path(), &sender);
-        let ctx = ToolContext::default();
-        assert_eq!(
-            tool.confirmation_preview(&file_args("../secret.txt"), &ctx).await,
-            Err("Path traversal ('..') is not allowed.".to_string())
-        );
-        let mut nameless = file_args("reports/q3.pdf");
-        nameless.as_object_mut().unwrap().remove("filename");
-        assert_eq!(
-            tool.confirmation_preview(&nameless, &ctx).await,
-            Err("Missing required parameter: filename (required for action=\"file\")".to_string())
-        );
+        {
+            let gp = project_with_report();
+            let tool = tool_with(&sender);
+            assert_eq!(
+                tool.confirmation_preview(&file_args("../secret.txt"), &gp.ctx())
+                    .await,
+                Err("Path traversal ('..') is not allowed.".to_string())
+            );
+            let mut nameless = file_args("reports/q3.pdf");
+            nameless.as_object_mut().unwrap().remove("filename");
+            assert_eq!(
+                tool.confirmation_preview(&nameless, &gp.ctx()).await,
+                Err(
+                    "Missing required parameter: filename (required for action=\"file\")"
+                        .to_string()
+                )
+            );
+        }
         let saved = saved();
         assert_eq!(
             artifact_tool(&saved, &sender)
@@ -1037,24 +1037,113 @@ mod tests {
     /// name on disk carries one, the display name the other.
     #[tokio::test]
     async fn hidden_characters_on_a_send_card_are_escaped_and_counted() {
-        let root = root_with_report();
-        std::fs::write(root.path().join("reports/q3\u{202E}fdp.exe"), b"%PDF-").unwrap();
+        let gp = project_with_report();
+        std::fs::write(gp.root.join("reports/q3\u{202E}fdp.exe"), b"%PDF-").unwrap();
         let sender = Arc::new(RecordingSender::default());
         let mut args = file_args("reports/q3\u{202E}fdp.exe");
         args["filename"] = serde_json::json!("report\u{200B}.pdf");
-        let card = tool_at(root.path(), &sender)
-            .confirmation_preview(&args, &ToolContext::default())
+        let card = tool_with(&sender)
+            .confirmation_preview(&args, &gp.ctx())
             .await
             .unwrap()
             .expect("a file send has a card");
-        let canonical = root.path().canonicalize().unwrap();
         assert_eq!(
             card,
             format!(
                 "Sends {}/reports/q3<U+202E>fdp.exe (5 bytes) to telegram recipient default as \
                  report<U+200B>.pdf.\nNote: this request contains 2 hidden characters, shown as <U+…>.",
-                canonical.display()
+                gp.root.display()
             )
+        );
+    }
+
+    // ── Storage design §10 (R26, R27, R32, R34): the working folder ──
+
+    #[tokio::test]
+    async fn a_file_is_sent_from_the_conversations_scratch_folder() {
+        let gp = crate::test_util::GuardedProject::new();
+        let scratch = gp.home_root().join("scratch").join("conv-test");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("notes.txt"), "notes").unwrap();
+        let sender = Arc::new(RecordingSender::default());
+
+        let out = tool_with(&sender)
+            .execute_with_context(&file_args("notes.txt"), &gp.scratch_ctx())
+            .await;
+        assert_eq!(out.as_deref(), Ok("Sent file 'q3.pdf'"));
+        assert_eq!(
+            sender.files.lock().unwrap()[0].0,
+            scratch.join("notes.txt").to_str().unwrap()
+        );
+    }
+
+    /// R32's read rule binds `send` like `file_read`: an older OpenAlpaca's
+    /// folder inside a project is never sent anywhere.
+    #[tokio::test]
+    async fn a_file_under_dot_openalpaca_in_a_project_is_refused_before_the_connector() {
+        let gp = project_with_report();
+        std::fs::create_dir_all(gp.root.join(".openalpaca/uploads")).unwrap();
+        std::fs::write(gp.root.join(".openalpaca/uploads/a.txt"), "old").unwrap();
+        let sender = Arc::new(RecordingSender::default());
+
+        let err = tool_with(&sender)
+            .execute_with_context(&file_args(".openalpaca/uploads/a.txt"), &gp.ctx())
+            .await
+            .expect_err("refused");
+        assert_eq!(
+            err,
+            "'.openalpaca/uploads/a.txt' is refused: a .openalpaca folder inside a project is an \
+             older OpenAlpaca's, and nothing in it is read or written any more."
+        );
+        assert!(
+            sender.files.lock().unwrap().is_empty(),
+            "nothing reached the connector"
+        );
+    }
+
+    /// R27: a missing project is refused at the card and in the body.
+    #[tokio::test]
+    async fn a_missing_project_refuses_the_send_and_raises_no_card() {
+        let gp = project_with_report();
+        std::fs::remove_dir_all(&gp.root).unwrap();
+        let missing = crate::tools::working_folder::WorkingFolderRefusal::ProjectMissing {
+            root: gp.root.display().to_string(),
+        }
+        .to_string();
+        let sender = Arc::new(RecordingSender::default());
+        let tool = tool_with(&sender);
+
+        assert_eq!(
+            tool.confirmation_preview(&file_args("reports/q3.pdf"), &gp.ctx())
+                .await,
+            Err(missing.clone())
+        );
+        assert_eq!(
+            tool.execute_with_context(&file_args("reports/q3.pdf"), &gp.ctx())
+                .await,
+            Err(missing)
+        );
+        assert!(sender.files.lock().unwrap().is_empty());
+    }
+
+    /// R34: the card names a file of the scratch folder without making the
+    /// folder — a conversation that never acts gets none.
+    #[tokio::test]
+    async fn a_file_card_makes_no_scratch_folder() {
+        let gp = crate::test_util::GuardedProject::new();
+        let sender = Arc::new(RecordingSender::default());
+
+        let err = tool_with(&sender)
+            .confirmation_preview(&file_args("notes.txt"), &gp.scratch_ctx())
+            .await
+            .expect_err("no such file yet");
+        assert!(
+            err.starts_with("Path resolution failed for 'notes.txt'"),
+            "{err}"
+        );
+        assert!(
+            !gp.home_root().join("scratch").exists(),
+            "the card made no folder"
         );
     }
 }

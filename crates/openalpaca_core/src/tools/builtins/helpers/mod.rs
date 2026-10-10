@@ -110,6 +110,14 @@ pub(super) fn acting_folder(ctx: &ToolContext) -> Result<(PathBuf, FolderRules),
     Ok((root, FolderRules::of(&folder)))
 }
 
+/// [`acting_folder`] for an approval card (R34): the folder named, never
+/// made — a conversation that never acts gets no scratch folder, and a file
+/// in a scratch folder not made yet does not exist either.
+pub(super) fn named_folder(ctx: &ToolContext) -> Result<(PathBuf, FolderRules), String> {
+    let folder = working_folder(ctx).map_err(|refusal| refusal.to_string())?;
+    Ok((folder.path().to_path_buf(), FolderRules::of(&folder)))
+}
+
 /// Resolve a relative path within the workspace and verify it doesn't escape
 /// the workspace boundary via symlinks or normalization.
 ///
@@ -252,18 +260,17 @@ pub(super) enum StoreAccess {
     Write,
 }
 
-/// The store's own files, which the generic file tools refuse (memory
-/// redesign, design §2; plan 3.2). The builtin registry captures the
-/// daemon's CWD as its workspace root and both launchers start the daemon
-/// in the home store, so a relative path reaches the store directly:
+/// The store's own files, which `workspace_write` refuses as an entry key: a
+/// key names the entry and, spilled, the artifact's path (memory redesign,
+/// design §2; plan 3.2). The file tools and `send` no longer ask (storage
+/// design §11, R33): they act in a project or a scratch folder, where none
+/// of these files is reachable.
 ///
 /// - any path whose first component is `state` — the control snapshots,
-///   the database, the discovery file — is refused on every access
-///   (`file_read` would disclose the owner-id mapping);
+///   the database, the discovery file — is refused on every access;
 /// - a memory partition's control files — a `.history/` component, a
 ///   `MEMORY.md` and a `.gitignore` directly under a `memory/` directory —
-///   are refused on write only, so a hand-dropped note stays possible and a
-///   read of a kept revision stays possible.
+///   are refused on write only.
 ///
 /// Returns what was matched, for the refusal message. Names are compared
 /// case-insensitively: the platforms with a case-insensitive file system
@@ -302,23 +309,6 @@ pub(super) fn is_store_owned_path(path: &str, access: StoreAccess) -> Option<&'s
         }
         _ => None,
     }
-}
-
-/// [`is_store_owned_path`] over the path a resolution landed on, relative
-/// to the workspace root. The argument check runs first, on the string;
-/// this one runs after `resolve_workspace_path[_for_write]`, because a
-/// symlink inside the workspace that points at `state/` (or at a
-/// partition's control files) canonicalizes under the root and would
-/// otherwise pass. A resolved path that is not under the canonical root —
-/// the resolvers refuse that already — matches nothing here.
-pub(super) fn is_store_owned_resolved(
-    resolved: &Path,
-    workspace_root: &Path,
-    access: StoreAccess,
-) -> Option<&'static str> {
-    let root = workspace_root.canonicalize().ok()?;
-    let relative = resolved.strip_prefix(&root).ok()?;
-    is_store_owned_path(&relative.to_string_lossy(), access)
 }
 
 /// Generate a unique backup path with nanosecond timestamp and UUID suffix.
