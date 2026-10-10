@@ -568,14 +568,14 @@ lane never posts its completion report or its confirmation prompts there.
 |---|---|
 | `POST /v1/files/upload` | Multipart upload (body limit 100 MiB). Answers `{id, filename, mime_type, size_bytes, status}`; the `id` is what a chat turn names in `attachments`. |
 | `GET /v1/files/{id}` | Upload metadata. |
-| `GET /v1/files/{id}/content` | The bytes. Query token or bearer header. |
-| `POST /v1/files/{id}/open` | Open the file with the OS default application. A result file in the project is opened only when the artifact store keeps its extension — text, Markdown or PDF, code or config, a table, a raster image, HTML, an archive or an office document; anything else (`.sh`, `.command`, `.svg`, `.exe`, `Makefile`, a dotfile such as `.env`) is `409 OPEN_NOT_OFFERED`: show it in its folder instead. |
-| `GET /v1/artifacts` | List produced artifacts (filters and paging). Each row carries `in_project` — a result file an agent wrote into the project, which points at the real file — and `openable`, whether `Open` is offered for it. `in_project=true` lists only the project's result files, `in_project=false` only by-products; absent, both. |
+| `GET /v1/files/{id}/content` | The bytes. Query token or bearer header. A result file in the project is read through its project's folder: `410 ARTIFACT_GONE` when the file is no longer there, `410 ARTIFACT_PROJECT_MISSING` when its project is missing (*Where an agent's files land*, below). |
+| `POST /v1/files/{id}/open` | Open the file with the OS default application. A result file in the project is opened only when the artifact store keeps its extension — text, Markdown or PDF, code or config, a table, a raster image, HTML, an archive or an office document; anything else (`.sh`, `.command`, `.svg`, `.exe`, `Makefile`, a dotfile such as `.env`) is `409 OPEN_NOT_OFFERED`: show it in its folder instead. That is decided again on what the file resolves to when it is opened, so a result file replaced since by a folder, or by a link to a script or an app in the project, is `409 OPEN_NOT_OFFERED` too, and the default application is never asked. A result file of a missing project is `410 ARTIFACT_PROJECT_MISSING`. |
+| `GET /v1/artifacts` | List produced artifacts (filters and paging). Each row carries `in_project` — a result file an agent wrote into the project, which points at the real file — and `openable`, whether `Open` is offered for it. `in_project=true` lists only the project's result files, `in_project=false` only by-products; absent, both. A row whose file was not there the last time it was read carries `missing: true` and is listed only with `include_missing=true`; a result file's mark goes when a later read finds the file again. |
 | `GET /v1/artifacts/{id}` | One artifact. |
 | `GET /v1/artifacts/{id}/versions` | Its versions. A result file in the project has none and answers an empty list: what OpenAlpaca keeps of it is the content it had before `file_write` or `file_edit` replaced or edited it, in the conversation's log (`~/.openalpaca/sessions/<id>/snapshots/`; a shell command's changes keep no copy), and any longer history is the project's own — git's, where the project is a repository. |
 | `GET /v1/artifacts/{id}/diff?from=&to=` | A diff between two versions; a result file in the project has no versions to compare. |
 | `PUT /v1/artifacts/{id}/pin` | Pin or unpin it. |
-| `GET /v1/artifacts/{id}/content` | The head version's bytes. Query token or bearer header. |
+| `GET /v1/artifacts/{id}/content` | The head version's bytes. Query token or bearer header. `410 ARTIFACT_GONE` when they are no longer on disk (the row is marked `missing`); for a result file in the project, `410 ARTIFACT_PROJECT_MISSING` when its project is missing. |
 | `GET /v1/artifacts/{id}/versions/{n}/content` | One version's bytes. Query token or bearer header. |
 | `GET /v1/workspaces` | Every project: `[{id, root, name, missing}]`, by folder name — `name` is its folder under `projects/`, `missing` that its root is no longer a directory or no longer leads to its own folder — renamed by case only, or moved with a link left at the old path (its data is kept; re-point it, or delete its data). |
 | `GET /v1/workspaces?path=` | What a path resolves to: `{path, root, id, name, missing, rows, active_tasks, queued_tasks}` — a root the projects recorded, sent as written, is that project (as on `PATCH` and the purge below), with `path` as sent; any other path is resolved as a turn's is — as written first, so a path inside a recorded root that now leads to another folder still names that root's project, then by its canonical form; `path` is then its canonical form; `root` `null` when it is in no project, `id` and `name` `null` for a git repository no folder under `projects/` records yet; `rows` counts the artifacts, conversations, runs, messages and follow-ups recorded under the root, `active_tasks` its runs running or paused and `queued_tasks` its queued ones. Reading records nothing. A relative path is `400 INVALID_PATH`; `500 IO_ERROR` while the folder under the store that holds the projects cannot be listed. |
@@ -605,7 +605,15 @@ works in).
   its path relative to the project; it is the real file, with no copy and no
   versions — OpenAlpaca keeps only the pre-edit copies above, and any longer
   history is the project's own, git's where the project is a repository — and
-  its record follows an edit you make yourself. The tool's result names the
+  its record follows an edit you make yourself. If the file goes, its row is
+  kept and marked `missing`, and a read that finds the file again — once you
+  put it back — clears the mark. A result file of a project that is
+  `missing` — its folder gone, renamed by case only, or moved with a link left
+  at its old path — is never read through that path: the content routes and
+  Open answer `410 ARTIFACT_PROJECT_MISSING` with the sentence
+  `<root>: this project's folder is gone or has moved; re-point the project to read its files.`,
+  the app's `Reveal in Finder` refuses it with the same sentence, and the
+  file reads again once the project is re-pointed. The tool's result names the
   file's absolute path and tells the model to give the user that path; if the
   row could not be written, it says the file is written and the app could not
   list it. A run's completion report ends with a line naming the files it
@@ -1278,8 +1286,13 @@ turn's **working folder**:
   is refused too, with a sentence saying no folder under `projects/` records
   that folder any more.
 - The model is told its working folder in one line of each turn's context —
-  the chat's, a file-based skill's, a workflow lead's and each subagent's (a
-  plugin's skills and agents are not told).
+  the chat's (an onboarding turn's, or one with only attachments, too), a
+  file-based skill's (one another skill invokes too), a workflow lead's and
+  each subagent's (a plugin's skills and agents are not told). The line names
+  only the file tools that loop holds and says a shell command starts there
+  only when it holds `shell_execute`; in a project, a loop that holds no tool
+  that writes a file is told so, and the lead that a subagent whose template
+  grants `file_write` writes the project's files.
 - The daemon's own working directory stays where its launcher put it; only an
   MCP server whose entry names no `cwd`, and the CLI model fallback, start
   there (a plugin runs in its own folder).
@@ -1551,8 +1564,12 @@ replacements and the line of the first, then quotes the text to find and the
 text to put in its place, each cut after 1,000 bytes with the cut named;
 a file `send`'s names the file, its size, the channel, the recipient and the
 name it is sent as (a message `send` carries no preview: its card is the
-arguments alone). A path, a quoted text and a recipient show every hidden character
-as `<U+XXXX>`, with the count on a line under them. A tool can refuse a call
+arguments alone). When the path a `file_write` or `file_edit` names reaches
+its file through a link inside the project, the card names the file that
+changes beside it
+(`Replaces docs/notes.md (a link to scripts/release.sh) in the project folder …`).
+A path, the file a link leads to, a quoted text and a recipient show every
+hidden character as `<U+XXXX>`, with the count on a line under them. A tool can refuse a call
 **before** its card is raised, and then no prompt is emitted at all:
 `memory_confirm` does for a suggestion that moved, `memory_update` for any
 `confirm`, and the file tools, `send` and `shell_execute` for a call they would

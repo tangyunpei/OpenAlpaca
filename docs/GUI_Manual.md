@@ -139,9 +139,11 @@ whole bridge (`src-tauri/src/lib.rs`):
   projects, is shown — every store file lives under the home root, a project's
   in its folder under `projects/`, and a file an agent wrote into a project
   lives in that project. A project whose folder is gone or has moved admits
-  nothing through its old path. The program gets the path as an argument of
-  its own, never through a shell, and a refusal is one sentence, shown as a
-  toast. Behind `Reveal in Finder` (Library, below).
+  nothing through its old path, and its refusal says so:
+  `<root>: this project's folder is gone or has moved; re-point the project to read its files.`
+  The program gets the path as an argument of its own, never through a shell,
+  and a refusal is one sentence, shown as a toast. Behind `Reveal in Finder`
+  (Library, below).
 
 The first two return `{ baseUrl, token, instanceId }`. `instanceId` is the identity
 guard: if it changes, the daemon restarted, so every `task_id`, `stream_id` and
@@ -571,22 +573,24 @@ the chat itself.
 **What a card says.** A card shows the tool's arguments — each hidden character
 written as `<U+XXXX>`, as described above — and, over them under
 `From OpenAlpaca`, what the daemon says about the call. A shell command's card
-names the folder it runs in — the project folder, or the conversation's
-scratch folder — and says the command can reach files outside it: read the command
+names the folder it runs in — the project folder, or the conversation's scratch
+folder — and says the command can reach files outside it: read the command
 before you approve it. A `file_write` card says where the file lands — written
 or replaced in the project folder (a replaced file's old content is kept in the
 conversation's log), or saved as a by-product in OpenAlpaca's artifact store. A
 `file_edit` card names the file, the number of replacements and the line of the
 first, and quotes the text to find and the text to put in its place, each cut
-after 1,000 bytes with the cut named. A file `send`'s card names the file, its
-size, the channel, the recipient and the name it is sent as; a message `send`'s
-card shows its arguments alone. Hidden characters in a path, a quoted text or a
-recipient are written as `<U+XXXX>`, with their count under them. A call the
-daemon would refuse anyway — a project folder that is gone or has moved, a path
-outside the working folder or inside `.git`, a file too large to keep a copy
-of — is refused before any card is raised, and the agent is told why. Reading a
-file or listing a folder never raises a card, and neither does saving a draft
-with `artifact_write`.
+after 1,000 bytes with the cut named. When the path reaches its file through a
+link inside the project, both cards name the file that changes beside it:
+`docs/notes.md (a link to scripts/release.sh)`. A file `send`'s card names the
+file, its size, the channel, the recipient and the name it is sent as; a
+message `send`'s card shows its arguments alone. Hidden characters in a path,
+the file a link leads to, a quoted text or a recipient are written as
+`<U+XXXX>`, with their count under them. A call the daemon would refuse anyway
+— a project folder that is gone or has moved, a path outside the working folder
+or inside `.git`, a file too large to keep a copy of — is refused before any
+card is raised, and the agent is told why. Reading a file or listing a folder
+never raises a card, and neither does saving a draft with `artifact_write`.
 
 **A prompt nobody answers settles anyway.** The daemon waits five minutes per
 prompt by default (`[execution.agent_defaults] confirmation_timeout_secs` in
@@ -777,13 +781,19 @@ The `Results in the project` chip shows instead the files agents wrote into
 your projects (`?in_project=true`): each row is named by the file's path in its
 project, carries a `project` tag, and its subtitle starts with the project's
 folder name; it points at the real file. Such a file has no versions: what
-OpenAlpaca keeps of it is the content it had before `file_write` or
-`file_edit` replaced or edited it, in the conversation's log
+OpenAlpaca keeps of it is the content it had before `file_write` or `file_edit`
+replaced or edited it, in the conversation's log
 (`~/.openalpaca/sessions/<id>/snapshots/`; a shell command's changes keep no
 copy), and any longer history is the project's own — git's, where the project
-is a repository. Its detail
-has no History or Diff, only Preview, and its row follows the file when you
-edit it yourself. The header's count is the shown side's own.
+is a repository. Its detail has no History or Diff, only Preview, and its row
+follows the file when you edit it yourself. A result file the daemon could not
+find the last time it was read stays listed with a `missing` tag
+(`?include_missing=true`): the Preview reads it again, and once the file is
+back it is shown and the tag goes. While its project is missing the Preview
+shows the daemon's sentence,
+`<root>: this project's folder is gone or has moved; re-point the project to read its files.`,
+and the tag stays until the project is re-pointed and the file read again. The
+header's count is the shown side's own.
 
 Pins are server state (`PUT /v1/artifacts/{id}/pin`). The client keeps a
 `localStorage` mirror so the star flips instantly, and every server answer
@@ -799,7 +809,11 @@ Finder` — over three tabs:
   a missing route. Binary bytes are not characters, so nothing is drawn and the
   row points at Export and Open. Anything over 512 KiB is refused before the
   fetch. A row whose bytes were deleted under the daemon says so — a blank pane
-  would claim "nothing here", which is a different statement.
+  would claim "nothing here", which is a different statement. For a result
+  file marked `missing` the Preview reads it again first: a file that is not
+  back says it is no longer at its path in the project, a missing project's
+  shows the daemon's sentence, and a kind the Preview does not read (binary, or
+  over 512 KiB) says it could not be read the last time it was asked for.
 - **Diff.** `GET …/diff` for the newest pair. The `+ / −` counters are counted
   from the patch rather than read off the response, so they cannot disagree with
   the lines under them. A refusal is stated in its own words: `NOT_DIFFABLE`
@@ -826,16 +840,22 @@ is drawn only when the Library keeps its kind — text, Markdown or PDF, code or
 config, a table, a raster image, HTML, an archive or an office document; a
 script, a `.command`, an `.svg`, a `Makefile` or a dotfile gets
 `Reveal in Finder` alone, and the daemon refuses to open one
-(`409 OPEN_NOT_OFFERED`). `Export` saves a result file under its base name
-(`main.rs`, not `src/main.rs`).
+(`409 OPEN_NOT_OFFERED`). The daemon decides that again on what the file is
+when you click: a result file replaced since by a folder, or by a link to a
+script or an app in the project, is refused the same way, and the toast says
+so. `Export` saves a result file under its base name (`main.rs`, not
+`src/main.rs`). For a result file of a missing project, `Open` and `Export` are
+refused with the daemon's sentence above, as the toast.
+
 `Reveal in Finder` — `Show in folder` on Windows and Linux — shows the file in
 its folder instead, through the app's own shell (`reveal_path`, above): Finder
 comes forward with the file selected. It is drawn only inside the app's window,
 never in the Vite preview, which has no shell to ask. A file that is gone, is
 not a regular file, or is in neither an OpenAlpaca store nor one of your
-projects — a project whose folder is gone or has moved admits none — is
-refused, and the toast is the shell's own sentence. The `File written` card in
-the chat and the file panel in the chat's aside carry the same two buttons.
+projects is refused, and the toast is the shell's own sentence — for a file of
+a project whose folder is gone or has moved, the same sentence as the
+Preview's. The `File written` card in the chat and the file panel in the chat's
+aside carry the same two buttons.
 
 ## Memory
 
