@@ -600,6 +600,13 @@ impl BuiltInTool for ScriptToolBuiltIn {
             ))
         }
     }
+
+    /// R29: a script's arguments become its command line (`--key=value`),
+    /// and `config/skills/create-skill/scripts/write_skill_md.sh` builds a
+    /// path from `--id` with no check of its own, so the `../` rule stays.
+    fn arguments_reach_a_program(&self) -> bool {
+        true
+    }
 }
 
 /// Return MCP-style annotations for a known built-in tool name.

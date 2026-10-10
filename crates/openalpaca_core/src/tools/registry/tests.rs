@@ -2792,3 +2792,82 @@ fn created_by_resolves_the_principal_before_the_owner_id() {
     assert_eq!(with(None, Some("user1")), "user1");
     assert_eq!(with(None, None), "system");
 }
+
+// ── R29: traversal_rule (storage design §11) ────────────────────────────
+
+/// A builtin that says its arguments reach a program, as a skill script does.
+struct ProgramBuiltIn;
+
+#[async_trait]
+impl BuiltInTool for ProgramBuiltIn {
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Ok("ran".to_string())
+    }
+
+    fn arguments_reach_a_program(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn only_a_first_party_builtin_is_spared_the_traversal_rule() {
+    let registry = ToolRegistry::default();
+    registry.register(make_tool("builtin_tool", "ok")).unwrap();
+    registry
+        .register(make_tool_with_backend(
+            "script_like",
+            ToolBackend::BuiltIn(Arc::new(ProgramBuiltIn)),
+        ))
+        .unwrap();
+    registry
+        .register(make_tool_with_backend(
+            "cmd_tool",
+            ToolBackend::Command {
+                command: "true".to_string(),
+                args_template: None,
+                timeout_secs: 5,
+            },
+        ))
+        .unwrap();
+    registry
+        .register(make_tool_with_backend(
+            "http_tool",
+            ToolBackend::Http {
+                method: "GET".to_string(),
+                url: "https://example.com/{q}".to_string(),
+                headers: HashMap::new(),
+                timeout_secs: 5,
+            },
+        ))
+        .unwrap();
+    registry
+        .register(make_tool_with_backend("srv__echo", mcp_backend()))
+        .unwrap();
+    registry
+        .register(make_tool_with_backend(
+            "plug::do",
+            ToolBackend::Plugin(Arc::new(ExtMockPluginExec)),
+        ))
+        .unwrap();
+
+    assert_eq!(registry.traversal_rule("builtin_tool"), TraversalRule::Allow);
+    for name in [
+        "script_like",
+        "cmd_tool",
+        "http_tool",
+        "srv__echo",
+        "plug::do",
+        "not_registered",
+    ] {
+        assert_eq!(registry.traversal_rule(name), TraversalRule::Refuse, "{name}");
+    }
+}
+
+#[test]
+fn a_builtin_says_its_arguments_reach_no_program_unless_it_says_otherwise() {
+    let plain = MockBuiltIn {
+        response: String::new(),
+    };
+    assert!(!plain.arguments_reach_a_program());
+    assert!(ProgramBuiltIn.arguments_reach_a_program());
+}

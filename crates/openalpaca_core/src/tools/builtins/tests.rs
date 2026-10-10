@@ -1562,3 +1562,61 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
         assert_eq!(sent, compliant, "{schema}");
     }
 }
+
+// --- R29: which tools keep the `../` rule (storage design §11) ---
+
+#[test]
+fn every_first_party_builtin_says_its_arguments_reach_no_program() {
+    use crate::bus::EventBus;
+    use crate::tools::registry::ToolBackend;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = PersonaToolContext {
+        soul_path: dir.path().join("SOUL.md"),
+        user_path: dir.path().join("USER.md"),
+        identity_path: dir.path().join("IDENTITY.md"),
+        backup_dir: dir.path().join("backups"),
+        bus: EventBus::new(16),
+        max_backups: None,
+    };
+    let provider: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
+    let tools = builtin_tools_with_persona_context(
+        None,
+        ctx,
+        None,
+        None,
+        Some(dir.path().to_path_buf()),
+        Some(provider),
+    );
+    assert!(tools.iter().any(|t| t.definition.name == "send"), "send is on the list");
+    for tool in &tools {
+        match &tool.backend {
+            ToolBackend::BuiltIn(handler) => assert!(
+                !handler.arguments_reach_a_program(),
+                "{} keeps the ../ rule",
+                tool.definition.name
+            ),
+            _ => panic!("{} is not a builtin", tool.definition.name),
+        }
+    }
+}
+
+#[test]
+fn a_skill_script_says_its_arguments_reach_a_program() {
+    let skill = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(skill.path().join("scripts")).unwrap();
+    std::fs::write(skill.path().join("scripts/noop.sh"), "exit 0\n").unwrap();
+    let script = ScriptToolBuiltIn::new(
+        skill.path(),
+        &crate::middleware::skill::ScriptConfig {
+            file: "noop.sh".to_string(),
+            name: "noop".to_string(),
+            description: "Does nothing".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            interpreter: Some("sh".to_string()),
+            timeout_secs: 5,
+        },
+    )
+    .unwrap();
+    assert!(script.arguments_reach_a_program());
+}

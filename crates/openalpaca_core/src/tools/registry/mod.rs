@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::orchestrator::skill::constraints::EffectiveToolSet;
 use crate::tools::extensions::{ExtensionId, ExtensionLedger};
+use crate::security::sanitizer::TraversalRule;
 
 pub mod availability;
 pub use availability::{
@@ -311,6 +312,15 @@ pub trait BuiltInTool: Send + Sync {
         _ctx: &ToolContext,
     ) -> Result<Option<String>, String> {
         Ok(None)
+    }
+
+    /// Whether this tool's arguments reach a shell line or another program,
+    /// so the sanitizer's `../` rule still applies to them (R29, storage
+    /// design §11). `false`, the default, is every first-party builtin: its
+    /// path arguments carry their own `..` refusal, and its other arguments
+    /// are content. A skill script answers `true`.
+    fn arguments_reach_a_program(&self) -> bool {
+        false
     }
 
     /// Called when a person denied this call on its card (design 09 §4.3),
@@ -1242,6 +1252,23 @@ impl ToolRegistry {
                 ToolBackend::BuiltIn(_) | ToolBackend::Http { .. } | ToolBackend::Plugin(_) | ToolBackend::Mcp { .. } => None,
             })
             .collect()
+    }
+
+    /// R29 (storage design §11): whether the sanitizer's `../` rule applies
+    /// to `tool_name`'s arguments. `Allow` only for a first-party builtin, a
+    /// `BuiltIn` whose handler says its arguments reach no program. `Refuse`
+    /// for a skill script, a `Command`, `Http`, `Plugin` or `Mcp` tool, and a
+    /// name that is not registered (fail closed). Identity is never read
+    /// from `author`, which a TOML tool sets for itself.
+    pub fn traversal_rule(&self, tool_name: &str) -> TraversalRule {
+        self.tools
+            .get(tool_name)
+            .map_or(TraversalRule::Refuse, |entry| match &entry.backend {
+                ToolBackend::BuiltIn(handler) if !handler.arguments_reach_a_program() => {
+                    TraversalRule::Allow
+                }
+                _ => TraversalRule::Refuse,
+            })
     }
 }
 
