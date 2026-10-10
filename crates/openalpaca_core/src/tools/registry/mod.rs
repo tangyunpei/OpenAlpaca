@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::orchestrator::skill::constraints::EffectiveToolSet;
 use crate::tools::extensions::{ExtensionId, ExtensionLedger};
 use crate::security::sanitizer::TraversalRule;
+use crate::tools::platform::{RunFailure, run_bounded, shell_command};
 
 pub mod availability;
 pub use availability::{
@@ -1433,12 +1434,17 @@ async fn execute_command(
     let timeout = std::time::Duration::from_secs(timeout_secs);
     let full_command = format!("{} {}", command, full_args);
 
-    let output = tokio::time::timeout(timeout, {
-        crate::tools::platform::shell_command(&full_command).output()
-    })
-    .await
-    .map_err(|_| format!("Command timed out after {}s", timeout_secs))?
-    .map_err(|e| format!("Failed to execute command: {}", e))?;
+    // R45 (storage design §11): killed with the processes it started when
+    // its time runs out or its call is dropped.
+    let output = match run_bounded(shell_command(&full_command), timeout).await {
+        Ok(output) => output,
+        Err(RunFailure::TimedOut) => {
+            return Err(format!("Command timed out after {}s", timeout_secs));
+        }
+        Err(RunFailure::Spawn(e) | RunFailure::Io(e)) => {
+            return Err(format!("Failed to execute command: {}", e));
+        }
+    };
 
     // Cap output size to prevent memory pressure from commands producing
     // unbounded stdout/stderr.

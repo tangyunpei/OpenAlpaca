@@ -2871,3 +2871,43 @@ fn a_builtin_says_its_arguments_reach_no_program_unless_it_says_otherwise() {
     assert!(!plain.arguments_reach_a_program());
     assert!(ProgramBuiltIn.arguments_reach_a_program());
 }
+
+// ── R45: a command tool is killed with what it started (storage design §11) ──
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_command_tool_that_times_out_takes_the_processes_it_started_with_it() {
+    use crate::test_util::{GONE_WITHIN, KillOnFail, pid_from_file, wait_until_gone};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("pid");
+    let registry = ToolRegistry::default();
+    registry
+        .register(make_tool_with_backend(
+            "hang_tool",
+            ToolBackend::Command {
+                command: "sh".to_string(),
+                args_template: Some("-c {script}".to_string()),
+                timeout_secs: 1,
+            },
+        ))
+        .unwrap();
+    let script = format!(
+        "cd '{}'; sleep 30 & echo $! > '{}'; wait",
+        dir.path().display(),
+        pidfile.display()
+    );
+
+    let err = registry
+        .execute("hang_tool", &serde_json::json!({"script": script}))
+        .await
+        .unwrap_err();
+    let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
+    let _kill = KillOnFail(pid);
+    assert_eq!(err, "Command timed out after 1s");
+    assert!(
+        wait_until_gone(pid, GONE_WITHIN).await,
+        "the command's background sleep {pid} outlived its timeout"
+    );
+}
