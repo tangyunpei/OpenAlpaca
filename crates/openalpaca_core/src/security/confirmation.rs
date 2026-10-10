@@ -30,10 +30,11 @@ pub struct ConfirmationRequest {
     pub task_id: Option<String>,
     /// The runtime agent instance whose lane is waiting.
     pub agent_instance_id: Option<String>,
-    /// What the card says about the call, written by the daemon from the
-    /// tool's own read (design 09 §4.4) — composed from the notes, never
-    /// from the call's arguments. `None` for the ordinary card, which shows
-    /// the literal arguments.
+    /// What the card says about the call, written by the daemon (design 09
+    /// §4.4; storage design R34, R49): `memory_confirm`'s from the notes it
+    /// names, the file tools' and the shell's from the working folder and the
+    /// call's path or strings, every third-party character escaped. `None`
+    /// for the ordinary card, which shows the literal arguments.
     pub preview: Option<String>,
     /// The approval is good for this one call only (design 09 §4.2 rule 2):
     /// a client offers no *Always allow*, and the sandbox would ignore the

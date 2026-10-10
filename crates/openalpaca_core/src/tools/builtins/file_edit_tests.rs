@@ -608,3 +608,155 @@ async fn execute_without_a_context_is_refused() {
         crate::tools::working_folder::WorkingFolderRefusal::NoContext.to_string()
     );
 }
+
+// ── R49: the card ───────────────────────────────────────────────────────
+
+/// §13's fifth test: a U+202E in either string is shown escaped on the card,
+/// which names the folder, the file and the line.
+#[tokio::test]
+async fn the_card_shows_both_strings_escaped_and_names_the_folder_the_file_and_the_line() {
+    let b = Bench::new();
+    b.put("src/a.rs", "fn main() {}\nlet a = 1;\u{202E}\n".as_bytes());
+
+    let card = b
+        .tool(None)
+        .confirmation_preview(
+            &args("src/a.rs", "let a = 1;\u{202E}", "let a = 2;\u{202E}"),
+            &b.ctx(),
+        )
+        .await
+        .unwrap()
+        .expect("file_edit's card carries the daemon's preview");
+
+    assert!(!card.contains('\u{202E}'), "{card}");
+    let lines: Vec<&str> = card.lines().collect();
+    assert_eq!(
+        lines[0],
+        format!(
+            "Edits src/a.rs in the project folder {}: 1 replacement, the first at line 2. Its \
+             current content is kept in this conversation's log.",
+            b.gp.root.display()
+        )
+    );
+    assert_eq!(
+        lines[1..].to_vec(),
+        vec![
+            "Replace:",
+            "let a = 1;<U+202E>",
+            "With:",
+            "let a = 2;<U+202E>",
+            "Note: this request contains 2 hidden characters, shown as <U+…>.",
+        ]
+    );
+}
+
+/// Interfaces §4.3: a call the body would refuse raises no card — the preview
+/// refuses with the body's own sentence — and a card's plan writes nothing:
+/// no copy, no row, the file as it was.
+#[tokio::test]
+async fn a_refused_edit_raises_no_card_and_a_card_writes_nothing() {
+    let b = Bench::new();
+    let before = "x = 1;\ny = 2;\nx = 1;\n";
+    b.put("src/a.rs", before.as_bytes());
+    let ctx = b.ctx();
+    let tool = b.tool(None);
+
+    let refused = tool
+        .confirmation_preview(&args("src/a.rs", "x = 1;", "x = 3;"), &ctx)
+        .await
+        .unwrap_err();
+    assert!(
+        refused.starts_with("old_string occurs 2 times in 'src/a.rs'."),
+        "{refused}"
+    );
+
+    let card = tool
+        .confirmation_preview(&args("src/a.rs", "y = 2;", "y = 4;"), &ctx)
+        .await
+        .unwrap();
+    assert!(card.is_some());
+    assert_eq!(b.bytes("src/a.rs"), before.as_bytes());
+    assert!(ctx.session_log.as_ref().unwrap().flush().await);
+    assert!(b.images().is_empty(), "a card keeps no copy");
+    assert!(b.rows().is_empty(), "a card records no row");
+}
+
+/// The card through the sandbox, as the main loop raises it: `file_edit` is
+/// destructive, so a card goes out carrying the escaped strings, and a Deny
+/// leaves the file as it was.
+#[tokio::test]
+async fn the_sandbox_raises_file_edits_card_and_a_deny_leaves_the_file() {
+    use crate::agent::subagent::AgentConstraints;
+    use crate::bus::EventBus;
+    use crate::daemon_config::CircuitBreakerConfig;
+    use crate::security::confirmation::{ConfirmationBroker, ConfirmationResponse};
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::tools::ToolRegistry;
+
+    let b = Bench::new();
+    let before = "let a = 1;\u{202E}\n";
+    b.put("src/a.rs", before.as_bytes());
+    let registry = ToolRegistry::default();
+    registry
+        .register(file_edit_tool(Some(b.db.clone()), None))
+        .unwrap();
+    let mut sandbox = SandboxManager::new(
+        Arc::new(registry),
+        EventBus::new(16),
+        &CircuitBreakerConfig::default(),
+    );
+    let broker = Arc::new(ConfirmationBroker::new());
+    sandbox.set_confirmation_broker(broker.clone());
+    let mut policy = SandboxPolicy::from_constraints(
+        "orchestrator",
+        &AgentConstraints {
+            allowed_capabilities: vec!["file_edit".to_string()],
+            ..Default::default()
+        },
+    );
+    // Fail fast rather than wait out the 300 s default should no card come.
+    policy.confirmation_timeout_secs = Some(5);
+    let answering = {
+        let broker = broker.clone();
+        tokio::spawn(async move {
+            for _ in 0..300 {
+                if let Some(card) = broker.pending_requests().into_iter().next() {
+                    broker
+                        .respond(
+                            &card.request_id,
+                            ConfirmationResponse {
+                                approved: false,
+                                approval_scope: None,
+                            },
+                        )
+                        .unwrap();
+                    return Some(card);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            None
+        })
+    };
+    let call = openalpaca_llm::ToolCall {
+        id: "tc-1".to_string(),
+        name: "file_edit".to_string(),
+        arguments: args("src/a.rs", "let a = 1;\u{202E}", "let a = 2;\u{202E}"),
+    };
+    let ctx = ToolContext {
+        agent_id: Some("orchestrator".to_string()),
+        ..b.ctx()
+    };
+
+    let refused = sandbox
+        .execute_tool(&call, &policy, &ctx)
+        .await
+        .unwrap_err();
+
+    let card = answering.await.unwrap().expect("a card was raised");
+    let preview = card.preview.expect("the card carries file_edit's preview");
+    assert!(preview.contains("let a = 1;<U+202E>"), "{preview}");
+    assert!(preview.contains("let a = 2;<U+202E>"), "{preview}");
+    assert!(!preview.contains('\u{202E}'), "{preview}");
+    assert!(refused.contains("denied by user"), "{refused}");
+    assert_eq!(b.bytes("src/a.rs"), before.as_bytes());
+}

@@ -245,10 +245,12 @@ pub enum ServerEvent {
         lane_key: Option<String>,
         /// The run waiting on this prompt (GAP-10), or `null` outside one.
         task_id: Option<String>,
-        /// What the card says about the call, written by the daemon from the
-        /// tool's own read (design 09 §4.4) — shown above the literal
-        /// arguments, composed from the notes, never from the call's
-        /// arguments. `null` for the ordinary card.
+        /// What the card says about the call, written by the daemon (design
+        /// 09 §4.4; storage design R34, R49) and shown above the literal
+        /// arguments: `memory_confirm`'s from the notes it names, the file
+        /// tools' and the shell's from the working folder and the call's path
+        /// or strings, every third-party character escaped. `null` for the
+        /// ordinary card.
         /// Live only: the `event_log` row keeps ids only.
         #[serde(default)]
         preview: Option<String>,

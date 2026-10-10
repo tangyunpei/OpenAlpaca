@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use crate::tools::working_folder::WorkingFolder;
-use crate::utils::text::{escape_hidden_line, hidden_notice};
+use crate::utils::text::{cut_notice, escape_hidden_line, escape_hidden_within, hidden_notice};
 
 /// The card of a command (`shell_execute`): the folder it starts in, and
 /// that the folder does not confine it (ST-14).
@@ -69,6 +69,46 @@ pub(super) fn write_card(path: &str, landing: WriteLanding<'_>) -> String {
         Some(notice) => format!("{line}\n{notice}"),
         None => line,
     }
+}
+
+/// R49's budget for each of `old_string` and `new_string` on `file_edit`'s
+/// card, in bytes of escaped text: two strings and the frame stay a card a
+/// person reads at a glance (~25 lines each), and the full arguments are
+/// drawn below the preview anyway.
+pub(super) const EDIT_PREVIEW_BYTES: usize = 1_000;
+
+/// `file_edit`'s card (R49): the file, the project folder and the line of the
+/// first occurrence, then both strings — each escaped (`escape_hidden_within`,
+/// which keeps `\n` and `\t` as their layout) and cut to
+/// [`EDIT_PREVIEW_BYTES`] with the cut notice — then one notice counting every
+/// hidden character of the path and both strings. The folder prints as it is:
+/// the owner's own path (interfaces §1.3).
+pub(super) fn edit_card(
+    path: &str,
+    root: &Path,
+    first_line: usize,
+    replacements: usize,
+    old_string: &str,
+    new_string: &str,
+) -> String {
+    let shown_path = escape_hidden_line(path);
+    let old = escape_hidden_within(old_string, EDIT_PREVIEW_BYTES);
+    let new = escape_hidden_within(new_string, EDIT_PREVIEW_BYTES);
+    let mut lines = vec![format!(
+        "Edits {} in the project folder {}: {replacements} replacement{}, the first at line \
+         {first_line}. Its current content is kept in this conversation's log.",
+        shown_path.text,
+        root.display(),
+        if replacements == 1 { "" } else { "s" }
+    )];
+    lines.push("Replace:".to_string());
+    lines.push(old.text);
+    lines.extend(cut_notice(old.left_out));
+    lines.push("With:".to_string());
+    lines.push(new.text);
+    lines.extend(cut_notice(new.left_out));
+    lines.extend(hidden_notice(shown_path.hidden + old.hidden + new.hidden));
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -160,5 +200,84 @@ mod tests {
              Note: this request contains 2 hidden characters, shown as <U+…>."
         );
         assert!(!card.contains('\u{202e}') && !card.contains('\u{200b}'), "{card:?}");
+    }
+}
+
+#[cfg(test)]
+mod edit_card_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn the_edit_card_names_the_file_the_folder_and_the_line_and_shows_both_strings() {
+        let card = edit_card(
+            "src/lib.rs",
+            Path::new("/work/alpaca"),
+            2,
+            1,
+            "    3\n}",
+            "    5\n}",
+        );
+        assert_eq!(
+            card,
+            "Edits src/lib.rs in the project folder /work/alpaca: 1 replacement, the first at \
+             line 2. Its current content is kept in this conversation's log.\n\
+             Replace:\n    3\n}\nWith:\n    5\n}"
+        );
+    }
+
+    #[test]
+    fn several_replacements_read_in_the_plural() {
+        let card = edit_card("a.txt", Path::new("/p"), 4, 3, "a", "b");
+        assert!(
+            card.starts_with(
+                "Edits a.txt in the project folder /p: 3 replacements, the first at line 4."
+            ),
+            "{card}"
+        );
+    }
+
+    /// R49 at the text layer: a U+202E in either string, and a U+200B in the
+    /// path, are shown escaped, and one notice counts all three.
+    #[test]
+    fn hidden_characters_in_the_path_and_both_strings_are_escaped_under_one_notice() {
+        let card = edit_card(
+            "src/a\u{200B}.rs",
+            Path::new("/p"),
+            1,
+            1,
+            "let a = 1;\u{202E}",
+            "let a = 2;\u{202E}",
+        );
+        assert!(
+            !card.contains('\u{202E}') && !card.contains('\u{200B}'),
+            "{card}"
+        );
+        let lines: Vec<&str> = card.lines().collect();
+        assert!(
+            lines[0].starts_with("Edits src/a<U+200B>.rs in the project folder /p:"),
+            "{card}"
+        );
+        assert_eq!(
+            lines[1..].to_vec(),
+            vec![
+                "Replace:",
+                "let a = 1;<U+202E>",
+                "With:",
+                "let a = 2;<U+202E>",
+                "Note: this request contains 3 hidden characters, shown as <U+…>.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_string_over_the_budget_is_cut_with_the_cut_notice() {
+        let long = "a".repeat(EDIT_PREVIEW_BYTES + 500);
+        let card = edit_card("a.txt", Path::new("/p"), 1, 1, &long, "b");
+        let lines: Vec<&str> = card.lines().collect();
+        assert_eq!(lines[1], "Replace:");
+        assert_eq!(lines[2], "a".repeat(EDIT_PREVIEW_BYTES));
+        assert_eq!(lines[3], "... (500 more characters not shown)");
+        assert_eq!(lines[4..].to_vec(), vec!["With:", "b"]);
     }
 }

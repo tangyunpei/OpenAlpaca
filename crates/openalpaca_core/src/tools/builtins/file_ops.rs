@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::annotations_for_builtin;
-use super::approval_preview::{WriteLanding, write_card};
+use super::approval_preview::{WriteLanding, edit_card, write_card};
 use super::artifact_write::{
     ToolArtifact, put_tool_artifact, record_tool_project_file, split_name,
 };
@@ -795,6 +795,26 @@ impl BuiltInTool for FileEditTool {
         ctx: &ToolContext,
     ) -> Result<String, String> {
         self.edit(arguments, ctx).await
+    }
+
+    /// R49: the folder, the file and the line, and both strings escaped and
+    /// cut — from the same plan as the body, so a call the body would refuse
+    /// raises no card (interfaces §4.3). Reads the file; writes nothing.
+    async fn confirmation_preview(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<Option<String>, String> {
+        let args = edit_args(arguments)?;
+        let plan = self.plan(&args, ctx).await?;
+        Ok(Some(edit_card(
+            args.path,
+            &plan.root,
+            plan.first_line,
+            plan.replacements,
+            args.old_string,
+            args.new_string,
+        )))
     }
 }
 
