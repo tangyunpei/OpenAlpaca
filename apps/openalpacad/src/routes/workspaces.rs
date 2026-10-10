@@ -962,10 +962,14 @@ pub(crate) async fn delete_workspace_data(deps: &PurgeDeps<'_>, request: PurgeRe
     };
     let root = project.root_string();
     // The root as `register` recorded it, sent as written — what the list
-    // prints, even when it no longer canonicalizes to itself — or a path
-    // whose canonical form is it (a missing tail as written, ST-7, so a
-    // missing project's root also compares equal).
+    // prints, even when it no longer canonicalizes to itself — or as named,
+    // its parent resolved and its last component not followed (R-T29: a
+    // missing project's root spelled through a link in an ancestor, macOS's
+    // `/var/…` for `/private/var/…`, residual X1), or a path whose canonical
+    // form is it (a missing tail as written, ST-7, so a missing project's
+    // root also compares equal).
     let exact = project.root.as_path() == Path::new(&written)
+        || projects::as_named(Path::new(&written)).is_some_and(|p| p == project.root)
         || projects::canonical_root(Path::new(&path)).is_ok_and(|p| p == project.root);
     if !exact {
         return api_error(

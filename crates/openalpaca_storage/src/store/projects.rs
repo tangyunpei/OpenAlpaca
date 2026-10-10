@@ -466,8 +466,11 @@ fn recorded_in(home: &Path, root: &Path) -> Result<Option<Project>> {
 /// own name, and so is any spelling of it through a link in an ancestor.
 /// Letter case and Unicode normalization are not reconciled here (design
 /// §18). `None` for a path with no parent or no last component, or one
-/// whose parent cannot be resolved.
-fn as_named(path: &Path) -> Option<PathBuf> {
+/// whose parent cannot be resolved. Public so a caller that compares a path
+/// with a recorded root itself — the CLI's `memory --project`, the delete
+/// route's exactness check — also accepts a root spelled through a link in
+/// an ancestor, as [`lookup`] does.
+pub fn as_named(path: &Path) -> Option<PathBuf> {
     let (parent, name) = (path.parent()?, path.file_name()?);
     canonical_root(parent).ok().map(|parent| parent.join(name))
 }

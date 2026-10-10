@@ -1498,6 +1498,43 @@ async fn a_root_now_linking_to_another_project_names_its_own_for_the_read_and_th
     assert_eq!(project_snapshots(&b.id), 1, "B's partition stays");
 }
 
+/// Residual X1 (R-T29's as-named spelling at the delete's exactness
+/// check): a missing project's recorded root spelled through a link in an
+/// ancestor — macOS's `/var/…` for a root recorded under `/private/var/…` —
+/// is the root itself, so the delete names that project rather than
+/// refusing the path as "inside" it; the moved folder is never touched.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_missing_root_spelled_through_a_link_in_an_ancestor_is_its_own_root_for_the_delete() {
+    let w = World::new();
+    let a = w.project("a");
+    let aliased = w.tmp.path().join("repos").join("a");
+    if aliased == a.root {
+        eprintln!(
+            "skipped: {} is its own canonical form, so no ancestor link spells it otherwise",
+            w.tmp.path().display()
+        );
+        return;
+    }
+    let moved = a.root.with_file_name("a-moved");
+    std::fs::rename(&a.root, &moved).expect("the user moves the folder");
+    std::os::unix::fs::symlink(&moved, &a.root).expect("and leaves a link at the old path");
+    std::fs::write(moved.join("README.md"), b"the user's own file").expect("own file");
+
+    let (status, body) = w.delete(&aliased, true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["project"]["id"], a.id.to_string(), "{body}");
+    assert_eq!(body["project"]["root"], text(&a.root), "{body}");
+
+    let (status, body) = w.delete(&aliased, false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!a.dir.exists(), "the project's folder under projects/ went");
+    assert_eq!(
+        std::fs::read(moved.join("README.md")).expect("the moved folder stays"),
+        b"the user's own file"
+    );
+}
+
 /// The same state, re-pointed: the PATCH naming A's recorded root moves A,
 /// and B stays where it is.
 #[cfg(unix)]
