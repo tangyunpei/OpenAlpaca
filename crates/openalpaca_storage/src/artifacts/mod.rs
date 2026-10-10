@@ -1217,9 +1217,12 @@ impl<'a> ArtifactStore<'a> {
         let sha256 = sha256_hex(file.content);
         let size_bytes = file.content.len() as i64;
         let kind = kind_for_file_name(rel_path).unwrap_or(ArtifactKind::Code);
-        // The stamp of the bytes standing there now, so R37's read-time check
-        // hashes nothing until the file changes.
-        let metadata_json = metadata_with_stamp(None, stamp_at(&storage_path));
+        // No head stamp (d5-results-3): the hash above is of the bytes the
+        // tool meant to write, and the file may already hold others — another
+        // writer's, recorded first, or a formatter's. A stamp of what stands
+        // there now would make R37's read-time check skip the hash for good;
+        // with none, the first read hashes and stamps what is on disk.
+        let metadata_json: Option<String> = None;
 
         self.db.with_connection(|conn| {
             use rusqlite::OptionalExtension;

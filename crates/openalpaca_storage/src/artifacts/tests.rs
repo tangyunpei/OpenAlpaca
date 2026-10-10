@@ -2966,7 +2966,11 @@ fn recording_a_result_file_writes_its_pointer_row_and_no_version() {
     assert_eq!(row.agent_id.as_deref(), Some("code_agent::a1"));
     assert_eq!((row.version, row.version_count, row.pinned), (1, 0, false));
     assert!(row.summary.is_none());
-    assert!(row.metadata().is_none(), "only the store's own head stamp");
+    assert!(row.metadata().is_none(), "no metadata");
+    assert!(
+        row.metadata_json.is_none(),
+        "and no head stamp: the first read hashes what is on disk (d5-results-3)"
+    );
     let asset = FileAssetRepository::new(&f.db)
         .get_by_id(&row.id)
         .unwrap()
@@ -3136,6 +3140,39 @@ fn a_result_file_with_no_address_in_its_project_is_refused_and_records_nothing()
         );
     }
     assert_eq!(file_asset_count(&f), 0);
+}
+
+/// d5-results-3: recording a result file stamps nothing, so the first read
+/// hashes what is on disk. Recorded with bytes A while the disk holds B —
+/// two subagents writing one path and recording in the other order, or a
+/// formatter rewriting the file right after the agent's write — the first
+/// read reports B's hash and size. A stamp of B taken at record time made
+/// every read skip the hash and keep A's for as long as the file stood.
+#[test]
+fn a_result_file_recorded_with_other_bytes_than_the_disk_holds_reads_back_the_disks() {
+    let f = Fixture::new();
+    let on_disk: &[u8] = b"B: what the last writer left, a longer file\n";
+    let path = f.project_root().join("README.md");
+    fs::write(&path, on_disk).unwrap();
+    let root = f.project_root().to_string_lossy().into_owned();
+    let (row, _) = f
+        .store()
+        .record_project_file(NewProjectFile {
+            owner_id: OWNER,
+            project_root: &root,
+            rel_path: "README.md",
+            content: b"A: short\n",
+            task_id: None,
+            agent_id: None,
+        })
+        .unwrap();
+    assert_eq!(row.sha256, sha256_hex(b"A: short\n"), "what was handed in");
+
+    assert_eq!(f.store().resolve_content(&row.id, None).unwrap(), path);
+
+    let after = f.store().get(&row.id, OWNER).unwrap().unwrap();
+    assert_eq!(after.sha256, sha256_hex(on_disk));
+    assert_eq!(after.size_bytes, on_disk.len() as i64);
 }
 
 /// S4a's deferred (4): a result file's path is normalised lexically before it
