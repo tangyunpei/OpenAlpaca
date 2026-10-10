@@ -225,12 +225,14 @@ using with an older build is the second case it names. To switch over:
    the reset too, and the daemon writes that directory only when it is absent,
    so a store an earlier build set up keeps the `system_agent.md` that build
    wrote. As earlier builds shipped it, that file ends its frontmatter with two
-   lines that switched the agent's approval prompts off: `file_delete` is not
+   lines that switch the agent's approval prompts off: `file_delete` is not
    the name of any tool, and a template's own `require_confirmation_for` list
    replaces the default — every tool marked destructive asks first — instead
    of adding to it, so with those two lines the agent's `shell_execute`,
-   `file_write`, `artifact_write` and `workspace_write` ran with no approval
-   card. Open the file and delete exactly these two lines:
+   `file_write` and `file_edit` run with no approval card. Since this build
+   those act on the project's own files: in a project conversation that agent
+   would replace and edit the project's files and run commands in its folder
+   without asking you. Open the file and delete exactly these two lines:
 
    ```yaml
    require_confirmation_for:
@@ -407,9 +409,12 @@ message above — the first start of this build:
 - moves the database to schema 4 (`004_project_files.sql` marks the records of
   the files agents write into a project); an earlier build then refuses the
   store, as *Keep the builds apart* above says;
-- keeps the agent templates that build wrote: step 8 gives the writing agent
-  its `file_read` line and says what a list in `require_confirmation_for` does
-  with `file_edit`;
+- keeps the agent templates that build wrote: if `agents/system_agent.md`
+  still ends its frontmatter with the two `require_confirmation_for` lines,
+  delete them as step 7 says — since this build they would let that agent
+  write and edit the project's files and run commands in it without asking;
+  step 8 gives the writing agent its `file_read` line and says what a list in
+  `require_confirmation_for` does with `file_edit`;
 - changes none of the files earlier builds saved: an artifact `file_write`
   saved before stays an artifact in the Library, and a file a daemon started
   by hand inside a project wrote there stays a file of the project, with no
@@ -665,6 +670,13 @@ exception — a pre-redesign build at schema 42 as well as an earlier
 Markdown-memory build at 43 to 45: the new daemon refuses the old database
 instead of starting on it. Follow [Switching to the Markdown Memory
 Build](#switching-to-the-markdown-memory-build) before you start it.
+
+An upgrade from an earlier build made since that re-baseline — one this build
+opens — keeps the store as it is, agent templates included: read [Agents work
+in the project](#agents-work-in-the-project) before you start it. Such a store
+may keep a `system_agent.md` with two leftover lines that, since this build,
+would let that agent write and edit your project's files and run commands in
+it without asking; step 7 of the switch-over removes them.
 
 Upgrade replaces:
 

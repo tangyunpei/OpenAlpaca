@@ -135,7 +135,11 @@ openalpaca daemon tail         # follow daemon events; -c N stops after N
   (`Database … is at schema version <n>, which this build does not know`)
   rather than convert it; read [Switching to the Markdown Memory
   Build](Installation_Manual.md#switching-to-the-markdown-memory-build) before
-  you start it.
+  you start it. Coming from an earlier build made since that date? It opens
+  your store as it is; read [Agents work in the
+  project](Installation_Manual.md#agents-work-in-the-project) first — an old
+  `system_agent.md` may keep two lines that would let that agent change your
+  project's files and run commands in it without asking.
 - **Uninstall:** `./scripts/release/uninstall.sh`. It leaves `~/.openalpaca`
   in place; delete that directory yourself for a complete cleanup.
 
