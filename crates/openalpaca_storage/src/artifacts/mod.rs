@@ -468,6 +468,25 @@ impl ArtifactRecord {
         !self.in_project || crate::store::opens_in_default_app(&self.name)
     }
 
+    /// The folder a by-product's or an upload's bytes lie under — its store's
+    /// `artifacts/` or `uploads/`, the home store's or a project's folder
+    /// under `projects/` — recovered from the row's own address columns, as
+    /// the Library's read finds it before it confines a head there
+    /// (`confine_to_root`). A reader outside this module that names a stored
+    /// file by its row confines it here (the lead's ruling R-T20: `send` by
+    /// `artifact_id`), so a link put at the file never leads out of that
+    /// folder. A result file has none: its bytes are the user's, in its
+    /// project (R37).
+    pub fn content_root(&self) -> Result<PathBuf> {
+        if self.in_project {
+            bail!(
+                "{} is a result file in its project, not a file in the store",
+                self.id
+            );
+        }
+        artifacts_root_for(self)
+    }
+
     /// The **writer's** metadata — `metadata_json` parsed, with
     /// [`HEAD_STAMP_KEY`] taken back out. This is what a route serialises: the
     /// stamp is this module's bookkeeping and no client's business.

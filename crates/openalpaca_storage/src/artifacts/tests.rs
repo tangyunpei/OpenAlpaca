@@ -3136,6 +3136,51 @@ fn a_result_files_record_says_so_and_the_list_filters_on_it() {
     assert_untouched(&script_path, b"echo hi\n", script_mtime);
 }
 
+/// The lead's ruling R-T20: a by-product's folder is its store's
+/// `artifacts/`, an upload's its store's `uploads/` — the home store's or the
+/// project's folder under `projects/` — and a result file has none (its bytes
+/// are in the project, R37).
+#[test]
+fn a_rows_content_root_is_its_stores_artifacts_or_uploads_folder_and_a_result_file_has_none() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "notes", b"a draft\n");
+    new.created = at(1);
+    let (by_product, _) = f.store().put(new).unwrap();
+    let home = StoreScope::Home;
+    let mut mine = NewArtifact::new(OWNER, &home, ArtifactKind::Markdown, "mine", b"mine\n");
+    mine.created = at(1);
+    let (home_by_product, _) = f.store().put(mine).unwrap();
+    let upload = crate::UploadStore::new(&f.db)
+        .put(crate::NewUpload {
+            owner_id: OWNER,
+            filename: "report.txt",
+            mime_type: "text/plain",
+            data: b"uploaded\n",
+            scope: &scope,
+            created: at(1),
+        })
+        .unwrap()
+        .asset;
+    let upload = f.store().get(&upload.id, OWNER).unwrap().unwrap();
+    let (result, _, _) = f.result_file("src/main.rs", b"fn main() {}\n");
+
+    assert_eq!(by_product.content_root().unwrap(), f.artifacts_root());
+    assert_eq!(
+        home_by_product.content_root().unwrap(),
+        f.home_root().join("artifacts")
+    );
+    assert_eq!(
+        upload.content_root().unwrap(),
+        crate::store::store_root(&scope).unwrap().join("uploads")
+    );
+    let err = result.content_root().unwrap_err();
+    assert!(
+        format!("{err:#}").contains("is a result file in its project"),
+        "{err:#}"
+    );
+}
+
 /// R39: `put` never adopts a pointer row whose path is artifact-shaped — the
 /// by-product is a new row under the store, at the name the result file's row
 /// holds, and the result file's row and file are untouched (fails when

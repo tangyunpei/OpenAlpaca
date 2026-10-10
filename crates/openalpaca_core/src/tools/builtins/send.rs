@@ -6,8 +6,8 @@ use crate::utils::text::{escape_hidden_line, hidden_notice};
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::repository::TaskRepository;
-use openalpaca_storage::{ArtifactStore, Database};
-use std::path::Path;
+use openalpaca_storage::{ArtifactRecord, ArtifactStore, Database};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// The tail of a refusal for an argument only a file send needs.
@@ -64,26 +64,62 @@ fn turn_owner(db: &Database, ctx: &ToolContext) -> Result<String, String> {
     })
 }
 
-/// A stored file `send` names by an artifact id, resolved the way the
-/// Library's read confines a head: storage's `confine_to_root` canonicalizes
-/// every component, the last included, under the home store, where every
-/// by-product and upload lives since Stage 1. A link put at the file is never
-/// followed out of the store, and the path returned, which the card names and
-/// the connector is handed, is the file the link reaches (interfaces §4.3; S1
-/// review, I2). Read only: nothing is written or stamped.
-fn confine_in_store(id: &str, storage_path: &str) -> Result<String, String> {
-    let home = openalpaca_storage::store::home_root()
-        .map_err(|e| format!("Failed to look up artifact '{id}': {e:#}"))?;
-    let confined = openalpaca_storage::store::confine_to_root(&home, Path::new(storage_path))
-        .map_err(|e| {
-            format!("send: the file of '{id}' is not inside OpenAlpaca's store ({e:#}).")
-        })?;
-    confined.into_os_string().into_string().map_err(|_| {
+/// The refusal for a stored file whose bytes are not there.
+fn bytes_gone(id: &str, path: &str) -> String {
+    format!("send: the bytes of '{id}' are gone ({path}).")
+}
+
+/// A confined path as the text a connector is handed.
+fn sendable(id: &str, path: PathBuf) -> Result<String, String> {
+    path.into_os_string().into_string().map_err(|_| {
         format!(
             "send: the file of '{id}' resolves to a path that is not UTF-8 text, which no channel \
              can send."
         )
     })
+}
+
+/// A by-product's or an upload's stored file, resolved the way the Library's
+/// read confines a head (`resolve_version_path`): storage's `confine_to_root`
+/// canonicalizes every component, the last included, under the row's own
+/// folder in the store — its `artifacts/` or `uploads/`, the home store's or
+/// a project's folder under `projects/` (`ArtifactRecord::content_root`; the
+/// lead's ruling R-T20). A link put at the file is never followed out of
+/// that folder — out of the store, or into the store's own `state/` — and
+/// the path returned, which the card names and the connector is handed, is
+/// the file the link reaches (interfaces §4.3; S1 review, I2). A folder that
+/// is gone holds no bytes, as the Library's read answers. Read only: nothing
+/// is written or stamped.
+fn confine_in_its_folder(id: &str, record: &ArtifactRecord) -> Result<String, String> {
+    let root = record
+        .content_root()
+        .map_err(|e| format!("Failed to look up artifact '{id}': {e:#}"))?;
+    if !root.exists() {
+        return Err(bytes_gone(id, &record.storage_path));
+    }
+    let confined =
+        openalpaca_storage::store::confine_to_root(&root, Path::new(&record.storage_path))
+            .map_err(|e| {
+                format!("send: the file of '{id}' is not inside OpenAlpaca's store ({e:#}).")
+            })?;
+    sendable(id, confined)
+}
+
+/// R37: a result file in the project (a pointer row, ST-12), read through
+/// R31's rule under the project its row records — storage's
+/// `confine_to_root` resolves every component, the last included — so a link
+/// put at the file never leads the send out of the project. Read only, like
+/// the rest of the lookup: the card shares it. The caller has already refused
+/// a project whose root no longer leads to its own folder (R-T19), so the
+/// root canonicalized here is the project's own.
+fn confine_in_project(id: &str, record: &ArtifactRecord) -> Result<String, String> {
+    let root = record.project_root.as_deref().unwrap_or_default();
+    let confined = openalpaca_storage::store::confine_to_root(
+        Path::new(root),
+        Path::new(&record.storage_path),
+    )
+    .map_err(|e| format!("send: the file of '{id}' is not inside its project folder ({e:#})."))?;
+    sendable(id, confined)
 }
 
 /// R23's card (interfaces §4.3): the file as resolved, its size, where it
@@ -180,11 +216,12 @@ impl SendTool {
         })
     }
 
-    /// R23: a by-product of the turn's owner, by its id: its head file,
-    /// resolved under the home store (`confine_in_store`), refused when it
-    /// leads out of the store or the bytes are gone. Read only. The
-    /// hand-edit check a Library read makes (`resolve_content`) can record a
-    /// version, and the card shares this lookup and must write nothing.
+    /// R23: a file of the turn's owner, by its id — a by-product, an upload,
+    /// or a result file in the project — refused when it belongs to a
+    /// project this turn is not in, when it leads out of its folder, or when
+    /// its bytes are gone. Read only. The hand-edit check a Library read
+    /// makes (`resolve_content`) can record a version or refresh a result
+    /// file's row, and the card shares this lookup and must write nothing.
     fn artifact(&self, id: &str, ctx: &ToolContext) -> Result<SendFile, String> {
         let db = self.db.as_ref().ok_or_else(|| {
             format!("send cannot look up artifact '{id}' here: there is no database.")
@@ -194,11 +231,46 @@ impl SendTool {
             .get(id, &owner)
             .map_err(|e| format!("Failed to look up artifact '{id}': {e}"))?
             .ok_or_else(|| format!("send: no artifact '{id}' of yours."))?;
-        let path = confine_in_store(id, &record.storage_path)?;
+        // The lead's ruling R-T19 (ST-23): a result file of a project whose
+        // root no longer leads to its own folder — gone, renamed by case
+        // only, or moved with a link left at the old path — is refused
+        // before anything is read, from any turn. R-T3's check below would
+        // pass it from a turn at that root (`project_root_of` names the
+        // recorded root as written), and `confine_to_root` would follow the
+        // link.
+        if record.in_project
+            && let Some(root) = record.project_root.as_deref()
+            && openalpaca_storage::store::projects::root_is_missing(Path::new(root))
+        {
+            return Err(format!(
+                "send: the file of '{id}' is in a project whose folder is gone or has moved \
+                 ({root}); re-point the project first."
+            ));
+        }
+        // The lead's ruling R-T3: a file is named by the rule `artifact_read`
+        // reads a by-product by (S5) — one of no project is the owner's from
+        // any turn, one of a project only from a turn in that project — so a
+        // conversation never sends from a project it is not in.
+        if let Some(root) = record.project_root.as_deref() {
+            let scope = super::artifact_write::scope_from_context(ctx);
+            let turn_project = openalpaca_storage::store::project_root_of(&scope)
+                .map_err(|e| format!("Failed to look up artifact '{id}': {e:#}"))?;
+            if turn_project.as_deref() != Some(root) {
+                return Err(format!(
+                    "send: '{id}' belongs to another project ({root}); send it from a \
+                     conversation in that project."
+                ));
+            }
+        }
+        let path = if record.in_project {
+            confine_in_project(id, &record)?
+        } else {
+            confine_in_its_folder(id, &record)?
+        };
         let metadata = std::fs::metadata(&path)
             .ok()
             .filter(std::fs::Metadata::is_file)
-            .ok_or_else(|| format!("send: the bytes of '{id}' are gone ({path})."))?;
+            .ok_or_else(|| bytes_gone(id, &path))?;
         Ok(SendFile {
             path,
             bytes: metadata.len(),
@@ -865,14 +937,15 @@ mod tests {
         assert!(sender.files.lock().unwrap().is_empty());
     }
 
-    /// S1 review I2: a by-product's stored file is resolved the way the
-    /// Library's read confines a head. A link put there that leads out of the
-    /// home store is refused, at the card and in the send, and nothing reaches
-    /// the connector. One that stays inside the store is named on the card by
-    /// the file it reaches, and that file is the one sent.
+    /// S1 review I2, with the lead's ruling R-T20: a by-product's stored file
+    /// is resolved the way the Library's read confines a head — under its own
+    /// folder in the store, `artifacts/` here. A link put there that leads out
+    /// of the home store is refused, at the card and in the send, and nothing
+    /// reaches the connector. One that stays inside that folder is named on
+    /// the card by the file it reaches, and that file is the one sent.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_link_at_an_artifacts_stored_file_is_named_by_its_target_and_never_followed_out_of_the_store()
+    async fn a_link_at_an_artifacts_stored_file_is_named_by_its_target_and_never_followed_out_of_its_folder()
      {
         let saved = saved();
         let id = saved.record.id.clone();
@@ -898,7 +971,7 @@ mod tests {
         assert!(sender.files.lock().unwrap().is_empty(), "nothing was sent");
 
         let home = saved._home.path().canonicalize().unwrap();
-        let elsewhere = home.join("elsewhere.md");
+        let elsewhere = home.join("artifacts").join("elsewhere.md");
         std::fs::write(&elsewhere, b"in the store\n").unwrap();
         std::fs::remove_file(&saved.record.storage_path).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &saved.record.storage_path).unwrap();
@@ -1145,5 +1218,316 @@ mod tests {
             !gp.home_root().join("scratch").exists(),
             "the card made no folder"
         );
+    }
+
+    // ── the lead's ruling R-T20: a by-product is confined under its own folder ──
+
+    /// R-T20: a by-product's stored file is confined under its own folder in
+    /// the store, not merely under the home store. A link put there that
+    /// leads into the store's own `state/` is refused, at the card and in the
+    /// send, and nothing reaches the connector.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_at_a_by_products_stored_file_into_the_stores_state_folder_is_refused() {
+        let saved = saved();
+        let id = saved.record.id.clone();
+        let state = saved._home.path().canonicalize().unwrap().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("x"), b"the daemon's\n").unwrap();
+        std::fs::remove_file(&saved.record.storage_path).unwrap();
+        std::os::unix::fs::symlink(state.join("x"), &saved.record.storage_path).unwrap();
+        let sender = Arc::new(RecordingSender::default());
+        let tool = artifact_tool(&saved, &sender);
+        let refused = format!("send: the file of '{id}' is not inside OpenAlpaca's store (");
+
+        let card = tool
+            .confirmation_preview(&artifact_args(&id), &owner_ctx(OWNER))
+            .await
+            .unwrap_err();
+        assert!(card.starts_with(&refused), "{card}");
+        let err = tool
+            .execute_with_context(&artifact_args(&id), &owner_ctx(OWNER))
+            .await
+            .unwrap_err();
+        assert!(err.starts_with(&refused), "{err}");
+        assert!(sender.files.lock().unwrap().is_empty(), "nothing was sent");
+    }
+
+    /// R-T20: an upload's folder is `uploads/`, and an upload of the turn's
+    /// owner is sent from its stored file like a by-product.
+    #[tokio::test]
+    async fn an_upload_of_the_turns_owner_is_sent_from_its_stored_file() {
+        let saved = saved();
+        let scope = StoreScope::Home;
+        let upload = openalpaca_storage::UploadStore::new(&saved.db)
+            .put(openalpaca_storage::NewUpload {
+                owner_id: OWNER,
+                filename: "notes.txt",
+                mime_type: "text/plain",
+                data: b"notes\n",
+                scope: &scope,
+                created: chrono::Utc::now(),
+            })
+            .unwrap()
+            .asset;
+        let sender = Arc::new(RecordingSender::default());
+
+        let out = artifact_tool(&saved, &sender)
+            .execute_with_context(&artifact_args(&upload.id), &owner_ctx(OWNER))
+            .await;
+        assert_eq!(out.as_deref(), Ok("Sent file 'report.md'"));
+        assert_eq!(
+            *sender.files.lock().unwrap(),
+            vec![(
+                upload.storage_path,
+                "report.md".to_string(),
+                "text/plain".to_string()
+            )]
+        );
+    }
+
+    /// R-T20, as the Library's read answers it: a by-product whose whole
+    /// folder is gone reads as gone — its bytes are not there — not as a file
+    /// outside the store.
+    #[tokio::test]
+    async fn an_artifact_whose_folder_is_gone_is_refused_as_gone() {
+        let saved = saved();
+        std::fs::remove_dir_all(saved._home.path().join("artifacts")).unwrap();
+        let sender = Arc::new(RecordingSender::default());
+        let err = artifact_tool(&saved, &sender)
+            .execute_with_context(&artifact_args(&saved.record.id), &owner_ctx(OWNER))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "send: the bytes of '{}' are gone ({}).",
+                saved.record.id, saved.record.storage_path
+            )
+        );
+        assert!(sender.files.lock().unwrap().is_empty());
+    }
+
+    // ── R37 (S4a): a result file in the project, by its id ──
+
+    /// A result file of the turn's owner, sent by its id, is read from the
+    /// path R31's rule resolves under its project; replaced by a link out of
+    /// the project it is refused, and nothing more is sent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_result_file_is_sent_from_inside_its_project_and_never_through_a_link_out() {
+        let gp = crate::test_util::GuardedProject::new();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let file = gp.root.join("docs").join("report.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"# Report\n").unwrap();
+        let root = gp.root.to_string_lossy().into_owned();
+        let (row, _) = ArtifactStore::new(&db)
+            .record_project_file(openalpaca_storage::NewProjectFile {
+                owner_id: "owner-test",
+                project_root: &root,
+                rel_path: "docs/report.md",
+                content: b"# Report\n",
+                task_id: None,
+                agent_id: None,
+            })
+            .unwrap();
+        let sender = Arc::new(RecordingSender::default());
+        let tool = SendTool {
+            provider: Arc::new(RwLock::new(Some(
+                sender.clone() as Arc<dyn crate::orchestrator::ConnectorSendProvider>
+            ))),
+            db: Some(db.clone()),
+        };
+
+        tool.execute_with_context(&artifact_args(&row.id), &gp.ctx())
+            .await
+            .unwrap();
+        let sent: Vec<String> = sender
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(path, _, _)| path.clone())
+            .collect();
+        assert_eq!(sent, vec![file.to_string_lossy().into_owned()]);
+
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.md");
+        std::fs::write(&secret, b"not the project's\n").unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&secret, &file).unwrap();
+
+        let err = tool
+            .execute_with_context(&artifact_args(&row.id), &gp.ctx())
+            .await
+            .unwrap_err();
+        assert!(
+            err.starts_with(&format!(
+                "send: the file of '{}' is not inside its project folder",
+                row.id
+            )),
+            "{err}"
+        );
+        assert_eq!(
+            sender.files.lock().unwrap().len(),
+            1,
+            "nothing more was sent"
+        );
+    }
+
+    // ── the lead's ruling R-T3: another project's by-product, by its id ──
+
+    /// `send` by `artifact_id` names a by-product by the rule
+    /// `artifact_read` reads it by (S5): another project's is refused, at
+    /// the card and in the send, naming that project; from a turn in that
+    /// project it goes, and one of no project goes from any turn.
+    #[tokio::test]
+    async fn a_by_product_of_another_project_is_refused_by_id() {
+        let gp = crate::test_util::GuardedProject::new();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let other_root = other.path().canonicalize().unwrap();
+        openalpaca_storage::store::projects::register(&other_root).unwrap();
+        let other_scope = openalpaca_storage::store::StoreScope::Project(other_root.clone());
+        let (theirs, _) = ArtifactStore::new(&db)
+            .put(openalpaca_storage::NewArtifact::new(
+                "owner-test",
+                &other_scope,
+                openalpaca_storage::ArtifactKind::Markdown,
+                "plan",
+                b"theirs\n",
+            ))
+            .unwrap();
+        let home_scope = openalpaca_storage::store::StoreScope::Home;
+        let (anywhere, _) = ArtifactStore::new(&db)
+            .put(openalpaca_storage::NewArtifact::new(
+                "owner-test",
+                &home_scope,
+                openalpaca_storage::ArtifactKind::Markdown,
+                "notes",
+                b"mine\n",
+            ))
+            .unwrap();
+        let sender = Arc::new(RecordingSender::default());
+        let tool = SendTool {
+            provider: Arc::new(RwLock::new(Some(
+                sender.clone() as Arc<dyn crate::orchestrator::ConnectorSendProvider>
+            ))),
+            db: Some(db.clone()),
+        };
+        let refused = format!(
+            "send: '{}' belongs to another project ({}); send it from a conversation in that project.",
+            theirs.id,
+            other_root.display()
+        );
+
+        assert_eq!(
+            tool.confirmation_preview(&artifact_args(&theirs.id), &gp.ctx())
+                .await,
+            Err(refused.clone())
+        );
+        assert_eq!(
+            tool.execute_with_context(&artifact_args(&theirs.id), &gp.ctx())
+                .await,
+            Err(refused)
+        );
+        assert!(sender.files.lock().unwrap().is_empty(), "nothing was sent");
+
+        let other_ctx = ToolContext {
+            request_workspace_root: Some(other_root.to_string_lossy().into_owned()),
+            workspace_id: Some(other_root.to_string_lossy().into_owned()),
+            ..gp.ctx()
+        };
+        tool.execute_with_context(&artifact_args(&theirs.id), &other_ctx)
+            .await
+            .unwrap();
+        tool.execute_with_context(&artifact_args(&anywhere.id), &gp.ctx())
+            .await
+            .unwrap();
+        assert_eq!(sender.files.lock().unwrap().len(), 2);
+    }
+
+    // ── the lead's ruling R-T19: a result file of a missing project, by its id ──
+
+    /// R-T19 (R37 with ST-23): a result file of a project whose folder moved
+    /// with a link left at its old root is refused by its id — from a turn
+    /// at that root too, which `project_root_of` names as the row's project,
+    /// so R-T3's check passes it — at the card and in the send, and nothing
+    /// is read through the link; once the folder is back at its root it goes.
+    /// The project is a folder of its own beside `GuardedProject`'s (which
+    /// holds the home-store guard), whose `TempDir` owns its root.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_result_file_of_a_missing_project_is_never_sent_through_its_old_root() {
+        let gp = crate::test_util::GuardedProject::new();
+        let scene = tempfile::tempdir().unwrap();
+        let root = scene.path().canonicalize().unwrap().join("app");
+        let file = root.join("docs").join("report.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"# Report\n").unwrap();
+        openalpaca_storage::store::projects::register(&root).unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let recorded = root.to_string_lossy().into_owned();
+        let (row, _) = ArtifactStore::new(&db)
+            .record_project_file(openalpaca_storage::NewProjectFile {
+                owner_id: "owner-test",
+                project_root: &recorded,
+                rel_path: "docs/report.md",
+                content: b"# Report\n",
+                task_id: None,
+                agent_id: None,
+            })
+            .unwrap();
+        let sender = Arc::new(RecordingSender::default());
+        let tool = SendTool {
+            provider: Arc::new(RwLock::new(Some(
+                sender.clone() as Arc<dyn crate::orchestrator::ConnectorSendProvider>
+            ))),
+            db: Some(db.clone()),
+        };
+        let ctx = ToolContext {
+            request_workspace_root: Some(recorded.clone()),
+            workspace_id: Some(recorded.clone()),
+            ..gp.ctx()
+        };
+        let moved = root.with_file_name("app-moved");
+        std::fs::rename(&root, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &root).unwrap();
+        let refused = format!(
+            "send: the file of '{}' is in a project whose folder is gone or has moved ({recorded}); \
+             re-point the project first.",
+            row.id
+        );
+
+        assert_eq!(
+            tool.confirmation_preview(&artifact_args(&row.id), &ctx)
+                .await,
+            Err(refused.clone())
+        );
+        assert_eq!(
+            tool.execute_with_context(&artifact_args(&row.id), &ctx)
+                .await,
+            Err(refused)
+        );
+        assert!(sender.files.lock().unwrap().is_empty(), "nothing was sent");
+
+        // The person moves the folder back: the file goes.
+        std::fs::remove_file(&root).unwrap();
+        std::fs::rename(&moved, &root).unwrap();
+        tool.execute_with_context(&artifact_args(&row.id), &ctx)
+            .await
+            .unwrap();
+        let sent: Vec<String> = sender
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(path, _, _)| path.clone())
+            .collect();
+        assert_eq!(sent, vec![file.to_string_lossy().into_owned()]);
     }
 }
