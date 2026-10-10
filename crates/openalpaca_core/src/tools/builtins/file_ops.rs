@@ -1720,6 +1720,31 @@ mod tests {
         assert!(!err.contains("theirs"), "{err}");
     }
 
+    /// R31 (Review Focus 1, d1-confine-3): a folder of the project that links
+    /// outside it carries no read out — `file_read` of a file through it is
+    /// refused with the boundary sentence and none of the outside bytes come
+    /// back. Pinned at the tool, so a reader that opened `root.join(path)`
+    /// instead of the resolver's answer would fail here.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_read_through_a_folder_linking_out_of_the_project_is_refused() {
+        let gp = crate::test_util::GuardedProject::new();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "the outside secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), gp.root.join("out")).unwrap();
+
+        let err = FileReadTool
+            .execute_with_context(&read_args("out/secret.txt"), &gp.ctx())
+            .await
+            .expect_err("a read through a link out of the project is refused");
+
+        assert_eq!(
+            err,
+            "Path 'out/secret.txt' resolves outside the workspace boundary"
+        );
+        assert!(!err.contains("the outside secret"), "{err}");
+    }
+
     /// R26: a call reached with no context names no folder.
     #[tokio::test]
     async fn file_read_refuses_a_call_with_no_context() {

@@ -567,6 +567,46 @@ async fn a_folder_is_refused() {
     assert_eq!(refused, "'src' is a folder, not a file.");
 }
 
+/// R31 (Review Focus 1, d1-confine-3): a link at the leaf pointing outside
+/// the project is never edited through — the card is refused (no card is
+/// raised), the body is refused with the boundary sentence, the outside
+/// file is byte-identical, and nothing is copied into `snapshots/`. Pinned
+/// at the tool, so a plan that read or wrote `root.join(path)` instead of
+/// the resolver's answer would fail here.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_edit_of_a_link_pointing_out_of_the_project_is_refused_and_raises_no_card() {
+    let b = Bench::new();
+    let outside = tempfile::tempdir().unwrap();
+    let elsewhere = outside.path().join("a.md");
+    fs::write(&elsewhere, "the outside text\n").unwrap();
+    fs::create_dir_all(b.gp.root.join("docs")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, b.gp.root.join("docs/a.md")).unwrap();
+    let ctx = b.ctx();
+    let tool = b.tool(None);
+    let edit = args("docs/a.md", "outside", "inside");
+    let boundary = "Path 'docs/a.md' resolves outside the workspace boundary";
+
+    assert_eq!(
+        tool.confirmation_preview(&edit, &ctx).await,
+        Err(boundary.to_string()),
+        "no card"
+    );
+    assert_eq!(
+        tool.execute_with_context(&edit, &ctx).await,
+        Err(boundary.to_string())
+    );
+
+    assert_eq!(
+        fs::read_to_string(&elsewhere).unwrap(),
+        "the outside text\n",
+        "the file outside is byte-identical"
+    );
+    assert!(ctx.session_log.as_ref().unwrap().flush().await);
+    assert!(b.images().is_empty(), "nothing was copied into snapshots/");
+    assert!(b.rows().is_empty(), "no row was recorded");
+}
+
 /// R36: the file is the result; the row is a view of it.
 #[tokio::test]
 async fn without_a_database_the_edit_lands_and_says_the_app_could_not_list_it() {
