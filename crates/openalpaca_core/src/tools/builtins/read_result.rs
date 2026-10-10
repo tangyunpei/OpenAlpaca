@@ -32,10 +32,10 @@ use super::annotations_for_builtin;
 /// enough that paging into a 200 MB result cannot refill the context the spill
 /// just emptied — and, since [`read_page_bytes`] seeks, small enough that it
 /// cannot fill the daemon's memory either.
-const DEFAULT_LIMIT: usize = 8 * 1024;
+pub(super) const DEFAULT_LIMIT: usize = 8 * 1024;
 
 /// The largest page a single call will return.
-const MAX_LIMIT: usize = 64 * 1024;
+pub(super) const MAX_LIMIT: usize = 64 * 1024;
 
 struct ReadResultTool {
     /// The sessions root, when a caller pins one (tests). Production leaves it
@@ -160,7 +160,7 @@ pub(super) async fn read_page_bytes(
 /// caller-supplied offset that is itself mid-character — the end backs off to
 /// the previous boundary instead: those bytes lead the next page rather than
 /// being handed back as half a character.
-fn page_bounds(buf: &[u8], limit: usize, at_eof: bool) -> (usize, usize) {
+pub(super) fn page_bounds(buf: &[u8], limit: usize, at_eof: bool) -> (usize, usize) {
     let mut start = 0;
     while start < buf.len() && is_continuation(buf[start]) {
         start += 1;

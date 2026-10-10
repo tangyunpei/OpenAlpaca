@@ -1,4 +1,5 @@
 mod approval_preview;
+mod artifact_read;
 mod artifact_write;
 mod file_ops;
 mod helpers;
@@ -51,6 +52,7 @@ use tokio::process::Command;
 pub type ConnectorSendLock = Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>>;
 
 use self::artifact_write::artifact_write_tool;
+use self::artifact_read::artifact_read_tool;
 use self::file_ops::{file_edit_tool, file_list_tool, file_read_tool, file_write_tool};
 use self::read_result::read_result_tool;
 use self::shell_execute::shell_execute_tool;
@@ -380,6 +382,11 @@ pub fn builtin_tools(
         // has to exist for capability resolution even where no database was
         // wired (tests, the CLI), and the tool refuses at call time instead.
         artifact_write_tool(ws_db.clone(), tool_cfg.clone()),
+        // R41: read a by-product back by the id artifact_write, file_write's
+        // by-product result, a workspace entry and task_status name. Comes
+        // with the `read_result` capability (R42); registered with or without
+        // a database, like artifact_write, and refuses at call time without.
+        artifact_read_tool(ws_db.clone()),
     ];
     // Always register workspace tools — definitions needed for capability resolution.
     for def in workspace_tool_definitions() {
@@ -623,8 +630,10 @@ impl BuiltInTool for ScriptToolBuiltIn {
 /// Returns `None` for unknown names; callers default to `None` (no special treatment).
 pub(crate) fn annotations_for_builtin(name: &str) -> Option<openalpaca_mcp::ToolAnnotations> {
     match name {
-        "file_read" | "file_list" | "workspace_read" | "read_result" | "memory_search"
-        | "memory_read" | "memory_list" | "memory_timeline" => Some(read_only_annotations()),
+        "file_read" | "file_list" | "artifact_read" | "workspace_read" | "read_result"
+        | "memory_search" | "memory_read" | "memory_list" | "memory_timeline" => {
+            Some(read_only_annotations())
+        }
         "web_fetch" | "web_search" => Some(read_only_open_world_annotations()),
         // Design §7, *Capabilities*: the two memory tools that prompt;
         // `memory_store` deliberately carries none — a plain save never
