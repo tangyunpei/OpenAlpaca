@@ -2665,28 +2665,34 @@ fn test_golden_dag_node_byte_identical() {
 /// Phase 6 Commit 3 — Lead Agent (build_lead_agent_prompt_from_templates) golden fixture.
 ///
 /// Asserts byte-identical system message content between:
-///   (a) pre-migration `PromptBuilder` chain at
-///       `runner/lead_agent/prompt.rs:12-138` and
-///   (b) migrated `ComposeEngine::compose(ComposeRequest::LeadAgent{...})` with
-///       `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal` +
+///   (a) the pre-migration `PromptBuilder` chain, its eight raw blocks spelled
+///       out here, and
+///   (b) the **real** `build_lead_agent_prompt_from_templates`, which carries
+///       the same blocks through `ComposeEngine::compose(ComposeRequest::LeadAgent{...})`
+///       with `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal` +
 ///       `DynamicContextMode::Skip` + `HistoryMode::Skip`.
 ///
+/// Until the S6text review's M4 the second half re-built those blocks here
+/// and composed them itself, so the test compared two copies it owned and
+/// never called the builder: a change to the lead's prompt passed it. It now
+/// calls the builder, so any change to the lead's system prompt fails here
+/// until the reference below is changed with it.
+///
 /// `build_lead_agent_prompt_from_templates` returns ONLY the system prompt
-/// string; the caller at `runner/lead_agent/mod.rs:217` then concatenates
-/// `format_tool_guidance` + `connector_suffix` inline before building the
-/// message vec. The migration therefore only needs to preserve the system
-/// message content emitted by the 8 raw_blocks — no tools, no connector
-/// guidance, no context bundle, no history flow through this call site.
+/// string; `run_lead_agent` then concatenates `format_tool_guidance` + the
+/// connector, extension and workflow-contract suffixes inline before building
+/// the message vec — none of them is part of this fixture. No user document
+/// is passed, so no profile block is carried.
 #[test]
 fn test_golden_lead_agent_byte_identical() {
     use crate::agent::template::{AgentSource, AgentTemplate, AgentTemplateFrontmatter};
     use crate::prompt::PromptBuilder;
-    use openalpaca_llm::Role;
-    use std::collections::HashMap;
     use crate::prompt_ctx::SectionPriority;
+    use crate::runner::lead_agent::build_lead_agent_prompt_from_templates;
+    use std::collections::HashMap;
 
-    // ── Canned Lead Agent scene. Mirrors the pre-migration arguments at
-    //    runner/lead_agent/prompt.rs:12-138 + runner/lead_agent/mod.rs:217. ──
+    // ── Canned Lead Agent scene: the builder's arguments, as `run_lead_agent`
+    //    passes them with no user document. ──
     let base_persona = "I am a Lead Agent persona for the golden test.";
     let model_window: usize = 200_000;
 
@@ -2758,8 +2764,8 @@ fn test_golden_lead_agent_byte_identical() {
     }
     agents_block.push_str("</agents>");
 
-    // Copy the 5 other raw_block string constants VERBATIM from
-    // runner/lead_agent/prompt.rs:46-134.
+    // The other raw blocks, as the builder in runner/lead_agent/prompt.rs
+    // writes them — the reference the real builder is held to below.
     let role_text = "<role>\n\
          You are a Lead Agent orchestrating a complex task. You are responsible for analyzing \
          the user's request, decomposing it into sub-objectives, delegating work to specialized \
@@ -2840,135 +2846,22 @@ fn test_golden_lead_agent_byte_identical() {
         .build();
     let expected_system = built.system_message.clone();
 
-    // ── Via the engine: PersonaMode::Skip + StaticPromptMode::SubagentMinimal. ──
-    //
-    // The 8 raw_blocks go through StaticPromptInput.raw_blocks in canonical
-    // registration order. No tools, no connector_guidance, no context_bundle,
-    // no history are threaded through — build_lead_agent_prompt_from_templates
-    // returns only the system prompt string.
+    // ── The real builder, composing the same blocks through the engine. ──
     let engine = ComposeEngine::new(16);
-
-    let raw_blocks_for_engine: Vec<SystemBlock> = vec![
-        SystemBlock {
-            name: "lead_persona",
-            content: Arc::<str>::from(base_persona.to_string()),
-            priority: SectionPriority::Critical,
-        },
-        SystemBlock {
-            name: "lead_role",
-            content: Arc::<str>::from(role_text.to_string()),
-            priority: SectionPriority::Critical,
-        },
-        SystemBlock {
-            name: "agents_catalog",
-            content: Arc::<str>::from(agents_block.clone()),
-            priority: SectionPriority::High,
-        },
-        SystemBlock {
-            name: "workflow",
-            content: Arc::<str>::from(workflow_text.to_string()),
-            priority: SectionPriority::High,
-        },
-        SystemBlock {
-            name: "delegation_criteria",
-            content: Arc::<str>::from(delegation_text.to_string()),
-            priority: SectionPriority::Normal,
-        },
-        SystemBlock {
-            name: "tool_patterns",
-            content: Arc::<str>::from(tool_patterns_text.to_string()),
-            priority: SectionPriority::Normal,
-        },
-        SystemBlock {
-            name: "failure_recovery",
-            content: Arc::<str>::from(failure_recovery_text.to_string()),
-            priority: SectionPriority::Normal,
-        },
-        SystemBlock {
-            name: "output_expectations",
-            content: Arc::<str>::from(output_expectations_text.to_string()),
-            priority: SectionPriority::Normal,
-        },
-    ];
-
-    let persona_input = PersonaInput {
-        system_persona: Arc::new(SystemPersona::default()),
-        user_document: Arc::new(None),
-        identity_document: Arc::new(None),
-        persona_version: 0,
-        mode: PersonaMode::Skip,
-        identity_budget: None,
-        user_budget: None,
-    };
-    let persona_output = Arc::new(super::persona::compute(&persona_input));
-
-    let static_prompt_input = StaticPromptInput {
-        persona_output,
-        agent_persona: None,
-        agent_config_fingerprint: [0u8; 32],
-        skill_block: None,
-        skills_catalog: None,
-        bootstrap: None,
-        tools: Arc::new(Vec::new()),
-        connector_status: Arc::new(Vec::new()),
-        send_tool_context: None,
-        message_source: None,
-        raw_blocks: raw_blocks_for_engine,
-        mode: StaticPromptMode::SubagentMinimal,
-        model_window: model_window as u32,
-    };
-
-    // No context bundle, no history — build_lead_agent_prompt_from_templates
-    // returns ONLY the system prompt string.
-    let dynamic_context_input = DynamicContextInput {
-        context_bundle: Arc::new(ContextBundle::empty()),
-        query: Arc::from(""),
-        path: ExecutionPath::LeadAgent,
-        reserved_tokens: 0,
-        mode: DynamicContextMode::Skip,
-    };
-
-    let history_input = HistoryInput {
-        lane_tip_fingerprint: [0u8; 32],
-        working_state: None,
-        previous: None,
-        summary_wrap_mode: SummaryWrapMode::Plain,
-        recent_messages: Arc::new(Vec::new()),
-        current_user_turn: None,
-        mode: HistoryMode::Skip,
-    };
-
-    let request = ComposeRequest::LeadAgent {
-        base_persona: Arc::<str>::from(base_persona.to_string()),
-        agents_catalog: Arc::<str>::from(agents_block.clone()),
-        objective: Arc::<str>::from(""),
-        overrides: ComposeOverrides::default(),
-    };
-
-    let composed = engine.compose(
-        &request,
-        persona_input,
-        static_prompt_input,
-        dynamic_context_input,
-        history_input,
-        model_window as u32,
-        Arc::new(Vec::new()),
+    let got = build_lead_agent_prompt_from_templates(
+        &engine,
+        base_persona,
+        &templates,
+        model_window,
         None,
         None,
     );
 
     // ── Byte-identical assertion on system message content. ─────────────
     assert_eq!(
-        composed.messages.len(),
-        1,
-        "Lead Agent prompt should yield exactly 1 system message (got {} messages)",
-        composed.messages.len()
-    );
-    assert_eq!(composed.messages[0].role, Role::System);
-    assert_eq!(
-        composed.messages[0].content, expected_system,
-        "Lead Agent migration system_message mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",
-        composed.messages[0].content, expected_system
+        got, expected_system,
+        "Lead Agent system prompt mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",
+        got, expected_system
     );
 }
 
