@@ -344,7 +344,9 @@ mod tests {
     #[tokio::test]
     async fn a_by_product_of_no_project_is_read_even_when_the_turns_project_cannot_be_looked_up() {
         let fx = Fixture::new();
-        let id = fx.save(&fx.scratch_ctx(), "notes.md", "markdown", "loose notes\n").await;
+        let id = fx
+            .save(&fx.scratch_ctx(), "notes.md", "markdown", "loose notes\n")
+            .await;
         let unresolvable = fx.gp.root.join("no-such-folder").join("..");
         let ctx = ToolContext {
             request_workspace_root: Some(unresolvable.to_string_lossy().into_owned()),
@@ -357,7 +359,10 @@ mod tests {
 
         let out = fx.read(&ctx, json!({"artifact_id": id})).await.unwrap();
 
-        assert!(out.starts_with("loose notes\n\n\n[artifact_read: "), "{out}");
+        assert!(
+            out.starts_with("loose notes\n\n\n[artifact_read: "),
+            "{out}"
+        );
     }
 
     /// C-S5-3 (S5's M1): a by-product edited by hand reads back as it is on
@@ -366,12 +371,17 @@ mod tests {
     #[tokio::test]
     async fn a_by_product_edited_by_hand_reads_back_its_new_bytes_as_version_2() {
         let fx = Fixture::new();
-        let id = fx.save(&fx.project_ctx(), "draft.md", "markdown", "first cut\n").await;
+        let id = fx
+            .save(&fx.project_ctx(), "draft.md", "markdown", "first cut\n")
+            .await;
         let path = fx.record(&id).storage_path;
         let edited = "second cut, edited by hand\n";
         std::fs::write(&path, edited).unwrap();
 
-        let out = fx.read(&fx.project_ctx(), json!({"artifact_id": id})).await.unwrap();
+        let out = fx
+            .read(&fx.project_ctx(), json!({"artifact_id": id}))
+            .await
+            .unwrap();
 
         let n = edited.len();
         assert_eq!(

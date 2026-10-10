@@ -260,7 +260,10 @@ mod tests {
             );
 
             assert_eq!(card, format!("{line}\n{notice}"));
-            assert!(!card.contains('\u{202e}') && !card.contains('\u{200b}'), "{card:?}");
+            assert!(
+                !card.contains('\u{202e}') && !card.contains('\u{200b}'),
+                "{card:?}"
+            );
         }
     }
 }

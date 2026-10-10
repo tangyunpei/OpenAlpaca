@@ -3298,7 +3298,10 @@ mod tests {
         );
         assert_eq!(
             list(&gp.ctx(), ".GIT").await.unwrap(),
-            format!(".GIT ({}): 1 entry\nHEAD  21 bytes", gp.root.join(".GIT").display())
+            format!(
+                ".GIT ({}): 1 entry\nHEAD  21 bytes",
+                gp.root.join(".GIT").display()
+            )
         );
     }
 
@@ -3387,7 +3390,9 @@ mod tests {
     #[test]
     fn one_entry_and_one_more_read_in_the_singular() {
         let dir = Path::new("/p");
-        let shown: Vec<String> = (0..FILE_LIST_MAX_ENTRIES).map(|i| format!("f{i}")).collect();
+        let shown: Vec<String> = (0..FILE_LIST_MAX_ENTRIES)
+            .map(|i| format!("f{i}"))
+            .collect();
 
         assert_eq!(format_listing(".", dir, 0, &[]), ". (/p): 0 entries");
         assert_eq!(
@@ -3395,7 +3400,10 @@ mod tests {
             ". (/p): 1 entry\nf0"
         );
         let one_more = format_listing(".", dir, FILE_LIST_MAX_ENTRIES + 1, &shown);
-        assert!(one_more.starts_with(". (/p): 501 entries\nf0\n"), "{one_more}");
+        assert!(
+            one_more.starts_with(". (/p): 501 entries\nf0\n"),
+            "{one_more}"
+        );
         assert!(
             one_more.ends_with("\nf499\n... and 1 more entry not shown — list a subfolder"),
             "{one_more}"
@@ -3425,6 +3433,9 @@ mod tests {
         assert_eq!(shown.len(), FILE_LIST_MAX_ENTRIES);
         assert_eq!(looked_at.first().map(String::as_str), Some("f000"));
         assert_eq!(looked_at.last().map(String::as_str), Some("f499"));
-        assert_eq!(shown, looked_at, "an entry that cannot be looked at is its bare name");
+        assert_eq!(
+            shown, looked_at,
+            "an entry that cannot be looked at is its bare name"
+        );
     }
 }
