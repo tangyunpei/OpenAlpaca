@@ -69,6 +69,24 @@ export interface ArtifactListPage {
   total: number;
 }
 
+/** A row as the wire may carry it: a daemon older than result files (S4a) sends neither field. */
+type WireArtifact = Omit<Artifact, "in_project" | "openable"> &
+  Partial<Pick<Artifact, "in_project" | "openable">>;
+
+/**
+ * One reading of a row for every caller (d7-app-4): a row without
+ * `in_project` / `openable` is a by-product that opens — the reading the
+ * `artifact_written` frame already gets — rather than a row every caller
+ * reads as "not openable".
+ */
+function fromWire(row: WireArtifact): Artifact {
+  return {
+    ...row,
+    in_project: row.in_project ?? false,
+    openable: row.openable ?? true,
+  };
+}
+
 export interface ArtifactVersion {
   version: number;
   note: string;
@@ -115,21 +133,25 @@ export async function listArtifacts(
   query: ListArtifactsQuery = {},
   signal?: AbortSignal,
 ): Promise<ArtifactListPage> {
-  return await apiFetch<ArtifactListPage>("/v1/artifacts", {
-    signal,
-    query: {
-      task_id: query.taskId,
-      kind: query.kind,
-      origin: query.origin,
-      project_root: query.projectRoot,
-      pinned: query.pinned,
-      q: query.q,
-      include_missing: query.includeMissing,
-      in_project: query.inProject,
-      limit: query.limit,
-      offset: query.offset,
+  const page = await apiFetch<{ artifacts: WireArtifact[]; total: number }>(
+    "/v1/artifacts",
+    {
+      signal,
+      query: {
+        task_id: query.taskId,
+        kind: query.kind,
+        origin: query.origin,
+        project_root: query.projectRoot,
+        pinned: query.pinned,
+        q: query.q,
+        include_missing: query.includeMissing,
+        in_project: query.inProject,
+        limit: query.limit,
+        offset: query.offset,
+      },
     },
-  });
+  );
+  return { ...page, artifacts: page.artifacts.map(fromWire) };
 }
 
 /** `GET /v1/artifacts/{id}` — 404 for an unknown row and for another owner's. */
@@ -137,9 +159,11 @@ export async function getArtifact(
   id: string,
   signal?: AbortSignal,
 ): Promise<Artifact> {
-  return await apiFetch<Artifact>(`/v1/artifacts/${encodeURIComponent(id)}`, {
-    signal,
-  });
+  return fromWire(
+    await apiFetch<WireArtifact>(`/v1/artifacts/${encodeURIComponent(id)}`, {
+      signal,
+    }),
+  );
 }
 
 /** `GET /v1/artifacts/{id}/versions` — newest first. */

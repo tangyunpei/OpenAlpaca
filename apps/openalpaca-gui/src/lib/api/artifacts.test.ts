@@ -172,6 +172,48 @@ describe("getArtifact", () => {
   });
 });
 
+describe("a row from a daemon older than result files (d7-app-4)", () => {
+  /** What a pre-S4a `GET /v1/artifacts` serves: no `in_project`, no `openable`. */
+  const { in_project: _side, openable: _open, ...older } = row;
+
+  it("is read as a by-product that opens, in a list", async () => {
+    reply = () => json({ artifacts: [older], total: 1 });
+
+    const page = await listArtifacts();
+
+    expect(page.artifacts[0]).toMatchObject({
+      in_project: false,
+      openable: true,
+    });
+  });
+
+  it("is read as a by-product that opens, on its own", async () => {
+    reply = () => json(older);
+
+    await expect(getArtifact("art-1")).resolves.toMatchObject({
+      in_project: false,
+      openable: true,
+    });
+  });
+
+  it("keeps what a newer daemon says", async () => {
+    const script = { ...row, in_project: true, openable: false };
+    reply = (url) =>
+      url.includes("/v1/artifacts?") || url.endsWith("/v1/artifacts")
+        ? json({ artifacts: [script], total: 1 })
+        : json(script);
+
+    expect((await listArtifacts()).artifacts[0]).toMatchObject({
+      in_project: true,
+      openable: false,
+    });
+    await expect(getArtifact("art-1")).resolves.toMatchObject({
+      in_project: true,
+      openable: false,
+    });
+  });
+});
+
 describe("listArtifactVersions", () => {
   it("unwraps the `{ versions }` envelope", async () => {
     reply = () =>
