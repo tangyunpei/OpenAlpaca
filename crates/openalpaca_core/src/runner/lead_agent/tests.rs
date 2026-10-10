@@ -2181,6 +2181,82 @@ async fn the_lead_is_never_handed_file_edit_or_file_write() {
     }
 }
 
+/// The lead's ruling R-T24 (the whole-stage review's d6-surfaces-2): R42 and
+/// §15 say the lead writes no file and runs no command, and the tests above
+/// check only what it is offered. Its sandbox admits the template's
+/// capability strings widened by its surface, matched by name (CLAUDE.md's
+/// settled rule, which stays), over a clone of the registry that holds every
+/// writing backend — so "writes none" holds because the **shipped**
+/// `lead_agent.md` names no writing tool. A scripted `file_write` and a
+/// scripted `shell_execute` from that template are refused by the allow
+/// list before either tool runs.
+#[tokio::test]
+async fn the_shipped_lead_template_refuses_a_file_write_and_a_shell_command() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents/lead_agent.md");
+    let body = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let template = crate::agent::template::parse_agent_markdown(&body)
+        .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+    assert_eq!(template.frontmatter.id, "lead_agent");
+    let lead = template.to_subagent("lead-1", "task-1");
+
+    let call = |id: &str, name: &str, arguments: serde_json::Value| {
+        scripted_response(
+            "",
+            vec![openalpaca_llm::ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments,
+            }],
+        )
+    };
+    let provider = ScriptedProvider::new(vec![
+        call(
+            "call-1",
+            "file_write",
+            serde_json::json!({"path": "notes.md", "content": "written by the lead"}),
+        ),
+        call(
+            "call-2",
+            "shell_execute",
+            serde_json::json!({"command": "echo ran"}),
+        ),
+        scripted_response("done", vec![]),
+    ]);
+
+    let result = run_lead_as(
+        &lead,
+        provider.clone(),
+        registry_with_builtins(),
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        EventBus::default(),
+    )
+    .await;
+
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+    for (round, tool) in [(1, "file_write"), (2, "shell_execute")] {
+        let results = tool_results_seen(&provider, round);
+        let last = results
+            .last()
+            .unwrap_or_else(|| panic!("no result for {tool}"));
+        assert!(
+            last.contains(&format!(
+                "Capability '{tool}' not in allow list for agent 'lead-1'"
+            )),
+            "{tool} is refused by the allow list: {last:?}"
+        );
+        assert!(!last.contains("ran"), "{tool} ran: {last:?}");
+    }
+}
+
 #[tokio::test]
 async fn test_lead_executes_extension_tool_through_sandbox() {
     let registry = Arc::new(ToolRegistry::default());
