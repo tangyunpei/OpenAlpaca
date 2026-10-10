@@ -279,6 +279,104 @@ fn annotations_for_builtin_by_product_writers_never_prompt() {
     }
 }
 
+// --- ST-16: reading never asks (storage design §12) ---
+
+/// ST-16: `file_read` and `read_result` are read-only and raise no card, with
+/// a broker attached and no confirmation list, so the set is the one derived
+/// from the annotations `builtin_tools` registers them with. `file_write`
+/// under the same policy does raise one, which is what makes the two "no
+/// card" findings mean something. The one-second timeout lets that card lapse
+/// unanswered, so nothing is written. A read that started asking would fail
+/// here in a second instead of hanging the suite.
+#[tokio::test]
+async fn reading_tools_raise_no_card_under_a_broker() {
+    use crate::bus::EventBus;
+    use crate::events::SystemEvent;
+    use crate::security::capabilities::Allowlist;
+    use crate::security::confirmation::ConfirmationBroker;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::test_util::GuardedProject;
+    use crate::tools::ToolRegistry;
+    use openalpaca_llm::ToolCall;
+
+    let gp = GuardedProject::new();
+    std::fs::write(gp.root.join("notes.txt"), "read me\n").unwrap();
+    let registry = ToolRegistry::default();
+    for tool in builtin_tools(None, None, None, Some(gp.root.clone())) {
+        registry.register(tool).unwrap();
+    }
+    let bus = EventBus::default();
+    let mut events = bus.subscribe();
+    let mut sandbox = SandboxManager::with_defaults(Arc::new(registry), bus);
+    let broker = Arc::new(ConfirmationBroker::new());
+    sandbox.set_confirmation_broker(broker.clone());
+    let policy = SandboxPolicy {
+        agent_id: "research_agent".to_string(),
+        allowed_capabilities: Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: Some(1),
+        auto_approve: false,
+        unattended: false,
+    };
+    let call = |name: &str, arguments: serde_json::Value| ToolCall {
+        id: format!("tc-{name}"),
+        name: name.to_string(),
+        arguments,
+    };
+    let carded = |events: &mut tokio::sync::broadcast::Receiver<SystemEvent>| {
+        let mut tools = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let SystemEvent::ToolConfirmationRequested { tool_name, .. } = event {
+                tools.push(tool_name);
+            }
+        }
+        tools
+    };
+
+    let read = sandbox
+        .execute_tool(
+            &call("file_read", serde_json::json!({"path": "notes.txt"})),
+            &policy,
+            &gp.ctx(),
+        )
+        .await;
+    assert_eq!(read, Ok("read me\n".to_string()));
+    // The tool's own refusal: the sandbox let the call through with no card,
+    // and the call has no session to page from.
+    let paged = sandbox
+        .execute_tool(
+            &call(
+                "read_result",
+                serde_json::json!({"result_ref": "file:results/000001-a1b2c3d4-shell_execute.txt"}),
+            ),
+            &policy,
+            &gp.ctx(),
+        )
+        .await;
+    assert_eq!(
+        paged,
+        Err("read_result is scoped to a session, and this call has none".to_string())
+    );
+    assert_eq!(carded(&mut events), Vec::<String>::new(), "a read raised a card");
+    assert_eq!(broker.pending_count(), 0);
+
+    let write = sandbox
+        .execute_tool(
+            &call("file_write", serde_json::json!({"path": "out.md", "content": "x"})),
+            &policy,
+            &gp.ctx(),
+        )
+        .await;
+    assert!(write.is_err(), "the unanswered card lapses: {write:?}");
+    assert_eq!(carded(&mut events), vec!["file_write".to_string()]);
+    assert!(!gp.root.join("out.md").exists(), "an unanswered write never runs");
+}
+
 #[test]
 fn annotations_for_builtin_readonly_tools_tagged() {
     for name in ["file_read", "workspace_read", "memory_search", "web_fetch", "web_search"] {
