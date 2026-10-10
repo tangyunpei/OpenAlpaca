@@ -81,6 +81,13 @@ const PROMPT_ARGUMENTS_BYTES: usize = 500;
 /// `PROMPT_ARGUMENTS_BYTES` (500 bytes), the `/yes` / `/no` instructions
 /// and, when others wait before it, its place in the chat's queue.
 ///
+/// `preview` is the daemon's own text for the card (design 09 §4.4; storage
+/// design R34: the folder a command starts in, where a write lands), printed
+/// under `From OpenAlpaca:` between the tool's name and its arguments, as the
+/// app and `openalpaca chat` print it. It is OpenAlpaca's prose; whatever it
+/// quotes from the call is already escaped (`utils::text`), so it is printed
+/// as written. Absent or empty, the prompt is the ordinary one.
+///
 /// A cut says how much it left out — `... (31 more characters not shown)` —
 /// because what it leaves out still runs: a model can pad a shell command
 /// past the cut, or put a key that sorts first (`serde_json` prints keys
@@ -112,6 +119,7 @@ const PROMPT_ARGUMENTS_BYTES: usize = 500;
 pub fn format_confirmation_prompt(
     tool_name: &str,
     tool_arguments: &serde_json::Value,
+    preview: Option<&str>,
     queue_len: usize,
 ) -> String {
     use openalpaca_core::utils::text::{
@@ -133,9 +141,17 @@ pub fn format_confirmation_prompt(
         String::new()
     };
 
+    // The daemon's own text for the card (R34: the folder a command starts
+    // in, where a write lands), above the arguments as it wrote it.
+    let from_openalpaca = preview
+        .filter(|text| !text.is_empty())
+        .map(|text| format!("From OpenAlpaca:\n{text}\n"))
+        .unwrap_or_default();
+
     format!(
         "A tool requires your confirmation before executing{queue_info}:\n\n\
          Tool: {name}\n\
+         {from_openalpaca}\
          Arguments:\n{args}{rest}{notice}\n\n\
          Reply /yes or /no to approve or deny.",
         name = name.text,

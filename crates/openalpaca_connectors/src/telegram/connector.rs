@@ -147,6 +147,7 @@ impl TelegramConnector {
                         tool_arguments,
                         stream_id: _,
                         lane_key: Some(ref lane_key),
+                        preview,
                         ..
                     }) if lane_key.ends_with(":telegram") => {
                         // Resolve chat_id from lane_key via DB lookup
@@ -180,8 +181,12 @@ impl TelegramConnector {
                         pending.entry(chat_id).or_default().push_back(request_id.clone());
                         let queue_len = pending.get(&chat_id).map(|q| q.len()).unwrap_or(1);
 
-                        let prompt =
-                            format_confirmation_prompt(&tool_name, &tool_arguments, queue_len);
+                        let prompt = format_confirmation_prompt(
+                            &tool_name,
+                            &tool_arguments,
+                            preview.as_deref(),
+                            queue_len,
+                        );
 
                         if let Err(e) =
                             send_approval_with_retry(&bot, ChatId(chat_id), &prompt).await

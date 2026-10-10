@@ -200,6 +200,7 @@ impl IMessageConnector {
                         tool_name,
                         tool_arguments,
                         lane_key: Some(ref lane_key),
+                        preview,
                         ..
                     }) if lane_key.ends_with(":imessage") => {
                         // Resolve the chat identifier from lane_key via the
@@ -228,8 +229,12 @@ impl IMessageConnector {
                             .push_back(request_id.clone());
                         let queue_len = pending.get(&chat_id).map(|q| q.len()).unwrap_or(1);
 
-                        let prompt =
-                            format_confirmation_prompt(&tool_name, &tool_arguments, queue_len);
+                        let prompt = format_confirmation_prompt(
+                            &tool_name,
+                            &tool_arguments,
+                            preview.as_deref(),
+                            queue_len,
+                        );
 
                         if let Err(e) = IMessageSender::send(&target, &prompt, is_group).await {
                             error!(

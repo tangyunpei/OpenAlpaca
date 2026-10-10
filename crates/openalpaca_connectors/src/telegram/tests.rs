@@ -159,7 +159,7 @@ fn a_multibyte_argument_block_is_cut_without_panicking() {
         "byte 500 must land inside a character for this to be the old panic"
     );
 
-    let prompt = format_confirmation_prompt("shell_exec", &args, 1);
+    let prompt = format_confirmation_prompt("shell_exec", &args, None, 1);
 
     assert!(prompt.contains("Tool: shell_exec"), "{prompt}");
     assert!(prompt.contains("Reply /yes or /no to approve or deny."));

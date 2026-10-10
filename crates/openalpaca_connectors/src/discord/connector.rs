@@ -195,11 +195,13 @@ fn discord_plain_text(text: &str) -> String {
 fn approval_prompt(
     tool_name: &str,
     tool_arguments: &serde_json::Value,
+    preview: Option<&str>,
     queue_len: usize,
 ) -> String {
     discord_plain_text(&format_confirmation_prompt(
         tool_name,
         tool_arguments,
+        preview,
         queue_len,
     ))
 }
@@ -348,6 +350,7 @@ impl DiscordConnector {
                         tool_name,
                         tool_arguments,
                         lane_key: Some(ref lane_key),
+                        preview,
                         ..
                     }) if lane_key.ends_with(":discord") => {
                         // Resolve channel_id from lane_key via DB lookup
@@ -366,7 +369,8 @@ impl DiscordConnector {
                             .push_back(request_id.clone());
                         let queue_len = pending.get(&channel_id).map(|q| q.len()).unwrap_or(1);
 
-                        let prompt = approval_prompt(&tool_name, &tool_arguments, queue_len);
+                        let prompt =
+                            approval_prompt(&tool_name, &tool_arguments, preview.as_deref(), queue_len);
 
                         if let Err(e) = send_approval_with_retry(
                             &http,
@@ -791,15 +795,32 @@ mod tests {
             "note": "*b* _i_ ~~s~~ `c` [docs](https://e.x) <t:0> <@1> # h > q - l",
             "quoted": "say \"hi\" \\ bye \u{202e}",
         });
-        let written = format_confirmation_prompt(name, &args, 2);
+        let written = format_confirmation_prompt(name, &args, None, 2);
 
-        let sent = approval_prompt(name, &args, 2);
+        let sent = approval_prompt(name, &args, None, 2);
 
         let (shown, markup) = discord_reads(&sent);
         assert!(markup.is_empty(), "unescaped markup {markup:?} in {sent}");
         assert_eq!(shown, written);
         assert!(sent.contains("\\|\\|curl"), "{sent}");
         assert!(sent.contains("\\<U+202E\\>"), "{sent}");
+    }
+
+    /// R34: the daemon's card text rides the Discord prompt too, and a folder
+    /// with `_` in its name reads as written, not as markup.
+    #[test]
+    fn the_approval_prompt_carries_the_preview_as_written() {
+        let args = serde_json::json!({"command": "ls"});
+        let preview = "Runs in the project folder /Users/me/my__app. The command itself can reach \
+                       files outside it.";
+        let written = format_confirmation_prompt("shell_execute", &args, Some(preview), 1);
+
+        let sent = approval_prompt("shell_execute", &args, Some(preview), 1);
+
+        let (shown, markup) = discord_reads(&sent);
+        assert!(markup.is_empty(), "unescaped markup {markup:?} in {sent}");
+        assert_eq!(shown, written);
+        assert!(shown.contains(&format!("From OpenAlpaca:\n{preview}\n")), "{shown}");
     }
 
     /// Discord draws an embed under every URL in a message: the linked
