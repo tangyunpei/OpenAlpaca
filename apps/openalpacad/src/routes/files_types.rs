@@ -83,7 +83,9 @@ pub(super) enum OpenFileApiError {
     NotFound,
     /// ST-18: a result file whose name has no extension a kind keeps —
     /// `.sh`, `.command`, `Makefile` — is shown in its folder, never handed
-    /// to the system's default app, which could run it.
+    /// to the system's default app, which could run it. Since R-T25 the
+    /// same answer is given when what the row resolves to is not such a
+    /// file: a folder, or a link inside the project to a script or an app.
     NotOffered {
         name: String,
     },
@@ -180,11 +182,24 @@ pub(super) async fn open_asset_for_user(
         let owned_db = db.clone();
         let owned_id = asset.id.clone();
         match tokio::task::spawn_blocking(move || {
-            openalpaca_storage::ArtifactStore::new(&owned_db).resolve_content(&owned_id, None)
+            let path = openalpaca_storage::ArtifactStore::new(&owned_db)
+                .resolve_content(&owned_id, None)?;
+            // The lead's ruling R-T25: ST-18 is decided again on what was
+            // resolved. A link inside the project is followed by the
+            // resolver, so the row's name says nothing of the target: only a
+            // regular file whose own name a kind keeps is handed to the
+            // default app — never a script, an app bundle or a folder.
+            let offered = std::fs::metadata(&path)?.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(openalpaca_storage::store::opens_in_default_app);
+            Ok::<_, anyhow::Error>((path, offered))
         })
         .await
         {
-            Ok(Ok(path)) => path.to_string_lossy().into_owned(),
+            Ok(Ok((path, true))) => path.to_string_lossy().into_owned(),
+            Ok(Ok((_, false))) => return Err(OpenFileApiError::NotOffered { name: asset.name }),
             // R-T26: a missing project's result file is refused with the
             // project's own sentence, never opened through its old root.
             Ok(Err(e))

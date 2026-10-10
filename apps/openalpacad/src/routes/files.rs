@@ -947,4 +947,57 @@ mod tests {
         }
         assert_eq!(std::fs::read(&secret).unwrap(), b"not the project's\n");
     }
+
+    /// The lead's ruling R-T25 (ST-18 on what is opened, not on the row's
+    /// name): a result file `docs/plan.md` replaced by a link to a script
+    /// inside the project is refused `NotOffered` naming the row — the link
+    /// stays in the project, so the resolver accepts it, and the opener is
+    /// never handed `run.command`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_result_file_replaced_by_a_link_to_a_script_in_the_project_is_not_opened() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "docs/plan.md", b"# Plan\n");
+        let script = gp.root.join("run.command");
+        std::fs::write(&script, b"#!/bin/sh\necho ran\n").expect("script");
+        let at = gp.root.join("docs").join("plan.md");
+        std::fs::remove_file(&at).expect("remove");
+        std::os::unix::fs::symlink(&script, &at).expect("link");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("Reveal only");
+        assert_eq!(
+            err,
+            OpenFileApiError::NotOffered {
+                name: "docs/plan.md".to_string()
+            },
+            "the opener was never called"
+        );
+    }
+
+    /// R-T25: a result file `docs/plan.md` replaced by a folder of that name
+    /// is refused `NotOffered` — the name's kind is kept, but a folder is not
+    /// a file the default app opens.
+    #[tokio::test]
+    async fn a_result_file_replaced_by_a_folder_is_not_opened() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "docs/plan.md", b"# Plan\n");
+        let at = gp.root.join("docs").join("plan.md");
+        std::fs::remove_file(&at).expect("remove");
+        std::fs::create_dir(&at).expect("a folder in its place");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("not a file");
+        assert_eq!(
+            err,
+            OpenFileApiError::NotOffered {
+                name: "docs/plan.md".to_string()
+            },
+            "the opener was never called"
+        );
+    }
 }
