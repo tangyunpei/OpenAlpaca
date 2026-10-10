@@ -330,6 +330,11 @@ impl FileWriteTool {
         match working_folder(ctx) {
             Ok(WorkingFolder::Project { root }) => {
                 let target = resolve_workspace_path_for_write(path, &root, FolderRules::Project)?;
+                // A folder at the target is refused here, before any card,
+                // in `file_edit`'s words — not after a card, by the open.
+                if std::fs::metadata(&target).is_ok_and(|metadata| metadata.is_dir()) {
+                    return Err(format!("'{path}' is a folder, not a file."));
+                }
                 let replaces = check_pre_edit(
                     path,
                     &target,
@@ -2522,6 +2527,35 @@ mod tests {
         assert_eq!(write.unwrap_err(), expected);
         assert_eq!(card.unwrap_err(), expected);
         assert!(st.artifacts().is_empty(), "no by-product instead");
+    }
+
+    /// S4a's deferred (3), interfaces §4.3: a folder standing at the target
+    /// is refused by the plan — the card and the write give one sentence, so
+    /// no card is raised for a write that would then fail — and the folder,
+    /// its files and the rows are left as they were.
+    #[tokio::test]
+    async fn a_folder_at_the_target_is_refused_before_any_card() {
+        let st = Store::new();
+        let project = st.project_root();
+        let sessions = tempfile::tempdir().unwrap();
+        let (_service, ctx) = logged(&st, &project, sessions.path(), "sess-folder");
+        fs::create_dir_all(project.join("reports")).unwrap();
+        fs::write(project.join("reports/a.md"), "kept").unwrap();
+        let tool = st.tool();
+        let args = serde_json::json!({"path": "reports", "content": "x"});
+
+        let expected = "'reports' is a folder, not a file.";
+        assert_eq!(
+            tool.confirmation_preview(&args, &ctx).await.unwrap_err(),
+            expected
+        );
+        assert_eq!(tool.write(&args, &ctx).await.unwrap_err(), expected);
+        assert!(project.join("reports").is_dir());
+        assert_eq!(
+            fs::read_to_string(project.join("reports/a.md")).unwrap(),
+            "kept"
+        );
+        assert!(st.artifacts().is_empty(), "no row");
     }
 
     /// R34: the card says where the write lands — the project folder, and

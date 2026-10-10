@@ -229,6 +229,40 @@ mod tests {
         );
         assert!(!card.contains('\u{202e}') && !card.contains('\u{200b}'), "{card:?}");
     }
+
+    /// The project arm too (S4a's deferred (5)): the path the model wrote is
+    /// shown escaped whether the write makes a file or replaces one, with the
+    /// notice under the card; the project's root prints as it is.
+    #[test]
+    fn a_hidden_character_in_a_project_writes_path_is_shown_escaped_with_the_notice() {
+        let root = Path::new("/Users/me/dev/app");
+        let notice = "Note: this request contains 2 hidden characters, shown as <U+…>.";
+        for (replaces, line) in [
+            (
+                false,
+                "Writes notes/<U+202E>dm<U+200B>.txt in the project folder /Users/me/dev/app."
+                    .to_string(),
+            ),
+            (
+                true,
+                "Replaces notes/<U+202E>dm<U+200B>.txt in the project folder /Users/me/dev/app; \
+                 its current content is kept in this conversation's log."
+                    .to_string(),
+            ),
+        ] {
+            let card = write_card(
+                "notes/\u{202e}dm\u{200b}.txt",
+                WriteLanding::Project {
+                    root,
+                    replaces,
+                    link_to: None,
+                },
+            );
+
+            assert_eq!(card, format!("{line}\n{notice}"));
+            assert!(!card.contains('\u{202e}') && !card.contains('\u{200b}'), "{card:?}");
+        }
+    }
 }
 
 #[cfg(test)]
