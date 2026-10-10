@@ -273,6 +273,8 @@ pub async fn run_lead_agent(
         compose_engine.clone(),
         // M6: every subagent of this run inherits the run's answer.
         unattended,
+        // R44: and the run's conversation.
+        session_id.map(str::to_string),
     ));
 
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
@@ -293,6 +295,10 @@ pub async fn run_lead_agent(
         request_workspace_root: workspace.request_workspace_root.clone(),
         lane_key: Some(lane_key.to_string()),
         source: Some(source.to_string()),
+        // R44 (storage design §10): the conversation the run was started
+        // from (resume's, the turn's, else the lane's active one, resolved
+        // at dispatch) — the scratch folder of a run with no project.
+        conversation_id: session_id.map(str::to_string),
         // No request, principal, scope or workspace path is threaded to the
         // lead, and the bus and session handles are the sandbox's to fill in
         // at dispatch (T28).
@@ -489,6 +495,13 @@ pub async fn run_lead_agent(
     if let Some((state, updated_at)) = &chat_state {
         let max_chars = daemon_config.load().orchestrator.memory.summary_max_chars;
         messages.push(ChatMessage::user(&state.render(updated_at, max_chars)));
+    }
+    // R28 (storage design §10): the lead is told the run's working folder —
+    // its project, or the conversation's scratch folder — after its objective
+    // and the chat's working state (CQ-6 keeps that block right after the
+    // objective). Read from the lead's own tool context.
+    if let Some(note) = crate::tools::working_folder::working_folder_note(&tool_ctx) {
+        messages.push(ChatMessage::user(&note));
     }
 
     // 7b. §5.6c — the replayed history.

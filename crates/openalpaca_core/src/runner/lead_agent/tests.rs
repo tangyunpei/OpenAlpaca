@@ -64,6 +64,7 @@ fn test_lead_agent_registry_contains_coordination_tools() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     ));
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -712,6 +713,7 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     ));
     let check_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -769,6 +771,7 @@ fn test_batch_spawn_tool_present_when_enabled() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     ));
     let batch_tool = Some(Arc::new(SpawnSubagentsBatchTool::new(spawn_tool.clone())));
     let check_tool = Arc::new(CheckSubagentStatusTool {
@@ -825,6 +828,7 @@ async fn test_batch_spawn_empty_array_error() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     ));
     let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 
@@ -866,6 +870,7 @@ async fn test_batch_spawn_exceeds_max_error() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     ));
     let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 
@@ -1580,6 +1585,7 @@ async fn test_spawn_subagent_executes_plugin_backed_template() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     );
 
     let msg = spawn_tool
@@ -2150,6 +2156,7 @@ async fn a_subagent_lane_is_narrated_into_the_runs_session_log() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     );
 
     spawn_tool
@@ -2948,6 +2955,7 @@ async fn spawn_and_finish(
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     );
 
     spawn_tool
@@ -3250,6 +3258,7 @@ async fn spawn_subagent_survives_a_multibyte_objective_preview() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     );
 
     // 40 Chinese characters = 120 bytes; byte 80 lands inside the 27th.
@@ -4021,6 +4030,182 @@ async fn the_lead_is_given_the_chats_working_state_after_its_objective() {
         blocks(&lead_first_request(&db, None).await),
         0,
         "no conversation, no block"
+    );
+}
+
+/// R44 + R28 (storage design §10), the lead: a run started from a
+/// conversation with no project is told that conversation's scratch folder
+/// after its objective — the line is read from the lead's own tool context,
+/// so naming the conversation proves the context carries it — and a run
+/// with neither a project nor a conversation is told nothing.
+#[tokio::test]
+async fn a_lead_with_no_project_is_told_its_conversations_scratch_folder() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+
+    let messages = lead_first_request(&db, Some("conv-lead")).await;
+
+    let folder = home_root.join("scratch").join("conv-lead");
+    let objective = messages
+        .iter()
+        .position(|m| m.content == "Book the Alfama hotel")
+        .expect("the objective");
+    let at = messages
+        .iter()
+        .position(|m| {
+            m.content.starts_with("<working_folder>This conversation has no project.")
+                && m.content.contains(&folder.display().to_string())
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no working-folder note: {:?}",
+                messages.iter().map(|m| &m.content).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(at, objective + 1, "with no chat state, the line follows the objective");
+    assert!(!home_root.join("scratch").exists(), "a note makes no folder");
+
+    let none = lead_first_request(&db, None).await;
+    assert!(
+        !none.iter().any(|m| m.content.starts_with("<working_folder>")),
+        "a run with neither a project nor a conversation is told nothing"
+    );
+}
+
+/// Tells the lead's rounds from a subagent's, as `LeadAndSubagentProvider`
+/// does, and keeps the message list of every subagent request.
+struct RecordsTheSubagent {
+    lead: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    subagent_requests: std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for RecordsTheSubagent {
+    fn name(&self) -> &str {
+        "records-the-subagent"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        let is_subagent = request
+            .messages
+            .first()
+            .is_some_and(|m| m.content.contains("You are a subagent"));
+        if is_subagent {
+            self.subagent_requests
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(request.messages.as_ref().clone());
+            return Ok(scripted_response("seventeen", vec![]));
+        }
+        let next = self
+            .lead
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .pop_front();
+        Ok(next.unwrap_or_else(|| scripted_response("done", vec![])))
+    }
+}
+
+/// R44 + R28: a subagent's tool context carries the run's conversation —
+/// handed down by `SpawnSubagentTool` — and its model is told the same
+/// scratch folder, right before its objective.
+#[tokio::test]
+async fn a_subagent_carries_the_runs_conversation_and_is_told_its_scratch_folder() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let shared = Arc::new(SharedContext::new());
+    let worker = crate::test_util::make_agent("worker", vec!["memory_read"]);
+    shared
+        .agent_registry
+        .register_template(crate::test_util::template_from_agent(&worker));
+    let provider = Arc::new(RecordsTheSubagent {
+        lead: std::sync::Mutex::new(
+            vec![
+                scripted_response(
+                    "",
+                    vec![openalpaca_llm::ToolCall {
+                        id: "call-1".to_string(),
+                        name: "spawn_subagent".to_string(),
+                        arguments: serde_json::json!({
+                            "agent_id": "worker",
+                            "objective": "count the alpacas",
+                        }),
+                    }],
+                ),
+                scripted_response(
+                    "",
+                    vec![openalpaca_llm::ToolCall {
+                        id: "call-2".to_string(),
+                        name: "wait_for_subagents".to_string(),
+                        arguments: serde_json::json!({}),
+                    }],
+                ),
+                scripted_response("all done", vec![]),
+            ]
+            .into(),
+        ),
+        subagent_requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "do the thing",
+        Arc::new(router),
+        Arc::new(ToolRegistry::default()),
+        shared,
+        EventBus::default(),
+        None,
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        Some("conv-sub"),
+    )
+    .await;
+    assert!(result.success, "finish: {:?}", result.loop_result.finish_reason);
+
+    let requests = provider.subagent_requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "the subagent answered in one round");
+    let messages = &requests[0];
+    let folder = home_root.join("scratch").join("conv-sub");
+    let note = &messages[messages.len() - 2].content;
+    assert!(
+        note.starts_with("<working_folder>This conversation has no project.")
+            && note.contains(&folder.display().to_string()),
+        "the line right before the objective names the run's scratch folder: {note}"
+    );
+    assert!(
+        messages.last().unwrap().content.contains("count the alpacas"),
+        "the objective is last"
     );
 }
 

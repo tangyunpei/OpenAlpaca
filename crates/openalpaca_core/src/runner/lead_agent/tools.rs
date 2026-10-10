@@ -118,6 +118,10 @@ pub struct SpawnSubagentTool {
     /// by every subagent this lead spawns. A subagent's confirmation has
     /// exactly the same responder as the lead's: none.
     unattended: bool,
+    /// R44 (storage design §10): the run's conversation, handed to every
+    /// subagent's tool context — it names the scratch folder a run with no
+    /// project works in. `None` for a run with no conversation.
+    conversation_id: Option<String>,
 }
 
 impl SpawnSubagentTool {
@@ -152,6 +156,7 @@ impl SpawnSubagentTool {
         parent_bundle: Arc<ContextBundle>,
         compose_engine: Arc<crate::compose::ComposeEngine>,
         unattended: bool,
+        conversation_id: Option<String>,
     ) -> Self {
         Self {
             router,
@@ -175,6 +180,7 @@ impl SpawnSubagentTool {
             parent_bundle,
             compose_engine,
             unattended,
+            conversation_id,
         }
     }
 
@@ -343,6 +349,9 @@ impl BuiltInTool for SpawnSubagentTool {
             owner_id: Some(self.created_by.clone()),
             workspace_id: self.workspace.workspace_id.clone(),
             request_workspace_root: self.workspace.request_workspace_root.clone(),
+            // R44 (storage design §10): the run's conversation, for its
+            // scratch folder; a plugin agent's proxied calls carry it too.
+            conversation_id: self.conversation_id.clone(),
             // Subagents are lane-detached: no lane, source, request,
             // principal, scope or workspace path is threaded here, and the
             // bus and session handles are the sandbox's to fill in at
@@ -549,6 +558,13 @@ impl BuiltInTool for SpawnSubagentTool {
         if let Some(memory) = &memory_turn {
             let insert_at = messages.len().saturating_sub(1);
             messages.insert(insert_at, ChatMessage::user(&memory.content));
+        }
+        // R28 (storage design §10): the subagent is told its working folder
+        // — the run's project, or its conversation's scratch folder — right
+        // before its objective. Read from the context its tools get.
+        if let Some(note) = crate::tools::working_folder::working_folder_note(&subagent_tool_ctx) {
+            let insert_at = messages.len().saturating_sub(1);
+            messages.insert(insert_at, ChatMessage::user(&note));
         }
 
         // **S3 — a subagent's rounds carry a budget too.** The lead's loop is
