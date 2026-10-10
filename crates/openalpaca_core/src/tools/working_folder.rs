@@ -229,6 +229,17 @@ pub fn remove_scratch(conversation_id: &str) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Who reads R28's line (the lead's ruling R-T22): the lead holds no tool
+/// that writes a file and hands a result file for the project to a
+/// subagent, so its line says where such a file comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoteReader {
+    /// A workflow's lead agent.
+    Lead,
+    /// Any other loop: the main loop, a skill, a nested skill, a subagent.
+    Loop,
+}
+
 /// R28 (storage design §10): the one line a turn's context carries about
 /// where its file tools and commands act — the project's folder, the
 /// conversation's scratch folder, or, for a project whose folder is gone or
@@ -236,19 +247,73 @@ pub fn remove_scratch(conversation_id: &str) -> std::io::Result<bool> {
 /// the model knows before it tries. `None` when there is nothing to name
 /// (no context, neither a project nor a conversation, an unreadable store).
 /// Pure, like [`working_folder`]: it creates nothing.
-pub fn working_folder_note(ctx: &ToolContext) -> Option<String> {
+///
+/// The lead's ruling R-T22: `held` is the names of the tools the loop is
+/// offered, and the line names only the file tools among them
+/// ([`FOLDER_FILE_TOOLS`], in that order), says a shell command starts in
+/// the folder only when `shell_execute` is held, and — with no project —
+/// says `file_write` saves a by-product only when it is held. On a project
+/// turn a loop that holds neither `file_write` nor `file_edit` is told it
+/// writes no file there; the lead is told, too, that a subagent does.
+pub fn working_folder_note<'a>(
+    ctx: &ToolContext,
+    held: impl IntoIterator<Item = &'a str>,
+    reader: NoteReader,
+) -> Option<String> {
+    let held: Vec<&str> = held.into_iter().collect();
+    let holds = |name: &str| held.contains(&name);
+    let shell = holds("shell_execute");
     let line = match working_folder(ctx) {
-        Ok(WorkingFolder::Project { root }) => format!(
-            "Your working folder is the project folder {}. Paths in file_read, file_list, \
-             file_write, file_edit and send are relative to it, and a shell command starts in it.",
-            root.display()
-        ),
-        Ok(WorkingFolder::Scratch { dir, .. }) => format!(
-            "This conversation has no project. Your working folder is its scratch folder {}: \
-             paths in file_read, file_list and send are relative to it, and a shell command \
-             starts in it. file_write saves a by-product in OpenAlpaca's artifact store instead.",
-            dir.display()
-        ),
+        Ok(WorkingFolder::Project { root }) => {
+            let mut line = format!(
+                "Your working folder is the project folder {}.",
+                root.display()
+            );
+            let names = named(&FOLDER_FILE_TOOLS, &holds);
+            match (names.is_empty(), shell) {
+                (false, true) => line.push_str(&format!(
+                    " Paths in {names} are relative to it, and a shell command starts in it."
+                )),
+                (false, false) => line.push_str(&format!(" Paths in {names} are relative to it.")),
+                (true, true) => line.push_str(" A shell command starts in it."),
+                (true, false) => {}
+            }
+            if !holds("file_write") && !holds("file_edit") {
+                line.push_str(" You hold no tool that writes a file in the project");
+                line.push_str(match reader {
+                    NoteReader::Lead => {
+                        ": a file for the project is written by a subagent whose template grants \
+                         file_write."
+                    }
+                    NoteReader::Loop => ".",
+                });
+            }
+            line
+        }
+        Ok(WorkingFolder::Scratch { dir, .. }) => {
+            let mut line = format!(
+                "This conversation has no project. Your working folder is its scratch folder {}",
+                dir.display()
+            );
+            // `file_write` saves a by-product and `file_edit` is refused
+            // there (it changes a project's file), so neither is relative to
+            // the scratch folder.
+            let names = named(&["file_read", "file_list", "send"], &holds);
+            match (names.is_empty(), shell) {
+                (false, true) => line.push_str(&format!(
+                    ": paths in {names} are relative to it, and a shell command starts in it."
+                )),
+                (false, false) => line.push_str(&format!(": paths in {names} are relative to it.")),
+                (true, true) => line.push_str(": a shell command starts in it."),
+                (true, false) => line.push('.'),
+            }
+            if holds("file_write") {
+                line.push_str(
+                    " file_write saves a by-product in OpenAlpaca's artifact store instead.",
+                );
+            }
+            line
+        }
         Err(
             refusal @ (WorkingFolderRefusal::ProjectMissing { .. }
             | WorkingFolderRefusal::NotAProject { .. }),
@@ -256,6 +321,21 @@ pub fn working_folder_note(ctx: &ToolContext) -> Option<String> {
         Err(_) => return None,
     };
     Some(format!("<working_folder>{line}</working_folder>"))
+}
+
+/// The file tools R28's line can name, in the order it names them (R-T22).
+pub const FOLDER_FILE_TOOLS: [&str; 5] =
+    ["file_read", "file_list", "file_write", "file_edit", "send"];
+
+/// The names in `among` that `holds` answers for, as one list: "a", "a and
+/// b", "a, b and c". Empty when none is held.
+fn named(among: &[&str], holds: &impl Fn(&str) -> bool) -> String {
+    let names: Vec<&str> = among.iter().copied().filter(|name| holds(name)).collect();
+    match names.split_last() {
+        None => String::new(),
+        Some((last, [])) => (*last).to_string(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// One level of a scratch folder: made private when absent (never
@@ -313,6 +393,16 @@ fn project_folder(root: &str) -> Result<WorkingFolder, WorkingFolderRefusal> {
 mod tests {
     use super::*;
     use crate::test_util::{GuardedProject, HomeStoreGuard};
+
+    /// Every tool R28's line can name: the file tools and the shell.
+    const EVERY_FOLDER_TOOL: [&str; 6] = [
+        "file_read",
+        "file_list",
+        "file_write",
+        "file_edit",
+        "send",
+        "shell_execute",
+    ];
 
     #[test]
     fn a_project_turn_works_in_the_registered_project_root() {
@@ -673,7 +763,7 @@ mod tests {
                 .contains("is missing — its folder is gone or has moved:")
         );
         assert_eq!(
-            working_folder_note(&ctx),
+            working_folder_note(&ctx, EVERY_FOLDER_TOOL, NoteReader::Loop),
             Some(format!("<working_folder>{missing}</working_folder>"))
         );
     }
@@ -758,7 +848,7 @@ mod tests {
     fn the_note_names_the_project_folder() {
         let gp = crate::test_util::GuardedProject::new();
         assert_eq!(
-            working_folder_note(&gp.ctx()),
+            working_folder_note(&gp.ctx(), EVERY_FOLDER_TOOL, NoteReader::Loop),
             Some(format!(
                 "<working_folder>Your working folder is the project folder {}. Paths in \
                  file_read, file_list, file_write, file_edit and send are relative to it, and a \
@@ -773,7 +863,7 @@ mod tests {
         let gp = crate::test_util::GuardedProject::new();
         let dir = gp.home_root().join("scratch").join("conv-test");
         assert_eq!(
-            working_folder_note(&gp.scratch_ctx()),
+            working_folder_note(&gp.scratch_ctx(), EVERY_FOLDER_TOOL, NoteReader::Loop),
             Some(format!(
                 "<working_folder>This conversation has no project. Your working folder is its \
                  scratch folder {}: paths in file_read, file_list and send are relative to it, \
@@ -796,7 +886,7 @@ mod tests {
             root: gp.root.display().to_string(),
         };
         assert_eq!(
-            working_folder_note(&gp.ctx()),
+            working_folder_note(&gp.ctx(), EVERY_FOLDER_TOOL, NoteReader::Loop),
             Some(format!("<working_folder>{missing}</working_folder>"))
         );
 
@@ -808,7 +898,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            working_folder_note(&ctx),
+            working_folder_note(&ctx, EVERY_FOLDER_TOOL, NoteReader::Loop),
             Some(format!(
                 "<working_folder>{root} is not a project OpenAlpaca knows: no folder under \
                  projects/ records it</working_folder>"
@@ -822,12 +912,146 @@ mod tests {
     /// to name.
     #[test]
     fn the_note_says_nothing_without_a_folder_to_name() {
-        assert_eq!(working_folder_note(&ToolContext::default()), None);
+        assert_eq!(
+            working_folder_note(&ToolContext::default(), EVERY_FOLDER_TOOL, NoteReader::Loop),
+            None
+        );
         let parked = ToolContext {
             owner_id: Some("owner-test".to_string()),
             task_id: Some("task-parked".to_string()),
             ..Default::default()
         };
-        assert_eq!(working_folder_note(&parked), None);
+        assert_eq!(
+            working_folder_note(&parked, EVERY_FOLDER_TOOL, NoteReader::Loop),
+            None
+        );
+    }
+
+    /// The lead's ruling R-T22 (the whole-stage review's d6-surfaces-1): the
+    /// line names only the file tools the loop holds, says a shell command
+    /// starts in the folder only when the loop holds `shell_execute`, and on
+    /// a project turn tells a loop that holds neither `file_write` nor
+    /// `file_edit` that it writes no file there. A loop holding `file_read`
+    /// alone gets neither a write clause nor the shell's.
+    #[test]
+    fn the_project_note_names_only_the_tools_the_loop_holds() {
+        let gp = crate::test_util::GuardedProject::new();
+        let root = gp.root.display();
+        let note =
+            |held: &[&str]| working_folder_note(&gp.ctx(), held.iter().copied(), NoteReader::Loop);
+
+        assert_eq!(
+            note(&["file_read"]),
+            Some(format!(
+                "<working_folder>Your working folder is the project folder {root}. Paths in \
+                 file_read are relative to it. You hold no tool that writes a file in the \
+                 project.</working_folder>"
+            ))
+        );
+        assert_eq!(
+            note(&["file_list", "artifact_read", "file_read"]),
+            Some(format!(
+                "<working_folder>Your working folder is the project folder {root}. Paths in \
+                 file_read and file_list are relative to it. You hold no tool that writes a file \
+                 in the project.</working_folder>"
+            )),
+            "named in one order whatever the surface's, and only the folder's tools"
+        );
+        assert_eq!(
+            note(&["file_edit"]),
+            Some(format!(
+                "<working_folder>Your working folder is the project folder {root}. Paths in \
+                 file_edit are relative to it.</working_folder>"
+            )),
+            "a loop that edits files writes in the project"
+        );
+        assert_eq!(
+            note(&["shell_execute"]),
+            Some(format!(
+                "<working_folder>Your working folder is the project folder {root}. A shell \
+                 command starts in it. You hold no tool that writes a file in the \
+                 project.</working_folder>"
+            ))
+        );
+        assert_eq!(
+            note(&["start_workflow", "memory_search"]),
+            Some(format!(
+                "<working_folder>Your working folder is the project folder {root}. You hold no \
+                 tool that writes a file in the project.</working_folder>"
+            ))
+        );
+    }
+
+    /// R-T22: the lead holds no tool that writes a file, and its line says
+    /// where a file for the project comes from — a subagent.
+    #[test]
+    fn the_leads_project_note_says_a_subagent_writes_a_file_for_the_project() {
+        let gp = crate::test_util::GuardedProject::new();
+        assert_eq!(
+            working_folder_note(&gp.ctx(), ["file_read", "file_list"], NoteReader::Lead),
+            Some(format!(
+                "<working_folder>Your working folder is the project folder {}. Paths in \
+                 file_read and file_list are relative to it. You hold no tool that writes a file \
+                 in the project: a file for the project is written by a subagent whose template \
+                 grants file_write.</working_folder>",
+                gp.root.display()
+            ))
+        );
+        // A lead whose template was edited to grant a writer is told no
+        // such thing.
+        assert_eq!(
+            working_folder_note(&gp.ctx(), ["file_read", "file_write"], NoteReader::Lead),
+            Some(format!(
+                "<working_folder>Your working folder is the project folder {}. Paths in \
+                 file_read and file_write are relative to it.</working_folder>",
+                gp.root.display()
+            ))
+        );
+    }
+
+    /// R-T22 with no project: the scratch line names the readers and `send`
+    /// it holds, the shell only when held, and `file_write`'s by-product
+    /// only when held; it never says the loop writes no file — with no
+    /// project there is no project to write into — and the lead's line is
+    /// the same.
+    #[test]
+    fn the_scratch_note_names_only_the_tools_the_loop_holds() {
+        let gp = crate::test_util::GuardedProject::new();
+        let dir = gp.home_root().join("scratch").join("conv-test");
+        let dir = dir.display();
+        let note = |held: &[&str], reader| {
+            working_folder_note(&gp.scratch_ctx(), held.iter().copied(), reader)
+        };
+
+        assert_eq!(
+            note(&["file_read"], NoteReader::Loop),
+            Some(format!(
+                "<working_folder>This conversation has no project. Your working folder is its \
+                 scratch folder {dir}: paths in file_read are relative to it.</working_folder>"
+            ))
+        );
+        assert_eq!(
+            note(&["file_read", "file_list"], NoteReader::Lead),
+            Some(format!(
+                "<working_folder>This conversation has no project. Your working folder is its \
+                 scratch folder {dir}: paths in file_read and file_list are relative to \
+                 it.</working_folder>"
+            ))
+        );
+        assert_eq!(
+            note(&["shell_execute", "file_write"], NoteReader::Loop),
+            Some(format!(
+                "<working_folder>This conversation has no project. Your working folder is its \
+                 scratch folder {dir}: a shell command starts in it. file_write saves a \
+                 by-product in OpenAlpaca's artifact store instead.</working_folder>"
+            ))
+        );
+        assert_eq!(
+            note(&[], NoteReader::Loop),
+            Some(format!(
+                "<working_folder>This conversation has no project. Your working folder is its \
+                 scratch folder {dir}.</working_folder>"
+            ))
+        );
     }
 }

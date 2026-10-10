@@ -562,7 +562,11 @@ impl BuiltInTool for SpawnSubagentTool {
         // R28 (storage design §10): the subagent is told its working folder
         // — the run's project, or its conversation's scratch folder — right
         // before its objective. Read from the context its tools get.
-        if let Some(note) = crate::tools::working_folder::working_folder_note(&subagent_tool_ctx) {
+        if let Some(note) = crate::tools::working_folder::working_folder_note(
+            &subagent_tool_ctx,
+            tools.iter().map(|d| d.name.as_str()),
+            crate::tools::working_folder::NoteReader::Loop,
+        ) {
             let insert_at = messages.len().saturating_sub(1);
             messages.insert(insert_at, ChatMessage::user(&note));
         }

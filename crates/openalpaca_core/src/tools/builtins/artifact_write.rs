@@ -467,7 +467,8 @@ pub(super) fn artifact_write_tool_definition() -> ToolDefinition {
             agent picks up — to OpenAlpaca's artifact store, where it is versioned, listed in \
             the Library and attached to the task that produced it. In a project, the files \
             the job is asked to produce are not saved here: they are written into the \
-            project with file_write or changed with file_edit. With no project, what you \
+            project with file_write or changed with file_edit — when you hold neither, by a \
+            subagent whose template grants file_write. With no project, what you \
             save here is the saved file. The store is OpenAlpaca's own: the project's folder \
             in OpenAlpaca's home store when the conversation has a project, the home store's \
             artifacts/ when it has none — never inside the project's own folder. Writing the \
@@ -1473,16 +1474,18 @@ mod tests {
 
     /// ST-11 and §15: `artifact_write` is for by-products — drafts, pictures,
     /// hand-offs. In a project the files a job is asked for are written into
-    /// the project with file_write or file_edit; with no project what is
-    /// saved here is the saved file. It never asks (ST-15), and its id reads
-    /// back with artifact_read (R41). The old preference for it over
-    /// file_write is gone.
+    /// the project with file_write or file_edit — by a subagent when the
+    /// reader holds neither, as the lead never does (R42; the lead's ruling
+    /// R-T22) — and with no project what is saved here is the saved file. It
+    /// never asks (ST-15), and its id reads back with artifact_read (R41).
+    /// The old preference for it over file_write is gone.
     #[test]
     fn the_description_says_it_saves_by_products_and_where_result_files_go() {
         let description = artifact_write_tool_definition().description;
         for clause in [
             "Save a by-product",
-            "written into the project with file_write or changed with file_edit",
+            "written into the project with file_write or changed with file_edit — when you \
+             hold neither, by a subagent whose template grants file_write.",
             "With no project, what you save here is the saved file",
             "Saving never asks for approval",
             "read it back with artifact_read",

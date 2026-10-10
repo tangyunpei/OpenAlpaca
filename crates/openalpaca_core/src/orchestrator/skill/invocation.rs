@@ -808,7 +808,11 @@ impl Orchestrator {
             // R28 (storage design §10): the skill's model is told its working
             // folder, right before the current user turn like the memory
             // block above. Read from the tool context the skill's tools get.
-            if let Some(note) = crate::tools::working_folder::working_folder_note(&tool_ctx) {
+            if let Some(note) = crate::tools::working_folder::working_folder_note(
+                &tool_ctx,
+                tools_for_loop.iter().map(|d| d.name.as_str()),
+                crate::tools::working_folder::NoteReader::Loop,
+            ) {
                 let insert_at = messages.len().saturating_sub(1);
                 messages.insert(insert_at, ChatMessage::user(&note));
             }

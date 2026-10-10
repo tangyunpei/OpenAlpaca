@@ -179,11 +179,13 @@ pub async fn run_lead_agent(
             tools.push(mem_tool.definition.clone());
         }
     }
-    // artifact_write (plan §4.6) — the lead writes deliverables itself as well
-    // as delegating them. Offered only where the lead's own template declares
-    // the capability: the lead's surface is assembled here rather than resolved
-    // from the template, so this is the listing that keeps it a per-template
-    // grant instead of an ambient one.
+    // artifact_write (plan §4.6) — the lead saves by-products itself (a
+    // draft, notes, a hand-off a subagent picks up); a result file for the
+    // project is a subagent's to write, since the lead holds no tool that
+    // writes or edits one (R42, the lead's ruling R-T22). Offered only where
+    // the lead's own template declares the capability: the lead's surface is
+    // assembled here rather than resolved from the template, so this is the
+    // listing that keeps it a per-template grant instead of an ambient one.
     if lead_agent
         .capabilities
         .iter()
@@ -521,8 +523,14 @@ pub async fn run_lead_agent(
     // R28 (storage design §10): the lead is told the run's working folder —
     // its project, or the conversation's scratch folder — after its objective
     // and the chat's working state (CQ-6 keeps that block right after the
-    // objective). Read from the lead's own tool context.
-    if let Some(note) = crate::tools::working_folder::working_folder_note(&tool_ctx) {
+    // objective). Read from the lead's own tool context, naming only the
+    // tools on its surface; on a project turn it is told that a file for the
+    // project is a subagent's to write (the lead's ruling R-T22).
+    if let Some(note) = crate::tools::working_folder::working_folder_note(
+        &tool_ctx,
+        tools.iter().map(|d| d.name.as_str()),
+        crate::tools::working_folder::NoteReader::Lead,
+    ) {
         messages.push(ChatMessage::user(&note));
     }
 

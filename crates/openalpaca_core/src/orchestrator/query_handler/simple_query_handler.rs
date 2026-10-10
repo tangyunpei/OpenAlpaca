@@ -766,12 +766,32 @@ impl Orchestrator {
             // the tools can never name two folders; it creates nothing.
             if main_loop_set.is_some() {
                 let relay = crate::tools::builtins::main_loop_relay_guidance();
-                let guidance = match crate::tools::working_folder::working_folder_note(&tool_ctx) {
+                let guidance = match crate::tools::working_folder::working_folder_note(
+                    &tool_ctx,
+                    tools_for_loop.iter().map(|d| d.name.as_str()),
+                    crate::tools::working_folder::NoteReader::Loop,
+                ) {
                     Some(note) => format!("{relay}\n{note}"),
                     None => relay.to_string(),
                 };
                 let insert_at = messages.len().saturating_sub(1);
                 messages.insert(insert_at, ChatMessage::user(&guidance));
+            } else if !tools_for_loop.is_empty()
+                && let Some(note) = crate::tools::working_folder::working_folder_note(
+                    &tool_ctx,
+                    tools_for_loop.iter().map(|d| d.name.as_str()),
+                    crate::tools::working_folder::NoteReader::Loop,
+                )
+            {
+                // R28 on the arms that are not the main loop (the lead's
+                // ruling R-T22): a bootstrap turn and an attachment-only one
+                // still run the tools they were offered — `file_write` by its
+                // verb, on a project turn `file_edit` and the readers with it
+                // — in the same folder, so their model is told it too. No
+                // relay message is sent there, so the line is a message of
+                // its own, right before the user's.
+                let insert_at = messages.len().saturating_sub(1);
+                messages.insert(insert_at, ChatMessage::user(&note));
             }
 
             // Routing V2: workflow-context block for lanes with active

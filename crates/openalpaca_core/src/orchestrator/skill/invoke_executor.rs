@@ -385,10 +385,19 @@ impl SkillInvocationToolExecutor {
             skill_doc.frontmatter.name, skill_doc.body
         );
 
-        let messages = vec![
-            ChatMessage::system(&system_prompt),
-            ChatMessage::user(query),
-        ];
+        // R28 (the lead's ruling R-T22): the nested loop acts in its
+        // parent's working folder — its context is a clone of the parent's —
+        // so its model is told that folder, naming only the tools it holds,
+        // right before its query, as the file-skill tier's is.
+        let mut messages = vec![ChatMessage::system(&system_prompt)];
+        if let Some(note) = crate::tools::working_folder::working_folder_note(
+            &child_tool_ctx,
+            tool_defs.iter().map(|d| d.name.as_str()),
+            crate::tools::working_folder::NoteReader::Loop,
+        ) {
+            messages.push(ChatMessage::user(&note));
+        }
+        messages.push(ChatMessage::user(query));
 
         let mut config = LoopConfig {
             max_rounds: 10,
@@ -684,5 +693,87 @@ Use echo_tool to answer.
             "nested tool call was stubbed out: {:?}",
             round2
         );
+    }
+
+    /// R28 on a nested `invoke_skill` loop (the lead's ruling R-T22, the
+    /// whole-stage review's d4-folder-3): the nested loop's context is a
+    /// clone of its parent's, so its file tools act in the parent's working
+    /// folder — and its model is told that folder, right before its query,
+    /// as the file-skill tier's is. A skill holding `file_read` alone is told
+    /// no write or shell clause, and that it writes no file in the project.
+    #[tokio::test]
+    async fn a_nested_skill_is_told_its_working_folder_naming_only_what_it_holds() {
+        let gp = crate::test_util::GuardedProject::new();
+        let tmp = TempDir::new().unwrap();
+        write_skill(
+            tmp.path(),
+            "reader-skill",
+            r#"---
+name: "Reader Skill"
+description: "Reads a file"
+tools:
+  allow:
+    - file_read
+---
+Read the file.
+"#,
+        );
+        let catalog = Arc::new(SkillCatalog::new());
+        catalog.scan_directory(tmp.path(), SkillScope::Project);
+        let registry = Arc::new(ToolRegistry::new().unwrap());
+        for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+            registry.register(tool).unwrap();
+        }
+        let provider = crate::test_util::RecordingProvider::new("read it");
+        let router = Arc::new(LlmRouter::single_provider(
+            provider.clone(),
+            ProviderType::Anthropic,
+            "claude-sonnet-4-20250514".to_string(),
+        ));
+        let executor = SkillInvocationToolExecutor::new(
+            catalog,
+            registry,
+            router,
+            EventBus::new(16),
+            vec!["parent-skill".to_string()],
+            3,
+            None,
+            None,
+            Some(gp.ctx()),
+            1.0,
+            false,
+            crate::daemon_config::CircuitBreakerConfig::default(),
+            300,
+        );
+
+        executor
+            .execute(
+                "invoke_skill:reader-skill",
+                &serde_json::json!({"query": "read notes.md"}),
+            )
+            .await
+            .unwrap();
+
+        let request = provider.first_request();
+        let contents: Vec<&str> = request
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(
+            contents.len(),
+            3,
+            "system, the line, the query: {contents:?}"
+        );
+        assert_eq!(
+            contents[1],
+            format!(
+                "<working_folder>Your working folder is the project folder {}. Paths in \
+                 file_read are relative to it. You hold no tool that writes a file in the \
+                 project.</working_folder>",
+                gp.root.display()
+            )
+        );
+        assert_eq!(contents[2], "read notes.md");
     }
 }

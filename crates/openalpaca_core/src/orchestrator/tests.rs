@@ -6089,12 +6089,13 @@ async fn a_main_loop_turn_with_no_project_is_told_its_scratch_folder() {
     .await
     .expect("the turn is answered");
 
+    // R-T22: the line names only the tools the turn holds, and this turn —
+    // over an empty registry, with no project — holds no file tool and no
+    // shell, so it is told its folder and nothing more.
     let folder = home_root.join("scratch").join(&session.id);
     let note = format!(
         "<working_folder>This conversation has no project. Your working folder is its scratch \
-         folder {}: paths in file_read, file_list and send are relative to it, and a shell \
-         command starts in it. file_write saves a by-product in OpenAlpaca's artifact store \
-         instead.</working_folder>",
+         folder {}.</working_folder>",
         folder.display()
     );
     let request = provider.first_request();
@@ -6131,8 +6132,35 @@ async fn a_main_loop_turn_with_no_project_is_told_its_scratch_folder() {
     assert!(!home_root.join("scratch").exists(), "a note makes no folder");
 }
 
-/// An orchestrator over `db` whose registry holds the builtins — so a
-/// scripted file tool really runs — answering from `steps`.
+/// An orchestrator over `router` and `db` whose registry holds the
+/// builtins, so a scripted file tool really runs and a suggested one is
+/// really offered.
+fn orchestrator_with_builtins(
+    router: Arc<openalpaca_llm::LlmRouter>,
+    db: Option<openalpaca_storage::Database>,
+) -> Orchestrator {
+    let registry = Arc::new(ToolRegistry::default());
+    for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let bus = EventBus::default();
+    Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus.clone(),
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        make_security_gate(&bus),
+        registry,
+        db,
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    )
+}
+
+/// [`orchestrator_with_builtins`] answering from `steps`.
 fn scripted_turn_orchestrator_with_builtins(
     steps: Vec<ScriptStep>,
     db: openalpaca_storage::Database,
@@ -6143,26 +6171,67 @@ fn scripted_turn_orchestrator_with_builtins(
         openalpaca_llm::ProviderType::Anthropic,
         "claude-sonnet-4-5-20250929".to_string(),
     );
-    let registry = Arc::new(ToolRegistry::default());
-    for tool in crate::tools::builtins::builtin_tools(None, None, None) {
-        registry.register(tool).unwrap();
-    }
-    let bus = EventBus::default();
-    let orch = Orchestrator::new(
-        Arc::new(SharedContext::new()),
-        Arc::new(LaneManager::new()),
-        bus.clone(),
-        SystemPersona::default(),
-        Some(Arc::new(router)),
-        LoopConfig::default(),
-        make_security_gate(&bus),
-        registry,
-        Some(db),
-        Arc::new(skill_catalog::SkillCatalog::new()),
-        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
-        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    (
+        orchestrator_with_builtins(Arc::new(router), Some(db)),
+        requests,
+    )
+}
+
+/// R28 on the `ModelOnly` arms (the lead's ruling R-T22, the whole-stage
+/// review's d4-folder-4): a bootstrap turn — like an attachment-only one —
+/// is not the main loop, but it still runs the tools it was offered, here
+/// `file_write` by its verb and, on a project turn, `file_edit` and the
+/// readers with it. Its model is told the folder those tools act in, naming
+/// only those tools, as a message of its own right before the user's.
+#[tokio::test]
+async fn a_bootstrap_turn_that_runs_tools_is_told_its_working_folder() {
+    use crate::middleware::bootstrap::{BootstrapDocument, BootstrapFrontmatter};
+
+    let gp = crate::test_util::GuardedProject::new();
+    let provider = crate::test_util::RecordingProvider::new("Noted.");
+    let orch = orchestrator_with_builtins(ollama_only_router(provider.clone()), None);
+    orch.update_bootstrap_document(Some(BootstrapDocument {
+        frontmatter: BootstrapFrontmatter {
+            summary: "onboarding".to_string(),
+            read_when: vec![],
+        },
+        body: "Welcome! Let's get set up.".to_string(),
+    }));
+
+    orch.handle_message(HandleRequest {
+        workspace_path: Some(gp.root.display().to_string()),
+        ..HandleRequest::new(
+            Uuid::new_v4(),
+            "cli",
+            "write notes.md with the plan",
+            Principal::User {
+                global_id: "user1".to_string(),
+            },
+            Scope::Global,
+            "user1:cli",
+        )
+    })
+    .await
+    .expect("the bootstrap turn is answered");
+
+    let request = provider.first_request();
+    let offered: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(offered.contains(&"file_write"), "{offered:?}");
+    let contents: Vec<&str> = request
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(
+        contents[contents.len() - 2],
+        format!(
+            "<working_folder>Your working folder is the project folder {}. Paths in file_read, \
+             file_list, file_write and file_edit are relative to it.</working_folder>",
+            gp.root.display()
+        ),
+        "the line is a message of its own right before the user's: {contents:?}"
     );
-    (orch, requests)
+    assert_eq!(contents[contents.len() - 1], "write notes.md with the plan");
 }
 
 /// The lead's ruling R-T27 (the whole-stage review's d4-folder-2): a turn's
@@ -6444,7 +6513,9 @@ async fn a_skill_allowed_file_read_by_name_is_handed_file_list_with_it() {
 /// R44 + R28 (storage design §10), the file-skill tier: a `/slash` skill's
 /// model is told the conversation's scratch folder — named from the turn's
 /// conversation, which its tool context now carries — right before the
-/// question, and nothing is made.
+/// question, and nothing is made. R-T22: the line names only what the skill
+/// holds — `file_read`, by name, and `file_list` with it — so it carries no
+/// shell, `send` or `file_write` clause.
 #[tokio::test]
 async fn a_file_skill_with_no_project_is_told_its_scratch_folder() {
     let home = tempfile::tempdir().unwrap();
@@ -6461,6 +6532,9 @@ description: "Looks at things"
 invoke:
   slash: "/look"
   mode: "auto"
+tools:
+  allow:
+    - file_read
 ---
 
 ## Instructions
@@ -6481,6 +6555,10 @@ Look.
     let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
     let bus = EventBus::default();
     let gate = make_security_gate(&bus);
+    let registry = Arc::new(ToolRegistry::default());
+    for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
     let orch = Orchestrator::new(
         Arc::new(SharedContext::new()),
         Arc::new(LaneManager::new()),
@@ -6489,7 +6567,7 @@ Look.
         Some(router),
         LoopConfig::default(),
         gate,
-        make_tool_registry(),
+        registry,
         Some(db.clone()),
         Arc::new(catalog),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
@@ -6522,16 +6600,22 @@ Look.
     let at = request
         .messages
         .iter()
-        .position(|m| {
-            m.content.starts_with("<working_folder>This conversation has no project.")
-                && m.content.contains(&folder.display().to_string())
-        })
+        .position(|m| m.content.starts_with("<working_folder>"))
         .unwrap_or_else(|| {
             panic!(
                 "no working-folder note: {:?}",
                 request.messages.iter().map(|m| &m.content).collect::<Vec<_>>()
             )
         });
+    assert_eq!(
+        request.messages[at].content,
+        format!(
+            "<working_folder>This conversation has no project. Your working folder is its \
+             scratch folder {}: paths in file_read and file_list are relative to \
+             it.</working_folder>",
+            folder.display()
+        )
+    );
     assert_eq!(at, request.messages.len() - 2, "right before the question");
     assert!(!home_root.join("scratch").exists(), "a note makes no folder");
 }

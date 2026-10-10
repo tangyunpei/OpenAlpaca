@@ -4416,6 +4416,71 @@ async fn a_lead_with_no_project_is_told_its_conversations_scratch_folder() {
     );
 }
 
+/// R28 with the lead's ruling R-T22 (the whole-stage review's
+/// d6-surfaces-1), the lead in a project: it reads the project with
+/// `file_read` and `file_list` and holds no tool that writes a file or runs
+/// a command (R42), so its line names those two and tells it a file for the
+/// project is a subagent's to write — not, as before, that its `file_write`,
+/// `file_edit`, `send` and shell act there. Its `artifact_write`, by
+/// template, says the same of result files.
+#[tokio::test]
+async fn a_lead_in_a_project_is_told_a_subagent_writes_its_files() {
+    let gp = crate::test_util::GuardedProject::new();
+    let root = gp.root.display().to_string();
+    let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "Write the release notes",
+        scripted_router(provider.clone()),
+        registry_with_builtins(),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:gui",
+        "gui",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::for_request(Some(root.as_str())),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        Some("conv-lead"),
+    )
+    .await;
+    assert!(result.success, "{:?}", result.loop_result.finish_reason);
+
+    let messages = provider.seen_messages.lock().unwrap()[0].clone();
+    let note = messages
+        .iter()
+        .find(|m| m.content.starts_with("<working_folder>"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no working-folder note: {:?}",
+                messages.iter().map(|m| &m.content).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        note.content,
+        format!(
+            "<working_folder>Your working folder is the project folder {root}. Paths in \
+             file_read and file_list are relative to it. You hold no tool that writes a file in \
+             the project: a file for the project is written by a subagent whose template grants \
+             file_write.</working_folder>"
+        )
+    );
+}
+
 /// Tells the lead's rounds from a subagent's, as `LeadAndSubagentProvider`
 /// does, and keeps the message list of every subagent request.
 struct RecordsTheSubagent {
@@ -4539,10 +4604,16 @@ async fn a_subagent_carries_the_runs_conversation_and_is_told_its_scratch_folder
     let messages = &requests[0];
     let folder = home_root.join("scratch").join("conv-sub");
     let note = &messages[messages.len() - 2].content;
-    assert!(
-        note.starts_with("<working_folder>This conversation has no project.")
-            && note.contains(&folder.display().to_string()),
-        "the line right before the objective names the run's scratch folder: {note}"
+    // R-T22: the worker holds no file tool and no shell (an empty
+    // registry), so its line names its folder and nothing more.
+    assert_eq!(
+        note,
+        &format!(
+            "<working_folder>This conversation has no project. Your working folder is its \
+             scratch folder {}.</working_folder>",
+            folder.display()
+        ),
+        "the line right before the objective names the run's scratch folder"
     );
     assert!(
         messages.last().unwrap().content.contains("count the alpacas"),
