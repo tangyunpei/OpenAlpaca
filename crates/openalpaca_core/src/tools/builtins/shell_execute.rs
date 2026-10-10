@@ -428,10 +428,14 @@ mod preview_tests {
         );
     }
 
-    /// R44 and the lead's ruling R-T2: a run parked by `POST /v1/tasks` on a
-    /// lane with no session is given the lane's session at dispatch (S3.13),
-    /// so its calls carry an owner, a task and a conversation — the card
-    /// names the conversation's scratch folder and the command runs there.
+    /// R44, the context half of the lead's ruling R-T2: a call that carries
+    /// an owner, a task and a conversation — the context a run's tools get
+    /// once the dispatch has given the run a session — has its card name the
+    /// conversation's scratch folder and its command run there. The context
+    /// is built by hand: that a parked run is really given that session is
+    /// the dispatcher's tests' to prove
+    /// (`starting_a_parked_run_on_a_lane_with_no_session_stores_the_session_it_opened`
+    /// and its `rerun` twin in `orchestrator/dispatcher/tests.rs`).
     #[tokio::test]
     async fn a_parked_run_works_in_its_conversations_scratch_folder() {
         let gp = crate::test_util::GuardedProject::new();

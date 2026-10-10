@@ -1152,6 +1152,148 @@ async fn a_run_on_a_lane_with_no_session_gets_one_and_works_in_its_scratch_folde
     assert!(!scratch.exists(), "a note makes no folder");
 }
 
+/// A dispatcher whose lead answers at once, over `db` — for R-T2's runs
+/// dispatched with no turn behind them.
+fn dispatcher_with_an_answering_lead(db: &Database) -> TaskDispatcher {
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(RecordingLeadMock {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+    setup_with_specific_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+        router,
+    )
+}
+
+/// R-T2 on the path a parked run really takes (the whole-stage review's
+/// d4-folder-1): `POST /v1/tasks` stores the row with no session
+/// (`routes/tasks.rs`, `create_task`), and `start` dispatches it through
+/// `dispatch_lead_agent_with_id` — `RowWrite::Relaunch`, so the row is
+/// written by `upsert_queued`. The session the dispatch opens for a lane
+/// with none must reach the **stored** row, or `session_has_live_run` no
+/// longer sees the run and its conversation can be deleted from under it.
+#[tokio::test]
+async fn starting_a_parked_run_on_a_lane_with_no_session_stores_the_session_it_opened() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let conversations = openalpaca_storage::ConversationRepository::new(&db);
+    let tasks = openalpaca_storage::repository::TaskRepository::new(&db);
+    assert!(
+        conversations
+            .active_session_id("user1:cli")
+            .unwrap()
+            .is_none()
+    );
+
+    // Parked as `create_task` parks it: queued, no workspace, no session.
+    let now = chrono::Utc::now();
+    tasks
+        .create(&openalpaca_storage::Task {
+            id: "t-parked".to_string(),
+            title: "Parked run".to_string(),
+            description: Some("Tidy the notes".to_string()),
+            status: openalpaca_storage::TaskStatus::Queued,
+            priority: 0,
+            progress_current: None,
+            progress_total: None,
+            result_summary: None,
+            created_by: "user1".to_string(),
+            source_lane: "user1:cli".to_string(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            state_json: None,
+            state_version: 0,
+            outcome_json: None,
+            outcome_kind: None,
+            artifact_count: 0,
+            workspace_id: None,
+            source_task_id: None,
+            session_id: None,
+            unattended: false,
+        })
+        .unwrap();
+
+    dispatcher_with_an_answering_lead(&db)
+        .dispatch_lead_agent_with_id(
+            "t-parked",
+            "Tidy the notes",
+            "Parked run".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            false,
+        )
+        .unwrap();
+
+    let stored = tasks.get("t-parked").unwrap().expect("the row is kept");
+    let active = conversations
+        .active_session_id("user1:cli")
+        .unwrap()
+        .expect("the dispatch opened a session for the lane");
+    assert_eq!(
+        stored.session_id.as_deref(),
+        Some(active.as_str()),
+        "the stored row carries the lane's session the dispatch opened"
+    );
+    // Let the run finish before the home-store guard is dropped.
+    wait_for_conversation_message(&db, "user1:cli").await;
+}
+
+/// R-T2 for `rerun`: a new row, dispatched with no turn on a lane with no
+/// session, is stored with the session the dispatch opened.
+#[tokio::test]
+async fn a_rerun_on_a_lane_with_no_session_stores_the_session_it_opened() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let conversations = openalpaca_storage::ConversationRepository::new(&db);
+    assert!(
+        conversations
+            .active_session_id("user1:cli")
+            .unwrap()
+            .is_none()
+    );
+
+    let outcome = dispatcher_with_an_answering_lead(&db)
+        .dispatch_lead_agent_rerun(
+            "Tidy the notes",
+            "Rerun".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            "t-original",
+            false,
+        )
+        .unwrap();
+
+    let stored = openalpaca_storage::repository::TaskRepository::new(&db)
+        .get(&outcome.task_id)
+        .unwrap()
+        .expect("the re-run's row is persisted at dispatch");
+    assert_eq!(stored.source_task_id.as_deref(), Some("t-original"));
+    let active = conversations
+        .active_session_id("user1:cli")
+        .unwrap()
+        .expect("the dispatch opened a session for the lane");
+    assert_eq!(
+        stored.session_id.as_deref(),
+        Some(active.as_str()),
+        "the stored row carries the lane's session the dispatch opened"
+    );
+    wait_for_conversation_message(&db, "user1:cli").await;
+}
+
 #[tokio::test]
 async fn test_lead_agent_steering_attach_detach_and_leftover_conversion() {
     let mut config = DaemonConfig::default();
