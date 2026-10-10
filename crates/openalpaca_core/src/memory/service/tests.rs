@@ -3908,8 +3908,8 @@ fn known_project_roots_are_the_registered_projects_holding_the_owners_partition(
 /// second lookup of its root (S3 M5 / S4 M2): a project whose recorded root
 /// no longer canonicalizes to itself — its folder moved and a link left at
 /// the old path, or renamed by case only on macOS — is still listed by
-/// `known_project_roots`. (Its partition is not reconciled while the root
-/// leads elsewhere: the scan opens a scope by its root — design §18.)
+/// `known_project_roots`. (Since ST-23 its partition is reconciled too: the
+/// scan opens a scope by its root, which `lookup` matches as written.)
 #[cfg(unix)]
 #[test]
 fn a_project_whose_root_now_leads_elsewhere_is_still_known_by_its_own_folder() {
@@ -3931,14 +3931,65 @@ fn a_project_whose_root_now_leads_elsewhere_is_still_known_by_its_own_folder() {
     );
 }
 
-/// That project's root opens as no registered project in the 30 s
-/// reconciliation, every tick, for as long as it leads elsewhere: a skip
-/// logged at debug, not a WARN every 30 s (residual X6). Nothing else of the
-/// tick changes.
+/// ST-23: a stored root that no longer leads to its own folder — moved with
+/// a link left at the old path, a project registered where the link leads —
+/// still scopes its own project's notes. A turn's tools, learning and the
+/// lead hand memory that root (`WorkspaceHint::Root`).
+#[cfg(unix)]
+#[test]
+fn a_stored_root_that_now_leads_elsewhere_reads_its_own_projects_notes() {
+    let h = Harness::new();
+    let repo = h.workspace("repo", Some(".git"));
+    h.store(
+        &h.user(ALICE, Some(&repo)),
+        "Release step",
+        "# Release step\n\nTag first.\n",
+        NoteKind::Procedure,
+    );
+    let moved = repo.with_file_name("repo-moved");
+    fs::rename(&repo, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &repo).unwrap();
+    openalpaca_storage::store::projects::register(&moved).unwrap();
+    h.store(
+        &h.user(ALICE, Some(&moved)),
+        "Other step",
+        "# Other step\n\nShip it.\n",
+        NoteKind::Procedure,
+    );
+
+    let ctx = h
+        .service
+        .context(
+            ALICE,
+            WorkspaceHint::Root(&repo),
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+
+    assert_eq!(ctx.project_root.as_deref(), Some(repo.as_path()));
+    let titles: Vec<String> = h
+        .service
+        .list(&ctx, ListInput::default())
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|item| item.title)
+        .collect();
+    assert!(titles.contains(&"Release step".to_string()), "{titles:?}");
+    assert!(!titles.contains(&"Other step".to_string()), "{titles:?}");
+}
+
+/// ST-23: that project's root names its own project again — `lookup`
+/// matches a recorded root as written first — so the 30 s reconciliation
+/// scans its partition while the root leads elsewhere, as it scans any
+/// missing project's (ST-7): no skip, no WARN. (Residual X6's debug skip is
+/// left for a root no folder records when the scan opens it.)
 #[cfg(unix)]
 #[test]
 #[tracing_test::traced_test]
-fn the_reconciliation_skips_a_root_that_names_no_project_now_at_debug() {
+fn the_reconciliation_scans_a_project_whose_root_now_leads_elsewhere() {
     let h = Harness::new();
     let repo = h.workspace("repo", Some(".git"));
     h.store(
@@ -3959,14 +4010,15 @@ fn the_reconciliation_skips_a_root_that_names_no_project_now_at_debug() {
 
     let report = h.service.reconcile_owner(ALICE).unwrap();
 
-    assert_eq!(report.scanned, 1, "the home partition is still scanned");
-    assert!(
-        !logs_contain("it did not open"),
-        "a root that names no project now is no WARN"
+    assert_eq!(
+        report.scanned, 2,
+        "the note files each scan listed: one at home, one in the project"
     );
-    assert!(logs_contain(
-        "names no registered project now, so the reconciliation scan skips it"
-    ));
+    assert!(!logs_contain("it did not open"), "no WARN");
+    assert!(
+        !logs_contain("names no registered project now"),
+        "no skip: the root names its own project"
+    );
 }
 
 // ============================================================================

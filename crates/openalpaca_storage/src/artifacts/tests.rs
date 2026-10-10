@@ -41,8 +41,9 @@ impl Fixture {
         ArtifactStore::new(&self.db)
     }
 
-    /// The canonical project root — canonical because `project_root` is the
-    /// canonical-path string everywhere (§4.8) and macOS's `/var` is a symlink.
+    /// The canonical project root — canonical because the fixture registers
+    /// its project there, so `project_root` records that string (§4.8; R-T19:
+    /// the root `lookup` finds), and macOS's `/var` is a symlink.
     fn project_root(&self) -> PathBuf {
         self.project.path().canonicalize().unwrap()
     }
@@ -803,6 +804,89 @@ fn a_project_artifact_lands_under_projects_and_records_the_turns_root() {
     );
     assert_eq!(record.project_root.as_deref(), f.project_root().to_str());
     assert!(!f.project_root().join(".openalpaca").exists(), "ST-1");
+}
+
+/// The lead's ruling R-T19 (ST-23 with R15): a by-product and an upload
+/// filed in a turn at the old root of a project whose folder moved with a
+/// link left there record that root — the project `lookup` finds, whose
+/// folder under `projects/` holds their bytes — and never the folder the
+/// link reaches, though a project is registered there. That project's own
+/// rows keep its canonical root, through another link to it too.
+#[cfg(unix)]
+#[test]
+fn a_write_at_a_missing_projects_old_root_records_that_root_and_never_the_folder_it_reaches() {
+    let f = Fixture::new();
+    // The root as it is recorded, and its folder, taken before the move:
+    // `project_root()` canonicalizes, which after the move would answer the
+    // moved folder.
+    let root = f.project_root();
+    let own = crate::store::projects::lookup(&root).unwrap().unwrap();
+    let aside = tempdir().unwrap();
+    let base = aside.path().canonicalize().unwrap();
+    let moved = base.join("app-moved");
+    fs::rename(&root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &root).unwrap();
+    // A turn in the moved folder registers it as a project of its own.
+    let theirs = crate::store::projects::register(&moved).unwrap();
+    assert_ne!(theirs.id, own.id);
+    let address = |id: &str| -> Option<String> {
+        f.db.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT project_root FROM file_assets WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap()
+    };
+    let recorded = root.to_string_lossy().into_owned();
+    let reached = moved.to_string_lossy().into_owned();
+
+    let old = StoreScope::Project(root.clone());
+    let mut new = NewArtifact::new(OWNER, &old, ArtifactKind::Markdown, "Notes", b"a\n");
+    new.created = at(1);
+    let (artifact, _) = f.store().put(new).unwrap();
+    let upload = crate::uploads::UploadStore::new(&f.db)
+        .put(crate::uploads::NewUpload {
+            owner_id: OWNER,
+            filename: "notes.txt",
+            mime_type: "text/plain",
+            data: b"up\n",
+            scope: &old,
+            created: at(1),
+        })
+        .unwrap();
+
+    assert_eq!(artifact.project_root.as_deref(), Some(recorded.as_str()));
+    assert_eq!(
+        address(&upload.asset.id).as_deref(),
+        Some(recorded.as_str())
+    );
+    for path in [&artifact.storage_path, &upload.asset.storage_path] {
+        assert!(
+            Path::new(path).starts_with(&own.dir),
+            "its bytes are in its own folder: {path}"
+        );
+    }
+
+    // The project registered where the link leads keeps its canonical root,
+    // and a write through another link to it records that root too.
+    let alias = base.join("alias");
+    std::os::unix::fs::symlink(&moved, &alias).unwrap();
+    for scope in [
+        StoreScope::Project(moved.clone()),
+        StoreScope::Project(alias),
+    ] {
+        let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Plan", b"b\n");
+        new.created = at(1);
+        let (row, _) = f.store().put(new).unwrap();
+        assert_eq!(row.project_root.as_deref(), Some(reached.as_str()));
+        assert!(
+            Path::new(&row.storage_path).starts_with(&theirs.dir),
+            "{}",
+            row.storage_path
+        );
+    }
 }
 
 /// R15/R12: a row whose own columns do not name its store falls back to

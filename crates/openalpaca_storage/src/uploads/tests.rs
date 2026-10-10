@@ -62,8 +62,9 @@ impl Fixture {
         self._home.path().canonicalize().unwrap()
     }
 
-    /// The canonical project root — canonical because `project_root` is the
-    /// canonical-path string everywhere (§4.8) and macOS's `/var` is a symlink.
+    /// The canonical project root — canonical because the fixture registers
+    /// its project there, so `project_root` records that string (§4.8; R-T19:
+    /// the root `lookup` finds), and macOS's `/var` is a symlink.
     fn project_root(&self) -> PathBuf {
         self.project.path().canonicalize().unwrap()
     }

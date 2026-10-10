@@ -66,10 +66,11 @@
 //!
 //! ## The address is the turn's project
 //!
-//! `project_root` and the sequence lookup both take the turn's project root,
-//! canonical (`store::project_root_of`, R15) — never the directory the bytes
-//! reached, which under ST-1 is the project's folder under the home store's
-//! `projects/` for every project.
+//! `project_root` and the sequence lookup both take the turn's project root
+//! (`store::project_root_of`, R15): the root of the project `lookup` finds —
+//! canonical, but for a missing project's recorded root (R-T19) — never the
+//! directory the bytes reached, which under ST-1 is the project's folder under
+//! the home store's `projects/` for every project.
 //!
 //! Everything from the dedup query to the committed row runs inside one
 //! `with_connection` transaction, which holds the database mutex for its whole

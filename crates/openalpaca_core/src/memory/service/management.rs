@@ -195,10 +195,11 @@ impl MemoryService {
                     );
                     continue;
                 }
-                // A listed project whose recorded root now leads elsewhere
-                // (its folder moved with a link left behind, or renamed by
-                // case only) opens as no project, every tick for as long as
-                // that lasts: not a WARN every 30 s (residual X6).
+                // A listed project whose folder under `projects/` went
+                // between the listing and this open (its data deleted, or
+                // re-pointed) opens as no project: skipped at debug, not a
+                // WARN (residual X6). A root that now leads to another
+                // folder names its own project (ST-23) and is scanned.
                 Err(files::MemoryFilesError::NotRegistered { root }) => {
                     tracing::debug!(
                         root = %root.display(),

@@ -1307,3 +1307,81 @@ fn a_project_renamed_by_case_only_reads_missing() {
         "ST-23: its root no longer canonicalizes to itself"
     );
 }
+
+// ── ST-23: a recorded root is matched as written first (Stage 2 S0) ─────────
+
+/// A recorded root whose folder moved with a link left at the old path names
+/// its own project — missing — before and after a turn registers the folder
+/// the link reaches; `register` answers it as it is and records nothing at
+/// that folder (the dispatch's `register` of a run's stored root), and
+/// `store_root` is its own folder.
+#[cfg(unix)]
+#[test]
+fn lookup_and_register_match_a_recorded_root_as_written_before_its_canonical_form() {
+    let w = World::new();
+    let root = w.folder("app");
+    let own = register(&root).unwrap();
+    let moved = root.with_file_name("app-moved");
+    fs::rename(&root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &root).unwrap();
+
+    let found = lookup(&root).unwrap().expect("ST-23: its own project");
+    assert_eq!((found.id, found.missing), (own.id, true));
+    assert_eq!(
+        register(&root).unwrap().id,
+        own.id,
+        "answered as it is (ST-7)"
+    );
+    assert_eq!(
+        list().unwrap().len(),
+        1,
+        "nothing registered at the folder the link reaches"
+    );
+    // A turn in the moved folder registers it as a project of its own.
+    let other = register(&moved).unwrap();
+    assert_ne!(other.id, own.id);
+    assert_eq!(
+        lookup(&root).unwrap().map(|p| p.id),
+        Some(own.id),
+        "never the project the link leads to"
+    );
+    assert_eq!(lookup(&moved).unwrap().map(|p| p.id), Some(other.id));
+    let again = register(&root).unwrap();
+    assert_eq!((again.id, again.missing), (own.id, true));
+    assert_eq!(
+        crate::store::store_root(&crate::store::StoreScope::Project(root.clone())).unwrap(),
+        own.dir
+    );
+    assert_eq!(list().unwrap().len(), 2, "nothing more was registered");
+}
+
+/// The same on a case-insensitive volume for a folder renamed by case only:
+/// the new spelling takes the hashed name, since the plain one is the old
+/// folder's on this volume (R6), and each spelling names its own project.
+#[cfg(unix)]
+#[test]
+fn a_root_renamed_by_case_only_still_looks_up_and_registers_as_its_own_project() {
+    let w = World::new();
+    let work = w.folder("cases");
+    if !crate::store::tests::volume_ignores_case(&work) {
+        eprintln!(
+            "skipped: {} is case-sensitive, so no folder can be renamed by case only",
+            work.display()
+        );
+        return;
+    }
+    let root = w.folder("cases/App");
+    let own = register(&root).unwrap();
+    let renamed = work.join("app");
+    fs::rename(&root, &renamed).unwrap();
+
+    let found = lookup(&root).unwrap().expect("ST-23: its own project");
+    assert_eq!((found.id, found.missing), (own.id, true));
+    let other = register(&renamed).unwrap();
+    assert_ne!(other.id, own.id);
+    assert_eq!(other.name, hashed_folder_name(&renamed));
+    assert_eq!(lookup(&root).unwrap().map(|p| p.id), Some(own.id));
+    assert_eq!(lookup(&renamed).unwrap().map(|p| p.id), Some(other.id));
+    assert_eq!(register(&root).unwrap().id, own.id);
+    assert_eq!(list().unwrap().len(), 2);
+}

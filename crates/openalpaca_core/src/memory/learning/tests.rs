@@ -1490,6 +1490,71 @@ async fn root_gone_means_no_longer_a_registered_project() {
     assert_eq!(check_project(None, None), ProjectCheck::Learn(None));
 }
 
+/// ST-21 with ST-23: a stored root whose folder moved with a link left at
+/// the old path is still its own project, missing, and is learned into its
+/// notes — before the check read it as gone (the canonical form names no
+/// project) and dropped its turns, and once a turn registered the folder
+/// the link reaches it filed them there.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_root_that_now_leads_elsewhere_is_learned_into_its_own_project() {
+    use super::extractor::{ProjectCheck, check_project};
+    let _scene = Scene::new(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let root = base.join("app");
+    std::fs::create_dir(&root).unwrap();
+    let own = openalpaca_storage::store::projects::register(&root).unwrap();
+    let moved = base.join("app-moved");
+    std::fs::rename(&root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &root).unwrap();
+
+    assert_eq!(
+        check_project(Some(&root), None),
+        ProjectCheck::Learn(Some(own.id)),
+        "a missing project is learned (ST-21)"
+    );
+    let other = openalpaca_storage::store::projects::register(&moved).unwrap();
+    assert_eq!(
+        check_project(Some(&root), None),
+        ProjectCheck::Learn(Some(own.id)),
+        "never the project the link leads to"
+    );
+    assert_eq!(
+        check_project(Some(&moved), None),
+        ProjectCheck::Learn(Some(other.id))
+    );
+}
+
+/// ST-21 across a re-point left unfinished (design §6, R24 — a crash after
+/// its rows moved) of a project whose root now leads elsewhere: the marked
+/// folder names that root, as written, as where it was, so the root is held
+/// until the next start finishes the re-point — never dropped as gone
+/// because its canonical form names nothing.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_re_point_left_unfinished_holds_a_root_that_now_leads_elsewhere() {
+    use super::extractor::{ProjectCheck, check_project};
+    use openalpaca_storage::project_life::{RepointStep, repoint_with};
+    let scene = Scene::new(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let root = base.join("app");
+    std::fs::create_dir(&root).unwrap();
+    openalpaca_storage::store::projects::register(&root).unwrap();
+    let moved = base.join("app-moved");
+    std::fs::rename(&root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &root).unwrap();
+    let elsewhere = base.join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    repoint_with(&scene.db, &root, &elsewhere, &mut |at| {
+        at != RepointStep::RowsRewritten
+    })
+    .unwrap_err();
+
+    assert_eq!(check_project(Some(&root), None), ProjectCheck::Hold);
+}
+
 /// ST-21's check reads `projects/` under `projects::lock()`, the lock a
 /// re-point and a delete change it under (Stage 1 review R2): it sees a
 /// re-point before its rename or after it, never between, where a listing

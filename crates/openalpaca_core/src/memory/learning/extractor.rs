@@ -1049,9 +1049,10 @@ pub(crate) enum ProjectCheck {
     /// Learn the chunk: it names no project, or a folder under `projects/`
     /// records its root — `Some` of that project's id — or the lookup
     /// failed, which is not "gone": the write's own error holds the cursor.
-    /// A missing project, whose folder is gone but whose record stands, is
-    /// learned into its notes, which live in the home store and re-create
-    /// nothing in the user's folder.
+    /// A missing project — its folder gone, or its recorded root now leading
+    /// to another folder (ST-23) — whose record stands is learned into its
+    /// notes, which live in the home store and re-create nothing in the
+    /// user's folder.
     Learn(Option<ProjectId>),
     /// Not now: no folder records the root, but the project is not gone — a
     /// re-point in flight names the root as its old or its new one (until
@@ -1086,15 +1087,17 @@ pub(crate) fn check_project(root: Option<&Path>, seen: Option<&ProjectId>) -> Pr
         Ok(None) => {}
         Err(_) => return ProjectCheck::Learn(None),
     }
-    // As `lookup` compares: the canonical form, which the rows and
-    // `project.json` both hold.
+    // As `lookup` compares: the root as written — a recorded root that now
+    // leads to another folder (ST-23) — and its canonical form.
     let want = projects::canonical_root(root).unwrap_or_else(|_| root.to_path_buf());
+    let names = |path: &Path| path == root || path == want.as_path();
     match projects::list() {
         Ok(listed) => {
             let named = listed.iter().any(|p| {
                 seen == Some(&p.id)
                     || (p.previous_root.is_some()
-                        && (p.root == want || p.previous_root.as_deref() == Some(want.as_path())))
+                        && (names(p.root.as_path())
+                            || p.previous_root.as_deref().is_some_and(names)))
             });
             if named {
                 ProjectCheck::Hold

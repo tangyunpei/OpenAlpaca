@@ -398,21 +398,50 @@ fn projects_dir_in(home: &Path) -> PathBuf {
     home.join(PROJECTS_DIR)
 }
 
-/// §3 *lookup*: the project registered at `root`, or `None`. Two small
-/// reads, no scan and no lock: `projects/<folder_name>/project.json` and,
-/// when that is absent, unreadable or records another root,
-/// `projects/<hashed_folder_name>/project.json`. Creates nothing. A folder
-/// with no readable file is passed over with one WARN per folder per process
-/// (R11). An error is a relative `root`, no home root, or a folder that
-/// cannot be resolved.
+/// §3 *lookup*: the project registered at `root`, or `None` — `root` as
+/// written first (ST-23), then its canonical form. A recorded root that no
+/// longer canonicalizes to itself — its folder renamed by case only on a
+/// case-insensitive volume, or moved with a link left at the old path —
+/// still names its own project, missing, never the project its canonical
+/// form now leads to; any other path that a link or another case leads to a
+/// registered root finds that root. Each form is two small reads, no scan
+/// and no lock — `projects/<folder_name>/project.json` and, when that is
+/// absent, unreadable or records another root,
+/// `projects/<hashed_folder_name>/project.json` — and the canonical form's
+/// two are read only when it differs from the root as written. Creates
+/// nothing. A folder with no readable file is passed over with one WARN per
+/// folder per process (R11). An error is a relative `root`, no home root, or
+/// a folder that cannot be resolved.
 pub fn lookup(root: &Path) -> Result<Option<Project>> {
-    let root = canonical_root(root)?;
-    lookup_in(&super::home_root()?, &root)
+    lookup_in(&super::home_root()?, root)
 }
 
-/// [`lookup`] of the **canonical** `root` under the home store `home`, as
-/// [`register`] resolved it once.
+/// [`lookup`] under the home store `home`, as [`register`] resolved it once.
 fn lookup_in(home: &Path, root: &Path) -> Result<Option<Project>> {
+    if !root.is_absolute() {
+        bail!(
+            "a project root must be an absolute path, got {}",
+            root.display()
+        );
+    }
+    // Lexically tidied — a trailing `/` or a `.` would change the folder
+    // name — and nothing resolved.
+    let written: PathBuf = root.components().collect();
+    if let Some(project) = recorded_in(home, &written)? {
+        return Ok(Some(project));
+    }
+    let canonical = canonical_root(&written)?;
+    if canonical == written {
+        return Ok(None);
+    }
+    recorded_in(home, &canonical)
+}
+
+/// The project whose `project.json` records exactly `root` — compared as
+/// written, nothing resolved: `projects/<folder_name>/project.json` and, when
+/// that is absent, unreadable or records another root,
+/// `projects/<hashed_folder_name>/project.json`.
+fn recorded_in(home: &Path, root: &Path) -> Result<Option<Project>> {
     let want = root.to_string_lossy();
     let projects = projects_dir_in(home);
     let plain = folder_name(root);
@@ -838,8 +867,10 @@ pub fn lock() -> ProjectsLock {
 /// none — create-if-absent under [`lock`]. In order: the home store,
 /// resolved once and judged by the test-build guard — every step after reads
 /// and writes under that one store ([`register_home`]); [`canonical_root`];
-/// an entry [`lookup`] finds is returned as it is, a
-/// missing project's included (ST-7); a root that overlaps the home store is
+/// an entry [`lookup`] finds — `root` as written first, then its canonical
+/// form (ST-23) — is returned as it is, a missing project's included (ST-7),
+/// so a stored root that now leads to another folder is never registered
+/// again at that folder; a root that overlaps the home store is
 /// [`ProjectError::IsHome`] (R13), one that is not a directory
 /// [`ProjectError::NotADirectory`], and one a re-point is moving a project
 /// onto whose rename or last write failed is refused until the next start
@@ -858,9 +889,10 @@ pub fn register(root: &Path) -> Result<Project> {
     if let Some(step) = AFTER_HOME_RESOLVED.with(|hook| hook.borrow_mut().take()) {
         step();
     }
-    let root = canonical_root(root)?;
+    let written = root;
+    let root = canonical_root(written)?;
     let held = lock();
-    if let Some(existing) = lookup_in(&home, &root)? {
+    if let Some(existing) = lookup_in(&home, written)? {
         return Ok(existing);
     }
     let path = root.to_string_lossy().into_owned();

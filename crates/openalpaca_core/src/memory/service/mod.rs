@@ -883,10 +883,10 @@ impl MemoryService {
     /// own does not name that root to this one.
     /// A project whose folder under `projects/` is gone is no project; a
     /// listing failure is logged and lists nothing. Each project is read in
-    /// its own folder, the listed entry's `dir` — never by a second lookup of
-    /// its root, which for a root that no longer canonicalizes to itself (a
-    /// folder moved with a link left behind, a case-only rename) would name
-    /// no project, or another one.
+    /// its own folder, the listed entry's `dir`: the listing has just read
+    /// it, and a second lookup of its root would only read the same folder
+    /// again — since ST-23 `lookup` matches a recorded root as written first,
+    /// so even a root that no longer canonicalizes to itself names its own.
     pub fn known_project_roots(&self, owner_id: &str) -> Vec<PathBuf> {
         let owner_key = files::owner_key(owner_id);
         let projects = match openalpaca_storage::store::projects::list() {

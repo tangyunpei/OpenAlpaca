@@ -577,19 +577,31 @@ pub(crate) fn project_folder_gone(
     }
 }
 
-/// The canonical-path string a content row records as its `project_root`;
-/// `None` is the home store, which is the address baseline (§4.8).
+/// The path string a content row records as its `project_root`; `None` is
+/// the home store, which is the address baseline (§4.8).
 ///
 /// The one place a [`StoreScope`] becomes a stored address, so
 /// `COALESCE(project_root, '')` means the same thing to every writer. R15:
 /// it is the turn's project, never the directory the bytes reached — under
 /// ST-1 that is the project's folder under `projects/` for every project.
+/// It is the root of the project [`projects::lookup`] finds — the project
+/// whose folder [`store_root`] names, so a row and its bytes name one
+/// project — and a root no project records is taken by its canonical form.
+/// A recorded root is canonical when it is recorded (R14), so for a project
+/// whose root still leads to itself this is that form; a missing project's
+/// root that no longer canonicalizes to itself (ST-23) is answered as
+/// written, never as the folder it now reaches (the lead's ruling R-T19).
+/// An error is [`projects::lookup`]'s: a relative root, no home root, or a
+/// folder that cannot be resolved.
 pub fn project_root_of(scope: &StoreScope) -> Result<Option<String>> {
     match scope {
         StoreScope::Home => Ok(None),
         StoreScope::Project(root) => {
-            let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
-            Ok(Some(canonical.to_string_lossy().to_string()))
+            let address = match projects::lookup(root)? {
+                Some(project) => project.root,
+                None => root.canonicalize().unwrap_or_else(|_| root.clone()),
+            };
+            Ok(Some(address.to_string_lossy().to_string()))
         }
     }
 }

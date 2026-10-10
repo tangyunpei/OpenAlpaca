@@ -14,9 +14,10 @@
 //! (`crate::store::{run_dir, loose_dir, artifact_file_name, version_file_path}`) —
 //! this module never joins a literal directory name onto a store root. R15: the
 //! `project_root` half of the address is the turn's project root
-//! ([`crate::store::project_root_of`], canonical), never the directory the
-//! bytes reached — every project's bytes land under the home store's
-//! `projects/`.
+//! ([`crate::store::project_root_of`]: the root of the project `lookup`
+//! finds — canonical, but for a missing project's recorded root, R-T19),
+//! never the directory the bytes reached — every project's bytes land under
+//! the home store's `projects/`.
 //!
 //! ## Write protocol (§4.2 + R24), as implemented by [`ArtifactStore::put`]
 //!
@@ -871,8 +872,9 @@ impl<'a> ArtifactStore<'a> {
         // R15: the address is the turn's project (`store::project_root_of`),
         // never the directory the bytes reached — every project's bytes land
         // under `<home>/projects/`. Both the row and the directory scan below
-        // take it; two scopes naming one project canonicalize to one root, so
-        // they share one sequence space and one identity.
+        // take it; two scopes naming one project — the project `lookup` finds,
+        // whose folder holds the bytes — record its one root, so they share
+        // one sequence space and one identity (R-T19).
         let project_root = project_root_of(new.scope)?;
         let project_key = project_root.clone().unwrap_or_default();
         let mime = new
