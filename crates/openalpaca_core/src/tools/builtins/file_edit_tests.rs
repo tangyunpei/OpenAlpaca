@@ -650,6 +650,23 @@ async fn the_card_shows_both_strings_escaped_and_names_the_folder_the_file_and_t
     );
 }
 
+/// S4a's review (a folder at `file_write`'s target raised a card, then failed
+/// EISDIR): `file_edit`'s card is built from the plan that refuses a folder,
+/// so no card is raised for one — the preview answers R47's sentence.
+#[tokio::test]
+async fn a_folder_at_the_target_raises_no_card() {
+    let b = Bench::new();
+    fs::create_dir_all(b.gp.root.join("src")).unwrap();
+
+    let refused = b
+        .tool(None)
+        .confirmation_preview(&args("src", "a", "b"), &b.ctx())
+        .await
+        .unwrap_err();
+
+    assert_eq!(refused, "'src' is a folder, not a file.");
+}
+
 /// Interfaces §4.3: a call the body would refuse raises no card — the preview
 /// refuses with the body's own sentence — and a card's plan writes nothing:
 /// no copy, no row, the file as it was.
