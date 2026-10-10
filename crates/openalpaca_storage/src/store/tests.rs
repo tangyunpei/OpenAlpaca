@@ -407,7 +407,10 @@ fn the_home_readme_lists_projects_and_repl_history_and_only_live_kinds() {
 /// working folder), so the row names the approved agent instead. A chosen
 /// folder with no git is a project too, so the row promises no git history:
 /// it names the pre-edit copy OpenAlpaca keeps in the conversation's log, and
-/// git only where the project is a repository.
+/// git only where the project is a repository. Only `file_write` and
+/// `file_edit` keep that copy (final review d8-docs-2): the row names them and
+/// says a shell command's changes keep none — the README is written only when
+/// absent, so a store keeps whatever it was seeded with.
 #[test]
 fn the_home_readme_projects_row_says_agents_write_the_projects_own_files_only_with_approval() {
     let projects = HOME_README
@@ -420,6 +423,8 @@ fn the_home_readme_projects_row_says_agents_write_the_projects_own_files_only_wi
         "real files",
         "asking you first",
         "`sessions/<id>/snapshots/`",
+        "before `file_write` or `file_edit` replaces or edits a file",
+        "a shell command's changes keep no copy",
         "where the project is a repository",
         "never the project's own files",
     ] {
@@ -434,6 +439,7 @@ fn the_home_readme_projects_row_says_agents_write_the_projects_own_files_only_wi
         "plain files",
         "Nothing is ever written inside",
         "git keeps",
+        "before an agent replaces or edits",
     ] {
         assert!(
             !projects.contains(stale),

@@ -776,10 +776,11 @@ The `Results in the project` chip shows instead the files agents wrote into
 your projects (`?in_project=true`): each row is named by the file's path in its
 project, carries a `project` tag, and its subtitle starts with the project's
 folder name; it points at the real file. Such a file has no versions: what
-OpenAlpaca keeps of it is the content it had before an agent replaced or
-edited it, in the conversation's log
-(`~/.openalpaca/sessions/<id>/snapshots/`), and any longer history is the
-project's own — git's, where the project is a repository. Its detail
+OpenAlpaca keeps of it is the content it had before `file_write` or
+`file_edit` replaced or edited it, in the conversation's log
+(`~/.openalpaca/sessions/<id>/snapshots/`; a shell command's changes keep no
+copy), and any longer history is the project's own — git's, where the project
+is a repository. Its detail
 has no History or Diff, only Preview, and its row follows the file when you
 edit it yourself. The header's count is the shown side's own.
 
