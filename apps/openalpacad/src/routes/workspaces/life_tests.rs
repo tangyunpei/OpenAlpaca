@@ -1670,6 +1670,55 @@ async fn a_project_renamed_by_case_only_is_listed_missing_and_re_pointed_to_the_
     );
 }
 
+/// ST-23 at every workspace route: a path inside a recorded root that now
+/// leads, through a link, to another project's folder names the root's own
+/// project — the read, the delete's refusal of a path inside (R-S8), and the
+/// re-point of the whole project (T36, kept as built) — and `Use` on the
+/// root itself chooses it; the other project is never touched.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_path_under_a_root_now_linking_to_another_project_names_its_own_at_every_route() {
+    let w = World::new();
+    let (a, b) = w.moved_behind_a_link("a", "b");
+    std::fs::create_dir_all(b.root.join("src")).expect("a folder inside");
+    let inside = a.root.join("src");
+
+    let (status, body) = w.get(&text(&inside)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], a.id.to_string(), "{body}");
+    assert_eq!(body["root"], text(&a.root), "{body}");
+    assert_eq!(body["missing"], true, "{body}");
+
+    let (status, body) = w.delete(&inside, true).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_A_ROOT");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(&text(&a.root)),
+        "names A's root: {message}"
+    );
+
+    let (status, body) = choose(&text(&a.root)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], a.id.to_string(), "{body}");
+    assert_eq!(body["missing"], true, "{body}");
+
+    let new = w.dir("a-new-home");
+    let (status, body) = w.repoint(&inside, &new).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["project"]["id"], a.id.to_string(), "{body}");
+    assert_eq!(body["project"]["root"], text(&new), "{body}");
+    let still = projects::lookup(&b.root)
+        .expect("lookup")
+        .expect("B is where it was");
+    assert_eq!((still.id, still.dir), (b.id, b.dir));
+    assert_eq!(
+        projects::list().expect("list").len(),
+        2,
+        "nothing new was registered"
+    );
+}
+
 /// `projects/` made searchable but not readable until this drops — then
 /// `0700` again, so a failed assertion never leaves the tempdir unremovable.
 #[cfg(unix)]

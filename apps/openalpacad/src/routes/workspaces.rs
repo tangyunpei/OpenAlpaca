@@ -102,7 +102,8 @@ pub struct ProjectView {
     pub id: String,
     pub root: String,
     pub name: String,
-    /// Its root is not a directory (ST-7): its data is kept.
+    /// Its root no longer leads to its folder — not a directory, or no longer
+    /// its own canonical form (ST-7, ST-23): its data is kept.
     pub missing: bool,
 }
 
@@ -319,13 +320,14 @@ fn projects_unreadable(e: &anyhow::Error) -> Response {
 /// written is that project ([`projects::by_recorded_root`]), even when it no
 /// longer canonicalizes to itself — a folder renamed by case only, or moved
 /// with a link left at the old path, whose canonical form may be another
-/// project's root. Anything else is resolved the way a turn's path is:
+/// project's root. Anything else is resolved as written, the way a turn's
+/// path is ([`projects::resolve`] walks it as written first, ST-23, so a path
+/// inside such a root names that root's project too):
 /// `404 WORKSPACE_NOT_FOUND` for a root no folder under `projects/` records
 /// (R12's words) or a path in no project. A listing of `projects/` that
 /// fails is `500 IO_ERROR` naming the projects folder
-/// ([`projects_unreadable`]) — never a fall-through to the resolution,
-/// which for a recorded root that now leads elsewhere would name that other
-/// project.
+/// ([`projects_unreadable`]) — never a fall-through to the resolution
+/// (residual X1).
 ///
 /// First, a project whose re-point has not finished — listed at its new
 /// root, its folder under the old name, found by `lookup` under neither path
@@ -366,7 +368,7 @@ fn registered_project(written: &str, path: &str) -> Result<Project, Response> {
         Ok(None) => {}
         Err(e) => return Err(projects_unreadable(&e)),
     }
-    match projects::resolve(Path::new(path)) {
+    match projects::resolve(Path::new(written)) {
         Ok(Some(ResolvedProject {
             project: Some(project),
             ..
@@ -422,12 +424,12 @@ async fn quiesce_project(
 /// memory slot is held: the re-point and the delete each resolve their
 /// project before they wait for that slot, and another re-point or delete of
 /// the same project may hold it meanwhile. Read by id — never by root, which
-/// for a recorded root that now leads elsewhere would name another project —
-/// and taken only when its root and its folder are still the ones it was
-/// read with; once the slot is held no other re-point or delete of this id
-/// can start, so it stays so until the slot is let go. Anything else — moved,
-/// deleted, re-registered under a new id, or marked mid re-point — is
-/// `409 WORKSPACE_BUSY`, saying `nothing was <done>`.
+/// would take a project deleted and registered again at that root, under a
+/// new id, for this one — and taken only when its root and its folder are
+/// still the ones it was read with; once the slot is held no other re-point
+/// or delete of this id can start, so it stays so until the slot is let go.
+/// Anything else — moved, deleted, re-registered under a new id, or marked
+/// mid re-point — is `409 WORKSPACE_BUSY`, saying `nothing was <done>`.
 #[allow(clippy::result_large_err)]
 fn still_the_project(project: &Project, done: &str) -> Result<Project, Response> {
     match projects::by_id(&project.id) {
@@ -478,7 +480,8 @@ pub(crate) fn get_workspace(db: &Database, query: WorkspaceQuery) -> Response {
     // A recorded root, as the list printed it, names its own project — the
     // re-point and delete dialogs read their counts here (see
     // `registered_project`). A listing that fails says so rather than
-    // resolving: the canonical form may be another project's root.
+    // resolving (residual X1). Any other path is resolved as written
+    // (ST-23); `path` stays its canonical form, as the answer prints it.
     let (path, resolved) = match projects::by_recorded_root(Path::new(&written)) {
         Ok(Some(project)) => (
             written,
@@ -490,7 +493,7 @@ pub(crate) fn get_workspace(db: &Database, query: WorkspaceQuery) -> Response {
         Err(e) => return projects_unreadable(&e),
         Ok(None) => {
             let path = canonical_of(&written);
-            match projects::resolve(Path::new(&path)) {
+            match projects::resolve(Path::new(&written)) {
                 Ok(resolved) => (path, resolved),
                 Err(e) => {
                     return api_error(
@@ -543,7 +546,10 @@ pub(crate) fn get_workspace(db: &Database, query: WorkspaceQuery) -> Response {
 /// already registered answers the same project. The fifth registration site
 /// of §2.2: the daemon registers, a read never does.
 pub(crate) fn choose_workspace(request: ChooseWorkspaceRequest) -> Response {
-    let path = match canonical_path(&request.path) {
+    // As written (ST-23): `projects::choose` resolves it and matches a root a
+    // project records before it canonicalizes anything, so `Use` on the root
+    // the list prints chooses that project even when it now leads elsewhere.
+    let path = match written_path(&request.path) {
         Ok(path) => path,
         Err(response) => return response,
     };
