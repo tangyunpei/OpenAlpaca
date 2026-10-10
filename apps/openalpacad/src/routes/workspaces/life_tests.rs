@@ -1450,6 +1450,7 @@ async fn a_root_now_linking_to_another_project_names_its_own_for_the_read_and_th
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["id"], a.id.to_string(), "{body}");
     assert_eq!(body["root"], text(&a.root), "{body}");
+    assert_eq!(body["missing"], true, "ST-23: {body}");
 
     let (status, body) = w.delete(&a.root, true).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1487,6 +1488,186 @@ async fn a_re_point_naming_a_root_that_now_links_to_another_project_moves_that_p
         .expect("lookup")
         .expect("B is where it was");
     assert_eq!((still.id, still.dir), (b.id, b.dir));
+}
+
+/// Whether the volume holding `dir` ignores case: a file made as
+/// `case-probe-Ab` is found by a stat of `CASE-PROBE-AB`. macOS's default
+/// volume does; Linux's tmpfs and ext4 do not, so a test of a rename by
+/// case only returns early there (storage design ST-23). The probe is
+/// removed before this returns. Unix only, as every test that calls it.
+#[cfg(unix)]
+fn volume_ignores_case(dir: &std::path::Path) -> bool {
+    let made = dir.join("case-probe-Ab");
+    std::fs::write(&made, b"").expect("probe");
+    let ignores = std::fs::symlink_metadata(dir.join("CASE-PROBE-AB")).is_ok();
+    std::fs::remove_file(&made).expect("probe removed");
+    ignores
+}
+
+/// ST-23, end to end through the routes: a project whose folder was moved
+/// with a link left at its old path is listed missing — the old path still
+/// opens the folder but no longer leads to itself — and `?path=` of its root
+/// says so; re-pointed onto where the folder is now, it is present there
+/// with its rows, its folder under `projects/` and its notes, and the link
+/// is left as the user made it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_project_moved_behind_a_link_is_listed_missing_and_re_pointed_whole() {
+    let w = World::new();
+    let p = w.project("app");
+    let old = text(&p.root);
+    w.session("s-1", &old);
+    w.message("s-1", &old);
+    w.note(OWNER, Some(p.root.as_path()), "Release step");
+    let moved = p.root.with_file_name("app-moved");
+    std::fs::rename(&p.root, &moved).expect("the user moves the folder");
+    std::os::unix::fs::symlink(&moved, &p.root).expect("and leaves a link at the old path");
+
+    let (status, list) = split(get_workspace(&w.db, WorkspaceQuery::default())).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list[0]["id"], p.id.to_string(), "{list}");
+    assert_eq!(list[0]["missing"], true, "ST-23: {list}");
+    let (status, body) = w.get(&old).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], p.id.to_string(), "{body}");
+    assert_eq!(body["missing"], true, "{body}");
+
+    let (status, body) = w.repoint(&p.root, &moved).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["project"]["id"], p.id.to_string(), "{body}");
+    assert_eq!(body["project"]["root"], text(&moved), "{body}");
+    assert_eq!(body["project"]["missing"], false, "{body}");
+    assert_eq!(body["moved"]["sessions"], 1, "{body}");
+    assert_eq!(body["moved"]["messages"], 1, "{body}");
+    let name = projects::folder_name(&moved);
+    let (_, list) = split(get_workspace(&w.db, WorkspaceQuery::default())).await;
+    assert_eq!(
+        list,
+        serde_json::json!([{
+            "id": p.id.to_string(),
+            "root": text(&moved),
+            "name": name.clone(),
+            "missing": false,
+        }])
+    );
+    assert_eq!(
+        std::fs::read_link(&p.root).expect("the link is still there"),
+        moved,
+        "the link is the user's: untouched"
+    );
+    assert!(!p.dir.exists(), "its folder under projects/ was renamed");
+    assert!(
+        w.home
+            .join(projects::PROJECTS_DIR)
+            .join(&name)
+            .join(projects::PROJECT_FILE)
+            .is_file()
+    );
+    let new = text(&moved);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT COUNT(*) FROM session WHERE workspace_id = '{new}'"
+        )),
+        1
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT COUNT(*) FROM conversation_messages WHERE workspace_root = '{new}'"
+        )),
+        1
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT COUNT(*) FROM session WHERE workspace_id = '{old}'"
+        )),
+        0
+    );
+    assert_eq!(
+        project_snapshots(&p.id),
+        1,
+        "its control snapshot is the one it had"
+    );
+    assert_eq!(
+        crate::test_util::note_titles(&w.memory, OWNER, Some(moved.as_path())),
+        vec!["Release step".to_string()],
+        "its notes are found under the new name"
+    );
+}
+
+/// ST-23 on a case-insensitive volume (macOS's default), end to end: a
+/// project whose folder was renamed by case only is missing at its recorded
+/// root; re-pointed onto the new spelling it is present, its folder under
+/// `projects/` renamed to the new case, its rows and its notes with it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_project_renamed_by_case_only_is_listed_missing_and_re_pointed_to_the_new_case() {
+    let w = World::new();
+    let p = w.project("App");
+    let repos = p.root.parent().expect("repos/").to_path_buf();
+    if !volume_ignores_case(&repos) {
+        eprintln!(
+            "skipped: {} is case-sensitive, so no folder can be renamed by case only",
+            repos.display()
+        );
+        return;
+    }
+    let old = text(&p.root);
+    w.session("s-1", &old);
+    w.note(OWNER, Some(p.root.as_path()), "Release step");
+    let renamed = repos.join("app");
+    std::fs::rename(&p.root, &renamed).expect("the user renames the folder by case");
+    assert_eq!(
+        p.root
+            .canonicalize()
+            .expect("the old spelling still opens it"),
+        renamed,
+        "ST-23's premise: the volume answers the spelling on disk"
+    );
+
+    let (status, body) = w.get(&old).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], p.id.to_string(), "{body}");
+    assert_eq!(body["missing"], true, "ST-23: {body}");
+
+    let (status, body) = w.repoint(&p.root, &renamed).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["project"]["id"], p.id.to_string(), "{body}");
+    assert_eq!(body["project"]["root"], text(&renamed), "{body}");
+    assert_eq!(body["project"]["missing"], false, "{body}");
+    let name = projects::folder_name(&renamed);
+    let on_disk: Vec<String> = std::fs::read_dir(w.home.join(projects::PROJECTS_DIR))
+        .expect("projects/")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        on_disk,
+        vec![name],
+        "its folder under projects/ takes the new case"
+    );
+    let new = text(&renamed);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT COUNT(*) FROM session WHERE workspace_id = '{new}'"
+        )),
+        1
+    );
+    assert_eq!(
+        project_snapshots(&p.id),
+        1,
+        "its control snapshot is the one it had"
+    );
+    assert_eq!(
+        crate::test_util::note_titles(&w.memory, OWNER, Some(renamed.as_path())),
+        vec!["Release step".to_string()]
+    );
 }
 
 /// `projects/` made searchable but not readable until this drops — then

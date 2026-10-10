@@ -264,7 +264,9 @@ pub struct Project {
     /// and the prefix every stored `storage_path` under it starts with.
     pub dir: PathBuf,
     pub created_at: String,
-    /// The root is not a directory, read when this entry was read (ST-7).
+    /// The root no longer leads to its own folder, read when this entry was
+    /// read: it is not a directory, or it no longer canonicalizes to itself
+    /// ([`root_is_missing`]; ST-7, ST-23).
     pub missing: bool,
     /// `Some` only mid re-point (§6).
     pub previous_root: Option<PathBuf>,
@@ -506,7 +508,7 @@ pub(crate) fn read_project_dir(dir: &Path) -> Result<Option<Project>> {
     let root = PathBuf::from(&file.root);
     Ok(Some(Project {
         id: file.id,
-        missing: !root.is_dir(),
+        missing: root_is_missing(&root),
         root,
         name,
         dir,
@@ -520,6 +522,22 @@ pub(crate) fn read_project_dir(dir: &Path) -> Result<Option<Project>> {
 /// read from one that stays without its file.
 fn vanished(dir: &Path) -> bool {
     matches!(fs::symlink_metadata(dir), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// ST-7 and ST-23: whether a project's recorded `root` no longer leads to its
+/// own folder — what [`Project::missing`] says, decided here and nowhere
+/// else. Missing when the root is not a directory (its folder is gone, or
+/// something else took its path), or when it no longer canonicalizes to
+/// itself: a root is canonical when it is recorded (R4, R14 — `register` and
+/// the re-point write only a canonical root), so a canonical form that
+/// differs means the folder moved under it — renamed by case only on a
+/// case-insensitive volume, where the old spelling still opens the renamed
+/// folder, or moved with a link left at the old path. A root that cannot be
+/// canonicalized at all is missing. Reads no file: a `stat` and a `realpath`.
+pub fn root_is_missing(root: &Path) -> bool {
+    let leads_to_itself =
+        root.is_dir() && fs::canonicalize(root).is_ok_and(|canonical| canonical.as_path() == root);
+    !leads_to_itself
 }
 
 /// Where in [`read_project_dir`] a test's step runs: the places a re-point's

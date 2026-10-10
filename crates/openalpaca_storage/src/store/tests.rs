@@ -84,6 +84,21 @@ impl Drop for HomeStoreGuard {
     }
 }
 
+/// Whether the volume holding `dir` ignores case: a file made as
+/// `case-probe-Ab` is found by a stat of `CASE-PROBE-AB`. macOS's default
+/// volume does; Linux's tmpfs and ext4 do not, so a test of a rename by
+/// case only returns early there (storage design ST-23). `dir` is a test's
+/// own temp folder; the probe is removed before this returns. Unix only, as
+/// every test that calls it.
+#[cfg(unix)]
+pub(crate) fn volume_ignores_case(dir: &Path) -> bool {
+    let made = dir.join("case-probe-Ab");
+    std::fs::write(&made, b"").unwrap();
+    let ignores = std::fs::symlink_metadata(dir.join("CASE-PROBE-AB")).is_ok();
+    std::fs::remove_file(&made).unwrap();
+    ignores
+}
+
 // ============================================================================
 // Root resolution
 // ============================================================================

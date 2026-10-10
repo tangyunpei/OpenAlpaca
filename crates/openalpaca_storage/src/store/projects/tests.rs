@@ -1220,3 +1220,90 @@ fn a_folder_renamed_away_before_its_file_is_read_spends_no_unreadable_report() {
         "the R11 report for this folder was spent on a folder that went"
     );
 }
+
+// ── ST-23: a root that no longer leads to itself is missing (Stage 2 S0) ───
+
+#[test]
+fn a_root_is_missing_when_it_is_not_a_directory_or_no_longer_leads_to_itself() {
+    let w = World::new();
+    let here = w.folder("here");
+    assert!(
+        !root_is_missing(&here),
+        "a folder that is its own canonical form"
+    );
+    let file = w.folder("files").join("notes.txt");
+    fs::write(&file, "x").unwrap();
+    assert!(root_is_missing(&file), "a file is no folder");
+    assert!(
+        root_is_missing(&w.folder("parent").join("never-made")),
+        "nothing there"
+    );
+    #[cfg(unix)]
+    {
+        let link = w.folder("links").join("here");
+        std::os::unix::fs::symlink(&here, &link).unwrap();
+        assert!(link.is_dir(), "the link opens the folder");
+        assert!(root_is_missing(&link), "but it leads to another path");
+    }
+}
+
+/// ST-23: the folder moved and a link left at the old path — the root still
+/// opens the folder, but no longer leads to itself — reads missing wherever
+/// the entry is read.
+#[cfg(unix)]
+#[test]
+fn a_project_moved_with_a_link_left_at_its_root_reads_missing() {
+    let w = World::new();
+    let root = w.folder("app");
+    let project = register(&root).unwrap();
+    assert!(!project.missing);
+    let moved = root.with_file_name("app-moved");
+    fs::rename(&root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &root).unwrap();
+    assert!(root.is_dir(), "the old path still opens the folder");
+
+    let listed = list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, project.id);
+    assert!(
+        listed[0].missing,
+        "ST-23: its root no longer leads to itself"
+    );
+    assert!(by_id(&project.id).unwrap().is_some_and(|p| p.missing));
+    assert!(by_recorded_root(&root).unwrap().is_some_and(|p| p.missing));
+}
+
+/// ST-23 on a case-insensitive volume: the folder renamed by case only — the
+/// old spelling still opens it, and the volume answers the new one — reads
+/// missing.
+#[cfg(unix)]
+#[test]
+fn a_project_renamed_by_case_only_reads_missing() {
+    let w = World::new();
+    let work = w.folder("cases");
+    if !crate::store::tests::volume_ignores_case(&work) {
+        eprintln!(
+            "skipped: {} is case-sensitive, so no folder can be renamed by case only",
+            work.display()
+        );
+        return;
+    }
+    let root = w.folder("cases/App");
+    let project = register(&root).unwrap();
+    let renamed = work.join("app");
+    fs::rename(&root, &renamed).unwrap();
+    assert!(root.is_dir(), "the old spelling still opens the folder");
+    assert_eq!(
+        root.canonicalize().unwrap(),
+        renamed,
+        "ST-23's premise: the volume answers the spelling on disk"
+    );
+
+    let listed = list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, project.id);
+    assert!(
+        listed[0].missing,
+        "ST-23: its root no longer canonicalizes to itself"
+    );
+}

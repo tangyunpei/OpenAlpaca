@@ -770,3 +770,64 @@ fn a_recovery_finishes_a_re_point_whose_old_root_still_reads_a_run_in_flight() {
     );
     assert_eq!(w.named(&new), 6, "the dead run's row moved with the rest");
 }
+
+/// ST-23 on a case-insensitive volume (macOS's default): a project whose
+/// folder was renamed by case only reads missing, and re-pointing it onto the
+/// new spelling renames its folder under `projects/` to the new case on disk,
+/// rewrites its five path columns and its by-product's address, and leaves
+/// one project, present.
+#[cfg(unix)]
+#[test]
+fn a_case_only_rename_reads_missing_and_is_re_pointed_to_the_new_case() {
+    let w = World::new();
+    if !crate::store::tests::volume_ignores_case(&w.work) {
+        eprintln!(
+            "skipped: {} is case-sensitive, so no folder can be renamed by case only",
+            w.work.display()
+        );
+        return;
+    }
+    let p = w.project("App");
+    w.rows_of(&p);
+    let renamed = w.work.join("app");
+    std::fs::rename(&p.root, &renamed).unwrap();
+    assert_eq!(
+        p.root.canonicalize().unwrap(),
+        renamed,
+        "ST-23's premise: the volume answers the spelling on disk"
+    );
+    let listed = projects::list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(
+        listed[0].missing,
+        "ST-23: its root no longer canonicalizes to itself"
+    );
+
+    let done = repoint(&w.db, &p.root, &renamed).unwrap();
+
+    assert_eq!(done.after.id, p.id);
+    assert_eq!(done.after.root, renamed);
+    assert!(!done.after.missing);
+    let name = projects::folder_name(&renamed);
+    assert_eq!(done.after.name, name);
+    let on_disk: Vec<String> = std::fs::read_dir(projects::projects_dir().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        on_disk,
+        vec![name.clone()],
+        "the folder takes the new case on disk"
+    );
+    assert_eq!(
+        done.after.dir.file_name().and_then(|n| n.to_str()),
+        Some(name.as_str())
+    );
+    assert_eq!(w.named(&renamed), 5);
+    assert_eq!(w.named(&p.root), 0, "no row keeps the old spelling");
+    assert!(
+        w.storage_path()
+            .starts_with(done.after.dir.to_string_lossy().as_ref())
+    );
+    assert_eq!(projects::list().unwrap().len(), 1);
+}
