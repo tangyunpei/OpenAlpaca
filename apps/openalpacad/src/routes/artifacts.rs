@@ -20,7 +20,8 @@
 //!
 //! **The envelope is Phase 0's shared `api_error`** (`{"error":{"code",
 //! "message"}}`), and the `code` is [`ArtifactError::code`] verbatim, so
-//! `ARTIFACT_GONE`/`NOT_DIFFABLE` reach the client unrenamed.
+//! `ARTIFACT_GONE`/`ARTIFACT_PROJECT_MISSING`/`NOT_DIFFABLE` reach the client
+//! unrenamed.
 //!
 //! **The content route authenticates inline** (GAP-11): it lives outside the
 //! bearer middleware so a webview `<img src>`/`<iframe src>`, which cannot set
@@ -361,8 +362,11 @@ pub(crate) fn get_artifact(db: &Database, owner_id: &str, id: &str) -> Response 
 ///
 /// Authenticates inline (GAP-11), then answers exactly as the store does:
 /// `404` for a row this owner cannot see or a version that does not exist,
-/// `410` `ARTIFACT_GONE` when the bytes are missing — which is also what
-/// stamps `missing_since` on the row.
+/// `410` `ARTIFACT_GONE` when the bytes are missing, and `410`
+/// `ARTIFACT_PROJECT_MISSING` for a result file of a project whose recorded
+/// root no longer leads to its own folder (ST-23), its message naming that
+/// root and the re-point (R-T26) — either of which is also what stamps
+/// `missing_since` on the row.
 ///
 /// A read is also where a **hand edit** is noticed (§4.8): if the bytes on
 /// disk are not the ones the row describes, the store records them as a version
