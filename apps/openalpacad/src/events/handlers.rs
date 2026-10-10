@@ -52,6 +52,8 @@ impl EventBroadcaster {
         kind: &str,
         version: u32,
         path: &str,
+        in_project: bool,
+        openable: bool,
     ) {
         let event = ServerEvent::ArtifactWritten {
             artifact_id: artifact_id.to_string(),
@@ -61,6 +63,8 @@ impl EventBroadcaster {
             kind: kind.to_string(),
             version,
             path: path.to_string(),
+            in_project,
+            openable,
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };

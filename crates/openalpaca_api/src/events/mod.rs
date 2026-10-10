@@ -358,8 +358,9 @@ pub enum ServerEvent {
         instance_id: String,
     },
     /// An agent wrote a **produced** artifact — `artifact_write`, a
-    /// `file_write` saved as an artifact (G2), or the
-    /// `workspace_write(entry_type = "artifact")` spill (plan §4.9).
+    /// `file_write` saved as a by-product (no project), the
+    /// `workspace_write(entry_type = "artifact")` spill (plan §4.9) — or a
+    /// result file `file_write` wrote into the project (`in_project`, R35).
     ///
     /// Never fired for uploads: an upload has no agent and no version to
     /// announce. A supersede is a write, so a second `put` of the same name
@@ -378,6 +379,14 @@ pub enum ServerEvent {
         version: u32,
         /// The head file's absolute path (`file_assets.storage_path`).
         path: String,
+        /// A result file in the project — a pointer row (ST-12) — rather than
+        /// a by-product. A frame from an older daemon carries neither this
+        /// field nor the next, and is a by-product.
+        #[serde(default)]
+        in_project: bool,
+        /// ST-18: whether Open is offered for it (`ArtifactRecord::openable`).
+        #[serde(default = "openable_by_default")]
+        openable: bool,
         ts: DateTime<Utc>,
         instance_id: String,
     },
@@ -501,6 +510,12 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+}
+
+/// `ArtifactWritten::openable` in a frame that predates it: every artifact
+/// announced before Stage 2 was a by-product, and every by-product opens.
+fn openable_by_default() -> bool {
+    true
 }
 
 /// The source of an event, identifying which connector or interface originated it.

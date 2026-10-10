@@ -432,6 +432,8 @@ pub(crate) fn announce_user_edit(bus: Option<&EventBus>, record: &ArtifactRecord
             .to_string(),
         version: record.version,
         path: record.storage_path.clone(),
+        in_project: record.in_project,
+        openable: record.openable(),
         timestamp: chrono::Utc::now(),
     });
 }

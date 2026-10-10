@@ -37,6 +37,13 @@ enum ServerEvent {
         kind: String,
         version: u32,
         path: String,
+        /// A result file in the project (Stage 2), not a by-product. Absent on
+        /// a frame from an older daemon.
+        #[serde(default)]
+        in_project: bool,
+        #[allow(dead_code)]
+        #[serde(default = "openable_by_default")]
+        openable: bool,
         ts: DateTime<Utc>,
         #[allow(dead_code)]
         instance_id: String,
@@ -136,6 +143,21 @@ enum ServerEvent {
     },
     #[serde(other)]
     Unknown,
+}
+
+fn openable_by_default() -> bool {
+    true
+}
+
+/// The bracketed tag `tail` prints after an artifact's name: its kind and
+/// version for a by-product, `in the project` for a result file, which has no
+/// versions (ST-12).
+fn artifact_tag(kind: &str, version: u32, in_project: bool) -> String {
+    if in_project {
+        "[in the project]".to_string()
+    } else {
+        format!("[{kind} v{version}]")
+    }
 }
 
 pub async fn run(count: usize) -> Result<()> {
@@ -246,6 +268,7 @@ fn print_event(event: &ServerEvent) {
             kind,
             version,
             path,
+            in_project,
             ts,
             ..
         } => {
@@ -255,7 +278,7 @@ fn print_event(event: &ServerEvent) {
                 time.dimmed(),
                 "artifact".green(),
                 name.bold(),
-                format!("[{kind} v{version}]").cyan(),
+                artifact_tag(kind, *version, *in_project).cyan(),
                 path.dimmed()
             );
         }
@@ -489,6 +512,62 @@ mod tests {
         ));
         // The print arm must survive both halves being absent.
         print_event(&event);
+    }
+
+    /// Stage 2: `tail` says a result file was written in the project, where a
+    /// by-product says its kind and version (a result file has no versions).
+    #[test]
+    fn a_result_file_is_tagged_in_the_project() {
+        assert_eq!(artifact_tag("markdown", 2, false), "[markdown v2]");
+        assert_eq!(artifact_tag("code", 1, true), "[in the project]");
+
+        let frame = r#"{
+            "type": "artifact_written",
+            "artifact_id": "a-3",
+            "task_id": null,
+            "agent_id": "code_agent",
+            "name": "src/main.rs",
+            "kind": "code",
+            "version": 1,
+            "path": "/w/app/src/main.rs",
+            "in_project": true,
+            "openable": true,
+            "ts": "2026-10-08T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        assert!(matches!(
+            event,
+            ServerEvent::ArtifactWritten {
+                in_project: true,
+                ..
+            }
+        ));
+        print_event(&event);
+    }
+
+    /// A frame from an older daemon has no `in_project`: a by-product.
+    #[test]
+    fn an_older_artifact_frame_is_a_by_product() {
+        let frame = r#"{
+            "type": "artifact_written",
+            "artifact_id": "a-4",
+            "task_id": null,
+            "agent_id": null,
+            "name": "01-notes.md",
+            "kind": "markdown",
+            "version": 1,
+            "path": "/h/.openalpaca/artifacts/loose/01-notes.md",
+            "ts": "2026-10-08T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        assert!(matches!(
+            serde_json::from_str::<ServerEvent>(frame).unwrap(),
+            ServerEvent::ArtifactWritten {
+                in_project: false,
+                ..
+            }
+        ));
     }
 
     /// GAP-09 — a lane transition has its own arm, so `openalpaca tail` shows

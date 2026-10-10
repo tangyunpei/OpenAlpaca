@@ -103,6 +103,8 @@ fn announce_artifact_written(ctx: &ToolContext, record: &ArtifactRecord) {
             .to_string(),
         version: record.version,
         path: record.storage_path.clone(),
+        in_project: record.in_project,
+        openable: record.openable(),
         timestamp: Utc::now(),
     });
 }

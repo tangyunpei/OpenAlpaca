@@ -572,10 +572,12 @@ pub fn spawn_event_bridge(
                     ref kind,
                     version,
                     ref path,
+                    in_project,
+                    openable,
                     ..
                 } => {
                     tracing::info!(
-                        %artifact_id, ?task_id, %name, %kind, version,
+                        %artifact_id, ?task_id, %name, %kind, version, in_project,
                         "Artifact written"
                     );
                     eb.artifact_written(
@@ -586,6 +588,8 @@ pub fn spawn_event_bridge(
                         kind,
                         version,
                         path,
+                        in_project,
+                        openable,
                     );
                 }
                 openalpaca_core::events::SystemEvent::SubagentSpan {
@@ -920,6 +924,8 @@ mod tests {
             kind: "markdown".into(),
             version: 2,
             path: "/p/.openalpaca/artifacts/run/01-quarterly-report.md".into(),
+            in_project: false,
+            openable: true,
             timestamp: chrono::Utc::now(),
         });
         match recv_event(&mut rx).await {
@@ -931,6 +937,8 @@ mod tests {
                 kind,
                 version,
                 path,
+                in_project,
+                openable,
                 ts,
                 instance_id,
             } => {
@@ -941,6 +949,8 @@ mod tests {
                 assert_eq!(kind, "markdown");
                 assert_eq!(version, 2);
                 assert_eq!(path, "/p/.openalpaca/artifacts/run/01-quarterly-report.md");
+                assert!(!in_project);
+                assert!(openable);
                 assert!(ts >= before);
                 assert_eq!(instance_id, "test-instance");
             }
@@ -961,6 +971,8 @@ mod tests {
             kind: "markdown".into(),
             version: 1,
             path: "/h/.openalpaca/artifacts/loose/01-notes.md".into(),
+            in_project: false,
+            openable: true,
             timestamp: chrono::Utc::now(),
         });
         match recv_event(&mut rx).await {
@@ -969,6 +981,39 @@ mod tests {
             } => {
                 assert_eq!(task_id, None);
                 assert_eq!(agent_id, None);
+            }
+            other => panic!("Expected ArtifactWritten, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    /// Stage 2: a result file crosses the bridge as one — `in_project` and
+    /// `openable` as the record said (R35, ST-18).
+    #[tokio::test]
+    async fn test_artifact_written_bridges_a_result_file_in_the_project() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::ArtifactWritten {
+            artifact_id: "a-3".into(),
+            task_id: None,
+            agent_id: Some("code_agent".into()),
+            name: "scripts/build.sh".into(),
+            kind: "code".into(),
+            version: 1,
+            path: "/w/app/scripts/build.sh".into(),
+            in_project: true,
+            openable: false,
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ArtifactWritten {
+                in_project,
+                openable,
+                name,
+                ..
+            } => {
+                assert!(in_project);
+                assert!(!openable);
+                assert_eq!(name, "scripts/build.sh");
             }
             other => panic!("Expected ArtifactWritten, got {other:?}"),
         }

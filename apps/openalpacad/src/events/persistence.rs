@@ -464,6 +464,8 @@ impl EventBroadcaster {
                     kind,
                     version,
                     path,
+                    in_project,
+                    openable,
                     ..
                 } => {
                     let detail = serde_json::json!({
@@ -474,6 +476,8 @@ impl EventBroadcaster {
                         "kind": kind,
                         "version": version,
                         "path": path,
+                        "in_project": in_project,
+                        "openable": openable,
                     });
                     repo.log_for_task(
                         "artifact_written",
@@ -661,6 +665,8 @@ mod tests {
             "markdown",
             2,
             "/p/.openalpaca/artifacts/run/01-quarterly-report.md",
+            false,
+            true,
         );
 
         let rows = EventLogRepository::new(&db).recent(10).unwrap();
@@ -680,6 +686,38 @@ mod tests {
             detail["path"],
             "/p/.openalpaca/artifacts/run/01-quarterly-report.md"
         );
+        assert_eq!(detail["in_project"], false);
+        assert_eq!(detail["openable"], true);
+    }
+
+    /// Stage 2: a result file's row in the event log says it was written in
+    /// the project — the run's log reads it (`lib/api/run-events.ts`, S6a).
+    #[test]
+    fn a_result_file_is_persisted_with_its_two_flags() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.artifact_written(
+            "a-3",
+            Some("t-1"),
+            Some("code_agent"),
+            "scripts/build.sh",
+            "code",
+            1,
+            "/w/app/scripts/build.sh",
+            true,
+            false,
+        );
+
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        let detail = rows
+            .iter()
+            .find(|r| r.event_type == "artifact_written")
+            .and_then(|r| r.detail.clone())
+            .expect("the write reaches the event log with a detail blob");
+        assert_eq!(detail["in_project"], true);
+        assert_eq!(detail["openable"], false);
+        assert_eq!(detail["name"], "scripts/build.sh");
     }
 
     /// Design 09 §4.4 and 03 §6's forget contract: a `memory_confirm` card's
@@ -742,6 +780,8 @@ mod tests {
             "markdown",
             1,
             "/h/.openalpaca/artifacts/loose/01-notes.md",
+            false,
+            true,
         );
 
         let rows = EventLogRepository::new(&db).recent(10).unwrap();
@@ -839,6 +879,8 @@ mod tests {
             "markdown",
             1,
             "/p/.openalpaca/artifacts/run/01-report.md",
+            false,
+            true,
         );
         eb.subagent_span(
             "t-1",
