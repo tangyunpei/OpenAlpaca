@@ -17,7 +17,8 @@
  * here: nothing in the browser can canonicalize a symlink, read the home
  * store's `projects/` or find a `.git`. So the route is asked the same question a
  * turn asks, with the same header, and its `project_root` is the window's
- * canonical root (ruling R50).
+ * project root (ruling R50) — canonical when it was recorded, as written once
+ * the project is missing (ST-23).
  *
  * `project_root` is `null` for a caller that sent no header, and for a path
  * that resolves to no project at all or to the home store.

@@ -188,7 +188,9 @@ impl GatewayPersistence {
     /// The resolved id comes back to the caller so the assistant half of the
     /// same turn can be pinned to it — see [`PersistedUserMessage`].
     ///
-    /// `request_id` is the turn's id and `workspace_path` its canonical root;
+    /// `request_id` is the turn's id and `workspace_path` its project's root —
+    /// canonical when it was recorded, as written once the project is missing
+    /// (ST-23);
     /// both are written on the row (migration 044, design 09 §1.3) — the id
     /// marks the row as a turn's, and the root is the project this row
     /// learns into, whatever the session's binding says. `None` for a row no

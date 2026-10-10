@@ -3,7 +3,8 @@
 //!
 //! `<home>/projects/<name>/` holds one project's content — `artifacts/`,
 //! `uploads/`, `memory/` — beside its `project.json`, which records the
-//! project's permanent id and its canonical root path. `projects/` is the
+//! project's permanent id and its root path, canonical when it was recorded
+//! (a project whose root no longer canonicalizes to itself is missing, ST-23). `projects/` is the
 //! user's, like everything at the home root but `state/` (R1), and a folder
 //! under it holds `project.json` and content directories, nothing else (R3).
 //!
@@ -240,7 +241,9 @@ pub struct ProjectFile {
     /// [`PROJECT_FILE_VERSION`]; any other reads as unreadable (R11).
     pub version: u32,
     pub id: ProjectId,
-    /// The canonical root — the string the rows hold (R4, R14).
+    /// The root — the string the rows hold (R4, R14): canonical when it was
+    /// recorded; once it no longer canonicalizes to itself the project is
+    /// missing (ST-23).
     pub root: String,
     /// RFC 3339, UTC, whole seconds: `2026-10-07T09:30:00Z`.
     pub created_at: String,

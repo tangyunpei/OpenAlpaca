@@ -384,8 +384,9 @@ pub fn ensure_runtime_config_dir() -> Result<PathBuf> {
 /// Which store a piece of content belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreScope {
-    /// A project, named by its canonical root (absolute) — what the resolver
-    /// returns, never the store directory. Its content lives in its folder
+    /// A project, named by its root (absolute) — what the resolver returns,
+    /// canonical when recorded and as written once the project is missing
+    /// (ST-23), never the store directory. Its content lives in its folder
     /// under `<home>/projects/` (ST-1), found by [`projects::lookup`].
     Project(PathBuf),
     /// `~/.openalpaca` — the no-project fallback.

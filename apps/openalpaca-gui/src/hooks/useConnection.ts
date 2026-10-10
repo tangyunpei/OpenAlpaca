@@ -74,8 +74,8 @@ export function useHealth(): UseQueryResult<HealthResponse> {
 
 /**
  * `GET /v1/status` — the daemon's own numbers (uptime, schema version, log
- * path, store sizes) plus the canonical root it resolves this window's project
- * path to (R50).
+ * path, store sizes) plus the project root it resolves this window's project
+ * path to (R50) — canonical when recorded, as written once missing (ST-23).
  *
  * Asked even with no project. It used to be disabled there, because the only
  * field that moved was `project_root` and `null` is what "no project" already
