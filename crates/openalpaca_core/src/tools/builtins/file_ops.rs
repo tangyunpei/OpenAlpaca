@@ -19,7 +19,7 @@ use super::artifact_write::{
     ToolArtifact, put_tool_artifact, record_tool_project_file, split_name,
 };
 use super::helpers::{
-    FolderRules, MAX_FILE_READ_SIZE, acting_folder, make_parents_below, open_leaf,
+    FolderRules, MAX_FILE_READ_SIZE, acting_folder, linked_target, make_parents_below, open_leaf,
     resolve_workspace_path, resolve_workspace_path_for_write, validate_workspace_path,
 };
 use super::pre_edit::{EditVerb, PreEdit, check_pre_edit, keep_pre_edit_copy};
@@ -531,11 +531,17 @@ impl BuiltInTool for FileWriteTool {
     ) -> Result<Option<String>, String> {
         let (path, content) = write_arguments(arguments)?;
         let card = match self.plan(path, content, ctx)? {
-            WritePlan::Project { root, replaces, .. } => write_card(
+            WritePlan::Project {
+                root,
+                target,
+                replaces,
+            } => write_card(
                 path,
                 WriteLanding::Project {
                     root: &root,
                     replaces,
+                    // R-T31: the file a link in the project leads the write to.
+                    link_to: linked_target(path, &root, &target).as_deref(),
                 },
             ),
             WritePlan::ByProduct => {
@@ -1003,6 +1009,8 @@ impl BuiltInTool for FileEditTool {
         let plan = self.plan(&args, ctx).await?;
         Ok(Some(edit_card(
             args.path,
+            // R-T31: the file a link in the project leads the edit to.
+            linked_target(args.path, &plan.root, &plan.target).as_deref(),
             &plan.root,
             plan.first_line,
             plan.replacements,
@@ -1658,6 +1666,116 @@ mod tests {
             !moved.join("docs").exists(),
             "nor written in the moved folder"
         );
+    }
+
+    // ── R-T31 (d1-confine-2, d3-approvals-3): the card names the file that changes ──
+
+    /// R-T31: a link inside the project at the path the model wrote carries
+    /// the write and the edit to its target (R31), so both cards name that
+    /// target beside the path — relative to the root, escaped, and counted in
+    /// the card's one notice — and a person approves the file that changes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_write_or_edit_card_names_the_file_an_in_project_link_leads_to() {
+        let b = bench();
+        let ctx = b.ctx("sess-link-card");
+        let real = "re\u{202E}lease\u{200B}.sh";
+        fs::create_dir_all(b.root().join("scripts")).unwrap();
+        fs::create_dir_all(b.root().join("docs")).unwrap();
+        fs::write(b.root().join("scripts").join(real), "echo release\n").unwrap();
+        std::os::unix::fs::symlink(format!("../scripts/{real}"), b.root().join("docs/notes.md"))
+            .unwrap();
+        let shown = "scripts/re<U+202E>lease<U+200B>.sh";
+        let notice = "Note: this request contains 2 hidden characters, shown as <U+…>.";
+
+        let write = b
+            .tool(None)
+            .confirmation_preview(
+                &serde_json::json!({"path": "docs/notes.md", "content": "notes\n"}),
+                &ctx,
+            )
+            .await
+            .unwrap()
+            .expect("file_write's card");
+        assert_eq!(
+            write,
+            format!(
+                "Replaces docs/notes.md (a link to {shown}) in the project folder {}; its current \
+                 content is kept in this conversation's log.\n{notice}",
+                b.root().display()
+            )
+        );
+
+        let edit = FileEditTool {
+            db: None,
+            daemon_config: None,
+        }
+        .confirmation_preview(
+            &serde_json::json!({
+                "path": "docs/notes.md",
+                "old_string": "echo release",
+                "new_string": "echo shipped"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap()
+        .expect("file_edit's card");
+        assert_eq!(
+            edit,
+            format!(
+                "Edits docs/notes.md (a link to {shown}) in the project folder {}: 1 replacement, \
+                 the first at line 1. Its current content is kept in this conversation's log.\n\
+                 Replace:\necho release\nWith:\necho shipped\n{notice}",
+                b.root().display()
+            )
+        );
+        for card in [&write, &edit] {
+            assert!(
+                !card.contains('\u{202E}') && !card.contains('\u{200B}'),
+                "{card:?}"
+            );
+        }
+    }
+
+    /// R-T31's other side: a path that names its file itself gets no clause
+    /// — `./` and doubled separators included, and on a volume that ignores
+    /// letter case, a spelling of the same file in other letters, which
+    /// resolves to the file's own spelling but goes through no link.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_card_names_no_link_for_a_path_that_names_its_file_itself() {
+        let b = bench();
+        let ctx = b.ctx("sess-plain-card");
+        fs::create_dir_all(b.root().join("docs")).unwrap();
+        fs::write(b.root().join("docs/notes.md"), "notes\n").unwrap();
+        let probe = b.root().join("case-probe-Ab");
+        fs::write(&probe, b"").unwrap();
+        let ignores_case = fs::symlink_metadata(b.root().join("CASE-PROBE-AB")).is_ok();
+        fs::remove_file(&probe).unwrap();
+        let mut paths = vec!["docs/notes.md", "./docs/notes.md", "docs//notes.md"];
+        if ignores_case {
+            paths.push("Docs/NOTES.md");
+        } else {
+            eprintln!("skipped: the case-only spelling (this volume is case-sensitive)");
+        }
+
+        for path in paths {
+            let card = b
+                .tool(None)
+                .confirmation_preview(&serde_json::json!({"path": path, "content": "x"}), &ctx)
+                .await
+                .unwrap()
+                .expect("file_write's card");
+            assert_eq!(
+                card,
+                format!(
+                    "Replaces {path} in the project folder {}; its current content is kept in \
+                     this conversation's log.",
+                    b.root().display()
+                )
+            );
+        }
     }
 
     // ── Storage design §10 (R26, R27, R32): file_read reads the working folder ──

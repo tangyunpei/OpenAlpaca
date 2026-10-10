@@ -327,6 +327,43 @@ fn is_link_at_leaf(e: &std::io::Error) -> bool {
     }
 }
 
+/// The file a write or an edit changes, relative to the project's `root`,
+/// when the path the model wrote reaches it through a link inside the
+/// project (the lead's ruling R-T31, d1-confine-2, d3-approvals-3): the
+/// write resolver's `target` is then not `root.join(relative_path)`, and
+/// the card names it, so a person approves the file that changes. `None`
+/// when the path names its file itself — `./` and doubled separators
+/// included (`Path`'s comparison drops them), and a spelling the volume
+/// takes for the same file (another letter case, another Unicode form),
+/// which resolves to the file's own spelling but goes through no link.
+pub(super) fn linked_target(relative_path: &str, root: &Path, target: &Path) -> Option<String> {
+    if target == root.join(relative_path) || !through_a_link(relative_path, root) {
+        return None;
+    }
+    Some(
+        openalpaca_storage::store::relative_to(root, target)
+            .unwrap_or_else(|_| target.display().to_string()),
+    )
+}
+
+/// Whether a component of `relative_path` under `root` that exists is a
+/// link — the walk stops at the first that does not exist.
+fn through_a_link(relative_path: &str, root: &Path) -> bool {
+    let mut at = root.to_path_buf();
+    for component in Path::new(relative_path).components() {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        at.push(name);
+        match std::fs::symlink_metadata(&at) {
+            Ok(meta) if meta.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
 /// Which way a builtin file tool is touching a path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StoreAccess {

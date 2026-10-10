@@ -30,16 +30,24 @@ pub(super) fn command_card(folder: &WorkingFolder) -> String {
 pub(super) enum WriteLanding<'a> {
     /// A real file in the project (ST-10, ST-12). `replaces`: a file is there
     /// now, and its content is kept in the conversation's log first (ST-17).
-    Project { root: &'a Path, replaces: bool },
+    /// `link_to`: the file the write changes, relative to `root`, when the
+    /// path reaches it through a link inside the project (R-T31).
+    Project {
+        root: &'a Path,
+        replaces: bool,
+        link_to: Option<&'a str>,
+    },
     /// A by-product in `store`, the artifact store directory
     /// (`store_root(scope)?.join("artifacts")` — creates nothing).
     ByProduct { store: &'a Path },
 }
 
 /// The card of a file write: the file, where it lands, and — when the path
-/// the model wrote holds a hidden character — the notice on its own line.
+/// the model wrote, or the file a link in the project leads it to, holds a
+/// hidden character — the notice on its own line, counting both.
 pub(super) fn write_card(path: &str, landing: WriteLanding<'_>) -> String {
     let shown = escape_hidden_line(path);
+    let mut hidden = shown.hidden;
     let line = match landing {
         WriteLanding::ByProduct { store } => format!(
             "Saves {} as a by-product in {}, OpenAlpaca's artifact store — not in a folder of \
@@ -49,23 +57,22 @@ pub(super) fn write_card(path: &str, landing: WriteLanding<'_>) -> String {
         ),
         WriteLanding::Project {
             root,
-            replaces: false,
-        } => format!(
-            "Writes {} in the project folder {}.",
-            shown.text,
-            root.display()
-        ),
-        WriteLanding::Project {
-            root,
-            replaces: true,
-        } => format!(
-            "Replaces {} in the project folder {}; its current content is kept in this \
-             conversation's log.",
-            shown.text,
-            root.display()
-        ),
+            replaces,
+            link_to,
+        } => {
+            let file = named_file(&shown.text, link_to, &mut hidden);
+            if replaces {
+                format!(
+                    "Replaces {file} in the project folder {}; its current content is kept in \
+                     this conversation's log.",
+                    root.display()
+                )
+            } else {
+                format!("Writes {file} in the project folder {}.", root.display())
+            }
+        }
     };
-    match hidden_notice(shown.hidden) {
+    match hidden_notice(hidden) {
         Some(notice) => format!("{line}\n{notice}"),
         None => line,
     }
@@ -77,14 +84,17 @@ pub(super) fn write_card(path: &str, landing: WriteLanding<'_>) -> String {
 /// drawn below the preview anyway.
 pub(super) const EDIT_PREVIEW_BYTES: usize = 1_000;
 
-/// `file_edit`'s card (R49): the file, the project folder and the line of the
-/// first occurrence, then both strings — each escaped (`escape_hidden_within`,
-/// which keeps `\n` and `\t` as their layout) and cut to
-/// [`EDIT_PREVIEW_BYTES`] with the cut notice — then one notice counting every
-/// hidden character of the path and both strings. The folder prints as it is:
-/// the owner's own path (interfaces §1.3).
+/// `file_edit`'s card (R49): the file — and, when the path reaches it through
+/// a link inside the project, the file it leads to (`link_to`, relative to
+/// `root`; R-T31) — the project folder and the line of the first occurrence,
+/// then both strings — each escaped (`escape_hidden_within`, which keeps
+/// `\n` and `\t` as their layout) and cut to [`EDIT_PREVIEW_BYTES`] with
+/// the cut notice — then one notice counting every hidden character of the
+/// path, the linked file and both strings. The folder prints as it is: the
+/// owner's own path (interfaces §1.3).
 pub(super) fn edit_card(
     path: &str,
+    link_to: Option<&str>,
     root: &Path,
     first_line: usize,
     replacements: usize,
@@ -92,12 +102,13 @@ pub(super) fn edit_card(
     new_string: &str,
 ) -> String {
     let shown_path = escape_hidden_line(path);
+    let mut hidden = shown_path.hidden;
+    let file = named_file(&shown_path.text, link_to, &mut hidden);
     let old = escape_hidden_within(old_string, EDIT_PREVIEW_BYTES);
     let new = escape_hidden_within(new_string, EDIT_PREVIEW_BYTES);
     let mut lines = vec![format!(
-        "Edits {} in the project folder {}: {replacements} replacement{}, the first at line \
+        "Edits {file} in the project folder {}: {replacements} replacement{}, the first at line \
          {first_line}. Its current content is kept in this conversation's log.",
-        shown_path.text,
         root.display(),
         if replacements == 1 { "" } else { "s" }
     )];
@@ -107,8 +118,23 @@ pub(super) fn edit_card(
     lines.push("With:".to_string());
     lines.push(new.text);
     lines.extend(cut_notice(new.left_out));
-    lines.extend(hidden_notice(shown_path.hidden + old.hidden + new.hidden));
+    lines.extend(hidden_notice(hidden + old.hidden + new.hidden));
     lines.join("\n")
+}
+
+/// The file a write or edit card names: the path as the model wrote it
+/// (`shown`, escaped already), and — when that path reaches the file through
+/// a link inside the project — `(a link to {file})`, the file escaped and
+/// its hidden characters added to `hidden` (R-T31).
+fn named_file(shown: &str, link_to: Option<&str>, hidden: &mut usize) -> String {
+    match link_to {
+        Some(target) => {
+            let target = escape_hidden_line(target);
+            *hidden += target.hidden;
+            format!("{shown} (a link to {})", target.text)
+        }
+        None => shown.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -164,7 +190,8 @@ mod tests {
                 "src/main.rs",
                 WriteLanding::Project {
                     root,
-                    replaces: false
+                    replaces: false,
+                    link_to: None,
                 }
             ),
             "Writes src/main.rs in the project folder /Users/me/dev/app."
@@ -174,7 +201,8 @@ mod tests {
                 "src/main.rs",
                 WriteLanding::Project {
                     root,
-                    replaces: true
+                    replaces: true,
+                    link_to: None,
                 }
             ),
             "Replaces src/main.rs in the project folder /Users/me/dev/app; its current content is \
@@ -212,6 +240,7 @@ mod edit_card_tests {
     fn the_edit_card_names_the_file_the_folder_and_the_line_and_shows_both_strings() {
         let card = edit_card(
             "src/lib.rs",
+            None,
             Path::new("/work/alpaca"),
             2,
             1,
@@ -228,7 +257,7 @@ mod edit_card_tests {
 
     #[test]
     fn several_replacements_read_in_the_plural() {
-        let card = edit_card("a.txt", Path::new("/p"), 4, 3, "a", "b");
+        let card = edit_card("a.txt", None, Path::new("/p"), 4, 3, "a", "b");
         assert!(
             card.starts_with(
                 "Edits a.txt in the project folder /p: 3 replacements, the first at line 4."
@@ -243,6 +272,7 @@ mod edit_card_tests {
     fn hidden_characters_in_the_path_and_both_strings_are_escaped_under_one_notice() {
         let card = edit_card(
             "src/a\u{200B}.rs",
+            None,
             Path::new("/p"),
             1,
             1,
@@ -273,7 +303,7 @@ mod edit_card_tests {
     #[test]
     fn a_string_over_the_budget_is_cut_with_the_cut_notice() {
         let long = "a".repeat(EDIT_PREVIEW_BYTES + 500);
-        let card = edit_card("a.txt", Path::new("/p"), 1, 1, &long, "b");
+        let card = edit_card("a.txt", None, Path::new("/p"), 1, 1, &long, "b");
         let lines: Vec<&str> = card.lines().collect();
         assert_eq!(lines[1], "Replace:");
         assert_eq!(lines[2], "a".repeat(EDIT_PREVIEW_BYTES));
