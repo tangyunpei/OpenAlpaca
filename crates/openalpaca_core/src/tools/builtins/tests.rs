@@ -430,6 +430,99 @@ fn artifact_read_comes_with_the_read_result_capability_and_is_read_only() {
     assert_eq!(annotations.destructive_hint, Some(false));
 }
 
+// --- ST-16: the read tools Stage 2 adds never ask ---
+
+/// ST-16 (storage design §12): `file_list` and `artifact_read` are read-only
+/// and never raise an approval card. They are outside the confirmation set
+/// the sandbox derives from the registered annotations, and run through the
+/// sandbox with a broker and an `unattended` policy — under which a tool that
+/// needed approval is refused at once — they run, and nothing waits on the
+/// broker or reaches the bus as a confirmation request.
+#[tokio::test]
+async fn file_list_and_artifact_read_run_with_no_approval_card() {
+    use crate::bus::EventBus;
+    use crate::security::capabilities::Allowlist;
+    use crate::security::confirmation::ConfirmationBroker;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy, effective_confirmation_set};
+    use crate::tools::ToolRegistry;
+
+    let gp = crate::test_util::GuardedProject::new();
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&db_dir.path().join("test.db")).unwrap();
+    let registry = ToolRegistry::default();
+    for tool in builtin_tools(Some(db), None, None) {
+        registry.register(tool).unwrap();
+    }
+    let registry = Arc::new(registry);
+    let bus = EventBus::new(64);
+    let mut rx = bus.subscribe();
+    let mut sandbox = SandboxManager::with_defaults(registry.clone(), bus);
+    let broker = Arc::new(ConfirmationBroker::new());
+    sandbox.set_confirmation_broker(broker.clone());
+    let policy = SandboxPolicy {
+        agent_id: "explore_agent::a1".to_string(),
+        allowed_capabilities: Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 30,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: Some(300),
+        auto_approve: false,
+        unattended: true,
+    };
+
+    let set = effective_confirmation_set(&policy, &registry);
+    for name in ["file_list", "artifact_read"] {
+        assert!(!set.contains(&name.to_string()), "{name} never asks: {set:?}");
+    }
+
+    std::fs::write(gp.root.join("README.md"), "hi").unwrap();
+    let listed = sandbox
+        .execute_tool(
+            &openalpaca_llm::ToolCall {
+                id: "tu-list".to_string(),
+                name: "file_list".to_string(),
+                arguments: serde_json::json!({"path": "."}),
+            },
+            &policy,
+            &gp.ctx(),
+        )
+        .await
+        .expect("file_list runs on an unattended turn");
+    assert!(listed.contains("README.md  2 bytes"), "{listed}");
+
+    let refused = sandbox
+        .execute_tool(
+            &openalpaca_llm::ToolCall {
+                id: "tu-read".to_string(),
+                name: "artifact_read".to_string(),
+                arguments: serde_json::json!({"artifact_id": "no-such-id"}),
+            },
+            &policy,
+            &gp.ctx(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused.contains("no artifact 'no-such-id' of yours"),
+        "the tool ran and answered, not the approval gate: {refused}"
+    );
+    assert!(!refused.contains("needs your approval"), "{refused}");
+
+    assert_eq!(broker.pending_count(), 0, "nothing was raised");
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                crate::events::SystemEvent::ToolConfirmationRequested { .. }
+            ),
+            "no card was raised: {event:?}"
+        );
+    }
+}
+
 /// ST-22 / R49: `file_edit` is a builtin, asks exactly as `file_write` does
 /// (destructive, local), is not strict-marked (`replace_all` is optional —
 /// interfaces §7.4), and the sanitizer's `../` rule does not read its strings
