@@ -610,14 +610,17 @@ async fn test_handle_event_malformed_lane_override_falls_back() {
 
 /// A handler that opens a **new** session on the lane while the turn is still
 /// running — what `POST /v1/sessions` (the GUI's "New chat") does to a lane
-/// whose agentic loop is mid-flight.
+/// whose agentic loop is mid-flight — and records the session the request
+/// carried to it.
 struct NewChatMidTurnHandler {
     db: openalpaca_storage::Database,
+    carried: std::sync::Mutex<Option<Option<String>>>,
 }
 
 #[async_trait]
 impl MessageHandler for NewChatMidTurnHandler {
     async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+        *self.carried.lock().unwrap() = Some(request.session_id.clone());
         openalpaca_storage::ConversationRepository::new(&self.db)
             .create_session(&request.lane_key, "gui", None, Some("New chat"))
             .map_err(|e| e.to_string())?;
@@ -633,10 +636,14 @@ impl MessageHandler for NewChatMidTurnHandler {
 async fn test_a_new_chat_mid_turn_keeps_the_turn_in_one_session() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let handler = Arc::new(NewChatMidTurnHandler {
+        db: db.clone(),
+        carried: std::sync::Mutex::new(None),
+    });
     let gw = Gateway::new(
         Arc::new(SharedContext::new()),
         Arc::new(LaneManager::new()),
-        Arc::new(NewChatMidTurnHandler { db: db.clone() }),
+        handler.clone(),
         EventBus::default(),
         Some(db.clone()),
     );
@@ -669,6 +676,14 @@ async fn test_a_new_chat_mid_turn_keeps_the_turn_in_one_session() {
         messages[1].session_id.as_deref(),
         Some(asked_in.as_str()),
         "the answer must land in the session the question was asked in"
+    );
+    // R-T27's gateway half (residual X11): the handler is told that same
+    // session, so the turn's tools act in its conversation and not in the
+    // one the "New chat" made active.
+    assert_eq!(
+        handler.carried.lock().unwrap().clone(),
+        Some(Some(asked_in.clone())),
+        "the request carries the session the turn was persisted in"
     );
 
     // And that session is the one the turn started in — the "New chat" the
