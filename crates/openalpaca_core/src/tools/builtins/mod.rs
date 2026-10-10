@@ -1,3 +1,4 @@
+mod approval_preview;
 mod artifact_write;
 mod file_ops;
 mod helpers;

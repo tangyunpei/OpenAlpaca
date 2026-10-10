@@ -1,10 +1,12 @@
 use crate::tools::platform::{RunFailure, run_bounded, shell_command};
-use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
 
 use super::annotations_for_builtin;
+use super::approval_preview::command_card;
+use crate::tools::working_folder::working_folder;
 
 struct ShellExecuteTool;
 
@@ -70,6 +72,19 @@ impl BuiltInTool for ShellExecuteTool {
                 }
             ))
         }
+    }
+
+    /// R34 (storage design §12, ST-14): the card names the folder the
+    /// command starts in, and that the folder does not confine it. A call
+    /// with no working folder keeps the ordinary card for now: the tool does
+    /// not act in its working folder yet (design §16, step 3), so there is
+    /// nothing to refuse it over.
+    async fn confirmation_preview(
+        &self,
+        _arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<Option<String>, String> {
+        Ok(working_folder(ctx).ok().map(|folder| command_card(&folder)))
     }
 }
 
@@ -190,5 +205,154 @@ mod tests {
             wait_until_gone(pid, GONE_WITHIN).await,
             "the background sleep {pid} outlived the sandbox's timeout"
         );
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use crate::bus::EventBus;
+    use crate::events::SystemEvent;
+    use crate::security::capabilities::Allowlist;
+    use crate::security::confirmation::{ConfirmationBroker, ConfirmationResponse};
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::test_util::GuardedProject;
+    use crate::tools::ToolRegistry;
+    use openalpaca_llm::ToolCall;
+
+    fn registry() -> ToolRegistry {
+        let registry = ToolRegistry::default();
+        registry.register(shell_execute_tool()).unwrap();
+        registry
+    }
+
+    fn ls() -> serde_json::Value {
+        serde_json::json!({"command": "ls"})
+    }
+
+    fn project_card(root: &std::path::Path) -> String {
+        format!(
+            "Runs in the project folder {}. The command itself can reach files outside it.",
+            root.display()
+        )
+    }
+
+    /// R34, ST-14: the card names the folder the command starts in.
+    #[tokio::test]
+    async fn a_shell_card_names_the_project_folder_the_command_starts_in() {
+        let gp = GuardedProject::new();
+
+        let preview = registry()
+            .confirmation_preview("shell_execute", &ls(), &gp.ctx())
+            .await;
+
+        assert_eq!(preview, Ok(Some(project_card(&gp.root))));
+    }
+
+    #[tokio::test]
+    async fn a_shell_card_with_no_project_names_the_conversations_scratch_folder() {
+        let gp = GuardedProject::new();
+
+        let preview = registry()
+            .confirmation_preview("shell_execute", &ls(), &gp.scratch_ctx())
+            .await;
+
+        let dir = gp.home_root().join("scratch").join("conv-test");
+        assert_eq!(
+            preview,
+            Ok(Some(format!(
+                "Runs in this conversation's scratch folder {}. The command itself can reach \
+                 files outside it.",
+                dir.display()
+            )))
+        );
+        assert!(!dir.exists(), "the card makes no folder");
+    }
+
+    /// Until the tool acts in its working folder (storage design §16 step 3),
+    /// a call with none keeps today's ordinary card rather than a refusal.
+    #[tokio::test]
+    async fn a_shell_call_with_no_working_folder_gets_the_ordinary_card() {
+        let gp = GuardedProject::new();
+
+        let neither = registry()
+            .confirmation_preview("shell_execute", &ls(), &ToolContext::default())
+            .await;
+        assert_eq!(neither, Ok(None));
+
+        std::fs::remove_dir_all(&gp.root).unwrap();
+        let missing = registry()
+            .confirmation_preview("shell_execute", &ls(), &gp.ctx())
+            .await;
+        assert_eq!(missing, Ok(None));
+    }
+
+    /// The card's text reaches the event every client draws the card from, and
+    /// a denied command never runs. The command would only touch a file in the
+    /// temp project; denied, nothing is spawned at all.
+    #[tokio::test]
+    async fn the_shell_card_reaches_the_confirmation_event_and_a_denied_command_never_runs() {
+        let gp = GuardedProject::new();
+        let bus = EventBus::default();
+        let mut events = bus.subscribe();
+        let mut sandbox = SandboxManager::with_defaults(Arc::new(registry()), bus);
+        let broker = Arc::new(ConfirmationBroker::new());
+        sandbox.set_confirmation_broker(broker.clone());
+        let policy = SandboxPolicy {
+            agent_id: "general_agent".to_string(),
+            allowed_capabilities: Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 60,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: Some(5),
+            auto_approve: false,
+            unattended: false,
+        };
+        let marker = gp.root.join("ran.txt");
+        let call = ToolCall {
+            id: "tc_1".to_string(),
+            name: "shell_execute".to_string(),
+            arguments: serde_json::json!({"command": format!("touch {}", marker.display())}),
+        };
+        let responder = tokio::spawn({
+            let broker = broker.clone();
+            async move {
+                loop {
+                    match events.recv().await {
+                        Ok(SystemEvent::ToolConfirmationRequested {
+                            request_id,
+                            preview,
+                            ..
+                        }) => {
+                            broker
+                                .respond(
+                                    &request_id,
+                                    ConfirmationResponse {
+                                        approved: false,
+                                        approval_scope: None,
+                                    },
+                                )
+                                .unwrap();
+                            return preview;
+                        }
+                        Ok(_) => continue,
+                        Err(e) => panic!("the bus closed before a card was raised: {e}"),
+                    }
+                }
+            }
+        });
+
+        let result = sandbox.execute_tool(&call, &policy, &gp.ctx()).await;
+
+        // The denial first: a call refused before any card (capability,
+        // sanitizer) publishes no event, and awaiting the responder then would
+        // wait for ever — this panics cleanly instead, aborting the task.
+        let refusal = result.unwrap_err();
+        assert!(refusal.contains("denied by user"), "the person said no: {refusal}");
+        assert_eq!(responder.await.unwrap(), Some(project_card(&gp.root)));
+        assert!(!marker.exists(), "a denied command never runs");
     }
 }
