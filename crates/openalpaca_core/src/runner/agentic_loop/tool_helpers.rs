@@ -67,7 +67,9 @@ pub(super) fn format_tool_error(msg: &str) -> String {
 /// Tool-specific recovery suggestions for common error patterns.
 fn tool_recovery_hint(tool_name: &str, error: &str) -> Option<&'static str> {
     if tool_name == "file_read" && (error.contains("not found") || error.contains("No such file")) {
-        return Some("Hint: verify the path exists using shell_execute with `ls`.");
+        return Some(
+            "Hint: paths are relative to the working folder; file_list shows what a folder holds.",
+        );
     }
     if tool_name == "file_write" && error.contains("Permission denied") {
         return Some("Hint: check file permissions or try a different output path.");

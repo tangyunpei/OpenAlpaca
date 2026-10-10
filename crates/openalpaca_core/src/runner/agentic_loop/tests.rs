@@ -875,7 +875,15 @@ async fn test_max_tokens_retries_exhausted_returns_truncated() {
 fn test_tool_error_hint_file_read() {
     let result = format_tool_error_with_hint("file_read", "not found: /foo/bar.txt");
     assert!(result.starts_with("[tool_error] not found:"));
-    assert!(result.contains("Hint: verify the path exists"));
+    assert!(
+        result.contains(
+            "Hint: paths are relative to the working folder; file_list shows what a folder holds."
+        ),
+        "{result}"
+    );
+    // ST-14: every shell command asks, so a hint must not send the model there
+    // for a question file_list answers without a card.
+    assert!(!result.contains("shell_execute"), "{result}");
 }
 
 #[test]
