@@ -5,7 +5,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::store::{
-    FILE_NAME_SLUG_BYTES, StoreScope, is_the_home_root, kind_for_file_name, slugify,
+    ContentKind, FILE_NAME_SLUG_BYTES, StoreScope, is_the_home_root, kind_for_file_name, slugify,
 };
 use openalpaca_storage::{ArtifactKind, Database};
 use sha2::{Digest, Sha256};
@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use super::annotations_for_builtin;
 use super::artifact_write::{ToolArtifact, put_tool_artifact, scope_from_context, split_name};
+use super::approval_preview::{WriteLanding, write_card};
 use super::helpers::{
     FolderRules, MAX_FILE_READ_SIZE, StoreAccess, is_identity_path, is_soul_path,
     is_store_owned_path, is_store_owned_resolved, is_user_path, resolve_workspace_path,
@@ -249,6 +250,18 @@ impl BuiltInTool for FileWriteTool {
     ) -> Result<String, String> {
         self.write(arguments, ctx).await
     }
+
+    /// R34: the card says where the file lands — a by-product in which
+    /// artifact store, or the plain write in the daemon's starting folder.
+    /// It never refuses a call itself yet: the write's own refusals still
+    /// come after the click.
+    async fn confirmation_preview(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<Option<String>, String> {
+        Ok(self.landing_card(arguments, ctx))
+    }
 }
 
 impl FileWriteTool {
@@ -281,8 +294,7 @@ impl FileWriteTool {
         // A path with no file name at its end ('', '.', 'reports/', a blank
         // one) names a directory, not a file: the plain write could not write
         // it, and an artifact would be named for nothing (`artifact.bin`).
-        let last = path.rsplit(['/', '\\']).next().unwrap_or_default().trim();
-        if last.is_empty() || last == "." {
+        if !names_a_file(path) {
             return Err(format!(
                 "Path '{path}' names no file. Give a file name, e.g. 'reports/summary.md'."
             ));
@@ -332,7 +344,7 @@ impl FileWriteTool {
         // would land owned by no content kind. Every other write is an
         // artifact, on `artifact_write`'s own store path.
         let scope = scope_from_context(ctx);
-        if !matches!(scope, StoreScope::Project(_)) || is_the_home_root(&self.workspace_root) {
+        if self.saves_as_artifact(&scope) {
             return self.save_as_artifact(path, content, ctx, &scope);
         }
 
@@ -371,6 +383,38 @@ impl FileWriteTool {
             content.len(),
             path
         ))
+    }
+
+    /// Round G's routing (FW-1), one predicate for the write and its card:
+    /// the plain write is taken only on a turn that carries a project and
+    /// from a workspace root that is not the home store; every other write
+    /// is saved as an artifact.
+    fn saves_as_artifact(&self, scope: &StoreScope) -> bool {
+        !matches!(scope, StoreScope::Project(_)) || is_the_home_root(&self.workspace_root)
+    }
+
+    /// R34: where this write would land, for its card — [`Self::write`]'s own
+    /// routing. `None` (today's ordinary card) for a call the write refuses
+    /// on its face — no path, an absolute one, a `..`, one that names no
+    /// file — and when the store cannot be named.
+    fn landing_card(&self, arguments: &serde_json::Value, ctx: &ToolContext) -> Option<String> {
+        let path = arguments.get("path").and_then(|v| v.as_str())?;
+        if validate_workspace_path(path).is_err() || !names_a_file(path) {
+            return None;
+        }
+        let scope = scope_from_context(ctx);
+        if !self.saves_as_artifact(&scope) {
+            return Some(write_card(
+                path,
+                WriteLanding::StartupFolder {
+                    dir: &self.workspace_root,
+                },
+            ));
+        }
+        let store = openalpaca_storage::store::store_root(&scope)
+            .ok()?
+            .join(ContentKind::Artifacts.dir_name());
+        Some(write_card(path, WriteLanding::ByProduct { store: &store }))
     }
 
     /// G2: the write is an artifact — in the project's store when the turn
@@ -451,6 +495,13 @@ fn read_back_path(storage_path: &str, workspace_root: &Path) -> Option<String> {
         })
         .collect::<Option<Vec<_>>>()?;
     (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// Whether `path` ends in a file name. '', '.', 'reports/' or a blank last
+/// component name a directory, which `file_write` refuses (G2).
+fn names_a_file(path: &str) -> bool {
+    let last = path.rsplit(['/', '\\']).next().unwrap_or_default().trim();
+    !(last.is_empty() || last == ".")
 }
 
 /// The artifact name `file_write` saves `path` under (G2): the path itself,
@@ -1354,6 +1405,130 @@ mod tests {
 
     fn pasta(content: &str) -> serde_json::Value {
         serde_json::json!({"path": PASTA, "content": content})
+    }
+
+    // ── R34: the card says where the write lands ──────────────────────
+
+    /// What the card says about `args`, or `None` for the ordinary card. The
+    /// write's card never refuses a call yet.
+    async fn card(
+        tool: &FileWriteTool,
+        args: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Option<String> {
+        tool.confirmation_preview(args, ctx)
+            .await
+            .expect("the write card refuses nothing yet")
+    }
+
+    fn by_product(store: &Path) -> String {
+        format!(
+            "Saves {PASTA} as a by-product in {}, OpenAlpaca's artifact store — not in a folder \
+             of yours.",
+            store.display()
+        )
+    }
+
+    #[tokio::test]
+    async fn a_write_card_with_no_project_names_the_home_artifact_store_and_creates_nothing() {
+        let st = Store::new();
+        let home = st.home.root();
+        let tool = st.tool_at(st.work.path());
+
+        let shown = card(&tool, &pasta("# Pasta night\n"), &st.ctx(None, None)).await;
+
+        assert_eq!(shown, Some(by_product(&home.join("artifacts"))));
+        assert!(!home.join("artifacts").exists(), "the card creates nothing");
+        assert!(st.artifacts().is_empty(), "the card writes no row");
+    }
+
+    /// The packaged app: the daemon runs in the home store, so a project turn's
+    /// write is saved in the project's own artifact store — and the card says so.
+    #[tokio::test]
+    async fn a_write_card_on_a_project_turn_from_the_home_store_names_the_projects_artifact_store() {
+        let st = Store::new();
+        let project = st.project_root();
+        let tool = st.tool_at(&st.home.root());
+        let store = openalpaca_storage::store::store_root(&StoreScope::Project(project.clone()))
+            .unwrap()
+            .join("artifacts");
+
+        let shown = card(&tool, &pasta("# Pasta night\n"), &st.ctx(Some(&project), None)).await;
+
+        assert_eq!(shown, Some(by_product(&store)));
+    }
+
+    /// Round G's exception: a project turn on a daemon started by hand in a
+    /// folder writes the plain file there — the card names that folder, and
+    /// the write lands where the card said.
+    #[tokio::test]
+    async fn a_write_card_on_a_project_turn_from_another_startup_folder_names_that_folder() {
+        let st = Store::new();
+        let project = st.project_root();
+        let work = st.work.path().to_path_buf();
+        let tool = st.tool_at(&work);
+        let ctx = st.ctx(Some(&project), None);
+
+        let shown = card(&tool, &pasta("# Pasta night\n"), &ctx).await;
+
+        assert_eq!(
+            shown,
+            Some(format!(
+                "Writes {PASTA} in {}, the folder the daemon was started in.",
+                work.display()
+            ))
+        );
+        tool.write(&pasta("# Pasta night\n"), &ctx).await.unwrap();
+        assert!(work.join(PASTA).exists(), "the write lands where the card said");
+    }
+
+    #[tokio::test]
+    async fn a_write_card_shows_a_hidden_character_in_the_path_escaped_with_the_notice() {
+        let st = Store::new();
+        let tool = st.tool_at(st.work.path());
+        let args = serde_json::json!({"path": "notes/\u{202e}dm\u{200b}.txt", "content": "x"});
+
+        let shown = card(&tool, &args, &st.ctx(None, None)).await;
+
+        assert_eq!(
+            shown,
+            Some(format!(
+                "Saves notes/<U+202E>dm<U+200B>.txt as a by-product in {}, OpenAlpaca's artifact \
+                 store — not in a folder of yours.\n\
+                 Note: this request contains 2 hidden characters, shown as <U+…>.",
+                st.home.root().join("artifacts").display()
+            ))
+        );
+    }
+
+    /// A project root no folder under `projects/` records names no store: the
+    /// ordinary card, and the write's own refusal after the click, as today.
+    #[tokio::test]
+    async fn a_write_card_whose_project_store_cannot_be_named_is_the_ordinary_card() {
+        let st = Store::new();
+        let stranger = tempfile::tempdir().unwrap();
+        let root = stranger.path().canonicalize().unwrap();
+        let tool = st.tool_at(&st.home.root());
+
+        assert_eq!(card(&tool, &pasta("x"), &st.ctx(Some(&root), None)).await, None);
+    }
+
+    /// A call the write refuses on its face gets no landing on its card.
+    #[tokio::test]
+    async fn a_write_card_for_a_path_the_write_refuses_on_its_face_is_the_ordinary_card() {
+        let st = Store::new();
+        let tool = st.tool_at(st.work.path());
+        let ctx = st.ctx(None, None);
+
+        for path in ["/etc/hosts", "../outside.md", "reports/", "."] {
+            let args = serde_json::json!({"path": path, "content": "x"});
+            assert_eq!(card(&tool, &args, &ctx).await, None, "{path}");
+        }
+        assert_eq!(
+            card(&tool, &serde_json::json!({"content": "x"}), &ctx).await,
+            None,
+            "no path"
+        );
     }
 
     /// The re-test's defect 1: with no project on the turn the file is an
