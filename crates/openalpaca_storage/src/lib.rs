@@ -26,8 +26,8 @@ pub(crate) mod test_util;
 
 pub use artifacts::{
     ArtifactDiff, ArtifactError, ArtifactQuery, ArtifactRecord, ArtifactStore, ArtifactVersionRow,
-    NewArtifact, PurgeCounts, PurgeSession, RebaseCounts, USER_EDIT_NOTE, VerifyReport,
-    WorkspaceRows,
+    NewArtifact, NewProjectFile, PurgeCounts, PurgeSession, RebaseCounts, USER_EDIT_NOTE,
+    VerifyReport, WorkspaceRows,
 };
 pub use database::Database;
 pub use models::EventLog;

@@ -182,8 +182,8 @@ use crate::models::{ArtifactKind, ArtifactOrigin};
 use crate::sql::escape_like;
 use crate::store::{
     ContentKind, StoreScope, artifact_extension, artifact_file_name, confine_to_root, content_dir,
-    create_below, leading_sequence, loose_dir, project_folder_gone, project_root_of, relative_to,
-    run_dir, store_root, version_file_path,
+    create_below, kind_for_file_name, leading_sequence, loose_dir, project_folder_gone,
+    project_root_of, relative_to, run_dir, store_root, version_file_path,
 };
 
 /// `[execution.artifacts] max_versions_per_artifact` (plan §4.6). The config key
@@ -392,6 +392,23 @@ impl<'a> NewArtifact<'a> {
             max_versions: None,
         }
     }
+}
+
+/// One result file an agent wrote into its project (ST-12, R35) — the file
+/// is already on disk; this is what its pointer row records.
+#[derive(Debug, Clone)]
+pub struct NewProjectFile<'a> {
+    pub owner_id: &'a str,
+    /// The project's canonical root (`store::project_root_of`'s string).
+    pub project_root: &'a str,
+    /// The file relative to `project_root`, `/`-separated — `store::relative_to`
+    /// of the **resolved** path, so a write through a link inside the root
+    /// records where it landed.
+    pub rel_path: &'a str,
+    /// The bytes now in the file; hashed here, before the connection is taken.
+    pub content: &'a [u8],
+    pub task_id: Option<&'a str>,
+    pub agent_id: Option<&'a str>,
 }
 
 /// One `file_assets` row as the artifact surface reads it. Faithful to the
@@ -1142,6 +1159,123 @@ impl<'a> ArtifactStore<'a> {
                 reservation.keep();
             }
             Ok((record, existing.is_none()))
+        })
+    }
+
+    /// R35: record a result file an agent wrote into its project — the pointer
+    /// row keyed on (`project_root`, `in_project = 1`, `rel_path`), inserted or
+    /// updated in one transaction. Returns the row and `true` when it inserted.
+    ///
+    /// Never calls [`Self::put`], whose protocol would move the user's file
+    /// into `.versions/` and reclaim an empty file at the target name; writes
+    /// no `artifact_versions` row; touches no file. `origin` is `produced` and
+    /// `status` `ready` on insert **and** on update — the column default
+    /// `upload` is what the orphan sweep deletes, and `uploaded` is what the
+    /// extractor reads. A row another owner recorded at the same address is
+    /// refused, never updated.
+    pub fn record_project_file(&self, file: NewProjectFile<'_>) -> Result<(ArtifactRecord, bool)> {
+        let root = Path::new(file.project_root);
+        if !root.is_absolute() {
+            bail!(
+                "a result file's project root must be an absolute path, got {}",
+                file.project_root
+            );
+        }
+        let plain = !file.rel_path.is_empty()
+            && Path::new(file.rel_path)
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !plain {
+            bail!(
+                "a result file's path must be relative and plain, got '{}'",
+                file.rel_path
+            );
+        }
+        let storage_path = root.join(file.rel_path);
+        let sha256 = sha256_hex(file.content);
+        let size_bytes = file.content.len() as i64;
+        let kind = kind_for_file_name(file.rel_path).unwrap_or(ArtifactKind::Code);
+        // The stamp of the bytes standing there now, so R37's read-time check
+        // hashes nothing until the file changes.
+        let metadata_json = metadata_with_stamp(None, stamp_at(&storage_path));
+
+        self.db.with_connection(|conn| {
+            use rusqlite::OptionalExtension;
+            let tx = conn.unchecked_transaction()?;
+            let existing: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT id, owner_id FROM file_assets
+                      WHERE COALESCE(project_root, '') = ?1 AND in_project = 1 AND rel_path = ?2",
+                    rusqlite::params![file.project_root, file.rel_path],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let inserted = existing.is_none();
+            let id = match existing {
+                Some((id, owner)) if owner != file.owner_id => bail!(
+                    "the result file {id} at {}/{} belongs to another owner",
+                    file.project_root,
+                    file.rel_path
+                ),
+                Some((id, _)) => {
+                    tx.execute(
+                        "UPDATE file_assets SET
+                            sha256 = ?1, size_bytes = ?2, storage_path = ?3, filename = ?4,
+                            kind = ?5, mime_type = ?6, task_id = ?7, agent_id = ?8,
+                            metadata_json = ?9, origin = ?10, status = ?11,
+                            missing_since = NULL, updated_at = datetime('now')
+                          WHERE id = ?12",
+                        rusqlite::params![
+                            sha256,
+                            size_bytes,
+                            storage_path.to_string_lossy(),
+                            file.rel_path,
+                            kind.as_str(),
+                            default_mime(kind),
+                            file.task_id,
+                            file.agent_id,
+                            metadata_json,
+                            ArtifactOrigin::Produced.as_str(),
+                            FileAssetStatus::Ready.as_str(),
+                            id,
+                        ],
+                    )?;
+                    id
+                }
+                None => {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    tx.execute(
+                        "INSERT INTO file_assets
+                            (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path,
+                             status, metadata_json, origin, kind, task_id, agent_id,
+                             project_root, rel_path, in_project, version, version_count, pinned)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                                 ?15, 1, 1, 0, 0)",
+                        rusqlite::params![
+                            id,
+                            file.owner_id,
+                            sha256,
+                            file.rel_path,
+                            default_mime(kind),
+                            size_bytes,
+                            storage_path.to_string_lossy(),
+                            FileAssetStatus::Ready.as_str(),
+                            metadata_json,
+                            ArtifactOrigin::Produced.as_str(),
+                            kind.as_str(),
+                            file.task_id,
+                            file.agent_id,
+                            file.project_root,
+                            file.rel_path,
+                        ],
+                    )?;
+                    id
+                }
+            };
+            let record = load_by_id(&tx, &id)?
+                .with_context(|| format!("result file {id} vanished inside its own transaction"))?;
+            tx.commit()?;
+            Ok((record, inserted))
         })
     }
 

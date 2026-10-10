@@ -63,6 +63,34 @@ impl Fixture {
             .join("artifacts")
     }
 
+    /// A result file the user has: real bytes in the project folder, and its
+    /// pointer row written by R35's method — never a hand `INSERT` (R39).
+    /// Returns the row, the file, and its modification time as written.
+    fn result_file(
+        &self,
+        rel: &str,
+        bytes: &[u8],
+    ) -> (ArtifactRecord, PathBuf, std::time::SystemTime) {
+        let path = self.project_root().join(rel);
+        fs::create_dir_all(path.parent().expect("a file has a parent")).unwrap();
+        fs::write(&path, bytes).unwrap();
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        let root = self.project_root().to_string_lossy().into_owned();
+        let (record, inserted) = self
+            .store()
+            .record_project_file(NewProjectFile {
+                owner_id: OWNER,
+                project_root: &root,
+                rel_path: rel,
+                content: bytes,
+                task_id: None,
+                agent_id: None,
+            })
+            .unwrap();
+        assert!(inserted, "{rel} is a new result file");
+        (record, path, mtime)
+    }
+
     /// A `file_assets` row written by neither `ArtifactStore` nor this owner's
     /// produced history — an **upload**, the table's other writer — addressing
     /// `rel` in this project's store. `dir_rows` never sees it (it filters on
@@ -961,6 +989,24 @@ fn assert_no_tmp_leftovers(dir: &Path) {
         "tmp leftovers in {}: {leftovers:?}",
         dir.display()
     );
+}
+
+/// R39: the user's file is exactly as they had it — its bytes, and its
+/// modification time, which any write (even of the same bytes) would move.
+fn assert_untouched(path: &Path, bytes: &[u8], mtime: std::time::SystemTime) {
+    assert_eq!(fs::read(path).unwrap(), bytes, "the user's bytes");
+    assert_eq!(
+        fs::metadata(path).unwrap().modified().unwrap(),
+        mtime,
+        "the user's modification time"
+    );
+}
+
+fn file_asset_count(f: &Fixture) -> i64 {
+    f.db.with_connection(|conn| {
+        Ok(conn.query_row("SELECT COUNT(*) FROM file_assets", [], |row| row.get(0))?)
+    })
+    .unwrap()
 }
 
 /// Runs one crash injection against an artifact that already has v1, and
@@ -2870,4 +2916,222 @@ fn a_by_product_is_outside_the_project_and_opens() {
     assert_eq!(ids(Some(false)), vec![by_product.id.clone()]);
     assert!(ids(Some(true)).is_empty(), "no result file yet");
     assert_eq!(ids(None), vec![by_product.id.clone()], "absent: both");
+}
+
+// ============================================================================
+// R35 — the pointer row (ST-12)
+// ============================================================================
+
+/// The row R35 writes: produced, ready, in the project, the real file's
+/// address, no version row, nothing under `.versions/` or the project's
+/// `artifacts/`, and the file untouched.
+#[test]
+fn recording_a_result_file_writes_its_pointer_row_and_no_version() {
+    let f = Fixture::new();
+    f.task("3f2a1b7c-0000-4000-8000-000000000000", "Build the parser");
+    let path = f.project_root().join("src").join("main.rs");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"fn main() {}\n").unwrap();
+    let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+    let root = f.project_root().to_string_lossy().into_owned();
+
+    let (row, inserted) = f
+        .store()
+        .record_project_file(NewProjectFile {
+            owner_id: OWNER,
+            project_root: &root,
+            rel_path: "src/main.rs",
+            content: b"fn main() {}\n",
+            task_id: Some("3f2a1b7c-0000-4000-8000-000000000000"),
+            agent_id: Some("code_agent::a1"),
+        })
+        .unwrap();
+
+    assert!(inserted);
+    assert!(row.in_project);
+    assert_eq!(row.origin, ArtifactOrigin::Produced);
+    assert_eq!(row.project_root.as_deref(), Some(root.as_str()));
+    assert_eq!(row.rel_path.as_deref(), Some("src/main.rs"));
+    assert_eq!(row.name, "src/main.rs");
+    assert_eq!(row.storage_path, path.to_string_lossy());
+    assert_eq!(row.kind, Some(ArtifactKind::Code));
+    assert_eq!(row.mime_type, "text/plain");
+    assert_eq!(row.sha256, sha256_hex(b"fn main() {}\n"));
+    assert_eq!(row.size_bytes, 13);
+    assert_eq!(
+        row.task_id.as_deref(),
+        Some("3f2a1b7c-0000-4000-8000-000000000000")
+    );
+    assert_eq!(row.agent_id.as_deref(), Some("code_agent::a1"));
+    assert_eq!((row.version, row.version_count, row.pinned), (1, 0, false));
+    assert!(row.summary.is_none());
+    assert!(row.metadata().is_none(), "only the store's own head stamp");
+    let asset = FileAssetRepository::new(&f.db)
+        .get_by_id(&row.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        asset.status.as_str(),
+        "ready",
+        "the extractor never reads it"
+    );
+    assert!(
+        f.store().versions(&row.id).unwrap().is_empty(),
+        "no artifact_versions row"
+    );
+    assert!(
+        !f.artifacts_root().exists(),
+        "nothing is written under the project's artifacts/"
+    );
+    assert!(!f.project_root().join("src").join(".versions").exists());
+    assert_untouched(&path, b"fn main() {}\n", mtime);
+}
+
+/// R39: a second `file_write` of a path updates its own pointer row — never a
+/// by-product that shares its address (fails when the lookup ignores
+/// `in_project`).
+#[test]
+fn a_second_file_write_of_a_path_updates_only_its_own_row() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "notes", b"a draft\n");
+    new.created = at(1);
+    let (by_product, _) = f.store().put(new).unwrap();
+    let rel = by_product.rel_path.clone().unwrap();
+    assert_eq!(rel, "loose/2026-09-01/01-notes.md");
+
+    let (first, path, _) = f.result_file(&rel, b"first\n");
+    fs::write(&path, b"second, longer\n").unwrap();
+    let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+    let root = f.project_root().to_string_lossy().into_owned();
+    let (second, inserted) = f
+        .store()
+        .record_project_file(NewProjectFile {
+            owner_id: OWNER,
+            project_root: &root,
+            rel_path: &rel,
+            content: b"second, longer\n",
+            task_id: None,
+            agent_id: None,
+        })
+        .unwrap();
+
+    assert!(!inserted, "the second write updates");
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.sha256, sha256_hex(b"second, longer\n"));
+    assert_eq!(second.size_bytes, 15);
+    assert_eq!(
+        (second.version, second.version_count),
+        (1, 0),
+        "no version: a result file's history is git's (ST-12)"
+    );
+    let untouched = f.store().get(&by_product.id, OWNER).unwrap().unwrap();
+    assert!(!untouched.in_project);
+    assert_eq!(untouched.storage_path, by_product.storage_path);
+    assert_eq!(untouched.sha256, by_product.sha256);
+    assert_eq!(fs::read(&by_product.storage_path).unwrap(), b"a draft\n");
+    assert_eq!(file_asset_count(&f), 2);
+    assert_untouched(&path, b"second, longer\n", mtime);
+}
+
+/// R39: a result file whose path equals an upload's address is a row of its
+/// own, and the upload's row is left alone (fails when the index or the
+/// lookup ignores `in_project`).
+#[test]
+fn a_pointer_path_equal_to_an_uploads_address_leaves_the_upload_row_alone() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let upload = crate::UploadStore::new(&f.db)
+        .put(crate::NewUpload {
+            owner_id: OWNER,
+            filename: "report.txt",
+            mime_type: "text/plain",
+            data: b"uploaded\n",
+            scope: &scope,
+            created: at(1),
+        })
+        .unwrap()
+        .asset;
+    let upload_row = f.store().get(&upload.id, OWNER).unwrap().unwrap();
+    let rel = upload_row.rel_path.clone().unwrap();
+    assert_eq!(rel, "2026-09-01/01-report.txt");
+
+    let (result, path, mtime) = f.result_file(&rel, b"the user's report\n");
+
+    assert_ne!(result.id, upload.id);
+    assert!(result.in_project);
+    let after = f.store().get(&upload.id, OWNER).unwrap().unwrap();
+    assert_eq!(after.origin, ArtifactOrigin::Upload);
+    assert!(!after.in_project);
+    assert_eq!(after.storage_path, upload_row.storage_path);
+    assert_eq!(after.sha256, upload_row.sha256);
+    assert_eq!(fs::read(&upload_row.storage_path).unwrap(), b"uploaded\n");
+    assert_untouched(&path, b"the user's report\n", mtime);
+}
+
+/// A pointer row another owner recorded is never updated by this one.
+#[test]
+fn a_result_file_another_owner_recorded_is_never_taken_over() {
+    let f = Fixture::new();
+    let (theirs, path, mtime) = f.result_file("docs/plan.md", b"theirs\n");
+    let root = f.project_root().to_string_lossy().into_owned();
+
+    let err = f
+        .store()
+        .record_project_file(NewProjectFile {
+            owner_id: "owner-2",
+            project_root: &root,
+            rel_path: "docs/plan.md",
+            content: b"mine\n",
+            task_id: None,
+            agent_id: None,
+        })
+        .unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("belongs to another owner"),
+        "{err:#}"
+    );
+    let row = f.store().get(&theirs.id, OWNER).unwrap().unwrap();
+    assert_eq!(row.sha256, theirs.sha256);
+    assert_untouched(&path, b"theirs\n", mtime);
+}
+
+/// ST-12, ST-18: a result file's record says it is in the project, Open is
+/// offered only when a kind keeps its extension, and `list` filters on the
+/// column — against rows R35's method wrote.
+#[test]
+fn a_result_files_record_says_so_and_the_list_filters_on_it() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "notes", b"a draft\n");
+    new.created = at(1);
+    let (by_product, _) = f.store().put(new).unwrap();
+    let (code, code_path, code_mtime) = f.result_file("src/main.rs", b"fn main() {}\n");
+    let (script, script_path, script_mtime) = f.result_file("scripts/build.sh", b"echo hi\n");
+
+    assert!(code.in_project && script.in_project);
+    assert!(code.openable(), "a kind keeps .rs");
+    assert!(!script.openable(), "a shell script is Reveal only (ST-18)");
+    let ids = |in_project: Option<bool>| -> Vec<String> {
+        let mut q = ArtifactQuery::new(OWNER);
+        q.in_project = in_project;
+        let mut ids: Vec<String> = f
+            .store()
+            .list(&q)
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(ids(Some(false)), vec![by_product.id.clone()]);
+    let mut results = vec![code.id.clone(), script.id.clone()];
+    results.sort();
+    assert_eq!(ids(Some(true)), results);
+    assert_eq!(ids(None).len(), 3, "absent: both");
+    assert_untouched(&code_path, b"fn main() {}\n", code_mtime);
+    assert_untouched(&script_path, b"echo hi\n", script_mtime);
 }
