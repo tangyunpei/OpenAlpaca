@@ -61,3 +61,48 @@ describe("previewPlan — the notes name Open", () => {
     });
   });
 });
+
+describe("previewPlan — a file written into the project", () => {
+  const written: Artifact = {
+    ...notes,
+    name: "docs/notes.md",
+    path: "/Users/dev/app/docs/notes.md",
+    project_root: "/Users/dev/app",
+    rel_path: "docs/notes.md",
+    version_count: 0,
+    in_project: true,
+  };
+
+  it("says a missing project file is no longer at its path in the project", () => {
+    expect(previewPlan({ ...written, missing: true })).toEqual({
+      mode: "none",
+      note: "This file is no longer at docs/notes.md in the project. Its row is kept, and the file is shown again once it is back.",
+    });
+  });
+
+  it("shows the hidden characters an agent put in a missing file's path, with their count", () => {
+    const path = "docs/‮notes​.md";
+    expect(
+      previewPlan({ ...written, name: path, rel_path: path, missing: true }),
+    ).toEqual({
+      mode: "none",
+      note: "This file is no longer at docs/<U+202E>notes<U+200B>.md in the project. Its row is kept, and the file is shown again once it is back. Note: this request contains 2 hidden characters, shown as <U+…>.",
+    });
+  });
+
+  it("sends a file too large to preview to Export alone when Open is not offered", () => {
+    expect(
+      previewPlan({
+        ...written,
+        name: "bin/tool.sh",
+        rel_path: "bin/tool.sh",
+        kind: "code",
+        size_bytes: MAX_PREVIEW_BYTES + 1,
+        openable: false,
+      }),
+    ).toEqual({
+      mode: "none",
+      note: "Too large to preview here (512.0 KB) — Export saves the whole file.",
+    });
+  });
+});

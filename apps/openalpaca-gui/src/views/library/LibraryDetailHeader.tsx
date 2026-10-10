@@ -14,27 +14,46 @@
  * The artifact's `summary`, when it has one, is a muted line under the name:
  * for a `file_write` artifact it is the path the file was written as
  * (`notes/tea.md`, `Makefile`), which the stored name may no longer show.
+ *
+ * A file an agent wrote into a project (storage design §13) is the project's
+ * own file, with no versions (R37): the meta row says `project` and the
+ * project's folder name (its root on the tooltip) where `vN of M` would be,
+ * the tab strip holds Preview alone, and `Open` is drawn only when the daemon
+ * says it opens that kind (`openable`, ST-18) — a `.sh` or a `Makefile` gets
+ * `Reveal in Finder` alone.
+ *
+ * The name and the summary are paths an agent chose, so both are drawn
+ * through `lib/hidden-chars`: each hidden character as a `<U+XXXX>` escape
+ * (the summary's tooltip too), and one line under them with the two counts
+ * summed. Text with no hidden character draws as it is.
  */
 
 import {
   Button,
+  EscapedText,
   FileBadge,
   Tab,
+  Tag,
   languageFromName,
   pinVariant,
   toFileKind,
 } from "@/components/ui";
 import type { Artifact } from "@/lib/api/artifacts";
+import { cn } from "@/lib/cn";
+import { escapeHiddenLine, hiddenNotice } from "@/lib/hidden-chars";
 import { canReveal, revealLabel } from "@/lib/reveal";
 import type { ArtifactTab } from "@/stores/ui";
 
-import { relativeTime } from "./format";
+import { projectName, relativeTime } from "./format";
 
 const TABS: readonly { id: ArtifactTab; label: string }[] = [
   { id: "preview", label: "Preview" },
   { id: "diff", label: "Diff" },
   { id: "history", label: "History" },
 ];
+
+/** A project file's one view: it has no versions to diff or list (R37). */
+const PROJECT_FILE_TABS = TABS.filter((entry) => entry.id === "preview");
 
 export interface LibraryDetailHeaderProps {
   artifact: Artifact;
@@ -63,10 +82,16 @@ export function LibraryDetailHeader({
   onJumpRun,
 }: LibraryDetailHeaderProps) {
   const agent = artifact.agent_template_id ?? artifact.agent_id;
+  const tabs = artifact.in_project ? PROJECT_FILE_TABS : TABS;
+  const project = artifact.in_project
+    ? projectName(artifact.project_root)
+    : null;
+  const name = escapeHiddenLine(artifact.name);
   const summary =
     artifact.summary !== null && artifact.summary.trim() !== ""
-      ? artifact.summary
+      ? escapeHiddenLine(artifact.summary)
       : null;
+  const notice = hiddenNotice(name.hidden + (summary?.hidden ?? 0));
   return (
     <div>
       <div className="flex items-start gap-[12px]">
@@ -77,21 +102,44 @@ export function LibraryDetailHeader({
         />
 
         <div className="min-w-0 flex-1">
-          <h2 className="m-0 text-2xl font-semibold tracking-tighter text-ink">
-            {artifact.name}
+          <h2
+            className={cn(
+              "m-0 text-2xl font-semibold tracking-tighter text-ink",
+              name.hidden > 0 && "wrap-anywhere",
+            )}
+          >
+            <EscapedText escaped={name} />
           </h2>
           {summary !== null && (
             <p
-              title={summary}
-              className="m-0 mt-[4px] truncate text-base text-muted-fg"
+              title={summary.text}
+              className={cn(
+                "m-0 mt-[4px] text-base text-muted-fg",
+                // An ellipsis could cut off an escape the count says is there.
+                summary.hidden > 0 ? "wrap-anywhere" : "truncate",
+              )}
             >
-              {summary}
+              <EscapedText escaped={summary} />
             </p>
           )}
+          {notice !== null && (
+            <p className="m-0 mt-[4px] text-2xs-plus text-red-ink">{notice}</p>
+          )}
           <div className="mt-[6px] flex flex-wrap items-center gap-[10px] font-mono text-xs text-muted-fg">
-            <span>
-              v{artifact.version} of {artifact.version_count}
-            </span>
+            {artifact.in_project ? (
+              <>
+                <Tag value="project" />
+                {project !== null && (
+                  <span title={artifact.project_root ?? undefined}>
+                    {project}
+                  </span>
+                )}
+              </>
+            ) : (
+              <span>
+                v{artifact.version} of {artifact.version_count}
+              </span>
+            )}
             {agent !== null && <span>{agent}</span>}
             {artifact.task_title !== null && onJumpRun !== undefined && (
               <button
@@ -118,9 +166,11 @@ export function LibraryDetailHeader({
           <Button variant="ghostSm" onClick={onExport}>
             Export
           </Button>
-          <Button variant="ghostSm" onClick={onOpen}>
-            Open
-          </Button>
+          {artifact.openable && (
+            <Button variant="ghostSm" onClick={onOpen}>
+              Open
+            </Button>
+          )}
           {canReveal() && (
             <Button variant="ghostSm" onClick={onReveal}>
               {revealLabel()}
@@ -134,7 +184,7 @@ export function LibraryDetailHeader({
         aria-label="Artifact views"
         className="mt-[16px] flex gap-[2px] border-b border-line-subtle"
       >
-        {TABS.map((entry) => (
+        {tabs.map((entry) => (
           <Tab
             key={entry.id}
             size="library"

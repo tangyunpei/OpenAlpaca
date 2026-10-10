@@ -110,3 +110,102 @@ describe("LibraryDetailHeader — the summary line", () => {
     expect(next).toHaveTextContent("v1 of 1");
   });
 });
+
+describe("LibraryDetailHeader — a file written into a project", () => {
+  const written: Artifact = {
+    ...artifact,
+    name: "scripts/release.sh",
+    kind: "code",
+    mime_type: "text/plain",
+    path: "/Users/dev/app/scripts/release.sh",
+    project_root: "/Users/dev/app",
+    rel_path: "scripts/release.sh",
+    version: 1,
+    version_count: 0,
+    in_project: true,
+    openable: false,
+  };
+
+  function renderWritten(patch: Partial<Artifact> = {}) {
+    render(
+      <LibraryDetailHeader
+        artifact={{ ...written, ...patch }}
+        pinned={false}
+        tab="preview"
+        onTabChange={vi.fn()}
+        onTogglePin={vi.fn()}
+        onExport={vi.fn()}
+        onOpen={vi.fn()}
+        onReveal={vi.fn()}
+      />,
+    );
+  }
+
+  it("offers Preview only, with no Diff or History", () => {
+    renderWritten();
+    expect(screen.getByRole("tab", { name: "Preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Diff" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "History" })).toBeNull();
+  });
+
+  it("names its project where a version would be", () => {
+    renderWritten();
+    expect(screen.queryByText(/v1 of 0/)).toBeNull();
+    expect(screen.getByText("project")).toBeInTheDocument();
+    expect(screen.getByText("app")).toHaveAttribute("title", "/Users/dev/app");
+  });
+
+  it("draws Reveal and no Open for a kind the daemon does not open", () => {
+    vi.stubGlobal("isTauri", true);
+    renderWritten();
+    expect(screen.queryByRole("button", { name: "Open" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: revealLabel() }),
+    ).toBeInTheDocument();
+  });
+
+  it("draws Open for a project file of a kind the store keeps", () => {
+    renderWritten({ name: "docs/notes.md", kind: "markdown", openable: true });
+    expect(screen.getByRole("button", { name: "Open" })).toBeInTheDocument();
+  });
+
+  it("shows the hidden characters an agent put in the path, with their count", () => {
+    const name = "scripts/‮release​.sh";
+    renderWritten({ name, rel_path: name });
+
+    const heading = screen.getByRole("heading", { level: 2 });
+    expect(heading).toHaveTextContent("scripts/<U+202E>release<U+200B>.sh");
+    expect(
+      Array.from(heading.querySelectorAll("[data-hidden-char]"), (element) =>
+        element.getAttribute("data-hidden-char"),
+      ),
+    ).toEqual(["U+202E", "U+200B"]);
+    // The count sits under the name, before the meta row.
+    expect(heading.nextElementSibling).toHaveTextContent(
+      "Note: this request contains 2 hidden characters, shown as <U+…>.",
+    );
+  });
+});
+
+describe("LibraryDetailHeader — hidden characters in the summary", () => {
+  it("escapes the summary, on its tooltip too, and counts it with the name", () => {
+    renderHeader("notes/‮tea.md");
+
+    const line = screen.getByText("tea.md", { exact: false });
+    expect(line).toHaveTextContent("notes/<U+202E>tea.md");
+    expect(line).toHaveAttribute("title", "notes/<U+202E>tea.md");
+    // An ellipsis could cut off an escape the count says is there.
+    expect(line).toHaveClass("wrap-anywhere");
+    expect(line).not.toHaveClass("truncate");
+    expect(line.nextElementSibling).toHaveTextContent(
+      "Note: this request contains 1 hidden character, shown as <U+…>.",
+    );
+  });
+
+  it("draws no hidden-character note for a plain name and summary", () => {
+    renderHeader("notes/tea.md");
+
+    expect(document.querySelector("[data-hidden-char]")).toBeNull();
+    expect(screen.queryByText(/hidden character/)).toBeNull();
+  });
+});

@@ -478,6 +478,46 @@ describe("LibraryDetail", () => {
   });
 });
 
+describe("LibraryDetail — a file written into a project", () => {
+  const notes: Artifact = {
+    ...findings,
+    id: "art-9",
+    name: "docs/notes.md",
+    task_id: null,
+    task_title: null,
+    path: "/Users/dev/app/docs/notes.md",
+    project_root: "/Users/dev/app",
+    rel_path: "docs/notes.md",
+    version: 1,
+    version_count: 0,
+    in_project: true,
+    openable: true,
+  };
+
+  beforeEach(() => {
+    route("in_project=true", () => json({ artifacts: [notes], total: 1 }));
+    route("/v1/artifacts/art-9/versions", () => json({ versions: [] }));
+    route("/v1/artifacts/art-9/content", () =>
+      text("# Notes\n\nKept in the project.\n"),
+    );
+    route("/v1/artifacts/art-9", () => json(notes));
+    useUiStore.setState({ openArtifactId: "art-9", libraryResults: true });
+  });
+
+  it("shows its Preview even when History was the last tab, and offers no other", async () => {
+    useUiStore.setState({ libraryTab: "history" });
+    renderView();
+
+    expect(await screen.findByText("Kept in the project.")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Preview" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.queryByRole("tab", { name: "History" })).toBeNull();
+    expect(screen.queryByText("No version history for this file.")).toBeNull();
+  });
+});
+
 describe("LibraryDetail — Open and Reveal", () => {
   /** What the mocked discovery command answers, as the factory above does. */
   const connection = {

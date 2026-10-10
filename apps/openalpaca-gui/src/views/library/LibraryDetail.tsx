@@ -26,7 +26,7 @@ import {
 import { useArtifactFileActions, useDownloadFile } from "@/hooks/useFiles";
 import { artifactContentUrl, type Artifact } from "@/lib/api/artifacts";
 import { ApiError } from "@/lib/http";
-import { useUiStore } from "@/stores/ui";
+import { useUiStore, type ArtifactTab } from "@/stores/ui";
 
 import { HistoryTab } from "./HistoryTab";
 import { LibraryDetailHeader } from "./LibraryDetailHeader";
@@ -93,6 +93,9 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
   const pinned = pins[model.id] ?? model.pinned;
   // Narrowed once so the jump handler does not need a cast.
   const taskId = model.task_id;
+  // A file written into the project has Preview alone (R37: no versions), so
+  // a tab kept from another row falls back to it.
+  const shownTab: ArtifactTab = model.in_project ? "preview" : tab;
 
   const onExport = () => {
     download.mutate(model.id, {
@@ -115,7 +118,7 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
         <LibraryDetailHeader
           artifact={model}
           pinned={pinned}
-          tab={tab}
+          tab={shownTab}
           onTabChange={setTab}
           onTogglePin={() => {
             togglePin.mutate(
@@ -137,9 +140,9 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
         />
       }
     >
-      {tab === "preview" && <PreviewTab artifact={model} />}
+      {shownTab === "preview" && <PreviewTab artifact={model} />}
 
-      {tab === "diff" && (
+      {shownTab === "diff" && (
         <ArtifactDiffTab
           size="full"
           diff={diff.data ?? null}
@@ -155,7 +158,7 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
         />
       )}
 
-      {tab === "history" &&
+      {shownTab === "history" &&
         (versions.error !== null ? (
           <SectionEmpty padded={false} note={versions.error.message}>
             The version history could not be read.
