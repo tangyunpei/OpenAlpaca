@@ -190,11 +190,16 @@ pub(super) fn unapprovable_tools(
 /// "Done, with one snag:" because the summary was cut at 500 characters, and
 /// a sentence the model wrote is exactly what a cut can take away. This line
 /// is appended by the runtime and [`truncate_summary`] keeps it whole.
+///
+/// An extension tool's name is any UTF-8 its server chose, up to 256 bytes,
+/// so each is shown through `utils::text::escape_hidden_line` and the names
+/// share [`REFUSED_TOOLS_LIST_CHARS`] as [`project_files_note`]'s paths share
+/// theirs, the rest counted (residual X21; no count line, as there).
 pub(super) fn unapprovable_note(tools: &[String]) -> Option<String> {
     if tools.is_empty() {
         return None;
     }
-    let list = tools.join(", ");
+    let list = bounded_list(tools, REFUSED_TOOLS_SHOWN, REFUSED_TOOLS_LIST_CHARS);
     let (subject, verb) = if tools.len() == 1 {
         ("tool", "was")
     } else {
@@ -206,6 +211,16 @@ pub(super) fn unapprovable_note(tools: &[String]) -> Option<String> {
          interactive `openalpaca chat`, and approve it there."
     ))
 }
+
+/// How many tools [`unapprovable_note`] names before it counts the rest.
+const REFUSED_TOOLS_SHOWN: usize = 20;
+
+/// How many characters the tool names [`unapprovable_note`] lists may take
+/// together, `, ` between them included. With [`PROJECT_FILES_LIST_CHARS`]
+/// and the two lines' own words the runtime's lines stay under about 1,550
+/// characters, so the summary's [`MAX_SUMMARY_LENGTH`] cut always keeps them
+/// whole with some of the report's prose before them.
+const REFUSED_TOOLS_LIST_CHARS: usize = 400;
 
 /// How many paths [`project_files_note`] names before it counts the rest.
 const PROJECT_FILES_SHOWN: usize = 20;
@@ -232,43 +247,54 @@ const PROJECT_FILES_LIST_CHARS: usize = 900;
 /// the report is not an approval surface (the lead's ruling on S6a's M4 for
 /// the event log's written-file row, the same text).
 pub(super) fn project_files_note(rel_paths: &[String]) -> Option<String> {
-    use crate::utils::text::escape_hidden_line;
-
     if rel_paths.is_empty() {
         return None;
     }
+    let list = bounded_list(rel_paths, PROJECT_FILES_SHOWN, PROJECT_FILES_LIST_CHARS);
+    Some(format!("Written in the project: {list}."))
+}
+
+/// `items` as a runtime line lists them: each escaped on one line
+/// (`utils::text::escape_hidden_line`), joined by `, `, at most `shown_max`
+/// of them and only as many as fit in `budget` characters together, then
+/// ", and N more" for the rest. A first item longer than the whole budget is
+/// named cut on a whole piece ([`escaped_within`]), so the list is never
+/// empty.
+fn bounded_list(items: &[String], shown_max: usize, budget: usize) -> String {
+    use crate::utils::text::escape_hidden_line;
+
     let mut shown: Vec<String> = Vec::new();
     let mut used = 0;
-    for path in rel_paths.iter().take(PROJECT_FILES_SHOWN) {
-        let escaped = escape_hidden_line(path).text;
+    for item in items.iter().take(shown_max) {
+        let escaped = escape_hidden_line(item).text;
         let cost = escaped.chars().count() + if shown.is_empty() { 0 } else { 2 };
-        if used + cost > PROJECT_FILES_LIST_CHARS {
+        if used + cost > budget {
             if shown.is_empty() {
-                shown.push(escaped_path_within(path, PROJECT_FILES_LIST_CHARS));
+                shown.push(escaped_within(item, budget));
             }
             break;
         }
         used += cost;
         shown.push(escaped);
     }
-    let more = rel_paths.len() - shown.len();
+    let more = items.len() - shown.len();
     let shown = shown.join(", ");
-    Some(if more == 0 {
-        format!("Written in the project: {shown}.")
+    if more == 0 {
+        shown
     } else {
-        format!("Written in the project: {shown}, and {more} more.")
-    })
+        format!("{shown}, and {more} more")
+    }
 }
 
-/// `path` as [`project_files_note`] shows it, cut to at most `max`
-/// characters on a whole piece — a character, or its whole `<U+XXXX>`
-/// escape, never part of one — with `…` where the cut is.
-fn escaped_path_within(path: &str, max: usize) -> String {
+/// `text` as [`bounded_list`] shows it, cut to at most `max` characters on a
+/// whole piece — a character, or its whole `<U+XXXX>` escape, never part of
+/// one — with `…` where the cut is.
+fn escaped_within(text: &str, max: usize) -> String {
     use crate::utils::text::escape_hidden_line;
 
     let mut out = String::new();
     let mut used = 0;
-    for c in path.chars() {
+    for c in text.chars() {
         let piece = escape_hidden_line(c.encode_utf8(&mut [0; 4])).text;
         let len = piece.chars().count();
         if used + len + 1 > max {
@@ -315,9 +341,8 @@ pub(super) fn runtime_notes(db: &openalpaca_storage::Database, task_id: &str) ->
 /// exactly the one whose last line would otherwise be lost, and the last line
 /// is the only part the runtime wrote. When the note alone is longer than
 /// `max` the note wins and the prose goes. At [`MAX_SUMMARY_LENGTH`] that
-/// takes a refusal line naming an unusual number of long tool names: the
-/// files line stays under 1,000 characters ([`project_files_note`]). The
-/// function must still be total.
+/// never happens: both runtime lines are bounded ([`unapprovable_note`],
+/// [`project_files_note`]; residual X21). The function must still be total.
 pub(super) fn truncate_summary(summary: &str, note: Option<&str>, max: usize) -> String {
     if summary.chars().count() <= max {
         return summary.to_string();

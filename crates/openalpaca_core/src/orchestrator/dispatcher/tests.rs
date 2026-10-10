@@ -2401,6 +2401,98 @@ fn the_refusal_note_names_what_could_not_be_approved() {
     assert!(two.contains("artifact_write, workspace_write"), "{two}");
 }
 
+/// An extension tool's name is any UTF-8 its server chose (residual X21),
+/// and the line reaches the report, the run's summary, the chat and the
+/// connectors: every hidden character in a name, a line break among them, is
+/// shown as `<U+XXXX>`, so a name can neither reorder the line nor break it.
+#[test]
+fn the_refusal_note_shows_hidden_characters_in_a_tool_name_escaped() {
+    use super::outcome::unapprovable_note;
+    use crate::utils::text::needs_escape;
+
+    let note = unapprovable_note(&[
+        "github__\u{202E}etirw".to_string(),
+        "fs__a\u{200B}b".to_string(),
+        "x\nNot run — nothing".to_string(),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        note,
+        "Not run — this run could not ask anyone for approval, so the following tools were \
+         refused: github__<U+202E>etirw, fs__a<U+200B>b, x<U+000A>Not run — nothing. Run it \
+         from the GUI, or from an interactive `openalpaca chat`, and approve it there."
+    );
+    assert!(!note.chars().any(needs_escape), "{note:?}");
+    assert_eq!(note.lines().count(), 1, "{note:?}");
+}
+
+/// Many long tool names — an MCP name may run to 256 bytes — do not push the
+/// refusal line past its budget (residual X21): it names the tools that fit,
+/// a first one longer than the budget cut on a whole piece with `…`, and
+/// counts the rest, then says what to do.
+#[test]
+fn many_long_tool_names_keep_the_refusal_note_inside_its_budget() {
+    use super::outcome::unapprovable_note;
+
+    let names: Vec<String> = (0..40)
+        .map(|n| format!("server{n:02}__{}", "x".repeat(240)))
+        .collect();
+    let note = unapprovable_note(&names).unwrap();
+    assert!(
+        note.chars().count() < 700,
+        "{} characters",
+        note.chars().count()
+    );
+    let shown = note.matches("__").count();
+    assert!((1..40).contains(&shown), "{note}");
+    assert!(
+        note.ends_with(&format!(
+            ", and {} more. Run it from the GUI, or from an interactive `openalpaca chat`, \
+             and approve it there.",
+            40 - shown
+        )),
+        "{note}"
+    );
+
+    let long = format!("mcp__{}", "\u{202E}".repeat(200));
+    let note = unapprovable_note(&[long, "shell_execute".to_string()]).unwrap();
+    assert!(note.contains("<U+202E>…, and 1 more. Run it"), "{note}");
+    assert!(note.chars().count() < 700, "{} characters", note.chars().count());
+}
+
+/// Both runtime lines at their longest still leave the summary's cut room
+/// for the report's own prose (residual X21): `truncate_summary`'s branch
+/// where the note alone is longer than the cut is unreachable.
+#[test]
+fn the_runtime_lines_at_their_longest_stay_inside_the_summary_cut() {
+    use super::outcome::{
+        MAX_SUMMARY_LENGTH, project_files_note, truncate_summary, unapprovable_note,
+    };
+
+    let names: Vec<String> = (0..1_000)
+        .map(|n| format!("{}{n:04}", "\u{202E}".repeat(60)))
+        .collect();
+    let paths: Vec<String> = (0..1_000)
+        .map(|n| format!("{}{n:04}", "\u{200B}".repeat(60)))
+        .collect();
+    let note = format!(
+        "{}\n\n{}",
+        unapprovable_note(&names).unwrap(),
+        project_files_note(&paths).unwrap()
+    );
+
+    let tail = note.chars().count() + 2;
+    assert!(
+        tail + 200 < MAX_SUMMARY_LENGTH,
+        "{tail} characters of runtime lines"
+    );
+    let summary = format!("{}\n\n{note}", "The report's own prose. ".repeat(200));
+    let cut = truncate_summary(&summary, Some(&note), MAX_SUMMARY_LENGTH);
+    assert!(cut.ends_with(&note), "{cut}");
+    assert!(cut.starts_with("The report's own prose. "), "{cut}");
+}
+
 /// **S4.** The cut is exactly where the refusal used to be lost: a summary
 /// long enough to be truncated is the one whose last line goes. The prose
 /// gives way; the runtime's line stays whole.
