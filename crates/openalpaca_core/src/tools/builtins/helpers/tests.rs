@@ -439,3 +439,75 @@ fn a_link_into_the_git_folder_is_judged_by_where_it_resolves() {
     resolve_workspace_path("old/memory/note.md", dir.path(), FolderRules::Project)
         .expect_err("a read through a link into .openalpaca");
 }
+
+// --- R31: the write resolver resolves the leaf (storage design §11) ---
+
+#[cfg(unix)]
+#[test]
+fn a_link_at_the_leaf_out_of_the_root_is_refused_for_writing() {
+    let (dir, _root) = write_resolution_root();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("elsewhere.txt");
+    std::fs::write(&target, "not the root's").unwrap();
+    std::os::unix::fs::symlink(&target, dir.path().join("src/link.txt")).unwrap();
+
+    let err = resolve_workspace_path_for_write("src/link.txt", dir.path(), FolderRules::Plain)
+        .expect_err("a link at the leaf that leaves the root is refused");
+    assert_eq!(err, "Path 'src/link.txt' resolves outside the workspace boundary");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "not the root's");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_link_at_the_leaf_is_refused_for_writing() {
+    let (dir, _root) = write_resolution_root();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path().join("missing.txt"), dir.path().join("dangling.txt"))
+        .unwrap();
+
+    let err = resolve_workspace_path_for_write("dangling.txt", dir.path(), FolderRules::Plain)
+        .expect_err("a dangling link at the leaf resolves to nothing");
+    assert!(err.starts_with("Path resolution failed for 'dangling.txt'"), "{err}");
+    assert!(!outside.path().join("missing.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_at_the_leaf_inside_the_root_resolves_to_its_target() {
+    let (dir, root) = write_resolution_root();
+    std::fs::write(dir.path().join("src/real.rs"), "fn main() {}\n").unwrap();
+    std::os::unix::fs::symlink("real.rs", dir.path().join("src/alias.rs")).unwrap();
+
+    assert_eq!(
+        resolve_workspace_path_for_write("src/alias.rs", dir.path(), FolderRules::Plain).unwrap(),
+        root.join("src/real.rs")
+    );
+}
+
+/// A guard, green before and after: an ordinary file at the leaf resolves
+/// to itself.
+#[test]
+fn an_existing_file_at_the_leaf_resolves_to_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "old").unwrap();
+    assert_eq!(
+        resolve_workspace_path_for_write("notes.txt", dir.path(), FolderRules::Plain).unwrap(),
+        dir.path().canonicalize().unwrap().join("notes.txt")
+    );
+}
+
+/// R31 and R32 together: a link at the leaf into `.git` is judged by where
+/// it lands.
+#[cfg(unix)]
+#[test]
+fn a_link_at_the_leaf_into_the_git_folder_is_refused_in_a_project() {
+    let (dir, _root) = project_folder();
+    std::fs::write(dir.path().join(".git/hooks/pre-commit"), "#!/bin/sh\n").unwrap();
+    std::os::unix::fs::symlink(".git/hooks/pre-commit", dir.path().join("hook")).unwrap();
+
+    assert_eq!(
+        resolve_workspace_path_for_write("hook", dir.path(), FolderRules::Project).unwrap_err(),
+        "Writing 'hook' is refused: it is inside the project's .git folder, which git keeps. \
+         Run git through shell_execute instead."
+    );
+}

@@ -161,9 +161,9 @@ impl FileWriteTool {
         if !metadata.is_file() {
             return Ok(());
         }
-        // Through any symlink, and only then judged: `file_write` resolves the
-        // *parent* against the workspace, so the last component can still be a
-        // link out of it.
+        // Through any symlink, and only then judged. Since R31 the write
+        // resolver refuses a leaf that links out of the workspace, so this is
+        // the tier's own check of where the bytes it would copy are.
         let Ok(target) = tokio::fs::canonicalize(full_path).await else {
             return Ok(());
         };
@@ -916,26 +916,14 @@ mod tests {
         );
     }
 
-    /// A **known confinement hole, not a decision**: the final component of a
-    /// write path is followed even when it is a symlink out of the workspace, so
-    /// the write below lands outside and succeeds. `resolve_workspace_path_for_write`
-    /// (`helpers/mod.rs`) canonicalizes the *parent* and re-appends the leaf
-    /// verbatim, so nothing resolves the leaf — unlike the store writers'
-    /// `confine_to_root` (`openalpaca_storage::store::artifact`), which
-    /// canonicalizes the nearest *existing* ancestor and therefore catches an
-    /// escaping symlink leaf. The plan's symlink claim (Phase 2 *Verify:*,
-    /// "`confine_to_root` rejects symlinked-parent escapes") is about those
-    /// writers; this helper predates it and no phase changed it. Carried as a
-    /// follow-up from §5.7's own review (T56: "a symlinked target outside the
-    /// workspace is still overwritten unimaged (pre-existing)").
-    ///
-    /// What §5.7 adds is only the second assertion: such a file is not this
-    /// session's to copy, so no pre-edit image is taken. This test therefore
-    /// pins today's behaviour rather than blessing it — closing the hole must
-    /// flip the `is_ok` below deliberately.
+    /// R31 (storage design §11): the write resolver resolves the leaf like
+    /// every other component, so a link at the leaf that leaves the root is
+    /// refused. Before R31 the write followed it and replaced the outside
+    /// file, with no pre-edit image kept; this test pinned that hole as
+    /// `a_symlink_out_of_the_workspace_is_not_imaged`.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_symlink_out_of_the_workspace_is_not_imaged() {
+    async fn a_write_through_a_link_out_of_the_root_is_refused() {
         let bench = bench();
         let tool = bench.tool(None);
         let ctx = bench.ctx("sess-e");
@@ -944,17 +932,23 @@ mod tests {
         fs::write(&elsewhere, "not the workspace's").unwrap();
         std::os::unix::fs::symlink(&elsewhere, bench.work.path().join("link.txt")).unwrap();
 
-        let result = tool
+        let err = tool
             .execute_with_context(
                 &serde_json::json!({"path": "link.txt", "content": "through the link"}),
                 &ctx,
             )
-            .await;
-        assert!(result.is_ok(), "{result:?}");
+            .await
+            .expect_err("a write through a link out of the root is refused");
+        assert_eq!(err, "Path 'link.txt' resolves outside the workspace boundary");
+        assert_eq!(
+            fs::read_to_string(&elsewhere).unwrap(),
+            "not the workspace's",
+            "the outside file is unchanged"
+        );
         assert!(ctx.session_log.as_ref().unwrap().flush().await);
         assert!(
             !bench.session_dir("sess-e").join(SNAPSHOTS_DIR).exists(),
-            "a file outside the workspace is not imaged"
+            "nothing was imaged"
         );
     }
 

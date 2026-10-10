@@ -144,8 +144,13 @@ pub(super) fn resolve_workspace_path(
 /// "Exists" means a directory entry is there — `symlink_metadata`, not
 /// `exists`, which answers no for a dangling link and would let the walk
 /// step past it; a dangling link then fails to canonicalize and the write
-/// is refused. The leaf itself is not resolved (a pre-existing behaviour
-/// `file_ops.rs`'s `a_symlink_out_of_the_workspace_is_not_imaged` pins).
+/// is refused. The leaf is resolved the same way (R31, storage design §11):
+/// an entry already standing there — a file, a folder, a link — is
+/// canonicalized whole and must stay under the root, as
+/// [`resolve_workspace_path`] does for a read, so a link at the leaf that
+/// leaves the root is refused instead of written through, and the path
+/// returned for a link inside the root is its target. Then R32's write rule
+/// when `rules` is [`FolderRules::Project`].
 pub(super) fn resolve_workspace_path_for_write(
     relative_path: &str,
     workspace_root: &Path,
@@ -197,7 +202,21 @@ pub(super) fn resolve_workspace_path_for_write(
             relative_path
         ));
     }
-    let target = resolved_parent.join(file_name);
+    // R31: the leaf is resolved like every other component. Nothing there:
+    // the leaf is new and cannot redirect anything.
+    let leaf = resolved_parent.join(file_name);
+    let leaf_failed =
+        |e: std::io::Error| format!("Path resolution failed for '{relative_path}': {e}");
+    let target = match std::fs::symlink_metadata(&leaf) {
+        Ok(_) => leaf.canonicalize().map_err(leaf_failed)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => leaf,
+        Err(e) => return Err(leaf_failed(e)),
+    };
+    if !target.starts_with(&canonical_root) {
+        return Err(format!(
+            "Path '{relative_path}' resolves outside the workspace boundary"
+        ));
+    }
     rules.check(relative_path, &target, &canonical_root, StoreAccess::Write)?;
     Ok(target)
 }
