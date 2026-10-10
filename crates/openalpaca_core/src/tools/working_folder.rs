@@ -190,10 +190,28 @@ pub fn scratch_dir(conversation_id: &str) -> anyhow::Result<PathBuf> {
 
 /// Removes a conversation's scratch folder: it goes with the conversation
 /// (storage design §10). `Ok(false)` when nothing stood at its name. Never
-/// follows a link — a link (or a file) at the folder's name is removed
+/// follows a link, at either of the two levels [`WorkingFolder::ensure`]
+/// makes: `<home>/scratch` itself must be a folder of its own — a link or a
+/// file standing there is refused, and nothing behind it is touched, since
+/// the system would otherwise resolve it on the way to the conversation's
+/// folder — and at the folder's own name a link (or a file) is removed
 /// itself, a directory with everything in it.
 pub fn remove_scratch(conversation_id: &str) -> std::io::Result<bool> {
     let dir = scratch_dir(conversation_id).map_err(|e| std::io::Error::other(format!("{e:#}")))?;
+    let scratch = dir
+        .parent()
+        .ok_or_else(|| std::io::Error::other(format!("{} has no parent folder", dir.display())))?;
+    match std::fs::symlink_metadata(scratch) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(std::io::Error::other(format!(
+                "{} is not a folder of its own: a link or a file stands at its name",
+                scratch.display()
+            )));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    }
     let meta = match std::fs::symlink_metadata(&dir) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -697,6 +715,42 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(elsewhere.path().join("precious.txt")).unwrap(),
             "precious"
+        );
+    }
+
+    /// A link at `<home>/scratch` itself — the level `ensure` refuses to make
+    /// anything through — is never followed by a removal either: the folder
+    /// of the same name behind it, and the link, are left as they are, and
+    /// the refusal names the link.
+    #[cfg(unix)]
+    #[test]
+    fn remove_scratch_never_follows_a_link_where_the_scratch_folder_should_be() {
+        let gp = crate::test_util::GuardedProject::new();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::create_dir(elsewhere.path().join("conv-x")).unwrap();
+        std::fs::write(elsewhere.path().join("conv-x/precious.txt"), "precious").unwrap();
+        let scratch = gp.home_root().join("scratch");
+        std::os::unix::fs::symlink(elsewhere.path(), &scratch).unwrap();
+
+        let err = remove_scratch("conv-x").expect_err("a link is not the scratch folder");
+        assert!(
+            err.to_string().contains("is not a folder of its own"),
+            "{err}"
+        );
+        assert!(
+            err.to_string().contains(&scratch.display().to_string()),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(elsewhere.path().join("conv-x/precious.txt")).unwrap(),
+            "precious"
+        );
+        assert!(
+            std::fs::symlink_metadata(&scratch)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link at scratch/ is left as it is"
         );
     }
 
