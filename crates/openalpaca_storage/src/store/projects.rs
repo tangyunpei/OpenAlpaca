@@ -1031,8 +1031,10 @@ fn build_project_folder(building: &Path, target: &Path, file: &ProjectFile) -> R
 /// folder under `projects/` yet — a git repository nobody has used (R12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedProject {
-    /// The canonical root: the registered project's `root`, or the folder
-    /// that holds `.git`.
+    /// The root: the registered project's recorded `root` — canonical when
+    /// it was recorded (R14), and as written for a missing project that no
+    /// longer leads to itself (ST-23) — or the canonical folder that holds
+    /// `.git`.
     pub root: PathBuf,
     /// The project's entry, when the root is registered.
     pub project: Option<Project>,

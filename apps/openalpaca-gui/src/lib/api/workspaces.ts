@@ -23,7 +23,11 @@ import { apiFetch } from "../http";
 export interface Project {
   /** The permanent id, a v4 UUID (ST-13). */
   id: string;
-  /** The canonical root — the path every row of the project holds (R14). */
+  /**
+   * The root as recorded — the path every row of the project holds, canonical
+   * when it was recorded (R14); a `missing` project's may no longer be its own
+   * canonical form (ST-23).
+   */
   root: string;
   /** Its folder's name under `<home>/projects/` (R4–R7). Never parsed back. */
   name: string;
