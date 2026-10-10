@@ -391,6 +391,9 @@ fn the_closing_line_calls_a_projects_artifacts_and_uploads_unreferenced_never_it
         "projects/ must not be listed with the unreferenced files:\n{done}"
     );
     for needle in [
+        // d4-folder-5: the folders the preview lists as kept, scratch/ among
+        // them — the agents' scratch files stay, and nothing sweeps them.
+        "artifacts/, uploads/, sessions/ and scratch/",
         "projects/<name>/artifacts/",
         "projects/<name>/uploads/",
         "project.json",

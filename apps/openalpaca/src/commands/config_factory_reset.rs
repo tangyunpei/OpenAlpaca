@@ -112,7 +112,7 @@ pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
 pub(super) fn reset_complete_message(db_path: &Path) -> String {
     format!(
         "Factory reset complete. {} is gone; the next daemon start builds an empty one.\n\
-         Your files under artifacts/, uploads/ and sessions/, and each project's \
+         Your files under artifacts/, uploads/, sessions/ and scratch/, and each project's \
          projects/<name>/artifacts/ and projects/<name>/uploads/, are still on disk, \
          with nothing pointing at them. Each project's folder stays registered by its \
          project.json and holds that project's memory notes: like yours under memory/, \
