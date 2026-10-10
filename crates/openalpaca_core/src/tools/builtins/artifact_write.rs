@@ -1318,7 +1318,7 @@ mod tests {
             allowed_capabilities: vec!["artifact_write".to_string()],
             ..Default::default()
         };
-        let mut policy = SandboxPolicy::from_constraints("writing_agent", &constraints);
+        let policy = SandboxPolicy::from_constraints("writing_agent", &constraints);
         let call = ToolCall {
             id: "call-1".to_string(),
             name: "artifact_write".to_string(),
@@ -1333,17 +1333,10 @@ mod tests {
             Some("t-5555ffff-0000-0000-0000-000000000000"),
         );
 
-        // artifact_write carries the same destructive annotation as its sibling
-        // writers, so an agent that declares no confirmation list gates it
-        // exactly like `file_write`/`workspace_write` — fail-closed with no
-        // broker wired. A real run has a broker (or the daemon's auto-approve).
-        let refusal = sandbox
-            .execute_tool(&call, &policy, &call_ctx)
-            .await
-            .unwrap_err();
-        assert!(refusal.contains("requires human confirmation"), "{refusal}");
-        policy.auto_approve = true;
-
+        // ST-15 (storage design §12): artifact_write writes only under
+        // ~/.openalpaca and never asks, so with no broker wired and no
+        // auto-approve the call runs; `file_write` here would be refused
+        // fail-closed.
         let out = sandbox
             .execute_tool(&call, &policy, &call_ctx)
             .await

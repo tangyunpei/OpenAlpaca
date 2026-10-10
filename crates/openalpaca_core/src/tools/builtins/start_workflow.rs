@@ -32,8 +32,8 @@ pub struct StartWorkflowTool {
     /// M6 — the client that sent this turn said it cannot answer a tool
     /// confirmation. Carried into the workflow this turn starts: the run
     /// outlives the turn, so the fact has to travel with it or the first
-    /// `artifact_write` blocks for the whole confirmation timeout with
-    /// nobody to answer.
+    /// `file_write` or `shell_execute` blocks for the whole confirmation
+    /// timeout with nobody to answer.
     unattended: bool,
     /// Result cell: the outcome of the (single) successful dispatch this
     /// request made, if any.

@@ -26,8 +26,8 @@ pub struct ChatSendRequest {
     pub model: Option<String>,
     /// M6 — **this client cannot answer a tool confirmation.** The CLI's
     /// one-shot (`--message`) and piped paths set it: they exit when the turn
-    /// ends, and a workflow's `artifact_write` asks for approval minutes
-    /// later, with nobody on the other end. Today that cost 300 seconds per
+    /// ends, and a workflow's `file_write` or `shell_execute` asks for
+    /// approval minutes later, with nobody on the other end. Today that cost 300 seconds per
     /// tool call and then failed anyway.
     ///
     /// Declared, never detected: a client that says nothing keeps today's

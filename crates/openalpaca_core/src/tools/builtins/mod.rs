@@ -630,10 +630,13 @@ pub(crate) fn annotations_for_builtin(name: &str) -> Option<openalpaca_mcp::Tool
         // prompts, and a tool-issued supersede is bounded by authority.
         // Design 09 §4.1: `memory_confirm` prompts on an attended turn and is
         // refused on an unattended one, like the other two.
-        "file_write" | "workspace_write" | "artifact_write" | "update_persona"
-        | "memory_forget" | "memory_update" | "memory_confirm" => {
+        "file_write" | "update_persona" | "memory_forget" | "memory_update" | "memory_confirm" => {
             Some(destructive_local_annotations())
         }
+        // ST-15 (storage design §12): the by-product writers write only under
+        // ~/.openalpaca and never ask. By name, before the tool runs — so
+        // `file_write` saving a by-product with no project still asks.
+        "artifact_write" | "workspace_write" => Some(local_write_annotations()),
         "shell_execute" | "send" => Some(destructive_open_world_annotations()),
         _ => None,
     }
@@ -667,6 +670,17 @@ fn read_only_open_world_annotations() -> openalpaca_mcp::ToolAnnotations {
         read_only_hint: Some(true),
         idempotent_hint: Some(true),
         open_world_hint: Some(true),
+        ..Default::default()
+    }
+}
+
+/// A by-product writer (ST-15): writes only under ~/.openalpaca, never asks.
+fn local_write_annotations() -> openalpaca_mcp::ToolAnnotations {
+    openalpaca_mcp::ToolAnnotations {
+        destructive_hint: Some(false),
+        read_only_hint: Some(false),
+        idempotent_hint: Some(false),
+        open_world_hint: Some(false),
         ..Default::default()
     }
 }

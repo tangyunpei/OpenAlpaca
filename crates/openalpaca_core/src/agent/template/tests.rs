@@ -350,8 +350,9 @@ fn every_shipped_template_grants_read_result() {
 /// then the effective set over a registry holding the builtins.
 ///
 /// Only `shell_execute` and `file_write` are pinned, plus one read that must
-/// not prompt: the design's ST-15 later takes `artifact_write` and
-/// `workspace_write` out of the derived set, so the whole set is not asserted.
+/// not prompt: ST-15 took `artifact_write` and `workspace_write` out of the
+/// derived set (`annotations_for_builtin_by_product_writers_never_prompt`),
+/// so the whole set is not asserted.
 #[test]
 fn the_shipped_system_agent_template_prompts_for_its_shell_and_file_writes() {
     use crate::security::sandbox::{SandboxPolicy, effective_confirmation_set};

@@ -241,9 +241,41 @@ fn annotations_for_builtin_unknown_returns_none() {
 
 #[test]
 fn annotations_for_builtin_destructive_tools_tagged() {
-    for name in ["file_write", "workspace_write", "artifact_write", "shell_execute", "update_persona", "send"] {
+    for name in ["file_write", "shell_execute", "update_persona", "send"] {
         let ann = annotations_for_builtin(name).unwrap();
         assert_eq!(ann.destructive_hint, Some(true), "{name} should be destructive");
+    }
+}
+
+/// ST-15 (storage design §12): `artifact_write` and `workspace_write` write
+/// only under ~/.openalpaca, so they carry no destructive hint, and an agent
+/// with no confirmation list of its own is never asked about them, while
+/// `file_write` and `shell_execute` still are. Decided by tool name, before
+/// the tool runs, so `file_write` saving a by-product still asks.
+#[test]
+fn annotations_for_builtin_by_product_writers_never_prompt() {
+    use crate::agent::subagent::AgentConstraints;
+    use crate::security::sandbox::{SandboxPolicy, effective_confirmation_set};
+    use crate::tools::ToolRegistry;
+
+    for name in ["artifact_write", "workspace_write"] {
+        let ann = annotations_for_builtin(name).unwrap();
+        assert_eq!(ann.destructive_hint, Some(false), "{name} must not prompt");
+        assert_eq!(ann.read_only_hint, Some(false), "{name} still writes");
+        assert_eq!(ann.open_world_hint, Some(false), "{name} writes under ~/.openalpaca only");
+    }
+
+    let registry = ToolRegistry::default();
+    for tool in builtin_tools(None, None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let policy = SandboxPolicy::from_constraints("writing_agent", &AgentConstraints::default());
+    let set = effective_confirmation_set(&policy, &registry);
+    for name in ["artifact_write", "workspace_write"] {
+        assert!(!set.contains(&name.to_string()), "{name} asks; the set is {set:?}");
+    }
+    for name in ["file_write", "shell_execute"] {
+        assert!(set.contains(&name.to_string()), "{name} must ask; the set is {set:?}");
     }
 }
 
