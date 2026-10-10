@@ -788,6 +788,47 @@ fn project_names_a_chosen_folder_moved_behind_a_link_by_its_old_root() {
     assert_eq!(listed_projects(), vec![(own.id, true)]);
 }
 
+/// Residual X9 (R-T29 in the CLI): the same moved folder named through a
+/// link in an ancestor — macOS's `/var/…` for a root recorded under
+/// `/private/var/…` — is a recorded root too, matched as `projects::lookup`
+/// matches it (as written, then as named), and sent as written: the daemon
+/// answers the old project for it. Canonicalizing first followed the link
+/// left at the root to the moved folder, which no project records, and the
+/// note went to the global partition.
+#[cfg(unix)]
+#[test]
+fn project_names_a_moved_chosen_folder_spelled_through_an_ancestor_link_by_that_spelling() {
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let root = tmp.path().canonicalize().unwrap().join("notes");
+    let aliased = tmp.path().join("notes");
+    if aliased == root {
+        eprintln!(
+            "skipped: {} is its own canonical form, so no ancestor link spells it otherwise",
+            tmp.path().display()
+        );
+        return;
+    }
+    std::fs::create_dir_all(&root).unwrap();
+    let own = store::projects::choose(&root).unwrap();
+    move_behind_a_link(&root);
+    let at = ScopeArgs {
+        project: Some(aliased.clone()),
+        ..Default::default()
+    };
+
+    let sent = sent_path(&at);
+
+    assert_eq!(sent, aliased.to_string_lossy(), "sent as written");
+    assert_eq!(
+        daemon_write_root(&sent),
+        Some(root.to_string_lossy().into_owned()),
+        "the daemon answers the old project"
+    );
+    assert_eq!(at.local_project_root().unwrap(), Some(root.clone()));
+    assert_eq!(listed_projects(), vec![(own.id, true)]);
+}
+
 /// d0-st23-1: the same `--project` from `doctor --repair` repairs the old
 /// project's partition — canonicalizing first answered the folder the link
 /// reaches, no project, and repaired the home notes alone.

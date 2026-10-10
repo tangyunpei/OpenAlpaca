@@ -147,10 +147,11 @@ impl ScopeArgs {
 /// A path a person typed for a project (`memory --project`, `sessions
 /// --workspace`), as the daemon should be handed it (ST-23, the lead's
 /// ruling R-T17): made absolute against this shell's directory, nothing
-/// resolved, and sent as written when a project records exactly that root
-/// ([`is_recorded_root`]) — a project whose folder is gone, renamed by case
-/// only, or moved with a link left at its old path is named by that root and
-/// never by what its canonical form now reaches, another project or none.
+/// resolved, and sent as written when a project records that root
+/// ([`is_recorded_root`]: as written, or as named through a link in an
+/// ancestor) — a project whose folder is gone, renamed by case only, or
+/// moved with a link left at its old path is named by that root and never
+/// by what its canonical form now reaches, another project or none.
 /// Any other path is its canonical form; `Err` is `canonicalize`'s: nothing
 /// is there.
 pub(crate) fn named_directory(path: &Path) -> std::io::Result<PathBuf> {
@@ -162,12 +163,19 @@ pub(crate) fn named_directory(path: &Path) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(path)
 }
 
-/// Whether a project's `project.json` records `path` as its root, as
-/// written (`store::projects::by_recorded_root` — the home store's registry,
-/// which this machine's daemon reads too). A registry that cannot be read is
-/// no: the path is then resolved as any other.
+/// Whether a project's `project.json` records `path` as its root
+/// (`store::projects::by_recorded_root` — the home store's registry, which
+/// this machine's daemon reads too), compared as `projects::lookup` compares
+/// it: as written, then as named — its parent resolved, its last component
+/// not followed (the lead's ruling R-T29, residual X9) — so a recorded root
+/// spelled through a link in an ancestor (macOS's `/var/…` for
+/// `/private/var/…`) is one too, and the link a moved folder left at the
+/// root itself is never followed. A registry that cannot be read is no: the
+/// path is then resolved as any other.
 fn is_recorded_root(path: &Path) -> bool {
-    matches!(store::projects::by_recorded_root(path), Ok(Some(_)))
+    let recorded = |root: &Path| matches!(store::projects::by_recorded_root(root), Ok(Some(_)));
+    recorded(path)
+        || store::projects::as_named(path).is_some_and(|named| named != path && recorded(&named))
 }
 
 #[derive(Subcommand, Debug)]
