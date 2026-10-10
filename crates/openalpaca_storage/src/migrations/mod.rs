@@ -13,8 +13,8 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-/// Migrations in execution order. Future schema changes start at version 4:
-/// add `004_<name>.sql` ending in `INSERT INTO schema_version(version) VALUES (4);`
+/// Migrations in execution order. Future schema changes start at version 5:
+/// add `005_<name>.sql` ending in `INSERT INTO schema_version(version) VALUES (5);`
 /// and append its entry here.
 ///
 /// Each file ends by registering its own version (`run_migrations` executes a
@@ -35,6 +35,11 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 3,
         name: "no_project_store_rows",
         sql: include_str!("003_no_project_store_rows.sql"),
+    },
+    Migration {
+        version: 4,
+        name: "project_files",
+        sql: include_str!("004_project_files.sql"),
     },
 ];
 

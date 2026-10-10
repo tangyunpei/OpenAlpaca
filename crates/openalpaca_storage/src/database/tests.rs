@@ -284,6 +284,23 @@ fn insert_asset(
     )
 }
 
+/// A minimal pointer row (migration 4, R35): a result file's address with
+/// `in_project = 1`, for the index tests.
+fn insert_result(
+    conn: &rusqlite::Connection,
+    id: &str,
+    project_root: &str,
+    rel_path: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes,
+                                  storage_path, status, origin, project_root, rel_path, in_project)
+         VALUES (?1, 'owner-1', 'sha-' || ?1, ?3, 'text/markdown', 10, ?2 || '/' || ?3,
+                 'ready', 'produced', ?2, ?3, 1)",
+        rusqlite::params![id, project_root, rel_path],
+    )
+}
+
 #[test]
 fn test_artifact_schema_columns_defaults_and_indexes() {
     let dir = tempdir().unwrap();
@@ -312,6 +329,7 @@ fn test_artifact_schema_columns_defaults_and_indexes() {
             "pinned",
             "summary",
             "missing_since",
+            "in_project",
         ] {
             assert!(
                 assets.contains(&expected.to_string()),
@@ -337,6 +355,15 @@ fn test_artifact_schema_columns_defaults_and_indexes() {
         assert_eq!(version_count, 1);
         assert_eq!(pinned, 0);
         assert_eq!(kind, None);
+        let in_project: i64 = conn.query_row(
+            "SELECT in_project FROM file_assets WHERE id = 'a1'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(
+            in_project, 0,
+            "a row is outside the project unless R35's method wrote it"
+        );
 
         let task = columns("task")?;
         assert!(
@@ -402,6 +429,16 @@ fn test_artifact_address_is_unique_but_null_rel_path_is_free() {
             "duplicate (project_root, rel_path) should violate idx_file_assets_addr"
         );
 
+        // Migration 4 (R35): a result file's pointer row at the same address
+        // is a row of its own — the index carries `in_project` — and is still
+        // unique among result files.
+        insert_result(conn, "r1", "/proj", "notes/plan.md")?;
+        let dup_result = insert_result(conn, "r2", "/proj", "notes/plan.md");
+        assert!(
+            dup_result.is_err(),
+            "a second pointer row at one address should violate idx_file_assets_addr"
+        );
+
         // Same rel_path under a different project => allowed.
         insert_asset(conn, "a3", Some("/other"), Some("notes/plan.md"))?;
 
@@ -420,7 +457,10 @@ fn test_artifact_address_is_unique_but_null_rel_path_is_free() {
         insert_asset(conn, "a8", Some("/proj"), None)?;
 
         let count: i64 = conn.query_row("SELECT count(*) FROM file_assets", [], |r| r.get(0))?;
-        assert_eq!(count, 6, "a2 and a5 should be the only rejected inserts");
+        assert_eq!(
+            count, 7,
+            "a2, a5 and r2 should be the only rejected inserts"
+        );
 
         Ok(())
     })
@@ -1300,7 +1340,7 @@ fn migration_3_deletes_the_rows_whose_bytes_lie_inside_a_projects_own_folder() {
     }
 
     let db = Database::open(&db_path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 3);
+    assert_eq!(db.schema_version().unwrap(), newest_version());
     db.with_connection(|conn| {
         let ids = conn
             .prepare("SELECT id FROM file_assets ORDER BY id")?
@@ -1331,6 +1371,72 @@ fn migration_3_deletes_the_rows_whose_bytes_lie_inside_a_projects_own_folder() {
                 row.get(0)
             })?;
         assert_eq!(messages, 2, "the messages keep their text");
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// Migration 4 (ST-12, R35): every row a version-3 store holds reads
+/// `in_project = 0` — a by-product or an upload, never a result file — and
+/// the address index is rebuilt with the column, so a result file may share
+/// its path with a by-product's or an upload's address.
+#[test]
+fn a_version_3_database_migrates_to_4_with_every_row_outside_the_project() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("v3.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        for migration in &migrations::MIGRATIONS[..3] {
+            conn.execute_batch(migration.sql).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes,
+                                      storage_path, origin, project_root, rel_path) VALUES
+                 ('upload', 'u', 'a', 'a.txt', 'text/plain', 1,
+                  '/h/.openalpaca/projects/-w-app/uploads/2026-09-01/01-a.txt', 'upload',
+                  '/w/app', '2026-09-01/01-a.txt'),
+                 ('by-product', 'u', 'b', '01-notes.md', 'text/markdown', 1,
+                  '/h/.openalpaca/projects/-w-app/artifacts/loose/2026-09-01/01-notes.md',
+                  'produced', '/w/app', 'loose/2026-09-01/01-notes.md');",
+        )
+        .unwrap();
+        let version: i32 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 3, "the fixture is a version-3 store");
+    }
+
+    let db = Database::open(&db_path).unwrap();
+    assert_eq!(db.schema_version().unwrap(), newest_version());
+    db.with_connection(|conn| {
+        let versions = conn
+            .prepare("SELECT version FROM schema_version ORDER BY version")?
+            .query_map([], |row| row.get::<_, i32>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert!(
+            versions.contains(&4),
+            "migration 4 ran in place: {versions:?}"
+        );
+        let rows = conn
+            .prepare("SELECT id, in_project FROM file_assets ORDER BY id")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(
+            rows,
+            [("by-product".to_string(), 0), ("upload".to_string(), 0)]
+        );
+        let index: String = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_file_assets_addr'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(index.contains("in_project"), "{index}");
+        // A result file at the upload's address is a row of its own.
+        insert_result(conn, "result", "/w/app", "2026-09-01/01-a.txt")?;
         Ok(())
     })
     .unwrap();

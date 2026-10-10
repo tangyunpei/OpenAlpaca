@@ -6,7 +6,7 @@
 
 - DB path resolver: `openalpaca_storage::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
-- Registered migrations: 3
+- Registered migrations: 4
 
 ## Tables
 
@@ -194,7 +194,7 @@ UNIQUE(provider, provider_user_id)
 
 ### `file_assets` (table)
 
-Source migration: `001_baseline.sql`
+Source migration: `004_project_files.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -222,6 +222,7 @@ version_count INTEGER NOT NULL DEFAULT 1
 pinned INTEGER NOT NULL DEFAULT 0
 summary TEXT
 missing_since TEXT
+in_project INTEGER NOT NULL DEFAULT 0
 ```
 
 ### `global_user` (table)
