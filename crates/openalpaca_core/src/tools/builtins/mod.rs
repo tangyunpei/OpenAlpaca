@@ -573,13 +573,21 @@ impl BuiltInTool for ScriptToolBuiltIn {
         cmd.args(&args);
         cmd.current_dir(&self.skill_dir);
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(self.timeout_secs),
-            cmd.output(),
-        )
-        .await
-        .map_err(|_| format!("Script timed out after {}s", self.timeout_secs))?
-        .map_err(|e| format!("Failed to execute script: {}", e))?;
+        // R45 (storage design §11): killed with the processes it started
+        // when its time runs out or its call is dropped.
+        let timeout = std::time::Duration::from_secs(self.timeout_secs);
+        let output = match crate::tools::platform::run_bounded(cmd, timeout).await {
+            Ok(output) => output,
+            Err(crate::tools::platform::RunFailure::TimedOut) => {
+                return Err(format!("Script timed out after {}s", self.timeout_secs));
+            }
+            Err(
+                crate::tools::platform::RunFailure::Spawn(e)
+                | crate::tools::platform::RunFailure::Io(e),
+            ) => {
+                return Err(format!("Failed to execute script: {}", e));
+            }
+        };
 
         // Cap output size to prevent memory pressure from scripts producing
         // unbounded stdout/stderr, matching the command backend limit.

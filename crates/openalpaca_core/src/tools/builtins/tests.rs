@@ -1620,3 +1620,48 @@ fn a_skill_script_says_its_arguments_reach_a_program() {
     .unwrap();
     assert!(script.arguments_reach_a_program());
 }
+
+// --- R45: a skill script is killed with what it started (storage design §11) ---
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_skill_script_that_times_out_takes_the_processes_it_started_with_it() {
+    use crate::test_util::{GONE_WITHIN, KillOnFail, pid_from_file, wait_until_gone};
+    use std::time::Duration;
+
+    let skill = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(skill.path().join("scripts")).unwrap();
+    std::fs::write(
+        skill.path().join("scripts/hang.sh"),
+        "for a in \"$@\"; do case \"$a\" in --pidfile=*) P=\"${a#--pidfile=}\" ;; esac; done\n\
+         sleep 30 &\n\
+         echo $! > \"$P\"\n\
+         wait\n",
+    )
+    .unwrap();
+    let tool = ScriptToolBuiltIn::new(
+        skill.path(),
+        &crate::middleware::skill::ScriptConfig {
+            file: "hang.sh".to_string(),
+            name: "hang".to_string(),
+            description: "Starts a sleep and waits on it".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            interpreter: Some("sh".to_string()),
+            timeout_secs: 1,
+        },
+    )
+    .unwrap();
+    let pidfile = skill.path().join("pid");
+
+    let err = tool
+        .execute(&serde_json::json!({"pidfile": pidfile.to_str().unwrap()}))
+        .await
+        .unwrap_err();
+    let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
+    let _kill = KillOnFail(pid);
+    assert_eq!(err, "Script timed out after 1s");
+    assert!(
+        wait_until_gone(pid, GONE_WITHIN).await,
+        "the script's background sleep {pid} outlived its timeout"
+    );
+}
