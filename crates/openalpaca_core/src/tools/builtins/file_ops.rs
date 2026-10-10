@@ -171,7 +171,8 @@ impl BuiltInTool for FileListTool {
 
 /// Read `dir`'s names, then lay out the entries shown. Only those are looked
 /// at (S5's M4): a folder of 100,000 names costs one `lstat` per line shown,
-/// all on one blocking-pool hop, not one hop per name.
+/// the `lstat`s all on one blocking-pool hop — not an `lstat` and a hop per
+/// name.
 async fn list_folder(path: &str, dir: &Path) -> Result<String, String> {
     let cannot = |e: std::io::Error| format!("Cannot list '{path}': {e}");
     let mut reader = tokio::fs::read_dir(dir).await.map_err(cannot)?;
