@@ -831,3 +831,62 @@ fn a_case_only_rename_reads_missing_and_is_re_pointed_to_the_new_case() {
     );
     assert_eq!(projects::list().unwrap().len(), 1);
 }
+
+/// R39: a re-point rewrites a result file's address — step 2's second
+/// `storage_path` prefix, `old_root` → `new_root` — and the file, moved by the
+/// user with their folder, is untouched and reads at its new address.
+#[test]
+fn a_re_point_rewrites_a_pointer_rows_path_and_leaves_the_file() {
+    let w = World::new();
+    let before = w.project("app");
+    let file = before.root.join("src").join("main.rs");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"fn main() {}\n").unwrap();
+    let old_root = before.root_string();
+    let (row, _) = ArtifactStore::new(&w.db)
+        .record_project_file(crate::NewProjectFile {
+            owner_id: "owner-1",
+            project_root: &old_root,
+            rel_path: "src/main.rs",
+            content: b"fn main() {}\n",
+            task_id: None,
+            agent_id: None,
+        })
+        .unwrap();
+    // The user moves their folder; the file moves with it.
+    let new = w.work.join("app-moved");
+    std::fs::rename(&before.root, &new).unwrap();
+    let moved = new.join("src").join("main.rs");
+    let mtime = std::fs::metadata(&moved).unwrap().modified().unwrap();
+
+    let done = repoint(&w.db, &before.root, &new).unwrap();
+
+    assert_eq!(done.rows.file_assets, 1);
+    let after = ArtifactStore::new(&w.db)
+        .get(&row.id, "owner-1")
+        .unwrap()
+        .unwrap();
+    let new_root = done.after.root_string();
+    assert!(after.in_project);
+    assert_eq!(after.project_root.as_deref(), Some(new_root.as_str()));
+    assert_eq!(after.rel_path.as_deref(), Some("src/main.rs"));
+    assert_eq!(
+        after.storage_path,
+        done.after
+            .root
+            .join("src")
+            .join("main.rs")
+            .to_string_lossy()
+    );
+    assert_eq!(
+        ArtifactStore::new(&w.db)
+            .resolve_content(&row.id, None)
+            .unwrap(),
+        moved.canonicalize().unwrap()
+    );
+    assert_eq!(std::fs::read(&moved).unwrap(), b"fn main() {}\n");
+    assert_eq!(
+        std::fs::metadata(&moved).unwrap().modified().unwrap(),
+        mtime
+    );
+}

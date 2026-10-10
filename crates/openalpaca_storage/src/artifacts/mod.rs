@@ -1667,13 +1667,15 @@ impl<'a> ArtifactStore<'a> {
     /// rows, `old_root` becomes `new_root`. A prefix counts only when a `/` or
     /// a `\` follows it, compared with `substr`, never `LIKE` (whose `_` and
     /// `%` a path may hold). `rel_path` is the address and does not change.
+    /// (`a_re_point_rewrites_a_pointer_rows_path_and_leaves_the_file`,
+    /// `project_life/tests.rs`, pins the second prefix.)
     ///
     /// `missing_since` is cleared with the address it described: the mark
     /// says "nothing is at `storage_path`", and this rewrites `storage_path`.
     /// No stat pass inside the transaction (R32) — the read path re-stamps.
     ///
     /// `file_assets` goes **last**: `idx_file_assets_addr` is
-    /// (`project_root`, `rel_path`), the one unique key a re-point can
+    /// (`project_root`, `in_project`, `rel_path`), the one unique key a re-point can
     /// violate, and the failure that rolls the transaction back must have the
     /// other four to roll back. Path-scoped, not owner-scoped: `session` and
     /// `task` carry no `owner_id`; the route refuses a root holding another
