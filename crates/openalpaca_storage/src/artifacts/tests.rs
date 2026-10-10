@@ -3172,3 +3172,180 @@ fn put_never_adopts_a_pointer_row_at_an_artifact_shaped_path() {
     assert!(f.store().versions(&pointer.id).unwrap().is_empty());
     assert_untouched(&file, b"the user's notes\n", mtime);
 }
+
+// ============================================================================
+// R37 — every reader goes through the resolver; no version is ever written
+// ============================================================================
+
+/// R39: a user's edit of a result file records no version — the read-time
+/// check refreshes the row's hash and size and nothing else, and the sweep
+/// passes result files over, neither recording an edit nor marking a deleted
+/// one missing (fails when `verify` or the read check ignores `in_project`).
+#[test]
+fn a_users_edit_of_a_result_file_records_no_version() {
+    let f = Fixture::new();
+    let (row, path, _) = f.result_file("docs/plan.md", b"# Plan\n");
+    let (gone, gone_path, _) = f.result_file("docs/old.md", b"# Old\n");
+    // The user edits one file in their editor and deletes another.
+    fs::write(&path, b"# Plan, revised by hand\n").unwrap();
+    let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::remove_file(&gone_path).unwrap();
+    let root = f.project_root().to_string_lossy().into_owned();
+
+    let report = f.store().verify(Some(&root)).unwrap();
+    assert!(report.user_edits.is_empty(), "{report:?}");
+    assert_eq!(
+        report.missing, 0,
+        "the sweep never marks a result file: {report:?}"
+    );
+    assert!(
+        f.store()
+            .get(&gone.id, OWNER)
+            .unwrap()
+            .unwrap()
+            .missing_since
+            .is_none()
+    );
+
+    let served = f.store().resolve_content(&row.id, None).unwrap();
+    assert_eq!(served, path.canonicalize().unwrap());
+    let after = f.store().get(&row.id, OWNER).unwrap().unwrap();
+    assert_eq!(after.sha256, sha256_hex(b"# Plan, revised by hand\n"));
+    assert_eq!(after.size_bytes, 24);
+    assert_eq!((after.version, after.version_count), (1, 0));
+    assert!(
+        f.store().versions(&row.id).unwrap().is_empty(),
+        "no version row"
+    );
+    assert!(!f.project_root().join("docs").join(".versions").exists());
+    assert_untouched(&path, b"# Plan, revised by hand\n", mtime);
+}
+
+/// R37: a result file the user moved away reads as gone and is marked
+/// missing; once it is back, the next read clears the mark.
+#[test]
+fn a_result_file_found_again_clears_its_missing_mark() {
+    let f = Fixture::new();
+    let (row, path, _) = f.result_file("notes/todo.md", b"- one\n");
+    let aside = f.project_root().join("todo.md.aside");
+    fs::rename(&path, &aside).unwrap();
+
+    let err = f.store().resolve_content(&row.id, None).unwrap_err();
+    assert!(
+        matches!(
+            err.downcast_ref::<ArtifactError>(),
+            Some(ArtifactError::Gone { .. })
+        ),
+        "{err:#}"
+    );
+    assert!(f.store().get(&row.id, OWNER).unwrap().unwrap().missing());
+
+    fs::rename(&aside, &path).unwrap();
+    let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(f.store().resolve_content(&row.id, None).unwrap(), path);
+    assert!(
+        !f.store().get(&row.id, OWNER).unwrap().unwrap().missing(),
+        "found again"
+    );
+    assert_untouched(&path, b"- one\n", mtime);
+}
+
+/// R37: a result file has no older version to read or diff. (Passes before
+/// this task too: it pins R37's "no History or Diff" at the store.)
+#[test]
+fn a_result_file_has_no_older_version_to_read_or_diff() {
+    let f = Fixture::new();
+    let (row, _, _) = f.result_file("src/lib.rs", b"pub fn a() {}\n");
+    assert!(f.store().versions(&row.id).unwrap().is_empty());
+    for err in [
+        f.store().resolve_content(&row.id, Some(2)).unwrap_err(),
+        f.store().diff_paths(&row.id, 1, 2).unwrap_err(),
+    ] {
+        assert!(
+            matches!(
+                err.downcast_ref::<ArtifactError>(),
+                Some(ArtifactError::VersionNotFound { version: 2, .. })
+            ),
+            "{err:#}"
+        );
+    }
+}
+
+/// R37 with R31's rule: a result file replaced by a link out of the project
+/// is neither hashed into the row nor read.
+#[cfg(unix)]
+#[test]
+fn a_result_file_replaced_by_a_link_out_of_the_project_is_not_read() {
+    let f = Fixture::new();
+    let (row, path, _) = f.result_file("docs/plan.md", b"# Plan\n");
+    let outside = tempdir().unwrap();
+    let secret = outside.path().join("secret.txt");
+    fs::write(&secret, b"not the project's\n").unwrap();
+    fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(&secret, &path).unwrap();
+
+    let err = f.store().resolve_content(&row.id, None).unwrap_err();
+
+    assert!(format!("{err:#}").contains("escapes"), "{err:#}");
+    let after = f.store().get(&row.id, OWNER).unwrap().unwrap();
+    assert_eq!(
+        after.sha256, row.sha256,
+        "nothing outside the project was hashed in"
+    );
+    assert!(f.store().versions(&row.id).unwrap().is_empty());
+    assert_eq!(fs::read(&secret).unwrap(), b"not the project's\n");
+}
+
+/// The lead's ruling R-T18 (R37 with ST-23): a result file of a project whose
+/// folder moved with a link left at its old root is not read, refreshed or
+/// served through that link — the project is missing, and the file reads as
+/// gone, marked as an absent file is. Once the folder is back at its root the
+/// next read finds the file again and clears the mark.
+#[cfg(unix)]
+#[test]
+fn a_result_file_of_a_project_moved_behind_a_link_is_not_read_through_its_old_root() {
+    let f = Fixture::new();
+    let (row, path, _) = f.result_file("docs/plan.md", b"# Plan\n");
+    // The root as it is recorded, taken before the move: `project_root()`
+    // canonicalizes, which after the move would answer the moved folder.
+    let root = f.project_root();
+    let aside = tempdir().unwrap();
+    let moved = aside.path().join("app-moved");
+    fs::rename(&root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &root).unwrap();
+    // The user edits the file where it is now.
+    fs::write(
+        moved.join("docs").join("plan.md"),
+        b"# Plan, moved and edited\n",
+    )
+    .unwrap();
+    assert!(
+        path.is_file(),
+        "the old path still opens the file, through the link"
+    );
+
+    let err = f.store().resolve_content(&row.id, None).unwrap_err();
+
+    assert!(
+        matches!(
+            err.downcast_ref::<ArtifactError>(),
+            Some(ArtifactError::Gone { .. })
+        ),
+        "{err:#}"
+    );
+    let after = f.store().get(&row.id, OWNER).unwrap().unwrap();
+    assert_eq!(
+        after.sha256, row.sha256,
+        "nothing read through the link was hashed in"
+    );
+    assert_eq!(after.size_bytes, row.size_bytes);
+    assert!(after.missing(), "it reads as gone");
+
+    // The folder comes back to its root: found again.
+    fs::remove_file(&root).unwrap();
+    fs::rename(&moved, &root).unwrap();
+    assert_eq!(f.store().resolve_content(&row.id, None).unwrap(), path);
+    let back = f.store().get(&row.id, OWNER).unwrap().unwrap();
+    assert!(!back.missing(), "found again");
+    assert_eq!(back.sha256, sha256_hex(b"# Plan, moved and edited\n"));
+}

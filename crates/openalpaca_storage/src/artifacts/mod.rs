@@ -1416,10 +1416,61 @@ impl<'a> ArtifactStore<'a> {
     /// asks again).
     pub fn check_head(&self, id: &str) -> Result<Option<ArtifactRecord>> {
         let probe = self.probe_head(id)?;
+        // R37: a result file is the user's; its row follows the file and never
+        // records a version.
+        if let Some(record) = &probe.project_file {
+            self.refresh_project_file(record)?;
+            return Ok(None);
+        }
         let Some(observation) = probe.observe() else {
             return Ok(None);
         };
         self.record_head_observation(id, observation)
+    }
+
+    /// R37's read-time check for a result file: the row follows the file and
+    /// no version is written. The file is reached through the project root
+    /// its row records ([`project_file_path`]); the hash runs with the
+    /// connection free and only when the stamp moved; and the row is updated
+    /// compare-and-set on `sha256`, so a write that landed meanwhile wins. An
+    /// absent file, one that leaves the root, or one of a missing project
+    /// (R-T18) is left to [`resolve_version_path`], which answers for it.
+    fn refresh_project_file(&self, record: &ArtifactRecord) -> Result<()> {
+        let Some(path) = project_file_path(record) else {
+            return Ok(());
+        };
+        let Some(stamp) = stamp_at(&path) else {
+            return Ok(());
+        };
+        if record.head_stamp() == Some(stamp) {
+            return Ok(());
+        }
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Cannot read the result file {}: {e}", path.display());
+                }
+                return Ok(());
+            }
+        };
+        let sha256 = hash_head(&bytes);
+        self.db.with_connection(|conn| {
+            conn.execute(
+                "UPDATE file_assets
+                    SET sha256 = ?1, size_bytes = ?2, metadata_json = ?3,
+                        updated_at = datetime('now')
+                  WHERE id = ?4 AND in_project = 1 AND sha256 = ?5",
+                rusqlite::params![
+                    sha256,
+                    bytes.len() as i64,
+                    metadata_with_stamp(record.metadata_json.as_deref(), Some(stamp)),
+                    record.id,
+                    record.sha256,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     /// Phase 1: the row and the cheap gate, under the lock and off metadata
@@ -1452,6 +1503,7 @@ impl<'a> ArtifactStore<'a> {
             };
             if record.sha256 != observation.row_sha256
                 || record.origin != ArtifactOrigin::Produced
+                || record.in_project
                 || record.missing_since.is_some()
             {
                 return Ok(None);
@@ -1799,7 +1851,9 @@ impl<'a> ArtifactStore<'a> {
     /// Re-stat every produced row under `project_root` (`Some("")` = the home
     /// store, `None` = every root), stamping `missing_since` on those whose
     /// bytes are gone and recording as a version every head whose bytes were
-    /// edited outside OpenAlpaca (§4.8).
+    /// edited outside OpenAlpaca (§4.8). A result file's pointer row
+    /// (`in_project = 1`) is never swept: it has no versions, and a read
+    /// answers for its file (R37).
     ///
     /// [`VerifyReport::missing`] is how many rows *are* missing — not how many
     /// this pass newly marked — so a status caller gets the same answer every
@@ -1812,8 +1866,9 @@ impl<'a> ArtifactStore<'a> {
     /// it had already recorded and the next one resumes from there.
     pub fn verify(&self, project_root: Option<&str>) -> Result<VerifyReport> {
         let records: Vec<ArtifactRecord> = self.db.with_connection(|conn| {
-            let mut sql =
-                format!("SELECT {RECORD_COLUMNS} FROM file_assets WHERE origin = 'produced'");
+            let mut sql = format!(
+                "SELECT {RECORD_COLUMNS} FROM file_assets WHERE origin = 'produced' AND in_project = 0"
+            );
             if project_root.is_some() {
                 sql.push_str(" AND COALESCE(project_root, '') = ?1");
             }
@@ -1966,18 +2021,41 @@ fn resolve_version_path(
         }
     };
 
-    let root = artifacts_root_for(record)?;
+    // R37: a result file lives under the project root its row records — the
+    // real folder, not a store. Everything else lives under its store's
+    // `artifacts/`.
+    let root = if record.in_project {
+        PathBuf::from(
+            record
+                .project_root
+                .as_deref()
+                .with_context(|| format!("result file {id} has no project root"))?,
+        )
+    } else {
+        artifacts_root_for(record)?
+    };
     let candidate = root.join(&rel);
+    // The lead's ruling R-T18 (R37 with ST-23): a result file of a project
+    // whose root no longer leads to its own folder — gone, renamed by case
+    // only, or moved with a link left at the old path — is not there to read.
+    // It is never reached through that link or the old spelling: it reads as
+    // gone and is marked as an absent head is, until the person re-points the
+    // project and a read finds it again (below).
+    let in_missing_project = record.in_project && crate::store::projects::root_is_missing(&root);
     // Belt and braces (the rel_path came out of our own grammar). A deleted
     // project has no root to canonicalize against — that is a gone artifact,
     // not a confinement failure.
-    let path = match confine_to_root(&root, &candidate) {
-        Ok(path) => path,
-        Err(_) if !root.exists() => candidate,
-        Err(e) => return Err(e),
+    let path = if in_missing_project {
+        candidate
+    } else {
+        match confine_to_root(&root, &candidate) {
+            Ok(path) => path,
+            Err(_) if !root.exists() => candidate,
+            Err(e) => return Err(e),
+        }
     };
 
-    if !path.exists() {
+    if in_missing_project || !path.exists() {
         if is_head && record.missing_since.is_none() {
             conn.execute(
                 "UPDATE file_assets SET missing_since = datetime('now'),
@@ -1989,6 +2067,14 @@ fn resolve_version_path(
             id: id.to_string(),
             path: path.to_string_lossy().to_string(),
         }));
+    }
+    // R37: a result file the user put back is found again.
+    if is_head && record.in_project && record.missing_since.is_some() {
+        conn.execute(
+            "UPDATE file_assets SET missing_since = NULL, updated_at = datetime('now')
+              WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
     }
     Ok(path)
 }
@@ -2010,6 +2096,9 @@ pub struct HeadProbe {
     /// The row's `sha256` when the probe was taken — phase 3's compare-and-set.
     row_sha256: String,
     work: Option<HeadWork>,
+    /// R37: a result file's row — [`ArtifactStore::check_head`] refreshes it
+    /// and records nothing.
+    project_file: Option<ArtifactRecord>,
 }
 
 /// What [`HeadProbe::observe`] has to read, once the gate says the head is
@@ -2038,7 +2127,16 @@ fn probe_for(record: &ArtifactRecord) -> HeadProbe {
     let nothing = HeadProbe {
         row_sha256: record.sha256.clone(),
         work: None,
+        project_file: None,
     };
+    // R37: a result file's bytes are the user's and never a version — not
+    // here, and not in `put`'s inline check either.
+    if record.in_project {
+        return HeadProbe {
+            project_file: Some(record.clone()),
+            ..nothing
+        };
+    }
     if record.origin != ArtifactOrigin::Produced || record.missing_since.is_some() {
         return nothing;
     }
@@ -2063,7 +2161,24 @@ fn probe_for(record: &ArtifactRecord) -> HeadProbe {
             is_text: is_text_kind_of(record),
             stamp: Some(stamp),
         }),
+        project_file: None,
     }
+}
+
+/// A result file's bytes, confined under the project root its row records —
+/// `confine_to_root` canonicalizes an existing path whole, the last component
+/// included (R31's rule), so a link out of the root is refused. `None` when
+/// the row carries no address, when its project is missing — the root no
+/// longer leads to its own folder, so nothing is read through a link left at
+/// the old path or through the old spelling (the lead's ruling R-T18; ST-23)
+/// — or when the path leaves the root.
+fn project_file_path(record: &ArtifactRecord) -> Option<PathBuf> {
+    let root = PathBuf::from(record.project_root.as_deref()?);
+    if crate::store::projects::root_is_missing(&root) {
+        return None;
+    }
+    let rel = record.rel_path.as_deref()?;
+    confine_to_root(&root, &root.join(rel)).ok()
 }
 
 impl HeadProbe {
