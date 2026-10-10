@@ -1834,8 +1834,28 @@ async fn run_lead_for_test(
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     bus: EventBus,
 ) -> LeadAgentResult {
-    run_lead_agent(
+    run_lead_as(
         &lead_subagent(),
+        provider,
+        tool_registry,
+        skill_catalog,
+        daemon_config,
+        bus,
+    )
+    .await
+}
+
+/// [`run_lead_for_test`] with a lead of the caller's choosing.
+async fn run_lead_as(
+    lead: &SubAgent,
+    provider: Arc<ScriptedProvider>,
+    tool_registry: Arc<ToolRegistry>,
+    skill_catalog: Arc<crate::orchestrator::skill_catalog::SkillCatalog>,
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
+    bus: EventBus,
+) -> LeadAgentResult {
+    run_lead_agent(
+        lead,
         "do the thing",
         scripted_router(provider),
         tool_registry,
@@ -1864,6 +1884,15 @@ async fn run_lead_for_test(
         None,
     )
     .await
+}
+
+/// A registry holding the builtins, as the daemon's global one does.
+fn registry_with_builtins() -> Arc<ToolRegistry> {
+    let registry = Arc::new(ToolRegistry::default());
+    for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    registry
 }
 
 #[tokio::test]
@@ -1914,6 +1943,83 @@ async fn test_lead_loop_request_carries_extension_defs_and_invoke_skill() {
         "lead system prompt missing extension guidance"
     );
     assert!(system.content.contains("invoke_skill"));
+}
+
+/// R42 and §15: the lead's hand-built surface carries `file_read`,
+/// `file_list` and `artifact_read` in code — its template names none of
+/// them — and no tool that writes or edits a file or runs a command, so it
+/// delegates result files. What the surface offers the sandbox admits: a
+/// `file_list` call reaches the tool, which answers that this run has no
+/// working folder, instead of the allow list's refusal.
+#[tokio::test]
+async fn the_lead_reads_files_and_by_products_and_writes_no_file() {
+    let provider = ScriptedProvider::new(vec![
+        scripted_response(
+            "",
+            vec![openalpaca_llm::ToolCall {
+                id: "call-1".to_string(),
+                name: "file_list".to_string(),
+                arguments: serde_json::json!({"path": "."}),
+            }],
+        ),
+        scripted_response("done", vec![]),
+    ]);
+
+    let result = run_lead_for_test(
+        provider.clone(),
+        registry_with_builtins(),
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        EventBus::default(),
+    )
+    .await;
+
+    assert!(result.success, "finish: {:?}", result.loop_result.finish_reason);
+    let names = provider.tool_names(0);
+    for offered in ["file_read", "file_list", "artifact_read"] {
+        assert!(names.iter().any(|n| n == offered), "{offered}: {names:?}");
+    }
+    for withheld in ["file_write", "file_edit", "shell_execute"] {
+        assert!(!names.iter().any(|n| n == withheld), "{withheld}: {names:?}");
+    }
+    let results = tool_results_seen(&provider, 1);
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(
+        results[0].contains("neither a project nor a conversation"),
+        "the tool ran: {:?}",
+        results[0]
+    );
+    assert!(!results[0].contains("not in allow list"), "{:?}", results[0]);
+}
+
+/// The sandbox denies by tool name, so a lead template that denies
+/// `file_read` would still be handed — and admitted — `file_list`, which
+/// comes with it, if the surface did not keep it off. It is handed neither
+/// file reader, and still `artifact_read`.
+#[tokio::test]
+async fn a_lead_that_denies_file_read_is_handed_neither_file_reader() {
+    let agent = crate::test_util::make_agent("lead_agent", vec!["orchestration", "memory_read"]);
+    let mut template = crate::test_util::template_from_agent(&agent);
+    template.frontmatter.denied_capabilities = vec!["file_read".to_string()];
+    let lead = template.to_subagent("lead-1", "task-1");
+    let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
+
+    let result = run_lead_as(
+        &lead,
+        provider.clone(),
+        registry_with_builtins(),
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        EventBus::default(),
+    )
+    .await;
+
+    assert!(result.success, "finish: {:?}", result.loop_result.finish_reason);
+    let names = provider.tool_names(0);
+    for withheld in ["file_read", "file_list"] {
+        assert!(!names.iter().any(|n| n == withheld), "{withheld}: {names:?}");
+    }
+    assert!(names.iter().any(|n| n == "artifact_read"), "{names:?}");
 }
 
 /// R48, §15: the lead holds no file-writing or editing tool. Its surface is

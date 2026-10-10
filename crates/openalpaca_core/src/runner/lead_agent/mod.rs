@@ -207,6 +207,28 @@ pub async fn run_lead_agent(
     {
         tools.push(tool.definition.clone());
     }
+    // R42 (storage design §14, §15): the lead reads the run's working folder
+    // and the run's by-products itself — `file_read` and `file_list` act in
+    // the project, or the conversation's scratch folder, and `artifact_read`
+    // reads back what a subagent saved — and holds no tool that writes or
+    // edits a file there or runs a command: it delegates result files. In
+    // code rather than by template, so a store seeded before Stage 2 gets
+    // them too; none of the three ever asks (ST-16). A tool whose name, or a
+    // capability it provides, the lead's template denies stays off: the
+    // sandbox denies by tool name, so `file_list` (which comes with
+    // `file_read`) would otherwise be admitted by `admit_tool_surface` below
+    // although `file_read` is denied — the same filter `resolve_capabilities`
+    // applies to a subagent's surface.
+    let denied = &lead_agent.constraints.denied_capabilities;
+    for name in ["file_read", "file_list", "artifact_read"] {
+        if let Some(tool) = tool_registry.get(name)
+            && !std::iter::once(&tool.definition.name)
+                .chain(tool.provides_capabilities.iter())
+                .any(|cap| denied.iter().any(|d| d.eq_ignore_ascii_case(cap)))
+        {
+            tools.push(tool.definition.clone());
+        }
+    }
     // Extension tools (MCP-bridged `<server>__<tool>` + plugin-provided
     // `<plugin>::<tool>`) join the lead surface by default, less those whose
     // extension is not enabled — same policy as the main loop (tool/skill
