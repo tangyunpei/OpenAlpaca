@@ -308,9 +308,15 @@ pub fn working_folder_note<'a>(
                 (true, false) => line.push('.'),
             }
             if holds("file_write") {
-                line.push_str(
-                    " file_write saves a by-product in OpenAlpaca's artifact store instead.",
-                );
+                // "Instead" of the folder only when something acts in it
+                // (residual X13): alone, the sentence has nothing to stand
+                // against.
+                line.push_str(" file_write saves a by-product in OpenAlpaca's artifact store");
+                line.push_str(if names.is_empty() && !shell {
+                    "."
+                } else {
+                    " instead."
+                });
             }
             line
         }
@@ -1051,6 +1057,16 @@ mod tests {
             Some(format!(
                 "<working_folder>This conversation has no project. Your working folder is its \
                  scratch folder {dir}.</working_folder>"
+            ))
+        );
+        // Residual X13: with nothing relative to the folder, the by-product
+        // sentence has no "instead" to stand against.
+        assert_eq!(
+            note(&["file_write"], NoteReader::Loop),
+            Some(format!(
+                "<working_folder>This conversation has no project. Your working folder is its \
+                 scratch folder {dir}. file_write saves a by-product in OpenAlpaca's artifact \
+                 store.</working_folder>"
             ))
         );
     }
