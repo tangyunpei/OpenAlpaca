@@ -3,8 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
+use openalpaca_storage::store::projects;
+
 use crate::tools::registry::ToolContext;
-use crate::tools::working_folder::{WorkingFolder, working_folder};
+use crate::tools::working_folder::{WorkingFolder, WorkingFolderRefusal, working_folder};
 
 /// Maximum file size for file_read (10 MB).
 pub(super) const MAX_FILE_READ_SIZE: u64 = 10 * 1024 * 1024;
@@ -250,6 +252,79 @@ pub(super) fn resolve_workspace_path_for_write(
     }
     rules.check(relative_path, &target, &canonical_root, StoreAccess::Write)?;
     Ok(target)
+}
+
+/// The refusal of a path that leaves the working folder — the resolvers'
+/// sentence, and the one an open of their target gives for a link found at
+/// its leaf ([`open_leaf`]).
+pub(super) fn outside_boundary(relative_path: &str) -> String {
+    format!("Path '{relative_path}' resolves outside the workspace boundary")
+}
+
+/// Opens `target` — a resolver's answer for `relative_path` — without
+/// following a link at its leaf (the lead's ruling R-T30, d1-confine-1):
+/// `O_NOFOLLOW` on unix, as the memory writer's opens do (`fsx.rs`). The
+/// resolvers canonicalized the target, so no link stands at its leaf when
+/// they answer; a link found there when it is opened was put there since,
+/// and following it could read or write a file outside the folder. That
+/// open fails (`ELOOP`) and is refused with [`outside_boundary`]'s
+/// sentence; any other failure is `other(e)`. A link at a *middle* folder
+/// is still followed by the open — closing that needs a walk with `openat`
+/// (recorded, not built). Elsewhere than unix the options are as given.
+pub(super) async fn open_leaf(
+    options: &mut tokio::fs::OpenOptions,
+    target: &Path,
+    relative_path: &str,
+    other: impl FnOnce(std::io::Error) -> String,
+) -> Result<tokio::fs::File, String> {
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    match options.open(target).await {
+        Ok(file) => Ok(file),
+        Err(e) if is_link_at_leaf(&e) => Err(outside_boundary(relative_path)),
+        Err(e) => Err(other(e)),
+    }
+}
+
+/// The folders above `target` that do not exist yet, made below the
+/// project's `root` one level at a time and never `root` itself (the lead's
+/// ruling R-T30, d5-results-2; `store::create_below`'s rules): a level that
+/// is a link or a file is refused, not followed, and a root that is gone —
+/// moved away since the plan — makes nothing and is refused with the missing
+/// project's sentence. `create_dir_all` re-made such a root, and the write
+/// landed in a stub folder that then read as the project, present.
+/// `target` is the write resolver's answer, so it lies under `root`; one
+/// that does not is refused rather than made.
+pub(super) fn make_parents_below(
+    relative_path: &str,
+    root: &Path,
+    target: &Path,
+) -> Result<(), String> {
+    let below = target
+        .parent()
+        .and_then(|parent| parent.strip_prefix(root).ok())
+        .ok_or_else(|| outside_boundary(relative_path))?;
+    match openalpaca_storage::store::create_below(root, below) {
+        Ok(_) => Ok(()),
+        Err(_) if projects::root_is_missing(root) => Err(WorkingFolderRefusal::ProjectMissing {
+            root: root.to_string_lossy().into_owned(),
+        }
+        .to_string()),
+        Err(e) => Err(format!("Failed to create directories: {e}")),
+    }
+}
+
+/// Whether an `O_NOFOLLOW` open failed because a link stands at the leaf.
+fn is_link_at_leaf(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        e.raw_os_error() == Some(libc::ELOOP)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = e;
+        false
+    }
 }
 
 /// Which way a builtin file tool is touching a path.

@@ -496,3 +496,107 @@ fn a_link_at_the_leaf_into_the_git_folder_is_refused_in_a_project() {
          Run git through shell_execute instead."
     );
 }
+
+// --- R-T30: the open of a resolver's target, and the folders above it ---
+
+/// R-T30 (d1-confine-1): a link put at a target's leaf after the resolver
+/// answered is never followed by its open — not for reading, not for
+/// writing: both are refused with the boundary sentence, and the file it
+/// points at outside the project is neither read nor changed. The target
+/// itself, a plain file, opens as before.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_open_never_follows_a_link_put_at_the_leaf_after_the_resolver_answered() {
+    use tokio::io::AsyncReadExt;
+
+    let gp = crate::test_util::GuardedProject::new();
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.txt");
+    std::fs::write(&secret, "the outside bytes").unwrap();
+    std::fs::create_dir_all(gp.root.join("docs")).unwrap();
+    std::fs::write(gp.root.join("docs/a.md"), "inside").unwrap();
+    let target =
+        resolve_workspace_path_for_write("docs/a.md", &gp.root, FolderRules::Project).unwrap();
+    let other = |e: std::io::Error| format!("other: {e}");
+
+    let mut file = open_leaf(
+        tokio::fs::OpenOptions::new().read(true),
+        &target,
+        "docs/a.md",
+        other,
+    )
+    .await
+    .expect("a plain file opens");
+    let mut text = String::new();
+    file.read_to_string(&mut text).await.unwrap();
+    assert_eq!(text, "inside");
+
+    std::fs::remove_file(&target).unwrap();
+    std::os::unix::fs::symlink(&secret, &target).unwrap();
+    let boundary = "Path 'docs/a.md' resolves outside the workspace boundary";
+    let read = open_leaf(
+        tokio::fs::OpenOptions::new().read(true),
+        &target,
+        "docs/a.md",
+        other,
+    )
+    .await
+    .map(|_| ());
+    assert_eq!(read, Err(boundary.to_string()));
+    let write = open_leaf(
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
+        &target,
+        "docs/a.md",
+        other,
+    )
+    .await
+    .map(|_| ());
+    assert_eq!(write, Err(boundary.to_string()));
+    assert_eq!(
+        std::fs::read_to_string(&secret).unwrap(),
+        "the outside bytes",
+        "the file outside is byte-identical"
+    );
+}
+
+/// R-T30 (d5-results-2): the missing folders above a target are made below
+/// the project's root one level at a time. A level that is a file is
+/// refused, a root that is gone is refused with the missing project's
+/// sentence and never re-made, and a target outside the root makes nothing.
+#[test]
+fn the_folders_above_a_target_are_made_below_the_root_and_never_the_root() {
+    let gp = crate::test_util::GuardedProject::new();
+    let root = gp.root.clone();
+
+    make_parents_below("a/b/c.txt", &root, &root.join("a/b/c.txt")).unwrap();
+    assert!(root.join("a/b").is_dir());
+
+    std::fs::write(root.join("file"), "x").unwrap();
+    let refused =
+        make_parents_below("file/d/e.txt", &root, &root.join("file/d/e.txt")).unwrap_err();
+    assert!(
+        refused.starts_with("Failed to create directories: "),
+        "{refused}"
+    );
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    assert_eq!(
+        make_parents_below("x/y.txt", &root, &elsewhere.path().join("x/y.txt")).unwrap_err(),
+        "Path 'x/y.txt' resolves outside the workspace boundary"
+    );
+    assert!(!elsewhere.path().join("x").exists());
+
+    let away = tempfile::tempdir().unwrap();
+    std::fs::rename(&root, away.path().join("app")).unwrap();
+    assert_eq!(
+        make_parents_below("new/z.txt", &root, &root.join("new/z.txt")).unwrap_err(),
+        WorkingFolderRefusal::ProjectMissing {
+            root: root.to_string_lossy().into_owned()
+        }
+        .to_string()
+    );
+    assert!(!root.exists(), "the root is not re-made");
+}

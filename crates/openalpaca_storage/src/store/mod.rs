@@ -513,9 +513,12 @@ pub fn content_dir(scope: &StoreScope, kind: ContentKind) -> Result<PathBuf> {
 /// `ErrorKind::NotFound` and creates nothing — the guard for a project's
 /// folder under `projects/`, which `create_dir_all` would re-create with no
 /// `project.json` for a writer that resolved the project before the delete
-/// removed it (R-F3). `rel` must be plain names (`ErrorKind::InvalidInput`
-/// otherwise); an empty `rel` answers `base` when it is a directory.
-pub(crate) fn create_below(base: &Path, rel: &Path) -> std::io::Result<PathBuf> {
+/// removed it (R-F3), and for a project's own root, which `file_write` makes
+/// its missing folders under (the lead's ruling R-T30: a root moved away
+/// mid-write is never re-made). `rel` must be plain names
+/// (`ErrorKind::InvalidInput` otherwise); an empty `rel` answers `base` when
+/// it is a directory.
+pub fn create_below(base: &Path, rel: &Path) -> std::io::Result<PathBuf> {
     use std::io::{Error, ErrorKind};
     let real_directory = |dir: &Path| -> std::io::Result<()> {
         if fs::symlink_metadata(dir)?.file_type().is_dir() {

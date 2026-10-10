@@ -11,6 +11,7 @@ use openalpaca_storage::{ArtifactKind, Database};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::annotations_for_builtin;
 use super::approval_preview::{WriteLanding, edit_card, write_card};
@@ -18,8 +19,8 @@ use super::artifact_write::{
     ToolArtifact, put_tool_artifact, record_tool_project_file, split_name,
 };
 use super::helpers::{
-    FolderRules, MAX_FILE_READ_SIZE, acting_folder, resolve_workspace_path,
-    resolve_workspace_path_for_write, validate_workspace_path,
+    FolderRules, MAX_FILE_READ_SIZE, acting_folder, make_parents_below, open_leaf,
+    resolve_workspace_path, resolve_workspace_path_for_write, validate_workspace_path,
 };
 use super::pre_edit::{EditVerb, PreEdit, check_pre_edit, keep_pre_edit_copy};
 
@@ -56,11 +57,19 @@ impl BuiltInTool for FileReadTool {
         // project: nothing under a `.openalpaca` folder. `.git` and `.env`
         // are read like any file — reading never asks (ST-16).
         let full_path = resolve_workspace_path(path, &root, rules)?;
+        // R-T30: opened without following a link put at the leaf since the
+        // resolver answered, and sized from the file that was opened.
+        let cannot_access = |e: std::io::Error| format!("Cannot access file '{path}': {e}");
+        let mut file = open_leaf(
+            tokio::fs::OpenOptions::new().read(true),
+            &full_path,
+            path,
+            cannot_access,
+        )
+        .await?;
 
         // Guard against OOM: reject files larger than 10 MB
-        let metadata = tokio::fs::metadata(&full_path)
-            .await
-            .map_err(|e| format!("Cannot access file '{}': {}", path, e))?;
+        let metadata = file.metadata().await.map_err(cannot_access)?;
         if metadata.len() > MAX_FILE_READ_SIZE {
             return Err(format!(
                 "File '{}' is {} bytes, exceeding the {} byte limit",
@@ -70,9 +79,11 @@ impl BuiltInTool for FileReadTool {
             ));
         }
 
-        tokio::fs::read_to_string(&full_path)
+        let mut text = String::new();
+        file.read_to_string(&mut text)
             .await
-            .map_err(|e| format!("Failed to read file '{}': {}", path, e))
+            .map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+        Ok(text)
     }
 }
 
@@ -350,33 +361,58 @@ impl FileWriteTool {
         ctx: &ToolContext,
     ) -> Result<String, String> {
         let (path, content) = write_arguments(arguments)?;
-        let (root, target) = match self.plan(path, content, ctx)? {
-            WritePlan::ByProduct => return self.save_as_artifact(path, content, ctx),
-            WritePlan::Project { root, target, .. } => (root, target),
-        };
+        match self.plan(path, content, ctx)? {
+            WritePlan::ByProduct => self.save_as_artifact(path, content, ctx),
+            WritePlan::Project { root, target, .. } => {
+                self.write_in_project(path, content, &root, &target, ctx)
+                    .await
+            }
+        }
+    }
+
+    /// A project write after its plan: the pre-edit copy, the file, the
+    /// pointer row. `root` and `target` are the plan's.
+    async fn write_in_project(
+        &self,
+        path: &str,
+        content: &str,
+        root: &Path,
+        target: &Path,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
         // ST-17 + R46: the bytes this write is about to replace are kept in
         // the conversation's log first; `Err` means nothing was written.
         let kept = keep_pre_edit_copy(
             path,
-            &target,
-            &root,
+            target,
+            root,
             ctx,
             self.snapshot_max_bytes(),
             EditVerb::Overwrite,
         )
         .await?;
-        if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("Failed to create directories: {e}"))?;
-        }
-        tokio::fs::write(&target, content)
+        make_parents_below(path, root, target)?;
+        // R-T30: the leaf is opened without following a link put there since
+        // the plan resolved it.
+        let write_failed = |e: std::io::Error| format!("Failed to write file '{path}': {e}");
+        let mut file = open_leaf(
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true),
+            target,
+            path,
+            write_failed,
+        )
+        .await?;
+        file.write_all(content.as_bytes())
             .await
-            .map_err(|e| format!("Failed to write file '{path}': {e}"))?;
+            .map_err(write_failed)?;
+        file.flush().await.map_err(write_failed)?;
         // R35, R36: the file is the result and the row a view of it — a row
         // that cannot be written does not undo the write.
         let listed = match self.db.as_ref() {
-            Some(db) => record_tool_project_file(db, ctx, &root, &target, content).map(|_| ()),
+            Some(db) => record_tool_project_file(db, ctx, root, target, content).map(|_| ()),
             None => Err("no database is wired to this tool".to_string()),
         };
         if let Err(e) = &listed {
@@ -389,7 +425,7 @@ impl FileWriteTool {
         Ok(Self::project_write_result(
             path,
             content.len(),
-            &target,
+            target,
             kept == PreEdit::Kept,
             listed,
         ))
@@ -825,9 +861,18 @@ impl FileEditTool {
                 metadata.len()
             ));
         }
-        let bytes = tokio::fs::read(&target)
-            .await
-            .map_err(|e| format!("Failed to read file '{path}': {e}"))?;
+        // R-T30: read without following a link put at the leaf since the
+        // resolver answered.
+        let read_failed = |e: std::io::Error| format!("Failed to read file '{path}': {e}");
+        let mut file = open_leaf(
+            tokio::fs::OpenOptions::new().read(true),
+            &target,
+            path,
+            read_failed,
+        )
+        .await?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).await.map_err(read_failed)?;
         let text = String::from_utf8(bytes)
             .map_err(|_| format!("'{path}' is not UTF-8 text, so file_edit cannot change it."))?;
         let edited = apply_edit(
@@ -879,9 +924,27 @@ impl FileEditTool {
             // The plan read the file a moment ago and it is gone now.
             PreEdit::NewFile => return Err(edit_missing(path)),
         }
-        tokio::fs::write(&plan.target, &plan.text)
+        // R-T30: the file is opened without following a link put at the
+        // leaf since the plan, and never created — an edit changes a file
+        // that exists.
+        let write_failed = |e: std::io::Error| format!("Failed to write file '{path}': {e}");
+        let mut file = open_leaf(
+            tokio::fs::OpenOptions::new().write(true).truncate(true),
+            &plan.target,
+            path,
+            |e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    edit_missing(path)
+                } else {
+                    write_failed(e)
+                }
+            },
+        )
+        .await?;
+        file.write_all(plan.text.as_bytes())
             .await
-            .map_err(|e| format!("Failed to write file '{path}': {e}"))?;
+            .map_err(write_failed)?;
+        file.flush().await.map_err(write_failed)?;
         let listed = match self.db.as_ref() {
             Some(db) => {
                 record_tool_project_file(db, ctx, &plan.root, &plan.target, &plan.text).map(|_| ())
@@ -1488,6 +1551,112 @@ mod tests {
         assert!(
             !outside.path().join("newdir").exists(),
             "a directory was created outside the workspace"
+        );
+    }
+
+    // ── R-T30 (d1-confine-1, d5-results-2): between the plan and the write ──
+
+    /// The plan of a project write — the root and the target `write` hands
+    /// to [`FileWriteTool::write_in_project`].
+    fn planned(
+        tool: &FileWriteTool,
+        path: &str,
+        content: &str,
+        ctx: &ToolContext,
+    ) -> (PathBuf, PathBuf) {
+        match tool.plan(path, content, ctx) {
+            Ok(WritePlan::Project { root, target, .. }) => (root, target),
+            Ok(WritePlan::ByProduct) => panic!("a project turn plans a project write"),
+            Err(e) => panic!("the plan lets this write through: {e}"),
+        }
+    }
+
+    /// R-T30 (d1-confine-1): a link put at the target's name after the plan
+    /// resolved it never carries the write out of the project. Over a file
+    /// outside, the write is refused and that file is byte-identical. At a
+    /// new file's name, a link to a file that does not exist yet is refused
+    /// with the boundary sentence and nothing is made outside: the write
+    /// opens its target without following a link at the leaf, where a plain
+    /// open followed it and created the outside file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_swapped_in_at_the_leaf_after_the_plan_writes_nothing_outside() {
+        let b = bench();
+        let tool = b.tool(None);
+        let ctx = b.ctx("sess-swap");
+        fs::create_dir_all(b.root().join("docs")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let keys = outside.path().join("authorized_keys");
+        fs::write(&keys, "ssh-ed25519 AAAA the person's key\n").unwrap();
+        let rc = outside.path().join("rc");
+
+        for (path, link_to) in [("docs/notes.md", &keys), ("docs/new.md", &rc)] {
+            let (root, target) = planned(&tool, path, "planted", &ctx);
+            std::os::unix::fs::symlink(link_to, &target).unwrap();
+
+            let refused = tool
+                .write_in_project(path, "planted", &root, &target, &ctx)
+                .await
+                .expect_err("a link swapped in at the leaf is refused");
+            if link_to == &rc {
+                assert_eq!(
+                    refused,
+                    format!("Path '{path}' resolves outside the workspace boundary")
+                );
+            }
+            assert!(
+                fs::symlink_metadata(&target)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{path}: the link is left as it was"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(&keys).unwrap(),
+            "ssh-ed25519 AAAA the person's key\n",
+            "the file outside is byte-identical"
+        );
+        assert!(!rc.exists(), "nothing was created outside the project");
+        assert!(ctx.session_log.as_ref().unwrap().flush().await);
+        assert!(
+            b.images("sess-swap").is_empty(),
+            "nothing outside was copied"
+        );
+    }
+
+    /// R-T30 (d5-results-2): missing parent folders are made below the
+    /// project's root, one level at a time, and never the root itself. A
+    /// project folder moved away after the plan is refused with the missing
+    /// project's sentence and nothing is made at its old path, where
+    /// `create_dir_all` re-made the root and wrote the file into a stub that
+    /// then read as the project, present.
+    #[tokio::test]
+    async fn a_write_whose_project_folder_moved_away_after_the_plan_never_re_creates_it() {
+        let b = bench();
+        let tool = b.tool(None);
+        let ctx = b.ctx("sess-moved");
+        let (root, target) = planned(&tool, "docs/new.md", "draft", &ctx);
+        let away = tempfile::tempdir().unwrap();
+        let moved = away.path().join("app");
+        fs::rename(b.root(), &moved).unwrap();
+
+        let refused = tool
+            .write_in_project("docs/new.md", "draft", &root, &target, &ctx)
+            .await
+            .expect_err("a project folder moved away is refused");
+
+        assert_eq!(
+            refused,
+            WorkingFolderRefusal::ProjectMissing {
+                root: root.display().to_string()
+            }
+            .to_string()
+        );
+        assert!(!root.exists(), "the project's root was not re-created");
+        assert!(
+            !moved.join("docs").exists(),
+            "nor written in the moved folder"
         );
     }
 
