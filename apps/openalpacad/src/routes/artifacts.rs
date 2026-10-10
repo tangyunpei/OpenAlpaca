@@ -1,7 +1,7 @@
 //! Artifact endpoints — the read surface over `ArtifactStore` (plan §4.9).
 //!
 //! ```text
-//! GET /v1/artifacts?task_id=&kind=&origin=&project_root=&pinned=&q=
+//! GET /v1/artifacts?task_id=&kind=&origin=&project_root=&pinned=&in_project=&q=
 //!                  &include_missing=&limit=&offset=  -> { artifacts, total }
 //! GET /v1/artifacts/{id}                             -> Artifact | 404
 //! GET /v1/artifacts/{id}/content[?version=N]         -> bytes | 401 | 404 | 410
@@ -62,6 +62,9 @@ pub struct ListArtifactsParams {
     /// `COALESCE(project_root, '')` the store matches on.
     pub project_root: Option<String>,
     pub pinned: Option<bool>,
+    /// `false`: by-products and uploads only (the Library's default view);
+    /// `true`: result files in the project only (ST-12); absent: both.
+    pub in_project: Option<bool>,
     pub q: Option<String>,
     #[serde(default)]
     pub include_missing: bool,
@@ -206,6 +209,10 @@ fn artifact_json(record: &ArtifactRecord, task_title: Option<&str>) -> serde_jso
         "path": record.storage_path,
         "project_root": record.project_root,
         "rel_path": record.rel_path,
+        // Stage 2: a result file in the project (ST-12) — a pointer to the
+        // real file, with no versions — and whether Open is offered (ST-18).
+        "in_project": record.in_project,
+        "openable": record.openable(),
     })
 }
 
@@ -295,6 +302,7 @@ pub(crate) fn list_artifacts(
     query.task_id = params.task_id;
     query.project_root = params.project_root;
     query.pinned = params.pinned;
+    query.in_project = params.in_project;
     query.q = params.q;
     query.include_missing = params.include_missing;
     query.limit = page_limit(params.limit);
@@ -403,7 +411,14 @@ pub(crate) async fn artifact_content(
     if let Some(edited) = edit {
         announce_user_edit(bus, &edited);
     }
-    content_response(&path, &record.mime_type, &record.name).await
+    // A result file's name is its path in the project (`src/main.rs`); the
+    // download is named for its last component, so the header carries no
+    // `/`. A by-product's name has none, and is unchanged.
+    let file_name = std::path::Path::new(&record.name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&record.name);
+    content_response(&path, &record.mime_type, file_name).await
 }
 
 /// One `ArtifactWritten` for a version nobody in OpenAlpaca wrote (§4.8).

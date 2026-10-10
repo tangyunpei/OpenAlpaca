@@ -292,6 +292,7 @@
 | `origin` | `Option<String>` |
 | `project_root` | `Option<String>` |
 | `pinned` | `Option<bool>` |
+| `in_project` | `Option<bool>` |
 | `q` | `Option<String>` |
 | `include_missing` | `bool` |
 | `limit` | `Option<i64>` |
