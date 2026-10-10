@@ -17,8 +17,7 @@ use super::annotations_for_builtin;
 use super::artifact_write::{ToolArtifact, put_tool_artifact, scope_from_context, split_name};
 use super::approval_preview::{WriteLanding, write_card};
 use super::helpers::{
-    FolderRules, MAX_FILE_READ_SIZE, StoreAccess, acting_folder, is_identity_path, is_soul_path,
-    is_store_owned_path, is_store_owned_resolved, is_user_path, resolve_workspace_path,
+    FolderRules, MAX_FILE_READ_SIZE, acting_folder, resolve_workspace_path,
     resolve_workspace_path_for_write, validate_workspace_path,
 };
 
@@ -299,42 +298,10 @@ impl FileWriteTool {
             ));
         }
 
-        // Safety: block writes to SOUL.md — use update_persona tool instead
-        if is_soul_path(path) {
-            return Err("Writing to SOUL.md via file_write is blocked. \
-                 Use the update_persona tool with target=\"soul\" instead, \
-                 which provides validation, backup, and safe atomic writes."
-                .to_string());
-        }
-
-        // Safety: block writes to USER.md — use update_persona tool instead
-        if is_user_path(path) {
-            return Err("Writing to USER.md via file_write is blocked. \
-                 Use the update_persona tool with target=\"user\" instead, \
-                 which provides validation, backup, and safe atomic writes."
-                .to_string());
-        }
-
-        // Safety: block writes to IDENTITY.md — use update_persona tool instead
-        if is_identity_path(path) {
-            return Err("Writing to IDENTITY.md via file_write is blocked. \
-                 Use the update_persona tool with target=\"identity\" instead, \
-                 which provides validation, backup, and safe atomic writes."
-                .to_string());
-        }
-
-        // The store's own files (design §2, plan 3.2): `state/` and a memory
-        // partition's control files are the service's, never file_write's.
-        let refuse = |what: &str| {
-            format!(
-                "Writing '{path}' is refused: it is {what}, which the daemon owns. Memory notes \
-                 are written with memory_store and memory_update; nothing under state/ is \
-                 workspace content."
-            )
-        };
-        if let Some(what) = is_store_owned_path(path, StoreAccess::Write) {
-            return Err(refuse(what));
-        }
+        // R33 (storage design §11): no home-store rule binds this tool. A
+        // project, a scratch folder or the artifact store reaches none of the
+        // files those rules protected, and a project may hold a `state/`
+        // folder or a `SOUL.md` of its own.
 
         // G2 (FW-1): the workspace root is the daemon's starting directory,
         // never the turn's, so the plain write below is taken only on a turn
@@ -351,14 +318,6 @@ impl FileWriteTool {
         // This prevents out-of-workspace directory creation via symlinked intermediates.
         let full_path =
             resolve_workspace_path_for_write(path, &self.workspace_root, FolderRules::Plain)?;
-        // Again on the resolved path: a symlink inside the workspace that
-        // points at `state/` or a partition's control files passes the
-        // string check above.
-        if let Some(what) =
-            is_store_owned_resolved(&full_path, &self.workspace_root, StoreAccess::Write)
-        {
-            return Err(refuse(what));
-        }
 
         // §5.7: the bytes this write is about to destroy are imaged first, and
         // the write does not happen unless that succeeded. Everything above is
@@ -1008,24 +967,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_file_write_blocks_soul_md() {
-        let dir = tempfile::tempdir().unwrap();
-        let tool = FileWriteTool {
-            workspace_root: dir.path().to_path_buf(),
-            db: None,
-            daemon_config: None,
-        };
-        let result = tool
-            .execute(&serde_json::json!({
-                "path": "SOUL.md",
-                "content": "malicious content"
-            }))
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("update_persona"));
-    }
-
-    #[tokio::test]
     async fn test_file_write_creates_subdirs_within_workspace() {
         let _home = SandboxedHome::new();
         let dir = tempfile::tempdir().unwrap();
@@ -1088,109 +1029,12 @@ mod tests {
         assert!(!outside.path().join("evil.txt").exists());
     }
 
-    #[tokio::test]
-    async fn test_file_write_blocks_soul_md_in_subdir() {
-        let dir = tempfile::tempdir().unwrap();
-        let tool = FileWriteTool {
-            workspace_root: dir.path().to_path_buf(),
-            db: None,
-            daemon_config: None,
-        };
-        let result = tool
-            .execute(&serde_json::json!({
-                "path": "config/SOUL.md",
-                "content": "sneaky content"
-            }))
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("update_persona"));
-    }
+    // ── S3-R1 (plan §7a): a link before a new directory ────────────────
 
-    // ── Memory redesign, plan 3.2: the store's own files are refused ────
-
-    /// Design §2: the builtin file tools refuse any path whose first
-    /// component is `state` (the control snapshots and the database live
-    /// there, and the daemon runs in the home store), and the writers also
-    /// refuse a partition's control files — `.history/`, `MEMORY.md` and
-    /// `memory/.gitignore`. Fixture 18 step 10.
-    #[tokio::test]
-    async fn file_write_refuses_the_store_state_and_the_partition_control_files() {
-        let b = bench();
-        let tool = b.tool(None);
-        let ctx = b.project_ctx();
-        for path in [
-            "state/memory-control/home-32acea7eb739b08afd959db91e46d450.json",
-            "state/openalpaca.db",
-            "State/anything.txt",
-        ] {
-            let err = tool
-                .write(&serde_json::json!({"path": path, "content": "{}"}), &ctx)
-                .await
-                .expect_err(path);
-            assert!(err.contains("state/"), "{path}: {err}");
-            assert!(!b.work.path().join(path).exists(), "{path} was written");
-        }
-        for path in [
-            ".openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/.history/x/y.md",
-            "memory/owners/32acea7eb739b08afd959db91e46d450/MEMORY.md",
-            "MEMORY.md",
-            ".openalpaca/memory/.gitignore",
-            "memory/.gitignore",
-        ] {
-            let err = tool
-                .write(&serde_json::json!({"path": path, "content": "*\n"}), &ctx)
-                .await
-                .expect_err(path);
-            assert!(
-                err.contains("memory") || err.contains(".history") || err.contains("MEMORY.md"),
-                "{path}: {err}"
-            );
-            assert!(!b.work.path().join(path).exists(), "{path} was written");
-        }
-        // Not store-owned: a `state` directory below the first component, an
-        // ordinary note file, a `.gitignore` anywhere but under `memory/`.
-        for path in ["src/state/notes.md", "memory/owners/x/notes/a.md", ".gitignore"] {
-            tool.write(&serde_json::json!({"path": path, "content": "ok\n"}), &ctx)
-                .await
-                .unwrap_or_else(|e| panic!("{path}: {e}"));
-            assert!(b.work.path().join(path).exists());
-        }
-    }
-
-    /// **S3-R1 (plan §7a), the probe.** A link into `state/` followed by a
-    /// directory that does not exist yet: the write resolver's absent-parent
-    /// branch used to return the joined path unresolved, so the string check
-    /// saw `link/…`, the resolved-path check saw `link/…` too, and
-    /// `create_dir_all` followed the link — the write landed in
-    /// `state/newdir/x.json`. The nearest existing ancestor is resolved now,
-    /// and the store check runs on what it resolved to.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_link_into_state_before_a_new_directory_is_refused() {
-        let b = bench();
-        let root = b.work.path().to_path_buf();
-        fs::create_dir_all(root.join("state")).unwrap();
-        std::os::unix::fs::symlink("state", root.join("link")).unwrap();
-
-        let err = b
-            .tool(None)
-            .write(
-                &serde_json::json!({"path": "link/newdir/x.json", "content": "{}"}),
-                &b.project_ctx(),
-            )
-            .await
-            .expect_err("a link into state/ before a new directory is refused");
-        assert!(err.contains("state/"), "{err}");
-        assert!(
-            !root.join("state/newdir").exists(),
-            "a directory was created through the link"
-        );
-    }
-
-    /// **S3-R1, the other half.** The same branch let a link to anywhere
-    /// leave the workspace, as long as the directory after it was new: its
-    /// boundary check compared the unresolved join with the root, which it
-    /// always starts with.
+    /// **S3-R1 (plan §7a).** The write resolver's absent-parent branch let a
+    /// link to anywhere leave the workspace, as long as the directory after
+    /// it was new: its boundary check compared the unresolved join with the
+    /// root, which it always starts with.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_link_out_of_the_workspace_before_a_new_directory_is_refused() {
@@ -1356,7 +1200,8 @@ mod tests {
     /// R33 (storage design §11): the home store's five rules are gone from the
     /// file tools — from a project or a scratch folder nothing they protected
     /// is reachable, and a project of the user's may hold a `state/` folder,
-    /// a `MEMORY.md` or a `SOUL.md` of its own.
+    /// a `MEMORY.md` or a `SOUL.md` of its own: written with file_write, read
+    /// back with file_read.
     #[tokio::test]
     async fn a_project_may_hold_a_state_folder_and_a_soul_md() {
         let gp = crate::test_util::GuardedProject::new();
@@ -1369,10 +1214,16 @@ mod tests {
             ("memory/.gitignore", "*\n"),
             ("notes/.history/a.md", "old\n"),
         ];
+        let write = FileWriteTool {
+            workspace_root: gp.root.clone(),
+            db: None,
+            daemon_config: None,
+        };
         for (path, content) in files {
-            let full = gp.root.join(path);
-            fs::create_dir_all(full.parent().unwrap()).unwrap();
-            fs::write(&full, content).unwrap();
+            write
+                .write(&serde_json::json!({ "path": path, "content": content }), &gp.ctx())
+                .await
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
         }
 
         for (path, content) in files {
@@ -1812,6 +1663,46 @@ mod tests {
         );
     }
 
+    /// Fixture 18 step 10, after R33 (storage design §11): a model told to
+    /// `file_write` the store's control snapshot reaches no file of the store.
+    /// With no project the path names a by-product in the artifact store; in
+    /// a project it is the project's own `state/` folder. The real snapshot is
+    /// unchanged either way.
+    #[tokio::test]
+    async fn a_store_path_written_from_a_conversation_never_reaches_the_store() {
+        const SNAPSHOT: &str = "state/memory-control/home-32acea7eb739b08afd959db91e46d450.json";
+        let st = Store::new();
+        let home = st.home.root();
+        let project = st.project_root();
+        fs::create_dir_all(home.join("state/memory-control")).unwrap();
+        fs::write(home.join(SNAPSHOT), "{\"real\":true}").unwrap();
+        let args = serde_json::json!({ "path": SNAPSHOT, "content": "{}" });
+
+        st.tool_at(&home)
+            .write(&args, &st.ctx(None, None))
+            .await
+            .expect("no project: a by-product named after the path");
+        st.tool_at(&project)
+            .write(&args, &st.ctx(Some(&project), None))
+            .await
+            .expect("a project: its own state/ folder");
+
+        assert_eq!(
+            fs::read_to_string(home.join(SNAPSHOT)).unwrap(),
+            "{\"real\":true}",
+            "the store's snapshot is untouched"
+        );
+        assert_eq!(fs::read_to_string(project.join(SNAPSHOT)).unwrap(), "{}");
+        let rows = st.artifacts();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].summary.as_deref(), Some(SNAPSHOT));
+        assert!(
+            !std::path::Path::new(&rows[0].storage_path).starts_with(home.join("state")),
+            "{}",
+            rows[0].storage_path
+        );
+    }
+
     /// Round G's five parts (FW-1), pinned whole. From Stage 2 (S3) on,
     /// `file_read` reads the working folder — the project or the
     /// conversation's scratch folder — and never the artifact store, so part
@@ -1849,26 +1740,16 @@ mod tests {
         );
     }
 
-    /// The refusals come before the routing: a store-owned path and an
-    /// oversized body are refused on a turn with no project exactly as on one
-    /// with a project, and no artifact is saved.
+    /// The size cap comes before the routing: an oversized body is refused on
+    /// a turn with no project exactly as on one with a project, and no
+    /// artifact is saved. (Its store-owned half went with R33, storage design
+    /// §11: no home-store rule binds `file_write` any more.)
     #[tokio::test]
-    async fn a_store_owned_path_and_the_size_cap_are_refused_before_routing() {
+    async fn the_size_cap_is_refused_before_routing() {
         let st = Store::new();
         let tool = st.tool_at(st.work.path());
         let ctx = st.ctx(None, None);
 
-        for path in [
-            "state/memory-control/home.json",
-            "memory/.gitignore",
-            "notes/MEMORY.md",
-        ] {
-            let err = tool
-                .write(&serde_json::json!({"path": path, "content": "{}"}), &ctx)
-                .await
-                .expect_err(path);
-            assert!(err.contains("which the daemon owns"), "{path}: {err}");
-        }
         let err = tool
             .write(
                 &serde_json::json!({"path": "big.md", "content": "x".repeat(10 * 1024 * 1024 + 1)}),

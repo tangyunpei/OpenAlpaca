@@ -160,10 +160,10 @@ pub(super) fn resolve_workspace_path(
 /// write will actually land. A link on the way is therefore followed here,
 /// not only later by the caller: `link -> state` plus `link/newdir/x.json`
 /// resolves to `<root>/state/newdir/x.json`, which the boundary check below
-/// and the caller's store check (`is_store_owned_resolved`) both see, and
-/// `link -> /anywhere` plus a new directory resolves outside the root and is
-/// refused (S3-R1, plan §7a). The missing directories cannot redirect
-/// anything: they do not exist, and `validate_workspace_path` refused `..`.
+/// sees, and `link -> /anywhere` plus a new directory resolves outside the
+/// root and is refused (S3-R1, plan §7a). The missing directories cannot
+/// redirect anything: they do not exist, and `validate_workspace_path`
+/// refused `..`.
 ///
 /// "Exists" means a directory entry is there — `symlink_metadata`, not
 /// `exists`, which answers no for a dangling link and would let the walk
@@ -245,24 +245,6 @@ pub(super) fn resolve_workspace_path_for_write(
     Ok(target)
 }
 
-/// Check if a path refers to SOUL.md (case-insensitive filename check).
-pub(super) fn is_soul_path(path: &str) -> bool {
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|f| f.to_str())
-        .map(|f| f.eq_ignore_ascii_case("soul.md"))
-        .unwrap_or(false)
-}
-
-/// Check if a path refers to USER.md (case-insensitive filename check).
-pub(super) fn is_user_path(path: &str) -> bool {
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|f| f.to_str())
-        .map(|f| f.eq_ignore_ascii_case("user.md"))
-        .unwrap_or(false)
-}
-
 /// Which way a builtin file tool is touching a path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StoreAccess {
@@ -337,15 +319,6 @@ pub(super) fn is_store_owned_resolved(
     let root = workspace_root.canonicalize().ok()?;
     let relative = resolved.strip_prefix(&root).ok()?;
     is_store_owned_path(&relative.to_string_lossy(), access)
-}
-
-/// Check if a path refers to IDENTITY.md (case-insensitive filename check).
-pub(super) fn is_identity_path(path: &str) -> bool {
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|f| f.to_str())
-        .map(|f| f.eq_ignore_ascii_case("identity.md"))
-        .unwrap_or(false)
 }
 
 /// Generate a unique backup path with nanosecond timestamp and UUID suffix.

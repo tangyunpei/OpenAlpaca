@@ -382,7 +382,7 @@ rather than guessing:
 | `quarantined` | §2 / `MEMORY_QUARANTINED` |
 | `fixture:no_owner` | §3: the owner is not a `global_user` row |
 | `fixture:capability_denied` | §7a `capabilities`: the context lacks the capability the operation needs (a worker's write) |
-| `fixture:path_refused` | §2 / plan 3.2: a builtin file tool refuses `state/` or a partition's control files |
+| `fixture:path_refused` | §3 rule 1: the file layer refuses a partition whose path holds a link, a junction or a non-directory (`MemoryFilesError::PathRefused`); since storage design R33 no builtin file tool refuses `state/` — they act in a project or a scratch folder |
 | `fixture:confirmation_unavailable` | §7 *Capabilities*: a `destructive_hint` tool on an `unattended` turn (the sandbox's M6 refusal) |
 | `fixture:newer_schema` | plan slice 0.5; `tasks/store-revision/design.md` §1.4 (the one refusal, above this build) |
 | `fixture:write_pending` | storage design §6 *Re-point*: refused while a memory write of the project is pending (the route answers `WORKSPACE_BUSY`) |

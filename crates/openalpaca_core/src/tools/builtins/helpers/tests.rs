@@ -18,17 +18,6 @@ fn test_validate_workspace_path_accepts_relative() {
 }
 
 #[test]
-fn test_is_soul_path_variants() {
-    assert!(is_soul_path("SOUL.md"));
-    assert!(is_soul_path("soul.md"));
-    assert!(is_soul_path("Soul.MD"));
-    assert!(is_soul_path("config/SOUL.md"));
-    assert!(!is_soul_path("README.md"));
-    assert!(!is_soul_path("SOULMATE.md"));
-    assert!(!is_soul_path("my_soul.md"));
-}
-
-#[test]
 fn test_unique_backup_path_avoids_collision() {
     let dir = tempfile::tempdir().unwrap();
     let backup_dir = dir.path().join("backups");
