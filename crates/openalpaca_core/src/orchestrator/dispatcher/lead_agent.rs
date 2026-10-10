@@ -60,7 +60,9 @@ impl TaskDispatcher {
     /// has one (§5.5 item 5: the main loop's `start_workflow` knows it, because
     /// the gateway pinned it for this turn). It is used as given; `None` — a
     /// scheduled skill, a `start`/`rerun` from the route, any caller with no
-    /// turn — falls back to the lane's active session, resolved at dispatch.
+    /// turn — falls back to the lane's active session, resolved at dispatch
+    /// and opened there when the lane has none (storage design §10, ruling
+    /// R-T2: a run parked on a lane with no conversation gets one).
     /// Without the carry, a `create_session`/`activate_session` landing during
     /// the loop's LLM round re-homed the completion report, its artifact links
     /// and the run's JSONL into whichever conversation happened to be active by
@@ -332,15 +334,25 @@ impl TaskDispatcher {
             .map(|r| r.session_id.clone())
             .or_else(|| turn_session_id.map(str::to_string))
             .or_else(|| {
-            self.db.as_ref().and_then(|db| {
-                openalpaca_storage::ConversationRepository::new(db)
-                    .active_session_id(lane_key)
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(%lane_key, "Failed to resolve the lane's active session: {e}");
-                        None
-                    })
-            })
-        });
+                // Storage design §10, ruling R-T2: a caller with no turn — a
+                // run parked by `POST /v1/tasks`, a scheduled skill, `start`,
+                // `rerun` — runs in the lane's active session, opened here
+                // when the lane has none, so the run has a conversation, a
+                // session log and a scratch folder. The same call the run's
+                // finalisation makes to post its report (`outcome.rs`), made
+                // earlier.
+                self.db.as_ref().and_then(|db| {
+                    match openalpaca_storage::ConversationRepository::new(db)
+                        .get_or_create_active_session(lane_key, source, None)
+                    {
+                        Ok(session) => Some(session.id),
+                        Err(e) => {
+                            tracing::warn!(%lane_key, "Failed to open the lane's session: {e}");
+                            None
+                        }
+                    }
+                })
+            });
 
         // Persist task to DB
         if let Some(ref db) = self.db {

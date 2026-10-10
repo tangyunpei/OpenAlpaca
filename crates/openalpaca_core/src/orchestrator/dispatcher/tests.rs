@@ -1072,6 +1072,86 @@ async fn the_dispatched_lead_is_given_the_turns_working_state() {
     assert_eq!(blocks, vec![state.render(&updated_at, 4000).as_str()]);
 }
 
+/// Storage design §10, R44 and the lead's ruling R-T2: a run dispatched with
+/// no turn on a lane that has no session — one parked by `POST /v1/tasks`
+/// and started later — is given the lane's session at dispatch, opened there,
+/// so it has a conversation and a session log, and its lead is told that
+/// conversation's scratch folder. Before R-T2 the row carried no session and
+/// every file tool and command of the run was refused `NoConversation`.
+#[tokio::test]
+async fn a_run_on_a_lane_with_no_session_gets_one_and_works_in_its_scratch_folder() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    assert!(repo.active_session_id("user1:cli").unwrap().is_none());
+
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(RecordingLeadMock {
+            requests: requests.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+    let dispatcher = setup_with_specific_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+        router,
+    );
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Tidy the notes",
+            "Parked run".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .unwrap();
+
+    let task = openalpaca_storage::repository::TaskRepository::new(&db)
+        .get(&outcome.task_id)
+        .unwrap()
+        .expect("the row is persisted at dispatch");
+    let session = task
+        .session_id
+        .clone()
+        .expect("the dispatch opened a session for the lane");
+    assert_eq!(
+        repo.active_session_id("user1:cli").unwrap().as_deref(),
+        Some(session.as_str()),
+        "the run's session is the lane's active one"
+    );
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let first = loop {
+        if let Some(first) = requests.lock().unwrap().first().cloned() {
+            break first;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the lead's request"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    let scratch = home_root.join("scratch").join(&session);
+    assert!(
+        first.iter().any(|m| {
+            m.content.starts_with("<working_folder>This conversation has no project.")
+                && m.content.contains(&scratch.display().to_string())
+        }),
+        "the lead is told its conversation's scratch folder: {:?}",
+        first.iter().map(|m| &m.content).collect::<Vec<_>>()
+    );
+    assert!(!scratch.exists(), "a note makes no folder");
+}
+
 #[tokio::test]
 async fn test_lead_agent_steering_attach_detach_and_leftover_conversion() {
     let mut config = DaemonConfig::default();
