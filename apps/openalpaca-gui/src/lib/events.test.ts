@@ -216,6 +216,42 @@ describe("DaemonEventsClient", () => {
     client.disconnect();
   });
 
+  // Storage design §13: a file written into the project (a pointer row) and
+  // whether Open is offered for it (ST-18) ride the frame.
+  it("carries a project file's in_project and openable through", async () => {
+    const client = makeClient();
+    const seen: ServerEvent[] = [];
+    client.onEvent((event) => seen.push(event));
+    await client.connect();
+
+    const socket = latest();
+    socket.onopen?.({});
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "artifact_written",
+        artifact_id: "a-3",
+        task_id: "b41",
+        agent_id: "code_agent",
+        name: "scripts/release.sh",
+        kind: "code",
+        version: 1,
+        path: "/Users/dev/app/scripts/release.sh",
+        in_project: true,
+        openable: false,
+        ts: "2026-10-08T10:00:00Z",
+        instance_id: "7f3a",
+      }),
+    });
+
+    const event = seen[0];
+    if (event?.type !== "artifact_written") {
+      throw new Error(`expected artifact_written, got ${event?.type}`);
+    }
+    expect(event.in_project).toBe(true);
+    expect(event.openable).toBe(false);
+    client.disconnect();
+  });
+
   // Phase 4. Narrowing on `type` proves the union member exists with the right
   // field types; `bun run check` fails if any of these reads is wrong.
   it("carries a subagent_span open through with its own fields", async () => {

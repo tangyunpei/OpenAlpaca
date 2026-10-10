@@ -32,6 +32,8 @@ const notes: Artifact = {
   path: "/home/.openalpaca/artifacts/loose/2026-10-02/01-notes.md",
   project_root: null,
   rel_path: "loose/2026-10-02/01-notes.md",
+  in_project: false,
+  openable: true,
 };
 
 describe("previewPlan — the notes name Open", () => {

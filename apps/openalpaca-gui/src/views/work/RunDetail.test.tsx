@@ -62,6 +62,8 @@ const artifact = {
   path: "/tmp/findings.md",
   project_root: null,
   rel_path: "findings.md",
+  in_project: false,
+  openable: true,
 };
 
 let artifactsReply: () => Response;

@@ -50,6 +50,8 @@ const findings: Artifact = {
   path: "/home/.openalpaca/artifacts/2026-09-05-run/01-connector-audit-findings.md",
   project_root: null,
   rel_path: "2026-09-05-run/01-connector-audit-findings.md",
+  in_project: false,
+  openable: true,
 };
 
 const chart: Artifact = {

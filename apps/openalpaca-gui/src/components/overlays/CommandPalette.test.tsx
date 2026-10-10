@@ -31,7 +31,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 /** The rows `GET /v1/artifacts?q=` answers with; empty unless a test sets it. */
-let hits: { id: string; name: string }[] = [];
+let hits: { id: string; name: string; in_project?: boolean }[] = [];
 let searches: string[] = [];
 
 function render(ui: React.ReactElement) {
@@ -81,6 +81,8 @@ beforeEach(() => {
             path: `/tmp/${hit.name}`,
             project_root: null,
             rel_path: hit.name,
+            in_project: hit.in_project ?? false,
+            openable: true,
           })),
           total: hits.length,
         }),

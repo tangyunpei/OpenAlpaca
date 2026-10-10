@@ -32,6 +32,8 @@ const artifact: Artifact = {
   path: "/home/.openalpaca/artifacts/2026-08-31-run/01-connector-audit-findings.md",
   project_root: null,
   rel_path: "2026-08-31-run/01-connector-audit-findings.md",
+  in_project: false,
+  openable: true,
 };
 
 describe("LibraryRow (§3.30)", () => {

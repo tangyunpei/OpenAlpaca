@@ -34,6 +34,8 @@ const artifact: Artifact = {
   path: "/home/.openalpaca/artifacts/loose/2026-09-05/01-connector-audit-findings.md",
   project_root: null,
   rel_path: "loose/2026-09-05/01-connector-audit-findings.md",
+  in_project: false,
+  openable: true,
 };
 
 function renderHeader(summary: string | null = null) {

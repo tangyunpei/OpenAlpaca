@@ -69,6 +69,8 @@ function libraryBadge(
     path: `/home/.openalpaca/uploads/${name}`,
     project_root: null,
     rel_path: name,
+    in_project: false,
+    openable: true,
   };
   const { container } = render(
     <LibraryRow

@@ -41,6 +41,8 @@ const row: Artifact = {
   path: "/Users/dev/.openalpaca/artifacts/loose/2026-10-02/01-pasta-night.md",
   project_root: null,
   rel_path: "loose/2026-10-02/01-pasta-night.md",
+  in_project: false,
+  openable: true,
 };
 
 let requests: string[] = [];

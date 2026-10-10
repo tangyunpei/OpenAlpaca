@@ -97,7 +97,7 @@ export type ServerEvent =
   // A produced artifact (plan §4.9). `name` is the head file's own name and
   // `path` its absolute location; `task_id`/`agent_id` are null for a loose
   // artifact — a chat turn that ran no workflow. Never fired for uploads.
-  | { type: "artifact_written"; artifact_id: string; task_id: string | null; agent_id: string | null; name: string; kind: string; version: number; path: string; ts: string; instance_id: string; _id: number }
+  | { type: "artifact_written"; artifact_id: string; task_id: string | null; agent_id: string | null; name: string; kind: string; version: number; path: string; in_project: boolean; openable: boolean; ts: string; instance_id: string; _id: number }
   // One subagent lane of a run opening or closing (GAP-09). The payload is the
   // `subagent_span` row, so `started_at`/`ended_at` are the same strings
   // `GET /v1/tasks/{id}/timeline` serves. `state` is never `"blocked"` here —

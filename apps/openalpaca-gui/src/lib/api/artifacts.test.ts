@@ -65,6 +65,8 @@ const row: Artifact = {
   path: "/home/.openalpaca/artifacts/loose/2026-09-05/findings.md",
   project_root: null,
   rel_path: "loose/2026-09-05/findings.md",
+  in_project: false,
+  openable: true,
 };
 
 beforeEach(() => {
@@ -120,6 +122,18 @@ describe("listArtifacts", () => {
     const url = new URL(requests[0]?.url ?? "");
     expect(url.searchParams.get("include_missing")).toBe("true");
   });
+
+  it("asks for one side of the Library when told to", async () => {
+    await listArtifacts({ inProject: false });
+    await listArtifacts({ inProject: true, taskId: "task-1", limit: 500 });
+
+    const byProducts = new URL(requests[0]?.url ?? "");
+    const results = new URL(requests[1]?.url ?? "");
+    expect(byProducts.searchParams.get("in_project")).toBe("false");
+    expect(results.searchParams.get("in_project")).toBe("true");
+    expect(results.searchParams.get("task_id")).toBe("task-1");
+    expect(results.searchParams.get("limit")).toBe("500");
+  });
 });
 
 describe("getArtifact", () => {
@@ -129,6 +143,20 @@ describe("getArtifact", () => {
     expect(artifact.rel_path).toBe("loose/2026-09-05/findings.md");
     expect(artifact.missing).toBe(false);
     expect(requests[0]?.url).toContain("/v1/artifacts/art-1");
+  });
+
+  it("carries the row's side and whether Open is offered", async () => {
+    reply = () =>
+      json({
+        ...row,
+        name: "scripts/release.sh",
+        rel_path: "scripts/release.sh",
+        in_project: true,
+        openable: false,
+      });
+    const artifact = await getArtifact("art-1");
+    expect(artifact.in_project).toBe(true);
+    expect(artifact.openable).toBe(false);
   });
 
   it("surfaces a 404 as an ApiError the caller can branch on", async () => {

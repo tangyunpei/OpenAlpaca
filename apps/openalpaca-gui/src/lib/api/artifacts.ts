@@ -4,7 +4,7 @@
  * These types were the *proposed* shapes in `unbacked.ts` until Phase 3 landed
  * the routes; they now describe what the daemon actually serves, with the
  * additive superset fields (`origin`, `pinned`, `missing`, `path`,
- * `project_root`, `rel_path`) the store writes.
+ * `project_root`, `rel_path`, `in_project`, `openable`) the store writes.
  *
  * Two URL builders sit beside the fetchers because the content routes are the
  * one part of the surface a *browser* loads rather than this client: they check
@@ -53,6 +53,14 @@ export interface Artifact {
   path: string;
   project_root: string | null;
   rel_path: string;
+  /**
+   * A result file in the project (ST-12): a pointer to the real file, with no
+   * versions. `name` and `rel_path` are then its path in the project and
+   * `path` the file itself.
+   */
+  in_project: boolean;
+  /** ST-18: Open is offered — every by-product; a result file only of a kind the store keeps. */
+  openable: boolean;
 }
 
 export interface ArtifactListPage {
@@ -96,6 +104,8 @@ export interface ListArtifactsQuery {
   q?: string;
   /** Rows whose bytes are gone are hidden unless this is set. */
   includeMissing?: boolean;
+  /** `in_project`: `false` by-products only (the Library's default), `true` results only; absent, both. */
+  inProject?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -115,6 +125,7 @@ export async function listArtifacts(
       pinned: query.pinned,
       q: query.q,
       include_missing: query.includeMissing,
+      in_project: query.inProject,
       limit: query.limit,
       offset: query.offset,
     },
