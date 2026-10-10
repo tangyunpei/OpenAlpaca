@@ -94,7 +94,7 @@ Every registered tool has a `ToolBackend` that executes its logic:
 
 | Backend | Examples | Source | Notes |
 |---------|----------|--------|-------|
-| **BuiltIn** | `shell_execute`, `file_read`, `file_write`, `artifact_write`, `read_result`, `web_search`, `web_fetch`, `memory_search`/`memory_read`/`memory_list`/`memory_timeline`, `workspace_read`/`workspace_write`, `update_persona`, `send` | Rust code, registered at startup | Tools needing identity override `execute_with_context()` |
+| **BuiltIn** | `shell_execute`, `file_read`, `file_list`, `file_write`, `file_edit`, `artifact_write`, `artifact_read`, `read_result`, `web_search`, `web_fetch`, `memory_search`/`memory_read`/`memory_list`/`memory_timeline`, `workspace_read`/`workspace_write`, `update_persona`, `send` | Rust code, registered at startup | Tools needing identity override `execute_with_context()` |
 | **BuiltIn (per request)** | Chat: `start_workflow`, `task_status`, `memory_store`, `memory_update`, `memory_forget`, `memory_confirm` (attended `gui` turns only), `invoke_skill`, `steer_workflow`, `queue_followup`. Lead agent: `spawn_subagent`, `spawn_subagents_batch`, `check_subagent_status`, `wait_for_subagents`, `post_update`, `queue_followup`, `invoke_skill` | Built fresh for one chat turn or one lead-agent run | Registered into a per-request copy of the registry, never the shared one (§4.2) |
 | **BuiltIn (skill scripts)** | `skill_script:analyze`, `invoke_skill:<id>` | Skill `SKILL.md` frontmatter | Available only during that skill's invocation |
 | **Http** | User-defined REST API wrappers | `config/tools/*.toml` | SSRF-validated, response capped |
@@ -152,10 +152,10 @@ struct built by the sandbox caller (never by the LLM).  It carries:
 | Group | Fields |
 |-------|--------|
 | Who | `agent_id`, `agent_instance_id`, `owner_id`, `principal` |
-| Which run | `task_id`, `request_id`, `session_id`, `lane_key`, `source` |
-| Which workspace | `workspace_id` (CWD-derived when the request sent none; no memory path reads it), `request_workspace_root` (the only field that may place files on disk, and the one the memory tools resolve a project partition from), `workspace_path` (as sent by the client; read by no tool since F4) |
+| Which run | `task_id`, `request_id`, `session_id`, `conversation_id` (the conversation, whether or not its loop keeps a log — what names a turn's scratch folder), `lane_key`, `source` |
+| Which workspace | `workspace_id` (CWD-derived when the request sent none; no memory path reads it), `request_workspace_root` (the turn's project: the working folder the file tools and the shell act in, through `tools::working_folder` — with none, the scratch folder `conversation_id` names — and the store a by-product is saved to; the memory tools resolve a project partition from it too), `workspace_path` (as sent by the client; read by no tool since F4) |
 | Skill nesting | `skill_stack`, `effective_constraints` |
-| Side channels | `session_log` (for `file_write`'s pre-edit snapshot), `event_bus` (filled in by the sandbox so a tool can announce what it produced) |
+| Side channels | `session_log` (for the pre-edit copy `file_write` and `file_edit` keep; with none they replace no existing file), `event_bus` (filled in by the sandbox so a tool can announce what it produced) |
 
 ### 3.2 The Extension Ledger
 
@@ -206,8 +206,9 @@ of its capabilities matches any agent capability and none is denied.
 - Deny lists let an agent exclude whole capability groups (e.g.
   `denied_capabilities: [web_access]` for an offline coding agent).
 
-**Built-in capability names:** `file_read`, `file_write`, `artifact_write`,
-`shell_execute`, `memory_read` (memory_search, memory_read, memory_list, memory_timeline), `read_result`,
+**Built-in capability names:** `file_read` (file_read, file_list), `file_write`
+(file_write, file_edit), `artifact_write`, `shell_execute`, `memory_read` (memory_search, memory_read,
+memory_list, memory_timeline), `read_result` (read_result, artifact_read),
 `web_access` (web_search, web_fetch), `workspace_read`, `workspace_write`,
 `persona_write` (update_persona), `messaging` (send), `orchestration`
 (lead-agent coordination tools).
@@ -305,8 +306,11 @@ call is never a user-directed surface: what it stores records origin
 or replace a note the user wrote.  `update_persona` writes only to
 the paths in its `PersonaToolContext`, configured at startup.
 `artifact_write` chooses its store from `request_workspace_root` alone, so
-a chat turn that carried no project lands its deliverable in the home store
-rather than in whatever directory the daemon was started from.
+a chat turn that carried no project lands its by-product in the home store
+rather than in whatever directory the daemon was started from.  The file
+tools and the shell act in the turn's working folder (`tools::working_folder`)
+— the project's own folder, or the conversation's scratch folder — never in
+the daemon's directory.
 `read_result` resolves only inside the calling session's own `results/`
 directory.
 
@@ -360,8 +364,9 @@ confirmation before execution, routed via `ConfirmationBroker`.
 template's `require_confirmation_for`, or a skill's
 `permissions.confirm.tools`); otherwise the set is *derived from
 annotations* — every registered tool with `destructive_hint = true`
-(built-ins: `file_write`, `artifact_write`, `workspace_write`,
-`update_persona`, `shell_execute`, `send`) requires confirmation.
+(built-ins: `file_write`, `file_edit`, `update_persona`, `shell_execute`,
+`send`; `artifact_write` and `workspace_write` write only under
+`~/.openalpaca` and are not flagged) requires confirmation.
 
 **Behavior, in order:**
 1. An **`ApprovalCache`** remembers approvals, scoped either to the exact
@@ -419,18 +424,22 @@ built-in tools providing key-value storage scoped to a task.
 **Decision:** Two built-ins keep large content out of the context window
 without losing it.
 
-- **`artifact_write`** saves a deliverable (document, plan, table, code,
+- **`artifact_write`** saves a by-product (document, plan, table, code,
   report) to the artifact store.  It is versioned — writing the same name
   again supersedes the previous version, which stays retrievable — listed
   in the GUI Library, and attached to the task that produced it.  Bodies
   are capped by `[execution.artifacts] max_artifact_bytes` (default 10 MB).
-  It is the right tool for anything the user is meant to keep;
-  `file_write` writes a plain file into the daemon's workspace only on a
-  turn that carries a project (and a workspace that is not the home store),
-  and otherwise saves an artifact named after its path (plus a short hash
-  of it when the name cannot carry the path whole: a character outside
-  ASCII, more than 60 bytes of name, an extension no kind keeps, or none),
-  with the path as its summary and no note.
+  It is the right tool for a by-product — a draft, a picture, something
+  one agent hands another — and raises no approval card by default.  In a
+  project the files a job is asked to produce are real files: `file_write`
+  writes one under the project folder and `file_edit` changes part of one,
+  each asking first, the old content kept in the session log, and a
+  pointer row (`in_project`) lists it with the project's results — no
+  copy, no versions.  With no project `file_write` saves an artifact named
+  after its path (plus a short hash of it when the name cannot carry the
+  path whole: a character outside ASCII, more than 60 bytes of name, an
+  extension no kind keeps, or none), with the path as its summary and no
+  note.  `artifact_read` reads a by-product back by its id.
 - **Spill, don't truncate.**  When a tool result exceeds
   `[orchestrator.sessions] tool_result_inline_bytes` (default 32 KB) and
   the loop has a session log, the whole result is written to the session's
@@ -441,11 +450,14 @@ without losing it.
   result is always shown as head **and** tail, so a compiler or test
   failure keeps the assertion at its end.
 
-When a call runs inside a session, `file_write` takes a pre-edit snapshot
-of any file it is about to overwrite (into the session's `snapshots/`), and
-refuses the write when the snapshot cannot be kept — for instance when the
-file is larger than `[orchestrator.sessions] snapshot_max_bytes`.  Outside a
-session there is nowhere to keep one, and the write proceeds without it.
+When a call runs inside a session, `file_write` and `file_edit` take a
+pre-edit snapshot of any file they are about to replace or change (into the
+session's `snapshots/`), and refuse the write when the snapshot cannot be
+kept — for instance when the file is larger than
+`[orchestrator.sessions] snapshot_max_bytes`.  Outside a session there is
+nowhere to keep one — a skill or a plugin agent keeps no session log —
+so `file_write` creates a new file but refuses to replace one, and
+`file_edit` refuses.
 
 ### 4.10 Protected Tool Names
 
@@ -512,6 +524,11 @@ The `InputSanitizer` provides three validation surfaces:
 **Tool argument sanitization** (recursive over all string values):
 - Tool name must be in the registered-tool list
 - Path traversal detection: `../` and `..\` are rejected in any string value
+  of a tool whose arguments reach a shell line or another program, as
+  `ToolRegistry::traversal_rule` decides: a skill script, an MCP tool, a
+  plugin's tool, or a command or HTTP tool from `config/tools`.
+  OpenAlpaca's own builtins are exempt: their path arguments carry their
+  own `..` refusal, and their other arguments are content
 - Null byte detection in all string values
 - Command injection detection — **only** for shell-like tools
   (`shell_execute` plus any command-backend tool from TOML):
@@ -606,9 +623,10 @@ their *name* has in `annotations_for_builtin()`, which is how
 
 | Tools | Profile |
 |-------|---------|
-| `file_read`, `workspace_read`, `memory_search`, `memory_read`, `memory_list`, `memory_timeline`, `read_result` | read-only, idempotent, closed-world |
+| `file_read`, `file_list`, `artifact_read`, `workspace_read`, `memory_search`, `memory_read`, `memory_list`, `memory_timeline`, `read_result` | read-only, idempotent, closed-world |
 | `web_fetch`, `web_search` | read-only, idempotent, open-world |
-| `file_write`, `workspace_write`, `artifact_write`, `update_persona`, `memory_update`, `memory_forget`, `memory_confirm` | destructive, closed-world |
+| `artifact_write`, `workspace_write` | not destructive, not read-only, closed-world — by-product writers, so outside the default confirmation set (`local_write_annotations`) |
+| `file_write`, `file_edit`, `update_persona`, `memory_update`, `memory_forget`, `memory_confirm` | destructive, closed-world |
 | `shell_execute`, `send` | destructive, open-world |
 
 Annotations feed three mechanisms:

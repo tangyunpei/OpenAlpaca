@@ -206,7 +206,7 @@ Controls what the skill is allowed to do.
 
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
-| `permissions.confirm.tools` | `Vec<String>` | `[]` | ENFORCED | Tool names requiring confirmation. Passed to `SandboxPolicy.require_confirmation_for`. When the list is empty, every tool flagged destructive requires confirmation instead (built-ins: `file_write`, `artifact_write`, `workspace_write`, `update_persona`, `shell_execute`, `send`). A non-empty list replaces that default. |
+| `permissions.confirm.tools` | `Vec<String>` | `[]` | ENFORCED | Tool names requiring confirmation. Passed to `SandboxPolicy.require_confirmation_for`. When the list is empty, every tool flagged destructive requires confirmation instead (built-ins: `file_write`, `file_edit`, `update_persona`, `shell_execute`, `send`; `artifact_write` and `workspace_write` are not among them). A non-empty list replaces that default. |
 
 > **Interactive Confirmation**: When a tool in the confirmation set is invoked, the sandbox pauses execution and requests approval through the `ConfirmationBroker` (a `ToolConfirmationRequested` event routed to the active client; the answer comes back via `POST /v1/chat/confirmations/{request_id}`). The approval timeout comes from `execution.agent_defaults.confirmation_timeout_secs` in `daemon.toml` (default 300s). Section 7 lists every way a prompt can end.
 
@@ -556,7 +556,7 @@ The resolved names become the invocation's allow list: the sandbox refuses any t
 
 Intent-suggested tools from the orchestrator are intentionally **not** merged, preserving skill-level tool isolation.
 
-Capability names provided by built-in tools: `file_read`, `file_write`, `artifact_write`, `shell_execute`, `web_access` (both `web_search` and `web_fetch`), `memory_read` (`memory_search`, `memory_read`, `memory_list`, `memory_timeline`), `read_result`, `workspace_read`, `workspace_write`, `persona_write` (update_persona), `messaging` (send). An MCP tool provides a capability equal to its own name (`<server>__<tool>`). A plugin's tools provide the capabilities its manifest declares.
+Capability names provided by built-in tools: `file_read` (`file_read`, `file_list`), `file_write` (`file_write`, `file_edit`), `artifact_write`, `shell_execute`, `web_access` (both `web_search` and `web_fetch`), `memory_read` (`memory_search`, `memory_read`, `memory_list`, `memory_timeline`), `read_result` (`read_result`, `artifact_read`), `workspace_read`, `workspace_write`, `persona_write` (update_persona), `messaging` (send). An MCP tool provides a capability equal to its own name (`<server>__<tool>`). A plugin's tools provide the capabilities its manifest declares.
 
 ### When a Required Tool Is Unavailable
 
@@ -583,7 +583,7 @@ The skill agentic loop runs with limits from `daemon.toml` `[execution.skill_def
 
 ### Confirmation Tools
 
-The confirmation set is `permissions.confirm.tools` when that list is non-empty. Otherwise it is every tool flagged destructive — among the built-ins: `file_write`, `artifact_write`, `workspace_write`, `update_persona`, `shell_execute` and `send`. So a skill that uses `shell_execute` asks for approval even if it lists nothing.
+The confirmation set is `permissions.confirm.tools` when that list is non-empty. Otherwise it is every tool flagged destructive — among the built-ins: `file_write`, `file_edit`, `update_persona`, `shell_execute` and `send` (`artifact_write` and `workspace_write` write only under `~/.openalpaca` and are not flagged). So a skill that uses `shell_execute` asks for approval even if it lists nothing.
 
 When a tool in the set is invoked, the first matching rule applies:
 
@@ -985,10 +985,12 @@ These are the tool names usable in `tools.allow` / `tools.deny`. Names must matc
 
 | Tool Name | Capability | Description | Availability |
 |-----------|-----------|-------------|--------------|
-| `file_read` | `file_read` | Read file contents from the workspace | Always registered |
-| `file_write` | `file_write` | Write/create files in the workspace on a turn that carries a project (from a daemon not started in the home store); otherwise save the file as an artifact named after its path (shown in the GUI Library) | Always registered; saving an artifact requires a database at execution time |
-| `artifact_write` | `artifact_write` | Save a versioned deliverable to the artifact store (shown in the GUI Library) | Always registered; requires a database at execution time |
-| `shell_execute` | `shell_execute` | Execute shell commands | Always registered |
+| `file_read` | `file_read` | Read a file of the working folder — the project, or the conversation's scratch folder; does not ask by default | Always registered |
+| `file_list` | `file_read` | List one folder of the working folder; does not ask by default | Always registered |
+| `file_write` | `file_write` | Write a whole file; asks by default. In a project, the real file under the project folder — a replaced file's old content is kept in the conversation's log, and a skill keeps none, so in a skill it creates a new file but refuses to replace one. With no project, save the file as a by-product named after its path (shown in the GUI Library) | Always registered; the by-product, and a project file's Library row, need a database at execution time |
+| `file_edit` | `file_write` | In a project, change part of one existing file — the exact text to find and the text to put in its place; asks by default. In a skill it is refused: a skill keeps no conversation log, so no copy of the old content can be kept | Always registered |
+| `artifact_write` | `artifact_write` | Save a versioned by-product — a draft, a picture, a hand-off — to the artifact store (shown in the GUI Library); does not ask by default | Always registered; requires a database at execution time |
+| `shell_execute` | `shell_execute` | Run a shell command, starting in the working folder; asks by default, and an approved command can reach files outside that folder | Always registered |
 | `web_search` | `web_access` | Search the web | Always registered; needs the `[web_search]` section (API key) in `config/llm.toml` |
 | `web_fetch` | `web_access` | Fetch and read content from a URL | Always registered |
 | `memory_search` | `memory_read` | Search the owner's memory notes by keyword — whole words and word beginnings, and substrings of titles, aliases, tags and Chinese, Japanese, Korean, Thai, Hindi, Tamil and similar scripts; no meaning-based search. Answers an index (one row per note: id, date, kind, status, title, why it matched, size) by default, or cited excerpts with `detail: "snippets"`; filters by date range, sorts by relevance or date | Registered by the daemon over its memory service |
@@ -996,6 +998,7 @@ These are the tool names usable in `tools.allow` / `tools.deny`. Names must matc
 | `memory_list` | `memory_read` | List memory notes by kind, status and scope, paged | Same |
 | `memory_timeline` | `memory_read` | The notes dated around one note, a search's best match or a date, in time order, as index rows — superseded, archived and ended ones marked, candidates never listed | Same |
 | `read_result` | `read_result` | Page back a tool result that was too large to show inline | Always registered, but only useful where results spill to a session log (chat turns and workflows). A skill loop has no session log, so its oversized results are cut inline instead and this tool has nothing to read |
+| `artifact_read` | `read_result` | Read a by-product back by its id, paged like `read_result`; does not ask by default | Always registered; requires a database at execution time |
 | `workspace_read` | `workspace_read` | Read entries from the shared task workspace | Always registered; requires database + task context at execution time |
 | `workspace_write` | `workspace_write` | Write entries to the shared task workspace (32 KB per entry, optimistic-locking retries) | Always registered; requires database + task context at execution time |
 | `update_persona` | `persona_write` | Update persona documents (SOUL.md, USER.md, or IDENTITY.md via `target` param) | Registered by the daemon with persona context |

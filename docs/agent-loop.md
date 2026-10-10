@@ -113,7 +113,13 @@ the memory reads `memory_search`, `memory_read` and `memory_timeline` (a
 search answers an index, so the read that follows it comes with it), plus
 `artifact_write` and `read_result` when the lead's
 own template declares those capabilities (the shipped `lead_agent`
-template does), unioned with the same extension set as the main loop —
+template does), `file_read`, `file_list` and `artifact_read` always —
+in code, so a template seeded before them gets them too, while one that
+denies a tool or its capability keeps it off; the lead reads the
+project and its by-products, holds neither `file_write`, `file_edit`
+nor `shell_execute`, and delegates the files a job is to produce to a
+subagent that writes them — unioned with the same extension set as the
+main loop —
 every installed MCP-bridged (`<server>__<tool>`) and plugin-provided
 (`<plugin>::<tool>`) tool whose extension is enabled — and a per-request
 `invoke_skill` instance, so the lead can run catalog
@@ -220,7 +226,13 @@ those, several at once; and before saving a fact that changes an earlier
 one, search for the note it changes and name it in `supersedes`),
 `read_result` (only when the daemon has both a session log and a
 database — the one case where a result can spill, see
-[Tool Results and the Spill](#tool-results-and-the-spill)), every
+[Tool Results and the Spill](#tool-results-and-the-spill)),
+`artifact_read` (every turn with a database), `file_read` (every turn
+with a project; with none, by keyword) with `file_list`
+wherever `file_read` is, `file_edit` beside a keyword-suggested
+`file_write` on a project turn (the query handler's offers,
+`offer_file_readers` and `offer_file_edit_beside_file_write` in
+`query_handler/mod.rs`, from one `is_project_turn` per turn), every
 installed extension tool whose extension is enabled (MCP-bridged
 `<server>__<tool>` and plugin-provided `<plugin>::<tool>`; a disabled
 server or plugin contributes nothing on either surface), and
@@ -232,6 +244,14 @@ enabled, `steer_workflow` + `queue_followup` join the surface.
 Per-request instances go into a per-request registry clone, never the
 global registry. Budgets come from `main_loop_max_rounds` /
 `main_loop_max_tools_per_round`.
+
+**Working folder**: each turn's context carries one `<working_folder>`
+line naming the project folder, or the conversation's scratch folder,
+that the file tools and the shell act in — at the end of the main
+loop's relay-rules message, right before the turn for a file-based
+skill and for a subagent, and for the lead after its objective and the
+chat's working state; a plugin's skills and agents are not told. See
+[Daemon Manual → The Working Folder](Daemon_Manual.md#the-working-folder).
 
 **Workflow context**: lanes with active workflows get a per-turn
 `<active_workflows>` block (`query_handler/workflow_context.rs`) — task
@@ -598,7 +618,8 @@ started:
    description agree that a run starts ONLY through a call in this turn,
    that a task id may be stated only when that call returned it, and that
    an explicit workflow request IS that call. Since the storage design's
-   Stage 2 the rules also say that writing a file, editing one or running
+   Stage 2 the relay rules alone — `start_workflow`'s description carries
+   no file clause — also say that writing a file, editing one or running
    a command in the project is the chat's own when those tools are on its
    surface, and that a file asked for with no writing tool on the surface
    is `start_workflow`'s (R-T7).
