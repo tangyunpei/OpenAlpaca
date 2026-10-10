@@ -91,6 +91,7 @@ does not choose this layout — it asks the storage crate for it
   memory/     your memory notes: owners/<owner-key>/notes/*.md
   projects/   one folder per project: project.json (its id and path),
               artifacts/, uploads/, memory/
+  scratch/    one working folder per conversation with no project
   artifacts/ uploads/ sessions/ …   content, home scope
 ```
 
@@ -100,8 +101,11 @@ output to `<root>/state/logs/daemon.log` — the same file, under the same
 rotation (16 MB, three older generations kept), that `openalpaca daemon start`
 writes (`src-tauri/src/lib.rs`, `spawn_daemon`). A project you choose keeps its
 data in the home store, in its folder under `projects/` — its artifacts, uploads
-and memory notes beside a `project.json` with its id and path; nothing is
-written inside the project's own folder.
+and memory notes beside a `project.json` with its id and path; nothing of
+OpenAlpaca's is written inside the project's own folder — only the files an
+agent writes there for you, each write asking first. A conversation with no
+project works in its own folder under `scratch/`, which goes when the
+conversation is deleted.
 
 ## Connection lifecycle
 
@@ -131,10 +135,13 @@ whole bridge (`src-tauri/src/lib.rs`):
   selected on macOS (`open -R`), Explorer with it selected on Windows, the
   folder in the file manager on Linux (`xdg-open`). It takes no path on trust:
   the path is resolved, symlinks included, and only a regular file under the
-  home root (`OPENALPACA_HOME_STORE` moves it) is shown — every store file
-  lives there, a project's in its folder under `projects/`. The program gets
-  the path as an argument of its own, never through a shell, and a refusal is
-  one sentence, shown as a toast. Behind `Reveal in Finder` (Library, below).
+  home root (`OPENALPACA_HOME_STORE` moves it), or under the root of one of your
+  projects, is shown — every store file lives under the home root, a project's
+  in its folder under `projects/`, and a file an agent wrote into a project
+  lives in that project. A project whose folder is gone or has moved admits
+  nothing through its old path. The program gets the path as an argument of
+  its own, never through a shell, and a refusal is one sentence, shown as a
+  toast. Behind `Reveal in Finder` (Library, below).
 
 The first two return `{ baseUrl, token, instanceId }`. `instanceId` is the identity
 guard: if it changes, the daemon restarted, so every `task_id`, `stream_id` and
@@ -310,10 +317,16 @@ Besides messages, the transcript carries:
 - a row for each steer or queued follow-up you sent (neither is a chat turn,
   so the daemon stores neither);
 - the tool confirmation banner, and the row that replaces it once it settles;
-- a `File written` card for each file an agent wrote — `Open` opens it in its
-  default app, `Reveal in Finder` shows it in its folder (inside the app's own
-  window only), `Open in Library` shows it in the Library — and chips for the
-  files a finished run produced;
+- a `File written` card for each file an agent wrote — for a file written into
+  the project the eyebrow reads `File written · in the project` and no version
+  is drawn; `Open` opens it in its default app (for a file in the project only
+  when the Library keeps its kind — text, Markdown or PDF, code or config, a
+  table, a raster image, HTML, an archive or an office document; a script, an
+  `.svg`, a `Makefile` or a dotfile gets `Reveal in Finder` alone),
+  `Reveal in Finder` shows it in its folder (inside the app's own window only),
+  `Open in Library` shows it in the Library (under `Results in the project` for
+  a file in the project) — and chips for the by-products a finished run
+  produced;
 - a card under your own message for each file **you** attached, live and after
   a reload. The daemon also writes a text rendering into the message
   (`[Attachments: notes.txt]`) for clients that can only print a string; this
@@ -386,11 +399,14 @@ card shows them: `its card shows 2 hidden characters`. The row an answer leaves,
 the Always-allow toast and the run's Event log name the tool the same way with
 no count (the palette row, the toast and the Event log show the escape as plain
 text). The `From OpenAlpaca` text is the daemon's own and is shown as it wrote
-it: a summary cut short for reading, from which the daemon leaves out every
-hidden character of the titles, texts and reason it quotes, and when it left any
-out, its last line says how many: `This preview leaves out 2 hidden characters;
-the Memory view shows them as <U+…>.` (The suggestion's exact text is in the
-Memory view, which shows each one.) Only what you see changes: approving answers
+it. A memory suggestion's is a summary cut short for reading, from which the
+daemon leaves out every hidden character of the titles, texts and reason it
+quotes, and when it left any out, its last line says how many: `This preview
+leaves out 2 hidden characters; the Memory view shows them as <U+…>.` (The
+suggestion's exact text is in the Memory view, which shows each one.) The
+previews of the file tools and `send` quote a path, a text or a recipient with
+each hidden character written as `<U+XXXX>` and their count on a line under
+it. Only what you see changes: approving answers
 the request the daemon sent. Three things no escape changes: right-to-left
 letters inside a value can still reorder the digits and punctuation next to
 them; a character that merely looks like another (a Cyrillic `а` for a Latin
@@ -552,6 +568,25 @@ lane never blocks this composer, and the card names who is asking — the agent
 template for a workflow's prompt, and `Alpaca` for one the assistant raised in
 the chat itself.
 
+**What a card says.** A card shows the tool's arguments as they are and, above
+them under `From OpenAlpaca`, what the daemon says about the call. A shell
+command's card names the folder it runs in — the project folder, or the
+conversation's scratch folder — and says the command can reach files outside
+it: read the command before you approve it. A `file_write` card says where the
+file lands — written or replaced in the project folder (a replaced file's old
+content is kept in the conversation's log), or saved as a by-product in
+OpenAlpaca's artifact store. A `file_edit` card names the file, the number of
+replacements and the line of the first, and quotes the text to find and the text
+to put in its place, each cut after 1,000 bytes with the cut named.
+A `send` card names the file, its size, the channel, the recipient and the
+name it is sent as. Hidden characters in a path, a quoted text or a recipient
+are written as `<U+XXXX>`, with their count under them. A call the daemon
+would refuse anyway — a project folder that is gone or has moved, a path
+outside the working folder or inside `.git`, a file too large to keep a copy
+of — is refused before any card is raised, and the agent is told why. Reading
+a file or listing a folder never raises a card, and neither does saving a
+draft with `artifact_write`.
+
 **A prompt nobody answers settles anyway.** The daemon waits five minutes per
 prompt by default (`[execution.agent_defaults] confirmation_timeout_secs` in
 `daemon.toml`) and then refuses the call: the tool does **not** run. The window
@@ -683,19 +718,24 @@ action group or, for a finished run, a terminal banner, then three cards:
   cancelled span is drawn neutral with its state spelled out, because the
   design's lane vocabulary has no colour for "failed" and painting it green
   would be a lie.
-- **Output** — this run's files from `GET /v1/artifacts?task_id=`, each of
-  which opens. A run whose files can only be read out of its free-form outcome
-  blob shows them without pretending they open.
+- **Output** — this run's by-products from `GET /v1/artifacts?task_id=`, each
+  of which opens. A run whose files can only be read out of its free-form
+  outcome blob shows them without pretending they open. The files the run
+  wrote into its project are listed apart, after it, in a card drawn only
+  when there are some, under `Written in the project` — up to 500, each of
+  which opens; past that the card says how many more the Library lists.
 - **Event log** — this run's own persisted log,
   `GET /v1/events/history?task_id=`, including the tool calls the live socket
   could never attribute to a run. Each row wears one of five tags (`tool`,
   `steer`, `artifact`, `spawn`, `run`) and a sentence built from the stored
-  row. A tool prompt reads `<tool> · awaiting approval`, and how it ended is
-  its own row: `<tool> · approved`, `denied`, `timed out`, or `withdrawn` (the
-  run went away before anyone answered). A row the window cannot fill a
-  sentence for shows the daemon's raw `event_type` instead of a guess. The card
-  refetches whenever a live frame names this run, so a denial or a timeout
-  appears without waiting for the next unrelated event.
+  row. A file the run wrote reads `<name> · v<n>`, or `<name> · in the project`
+  for one it wrote into its project. A tool prompt reads
+  `<tool> · awaiting approval`, and how it ended is its own row:
+  `<tool> · approved`, `denied`, `timed out`, or `withdrawn` (the run went away
+  before anyone answered). A row the window cannot fill a sentence for shows
+  the daemon's raw `event_type` instead of a guess. The card refetches whenever
+  a live frame names this run, so a denial or a timeout appears without
+  waiting for the next unrelated event.
 
 Every card distinguishes "nothing happened" from "the read failed" and says
 which.
@@ -730,6 +770,16 @@ than re-querying, because two of the labels cover more than one artifact kind
 while `?kind=` takes exactly one, and because that keeps `total` meaning one
 thing.
 
+By default the list shows by-products — drafts, pictures and hand-offs agents
+saved, your uploads, and every file saved in a conversation with no project.
+The `Results in the project` chip shows instead the files agents wrote into
+your projects (`?in_project=true`): each row is named by the file's path in its
+project, carries a `project` tag, and its subtitle starts with the project's
+folder name; it points at the real file. Such a file has no versions, since
+git keeps its history: its detail has no History or Diff, only Preview, and
+its row follows the file when you edit it yourself. The header's count is the
+shown side's own.
+
 Pins are server state (`PUT /v1/artifacts/{id}/pin`). The client keeps a
 `localStorage` mirror so the star flips instantly, and every server answer
 overwrites it, so the mirror cannot drift into claiming a pin the daemon does
@@ -758,20 +808,29 @@ Finder` — over three tabs:
 
 Under the name, the header draws the artifact's `summary`, when it is not
 blank, on one muted line — cut with an ellipsis, whole on its tooltip — which
-for a file an agent saved with `file_write` is the path it was written as
-(`notes/tea.md`, `Makefile`), a path the stored name may not show.
+for a by-product an agent saved with `file_write` in a conversation with no
+project is the path it was written as (`notes/tea.md`, `Makefile`), a path the
+stored name may not show. A file written into the project has none: its name
+is already its path there.
 
 `Open` opens the file in its default application through the daemon
 (`POST /v1/files/{id}/open`), on the machine the daemon runs on, and the toast
 reads `<name> opened in its default app`. (The design labelled this button
-`Reveal`; it always opened the file.)
+`Reveal`; it always opened the file.) For a result file in the project `Open`
+is drawn only when the Library keeps its kind — text, Markdown or PDF, code or
+config, a table, a raster image, HTML, an archive or an office document; a
+script, a `.command`, an `.svg`, a `Makefile` or a dotfile gets
+`Reveal in Finder` alone, and the daemon refuses to open one
+(`409 OPEN_NOT_OFFERED`). `Export` saves a result file under its base name
+(`main.rs`, not `src/main.rs`).
 `Reveal in Finder` — `Show in folder` on Windows and Linux — shows the file in
 its folder instead, through the app's own shell (`reveal_path`, above): Finder
 comes forward with the file selected. It is drawn only inside the app's window,
 never in the Vite preview, which has no shell to ask. A file that is gone, is
-not a regular file or is not inside an OpenAlpaca store is refused, and the
-toast is the shell's own sentence. The `File written` card in the chat and the
-file panel in the chat's aside carry the same two buttons.
+not a regular file, or is in neither an OpenAlpaca store nor one of your
+projects — a project whose folder is gone or has moved admits none — is
+refused, and the toast is the shell's own sentence. The `File written` card in
+the chat and the file panel in the chat's aside carry the same two buttons.
 
 ## Memory
 
@@ -1011,8 +1070,9 @@ was re-pointed to `<root>`: its turns go there now." A path an earlier build
 stored carries no id and is not followed; press `Use` on the new folder. The
 window sends that root as `x-workspace-path` on `POST /v1/chat`; runs started
 here record
-the project, and what they produce is kept in its folder under `projects/` in
-the home store — nothing is written into the project's own folder. `Clear`
+the project: the by-products they save are kept in its folder under
+`projects/` in the home store, and a file an agent writes into the project's
+own folder, after asking, stays there as the project's own file. `Clear`
 drops the window's project; with none, the GUI sends no header and everything
 goes to the home store's own folders. A relative path is refused before
 anything is sent. A refusal — the home store, or a path that is not a
@@ -1021,10 +1081,12 @@ project.
 
 **Projects.** Under the card, every project the daemon knows
 (`GET /v1/workspaces`): its path, its folder under `projects/`, a `this window`
-tag on this window's own, and a `missing` tag on one whose folder is no longer
-at its path — its data is kept until you re-point it or delete its data. The
-list is read when the panel opens and after each change made here; a project a
-chat turn records elsewhere appears the next time it is read.
+tag on this window's own, and a `missing` tag on one whose folder is gone,
+renamed by case only, or moved with a link left at its old path — its data is
+kept until you re-point it or delete its data, and until then no agent's file
+tool or command runs there. The list is read when the panel opens and after
+each change made here; a project a chat turn records elsewhere appears the
+next time it is read.
 
 **`Re-point…`** tells the daemon where a moved project's folder is now. The
 dialog counts what is recorded at the old path (`GET /v1/workspaces?path=`) —
@@ -1059,11 +1121,13 @@ with what it holds and its retention class, the counts, and what another
 conversation keeps — an upload whole, a by-product as its newest version.
 Should the plan the daemon answers be another project's, the dialog draws none
 of it, says whose it is, and keeps `Delete data` off. `Delete data` — there is no word to type —
-then deletes the project's conversations, runs, uploads and by-products, the
-memory notes of
-every owner, and its folder under `projects/`; a file a surviving conversation
-still shows is moved to `uploads/kept/` or `artifacts/kept/` in the home store
-and stays readable. The project's own folder is never touched. While a run
+then deletes the project's conversations (with their scratch folders), runs,
+uploads and by-products,
+the records of the files its agents wrote into the project (never the files),
+the memory notes of every owner, and its folder under `projects/`; a file a
+surviving conversation still shows is moved to `uploads/kept/` or
+`artifacts/kept/` in the home store and stays readable. The project's own
+folder is never touched. While a run
 there is queued, running or paused, or the project's own re-point has not
 finished, the daemon refuses even the plan (`WORKSPACE_BUSY`), and the dialog
 says why with `Delete data` off; the delete itself is refused the same way
