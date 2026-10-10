@@ -279,6 +279,33 @@ pub(super) async fn open_leaf(
 ) -> Result<tokio::fs::File, String> {
     #[cfg(unix)]
     options.custom_flags(libc::O_NOFOLLOW);
+    open_leaf_as_set(options, target, relative_path, other).await
+}
+
+/// [`open_leaf`] for a read that must not wait (residual X6): on unix the
+/// open also carries `O_NONBLOCK`, so a named pipe's open returns at once
+/// where it would wait for a writer that may never come, and a device's
+/// open does not wait for its line. The caller then judges the opened file
+/// by its own `fstat` — no window between a check and the open — and reads
+/// only a regular file, whose reads `O_NONBLOCK` does not change.
+pub(super) async fn open_leaf_without_waiting(
+    options: &mut tokio::fs::OpenOptions,
+    target: &Path,
+    relative_path: &str,
+    other: impl FnOnce(std::io::Error) -> String,
+) -> Result<tokio::fs::File, String> {
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    open_leaf_as_set(options, target, relative_path, other).await
+}
+
+/// The open both [`open_leaf`]s share, with their flags already set.
+async fn open_leaf_as_set(
+    options: &tokio::fs::OpenOptions,
+    target: &Path,
+    relative_path: &str,
+    other: impl FnOnce(std::io::Error) -> String,
+) -> Result<tokio::fs::File, String> {
     match options.open(target).await {
         Ok(file) => Ok(file),
         Err(e) if is_link_at_leaf(&e) => Err(outside_boundary(relative_path)),

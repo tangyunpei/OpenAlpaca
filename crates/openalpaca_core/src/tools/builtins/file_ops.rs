@@ -21,7 +21,8 @@ use super::artifact_write::{
 };
 use super::helpers::{
     FolderRules, MAX_FILE_READ_SIZE, acting_folder, linked_target, make_parents_below, open_leaf,
-    resolve_workspace_path, resolve_workspace_path_for_write, validate_workspace_path,
+    open_leaf_without_waiting, resolve_workspace_path, resolve_workspace_path_for_write,
+    validate_workspace_path,
 };
 use super::pre_edit::{EditVerb, PreEdit, check_pre_edit, keep_pre_edit_copy};
 
@@ -59,18 +60,28 @@ impl BuiltInTool for FileReadTool {
         // are read like any file — reading never asks (ST-16).
         let full_path = resolve_workspace_path(path, &root, rules)?;
         // R-T30: opened without following a link put at the leaf since the
-        // resolver answered, and sized from the file that was opened.
+        // resolver answered, and judged and sized from the file that was
+        // opened. Residual X6: the open does not wait, so a named pipe or a
+        // device is refused here rather than blocking the call.
         let cannot_access = |e: std::io::Error| format!("Cannot access file '{path}': {e}");
-        let mut file = open_leaf(
+        let mut file = open_leaf_without_waiting(
             tokio::fs::OpenOptions::new().read(true),
             &full_path,
             path,
             cannot_access,
         )
         .await?;
+        let metadata = file.metadata().await.map_err(cannot_access)?;
+        if metadata.is_dir() {
+            return Err(format!("'{path}' is a folder, not a file."));
+        }
+        if !metadata.is_file() {
+            return Err(format!(
+                "'{path}' is not a regular file, so file_read cannot read it."
+            ));
+        }
 
         // Guard against OOM: reject files larger than 10 MB
-        let metadata = file.metadata().await.map_err(cannot_access)?;
         if metadata.len() > MAX_FILE_READ_SIZE {
             return Err(format!(
                 "File '{}' is {} bytes, exceeding the {} byte limit",
@@ -359,9 +370,19 @@ impl FileWriteTool {
             Ok(WorkingFolder::Project { root }) => {
                 let target = resolve_workspace_path_for_write(path, &root, FolderRules::Project)?;
                 // A folder at the target is refused here, before any card,
-                // in `file_edit`'s words — not after a card, by the open.
-                if std::fs::metadata(&target).is_ok_and(|metadata| metadata.is_dir()) {
-                    return Err(format!("'{path}' is a folder, not a file."));
+                // in `file_edit`'s words — not after a card, by the open —
+                // and anything else that is not a regular file (a named
+                // pipe, a socket, a device), whose open could block on it
+                // (residual X6).
+                if let Ok(metadata) = std::fs::metadata(&target) {
+                    if metadata.is_dir() {
+                        return Err(format!("'{path}' is a folder, not a file."));
+                    }
+                    if !metadata.is_file() {
+                        return Err(format!(
+                            "'{path}' is not a regular file, so file_write cannot replace it."
+                        ));
+                    }
                 }
                 let replaces = check_pre_edit(
                     path,
@@ -1901,6 +1922,60 @@ mod tests {
         assert!(!err.contains("the outside secret"), "{err}");
     }
 
+    /// A named pipe at `path`, made with `mkfifo(3)`.
+    #[cfg(unix)]
+    fn make_fifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c_path` is a NUL-terminated path that outlives the call,
+        // and `mkfifo` only creates a node there; it reads no other memory.
+        let made = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+        assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    }
+
+    /// Residual X6: a read of anything but a regular file — here a named
+    /// pipe, whose ordinary open waits for a writer that never comes — is
+    /// refused at once, in `file_edit`'s words, and a folder in the folder
+    /// refusal's; neither blocks the call.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_read_refuses_a_named_pipe_or_a_folder_instead_of_blocking() {
+        use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+
+        let gp = crate::test_util::GuardedProject::new();
+        let fifo = gp.root.join("pipe");
+        make_fifo(&fifo);
+        fs::create_dir_all(gp.root.join("src")).unwrap();
+
+        let read = tokio::time::timeout(
+            Duration::from_secs(5),
+            FileReadTool.execute_with_context(&read_args("pipe"), &gp.ctx()),
+        )
+        .await;
+        // Release an open still waiting for a writer, so a failure is
+        // reported rather than left blocking the runtime's shutdown; with
+        // no reader waiting this open is refused, which is fine.
+        let _ = fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo);
+
+        assert_eq!(
+            read.expect("the read is refused at once, not blocked on the pipe")
+                .unwrap_err(),
+            "'pipe' is not a regular file, so file_read cannot read it."
+        );
+        assert!(fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo());
+        assert_eq!(
+            FileReadTool
+                .execute_with_context(&read_args("src"), &gp.ctx())
+                .await
+                .unwrap_err(),
+            "'src' is a folder, not a file."
+        );
+    }
+
     /// R26: a call reached with no context names no folder.
     #[tokio::test]
     async fn file_read_refuses_a_call_with_no_context() {
@@ -2583,6 +2658,38 @@ mod tests {
             fs::read_to_string(project.join("reports/a.md")).unwrap(),
             "kept"
         );
+        assert!(st.artifacts().is_empty(), "no row");
+    }
+
+    /// Residual X6: anything else but a regular file at the target — here a
+    /// named pipe, which the write's open would block on until a reader
+    /// came — is refused by the plan from its `stat`, before any card, in
+    /// the folder refusal's shape; the pipe is left as it was and no row is
+    /// written.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_named_pipe_at_the_target_is_refused_before_any_card() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let st = Store::new();
+        let project = st.project_root();
+        let sessions = tempfile::tempdir().unwrap();
+        let (_service, ctx) = logged(&st, &project, sessions.path(), "sess-pipe");
+        let fifo = project.join("pipe");
+        make_fifo(&fifo);
+        let tool = st.tool();
+        let args = serde_json::json!({"path": "pipe", "content": "x"});
+
+        let expected = "'pipe' is not a regular file, so file_write cannot replace it.";
+        assert_eq!(
+            tool.confirmation_preview(&args, &ctx).await.unwrap_err(),
+            expected
+        );
+        let written = tokio::time::timeout(Duration::from_secs(5), tool.write(&args, &ctx))
+            .await
+            .expect("the write is refused at once, not blocked on the pipe");
+        assert_eq!(written.unwrap_err(), expected);
+        assert!(fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo());
         assert!(st.artifacts().is_empty(), "no row");
     }
 
