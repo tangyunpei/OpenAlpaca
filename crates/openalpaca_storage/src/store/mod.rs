@@ -36,8 +36,8 @@ mod reveal;
 
 pub use artifact::{
     FILE_NAME_SLUG_BYTES, artifact_extension, artifact_file_name, confine_to_root,
-    kind_for_file_name, leading_sequence, loose_dir, run_dir, slugify, upload_dir,
-    upload_file_name, version_file_path,
+    kind_for_file_name, leading_sequence, loose_dir, opens_in_default_app, run_dir, slugify,
+    upload_dir, upload_file_name, version_file_path,
 };
 pub use reveal::{RevealRefusal, revealable_path};
 

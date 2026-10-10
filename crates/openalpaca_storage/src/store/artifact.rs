@@ -460,6 +460,15 @@ pub fn kind_for_file_name(name: &str) -> Option<ArtifactKind> {
     .find(|kind| kind_allowed_extensions(*kind).contains(&ext.as_str()))
 }
 
+/// ST-18: whether Open hands a file named `name` to the system's default app —
+/// only when a kind keeps its extension (R21's sets, [`kind_for_file_name`]).
+/// `false` for `.sh`, `.command`, `.svg`, `.exe` and every name with no
+/// extension (`Makefile`, `Dockerfile`, a dotfile such as `.env`): those get
+/// Reveal only, since a default app could run them.
+pub fn opens_in_default_app(name: &str) -> bool {
+    kind_for_file_name(name).is_some()
+}
+
 fn mime_extension(mime: &str) -> Option<String> {
     let mime = mime
         .split(';')

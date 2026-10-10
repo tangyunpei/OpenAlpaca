@@ -2837,3 +2837,37 @@ fn line_counts_are_absent_for_a_binary_kind() {
     assert_eq!(rows[0].added_lines, None);
     assert_eq!(rows[0].removed_lines, None);
 }
+
+// ============================================================================
+// Stage 2 — result files (ST-12): the column, the filter, Open (ST-18)
+// ============================================================================
+
+/// Every record reads `in_project` — `false` for a by-product — a by-product
+/// always opens (ST-18), and `list` filters on the column. A result file's
+/// side of each is pinned in S4a.3, against rows R35's method writes (R39:
+/// no hand `INSERT`).
+#[test]
+fn a_by_product_is_outside_the_project_and_opens() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "notes", b"a draft\n");
+    new.created = at(1);
+    let (by_product, _) = f.store().put(new).unwrap();
+
+    assert!(!by_product.in_project);
+    assert!(by_product.openable(), "every by-product opens");
+    let ids = |in_project: Option<bool>| -> Vec<String> {
+        let mut q = ArtifactQuery::new(OWNER);
+        q.in_project = in_project;
+        f.store()
+            .list(&q)
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    };
+    assert_eq!(ids(Some(false)), vec![by_product.id.clone()]);
+    assert!(ids(Some(true)).is_empty(), "no result file yet");
+    assert_eq!(ids(None), vec![by_product.id.clone()], "absent: both");
+}

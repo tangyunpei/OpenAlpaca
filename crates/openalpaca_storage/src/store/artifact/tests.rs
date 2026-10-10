@@ -571,6 +571,37 @@ fn kind_for_file_name_reads_the_r21_sets_in_declared_order() {
     }
 }
 
+/// ST-18: Open hands a result file to the system's default app only when a
+/// kind keeps its extension (R21's sets); a script, an SVG, an executable and
+/// every name with no extension — `Makefile`, `Dockerfile`, a dotfile — get
+/// Reveal only.
+#[test]
+fn only_a_name_a_kind_keeps_opens_in_the_default_app() {
+    for name in [
+        "docs/plan.md",
+        "src/main.rs",
+        "data.json",
+        "chart.png",
+        "index.html",
+        "report.pdf",
+        "config.env",
+    ] {
+        assert!(opens_in_default_app(name), "{name}");
+    }
+    for name in [
+        "scripts/build.sh",
+        "Run.command",
+        "logo.svg",
+        "setup.exe",
+        "Makefile",
+        "Dockerfile",
+        ".env",
+        "src/.gitignore",
+    ] {
+        assert!(!opens_in_default_app(name), "{name}");
+    }
+}
+
 // ============================================================================
 // D2 upload placement
 // ============================================================================

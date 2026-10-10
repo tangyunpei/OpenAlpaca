@@ -414,7 +414,8 @@ pub struct ArtifactRecord {
     pub storage_path: String,
     /// `NULL` => the home store (§4.8: the home root *is* the baseline).
     pub project_root: Option<String>,
-    /// The head's path relative to `<store>/artifacts`.
+    /// The head's path relative to `<store>/artifacts`; for a result file
+    /// (`in_project`), the file's path relative to `project_root`.
     pub rel_path: Option<String>,
     pub task_id: Option<String>,
     pub agent_id: Option<String>,
@@ -427,6 +428,11 @@ pub struct ArtifactRecord {
     /// Set the first time the bytes were found absent; cleared by the next
     /// successful `put`.
     pub missing_since: Option<String>,
+    /// `file_assets.in_project` (migration 4): a result file an agent wrote
+    /// into its project (ST-12) — `project_root` is that project, `rel_path`
+    /// the file's path in it, `storage_path` the real file — with no
+    /// versions. `false` for every by-product and upload.
+    pub in_project: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -435,6 +441,14 @@ impl ArtifactRecord {
     /// §4.8: list rows carry `missing: true`.
     pub fn missing(&self) -> bool {
         self.missing_since.is_some()
+    }
+
+    /// ST-18: whether Open is offered — every by-product and upload; a result
+    /// file only when its name has an extension a kind keeps
+    /// ([`crate::store::opens_in_default_app`]): `.sh`, `.command`,
+    /// `Makefile` get Reveal only.
+    pub fn openable(&self) -> bool {
+        !self.in_project || crate::store::opens_in_default_app(&self.name)
     }
 
     /// The **writer's** metadata — `metadata_json` parsed, with
@@ -549,6 +563,9 @@ pub struct ArtifactQuery {
     /// index is built on — so `Some(String::new())` selects the home store.
     pub project_root: Option<String>,
     pub pinned: Option<bool>,
+    /// `Some(false)`: by-products and uploads only; `Some(true)`: result
+    /// files in the project only (ST-12); `None`: both.
+    pub in_project: Option<bool>,
     /// Substring match over the head file name and the summary.
     pub q: Option<String>,
     /// §4.8: default `false`.
@@ -567,6 +584,7 @@ impl ArtifactQuery {
             origin: None,
             project_root: None,
             pinned: None,
+            in_project: None,
             q: None,
             include_missing: false,
             limit: None,
@@ -1170,6 +1188,10 @@ impl<'a> ArtifactStore<'a> {
             clauses.push("pinned = ?");
             args.push(Value::Integer(i64::from(pinned)));
         }
+        if let Some(in_project) = q.in_project {
+            clauses.push("in_project = ?");
+            args.push(Value::Integer(i64::from(in_project)));
+        }
         if let Some(text) = &q.q {
             clauses.push("(filename LIKE ? ESCAPE '\\' OR IFNULL(summary, '') LIKE ? ESCAPE '\\')");
             let pattern = format!("%{}%", escape_like(text));
@@ -1720,7 +1742,8 @@ impl<'a> ArtifactStore<'a> {
 /// order. Named explicitly so a later migration cannot shift the indexes.
 const RECORD_COLUMNS: &str = "id, owner_id, origin, kind, filename, mime_type, size_bytes, \
      sha256, storage_path, project_root, rel_path, task_id, agent_id, agent_template_id, \
-     version, version_count, pinned, summary, metadata_json, missing_since, created_at, updated_at";
+     version, version_count, pinned, summary, metadata_json, missing_since, created_at, updated_at, \
+     in_project";
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> Result<ArtifactRecord> {
     let origin: String = row.get(2)?;
@@ -1748,6 +1771,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> Result<ArtifactRecord> {
         missing_since: row.get(19)?,
         created_at: row.get(20)?,
         updated_at: row.get(21)?,
+        in_project: row.get::<_, i64>(22)? != 0,
     })
 }
 
