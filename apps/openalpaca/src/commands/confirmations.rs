@@ -452,12 +452,14 @@ fn confirmation_frame(text: &str) -> Option<ConfirmationFrame> {
 /// rewrites the line and a bidi override reorders it: every hidden character
 /// in them is shown as `<U+XXXX>` ([`EscapedPrompt`]) and one notice directly
 /// under the arguments counts them. The run and request ids are the daemon's
-/// own; the preview is the daemon's text, printed as it comes, because no raw
-/// hidden character reaches it: `memory_confirm`'s has every character the
-/// escape would show taken out of what it quotes (`utils::text::one_line`),
-/// and those of `shell_execute`, `file_write`, `file_edit` and `send` show
-/// the ones in what they quote escaped (`<U+XXXX>`), with their own count
-/// line.
+/// own; the preview is the daemon's text, printed as it comes, because
+/// nothing the model wrote reaches it raw: `memory_confirm`'s has every
+/// character the escape would show taken out of what it quotes
+/// (`utils::text::one_line`), and those of `shell_execute`, `file_write`,
+/// `file_edit` and `send` show the ones in what they quote escaped
+/// (`<U+XXXX>`), with their own count line. The folder a card names — the
+/// project's root, the conversation's scratch folder or the artifact store —
+/// is printed as it is: the person's own path or OpenAlpaca's.
 fn prompt_block(frame: &ConfirmationFrame) -> String {
     let shown = EscapedPrompt::new(
         &frame.tool_name,

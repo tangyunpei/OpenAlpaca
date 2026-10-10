@@ -43,8 +43,8 @@
  *   `escapeHiddenLine`, which also shows a newline and a tab: a name has no
  *   layout of its own, and a line break in it would draw lines the card does
  *   not have.
- * - **The daemon-authored `preview`** is not escaped here: no raw character
- *   of the set reaches it. `memory_confirm`'s is OpenAlpaca's own prose,
+ * - **The daemon-authored `preview`** is not escaped here: nothing the model
+ *   wrote reaches it raw. `memory_confirm`'s is OpenAlpaca's own prose,
  *   composed to be read, and the daemon drops from it every character this
  *   module would escape; its arguments are three ids, the suggestion's exact
  *   text is in the Memory view, which escapes it, and the preview's own last
@@ -52,8 +52,10 @@
  *   `shell_execute`, `file_write`, `file_edit` and `send` quote a path, a
  *   name or the strings an edit swaps, and the daemon escapes those as
  *   `<U+XXXX>` with their own count line, which the card draws as it comes.
- *   Either way the values that decide what runs are the arguments beside it,
- *   which this escapes.
+ *   The folder a card names — the project's root, the conversation's scratch
+ *   folder or the artifact store — is printed as it is: the person's own
+ *   path or OpenAlpaca's, not the model's. Either way the values that decide
+ *   what runs are the arguments beside it, which this escapes.
  *
  * Display only: nothing sent to the daemon, stored or matched changes — the
  * card, the composer's answer and every POST body read the raw values. The
