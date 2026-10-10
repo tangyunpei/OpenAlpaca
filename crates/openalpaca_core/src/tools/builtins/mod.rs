@@ -335,9 +335,11 @@ fn startup_root(workspace_root: Option<PathBuf>) -> PathBuf {
 /// [`memory_read_tools`] over the daemon's `MemoryService`, and the writers
 /// are per-request (`main_loop_tool_set`).
 ///
-/// `workspace_root` is the explicit workspace directory for file tools.
-/// If `None`, falls back to `std::env::current_dir()` (for backward
-/// compatibility in tests and CLI).
+/// `workspace_root` is the directory `file_write`'s plain write lands in, on
+/// a project turn whose daemon was not started in the home store (Round G's
+/// FW-1; it goes with that write in Stage 2's pointer-row slice). If `None`,
+/// falls back to `std::env::current_dir()`. Every other file tool and the
+/// shell act in the call's working folder (`tools::working_folder`).
 pub fn builtin_tools(
     db: Option<openalpaca_storage::Database>,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
@@ -356,7 +358,7 @@ pub fn builtin_tools(
     let mut tools = vec![
         web_search_tool(ws_cfg),
         web_fetch_tool(),
-        file_read_tool(ws_root.clone()),
+        file_read_tool(),
         // The config carries §5.7's `snapshot_max_bytes` — the bound on the
         // pre-edit image `file_write` takes before it overwrites a file — and
         // the artifact caps; the database is the store a file not written

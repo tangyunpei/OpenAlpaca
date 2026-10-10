@@ -3,6 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::tools::registry::ToolContext;
+use crate::tools::working_folder::{WorkingFolder, working_folder};
+
 /// Maximum file size for file_read (10 MB).
 pub(super) const MAX_FILE_READ_SIZE: u64 = 10 * 1024 * 1024;
 
@@ -34,9 +37,6 @@ pub(super) enum FolderRules {
     /// component, compared without case, of the path relative to the
     /// canonical root **after** resolution, so a link into either folder is
     /// judged by where it lands.
-    // Built in Stage 2's S1 and passed by no caller until S3 (reads) and
-    // S4a (writes); S3 removes this attribute with the first caller.
-    #[cfg_attr(not(test), allow(dead_code))]
     Project,
     /// No rule beyond confinement: a conversation's scratch folder, and until
     /// S3 and S4a every caller whose root is the daemon's starting directory.
@@ -44,6 +44,16 @@ pub(super) enum FolderRules {
 }
 
 impl FolderRules {
+    /// R32's rules for a working folder: [`FolderRules::Project`] in a
+    /// project, [`FolderRules::Plain`] in a conversation's scratch folder.
+    pub(super) fn of(folder: &WorkingFolder) -> Self {
+        if folder.is_project() {
+            FolderRules::Project
+        } else {
+            FolderRules::Plain
+        }
+    }
+
     /// R32 over `resolved`, the path a resolver landed on. The resolvers
     /// refused anything outside `canonical_root` first, so the fallback below
     /// only keeps this fail-closed.
@@ -84,6 +94,20 @@ impl FolderRules {
         }
         Ok(())
     }
+}
+
+/// R26 (storage design §10): the call's working folder, ready to act in — a
+/// scratch folder is made on first use (`WorkingFolder::ensure`) — and R32's
+/// rules for it. `Err` is the refusal's own sentence (R26's no context, R27's
+/// missing project, R44's neither project nor conversation): nothing was
+/// read, made or run.
+pub(super) fn acting_folder(ctx: &ToolContext) -> Result<(PathBuf, FolderRules), String> {
+    let folder = working_folder(ctx).map_err(|refusal| refusal.to_string())?;
+    let root = folder
+        .ensure()
+        .map_err(|refusal| refusal.to_string())?
+        .to_path_buf();
+    Ok((root, FolderRules::of(&folder)))
 }
 
 /// Resolve a relative path within the workspace and verify it doesn't escape

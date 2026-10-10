@@ -1,6 +1,7 @@
 use crate::daemon_config::{DaemonConfig, SessionsConfig};
 use crate::session_log::SnapshotSpec;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
+use crate::tools::working_folder::WorkingFolderRefusal;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
@@ -9,53 +10,51 @@ use openalpaca_storage::store::{
 };
 use openalpaca_storage::{ArtifactKind, Database};
 use sha2::{Digest, Sha256};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::annotations_for_builtin;
 use super::artifact_write::{ToolArtifact, put_tool_artifact, scope_from_context, split_name};
 use super::approval_preview::{WriteLanding, write_card};
 use super::helpers::{
-    FolderRules, MAX_FILE_READ_SIZE, StoreAccess, is_identity_path, is_soul_path,
+    FolderRules, MAX_FILE_READ_SIZE, StoreAccess, acting_folder, is_identity_path, is_soul_path,
     is_store_owned_path, is_store_owned_resolved, is_user_path, resolve_workspace_path,
     resolve_workspace_path_for_write, validate_workspace_path,
 };
 
 // --- file_read ---
 
-struct FileReadTool {
-    workspace_root: PathBuf,
-}
+/// Reads one file of the call's working folder (storage design §10, R26):
+/// the project's root, or the conversation's scratch folder. It holds no
+/// root of its own — the folder is the call's, read from its context.
+struct FileReadTool;
 
 #[async_trait]
 impl BuiltInTool for FileReadTool {
-    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+    /// R26: a call reached with no context names no folder, and is refused
+    /// rather than read from the daemon's own directory.
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err(WorkingFolderRefusal::NoContext.to_string())
+    }
+
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
         let path = arguments
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: path".to_string())?;
 
-        // The store's `state/` is the daemon's, never the model's to read
-        // (design §2): the control snapshots there map owner keys to ids.
-        let refuse = |what: &str| {
-            format!(
-                "Reading '{path}' is refused: it is inside {what}, which belongs to the daemon's \
-                 own state/ and is not workspace content."
-            )
-        };
-        if let Some(what) = is_store_owned_path(path, StoreAccess::Read) {
-            return Err(refuse(what));
-        }
-
-        // Security: resolve path, reject traversal and symlink escapes
-        let full_path = resolve_workspace_path(path, &self.workspace_root, FolderRules::Plain)?;
-        // Again on the resolved path: a symlink inside the workspace that
-        // points at `state/` passes the string check above.
-        if let Some(what) =
-            is_store_owned_resolved(&full_path, &self.workspace_root, StoreAccess::Read)
-        {
-            return Err(refuse(what));
-        }
+        // R26, R27, R44: the project's folder, or the conversation's scratch
+        // folder; a missing project, or a call with neither, is refused with
+        // its sentence before anything is read.
+        let (root, rules) = acting_folder(ctx)?;
+        // R31: relative, no `..`, resolved whole and under the root. R32 in a
+        // project: nothing under a `.openalpaca` folder. `.git` and `.env`
+        // are read like any file — reading never asks (ST-16).
+        let full_path = resolve_workspace_path(path, &root, rules)?;
 
         // Guard against OOM: reject files larger than 10 MB
         let metadata = tokio::fs::metadata(&full_path)
@@ -76,22 +75,22 @@ impl BuiltInTool for FileReadTool {
     }
 }
 
-pub(super) fn file_read_tool(workspace_root: PathBuf) -> RegisteredTool {
+pub(super) fn file_read_tool() -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "file_read".to_string(),
-            description: "Read a file's full contents from the workspace directory. \
-                Returns the file content as a UTF-8 string. Files larger than 10MB are \
-                rejected. Use this to inspect configuration files, source code, or data \
-                before processing. For binary files, use shell_execute with appropriate \
-                commands instead."
+            description: "Read a file from the working folder — the project, or this \
+                conversation's scratch folder. Returns its full content as UTF-8; files over \
+                10MB are refused. Paths are relative to the working folder; '..' is refused, \
+                and in a project so is any .openalpaca folder. Reading never asks. For binary \
+                files, use shell_execute."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path to the file within the workspace (e.g., 'src/main.rs', 'config/settings.toml'). Absolute paths and '..' traversal are rejected."
+                        "description": "The file, relative to the working folder (e.g. 'src/main.rs', 'config/settings.toml'). Absolute paths and '..' are refused."
                     }
                 },
                 "required": ["path"]
@@ -101,7 +100,7 @@ pub(super) fn file_read_tool(workspace_root: PathBuf) -> RegisteredTool {
                 serde_json::json!({"path": "src/main.rs"}),
             ]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(FileReadTool { workspace_root })),
+        backend: ToolBackend::BuiltIn(Arc::new(FileReadTool)),
         provides_capabilities: vec!["file_read".into()],
         exempt_from_timeout: false,
         annotations: annotations_for_builtin("file_read"),
@@ -459,42 +458,18 @@ impl FileWriteTool {
                  OpenAlpaca's artifact store."
             }
         };
-        let read_back = match read_back_path(&record.storage_path, &self.workspace_root) {
-            Some(rel) => format!("To read it back, call file_read with \"{rel}\"."),
-            None => "file_read cannot open it from this conversation; what you passed is what \
-                     was saved, so there is nothing to check."
-                .to_string(),
-        };
+        // Part 4 (interfaces C7): `file_read` reads the call's working folder
+        // (storage design §10), never the artifact store, so no path opens it.
         Ok(format!(
             "Saved: {path} is the artifact \"{}\", version {}, at {}. {kept} It is listed in the \
              Library. This file is the deliverable: tell the user it is saved at that absolute \
-             path, and do not write another copy with the shell or any other tool. {read_back} \
-             To change it, call file_write with \"{path}\" again; that saves its next version.",
+             path, and do not write another copy with the shell or any other tool. file_read \
+             cannot open it from this conversation; what you passed is what was saved, so there \
+             is nothing to check. To change it, call file_write with \"{path}\" again; that saves \
+             its next version.",
             record.name, record.version, record.storage_path
         ))
     }
-}
-
-/// The path `file_read` opens a saved artifact by: its file relative to the
-/// workspace root, `/`-separated, both resolved first. `None` when the file
-/// is not under the root — a store seen from a root that does not contain it
-/// (a daemon started outside the home store). A project's by-products are in
-/// its folder under the home store's `projects/`, so from the home store they
-/// are under the root. `file_read` joins the same root, so the path named is
-/// one it opens.
-fn read_back_path(storage_path: &str, workspace_root: &Path) -> Option<String> {
-    let file = Path::new(storage_path).canonicalize().ok()?;
-    let root = workspace_root.canonicalize().ok()?;
-    let parts = file
-        .strip_prefix(&root)
-        .ok()?
-        .components()
-        .map(|part| match part {
-            Component::Normal(part) => part.to_str(),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
-    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 /// Whether `path` ends in a file name. '', '.', 'reports/' or a blank last
@@ -1182,73 +1157,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn file_read_refuses_the_store_state_but_not_a_partition_file() {
-        let b = bench();
-        let root = b.work.path().to_path_buf();
-        fs::create_dir_all(root.join("state/memory-control")).unwrap();
-        fs::write(root.join("state/memory-control/home.json"), "{\"owner_id\":\"secret\"}").unwrap();
-        let tool = FileReadTool {
-            workspace_root: root.clone(),
-        };
-        let err = tool
-            .execute(&serde_json::json!({"path": "state/memory-control/home.json"}))
-            .await
-            .expect_err("state/ is refused");
-        assert!(err.contains("state/"), "{err}");
-        assert!(!err.contains("secret"), "{err}");
-        fs::create_dir_all(root.join("memory/owners/k/.history/id")).unwrap();
-        fs::write(root.join("memory/owners/k/.history/id/rev.md"), "old").unwrap();
-        fs::write(root.join("memory/owners/k/MEMORY.md"), "# Memory").unwrap();
-        for path in ["memory/owners/k/.history/id/rev.md", "memory/owners/k/MEMORY.md"] {
-            tool.execute(&serde_json::json!({"path": path}))
-                .await
-                .unwrap_or_else(|e| panic!("{path}: {e}"));
-        }
-    }
-
-    /// Defence in depth: the argument check reads the string, and a symlink
-    /// inside the workspace that points at `state/` canonicalizes under the
-    /// root, so both tools run the check again on the path the resolution
-    /// landed on. Unix only: the test needs a symlink.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_symlink_into_the_store_state_is_refused_after_resolution() {
-        let b = bench();
-        let root = b.work.path().to_path_buf();
-        fs::create_dir_all(root.join("state/memory-control")).unwrap();
-        fs::write(
-            root.join("state/memory-control/home.json"),
-            "{\"owner_id\":\"secret\"}",
-        )
-        .unwrap();
-        std::os::unix::fs::symlink(root.join("state"), root.join("link")).unwrap();
-
-        let read = FileReadTool {
-            workspace_root: root.clone(),
-        };
-        let err = read
-            .execute(&serde_json::json!({"path": "link/memory-control/home.json"}))
-            .await
-            .expect_err("a symlink into state/ is refused on read");
-        assert!(err.contains("state/"), "{err}");
-        assert!(!err.contains("secret"), "{err}");
-
-        let write = b.tool(None);
-        let err = write
-            .write(
-                &serde_json::json!({"path": "link/memory-control/x.json", "content": "{}"}),
-                &b.project_ctx(),
-            )
-            .await
-            .expect_err("a symlink into state/ is refused on write");
-        assert!(err.contains("state/"), "{err}");
-        assert!(
-            !root.join("state/memory-control/x.json").exists(),
-            "written through the link"
-        );
-    }
-
     /// **S3-R1 (plan §7a), the probe.** A link into `state/` followed by a
     /// directory that does not exist yet: the write resolver's absent-parent
     /// branch used to return the joined path unresolved, so the string check
@@ -1303,6 +1211,177 @@ mod tests {
             !outside.path().join("newdir").exists(),
             "a directory was created outside the workspace"
         );
+    }
+
+    // ── Storage design §10 (R26, R27, R32): file_read reads the working folder ──
+
+    fn read_args(path: &str) -> serde_json::Value {
+        serde_json::json!({ "path": path })
+    }
+
+    #[tokio::test]
+    async fn file_read_reads_a_file_of_the_project_folder() {
+        let gp = crate::test_util::GuardedProject::new();
+        fs::create_dir_all(gp.root.join("src")).unwrap();
+        fs::write(gp.root.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let out = FileReadTool
+            .execute_with_context(&read_args("src/main.rs"), &gp.ctx())
+            .await
+            .unwrap();
+        assert_eq!(out, "fn main() {}\n");
+    }
+
+    /// One conversation never sees another's files: each reads its own
+    /// scratch folder, and `..` cannot reach a neighbour's.
+    #[tokio::test]
+    async fn file_read_reads_the_conversations_scratch_folder_and_no_other() {
+        let gp = crate::test_util::GuardedProject::new();
+        let scratch = gp.home_root().join("scratch");
+        fs::create_dir_all(scratch.join("conv-test")).unwrap();
+        fs::write(scratch.join("conv-test/notes.txt"), "mine").unwrap();
+        fs::create_dir_all(scratch.join("conv-other")).unwrap();
+        fs::write(scratch.join("conv-other/secret.txt"), "theirs").unwrap();
+        let other = ToolContext {
+            conversation_id: Some("conv-other".to_string()),
+            ..Default::default()
+        };
+
+        let tool = FileReadTool;
+        assert_eq!(
+            tool.execute_with_context(&read_args("notes.txt"), &gp.scratch_ctx())
+                .await
+                .unwrap(),
+            "mine"
+        );
+        assert_eq!(
+            tool.execute_with_context(&read_args("secret.txt"), &other).await.unwrap(),
+            "theirs"
+        );
+        let err = tool
+            .execute_with_context(&read_args("secret.txt"), &gp.scratch_ctx())
+            .await
+            .expect_err("another conversation's file is not in this folder");
+        // The resolver's own wording is S1's; what matters is that nothing of
+        // the other conversation's file came back.
+        assert!(!err.contains("theirs"), "{err}");
+        let err = tool
+            .execute_with_context(&read_args("../conv-other/secret.txt"), &gp.scratch_ctx())
+            .await
+            .expect_err("'..' is refused");
+        assert!(err.contains(".."), "{err}");
+        assert!(!err.contains("theirs"), "{err}");
+    }
+
+    /// R26: a call reached with no context names no folder.
+    #[tokio::test]
+    async fn file_read_refuses_a_call_with_no_context() {
+        let err = FileReadTool
+            .execute(&read_args("README.md"))
+            .await
+            .expect_err("no context");
+        assert_eq!(
+            err,
+            "This tool acts in the conversation's working folder, and this call carries no \
+             conversation to name one."
+        );
+    }
+
+    /// R27: a project whose folder is gone is refused with §6's sentence
+    /// before anything is read, and no folder is made in its place.
+    #[tokio::test]
+    async fn file_read_refuses_a_missing_project_before_reading() {
+        let gp = crate::test_util::GuardedProject::new();
+        fs::remove_dir_all(&gp.root).unwrap();
+
+        let err = FileReadTool
+            .execute_with_context(&read_args("README.md"), &gp.ctx())
+            .await
+            .expect_err("the project folder is missing");
+        assert_eq!(
+            err,
+            WorkingFolderRefusal::ProjectMissing {
+                root: gp.root.display().to_string()
+            }
+            .to_string()
+        );
+        assert!(
+            err.starts_with(&format!("The project folder {} is missing", gp.root.display())),
+            "{err}"
+        );
+        assert!(!gp.root.exists(), "nothing re-created the folder");
+        assert!(!gp.home_root().join("scratch").exists());
+    }
+
+    /// R32's read rule, switched on: in a project nothing under a
+    /// `.openalpaca` folder is read (ST-9); `.git` is (ST-16: reading never
+    /// asks). A scratch folder has no such rule.
+    #[tokio::test]
+    async fn file_read_refuses_dot_openalpaca_in_a_project_and_reads_dot_git() {
+        let gp = crate::test_util::GuardedProject::new();
+        fs::create_dir_all(gp.root.join(".openalpaca/memory")).unwrap();
+        fs::write(gp.root.join(".openalpaca/memory/note.md"), "old").unwrap();
+        fs::create_dir_all(gp.root.join(".git")).unwrap();
+        fs::write(gp.root.join(".git/config"), "[core]\n").unwrap();
+
+        let err = FileReadTool
+            .execute_with_context(&read_args(".openalpaca/memory/note.md"), &gp.ctx())
+            .await
+            .expect_err(".openalpaca is refused in a project");
+        assert_eq!(
+            err,
+            "'.openalpaca/memory/note.md' is refused: a .openalpaca folder inside a project is an \
+             older OpenAlpaca's, and nothing in it is read or written any more."
+        );
+        assert_eq!(
+            FileReadTool
+                .execute_with_context(&read_args(".git/config"), &gp.ctx())
+                .await
+                .unwrap(),
+            "[core]\n"
+        );
+
+        let scratch = gp.home_root().join("scratch/conv-test/.openalpaca");
+        fs::create_dir_all(&scratch).unwrap();
+        fs::write(scratch.join("x.txt"), "plain").unwrap();
+        assert_eq!(
+            FileReadTool
+                .execute_with_context(&read_args(".openalpaca/x.txt"), &gp.scratch_ctx())
+                .await
+                .unwrap(),
+            "plain"
+        );
+    }
+
+    /// R33 (storage design §11): the home store's five rules are gone from the
+    /// file tools — from a project or a scratch folder nothing they protected
+    /// is reachable, and a project of the user's may hold a `state/` folder,
+    /// a `MEMORY.md` or a `SOUL.md` of its own.
+    #[tokio::test]
+    async fn a_project_may_hold_a_state_folder_and_a_soul_md() {
+        let gp = crate::test_util::GuardedProject::new();
+        let files = [
+            ("state/notes.json", "{}"),
+            ("SOUL.md", "# Soul\n"),
+            ("docs/USER.md", "# User\n"),
+            ("IDENTITY.md", "# Identity\n"),
+            ("MEMORY.md", "# Memory\n"),
+            ("memory/.gitignore", "*\n"),
+            ("notes/.history/a.md", "old\n"),
+        ];
+        for (path, content) in files {
+            let full = gp.root.join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(&full, content).unwrap();
+        }
+
+        for (path, content) in files {
+            let out = FileReadTool
+                .execute_with_context(&read_args(path), &gp.ctx())
+                .await
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+            assert_eq!(out, content, "{path}");
+        }
     }
 
     // ── G2 (FW-1): a file not written into a project folder is an artifact ──
@@ -1616,15 +1695,12 @@ mod tests {
             !out.contains("no project folder"),
             "the turn carries a project: {out}"
         );
-        // The project's folder is under the home store `file_read` reads from.
-        let name = openalpaca_storage::store::projects::folder_name(&project);
+        // Stage 2 (S3): file_read reads the working folder, never the
+        // artifact store, so no read-back path is named.
         assert!(
-            out.contains(&format!(
-                "To read it back, call file_read with \"projects/{name}/artifacts/"
-            )),
+            out.contains("file_read cannot open it from this conversation"),
             "{out}"
         );
-        assert!(!out.contains("file_read cannot open it"), "{out}");
     }
 
     /// The root is compared resolved: a workspace root that is a link to the
@@ -1736,85 +1812,41 @@ mod tests {
         );
     }
 
-    /// The path a result tells the model to read the artifact back by.
-    fn read_back_in(out: &str) -> &str {
-        let (_, rest) = out
-            .split_once("To read it back, call file_read with \"")
-            .unwrap_or_else(|| panic!("no read-back path: {out}"));
-        rest.split_once('"')
-            .unwrap_or_else(|| panic!("an unclosed read-back path: {out}"))
-            .0
-    }
-
-    /// Round G's live check, defect 2. From the home store — where both
-    /// launchers start the daemon — the result names the path `file_read`
-    /// opens the artifact by, and `file_read` on that path, from the same
-    /// root and turn, returns what was written; written again, the path its
-    /// result names returns the second content. The first result is pinned
-    /// whole: the five parts, in order.
+    /// Round G's five parts (FW-1), pinned whole. From Stage 2 (S3) on,
+    /// `file_read` reads the working folder — the project or the
+    /// conversation's scratch folder — and never the artifact store, so part
+    /// 4 says there is nothing to read back (S5 names `artifact_read` there).
     #[tokio::test]
-    async fn from_the_home_store_the_result_names_a_path_file_read_opens() {
+    async fn a_by_product_result_is_pinned_whole_in_five_parts() {
         let st = Store::new();
         let home = st.home.root();
-        let ctx = st.ctx(None, None);
-        let write = st.tool_at(&home);
-        let read = FileReadTool {
-            workspace_root: home.clone(),
-        };
-
-        for (i, content) in ["# Pasta night\n", "# Pasta night, again\n"]
-            .into_iter()
-            .enumerate()
-        {
-            let out = write.write(&pasta(content), &ctx).await.unwrap();
-            assert!(!out.contains("file_read cannot open"), "{out}");
-            let rel = read_back_in(&out);
-            let read_back = read
-                .execute_with_context(&serde_json::json!({ "path": rel }), &ctx)
-                .await
-                .unwrap_or_else(|e| panic!("file_read({rel}): {e}"));
-            assert_eq!(read_back, content, "{out}");
-
-            if i == 0 {
-                let row = &st.artifacts()[0];
-                assert_eq!(
-                    out,
-                    format!(
-                        "Saved: {PASTA} is the artifact \"{}\", version 1, at {}. This \
-                         conversation has no project folder, so its files are kept in \
-                         OpenAlpaca's artifact store. It is listed in the Library. This file \
-                         is the deliverable: tell the user it is saved at that absolute \
-                         path, and do not write another copy with the shell or any other \
-                         tool. To read it back, call file_read with \"{rel}\". To change it, \
-                         call file_write with \"{PASTA}\" again; that saves its next version.",
-                        row.name, row.storage_path
-                    )
-                );
-            }
-        }
-        assert!(
-            !home.join(PASTA).exists(),
-            "written into the home store's root"
-        );
-    }
-
-    /// From a workspace root that is not the home store the artifact is out
-    /// of `file_read`'s reach, and the result says so rather than name a path.
-    #[tokio::test]
-    async fn from_a_root_that_is_not_the_home_store_the_result_says_file_read_cannot_open_it() {
-        let st = Store::new();
 
         let out = st
-            .tool_at(st.work.path())
+            .tool_at(&home)
             .write(&pasta("# Pasta night\n"), &st.ctx(None, None))
             .await
             .unwrap();
 
-        assert!(
-            out.contains("file_read cannot open it from this conversation"),
-            "{out}"
+        let row = &st.artifacts()[0];
+        assert_eq!(
+            out,
+            format!(
+                "Saved: {PASTA} is the artifact \"{}\", version 1, at {}. This \
+                 conversation has no project folder, so its files are kept in \
+                 OpenAlpaca's artifact store. It is listed in the Library. This file \
+                 is the deliverable: tell the user it is saved at that absolute \
+                 path, and do not write another copy with the shell or any other \
+                 tool. file_read cannot open it from this conversation; what you \
+                 passed is what was saved, so there is nothing to check. To change \
+                 it, call file_write with \"{PASTA}\" again; that saves its next \
+                 version.",
+                row.name, row.storage_path
+            )
         );
-        assert!(!out.contains("To read it back"), "{out}");
+        assert!(
+            !home.join(PASTA).exists(),
+            "written into the home store's root"
+        );
     }
 
     /// The refusals come before the routing: a store-owned path and an
