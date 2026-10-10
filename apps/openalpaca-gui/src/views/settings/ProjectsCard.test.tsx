@@ -173,6 +173,9 @@ describe("ProjectsCard (storage design §6, ST-7)", () => {
     await screen.findByText(GONE.root);
     expect(screen.getAllByText("missing")).toHaveLength(1);
     expect(screen.getByText(MISSING_PROJECT_COPY)).toBeInTheDocument();
+    expect(MISSING_PROJECT_COPY).toBe(
+      "Its folder is gone or has moved. Everything recorded for it is kept until you re-point it or delete its data.",
+    );
   });
 
   it("marks the project this window's turns go to", async () => {

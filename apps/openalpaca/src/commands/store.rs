@@ -8,8 +8,9 @@
 //!
 //! A project's content lives at home, in `~/.openalpaca/projects/<name>/`, and
 //! its path is recorded in five columns of the database. `list` shows every
-//! project and marks one whose folder is gone. `rebase` re-points a moved
-//! project — its rows and its folder's name under `projects/` — and its
+//! project and marks one whose folder is gone or has moved (storage design
+//! ST-23). `rebase` re-points a moved project — its rows and its folder's
+//! name under `projects/` — and its
 //! `--dry-run` reads what is recorded at both paths and names what the daemon
 //! would refuse. `purge` deletes everything OpenAlpaca holds for a project
 //! (ST-19) — conversations, runs, by-products, uploads, every owner's notes and
@@ -306,7 +307,8 @@ fn render_list(projects: &[ProjectView]) -> String {
         let missing = match project.missing {
             true => format!(
                 "  {}",
-                "missing — its folder is gone: re-point it, or delete its data".yellow()
+                "missing — its folder is gone or has moved: re-point it, or delete its data"
+                    .yellow()
             ),
             false => String::new(),
         };
@@ -434,7 +436,7 @@ fn render_plan(from: &WorkspaceView, to: &WorkspaceView) -> String {
     if from.missing {
         let _ = writeln!(
             out,
-            "  its folder is gone; re-pointing is what re-attaches its data"
+            "  its folder is gone or has moved; re-pointing is what re-attaches its data"
         );
     }
     if let Some(name) = &from.name {
@@ -800,8 +802,8 @@ mod tests {
             text,
             format!(
                 "/work/app\n  projects/-work-app · id {APP_ID}\n\
-                 /work/old  missing — its folder is gone: re-point it, or delete its data\n  \
-                 projects/-work-old · id {OLD_ID}\n"
+                 /work/old  missing — its folder is gone or has moved: re-point it, or delete its \
+                 data\n  projects/-work-old · id {OLD_ID}\n"
             )
         );
     }
@@ -978,7 +980,9 @@ mod tests {
         );
         assert!(!text.contains("takes their rows with it"), "{text}");
         assert!(
-            text.contains("its folder is gone; re-pointing is what re-attaches its data"),
+            text.contains(
+                "its folder is gone or has moved; re-pointing is what re-attaches its data"
+            ),
             "{text}"
         );
         assert!(

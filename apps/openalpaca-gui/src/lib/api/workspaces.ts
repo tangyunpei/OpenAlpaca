@@ -9,8 +9,10 @@
  * the daemon answered.
  *
  * Nothing is written inside a project folder (ST-1), so nothing travels with
- * a moved folder: a project whose root is gone is `missing` (ST-7) until its
- * owner re-points it or deletes its data. Every refusal below is an
+ * a moved folder: a project whose root is gone, or no longer leads to its own
+ * folder (renamed by case only, or moved with a link left at the old path),
+ * is `missing` (ST-7, ST-23) until its owner re-points it or deletes its
+ * data. Every refusal below is an
  * `ApiError` carrying the daemon's code and a sentence written for the
  * owner, which the caller shows as written.
  */
@@ -25,7 +27,11 @@ export interface Project {
   root: string;
   /** Its folder's name under `<home>/projects/` (R4–R7). Never parsed back. */
   name: string;
-  /** The root is not a directory any more (ST-7); its data is kept. */
+  /**
+   * The root is not a directory any more, or no longer leads to its own
+   * folder — renamed by case only, or moved with a link left at the old path
+   * (ST-7, ST-23); its data is kept.
+   */
   missing: boolean;
 }
 
@@ -55,7 +61,10 @@ export interface Workspace {
   id: string | null;
   /** The project's folder under `projects/`; `null` as `id` is. */
   name: string | null;
-  /** The root is not a directory (ST-7); `false` when `root` is `null`. */
+  /**
+   * The root is not a directory, or no longer leads to its own folder (ST-7,
+   * ST-23); `false` when `root` is `null`.
+   */
   missing: boolean;
   /** What is recorded under `root`; zeros when `root` is `null`. */
   rows: WorkspaceCounts;

@@ -98,11 +98,11 @@ describe("RepointProjectDialog", () => {
     );
   });
 
-  it("says when the project's folder is gone", () => {
+  it("says when the project's folder is gone or has moved", () => {
     renderDialog({ project: { ...REPO, missing: true } });
 
     expect(screen.getByRole("dialog")).toHaveTextContent(
-      `Its folder is gone from ${REPO.root}.`,
+      `Its folder is gone or has moved from ${REPO.root}.`,
     );
   });
 

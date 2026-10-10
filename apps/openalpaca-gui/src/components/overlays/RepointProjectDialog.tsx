@@ -176,7 +176,9 @@ export function RepointProjectDialog({
         </h2>
 
         <p className={paragraph}>
-          {project.missing ? "Its folder is gone from " : "It is recorded at "}
+          {project.missing
+            ? "Its folder is gone or has moved from "
+            : "It is recorded at "}
           <span className="font-mono text-2xs-plus text-ink">
             {project.root}
           </span>

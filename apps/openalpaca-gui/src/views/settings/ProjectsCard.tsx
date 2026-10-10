@@ -4,8 +4,10 @@
  * Every project the home store records — one folder under `projects/` each,
  * whose `project.json` holds its id and its root (ST-13) — as
  * `GET /v1/workspaces` lists it, by folder name. A project whose root is no
- * longer a directory is marked `missing` and keeps everything recorded for
- * it (ST-7): nothing detects a move, and nothing is dropped on its own.
+ * longer a directory, or no longer leads to its own folder (renamed by case
+ * only, or moved with a link left at the old path), is marked `missing` and
+ * keeps everything recorded for it (ST-7, ST-23): nothing follows a moved
+ * folder, and nothing is dropped on its own.
  * `Re-point…` is how the owner says where a moved folder went, and
  * `Delete data…` removes everything OpenAlpaca holds for a project (ST-19).
  *
@@ -50,9 +52,9 @@ import { ListCard, ListRow, ListState } from "./primitives";
 export const PROJECTS_EMPTY_COPY =
   "No projects yet. A folder becomes one when you Use it above, or the first time you chat from inside a git repository.";
 
-/** What a missing project's row says under its root (ST-7). */
+/** What a missing project's row says under its root (ST-7, ST-23). */
 export const MISSING_PROJECT_COPY =
-  "Its folder is gone. Everything recorded for it is kept until you re-point it or delete its data.";
+  "Its folder is gone or has moved. Everything recorded for it is kept until you re-point it or delete its data.";
 
 export interface ProjectsCardProps {
   /** `GET /v1/status.project_root` — the project this window's turns go to. */
