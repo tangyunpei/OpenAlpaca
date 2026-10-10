@@ -260,6 +260,20 @@ pub async fn run(count: usize) -> Result<()> {
     Ok(())
 }
 
+/// An id as `tail` shows it: its first eight characters in brackets, `...`
+/// when more were left out. Cut by characters, never by bytes (residual
+/// X22): `&id[..8]` panicked on an id shorter than eight bytes or one whose
+/// eighth byte fell inside a character.
+fn short_id(id: &str) -> String {
+    let mut chars = id.chars();
+    let head: String = chars.by_ref().take(8).collect();
+    if chars.next().is_some() {
+        format!("[{head}...]")
+    } else {
+        format!("[{head}]")
+    }
+}
+
 fn print_event(event: &ServerEvent) {
     match event {
         ServerEvent::Heartbeat { ts, instance_id } => {
@@ -268,7 +282,7 @@ fn print_event(event: &ServerEvent) {
                 "{} 💓 {} {}",
                 time.dimmed(),
                 "heartbeat".cyan(),
-                format!("[{}...]", &instance_id[..8]).dimmed()
+                short_id(instance_id).dimmed()
             );
         }
         ServerEvent::CommandReceived {
@@ -283,7 +297,7 @@ fn print_event(event: &ServerEvent) {
                 time.dimmed(),
                 "command".magenta(),
                 command.bold(),
-                format!("[{}...]", &request_id[..8]).dimmed()
+                short_id(request_id).dimmed()
             );
         }
         ServerEvent::ArtifactWritten {
@@ -474,6 +488,21 @@ fn print_event(event: &ServerEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Residual X22: an id is shown by its first eight characters, never
+    /// cut by bytes — a short id is shown whole and a non-ASCII one is cut
+    /// between characters, where `&id[..8]` panicked on both.
+    #[test]
+    fn an_id_is_shortened_by_characters_and_a_short_one_is_shown_whole() {
+        assert_eq!(short_id("3f2a9c1e-7b40-4d6a"), "[3f2a9c1e...]");
+        assert_eq!(short_id("3f2a9c1e"), "[3f2a9c1e]");
+        assert_eq!(short_id("abc"), "[abc]");
+        assert_eq!(short_id(""), "[]");
+        assert_eq!(
+            short_id("\u{4e16}\u{754c}\u{4e16}\u{754c}\u{4e16}\u{754c}\u{4e16}\u{754c}\u{4e16}"),
+            "[\u{4e16}\u{754c}\u{4e16}\u{754c}\u{4e16}\u{754c}\u{4e16}\u{754c}...]"
+        );
+    }
 
     /// T28 — `artifact_written` has a real arm, so `openalpaca tail` names the
     /// deliverable instead of printing "unknown event".
