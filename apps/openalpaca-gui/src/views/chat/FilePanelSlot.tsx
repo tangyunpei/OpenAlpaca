@@ -8,7 +8,10 @@
  * through the very same renderers, with `previewPlan` making the same call
  * about what may be drawn.
  *
- * `Library ↗` carries the current tab across (§4.2 `openInLibrary`).
+ * `Library ↗` carries the current tab across (§4.2 `openInLibrary`), and the
+ * row's side: a file written into the project lands on the Library's results,
+ * on Preview.
+ * `Open` is handed over only for a row the daemon opens (`openable`, ST-18).
  */
 
 import { FilePanel, formatClock } from "@/components/chat";
@@ -92,6 +95,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
           version: model.version,
           agent: model.agent_template_id ?? model.agent_id,
           runId: model.task_title ?? model.task_id,
+          inProject: model.in_project,
         };
 
   const artifactNote =
@@ -131,7 +135,11 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
           ? undefined
           : () => focusRun(model.task_id as string)
       }
-      onOpen={model === null ? undefined : () => fileActions.open(model)}
+      onOpen={
+        model === null || !model.openable
+          ? undefined
+          : () => fileActions.open(model)
+      }
       onReveal={
         model === null ? undefined : () => fileActions.reveal(model.path)
       }

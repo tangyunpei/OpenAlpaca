@@ -6,7 +6,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -173,5 +173,71 @@ describe("FilePanelSlot — Library ↗ for a file written into the project", ()
       libraryResults: true,
       libraryTab: "preview",
     });
+  });
+});
+
+describe("FilePanelSlot — a file written into the project", () => {
+  it("draws Reveal and no Open for a kind the daemon does not open", async () => {
+    served = projectScript;
+    vi.stubGlobal("isTauri", true);
+    renderSlot();
+
+    expect(
+      await screen.findByRole("button", { name: revealLabel() }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open" })).toBeNull();
+  });
+
+  it("shows Preview alone and says the file is in the project", async () => {
+    served = projectScript;
+    useUiStore.setState({ panelTab: "history" });
+    renderSlot();
+
+    expect(await screen.findByText("in the project")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Preview" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.queryByRole("tab", { name: "Diff" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "History" })).toBeNull();
+  });
+
+  it("shows the hidden characters an agent put in the path, with their count", async () => {
+    // The path is the agent's: a bidi override and a zero-width space in it
+    // would make the panel name a different file.
+    const name = "scripts/‮release​.sh";
+    served = { ...projectScript, name, rel_path: name };
+    renderSlot();
+
+    const header = await screen.findByRole("button", { name: /release/ });
+    const escapes = Array.from(
+      header.querySelectorAll("[data-hidden-char]"),
+      (element) => element.getAttribute("data-hidden-char"),
+    );
+    expect(escapes).toEqual(["U+202E", "U+200B"]);
+    const shown = within(header).getByText("release", { exact: false });
+    expect(shown).toHaveTextContent("scripts/<U+202E>release<U+200B>.sh");
+    // An ellipsis could cut off an escape the count says is there.
+    expect(shown).toHaveClass("wrap-anywhere");
+    expect(shown).not.toHaveClass("truncate");
+    expect(
+      within(header).getByText(
+        "Note: this request contains 2 hidden characters, shown as <U+…>.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("draws no hidden-character note for a plain path", async () => {
+    served = projectScript;
+    renderSlot();
+
+    const header = await screen.findByRole("button", {
+      name: /scripts\/release\.sh/,
+    });
+    expect(header.querySelector("[data-hidden-char]")).toBeNull();
+    expect(screen.queryByText(/hidden character/)).toBeNull();
+    expect(within(header).getByText("scripts/release.sh")).toHaveClass(
+      "truncate",
+    );
   });
 });

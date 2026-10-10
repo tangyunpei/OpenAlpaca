@@ -4,7 +4,7 @@
  * window as well.
  */
 
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -72,5 +72,47 @@ describe("FilePanel — Open and Reveal", () => {
       .click(screen.getByRole("button", { name: revealLabel() }));
 
     expect(onReveal).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("FilePanel — the picker's names", () => {
+  it("shows the hidden characters an agent put in a listed path, with their count", () => {
+    // A result file's name is its path in the project, which the agent chose.
+    renderPanel({
+      pickerOpen: true,
+      pickerItems: [
+        { id: "art-2", name: "scripts/‮release​.sh", kind: "code" },
+      ],
+    });
+
+    const option = screen.getByRole("option", { name: /release/ });
+    const escapes = Array.from(
+      option.querySelectorAll("[data-hidden-char]"),
+      (element) => element.getAttribute("data-hidden-char"),
+    );
+    expect(escapes).toEqual(["U+202E", "U+200B"]);
+    const shown = within(option).getByText("release", { exact: false });
+    expect(shown).toHaveTextContent("scripts/<U+202E>release<U+200B>.sh");
+    expect(shown).toHaveClass("wrap-anywhere");
+    expect(shown).not.toHaveClass("truncate");
+    expect(
+      within(option).getByText(
+        "Note: this request contains 2 hidden characters, shown as <U+…>.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("draws no hidden-character note for a plain listed path", () => {
+    renderPanel({
+      pickerOpen: true,
+      pickerItems: [{ id: "art-2", name: "scripts/release.sh", kind: "code" }],
+    });
+
+    const option = screen.getByRole("option", { name: /release/ });
+    expect(option.querySelector("[data-hidden-char]")).toBeNull();
+    expect(within(option).queryByText(/hidden character/)).toBeNull();
+    expect(within(option).getByText("scripts/release.sh")).toHaveClass(
+      "truncate",
+    );
   });
 });

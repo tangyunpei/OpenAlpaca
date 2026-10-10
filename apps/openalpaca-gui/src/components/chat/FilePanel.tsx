@@ -15,10 +15,26 @@
  * `Reveal in Finder` (the file in its folder, through the Tauri shell — drawn
  * only inside the app's window, `canReveal`), each only when the caller gives
  * it a handler.
+ *
+ * A file an agent wrote into its project (storage design §13) has no
+ * versions: the tab strip holds Preview alone (a tab kept from another file
+ * falls back to it) and the meta row says `in the project` where `vN` would be.
+ *
+ * A name — the header's and each the picker lists — may be a path an agent
+ * chose, so it is drawn through `lib/hidden-chars`: each hidden character as
+ * a `<U+XXXX>` escape, with the count on a line of its own under the name. A
+ * name with no hidden character draws as it is.
  */
 
-import { Button, FileBadge, Tab, type FileKind } from "@/components/ui";
+import {
+  Button,
+  EscapedText,
+  FileBadge,
+  Tab,
+  type FileKind,
+} from "@/components/ui";
 import { cn } from "@/lib/cn";
+import { escapeHiddenLine, hiddenNotice } from "@/lib/hidden-chars";
 import { canReveal, revealLabel } from "@/lib/reveal";
 import type { ArtifactTab } from "@/stores/ui";
 
@@ -31,6 +47,11 @@ export interface PanelArtifact {
   version?: number | null;
   agent?: string | null;
   runId?: string | null;
+  /**
+   * A result file in the project (ST-12): it has no versions, so the panel
+   * offers Preview alone and says where the file is instead of a version.
+   */
+  inProject?: boolean;
 }
 
 export interface PickerItem {
@@ -81,11 +102,41 @@ export interface FilePanelProps {
 }
 
 const TABS: readonly ArtifactTab[] = ["preview", "diff", "history"];
+/** A project file's one view (R37: History and Diff are not offered). */
+const PROJECT_FILE_TABS: readonly ArtifactTab[] = ["preview"];
 const TAB_LABEL: Record<ArtifactTab, string> = {
   preview: "Preview",
   diff: "Diff",
   history: "History",
 };
+
+/**
+ * A name as the panel draws it: escaped, wrapping instead of truncating when
+ * it holds an escape (an ellipsis could cut off one the count says is there),
+ * with the count on its own line under it.
+ */
+function ShownName({ name, className }: { name: string; className: string }) {
+  const shown = escapeHiddenLine(name);
+  const notice = hiddenNotice(shown.hidden);
+  return (
+    <span className="min-w-0 flex-1">
+      <span
+        className={cn(
+          "block",
+          className,
+          shown.hidden > 0 ? "wrap-anywhere" : "truncate",
+        )}
+      >
+        <EscapedText escaped={shown} />
+      </span>
+      {notice !== null && (
+        <span className="mt-[2px] block text-2xs-plus text-red-ink">
+          {notice}
+        </span>
+      )}
+    </span>
+  );
+}
 
 /** The design's empty body: the sentence, plus why there is nothing to draw. */
 function EmptyBody({ note }: { note: string }) {
@@ -125,6 +176,9 @@ export function FilePanel({
 }: FilePanelProps) {
   const name = artifact?.name ?? "Unknown file";
   const kind: FileKind = artifact?.kind ?? "term";
+  const tabs = artifact?.inProject === true ? PROJECT_FILE_TABS : TABS;
+  // A tab kept from another file falls back to Preview where it is not offered.
+  const shownTab: ArtifactTab = tabs.includes(tab) ? tab : "preview";
 
   return (
     <>
@@ -150,9 +204,7 @@ export function FilePanel({
               size={17}
               language={artifact?.language ?? null}
             />
-            <span className="min-w-0 flex-1 truncate text-base-plus font-medium">
-              {name}
-            </span>
+            <ShownName name={name} className="text-base-plus font-medium" />
             <span aria-hidden className="text-2xs text-muted-fg">
               {pickerOpen ? "▴" : "▾"}
             </span>
@@ -173,12 +225,12 @@ export function FilePanel({
           aria-label="Artifact view"
           className="flex items-center px-[12px]"
         >
-          {TABS.map((value) => (
+          {tabs.map((value) => (
             <Tab
               key={value}
               label={TAB_LABEL[value]}
               size="panel"
-              active={tab === value}
+              active={shownTab === value}
               onClick={() => onTabChange(value)}
             />
           ))}
@@ -224,9 +276,7 @@ export function FilePanel({
                     size={16}
                     language={item.language ?? null}
                   />
-                  <span className="min-w-0 flex-1 truncate text-base">
-                    {item.name}
-                  </span>
+                  <ShownName name={item.name} className="text-base" />
                   {item.pinned === true && (
                     <span aria-hidden className="text-2xs-plus text-gold">
                       ★
@@ -253,7 +303,11 @@ export function FilePanel({
         <div className="mb-[11px] flex flex-wrap items-center gap-[8px]">
           <span className="font-mono text-2xs-plus text-muted-fg">
             {[
-              artifact?.version != null ? `v${artifact.version}` : null,
+              artifact?.inProject === true
+                ? "in the project"
+                : artifact?.version != null
+                  ? `v${artifact.version}`
+                  : null,
               artifact?.agent ?? null,
             ]
               .filter((part) => part !== null)
@@ -297,13 +351,13 @@ export function FilePanel({
 
         {artifact === null && artifactNote !== null ? (
           <EmptyBody note={artifactNote} />
-        ) : tab === "preview" ? (
+        ) : shownTab === "preview" ? (
           (preview ?? (
             <EmptyBody
               note={previewNote ?? "Preview not available for this file"}
             />
           ))
-        ) : tab === "diff" ? (
+        ) : shownTab === "diff" ? (
           (diff ?? <EmptyBody note={diffNote ?? "No diff for this file."} />)
         ) : (
           (history ?? (
