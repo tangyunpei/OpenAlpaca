@@ -18,6 +18,7 @@ const initial: Partial<UiState> = {
   paletteOpen: false,
   toast: null,
   dense: false,
+  libraryResults: false,
 };
 
 beforeEach(() => {
@@ -208,5 +209,18 @@ describe("pins", () => {
 
     // Identity matters: a new object every fetch would re-render every row.
     expect(useUiStore.getState().pins).toBe(before);
+  });
+});
+
+describe("the Library's two sides (storage design §13)", () => {
+  it("switches between by-products and results and keeps the selection", () => {
+    useUiStore.setState({ openArtifactId: "findings" });
+
+    useUiStore.getState().setLibraryResults(true);
+    expect(useUiStore.getState().libraryResults).toBe(true);
+    expect(useUiStore.getState().openArtifactId).toBe("findings");
+
+    useUiStore.getState().setLibraryResults(false);
+    expect(useUiStore.getState().libraryResults).toBe(false);
   });
 });

@@ -81,6 +81,13 @@ export interface UiState {
   openArtifactId: string | null;
   libraryTab: ArtifactTab;
   libraryKind: string;
+  /**
+   * The Library's side (storage design §13, ST-12): `false` lists by-products
+   * — drafts, hand-offs, uploads, a file saved with no project — the default;
+   * `true` lists the files agents wrote into a project, which are the
+   * project's own files and have no versions.
+   */
+  libraryResults: boolean;
   settingsSectionId: string;
   /** Selected note in the Memory view. */
   openMemoryId: string | null;
@@ -132,6 +139,7 @@ export interface UiState {
   openArtifact: (artifactId: string) => void;
   setLibraryTab: (tab: ArtifactTab) => void;
   setLibraryKind: (kind: string) => void;
+  setLibraryResults: (results: boolean) => void;
   setSettingsSection: (sectionId: string) => void;
   /** From anywhere — a chat turn's "notes used", a link — onto its Note tab. */
   openMemory: (noteId: string) => void;
@@ -196,6 +204,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   openArtifactId: null,
   libraryTab: "preview",
   libraryKind: "All",
+  libraryResults: false,
   settingsSectionId: "connection",
   openMemoryId: null,
   memoryTab: "note",
@@ -226,6 +235,7 @@ export const useUiStore = create<UiState>((set, get) => ({
     set({ view: "library", openArtifactId: artifactId, libraryTab: "preview" }),
   setLibraryTab: (libraryTab) => set({ libraryTab }),
   setLibraryKind: (libraryKind) => set({ libraryKind }),
+  setLibraryResults: (libraryResults) => set({ libraryResults }),
   setSettingsSection: (settingsSectionId) => set({ settingsSectionId }),
   openMemory: (noteId) =>
     set({ view: "memory", openMemoryId: noteId, memoryTab: "note" }),

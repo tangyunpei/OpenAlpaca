@@ -18,6 +18,7 @@ import { resetConnection } from "@/lib/connection";
 import { revealLabel } from "@/lib/reveal";
 import { useUiStore } from "@/stores/ui";
 
+import { RESULTS_EMPTY } from "./LibraryList";
 import LibraryView from "./LibraryView";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -100,6 +101,7 @@ beforeEach(() => {
   resetConnection();
   useUiStore.setState({
     libraryKind: "All",
+    libraryResults: false,
     openArtifactId: null,
     libraryTab: "preview",
     pins: {},
@@ -208,6 +210,65 @@ describe("LibraryList — what the daemon serves", () => {
       expect(screen.getByText("spend.png")).toBeInTheDocument(),
     );
     expect(urlsFor("offset=1")).toHaveLength(1);
+  });
+});
+
+describe("LibraryList — by-products and results (storage design §13)", () => {
+  const written: Artifact = {
+    ...findings,
+    id: "art-9",
+    name: "src/main.rs",
+    kind: "code",
+    mime_type: "text/plain",
+    task_id: null,
+    task_title: null,
+    path: "/Users/dev/app/src/main.rs",
+    project_root: "/Users/dev/app",
+    rel_path: "src/main.rs",
+    version: 1,
+    version_count: 0,
+    in_project: true,
+    openable: true,
+  };
+
+  it("lists by-products by default, asking the daemon for that side only", async () => {
+    listing([findings], 1);
+    renderView();
+
+    expect(
+      await screen.findByText("connector-audit-findings.md"),
+    ).toBeInTheDocument();
+    expect(urlsFor("in_project=false")).not.toHaveLength(0);
+    expect(urlsFor("in_project=true")).toHaveLength(0);
+  });
+
+  it("lists the files agents wrote into a project behind its chip", async () => {
+    listing([findings], 1);
+    route("in_project=true", () => json({ artifacts: [written], total: 1 }));
+    const user = userEvent.setup();
+    renderView();
+    await screen.findByText("connector-audit-findings.md");
+
+    await user.click(
+      screen.getByRole("button", { name: "Results in the project" }),
+    );
+
+    expect(await screen.findByText("src/main.rs")).toBeInTheDocument();
+    expect(
+      screen.queryByText("connector-audit-findings.md"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Results in the project" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(useUiStore.getState().libraryResults).toBe(true);
+  });
+
+  it("says no file was written into a project yet when that side is empty", async () => {
+    route("in_project=true", () => json({ artifacts: [], total: 0 }));
+    useUiStore.setState({ libraryResults: true });
+    renderView();
+
+    expect(await screen.findByText(RESULTS_EMPTY)).toBeInTheDocument();
   });
 });
 
