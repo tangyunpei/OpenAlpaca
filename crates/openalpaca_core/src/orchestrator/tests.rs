@@ -870,6 +870,42 @@ mod project_turn_offers {
         assert!(names.contains(&"file_write".to_string()), "{names:?}");
         assert!(!names.contains(&"file_edit".to_string()), "{names:?}");
     }
+
+    // ── R42 and the lead's rulings R-T6, R-T14: the file readers ──
+
+    const ASK_NO_KEYWORD: &str = "what does the retry loop do?";
+
+    #[tokio::test]
+    async fn a_project_turn_is_offered_the_file_readers_with_no_keyword() {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+
+        let names = offered(
+            Some(project.path().to_string_lossy().to_string()),
+            ASK_NO_KEYWORD,
+            &["file_read", "file_list"],
+        )
+        .await;
+
+        assert!(names.contains(&"file_read".to_string()), "{names:?}");
+        assert!(names.contains(&"file_list".to_string()), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn with_no_project_file_list_comes_only_with_a_keyword_file_read() {
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+
+        let asked = offered(None, "read file notes.md", &["file_read", "file_list"]).await;
+        assert!(asked.contains(&"file_read".to_string()), "{asked:?}");
+        assert!(asked.contains(&"file_list".to_string()), "{asked:?}");
+
+        let not_asked = offered(None, ASK_NO_KEYWORD, &["file_read", "file_list"]).await;
+        assert!(!not_asked.contains(&"file_read".to_string()), "{not_asked:?}");
+        assert!(!not_asked.contains(&"file_list".to_string()), "{not_asked:?}");
+    }
 }
 
 #[tokio::test]

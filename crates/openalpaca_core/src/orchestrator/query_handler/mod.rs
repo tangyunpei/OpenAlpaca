@@ -185,6 +185,22 @@ fn offer_file_edit_beside_file_write(tool_names: &mut Vec<String>, project_turn:
     }
 }
 
+/// R42 and the lead's rulings R-T6 and R-T14: on a project turn the main chat
+/// is offered `file_read` — its working folder is the project and reading
+/// never asks (ST-16), so it does not wait for a keyword — and `file_list`
+/// comes wherever `file_read` is, by a keyword or by the project. Each name
+/// is added once.
+fn offer_file_readers(tool_names: &mut Vec<String>, project_turn: bool) {
+    if project_turn && !tool_names.iter().any(|name| name == "file_read") {
+        tool_names.push("file_read".to_string());
+    }
+    if tool_names.iter().any(|name| name == "file_read")
+        && !tool_names.iter().any(|name| name == "file_list")
+    {
+        tool_names.push("file_list".to_string());
+    }
+}
+
 impl Orchestrator {
     /// Build a deterministic `<send_context>` block with resolved recipient info.
     /// This removes ambiguity: the LLM sees facts, not hints.

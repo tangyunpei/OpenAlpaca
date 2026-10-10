@@ -9,6 +9,10 @@
 //!   their backends already live in the shared registry). On an attended turn of the GUI's or the
 //!   CLI's chat, `memory_confirm` too (design 09 §4.1): the assistant raises a
 //!   suggestion, and the person's card answers it.
+//! - **Readers** (R42): `artifact_read` on every turn with a database
+//!   (definition only); `file_read` and `file_list` are offered by the query
+//!   handler on a project turn, and `file_list` wherever `file_read` is
+//!   (R-T6, R-T14).
 //! - **Extension tools** (tool/skill wiring, Chunk 2): every MCP-bridged
 //!   (`<server>__<tool>`) and plugin-provided (`<plugin>::<tool>`) tool in the
 //!   global registry whose extension is enabled (definitions only — backends
@@ -260,6 +264,19 @@ pub fn main_loop_tool_set(
         && let Some(read_result) = global_registry.get("read_result")
     {
         definitions.push(read_result.definition.clone());
+    }
+
+    // ── artifact_read (every turn with a database, R42) ─────────────────
+    // A by-product's id is named by artifact_write's result, by file_write's
+    // when there is no project, by a workspace entry and by task_status, so
+    // any turn may be handed one to read back. Definition only, like
+    // read_result's: the backend is globally registered, the per-request
+    // clone carries it, and this surface is the allowlist that admits it.
+    // The file readers are the query handler's offer (`offer_file_readers`).
+    if db.is_some()
+        && let Some(artifact_read) = global_registry.get("artifact_read")
+    {
+        definitions.push(artifact_read.definition.clone());
     }
 
     // ── Extension tools (MCP-bridged + plugin-provided) ─────────────────
@@ -620,6 +637,64 @@ mod tests {
                 .any(|(def, _)| def.name == "read_result"),
             "no per-request instance is built for a globally registered backend"
         );
+    }
+
+    /// R42: `artifact_read` is on every main-loop turn with a database — any
+    /// turn may be handed a by-product's id. Definition only: the backend is
+    /// the global registry's, which the per-request clone carries. The file
+    /// readers are not this set's: the query handler offers them, from the
+    /// turn's one project-turn predicate (the lead's ruling R-T14).
+    #[test]
+    fn artifact_read_joins_every_turn_with_a_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+        let surface = |db: Option<openalpaca_storage::Database>, root: Option<&str>| {
+            let (shared, dispatcher, bus, registry) = setup();
+            for tool in super::super::builtin_tools(db.clone(), None, None) {
+                registry.register(tool).unwrap();
+            }
+            let set = main_loop_tool_set(
+                dispatcher,
+                shared,
+                bus,
+                &RoutingConfig::default(),
+                db,
+                None,
+                Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+                Arc::new(SkillCatalog::new()),
+                None,
+                1.0,
+                &registry,
+                "user1:gui",
+                &ToolContext {
+                    owner_id: Some("user1".to_string()),
+                    lane_key: Some("user1:gui".to_string()),
+                    request_workspace_root: root.map(str::to_string),
+                    ..Default::default()
+                },
+                false,
+            );
+            for (def, _) in &set.instances {
+                assert_ne!(def.name, "artifact_read", "artifact_read is offered by definition only");
+            }
+            names(&set.definitions)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let has = |names: &[String], name: &str| names.iter().any(|n| n == name);
+
+        let chat = surface(Some(db.clone()), None);
+        assert!(has(&chat, "artifact_read"), "{chat:?}");
+
+        let project = surface(Some(db.clone()), Some("/the/project"));
+        assert!(has(&project, "artifact_read"), "{project:?}");
+        for name in ["file_read", "file_list"] {
+            assert!(!has(&project, name), "{name} is the query handler's offer: {project:?}");
+        }
+
+        let no_db = surface(None, Some("/the/project"));
+        assert!(!has(&no_db, "artifact_read"), "{no_db:?}");
     }
 
     #[test]

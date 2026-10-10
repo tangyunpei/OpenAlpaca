@@ -175,6 +175,9 @@ impl Orchestrator {
         let project_turn = crate::tools::builtins::is_project_turn(&tool_ctx);
         // R48: on a project turn `file_edit` comes with `file_write`.
         super::offer_file_edit_beside_file_write(&mut tool_names, project_turn);
+        // R42, R-T6: on a project turn the file readers come too, and
+        // `file_list` comes wherever `file_read` is.
+        super::offer_file_readers(&mut tool_names, project_turn);
         let tool_defs: Vec<_> = tool_names
             .iter()
             .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
