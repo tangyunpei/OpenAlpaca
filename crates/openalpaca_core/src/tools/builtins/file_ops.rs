@@ -9,6 +9,7 @@ use openalpaca_storage::store::{
 };
 use openalpaca_storage::{ArtifactKind, Database};
 use sha2::{Digest, Sha256};
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -168,48 +169,74 @@ impl BuiltInTool for FileListTool {
     }
 }
 
-/// Read `dir`'s entries and lay them out. `DirEntry::metadata` does not
-/// follow a link, so a link is shown as one (`@`) rather than as what it
-/// points at; a directory gets a trailing `/`, a file its size, anything
-/// else (a socket, a pipe) its bare name.
+/// Read `dir`'s names, then lay out the entries shown. Only those are looked
+/// at (S5's M4): a folder of 100,000 names costs one `lstat` per line shown,
+/// all on one blocking-pool hop, not one hop per name.
 async fn list_folder(path: &str, dir: &Path) -> Result<String, String> {
     let cannot = |e: std::io::Error| format!("Cannot list '{path}': {e}");
     let mut reader = tokio::fs::read_dir(dir).await.map_err(cannot)?;
-    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut names: Vec<(String, OsString)> = Vec::new();
     while let Some(entry) = reader.next_entry().await.map_err(cannot)? {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let shown = match entry.metadata().await {
-            Ok(meta) if meta.file_type().is_symlink() => format!("{name}@"),
-            Ok(meta) if meta.is_dir() => format!("{name}/"),
-            Ok(meta) if meta.is_file() => format!("{name}  {} bytes", meta.len()),
-            _ => name.clone(),
-        };
-        entries.push((name, shown));
+        let name = entry.file_name();
+        names.push((name.to_string_lossy().into_owned(), name));
     }
-    Ok(format_listing(path, dir, entries))
+    let total = names.len();
+    let folder = dir.to_path_buf();
+    let shown = tokio::task::spawn_blocking(move || {
+        shown_entries(names, |name| std::fs::symlink_metadata(folder.join(name)))
+    })
+    .await
+    .map_err(|e| format!("Cannot list '{path}': {e}"))?;
+    Ok(format_listing(path, dir, total, &shown))
 }
 
-/// The listing's text: `{path} ({abs}): {n} entries`, then one line per
-/// entry sorted by name in byte order, at most [`FILE_LIST_MAX_ENTRIES`] of
-/// them, then — past that — how many were left out. Names are not escaped:
-/// this is a tool result, not an approval surface.
-fn format_listing(path: &str, dir: &Path, mut entries: Vec<(String, String)>) -> String {
-    // By name in byte order: the tuple sorts on its first field, and names in
-    // one folder are unique (and `sort()` keeps clippy's sort lints quiet).
-    entries.sort();
-    let total = entries.len();
-    let mut out = format!("{path} ({}): {total} entries", dir.display());
-    for (_, shown) in entries.iter().take(FILE_LIST_MAX_ENTRIES) {
+/// The lines of the entries a listing shows: sorted by name in byte order —
+/// the name as shown first, the name itself breaking a tie — the first
+/// [`FILE_LIST_MAX_ENTRIES`] of them, each described from `stat`, which is
+/// asked of those entries only. `stat` is an `lstat` in production, so a link
+/// is shown as one (`@`) rather than as what it points at; a directory gets a
+/// trailing `/`, a file its size, anything else (a socket, a pipe) or an
+/// entry that cannot be looked at its bare name.
+fn shown_entries(
+    mut names: Vec<(String, OsString)>,
+    mut stat: impl FnMut(&OsStr) -> std::io::Result<std::fs::Metadata>,
+) -> Vec<String> {
+    names.sort();
+    names
+        .into_iter()
+        .take(FILE_LIST_MAX_ENTRIES)
+        .map(|(shown, name)| match stat(&name) {
+            Ok(meta) if meta.file_type().is_symlink() => format!("{shown}@"),
+            Ok(meta) if meta.is_dir() => format!("{shown}/"),
+            Ok(meta) if meta.is_file() => format!("{shown}  {} bytes", meta.len()),
+            _ => shown,
+        })
+        .collect()
+}
+
+/// The listing's text: `{path} ({abs}): {n} entries` (`1 entry`), then the
+/// lines of the entries shown, then — when `total` holds more — how many
+/// were left out. Names are not escaped: this is a tool result, not an
+/// approval surface.
+fn format_listing(path: &str, dir: &Path, total: usize, shown: &[String]) -> String {
+    let mut out = format!("{path} ({}): {total} {}", dir.display(), entries(total));
+    for line in shown {
         out.push('\n');
-        out.push_str(shown);
+        out.push_str(line);
     }
-    if total > FILE_LIST_MAX_ENTRIES {
+    let more = total.saturating_sub(shown.len());
+    if more > 0 {
         out.push_str(&format!(
-            "\n... and {} more entries not shown — list a subfolder",
-            total - FILE_LIST_MAX_ENTRIES
+            "\n... and {more} more {} not shown — list a subfolder",
+            entries(more)
         ));
     }
     out
+}
+
+/// `entry` for one, `entries` for any other count.
+fn entries(count: usize) -> &'static str {
+    if count == 1 { "entry" } else { "entries" }
 }
 
 pub(super) fn file_list_tool() -> RegisteredTool {
@@ -3233,7 +3260,7 @@ mod tests {
         assert_eq!(
             list(&gp.ctx(), "src").await.unwrap(),
             format!(
-                "src ({}): 1 entries\nmain.rs  12 bytes",
+                "src ({}): 1 entry\nmain.rs  12 bytes",
                 gp.root.join("src").display()
             )
         );
@@ -3250,6 +3277,57 @@ mod tests {
         );
         let err = list(&gp.ctx(), "nowhere").await.unwrap_err();
         assert!(err.contains("Path resolution failed for 'nowhere'"), "{err}");
+    }
+
+    /// R32 in any letter case, on a read: a folder named `.OpenAlpaca` is
+    /// refused like `.openalpaca` (ST-9), and `.GIT` lists like `.git` —
+    /// only a write into git's folder is refused, and reading never asks
+    /// (ST-16). One folder of each, so the test means the same on a volume
+    /// that ignores case and on one that does not.
+    #[tokio::test]
+    async fn file_list_refuses_an_openalpaca_folder_in_any_case_and_lists_git_in_any_case() {
+        let gp = crate::test_util::GuardedProject::new();
+        fs::create_dir_all(gp.root.join(".OpenAlpaca")).unwrap();
+        fs::create_dir_all(gp.root.join(".GIT")).unwrap();
+        fs::write(gp.root.join(".GIT/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        assert_eq!(
+            list(&gp.ctx(), ".OpenAlpaca").await.unwrap_err(),
+            "'.OpenAlpaca' is refused: a .openalpaca folder inside a project is an older \
+             OpenAlpaca's, and nothing in it is read or written any more."
+        );
+        assert_eq!(
+            list(&gp.ctx(), ".GIT").await.unwrap(),
+            format!(".GIT ({}): 1 entry\nHEAD  21 bytes", gp.root.join(".GIT").display())
+        );
+    }
+
+    /// R27 (ST-23): a project whose folder is gone, or was moved with a link
+    /// left at its old root, is refused with §6's sentence before anything
+    /// is listed — never listed through the link — and nothing is made in
+    /// its place.
+    #[tokio::test]
+    async fn file_list_refuses_a_missing_project_before_listing() {
+        let gp = crate::test_util::GuardedProject::new();
+        let expected = WorkingFolderRefusal::ProjectMissing {
+            root: gp.root.display().to_string(),
+        }
+        .to_string();
+        let moved = gp.root.with_extension("moved");
+        fs::rename(&gp.root, &moved).unwrap();
+        fs::write(moved.join("seen.txt"), "x").unwrap();
+
+        assert_eq!(list(&gp.ctx(), ".").await.unwrap_err(), expected);
+        assert!(!gp.root.exists(), "nothing re-created the folder");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&moved, &gp.root).unwrap();
+            assert_eq!(list(&gp.ctx(), ".").await.unwrap_err(), expected);
+            fs::remove_file(&gp.root).unwrap();
+        }
+        fs::rename(&moved, &gp.root).unwrap();
+        assert!(!gp.home_root().join("scratch").exists());
     }
 
     /// With no project the working folder is the conversation's scratch
@@ -3302,5 +3380,51 @@ mod tests {
             lines[501],
             "... and 2 more entries not shown — list a subfolder"
         );
+    }
+
+    /// One entry, and one more left out, read in the singular (S5's M6);
+    /// none, and several, in the plural.
+    #[test]
+    fn one_entry_and_one_more_read_in_the_singular() {
+        let dir = Path::new("/p");
+        let shown: Vec<String> = (0..FILE_LIST_MAX_ENTRIES).map(|i| format!("f{i}")).collect();
+
+        assert_eq!(format_listing(".", dir, 0, &[]), ". (/p): 0 entries");
+        assert_eq!(
+            format_listing(".", dir, 1, &shown[..1]),
+            ". (/p): 1 entry\nf0"
+        );
+        let one_more = format_listing(".", dir, FILE_LIST_MAX_ENTRIES + 1, &shown);
+        assert!(one_more.starts_with(". (/p): 501 entries\nf0\n"), "{one_more}");
+        assert!(
+            one_more.ends_with("\nf499\n... and 1 more entry not shown — list a subfolder"),
+            "{one_more}"
+        );
+    }
+
+    /// S5's M4: a folder's names are all read and sorted, and only the
+    /// entries shown are looked at — 500 `lstat`s for a folder of 502, not
+    /// 502 — in byte order of their names.
+    #[test]
+    fn only_the_entries_shown_are_looked_at() {
+        let names: Vec<(String, std::ffi::OsString)> = (0..FILE_LIST_MAX_ENTRIES + 2)
+            .rev()
+            .map(|i| {
+                let name = format!("f{i:03}");
+                (name.clone(), name.into())
+            })
+            .collect();
+        let mut looked_at = Vec::new();
+
+        let shown = shown_entries(names, |name| {
+            looked_at.push(name.to_string_lossy().into_owned());
+            Err(std::io::Error::other("not looked up in this test"))
+        });
+
+        assert_eq!(looked_at.len(), FILE_LIST_MAX_ENTRIES);
+        assert_eq!(shown.len(), FILE_LIST_MAX_ENTRIES);
+        assert_eq!(looked_at.first().map(String::as_str), Some("f000"));
+        assert_eq!(looked_at.last().map(String::as_str), Some("f499"));
+        assert_eq!(shown, looked_at, "an entry that cannot be looked at is its bare name");
     }
 }
