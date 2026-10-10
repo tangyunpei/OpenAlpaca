@@ -113,6 +113,28 @@ describe("LibraryRow — a file written into a project (storage design §13)", (
     );
   });
 
+  it("tags a row the daemon marked missing, and only that row (d7-app-1)", () => {
+    const { rerender } = render(
+      <LibraryRow
+        artifact={{ ...written, missing: true }}
+        active={false}
+        pinned={false}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("missing")).toBeInTheDocument();
+
+    rerender(
+      <LibraryRow
+        artifact={written}
+        active={false}
+        pinned={false}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText("missing")).not.toBeInTheDocument();
+  });
+
   it("draws no project tag on a by-product", () => {
     render(
       <LibraryRow

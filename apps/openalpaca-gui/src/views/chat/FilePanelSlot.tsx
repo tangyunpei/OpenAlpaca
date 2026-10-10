@@ -24,6 +24,7 @@ import {
   useArtifactText,
   useArtifactVersions,
   useArtifacts,
+  useFoundAgain,
   useTogglePin,
 } from "@/hooks/useArtifacts";
 import { useArtifactFileActions } from "@/hooks/useFiles";
@@ -31,7 +32,7 @@ import { artifactContentUrl } from "@/lib/api/artifacts";
 import { ApiError } from "@/lib/http";
 import { useUiStore } from "@/stores/ui";
 import { HistoryTab } from "@/views/library/HistoryTab";
-import { diffPair, previewPlan } from "@/views/library/preview";
+import { diffPair, previewNote, previewPlan } from "@/views/library/preview";
 
 import { fileLanguage } from "./artifact";
 
@@ -56,6 +57,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
 
   const plan = model === null ? null : previewPlan(model);
   const content = useArtifactText(artifactId, plan?.mode === "text");
+  useFoundAgain(model, content.isSuccess);
 
   const panelTab = useUiStore((s) => s.panelTab);
   const setPanelTab = useUiStore((s) => s.setPanelTab);
@@ -163,15 +165,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
               language: fileLanguage(model.name),
             }}
             content={plan.mode === "text" ? (content.data ?? null) : null}
-            note={
-              plan.mode === "none"
-                ? plan.note
-                : content.error !== null
-                  ? content.error.message
-                  : content.isLoading
-                    ? "Reading the file…"
-                    : plan.note
-            }
+            note={previewNote(model, plan, content)}
           />
         )
       }

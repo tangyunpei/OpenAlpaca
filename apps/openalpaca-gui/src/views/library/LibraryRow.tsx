@@ -13,6 +13,10 @@
  * subtitle starts with the project's folder name: the Library lists every
  * project's results, and two projects' `README.md` must not read the same.
  *
+ * A row the daemon marked missing — its file was not there the last time it
+ * was read — carries a `missing` tag; the results side lists such rows, and
+ * the read that finds the file again clears the mark (R37, d7-app-1).
+ *
  * The name is the agent's, so it is drawn through `lib/hidden-chars`: each
  * hidden character as a `<U+XXXX>` escape, with the count on a line of its
  * own under the subtitle. A name with no hidden character draws as it is.
@@ -93,6 +97,7 @@ export function LibraryRow({
             <EscapedText escaped={name} />
           </span>
           {artifact.in_project && <Tag value="project" />}
+          {artifact.missing && <Tag value="missing" tone="warn" />}
           {pinned && (
             <span aria-label="Pinned" role="img" className="text-sm text-gold">
               ★

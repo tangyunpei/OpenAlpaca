@@ -209,7 +209,12 @@ describe("RunDetail — written in the project (storage design §13, R38)", () =
     ).toBeInTheDocument();
     expect(
       requested.some(
-        (url) => url.includes("in_project=true") && url.includes("limit=500"),
+        (url) =>
+          url.includes("in_project=true") &&
+          url.includes("limit=500") &&
+          // A file marked missing is still listed: a read that finds it back
+          // clears the mark (d7-app-1).
+          url.includes("include_missing=true"),
       ),
     ).toBe(true);
     expect(requested.some((url) => url.includes("in_project=false"))).toBe(

@@ -127,9 +127,15 @@ export function RunDetail({
     { taskId: runId ?? "", inProject: false },
     { enabled: runId !== null },
   );
-  // The files it wrote into its project, listed apart.
+  // The files it wrote into its project, listed apart — a file marked
+  // missing among them, which opening it reads again (R37, d7-app-1).
   const written = useArtifacts(
-    { taskId: runId ?? "", inProject: true, limit: PROJECT_FILES_LIMIT },
+    {
+      taskId: runId ?? "",
+      inProject: true,
+      includeMissing: true,
+      limit: PROJECT_FILES_LIMIT,
+    },
     { enabled: runId !== null },
   );
   const outputs = useMemo<OutcomeArtifact[] | null>(

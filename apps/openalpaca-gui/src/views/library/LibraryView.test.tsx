@@ -518,6 +518,125 @@ describe("LibraryDetail — a file written into a project", () => {
   });
 });
 
+describe("Results — a file marked missing (d7-app-1, R-T26)", () => {
+  const connection = {
+    baseUrl: "http://127.0.0.1:9999",
+    token: "test-token",
+    instanceId: "7f3a1122",
+  };
+  const sentence =
+    "/Users/dev/app: this project's folder is gone or has moved; re-point the project to read its files.";
+  const marked: Artifact = {
+    ...findings,
+    id: "art-9",
+    name: "docs/notes.md",
+    task_id: null,
+    task_title: null,
+    path: "/Users/dev/app/docs/notes.md",
+    project_root: "/Users/dev/app",
+    rel_path: "docs/notes.md",
+    version: 1,
+    version_count: 0,
+    in_project: true,
+    openable: true,
+    missing: true,
+  };
+
+  /** Whether the content route has found the file again (R37 clears the mark). */
+  let back = false;
+
+  beforeEach(() => {
+    back = false;
+    const row = () => ({ ...marked, missing: !back });
+    route("in_project=true", () => json({ artifacts: [row()], total: 1 }));
+    route("/v1/artifacts/art-9/versions", () => json({ versions: [] }));
+    route("/v1/artifacts/art-9", () => json(row()));
+    useUiStore.setState({ openArtifactId: "art-9", libraryResults: true });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.mocked(invoke).mockImplementation(async () => connection);
+  });
+
+  it("lists a marked result file with a missing tag, reads it again and drops the tag once it is back", async () => {
+    route("/v1/artifacts/art-9/content", () => {
+      back = true;
+      return text("# Notes\n\nIt is back.\n");
+    });
+    renderView();
+
+    expect(await screen.findByText("It is back.")).toBeInTheDocument();
+    expect(urlsFor("include_missing=true")).not.toHaveLength(0);
+    expect(urlsFor("/v1/artifacts/art-9/content")).toHaveLength(1);
+    // The read cleared the mark on the daemon; the rows are read again and
+    // the tag goes.
+    await waitFor(() =>
+      expect(screen.queryByText("missing")).not.toBeInTheDocument(),
+    );
+    expect(
+      requests.filter((r) => r.url.endsWith("/v1/artifacts/art-9")).length,
+    ).toBeGreaterThan(1);
+  });
+
+  it("draws the missing tag on a marked row", async () => {
+    route("/v1/artifacts/art-9/content", () =>
+      json(
+        {
+          error: {
+            code: "ARTIFACT_GONE",
+            message:
+              "artifact art-9 is gone: /Users/dev/app/docs/notes.md no longer exists",
+          },
+        },
+        410,
+      ),
+    );
+    renderView();
+
+    expect(await screen.findByText("missing")).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "This file is no longer at docs/notes.md in the project. Its row is kept, and the file is shown again once it is back.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the daemon's sentence when the project's folder is gone or has moved", async () => {
+    route("/v1/artifacts/art-9/content", () =>
+      json(
+        { error: { code: "ARTIFACT_PROJECT_MISSING", message: sentence } },
+        410,
+      ),
+    );
+    renderView();
+
+    expect(await screen.findByText(sentence)).toBeInTheDocument();
+    expect(screen.queryByText(/no longer at/)).not.toBeInTheDocument();
+  });
+
+  it("toasts Reveal's refusal for a missing project's file as the shell words it", async () => {
+    vi.stubGlobal("isTauri", true);
+    route("/v1/artifacts/art-9/content", () =>
+      json(
+        { error: { code: "ARTIFACT_PROJECT_MISSING", message: sentence } },
+        410,
+      ),
+    );
+    vi.mocked(invoke).mockImplementation(async (command: string) =>
+      command === "reveal_path" ? Promise.reject(sentence) : connection,
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(
+      await screen.findByRole("button", { name: revealLabel() }),
+    );
+
+    await waitFor(() => expect(useUiStore.getState().toast).toBe(sentence));
+  });
+});
+
 describe("LibraryDetail — Open and Reveal", () => {
   /** What the mocked discovery command answers, as the factory above does. */
   const connection = {

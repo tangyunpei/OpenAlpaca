@@ -69,6 +69,8 @@ export const qk = {
 
   artifacts: {
     all: () => ["artifacts"] as const,
+    /** Every list and feed, whatever its query — the prefix of `list`. */
+    lists: () => ["artifacts", "list"] as const,
     list: (query: Record<string, unknown>) =>
       ["artifacts", "list", query] as const,
     detail: (id: string) => ["artifacts", "detail", id] as const,

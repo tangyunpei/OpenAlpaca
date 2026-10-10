@@ -21,6 +21,7 @@ import {
   useArtifactDiff,
   useArtifactText,
   useArtifactVersions,
+  useFoundAgain,
   useTogglePin,
 } from "@/hooks/useArtifacts";
 import { useArtifactFileActions, useDownloadFile } from "@/hooks/useFiles";
@@ -30,7 +31,7 @@ import { useUiStore, type ArtifactTab } from "@/stores/ui";
 
 import { HistoryTab } from "./HistoryTab";
 import { LibraryDetailHeader } from "./LibraryDetailHeader";
-import { diffPair, previewPlan } from "./preview";
+import { diffPair, previewNote, previewPlan } from "./preview";
 import { baseName } from "./format";
 
 export interface LibraryDetailProps {
@@ -206,6 +207,7 @@ function DetailShell({
 function PreviewTab({ artifact }: { artifact: Artifact }) {
   const plan = previewPlan(artifact);
   const content = useArtifactText(artifact.id, plan.mode === "text");
+  useFoundAgain(artifact, content.isSuccess);
 
   const byline =
     artifact.version_count > 1
@@ -229,14 +231,7 @@ function PreviewTab({ artifact }: { artifact: Artifact }) {
   }
 
   const body = plan.mode === "text" ? (content.data ?? null) : null;
-  const note =
-    plan.mode === "none"
-      ? plan.note
-      : content.error !== null
-        ? content.error.message
-        : content.isLoading
-          ? "Reading the file…"
-          : plan.note;
+  const note = previewNote(artifact, plan, content);
 
   return (
     <>

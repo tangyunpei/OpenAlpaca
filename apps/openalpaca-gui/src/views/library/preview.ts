@@ -15,9 +15,13 @@
  *   * **too large** is refused before the fetch: pulling a multi-megabyte file
  *     into the webview to render six lines of it helps nobody;
  *   * a **missing** row (its bytes deleted under the daemon) says so. That
- *     state is the reason `Artifact.missing` exists — never a blank pane. A
- *     file written into the project (storage design §13) has no history and
- *     its row is kept, so its note names its path in the project instead.
+ *     state is the reason `Artifact.missing` exists — never a blank pane.
+ *   * a file written into the project (storage design §13) that the daemon
+ *     marked missing is **read again**: R37 clears the mark on the read that
+ *     finds it, so a file the person put back is shown (d7-app-1). Only a
+ *     failed read says why — `previewNote`: the file is not at its path in
+ *     the project, or the daemon's own sentence for a project whose folder is
+ *     gone or has moved (R-T26) — never a guess before the read.
  *
  * A note names `Open` only for a row the daemon opens (`openable`, ST-18):
  * a project file of another kind — a `.sh`, a `Makefile` — is sent to Export.
@@ -28,6 +32,7 @@ import { toFileKind } from "@/components/ui";
 import type { Artifact } from "@/lib/api/artifacts";
 import { formatFileSize } from "@/lib/api/types";
 import { escapeHiddenLine, hiddenNotice } from "@/lib/hidden-chars";
+import { ApiError } from "@/lib/http";
 
 /** Past this, the Preview tab points at Export instead of fetching. */
 export const MAX_PREVIEW_BYTES = 512 * 1024;
@@ -46,15 +51,29 @@ function isSvg(mimeType: string): boolean {
 }
 
 export function previewPlan(artifact: Artifact): PreviewPlan {
-  if (artifact.missing) {
+  if (artifact.missing && !artifact.in_project) {
     return {
       mode: "none",
-      note: artifact.in_project
-        ? missingProjectFileNote(artifact.rel_path)
-        : "This file is no longer on disk. The daemon kept its record, so the history below is still real.",
+      note: "This file is no longer on disk. The daemon kept its record, so the history below is still real.",
     };
   }
 
+  const plan = presentPlan(artifact);
+  // A result file the daemon marked missing is planned as if it were there:
+  // the read is what finds it again (R37). A plan that reads nothing says
+  // what the mark means — the last read failed — without claiming the file
+  // is gone, which is false for a project moved behind a link (R-T26).
+  if (artifact.missing && plan.mode === "none") {
+    return {
+      mode: "none",
+      note: `This file could not be read the last time it was asked for. ${plan.note}`,
+    };
+  }
+  return plan;
+}
+
+/** The plan for a row whose bytes the daemon has not marked missing. */
+function presentPlan(artifact: Artifact): PreviewPlan {
   const markup = artifact.kind === "html" || isSvg(artifact.mime_type);
 
   if (artifact.kind === "image" && !markup) return { mode: "image" };
@@ -90,6 +109,47 @@ export function previewPlan(artifact: Artifact): PreviewPlan {
   }
 
   return { mode: "text", kind: toFileKind(artifact.kind), note: null };
+}
+
+/** How the bytes' read is going, as React Query reports it. */
+export interface PreviewRead {
+  error: Error | null;
+  isLoading: boolean;
+}
+
+/**
+ * The note under (or in place of) a text or `none` plan's preview — one
+ * ladder for the Library detail and the chat file panel, so the two cannot
+ * drift: the plan's own note when nothing is read, the read's failure, the
+ * wait, then the plan's note again.
+ *
+ * A failed read is said in the person's terms. For a file written into the
+ * project a `410 ARTIFACT_GONE` means the file is not at its path there;
+ * `410 ARTIFACT_PROJECT_MISSING` is the daemon's sentence for a project
+ * whose folder is gone or has moved (R-T26), shown as it comes. Every
+ * refusal carries a path an agent may have chosen, so it is escaped
+ * (`lib/hidden-chars`) — never drawn raw.
+ */
+export function previewNote(
+  artifact: Artifact,
+  plan: Exclude<PreviewPlan, { mode: "image" }>,
+  read: PreviewRead,
+): string | null {
+  if (plan.mode === "none") return plan.note;
+  if (read.error !== null) {
+    const { error } = read;
+    if (
+      error instanceof ApiError &&
+      error.status === 410 &&
+      error.code === "ARTIFACT_GONE" &&
+      artifact.in_project
+    ) {
+      return missingProjectFileNote(artifact.rel_path);
+    }
+    return escapeHiddenLine(error.message).text;
+  }
+  if (read.isLoading) return "Reading the file…";
+  return plan.note;
 }
 
 /**
