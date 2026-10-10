@@ -3098,6 +3098,77 @@ fn a_result_file_another_owner_recorded_is_never_taken_over() {
     assert_untouched(&path, b"theirs\n", mtime);
 }
 
+/// R35's guards on a result file's address (S4a's deferred (4)): a project
+/// root that is not absolute, and a path that is empty, absolute, or climbs
+/// out with `..` — after its `.` components are dropped — are each refused,
+/// and nothing is recorded for any of them.
+#[test]
+fn a_result_file_with_no_address_in_its_project_is_refused_and_records_nothing() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().into_owned();
+    const PLAIN: &str = "must be relative and plain";
+    let cases = [
+        ("relative/root", "docs/plan.md", "must be an absolute path"),
+        (root.as_str(), "", PLAIN),
+        (root.as_str(), ".", PLAIN),
+        (root.as_str(), "./", PLAIN),
+        (root.as_str(), "/etc/passwd", PLAIN),
+        (root.as_str(), "../outside.md", PLAIN),
+        (root.as_str(), "docs/../plan.md", PLAIN),
+        (root.as_str(), "docs/./../../outside.md", PLAIN),
+    ];
+
+    for (project_root, rel_path, refusal) in cases {
+        let err = f
+            .store()
+            .record_project_file(NewProjectFile {
+                owner_id: OWNER,
+                project_root,
+                rel_path,
+                content: b"x\n",
+                task_id: None,
+                agent_id: None,
+            })
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains(refusal),
+            "{project_root} {rel_path:?}: {err:#}"
+        );
+    }
+    assert_eq!(file_asset_count(&f), 0);
+}
+
+/// S4a's deferred (4): a result file's path is normalised lexically before it
+/// is recorded — `docs/./plan.md`, `docs//plan.md` and `./docs/plan.md` are
+/// `docs/plan.md` — so one file has one row, its name, address and storage
+/// path in one spelling, whatever spelling the caller passed.
+#[test]
+fn a_result_files_path_is_recorded_in_one_spelling() {
+    let f = Fixture::new();
+    let (first, path, _) = f.result_file("docs/plan.md", b"# Plan\n");
+    let root = f.project_root().to_string_lossy().into_owned();
+
+    for spelling in ["docs/./plan.md", "docs//plan.md", "./docs/plan.md"] {
+        let (row, inserted) = f
+            .store()
+            .record_project_file(NewProjectFile {
+                owner_id: OWNER,
+                project_root: &root,
+                rel_path: spelling,
+                content: b"# Plan\n",
+                task_id: None,
+                agent_id: None,
+            })
+            .unwrap();
+        assert!(!inserted, "{spelling}: the row docs/plan.md already has");
+        assert_eq!(row.id, first.id, "{spelling}");
+        assert_eq!(row.rel_path.as_deref(), Some("docs/plan.md"), "{spelling}");
+        assert_eq!(row.name, "docs/plan.md", "{spelling}");
+        assert_eq!(row.storage_path, path.to_string_lossy(), "{spelling}");
+    }
+    assert_eq!(file_asset_count(&f), 1);
+}
+
 /// ST-12, ST-18: a result file's record says it is in the project, Open is
 /// offered only when a kind keeps its extension, and `list` filters on the
 /// column — against rows R35's method wrote.

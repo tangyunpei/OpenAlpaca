@@ -1201,20 +1201,22 @@ impl<'a> ArtifactStore<'a> {
                 file.project_root
             );
         }
-        let plain = !file.rel_path.is_empty()
-            && Path::new(file.rel_path)
-                .components()
-                .all(|c| matches!(c, std::path::Component::Normal(_)));
-        if !plain {
-            bail!(
+        // One spelling per file (S4a's deferred (4)): normalised lexically —
+        // `.` components and repeated separators dropped, nothing resolved —
+        // so `docs/./plan.md` and `docs//plan.md` address the row
+        // `docs/plan.md` has; `..`, an absolute path and nothing at all are
+        // refused.
+        let rel_path = plain_relative_path(file.rel_path).with_context(|| {
+            format!(
                 "a result file's path must be relative and plain, got '{}'",
                 file.rel_path
-            );
-        }
-        let storage_path = root.join(file.rel_path);
+            )
+        })?;
+        let rel_path = rel_path.as_str();
+        let storage_path = root.join(rel_path);
         let sha256 = sha256_hex(file.content);
         let size_bytes = file.content.len() as i64;
-        let kind = kind_for_file_name(file.rel_path).unwrap_or(ArtifactKind::Code);
+        let kind = kind_for_file_name(rel_path).unwrap_or(ArtifactKind::Code);
         // The stamp of the bytes standing there now, so R37's read-time check
         // hashes nothing until the file changes.
         let metadata_json = metadata_with_stamp(None, stamp_at(&storage_path));
@@ -1226,7 +1228,7 @@ impl<'a> ArtifactStore<'a> {
                 .query_row(
                     "SELECT id, owner_id FROM file_assets
                       WHERE COALESCE(project_root, '') = ?1 AND in_project = 1 AND rel_path = ?2",
-                    rusqlite::params![file.project_root, file.rel_path],
+                    rusqlite::params![file.project_root, rel_path],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
@@ -1235,7 +1237,7 @@ impl<'a> ArtifactStore<'a> {
                 Some((id, owner)) if owner != file.owner_id => bail!(
                     "the result file {id} at {}/{} belongs to another owner",
                     file.project_root,
-                    file.rel_path
+                    rel_path
                 ),
                 Some((id, _)) => {
                     tx.execute(
@@ -1249,7 +1251,7 @@ impl<'a> ArtifactStore<'a> {
                             sha256,
                             size_bytes,
                             storage_path.to_string_lossy(),
-                            file.rel_path,
+                            rel_path,
                             kind.as_str(),
                             default_mime(kind),
                             file.task_id,
@@ -1275,7 +1277,7 @@ impl<'a> ArtifactStore<'a> {
                             id,
                             file.owner_id,
                             sha256,
-                            file.rel_path,
+                            rel_path,
                             default_mime(kind),
                             size_bytes,
                             storage_path.to_string_lossy(),
@@ -1286,7 +1288,7 @@ impl<'a> ArtifactStore<'a> {
                             file.task_id,
                             file.agent_id,
                             file.project_root,
-                            file.rel_path,
+                            rel_path,
                         ],
                     )?;
                     id
@@ -2193,6 +2195,22 @@ fn probe_for(record: &ArtifactRecord) -> HeadProbe {
         }),
         project_file: None,
     }
+}
+
+/// `rel` as one `/`-separated spelling (S4a's deferred (4)), lexically —
+/// nothing on disk is read: its `.` components and repeated separators
+/// dropped. `None` when it holds a `..` or is absolute, or when nothing is
+/// left.
+fn plain_relative_path(rel: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    for component in Path::new(rel).components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(part.to_str()?),
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 /// A result file's bytes, confined under the project root its row records —
