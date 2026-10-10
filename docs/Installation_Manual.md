@@ -138,10 +138,10 @@ Inside the runtime root, `state/` is the machine's (database, logs, lock,
 master key, caches) and everything else is yours to read and edit. Each
 project you work in has a folder there too, under `projects/`, with its
 artifacts, uploads and memory notes. Nothing OpenAlpaca stores is written
-inside the project's own folder: an agent writes there only the files you ask
-for, each write asking first. A conversation with no project works in a folder
-of its own under `scratch/`, removed with the conversation. The root
-describes itself: the daemon seeds a `README.md` there
+inside the project's own folder: an agent writes there only with your
+approval, each write and each command asking first. A conversation with no
+project works in a folder of its own under `scratch/`, removed with the
+conversation. The root describes itself: the daemon seeds a `README.md` there
 that explains every entry.
 
 When the CLI or the desktop app launches the daemon, it sets

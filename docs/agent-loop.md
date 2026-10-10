@@ -108,26 +108,25 @@ lead-agent workflow does not use this line; it has its own fallback (see
 **Lead tool surface** (`runner/lead_agent/mod.rs::run_lead_agent`):
 coordination tools (`spawn_subagent`, `spawn_subagents_batch` when
 enabled, `check_subagent_status`, `wait_for_subagents`, plus
-`post_update` + `queue_followup` under steering) + workspace tools +
-the memory reads `memory_search`, `memory_read` and `memory_timeline` (a
-search answers an index, so the read that follows it comes with it), plus
-`artifact_write` and `read_result` when the lead's
-own template declares those capabilities (the shipped `lead_agent`
-template does), `file_read`, `file_list` and `artifact_read` always —
-in code, so a template seeded before them gets them too, while one that
-denies a tool or its capability keeps it off; the lead reads the
-project and its by-products, holds neither `file_write`, `file_edit`
-nor `shell_execute`, and delegates the files a job is to produce to a
-subagent that writes them — unioned with the same extension set as the
-main loop —
-every installed MCP-bridged (`<server>__<tool>`) and plugin-provided
-(`<plugin>::<tool>`) tool whose extension is enabled — and a per-request
-`invoke_skill` instance, so the lead can run catalog
-skills and connected integrations itself or delegate them. The lead's
-`SandboxPolicy` allowlist is extended from the final tool definitions at
-run time (template denials still win); subagents stay template-scoped —
-they get only the capabilities their own template declares, never the
-lead's blanket grant.
+`post_update` + `queue_followup` under steering) + workspace tools + the
+memory reads `memory_search`, `memory_read` and `memory_timeline` (a
+search answers an index, so the read that follows it comes with it),
+plus `artifact_write` and `read_result` when the lead's own template
+declares those capabilities (the shipped `lead_agent` template does),
+`file_read`, `file_list` and `artifact_read` always — in code, so a
+template seeded before them gets them too, while one that denies a tool
+or its capability keeps it off; the lead reads the project and its
+by-products, holds neither `file_write`, `file_edit` nor
+`shell_execute`, and delegates the files a job is to produce to a
+subagent that writes them. That surface is unioned with the same
+extension set as the main loop — every installed MCP-bridged
+(`<server>__<tool>`) and plugin-provided (`<plugin>::<tool>`) tool whose
+extension is enabled — and a per-request `invoke_skill` instance, so the
+lead can run catalog skills and connected integrations itself or
+delegate them. The lead's `SandboxPolicy` allowlist is extended from the
+final tool definitions at run time (template denials still win);
+subagents stay template-scoped — they get only the capabilities their
+own template declares, never the lead's blanket grant.
 
 Subagents can be plugin-backed: when the spawned template's source is
 `AgentSource::Plugin` (contributed by a plugin manifest), the spawn path
@@ -247,11 +246,18 @@ global registry. Budgets come from `main_loop_max_rounds` /
 
 **Working folder**: each turn's context carries one `<working_folder>`
 line naming the project folder, or the conversation's scratch folder,
-that the file tools and the shell act in — at the end of the main
-loop's relay-rules message, right before the turn for a file-based
-skill and for a subagent, and for the lead after its objective and the
-chat's working state; a plugin's skills and agents are not told. See
-[Daemon Manual → The Working Folder](Daemon_Manual.md#the-working-folder).
+that the file tools and the shell act in — at the end of the main loop's
+relay-rules message; as a message of its own right before the user's on
+a turn that runs tools outside the main loop (onboarding, a message with
+only attachments); right before the turn for a file-based skill, for a
+skill another skill invokes and for a subagent; and for the lead after
+its objective and the chat's working state. The line names only the file
+tools that loop holds, says a shell command starts there only when it
+holds `shell_execute`, and on a project turn tells a loop that holds no
+tool writing a file so — the lead, that a subagent whose template grants
+`file_write` writes the project's files. A plugin's skills and agents
+are not told. See [Daemon Manual → The Working
+Folder](Daemon_Manual.md#the-working-folder).
 
 **Workflow context**: lanes with active workflows get a per-turn
 `<active_workflows>` block (`query_handler/workflow_context.rs`) — task

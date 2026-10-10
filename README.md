@@ -175,7 +175,7 @@ Data always lives under `~/.openalpaca/`, on every platform:
 | `memory/` | Memory notes, one Markdown file each, per owner |
 | `projects/` | One folder per project — a git repository you chat in, or a folder you chose — with its `project.json`, artifacts, uploads and memory notes |
 
-Set `OPENALPACA_HOME_STORE=/absolute/path` to move the whole root, for example to try things in a sandbox. A project's files and notes live in its folder under `projects/`, named after its path. Nothing OpenAlpaca stores is written inside the project's own folder: an agent writes there only the files you ask for, each write asking first (Daemon Manual → *The Working Folder*).
+Set `OPENALPACA_HOME_STORE=/absolute/path` to move the whole root, for example to try things in a sandbox. A project's files and notes live in its folder under `projects/`, named after its path. Nothing OpenAlpaca stores is written inside the project's own folder: an agent writes there only with your approval, each write and each command asking first (Daemon Manual → *The Working Folder*).
 
 ## Documentation
 

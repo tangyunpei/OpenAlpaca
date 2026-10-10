@@ -1270,8 +1270,9 @@ turn's **working folder**:
   folder. Only a call with neither a project nor a conversation is refused,
   with a sentence saying why.
 - A project that is `missing` — its folder gone, renamed by case only, or moved
-  with a link left at its old path — is refused before any tool runs, and the
-  sentence names the two ways out: re-point the project or delete its data
+  with a link left at its old path — is refused: no file tool or command runs
+  there until the project is re-pointed, and the sentence names the two ways
+  out, re-pointing the project or deleting its data
   ([Files, artifacts and workspaces](#files-artifacts-and-workspaces)).
   A turn whose project was re-pointed or deleted while the conversation ran
   is refused too, with a sentence saying no folder under `projects/` records

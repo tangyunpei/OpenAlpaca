@@ -102,10 +102,10 @@ rotation (16 MB, three older generations kept), that `openalpaca daemon start`
 writes (`src-tauri/src/lib.rs`, `spawn_daemon`). A project you choose keeps its
 data in the home store, in its folder under `projects/` — its artifacts, uploads
 and memory notes beside a `project.json` with its id and path; nothing of
-OpenAlpaca's is written inside the project's own folder — only the files an
-agent writes there for you, each write asking first. A conversation with no
-project works in its own folder under `scratch/`, which goes when the
-conversation is deleted.
+OpenAlpaca's is written inside the project's own folder — an agent writes
+there only with your approval, each write and each command asking first. A
+conversation with no project works in its own folder under `scratch/`, which
+goes when the conversation is deleted.
 
 ## Connection lifecycle
 
@@ -568,24 +568,25 @@ lane never blocks this composer, and the card names who is asking — the agent
 template for a workflow's prompt, and `Alpaca` for one the assistant raised in
 the chat itself.
 
-**What a card says.** A card shows the tool's arguments as they are and, above
-them under `From OpenAlpaca`, what the daemon says about the call. A shell
-command's card names the folder it runs in — the project folder, or the
-conversation's scratch folder — and says the command can reach files outside
-it: read the command before you approve it. A `file_write` card says where the
-file lands — written or replaced in the project folder (a replaced file's old
-content is kept in the conversation's log), or saved as a by-product in
-OpenAlpaca's artifact store. A `file_edit` card names the file, the number of
-replacements and the line of the first, and quotes the text to find and the text
-to put in its place, each cut after 1,000 bytes with the cut named.
-A file `send`'s card names the file, its size, the channel, the recipient
-and the name it is sent as; a message `send`'s card shows its arguments alone. Hidden characters in a path, a quoted text or a recipient
-are written as `<U+XXXX>`, with their count under them. A call the daemon
-would refuse anyway — a project folder that is gone or has moved, a path
+**What a card says.** A card shows the tool's arguments — each hidden character
+written as `<U+XXXX>`, as described above — and, over them under
+`From OpenAlpaca`, what the daemon says about the call. A shell command's card
+names the folder it runs in — the project folder, or the conversation's
+scratch folder — and says the command can reach files outside it: read the command
+before you approve it. A `file_write` card says where the file lands — written
+or replaced in the project folder (a replaced file's old content is kept in the
+conversation's log), or saved as a by-product in OpenAlpaca's artifact store. A
+`file_edit` card names the file, the number of replacements and the line of the
+first, and quotes the text to find and the text to put in its place, each cut
+after 1,000 bytes with the cut named. A file `send`'s card names the file, its
+size, the channel, the recipient and the name it is sent as; a message `send`'s
+card shows its arguments alone. Hidden characters in a path, a quoted text or a
+recipient are written as `<U+XXXX>`, with their count under them. A call the
+daemon would refuse anyway — a project folder that is gone or has moved, a path
 outside the working folder or inside `.git`, a file too large to keep a copy
-of — is refused before any card is raised, and the agent is told why. Reading
-a file or listing a folder never raises a card, and neither does saving a
-draft with `artifact_write`.
+of — is refused before any card is raised, and the agent is told why. Reading a
+file or listing a folder never raises a card, and neither does saving a draft
+with `artifact_write`.
 
 **A prompt nobody answers settles anyway.** The daemon waits five minutes per
 prompt by default (`[execution.agent_defaults] confirmation_timeout_secs` in

@@ -208,7 +208,7 @@ holds no database handle.
 | `task_id` | `Option<String>` | The workflow run; `None` outside one |
 | `owner_id` | `Option<String>` | The owning user |
 | `principal`, `scope` | `Option<…>` | The requesting principal and resource scope, where threaded |
-| `workspace_id` | `Option<String>` | The resolved workspace root, derived from the daemon's current directory when the request carried none. **No memory path reads it** — the memory tools and the per-turn recall take `request_workspace_root`, so the daemon's CWD never selects a memory partition (memory redesign MD-5); `start_workflow` still forwards it into the run it starts, where nothing reads it |
+| `workspace_id` | `Option<String>` | The root the request's path resolved to — the same value as `request_workspace_root` — and `None` when the request carried none; never derived from the daemon's current directory. **No memory path reads it** — the memory tools and the per-turn recall take `request_workspace_root` (memory redesign MD-5); `start_workflow` still forwards it into the run it starts, where nothing reads it |
 | `request_workspace_root` | `Option<String>` | The project root the *request* supplied, resolved.  Never derived from the current directory.  It names the turn's working folder (`tools::working_folder`), where the file tools and the shell act, and places the turn's by-products (`artifact_write`, the workspace spill) |
 | `workspace_path` | `Option<String>` | The path as sent; threaded on the main loop and read by no tool since F4 — the steering and follow-up writers persist `request_workspace_root` |
 | `skill_stack` | `Vec<String>` | Skill invocation chain, oldest first |
