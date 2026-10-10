@@ -9,6 +9,8 @@ use crate::orchestrator::skill::constraints::EffectiveToolSet;
 use crate::tools::extensions::{ExtensionId, ExtensionLedger};
 use crate::security::sanitizer::TraversalRule;
 use crate::tools::platform::{RunFailure, run_bounded, shell_command};
+use crate::tools::working_folder::{WorkingFolderRefusal, working_folder};
+use std::path::{Path, PathBuf};
 
 pub mod availability;
 pub use availability::{
@@ -665,8 +667,9 @@ impl ToolRegistry {
     }
 
     /// Execute a tool by name with per-invocation context.
-    /// Routes to BuiltInTool::execute_with_context() for BuiltIn backends.
-    /// For Http/Command/Plugin backends, context is ignored (they don't need identity).
+    /// Routes to BuiltInTool::execute_with_context() for BuiltIn backends; a
+    /// command tool runs in the call's working folder (storage design §10,
+    /// R26); Http, Plugin and MCP backends do not read the context.
     pub async fn execute_with_context(
         &self,
         tool_name: &str,
@@ -776,12 +779,9 @@ impl ToolRegistry {
         // Pre-validate arguments against the tool's JSON Schema definition.
         validate_tool_arguments(&definition, arguments)?;
 
-        if ctx.is_some()
-            && matches!(
-                backend,
-                ToolBackend::Http { .. } | ToolBackend::Command { .. } | ToolBackend::Plugin(_)
-            )
-        {
+        // A command tool reads the context for its working folder (R26);
+        // these two do not.
+        if ctx.is_some() && matches!(backend, ToolBackend::Http { .. } | ToolBackend::Plugin(_)) {
             tracing::trace!(
                 tool_name,
                 agent_id = ?ctx.and_then(|c| c.agent_id.as_ref()),
@@ -807,7 +807,10 @@ impl ToolRegistry {
                 command,
                 args_template,
                 timeout_secs,
-            } => execute_command(command, args_template.as_deref(), *timeout_secs, arguments).await,
+            } => {
+                execute_command(command, args_template.as_deref(), *timeout_secs, arguments, ctx)
+                    .await
+            }
             ToolBackend::Plugin(executor) => executor.execute(tool_name, arguments).await,
             ToolBackend::Mcp {
                 client,
@@ -1407,12 +1410,16 @@ async fn execute_http(
     }
 }
 
-/// Execute a command backend tool call.
+/// Execute a command backend tool call in the call's working folder
+/// (storage design §10, R26): the template's placeholders are substituted
+/// and checked first — a missing argument is named as such whatever the
+/// context — then the folder is resolved, and a call with none is refused.
 async fn execute_command(
     command: &str,
     args_template: Option<&str>,
     timeout_secs: u64,
     arguments: &serde_json::Value,
+    ctx: Option<&ToolContext>,
 ) -> Result<String, String> {
     let mut full_args = args_template.unwrap_or("").to_string();
     if let Some(obj) = arguments.as_object() {
@@ -1439,12 +1446,14 @@ async fn execute_command(
         ));
     }
 
+    let folder = command_folder(ctx)?;
     let timeout = std::time::Duration::from_secs(timeout_secs);
     let full_command = format!("{} {}", command, full_args);
-
+    let mut cmd = shell_command(&full_command);
+    cmd.current_dir(&folder);
     // R45 (storage design §11): killed with the processes it started when
     // its time runs out or its call is dropped.
-    let output = match run_bounded(shell_command(&full_command), timeout).await {
+    let output = match run_bounded(cmd, timeout).await {
         Ok(output) => output,
         Err(RunFailure::TimedOut) => {
             return Err(format!("Command timed out after {}s", timeout_secs));
@@ -1472,6 +1481,18 @@ async fn execute_command(
             stderr
         ))
     }
+}
+
+/// The folder a command tool runs in: the call's working folder, made ready
+/// (R26); a call with no context, or one the folder refuses, gets the
+/// refusal's sentence and runs nothing.
+fn command_folder(ctx: Option<&ToolContext>) -> Result<PathBuf, String> {
+    let ctx = ctx.ok_or_else(|| WorkingFolderRefusal::NoContext.to_string())?;
+    let folder = working_folder(ctx).map_err(|refusal| refusal.to_string())?;
+    folder
+        .ensure()
+        .map(Path::to_path_buf)
+        .map_err(|refusal| refusal.to_string())
 }
 
 /// Basic JSON Schema pre-validation for tool arguments.

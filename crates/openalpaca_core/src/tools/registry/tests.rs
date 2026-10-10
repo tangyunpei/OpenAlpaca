@@ -507,26 +507,24 @@ async fn test_command_unsubstituted_placeholder_detected() {
     );
 }
 
-#[tokio::test]
-async fn test_command_all_placeholders_substituted_runs() {
-    let registry = ToolRegistry::default();
-    registry.register(RegisteredTool {
+/// A command tool built for the tests below.
+fn command_tool(
+    name: &str,
+    command: &str,
+    args_template: Option<&str>,
+    params: serde_json::Value,
+) -> RegisteredTool {
+    RegisteredTool {
         definition: ToolDefinition {
-            name: "echo_tool".to_string(),
-            description: "Echo a message".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "msg": {"type": "string"}
-                },
-                "required": ["msg"]
-            }),
+            name: name.to_string(),
+            description: format!("{name} tool"),
+            parameters: params,
             strict: None,
             input_examples: None,
         },
         backend: ToolBackend::Command {
-            command: "echo".to_string(),
-            args_template: Some("{msg}".to_string()),
+            command: command.to_string(),
+            args_template: args_template.map(str::to_string),
             timeout_secs: 5,
         },
         provides_capabilities: vec![],
@@ -535,14 +533,99 @@ async fn test_command_all_placeholders_substituted_runs() {
         version: "test-0.0.0".into(),
         author: "test".into(),
         created_at: chrono::Utc::now(),
-    }).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_command_all_placeholders_substituted_runs() {
+    // Stage 2 (R26): a command tool runs in the call's working folder, so
+    // the call carries one — a guarded project made for the test.
+    let gp = crate::test_util::GuardedProject::new();
+    let registry = ToolRegistry::default();
+    registry
+        .register(command_tool(
+            "echo_tool",
+            "echo",
+            Some("{msg}"),
+            serde_json::json!({
+                "type": "object",
+                "properties": {"msg": {"type": "string"}},
+                "required": ["msg"]
+            }),
+        ))
+        .unwrap();
 
     let result = registry
-        .execute("echo_tool", &serde_json::json!({"msg": "hello"}))
+        .execute_with_context("echo_tool", &serde_json::json!({"msg": "hello"}), &gp.ctx())
         .await;
     // Should succeed — no unsubstituted placeholders
     assert!(result.is_ok(), "Expected success, got: {:?}", result);
     assert!(result.unwrap().contains("hello"));
+}
+
+/// R26: a command tool's program starts in the project's folder, or in the
+/// conversation's scratch folder when there is no project.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_command_tool_runs_in_the_working_folder() {
+    let gp = crate::test_util::GuardedProject::new();
+    let registry = ToolRegistry::default();
+    registry
+        .register(command_tool(
+            "where_am_i",
+            "pwd",
+            Some("-P"),
+            serde_json::json!({"type": "object", "properties": {}}),
+        ))
+        .unwrap();
+
+    let out = registry
+        .execute_with_context("where_am_i", &serde_json::json!({}), &gp.ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.trim_end(), gp.root.display().to_string());
+
+    let out = registry
+        .execute_with_context("where_am_i", &serde_json::json!({}), &gp.scratch_ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        out.trim_end(),
+        gp.home_root()
+            .join("scratch")
+            .join("conv-test")
+            .display()
+            .to_string()
+    );
+}
+
+/// R26: reached with no context, a command tool runs nothing — and its
+/// placeholders are checked first, so a missing argument is still named as
+/// such (`test_command_unsubstituted_placeholder_detected` calls `execute`).
+#[tokio::test]
+async fn a_command_tool_with_no_context_is_refused_after_its_placeholders_are_checked() {
+    let registry = ToolRegistry::default();
+    registry
+        .register(command_tool(
+            "echo_tool",
+            "echo",
+            Some("{msg}"),
+            serde_json::json!({
+                "type": "object",
+                "properties": {"msg": {"type": "string"}},
+                "required": ["msg"]
+            }),
+        ))
+        .unwrap();
+
+    let err = registry
+        .execute("echo_tool", &serde_json::json!({"msg": "hello"}))
+        .await
+        .expect_err("no context");
+    assert_eq!(
+        err,
+        crate::tools::working_folder::WorkingFolderRefusal::NoContext.to_string()
+    );
 }
 
 // --- registry::execute_with_context ---
@@ -2899,8 +2982,16 @@ async fn a_command_tool_that_times_out_takes_the_processes_it_started_with_it() 
         pidfile.display()
     );
 
+    // Stage 2 (R26): a command tool runs in its call's working folder, so the
+    // call carries one — a guarded project made for the test. (The script
+    // `cd`s into its own tempdir, so where it starts does not matter.)
+    let gp = crate::test_util::GuardedProject::new();
     let err = registry
-        .execute("hang_tool", &serde_json::json!({"script": script}))
+        .execute_with_context(
+            "hang_tool",
+            &serde_json::json!({"script": script}),
+            &gp.ctx(),
+        )
         .await
         .unwrap_err();
     let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
