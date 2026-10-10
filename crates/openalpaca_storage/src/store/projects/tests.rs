@@ -1308,6 +1308,42 @@ fn a_project_renamed_by_case_only_reads_missing() {
     );
 }
 
+/// ST-23 for a root outside ASCII (S0's deferred M2): a folder named in
+/// another script, with an accented letter, reads present while its root
+/// leads to itself — the root is recorded as the volume spells it, so the
+/// canonical form compares equal byte for byte — and missing once the folder
+/// is moved with a link left at its root.
+#[cfg(unix)]
+#[test]
+fn a_non_ascii_root_reads_present_and_missing_once_moved_behind_a_link() {
+    let w = World::new();
+    let root = w.folder("プロジェクト-\u{e9}");
+    let project = register(&root).unwrap();
+    assert!(!project.missing);
+    assert_eq!(
+        list()
+            .unwrap()
+            .iter()
+            .map(|p| p.missing)
+            .collect::<Vec<_>>(),
+        vec![false]
+    );
+    assert!(!root_is_missing(&root));
+
+    let moved = root.with_file_name("プロジェクト-\u{e9}-moved");
+    fs::rename(&root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &root).unwrap();
+
+    assert!(root_is_missing(&root));
+    let listed = list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!((listed[0].id, listed[0].missing), (project.id, true));
+    assert_eq!(
+        lookup(&root).unwrap().map(|p| (p.id, p.missing)),
+        Some((project.id, true))
+    );
+}
+
 // ── ST-23: a recorded root is matched as written first (Stage 2 S0) ─────────
 
 /// A recorded root whose folder moved with a link left at the old path names
