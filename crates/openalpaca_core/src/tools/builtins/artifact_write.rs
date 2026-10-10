@@ -1300,14 +1300,16 @@ mod tests {
             bus.clone(),
             &CircuitBreakerConfig::default(),
         );
-        let mut policy = SandboxPolicy::from_constraints(
+        // No `auto_approve`: `artifact_write` asks nobody since ST-15
+        // (`local_write_annotations`), so the call never reaches the
+        // confirmation branch.
+        let policy = SandboxPolicy::from_constraints(
             "writing_agent",
             &AgentConstraints {
                 allowed_capabilities: vec!["artifact_write".to_string()],
                 ..Default::default()
             },
         );
-        policy.auto_approve = true;
 
         // The runner's context: no bus on it at all.
         let call_ctx = ctx(Some(project.to_str().unwrap()), None);
