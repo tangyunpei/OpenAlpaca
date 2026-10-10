@@ -3135,3 +3135,40 @@ fn a_result_files_record_says_so_and_the_list_filters_on_it() {
     assert_untouched(&code_path, b"fn main() {}\n", code_mtime);
     assert_untouched(&script_path, b"echo hi\n", script_mtime);
 }
+
+/// R39: `put` never adopts a pointer row whose path is artifact-shaped — the
+/// by-product is a new row under the store, at the name the result file's row
+/// holds, and the result file's row and file are untouched (fails when
+/// `put`'s scan, or its name reservation, ignores `in_project`).
+#[test]
+fn put_never_adopts_a_pointer_row_at_an_artifact_shaped_path() {
+    let f = Fixture::new();
+    let (pointer, file, mtime) =
+        f.result_file("loose/2026-09-01/01-notes.md", b"the user's notes\n");
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "notes", b"a draft\n");
+    new.created = at(1);
+
+    let (by_product, created) = f.store().put(new).unwrap();
+
+    assert!(
+        created,
+        "a new by-product, not a version of the result file"
+    );
+    assert_ne!(by_product.id, pointer.id);
+    assert!(!by_product.in_project);
+    assert_eq!(
+        by_product.rel_path.as_deref(),
+        Some("loose/2026-09-01/01-notes.md"),
+        "the name the result file's row holds is not stepped past"
+    );
+    assert!(Path::new(&by_product.storage_path).starts_with(f.artifacts_root()));
+    assert_eq!(fs::read(&by_product.storage_path).unwrap(), b"a draft\n");
+    let after = f.store().get(&pointer.id, OWNER).unwrap().unwrap();
+    assert!(after.in_project);
+    assert_eq!(after.storage_path, pointer.storage_path);
+    assert_eq!(after.sha256, pointer.sha256);
+    assert_eq!(after.version, 1);
+    assert!(f.store().versions(&pointer.id).unwrap().is_empty());
+    assert_untouched(&file, b"the user's notes\n", mtime);
+}

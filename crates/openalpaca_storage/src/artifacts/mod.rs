@@ -2288,11 +2288,13 @@ struct DirRow {
 
 /// Every produced head addressed directly under `rel_dir` — the scan that both
 /// identifies the artifact being superseded and yields the next `NN-` sequence.
+/// A result file's pointer row (`in_project = 1`) addresses the user's folder,
+/// never this store, and is never one of them (R35).
 fn dir_rows(conn: &Connection, project_key: &str, rel_dir: &str) -> Result<Vec<DirRow>> {
     let prefix = format!("{rel_dir}/");
     let mut stmt = conn.prepare(
         "SELECT id, owner_id, rel_path, version FROM file_assets
-         WHERE origin = 'produced' AND COALESCE(project_root, '') = ?1
+         WHERE origin = 'produced' AND in_project = 0 AND COALESCE(project_root, '') = ?1
            AND rel_path IS NOT NULL AND rel_path LIKE ?2 ESCAPE '\\'",
     )?;
     let mut rows = stmt.query(rusqlite::params![
@@ -2426,15 +2428,17 @@ fn reclaim_empty_orphan(path: &Path) -> bool {
 /// Does any row of this store address `rel` — a head in `file_assets` or a
 /// retained version in `artifact_versions`? Scoped to `project_key`, because
 /// `rel_path` alone repeats in every store: that pair *is* the address (§4.3).
+/// A result file's pointer row (`in_project = 1`) is an address in the user's
+/// folder, not this store's, and reserves nothing here (R35).
 fn rel_path_is_referenced(conn: &Connection, project_key: &str, rel: &str) -> Result<bool> {
     let referenced: bool = conn.query_row(
         "SELECT EXISTS (
              SELECT 1 FROM file_assets
-              WHERE COALESCE(project_root, '') = ?1 AND rel_path = ?2
+              WHERE COALESCE(project_root, '') = ?1 AND rel_path = ?2 AND in_project = 0
              UNION ALL
              SELECT 1 FROM artifact_versions v
                JOIN file_assets f ON f.id = v.artifact_id
-              WHERE COALESCE(f.project_root, '') = ?1 AND v.rel_path = ?2
+              WHERE COALESCE(f.project_root, '') = ?1 AND v.rel_path = ?2 AND f.in_project = 0
          )",
         rusqlite::params![project_key, rel],
         |row| row.get(0),
