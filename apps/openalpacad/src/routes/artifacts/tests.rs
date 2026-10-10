@@ -1160,3 +1160,47 @@ async fn a_result_files_content_is_named_for_its_last_component() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(bytes, b"fn main() {}\n");
 }
+
+/// R37: the file route reads a result file through the resolver under its
+/// project, and names the download for its last component.
+#[tokio::test]
+async fn the_file_content_route_reads_a_result_file_through_the_resolver() {
+    let f = Fixture::new();
+    let row = f.result_file(OWNER, "src/main.rs", "fn main() {}\n");
+
+    let response =
+        crate::routes::files::file_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id)
+            .await;
+
+    assert_eq!(
+        header(&response, "content-disposition").as_deref(),
+        Some("inline; filename=\"main.rs\"")
+    );
+    let (status, _, bytes) = split_bytes(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, b"fn main() {}\n");
+}
+
+/// R37 with R31's rule: a result file replaced by a link out of the project
+/// is not served by the file route.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_result_file_replaced_by_a_link_out_of_the_project_is_not_served() {
+    let f = Fixture::new();
+    let row = f.result_file(OWNER, "docs/plan.md", "# Plan\n");
+    let outside = tempfile::tempdir().expect("outside");
+    let secret = outside.path().join("secret.md");
+    std::fs::write(&secret, "not the project's\n").expect("secret");
+    std::fs::remove_file(&row.storage_path).expect("remove");
+    std::os::unix::fs::symlink(&secret, &row.storage_path).expect("link");
+
+    let (status, body) = split(
+        crate::routes::files::file_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id)
+            .await,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(error_code(&body), "CONTENT_FAILED");
+    assert!(!body.to_string().contains("not the project's"), "{body}");
+}

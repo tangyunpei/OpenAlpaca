@@ -287,17 +287,10 @@ pub(crate) async fn file_content(
         return super::invalid_token();
     }
 
-    let repo = FileAssetRepository::new(db);
-    let asset = match repo.get_by_id(id) {
-        Ok(Some(a)) => {
-            if a.owner_id != owner_id {
-                tracing::debug!(file_id = %id, owner = %a.owner_id, "File owner mismatch — returning 404");
-                return error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found")
-                    .into_response();
-            }
-            a
-        }
+    let record = match openalpaca_storage::ArtifactStore::new(db).get(id, owner_id) {
+        Ok(Some(record)) => record,
         Ok(None) => {
+            tracing::debug!(file_id = %id, "File not found for this owner — returning 404");
             return error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found")
                 .into_response();
         }
@@ -311,12 +304,46 @@ pub(crate) async fn file_content(
         }
     };
 
-    super::content_response(
-        std::path::Path::new(&asset.storage_path),
-        &asset.mime_type,
-        &asset.filename,
-    )
-    .await
+    // R37: a result file's bytes are read through the resolver, under the
+    // project its row records — never from `storage_path` as written, which a
+    // link put there could lead out of the project.
+    let path = if record.in_project {
+        let owned_db = db.clone();
+        let owned_id = record.id.clone();
+        match tokio::task::spawn_blocking(move || {
+            openalpaca_storage::ArtifactStore::new(&owned_db).resolve_content(&owned_id, None)
+        })
+        .await
+        {
+            Ok(Ok(path)) => path,
+            Ok(Err(e)) => {
+                let (status, code) = match e.downcast_ref::<openalpaca_storage::ArtifactError>() {
+                    Some(openalpaca_storage::ArtifactError::Gone { .. }) => {
+                        (StatusCode::GONE, "ARTIFACT_GONE")
+                    }
+                    _ => (StatusCode::INTERNAL_SERVER_ERROR, "CONTENT_FAILED"),
+                };
+                return error_response(status, code, &format!("{e:#}")).into_response();
+            }
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "CONTENT_FAILED",
+                    &format!("the content task did not finish: {e}"),
+                )
+                .into_response();
+            }
+        }
+    } else {
+        PathBuf::from(&record.storage_path)
+    };
+    // A result file's name is its path in the project; the download is named
+    // for its last component.
+    let file_name = std::path::Path::new(&record.name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&record.name);
+    super::content_response(&path, &record.mime_type, file_name).await
 }
 
 pub async fn get_file_content_handler(
