@@ -499,4 +499,56 @@ mod tests {
             "the row must outlive a failed removal, or the bytes are unreachable"
         );
     }
+
+    /// R39: the orphan sweep deletes an upload's bytes with its row; a result
+    /// file's pointer row is no upload — its file is the user's — so a row
+    /// past the grace period and linked to no message is left, file and all
+    /// (fails when the pointer insert omits `origin`, whose default is
+    /// `upload`).
+    #[test]
+    fn the_orphan_sweep_leaves_a_pointer_rows_file() {
+        let gp = crate::test_util::GuardedProject::new();
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        let file = gp.root.join("docs").join("plan.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"# Plan\n").unwrap();
+        let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let root = gp.root.to_string_lossy().into_owned();
+        let (row, _) = openalpaca_storage::ArtifactStore::new(&db)
+            .record_project_file(openalpaca_storage::NewProjectFile {
+                owner_id: "owner-1",
+                project_root: &root,
+                rel_path: "docs/plan.md",
+                content: b"# Plan\n",
+                task_id: None,
+                agent_id: None,
+            })
+            .unwrap();
+        // Past any grace period, and linked to no message.
+        db.with_connection(|conn| {
+            conn.execute(
+                "UPDATE file_assets SET created_at = datetime('now', '-48 hours')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(sweep_orphaned_uploads(&db, 24), 0);
+
+        assert_eq!(std::fs::read(&file).unwrap(), b"# Plan\n");
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), mtime);
+        assert!(
+            !file.starts_with(gp.home_root()),
+            "the user's folder, not the store"
+        );
+        assert!(
+            FileAssetRepository::new(&db)
+                .get_by_id(&row.id)
+                .unwrap()
+                .is_some(),
+            "the row stays"
+        );
+    }
 }
