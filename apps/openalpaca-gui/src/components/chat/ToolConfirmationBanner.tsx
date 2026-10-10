@@ -8,10 +8,14 @@
  *
  * The command box shows the literal argument the user is being asked to
  * approve. It is never summarised. The one exception is a **daemon-authored
- * preview** (design 09 §4.4, `memory_confirm`'s card, whose arguments are
- * three opaque ids): it is shown above the arguments, labelled as
- * OpenAlpaca's own text — composed from the notes, never from the call's
- * arguments — and the arguments stay.
+ * preview**, shown above the arguments and labelled as OpenAlpaca's own text,
+ * with the arguments staying: `memory_confirm`'s (design 09 §4.4, whose
+ * arguments are three opaque ids), composed from the notes; and, since
+ * storage design Stage 2 (R34, R49), `shell_execute`'s, `file_write`'s,
+ * `file_edit`'s and `send`'s, naming the folder a command or a write acts in.
+ * `file_edit`'s quotes `old_string` and `new_string` from the call — already
+ * escaped (`<U+XXXX>`) and cut to a budget by the daemon, with its own count
+ * and cut lines — so it is still drawn as written.
  *
  * **Hidden characters** (`lib/hidden-chars`). The tool name, the arguments
  * and the agent's name come from the model, an MCP server or a plugin, and

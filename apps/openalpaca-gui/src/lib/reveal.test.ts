@@ -65,11 +65,11 @@ describe("revealInFolder", () => {
 
   it("rejects with the shell's own sentence", async () => {
     vi.mocked(invoke).mockRejectedValue(
-      "/tmp/notes.md is not in an OpenAlpaca store, so it is not shown in its folder.",
+      "/tmp/notes.md is not in an OpenAlpaca store or one of your projects, so it is not shown in its folder.",
     );
 
     await expect(revealInFolder("/tmp/notes.md")).rejects.toThrow(
-      "/tmp/notes.md is not in an OpenAlpaca store, so it is not shown in its folder.",
+      "/tmp/notes.md is not in an OpenAlpaca store or one of your projects, so it is not shown in its folder.",
     );
   });
 });

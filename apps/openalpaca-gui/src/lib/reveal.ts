@@ -4,7 +4,8 @@
  * The one action here the daemon cannot do: the daemon may run on another
  * host, but the folder has to open on this one, so the Tauri shell's
  * `reveal_path` command does it. The shell checks the path itself (a regular
- * file in an OpenAlpaca store, symlinks resolved) and runs the platform's
+ * file in an OpenAlpaca store or under the root of a registered project that
+ * is not missing, symlinks resolved) and runs the platform's
  * reveal with the path as an argument. *Opening* a file is the daemon's route
  * (`POST /v1/files/{id}/open`, `useOpenFile`) and is labelled `Open`.
  */

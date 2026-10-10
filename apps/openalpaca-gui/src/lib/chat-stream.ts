@@ -127,10 +127,12 @@ export interface ChatConfirmationRequest {
    */
   stream_id?: string | null;
   /**
-   * What the card says about the call, written by the daemon from the tool's
-   * own read (design 09 §4.4) — shown above the literal arguments, composed
-   * from the notes, never from the call's arguments. `null`/absent for the
-   * ordinary card.
+   * What the card says about the call, written by the daemon and shown above
+   * the literal arguments: `memory_confirm`'s composed from the notes (design
+   * 09 §4.4); since storage design Stage 2 (R34, R49) `shell_execute`'s,
+   * `file_write`'s, `file_edit`'s and `send`'s, naming the folder the call acts
+   * in and quoting its path and strings, already escaped and cut by the daemon.
+   * `null`/absent for the ordinary card.
    */
   preview?: string | null;
   /**

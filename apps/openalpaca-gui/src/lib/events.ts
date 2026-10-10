@@ -96,7 +96,10 @@ export type ServerEvent =
   | { type: "followup_cancelled"; lane_key: string; followup_id: number; ts: string; instance_id: string; _id: number }
   // A produced artifact (plan §4.9). `name` is the head file's own name and
   // `path` its absolute location; `task_id`/`agent_id` are null for a loose
-  // artifact — a chat turn that ran no workflow. Never fired for uploads.
+  // artifact — a chat turn that ran no workflow. Never fired for uploads. For
+  // a file an agent wrote into its project (`in_project`, storage design §13)
+  // `name` is its path in the project, `path` the real file and `version`
+  // always 1; `openable` says whether Open is offered (ST-18).
   | { type: "artifact_written"; artifact_id: string; task_id: string | null; agent_id: string | null; name: string; kind: string; version: number; path: string; in_project: boolean; openable: boolean; ts: string; instance_id: string; _id: number }
   // One subagent lane of a run opening or closing (GAP-09). The payload is the
   // `subagent_span` row, so `started_at`/`ended_at` are the same strings
