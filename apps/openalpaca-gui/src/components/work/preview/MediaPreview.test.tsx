@@ -45,6 +45,47 @@ describe("ImagePreview (§3.25f) — load failure", () => {
     expect(screen.queryByText(/Export or Open/)).not.toBeInTheDocument();
   });
 
+  it("tries the same src again when the caller's failedNote changes, so a row whose mark is cleared shows its image (Y.4)", () => {
+    const marked =
+      "This file could not be read the last time it was asked for.";
+    const { rerender } = render(
+      <ImagePreview
+        filename="docs/diagram.png"
+        size="compact"
+        src={SRC}
+        failedNote={marked}
+      />,
+    );
+    fireEvent.error(screen.getByRole("img", { name: "docs/diagram.png" }));
+    expect(screen.getByText(marked)).toBeInTheDocument();
+
+    // The same row read again, still marked: the failure stands.
+    rerender(
+      <ImagePreview
+        filename="docs/diagram.png"
+        size="compact"
+        src={SRC}
+        failedNote={marked}
+      />,
+    );
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+
+    // The row read again with its mark cleared: a new attempt, not the
+    // placeholder's own sentence.
+    rerender(
+      <ImagePreview
+        filename="docs/diagram.png"
+        size="compact"
+        src={SRC}
+        failedNote={null}
+      />,
+    );
+    expect(
+      screen.getByRole("img", { name: "docs/diagram.png" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Export or Open/)).not.toBeInTheDocument();
+  });
+
   it("does not claim a load failure when there was never a src", () => {
     render(
       <ImagePreview

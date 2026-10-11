@@ -82,7 +82,7 @@ describe("previewPlan — a file written into the project", () => {
     });
   });
 
-  it("says a marked project file it cannot read could not be read last time, never that it is gone", () => {
+  it("says a marked project file it cannot read could not be read last time, never that it is gone nor that Export or Open opens it (Y.4)", () => {
     expect(
       previewPlan({
         ...written,
@@ -93,8 +93,24 @@ describe("previewPlan — a file written into the project", () => {
       }),
     ).toEqual({
       mode: "none",
-      note: "This file could not be read the last time it was asked for. Binary file, 2.0 KB — Export or Open opens it in its own app.",
+      note: "This file could not be read the last time it was asked for: it was not at its path in the project, or the project's folder is gone or has moved. Binary file, 2.0 KB.",
     });
+  });
+
+  it("says a marked project file too large to preview could not be read last time, sending it to neither Export nor Open (Y.4)", () => {
+    for (const openable of [true, false]) {
+      expect(
+        previewPlan({
+          ...written,
+          size_bytes: MAX_PREVIEW_BYTES + 1,
+          missing: true,
+          openable,
+        }),
+      ).toEqual({
+        mode: "none",
+        note: "This file could not be read the last time it was asked for: it was not at its path in the project, or the project's folder is gone or has moved. Too large to preview here (512.0 KB).",
+      });
+    }
   });
 
   it("loads a marked project image again, with a note for a failed load that names neither Export nor Open (X14)", () => {
@@ -108,7 +124,7 @@ describe("previewPlan — a file written into the project", () => {
     expect(previewPlan({ ...diagram, missing: true })).toEqual({
       mode: "image",
       failedNote:
-        "This file could not be read the last time it was asked for: it was not at its path in the project, or the project's folder is gone or has moved. Its row is kept, and the image is shown once the file can be read again.",
+        "This file could not be read the last time it was asked for: it was not at its path in the project, or the project's folder is gone or has moved. Its row is kept, and the image is loaded again the next time this preview is opened.",
     });
     // An image nobody marked keeps the placeholder's own sentence.
     expect(previewPlan(diagram)).toEqual({ mode: "image", failedNote: null });

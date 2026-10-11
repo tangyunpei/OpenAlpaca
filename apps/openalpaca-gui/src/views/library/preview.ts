@@ -24,8 +24,10 @@
  *     gone or has moved (R-T26) — never a guess before the read. An image is
  *     read by the browser's load, whose failure carries no status, so a
  *     marked image that does not load says what the mark means — the last
- *     read did not find it — and never sends the person to Export or Open,
- *     which fail the same way (X14).
+ *     read did not find it — and a marked binary or too-large file, which is
+ *     not read at all, says the same; neither sends the person to Export or
+ *     Open, which fail the same way while the file cannot be found (X14,
+ *     Y.4).
  *
  * A note names `Open` only for a row the daemon opens (`openable`, ST-18):
  * a project file of another kind — a `.sh`, a `Makefile` — is sent to Export.
@@ -54,13 +56,23 @@ export type PreviewPlan =
   | { mode: "none"; note: string };
 
 /**
- * What a marked result image says when its load fails (X14): the mark is a
- * read that did not find the file — not at its path, or its project missing
- * (R-T18) — and the load gives no status to tell the two apart, so the note
- * names both and claims neither.
+ * What a result file the daemon marked missing says when nothing is read
+ * that could say more (X14): the mark is a read that did not find the file —
+ * not at its path, or its project missing (R-T18) — and neither an image's
+ * load nor a plan that reads nothing gives a status to tell the two apart,
+ * so the note names both and claims neither.
  */
-const MARKED_IMAGE_NOTE =
-  "This file could not be read the last time it was asked for: it was not at its path in the project, or the project's folder is gone or has moved. Its row is kept, and the image is shown once the file can be read again.";
+const MARKED_NOTE =
+  "This file could not be read the last time it was asked for: it was not at its path in the project, or the project's folder is gone or has moved.";
+
+/**
+ * A marked result image whose load fails. It promises only what an open
+ * pane keeps (Y.4): nothing watches the file, so the image is loaded again
+ * when the preview is opened again — or, in an open one, when the row read
+ * again comes back unmarked (`ImagePreview` tries anew when its
+ * `failedNote` changes).
+ */
+const MARKED_IMAGE_NOTE = `${MARKED_NOTE} Its row is kept, and the image is loaded again the next time this preview is opened.`;
 
 /** `image/svg+xml`, `;charset=` and casing aside. */
 function isSvg(mimeType: string): boolean {
@@ -76,18 +88,19 @@ export function previewPlan(artifact: Artifact): PreviewPlan {
   }
 
   const plan = presentPlan(artifact);
+  if (!artifact.missing) return plan;
   // A result file the daemon marked missing is planned as if it were there:
   // the read is what finds it again (R37). A plan that reads nothing says
   // what the mark means — the last read failed — without claiming the file
-  // is gone, which is false for a project moved behind a link (R-T26).
-  if (artifact.missing && plan.mode === "image") {
+  // is gone, which is false for a project moved behind a link (R-T26), and
+  // without sending the person to Export or Open, which read the file the
+  // same way and fail the same way while it cannot be found (X14, Y.4).
+  if (plan.mode === "image") {
     return { mode: "image", failedNote: MARKED_IMAGE_NOTE };
   }
-  if (artifact.missing && plan.mode === "none") {
-    return {
-      mode: "none",
-      note: `This file could not be read the last time it was asked for. ${plan.note}`,
-    };
+  const unread = unreadFile(artifact);
+  if (unread !== null) {
+    return { mode: "none", note: `${MARKED_NOTE} ${unread.what}.` };
   }
   return plan;
 }
@@ -100,26 +113,9 @@ function presentPlan(artifact: Artifact): PreviewPlan {
     return { mode: "image", failedNote: null };
   }
 
-  // `Open` is named only where it is drawn: a row the daemon opens (ST-18).
-  const binaryNote = artifact.openable
-    ? "Export or Open opens it in its own app."
-    : "Export saves it.";
-  const wholeNote = artifact.openable
-    ? "Export or Open opens the whole file."
-    : "Export saves the whole file.";
-
-  if (artifact.kind === "binary") {
-    return {
-      mode: "none",
-      note: `Binary file, ${formatFileSize(artifact.size_bytes)} — ${binaryNote}`,
-    };
-  }
-
-  if (artifact.size_bytes > MAX_PREVIEW_BYTES) {
-    return {
-      mode: "none",
-      note: `Too large to preview here (${formatFileSize(artifact.size_bytes)}) — ${wholeNote}`,
-    };
+  const unread = unreadFile(artifact);
+  if (unread !== null) {
+    return { mode: "none", note: `${unread.what} — ${unread.then}` };
   }
 
   if (markup) {
@@ -131,6 +127,33 @@ function presentPlan(artifact: Artifact): PreviewPlan {
   }
 
   return { mode: "text", kind: toFileKind(artifact.kind), note: null };
+}
+
+/**
+ * A file the Preview draws nothing of — binary bytes, or more than it
+ * fetches — said as what it is and what Export (and Open, where it is
+ * drawn) does instead; `null` for a file the Preview reads.
+ */
+function unreadFile(artifact: Artifact): { what: string; then: string } | null {
+  const size = formatFileSize(artifact.size_bytes);
+  // `Open` is named only where it is drawn: a row the daemon opens (ST-18).
+  if (artifact.kind === "binary") {
+    return {
+      what: `Binary file, ${size}`,
+      then: artifact.openable
+        ? "Export or Open opens it in its own app."
+        : "Export saves it.",
+    };
+  }
+  if (artifact.size_bytes > MAX_PREVIEW_BYTES) {
+    return {
+      what: `Too large to preview here (${size})`,
+      then: artifact.openable
+        ? "Export or Open opens the whole file."
+        : "Export saves the whole file.",
+    };
+  }
+  return null;
 }
 
 /** How the bytes' read is going, as React Query reports it. */

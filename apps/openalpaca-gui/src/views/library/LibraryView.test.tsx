@@ -633,7 +633,7 @@ describe("Results — a file marked missing (d7-app-1, R-T26)", () => {
 
     expect(
       await screen.findByText(
-        "This file could not be read the last time it was asked for: it was not at its path in the project, or the project's folder is gone or has moved. Its row is kept, and the image is shown once the file can be read again.",
+        "This file could not be read the last time it was asked for: it was not at its path in the project, or the project's folder is gone or has moved. Its row is kept, and the image is loaded again the next time this preview is opened.",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/Export or Open/)).not.toBeInTheDocument();
