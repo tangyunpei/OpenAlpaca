@@ -63,9 +63,16 @@ async fn send_approval_with_retry(
 }
 
 /// An approval prompt split into Discord messages, only between lines
-/// (`common::chunk_approval_prompt`, the lead's ruling R-T32).
+/// (`common::chunk_approval_prompt`, the lead's ruling R-T32), every one
+/// after the first begun with the prompt's own continued line (Y.2) —
+/// escaped like the prompt itself, since the text is escaped before it is
+/// split, so it too reads on Discord exactly as written.
 fn approval_chunks(text: &str) -> Vec<String> {
-    crate::common::chunk_approval_prompt(text, DISCORD_MAX_LENGTH)
+    crate::common::chunk_approval_prompt(
+        text,
+        DISCORD_MAX_LENGTH,
+        &discord_plain_text(crate::common::APPROVAL_CONTINUED),
+    )
 }
 
 type ChannelId = twilight_model::id::Id<twilight_model::id::marker::ChannelMarker>;
@@ -746,26 +753,30 @@ mod tests {
         assert_eq!(lens, [2000, 1]);
     }
 
-    /// The lead's ruling R-T32 at Discord's 2,000 bytes: an approval prompt
-    /// sent in several messages keeps every preview line indented, so no
-    /// message starts a line at the margin with the model's text — across
-    /// every chunk one line starts `Arguments:` and one `Reply /yes`, the
-    /// prompt's own — and every chunk fits a message.
+    /// The lead's rulings R-T32 and Y.2 at Discord's 2,000 bytes: an approval
+    /// prompt sent in several messages keeps every preview line indented,
+    /// and every message after the first begins with the prompt's own
+    /// `(approval prompt, continued)` line, so even with each message's
+    /// leading whitespace trimmed — as Discord shows it — no message starts
+    /// a line at the margin with the model's text: across them all one line
+    /// starts `Arguments:` and one `Reply /yes`, the prompt's own. Each
+    /// message is read as Discord shows it, with no Markdown left
+    /// unescaped, the line included; none begins or ends with a blank line,
+    /// and every one fits.
     #[test]
-    fn a_chunked_approval_prompt_keeps_every_preview_line_indented() {
+    fn a_chunked_approval_prompt_begins_every_later_message_with_its_own_line() {
         let (args, preview) = crate::common::forging_edit_prompt(DISCORD_MAX_LENGTH);
         let chunks = approval_chunks(&approval_prompt("file_edit", &args, Some(&preview), 1));
 
-        assert!(chunks.len() > 1, "the prompt is long enough to be split");
-        let starting = |head: &str| {
-            chunks
-                .iter()
-                .flat_map(|chunk| chunk.lines())
-                .filter(|line| line.starts_with(head))
-                .count()
-        };
-        assert_eq!(starting("Arguments:"), 1, "{chunks:#?}");
-        assert_eq!(starting("Reply /yes"), 1, "{chunks:#?}");
+        let shown: Vec<String> = chunks
+            .iter()
+            .map(|chunk| {
+                let (shown, markup) = discord_reads(chunk);
+                assert!(markup.is_empty(), "unescaped markup {markup:?} in {chunk}");
+                shown
+            })
+            .collect();
+        crate::common::assert_approval_messages(&shown);
         assert!(
             chunks
                 .iter()

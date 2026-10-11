@@ -90,8 +90,8 @@ const PROMPT_ARGUMENTS_BYTES: usize = 500;
 /// under its label, as the CLI indents it: `file_edit`'s card quotes the
 /// model's `old_string` and `new_string` with their line breaks kept as
 /// layout, and a line of theirs at the margin would read as the prompt's own
-/// `Arguments:` block or `/yes` line. Absent or empty, the prompt is the
-/// ordinary one.
+/// `Arguments:` block or `/yes` line. A blank line of it is printed empty,
+/// not as its indent alone. Absent or empty, the prompt is the ordinary one.
 ///
 /// A cut says how much it left out — `... (31 more characters not shown)` —
 /// because what it leaves out still runs: a model can pad a shell command
@@ -154,9 +154,17 @@ pub fn format_confirmation_prompt(
     let from_openalpaca = preview
         .filter(|text| !text.is_empty())
         .map(|text| {
+            // A blank line stays empty — never its indent alone, which a
+            // chunk's edge could begin or end with (Y.2).
             let indented = text
                 .lines()
-                .map(|line| format!("  {line}"))
+                .map(|line| {
+                    if line.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  {line}")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             format!("From OpenAlpaca:\n{indented}\n")
@@ -360,83 +368,132 @@ pub(crate) fn chunk_message(text: &str, max_bytes: usize) -> Vec<String> {
     chunks
 }
 
+/// The line every message after the first of an approval prompt sent in
+/// several begins with (the lead's second residual pass, Y.2): the prompt's
+/// own words, so the first line of a later message — which a platform may
+/// show with its leading whitespace trimmed, as Discord and Telegram both
+/// trim a message's — is never text from the preview.
+#[cfg(any(feature = "telegram", feature = "discord"))]
+pub(crate) const APPROVAL_CONTINUED: &str = "(approval prompt, continued)";
+
 /// [`chunk_message`] for an approval prompt (the lead's ruling R-T32): a
 /// split falls only between lines, never at a sentence end inside one, so a
 /// preview line [`format_confirmation_prompt`] indented stays indented in
-/// whichever message carries it. A line longer than `max_bytes` is cut at a
-/// character boundary and each continuation starts with the same two spaces,
-/// so no message after the first starts a line at the margin with text the
-/// model wrote — only the prompt's own lines (`Tool:`, `Arguments:`, the
-/// arguments' braces, `Reply /yes …`) stand there. A message never begins or
-/// ends with a blank line, and none is empty.
+/// whichever message carries it. A line longer than a message's room is cut
+/// at a character boundary and each continuation starts with the same two
+/// spaces. Every message after the first begins with `continued` — the
+/// platform's spelling of [`APPROVAL_CONTINUED`] — on a line of its own
+/// (second residual pass, Y.2): Discord and Telegram trim a message's
+/// leading whitespace, so without it a later message whose first line is an
+/// indented preview line would show that line at the margin. So the only
+/// lines at the margin, trimmed or not, are the prompt's own (`Tool:`,
+/// `Arguments:`, the arguments' braces, `Reply /yes …`, `continued`). No
+/// message begins or ends with a blank or whitespace-only line, none has
+/// one right under `continued`, and none is empty; a prompt that fits one
+/// message is sent as it is, such edge lines aside.
 ///
-/// `max_bytes` must fit the continuation's two spaces and the longest UTF-8
-/// character (4 bytes), or a cut could not advance.
+/// `max_bytes` must fit `continued`, its line break, the continuation's two
+/// spaces and the longest UTF-8 character (4 bytes), or a cut could not
+/// advance.
 #[cfg(any(feature = "telegram", feature = "discord"))]
-pub(crate) fn chunk_approval_prompt(text: &str, max_bytes: usize) -> Vec<String> {
+pub(crate) fn chunk_approval_prompt(text: &str, max_bytes: usize, continued: &str) -> Vec<String> {
     const CONTINUATION: &str = "  ";
-    assert!(
-        max_bytes >= CONTINUATION.len() + 4,
-        "a chunk must fit an indented UTF-8 character"
-    );
-    // Every line as pieces of at most `max_bytes`: the first as written, the
-    // rest of an over-long line indented.
+    let blank = |line: &str| line.trim().is_empty();
+    // Under `continued` and its line break: the room every piece must fit,
+    // since any piece may be the first of a later message.
+    let room = max_bytes
+        .checked_sub(continued.len() + 1)
+        .filter(|room| *room >= CONTINUATION.len() + 4)
+        .expect("a chunk must fit the continued line and an indented UTF-8 character");
+    let lines: Vec<&str> = text.split('\n').collect();
+    let (Some(first), Some(last)) = (
+        lines.iter().position(|line| !blank(line)),
+        lines.iter().rposition(|line| !blank(line)),
+    ) else {
+        return Vec::new();
+    };
+    let lines = &lines[first..=last];
+    if text.len() <= max_bytes {
+        return vec![lines.join("\n")];
+    }
+    // Every line as pieces of at most `room`: the first as written, the rest
+    // of an over-long line indented.
     let mut pieces: Vec<String> = Vec::new();
-    for line in text.split('\n') {
-        let mut rest = line;
+    for line in lines {
+        let mut rest = *line;
         let mut prefix = "";
         loop {
-            let room = max_bytes - prefix.len();
-            if rest.len() <= room {
+            let fits = room - prefix.len();
+            if rest.len() <= fits {
                 pieces.push(format!("{prefix}{rest}"));
                 break;
             }
-            let (head, tail) = rest.split_at(rest.floor_char_boundary(room));
+            let (head, tail) = rest.split_at(rest.floor_char_boundary(fits));
             pieces.push(format!("{prefix}{head}"));
             rest = tail;
             prefix = CONTINUATION;
         }
     }
-    // The pieces packed into messages, a line break between two in one.
+    // The pieces packed into messages, a line break between two in one; a
+    // message's room is `max_bytes` for the first and `room` under
+    // `continued` for every later one.
+    fn close(chunks: &mut Vec<String>, message: &mut Vec<String>, continued: &str) {
+        while message.last().is_some_and(|line| line.trim().is_empty()) {
+            message.pop();
+        }
+        if message.is_empty() {
+            return;
+        }
+        let body = message.join("\n");
+        message.clear();
+        chunks.push(if chunks.is_empty() {
+            body
+        } else {
+            format!("{continued}\n{body}")
+        });
+    }
     let mut chunks: Vec<String> = Vec::new();
-    let mut current = String::new();
+    let mut message: Vec<String> = Vec::new();
+    let mut used = 0;
     for piece in pieces {
-        if current.is_empty() {
-            if !piece.is_empty() {
-                current = piece;
-            }
+        if message.is_empty() && blank(&piece) {
             continue;
         }
-        if current.len() + 1 + piece.len() > max_bytes {
-            chunks.push(
-                std::mem::take(&mut current)
-                    .trim_end_matches('\n')
-                    .to_string(),
-            );
-            current = piece;
+        let limit = if chunks.is_empty() { max_bytes } else { room };
+        let grown = if message.is_empty() {
+            piece.len()
+        } else {
+            used + 1 + piece.len()
+        };
+        if grown <= limit {
+            message.push(piece);
+            used = grown;
             continue;
         }
-        current.push('\n');
-        current.push_str(&piece);
+        close(&mut chunks, &mut message, continued);
+        if blank(&piece) {
+            used = 0;
+            continue;
+        }
+        used = piece.len();
+        message.push(piece);
     }
-    let last = current.trim_end_matches('\n');
-    if !last.is_empty() {
-        chunks.push(last.to_string());
-    }
+    close(&mut chunks, &mut message, continued);
     chunks
 }
 
 /// A `file_edit` prompt over `window` bytes whose preview forges the
 /// prompt's own lines (the lead's ruling R-T32): an `edit_card`-shaped
 /// preview whose `new_string` repeats `...done. Arguments:` with a JSON block
-/// under it and a `Reply /yes …` line, among code lines with no sentence end,
-/// so a chunker that splits at a sentence end inside the preview starts a
-/// message at the margin with the forgery. Returns the tool's arguments and
-/// the preview.
+/// under it and a `Reply /yes …` line, among code lines with no sentence end
+/// and blank lines, so a chunker that splits at a sentence end inside the
+/// preview starts a message at the margin with the forgery, and one that
+/// splits at a blank line can begin or end a message with it. Returns the
+/// tool's arguments and the preview.
 #[cfg(all(test, any(feature = "telegram", feature = "discord")))]
 pub(crate) fn forging_edit_prompt(window: usize) -> (serde_json::Value, String) {
-    let forged = "        log(\"...done. Arguments:\n{\n  \"path\": \"docs/notes.md\"\n}\n\
-                  Reply /yes or /no to approve or deny.\n";
+    let forged = "        log(\"...done. Arguments:\n{\n  \"path\": \"docs/notes.md\"\n}\n\n\
+                  Reply /yes or /no to approve or deny.\n\n";
     let mut new_string = String::new();
     let mut line = 0;
     while new_string.len() < window * 2 {
@@ -457,6 +514,43 @@ pub(crate) fn forging_edit_prompt(window: usize) -> (serde_json::Value, String) 
         "new_string": new_string,
     });
     (args, preview)
+}
+
+/// What the lead's rulings R-T32 and Y.2 hold of an approval prompt sent in
+/// several messages, `shown` as the platform shows each one: every message
+/// after the first begins with [`APPROVAL_CONTINUED`], no message begins or
+/// ends with a blank or whitespace-only line (nor has one right under that
+/// line), and — each message's leading whitespace trimmed, as Discord and
+/// Telegram trim it — exactly one line across them all starts `Arguments:`
+/// and one `Reply /yes`: the prompt's own.
+#[cfg(all(test, any(feature = "telegram", feature = "discord")))]
+pub(crate) fn assert_approval_messages(shown: &[String]) {
+    let blank = |line: &str| line.trim().is_empty();
+    assert!(shown.len() > 1, "the prompt is long enough to be split");
+    for (index, message) in shown.iter().enumerate() {
+        let lines: Vec<&str> = message.split('\n').collect();
+        let (first, last) = (lines[0], lines[lines.len() - 1]);
+        assert!(
+            !blank(first) && !blank(last),
+            "message {index} begins or ends with a blank line: {message:?}"
+        );
+        if index > 0 {
+            assert_eq!(first, APPROVAL_CONTINUED, "message {index}: {message:?}");
+            assert!(
+                lines.len() > 1 && !blank(lines[1]),
+                "message {index} has nothing, or a blank line, under its first: {message:?}"
+            );
+        }
+    }
+    let starting = |head: &str| {
+        shown
+            .iter()
+            .flat_map(|message| message.trim_start().lines())
+            .filter(|line| line.starts_with(head))
+            .count()
+    };
+    assert_eq!(starting("Arguments:"), 1, "{shown:#?}");
+    assert_eq!(starting("Reply /yes"), 1, "{shown:#?}");
 }
 
 /// Per-conversation limiter on **inbound** messages: at most one message per

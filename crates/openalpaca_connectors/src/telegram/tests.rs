@@ -15,27 +15,21 @@ fn chunk_message_uses_the_telegram_limit() {
     assert_eq!(lens, [4096, 1]);
 }
 
-/// The lead's ruling R-T32 at Telegram's 4,096 bytes: an approval prompt
-/// sent in several messages keeps every preview line indented, so no message
-/// starts a line at the margin with the model's text — across every chunk
-/// one line starts `Arguments:` and one `Reply /yes`, the prompt's own — and
-/// every chunk fits a message.
+/// The lead's rulings R-T32 and Y.2 at Telegram's 4,096 bytes: an approval
+/// prompt sent in several messages keeps every preview line indented, and
+/// every message after the first begins with the prompt's own
+/// `(approval prompt, continued)` line, so even with each message's leading
+/// whitespace trimmed — as Telegram shows it — no message starts a line at
+/// the margin with the model's text: across them all one line starts
+/// `Arguments:` and one `Reply /yes`, the prompt's own. No message begins or
+/// ends with a blank line, and every one fits.
 #[test]
-fn a_chunked_approval_prompt_keeps_every_preview_line_indented() {
+fn a_chunked_approval_prompt_begins_every_later_message_with_its_own_line() {
     let (args, preview) = crate::common::forging_edit_prompt(TELEGRAM_MAX_LENGTH);
     let prompt = crate::common::format_confirmation_prompt("file_edit", &args, Some(&preview), 1);
     let chunks = approval_chunks(&prompt);
 
-    assert!(chunks.len() > 1, "the prompt is long enough to be split");
-    let starting = |head: &str| {
-        chunks
-            .iter()
-            .flat_map(|chunk| chunk.lines())
-            .filter(|line| line.starts_with(head))
-            .count()
-    };
-    assert_eq!(starting("Arguments:"), 1, "{chunks:#?}");
-    assert_eq!(starting("Reply /yes"), 1, "{chunks:#?}");
+    crate::common::assert_approval_messages(&chunks);
     assert!(
         chunks
             .iter()

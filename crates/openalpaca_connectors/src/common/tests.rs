@@ -173,6 +173,34 @@ mod confirmation {
         );
     }
 
+    /// A blank line of the preview — `file_edit`'s card keeps the empty
+    /// lines of the strings it quotes — is printed as an empty line, not as
+    /// its two-space indent alone, so no line of the prompt is only
+    /// whitespace (second residual pass, Y.2).
+    #[test]
+    fn a_blank_preview_line_is_an_empty_line_not_its_indent() {
+        let prompt = format_confirmation_prompt(
+            "file_edit",
+            &serde_json::json!({"path": "docs/a.md"}),
+            Some("Edits docs/a.md in the project folder /w/app.\nWith:\nfirst\n\nthird"),
+            1,
+        );
+
+        assert!(
+            prompt.contains(
+                "From OpenAlpaca:\n  Edits docs/a.md in the project folder /w/app.\n  With:\n  \
+                 first\n\n  third\nArguments:\n"
+            ),
+            "{prompt:?}"
+        );
+        assert!(
+            prompt
+                .split('\n')
+                .all(|line| line.is_empty() || !line.trim().is_empty()),
+            "{prompt:?}"
+        );
+    }
+
     /// Every listener pushes the request to the back of the chat's queue and
     /// passes the queue's length, so a prompt that arrives while two others
     /// wait is the third — and a reply answers the oldest, not this one.
@@ -978,32 +1006,47 @@ mod attachments {
 
 #[cfg(any(feature = "telegram", feature = "discord"))]
 mod chunking {
-    use super::super::{chunk_approval_prompt, chunk_message};
+    use super::super::{
+        APPROVAL_CONTINUED, assert_approval_messages, chunk_approval_prompt, chunk_message,
+        forging_edit_prompt, format_confirmation_prompt,
+    };
 
-    /// The lead's ruling R-T32, the chunker's own contract: an approval
-    /// prompt is split only between lines — a sentence end inside a line is
-    /// never a split — and a line longer than the limit is cut at a character
-    /// boundary with every continuation indented two spaces, so the only
-    /// lines at the margin in any message are the ones the text put there.
-    /// No message is empty, longer than the limit, or begins or ends with a
-    /// blank line.
+    /// The lead's ruling R-T32 and the second residual pass's Y.2, the
+    /// chunker's own contract: an approval prompt is split only between
+    /// lines — a sentence end inside a line is never a split — a line longer
+    /// than a message's room is cut at a character boundary with every
+    /// continuation indented two spaces, and every message after the first
+    /// begins with the continued line. So the only lines at the margin in
+    /// any message are the ones the text put there and that line. No
+    /// message is empty, longer than the limit, or begins or ends with a
+    /// blank or whitespace-only line, and none has one under its first.
     #[test]
     fn an_approval_prompt_is_split_only_between_lines_and_a_cut_line_stays_indented() {
-        let max = 40;
+        let max = 70;
         let long = format!("  {}", "\u{4e16}x. y".repeat(30));
-        let text = format!("Header:\n\n  one. two\n{long}\n  three. four\n\nReply /yes");
+        let text = format!("Header:\n\n  one. two\n   \n{long}\n\n  three. four\n  \n\nReply /yes");
 
-        let chunks = chunk_approval_prompt(&text, max);
+        let chunks = chunk_approval_prompt(&text, max, APPROVAL_CONTINUED);
 
         assert!(chunks.len() > 3, "{chunks:#?}");
-        for chunk in &chunks {
+        let blank = |line: &str| line.trim().is_empty();
+        for (index, chunk) in chunks.iter().enumerate() {
             assert!(!chunk.is_empty() && chunk.len() <= max, "{chunk:?}");
+            let lines: Vec<&str> = chunk.split('\n').collect();
             assert!(
-                !chunk.starts_with('\n') && !chunk.ends_with('\n'),
+                !blank(lines[0]) && !blank(lines[lines.len() - 1]),
                 "{chunk:?}"
             );
+            if index > 0 {
+                assert_eq!(lines[0], APPROVAL_CONTINUED, "{chunk:?}");
+                assert!(!blank(lines[1]), "{chunk:?}");
+            }
         }
-        let lines: Vec<&str> = chunks.iter().flat_map(|c| c.lines()).collect();
+        let lines: Vec<&str> = chunks
+            .iter()
+            .flat_map(|c| c.lines())
+            .filter(|l| *l != APPROVAL_CONTINUED)
+            .collect();
         let at_margin: Vec<&str> = lines
             .iter()
             .copied()
@@ -1020,12 +1063,45 @@ mod chunking {
         assert_eq!(rebuilt, long.strip_prefix("  ").unwrap());
     }
 
-    /// Below room for the continuation's indent and one character, a cut
-    /// could not advance, so such a limit is refused outright.
+    /// A prompt that fits one message is that message, as written — no
+    /// continued line, and no line cut, though its 42-byte line is longer
+    /// than the 35 bytes a later message has under the continued line.
     #[test]
-    #[should_panic(expected = "a chunk must fit an indented UTF-8 character")]
+    fn an_approval_prompt_that_fits_is_one_message_as_written() {
+        let text = format!("Header:\n  {}\n\nReply /yes", "a".repeat(40));
+        assert_eq!(text.len(), 62);
+
+        assert_eq!(chunk_approval_prompt(&text, 64, APPROVAL_CONTINUED), [text]);
+        assert!(chunk_approval_prompt("  \n\n", 64, APPROVAL_CONTINUED).is_empty());
+    }
+
+    /// Y.2 at both platforms' limits, over a `file_edit` prompt whose
+    /// preview forges the prompt's own lines among blank ones: read with
+    /// each message's leading whitespace trimmed, as both platforms show a
+    /// message, one line starts `Arguments:` and one `Reply /yes`, and every
+    /// message after the first begins with the continued line.
+    #[test]
+    fn a_chunked_approval_prompt_shows_no_preview_line_at_the_margin_when_trimmed() {
+        for window in [2000, 4096] {
+            let (args, preview) = forging_edit_prompt(window);
+            let prompt = format_confirmation_prompt("file_edit", &args, Some(&preview), 1);
+
+            let chunks = chunk_approval_prompt(&prompt, window, APPROVAL_CONTINUED);
+
+            assert_approval_messages(&chunks);
+            assert!(chunks.iter().all(|c| c.len() <= window), "{window}");
+        }
+    }
+
+    /// Below room for the continued line, the continuation's indent and one
+    /// character, a cut could not advance, so such a limit is refused
+    /// outright.
+    #[test]
+    #[should_panic(
+        expected = "a chunk must fit the continued line and an indented UTF-8 character"
+    )]
     fn an_approval_limit_below_an_indented_character_is_refused() {
-        chunk_approval_prompt("abc", 5);
+        chunk_approval_prompt("abc", APPROVAL_CONTINUED.len() + 6, APPROVAL_CONTINUED);
     }
 
     /// Every property the two platform copies had, asserted at one limit.

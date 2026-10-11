@@ -41,9 +41,14 @@ pub(super) async fn send_approval_with_retry(
 }
 
 /// An approval prompt split into Telegram messages, only between lines
-/// (`common::chunk_approval_prompt`, the lead's ruling R-T32).
+/// (`common::chunk_approval_prompt`, the lead's ruling R-T32), every one
+/// after the first begun with the prompt's own continued line (Y.2).
 pub(super) fn approval_chunks(text: &str) -> Vec<String> {
-    crate::common::chunk_approval_prompt(text, TELEGRAM_MAX_LENGTH)
+    crate::common::chunk_approval_prompt(
+        text,
+        TELEGRAM_MAX_LENGTH,
+        crate::common::APPROVAL_CONTINUED,
+    )
 }
 
 /// An approval prompt, or the acknowledgement of a reply to one, as a
