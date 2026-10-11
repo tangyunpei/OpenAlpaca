@@ -1836,3 +1836,35 @@ async fn a_builtins_null_byte_is_still_refused() {
         .unwrap_err();
     assert_eq!(err, "Input blocked: Argument contains null bytes");
 }
+
+// ── R-T35: an explicit confirmation list naming `file_write` asks for `file_edit` ──
+
+/// The lead's ruling R-T35: `file_edit` provides `file_write`'s capability
+/// (R42), so whoever holds `file_write` holds `file_edit` beside it — a
+/// template granted the capability, a skill allowed `file_write` by name
+/// (`constraints::paired_tools`). An explicit list that names `file_write`
+/// asks for `file_edit` too, so a project file is never changed with no card
+/// where the author asked writes to prompt (T34's shape). Only that pair: a
+/// list naming a reader, or naming neither half, is returned as written, and
+/// one naming both is not doubled.
+#[test]
+fn an_explicit_confirmation_list_naming_file_write_also_asks_for_file_edit() {
+    let registry = make_registry();
+    let set = |list: &[&str]| {
+        let mut policy = make_policy("agent1");
+        policy.require_confirmation_for = list.iter().map(|name| name.to_string()).collect();
+        effective_confirmation_set(&policy, &registry)
+    };
+
+    assert_eq!(set(&["file_write"]), ["file_write", "file_edit"]);
+    assert_eq!(
+        set(&["shell_execute", "file_write"]),
+        ["shell_execute", "file_write", "file_edit"]
+    );
+    assert_eq!(
+        set(&["file_edit", "file_write"]),
+        ["file_edit", "file_write"]
+    );
+    assert_eq!(set(&["file_read"]), ["file_read"]);
+    assert_eq!(set(&["shell_execute"]), ["shell_execute"]);
+}

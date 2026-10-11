@@ -906,3 +906,175 @@ async fn the_sandbox_raises_file_edits_card_and_a_deny_leaves_the_file() {
     assert!(refused.contains("denied by user"), "{refused}");
     assert_eq!(b.bytes("src/a.rs"), before.as_bytes());
 }
+
+// ── R-T35: a confirmation list naming file_write asks before file_edit ───
+
+/// The builtins as the agent paths register them, with this bench's
+/// database, behind a sandbox with a broker.
+fn builtins_sandbox(
+    b: &Bench,
+) -> (
+    Arc<crate::tools::ToolRegistry>,
+    crate::security::sandbox::SandboxManager,
+    Arc<crate::security::confirmation::ConfirmationBroker>,
+) {
+    use crate::bus::EventBus;
+    use crate::daemon_config::CircuitBreakerConfig;
+    use crate::security::confirmation::ConfirmationBroker;
+    use crate::security::sandbox::SandboxManager;
+    use crate::tools::ToolRegistry;
+
+    let registry = ToolRegistry::default();
+    for tool in crate::tools::builtins::builtin_tools(Some(b.db.clone()), None, None) {
+        registry.register(tool).unwrap();
+    }
+    let registry = Arc::new(registry);
+    let mut sandbox = SandboxManager::new(
+        registry.clone(),
+        EventBus::new(16),
+        &CircuitBreakerConfig::default(),
+    );
+    let broker = Arc::new(ConfirmationBroker::new());
+    sandbox.set_confirmation_broker(broker.clone());
+    (registry, sandbox, broker)
+}
+
+/// `file_edit` of `docs/notes.md` in this bench's project turn, run under
+/// `policy` while a person denies the first card that comes. Returns the
+/// tool the card named (`None` when no card came within three seconds) and
+/// the call's answer.
+async fn file_edit_with_cards_denied(
+    b: &Bench,
+    sandbox: &crate::security::sandbox::SandboxManager,
+    broker: &Arc<crate::security::confirmation::ConfirmationBroker>,
+    policy: &crate::security::sandbox::SandboxPolicy,
+) -> (Option<String>, Result<String, String>) {
+    use crate::security::confirmation::ConfirmationResponse;
+
+    let answering = {
+        let broker = broker.clone();
+        tokio::spawn(async move {
+            for _ in 0..300 {
+                if let Some(card) = broker.pending_requests().into_iter().next() {
+                    broker
+                        .respond(
+                            &card.request_id,
+                            ConfirmationResponse {
+                                approved: false,
+                                approval_scope: None,
+                            },
+                        )
+                        .unwrap();
+                    return Some(card.tool_name);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            None
+        })
+    };
+    let call = openalpaca_llm::ToolCall {
+        id: "tc-r-t35".to_string(),
+        name: "file_edit".to_string(),
+        arguments: args("docs/notes.md", "old line", "new line"),
+    };
+    let ctx = ToolContext {
+        agent_id: Some(policy.agent_id.clone()),
+        ..b.ctx()
+    };
+    let answer = sandbox.execute_tool(&call, policy, &ctx).await;
+    (answering.await.unwrap(), answer)
+}
+
+/// The lead's ruling R-T35 on an agent template: one granted the
+/// `file_write` capability holds `file_edit` beside it (R42), so a
+/// `require_confirmation_for` naming `file_write` asks before `file_edit`
+/// too — the card is raised, a Deny leaves the file as it was, and no
+/// pre-edit copy or row is kept. Walked as the subagent spawn walks it:
+/// `to_subagent`, the surface the capability resolves to, the policy from
+/// the constraints with that surface admitted.
+#[tokio::test]
+async fn a_template_whose_confirmation_list_names_file_write_asks_before_file_edit() {
+    use crate::security::sandbox::SandboxPolicy;
+
+    let b = Bench::new();
+    b.put("docs/notes.md", b"old line\n");
+    let (registry, sandbox, broker) = builtins_sandbox(&b);
+    let doc = crate::agent::template::parse_agent_markdown(
+        "---\nid: \"careful_writer\"\nname: \"Careful Writer\"\ndescription: \"Writes \
+         files\"\ncapabilities:\n  - \"file_write\"\nrequire_confirmation_for:\n  - \
+         \"file_write\"\n---\n\n## Persona\n\nYou write files.\n",
+    )
+    .unwrap();
+    let agent = doc.to_subagent("careful_writer::r-t35", "task-1");
+    let surface = crate::tools::resolve_agent_tools(&agent, &registry, None);
+    let names: Vec<&str> = surface.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        names.contains(&"file_edit"),
+        "the capability brings file_edit: {names:?}"
+    );
+    let mut policy = SandboxPolicy::from_constraints(&agent.id, &agent.constraints);
+    policy.admit_tool_surface(&surface);
+    policy.confirmation_timeout_secs = Some(5);
+
+    let (card, answer) = file_edit_with_cards_denied(&b, &sandbox, &broker, &policy).await;
+
+    assert_eq!(card.as_deref(), Some("file_edit"), "{answer:?}");
+    assert!(answer.unwrap_err().contains("denied by user"));
+    assert_eq!(b.bytes("docs/notes.md"), b"old line\n");
+    assert!(b.images().is_empty(), "a denied edit keeps no copy");
+    assert!(b.rows().is_empty(), "a denied edit records no row");
+}
+
+/// The lead's ruling R-T35 on a skill: one whose legacy `tools.allow` names
+/// `file_write` is handed `file_edit` with it (`constraints::paired_tools`,
+/// residual X5), so its `permissions.confirm.tools` naming `file_write` asks
+/// before `file_edit` too. The policy is the skill tier's
+/// (`orchestrator/skill/invocation.rs`): the closed set of the tools
+/// resolved for it, its deny list, its confirm list. The call runs in a turn
+/// that keeps a conversation log; on the skill tiers themselves no log is
+/// kept, so `file_edit` of an existing file is refused before any card
+/// (R46), and this is where the card shows.
+#[tokio::test]
+async fn a_skill_whose_confirm_list_names_file_write_asks_before_file_edit() {
+    use crate::security::capabilities::Allowlist;
+    use crate::security::sandbox::SandboxPolicy;
+
+    let b = Bench::new();
+    b.put("docs/notes.md", b"old line\n");
+    let (_registry, sandbox, broker) = builtins_sandbox(&b);
+    let skill = crate::middleware::skill::parse_skill_markdown(
+        "---\nname: \"careful-writer\"\ndescription: \"Writes files\"\ntools:\n  allow:\n    - \
+         file_write\npermissions:\n  confirm:\n    tools:\n      - file_write\n---\n\n## \
+         Instructions\n\nWrite.\n",
+    )
+    .unwrap();
+    let fm = &skill.frontmatter;
+    let mut resolved: Vec<&str> = fm.tools.allow.iter().map(String::as_str).collect();
+    let partners = crate::orchestrator::skill::constraints::paired_tools(
+        resolved.iter().copied(),
+        &fm.tools.deny,
+    );
+    resolved.extend(partners);
+    assert_eq!(resolved, ["file_write", "file_edit"]);
+    let policy = SandboxPolicy {
+        agent_id: "orchestrator".to_string(),
+        allowed_capabilities: Allowlist::only(resolved),
+        denied_capabilities: fm.tools.deny.clone(),
+        require_confirmation_for: fm.permissions.confirm.tools.clone(),
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: Some(5),
+        auto_approve: false,
+        unattended: false,
+    };
+
+    let (card, answer) = file_edit_with_cards_denied(&b, &sandbox, &broker, &policy).await;
+
+    assert_eq!(card.as_deref(), Some("file_edit"), "{answer:?}");
+    assert!(answer.unwrap_err().contains("denied by user"));
+    assert_eq!(b.bytes("docs/notes.md"), b"old line\n");
+    assert!(b.images().is_empty(), "a denied edit keeps no copy");
+    assert!(b.rows().is_empty(), "a denied edit records no row");
+}

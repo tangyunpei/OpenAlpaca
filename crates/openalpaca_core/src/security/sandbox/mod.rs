@@ -752,15 +752,27 @@ fn disciplined(ctx: &ToolContext) -> ToolContext {
 
 /// Compute the effective confirmation set for a policy.
 ///
-/// - If `policy.require_confirmation_for` is non-empty, return it verbatim
-///   (explicit list wins per design spec Q1(C)).
+/// - If `policy.require_confirmation_for` is non-empty, return it as written
+///   (explicit list wins per design spec Q1(C)) — with `file_edit` added when
+///   it names `file_write` and not `file_edit` (the lead's ruling R-T35).
+///   `file_edit` provides `file_write`'s capability (R42), so a template
+///   granted `file_write` and a skill allowed it by name
+///   (`orchestrator::skill::constraints::paired_tools`) hold `file_edit`
+///   beside it; without this, a list asking every write to prompt would let a
+///   project file be changed with no card (T34's shape). Only that pair: a
+///   reader brings a reader, which never asks.
 /// - Otherwise, derive from `destructive_hint=true` annotations on registered tools.
 pub(crate) fn effective_confirmation_set(
     policy: &SandboxPolicy,
     registry: &crate::tools::ToolRegistry,
 ) -> Vec<String> {
     if !policy.require_confirmation_for.is_empty() {
-        return policy.require_confirmation_for.clone();
+        let mut set = policy.require_confirmation_for.clone();
+        let names = |tool: &str| set.iter().any(|name| name == tool);
+        if names("file_write") && !names("file_edit") {
+            set.push("file_edit".to_string());
+        }
+        return set;
     }
     registry
         .iter_registered_tools()

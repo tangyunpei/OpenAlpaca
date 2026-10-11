@@ -388,8 +388,9 @@ fn shipped_templates_are_handed_the_stage_2_readers_by_the_capabilities_they_nam
 /// Owner decision T34 (`tasks/api-fix-plan.md` §0; storage design §12 R30,
 /// Stage 0 fix F1). The shipped `system_agent` template used to end its
 /// frontmatter with `require_confirmation_for: ["file_delete"]`. An explicit,
-/// non-empty list is returned verbatim by `effective_confirmation_set`
-/// (`security/sandbox/mod.rs`) instead of the set derived from the tools'
+/// non-empty list is returned as written by `effective_confirmation_set`
+/// (`security/sandbox/mod.rs`; since R-T35 with `file_edit` added beside a
+/// `file_write` it names) instead of the set derived from the tools'
 /// `destructive_hint` annotations, and no tool is named `file_delete`, so
 /// that agent's `shell_execute` and `file_write` never prompted — live, the
 /// lead delegated to it a shell write the person had just denied another
