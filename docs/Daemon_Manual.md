@@ -569,7 +569,7 @@ lane never posts its completion report or its confirmation prompts there.
 | `POST /v1/files/upload` | Multipart upload (body limit 100 MiB). Answers `{id, filename, mime_type, size_bytes, status}`; the `id` is what a chat turn names in `attachments`. |
 | `GET /v1/files/{id}` | Upload metadata. |
 | `GET /v1/files/{id}/content` | The bytes. Query token or bearer header. A result file in the project is read through its project's folder: `410 ARTIFACT_GONE` when the file is no longer there, `410 ARTIFACT_PROJECT_MISSING` when its project is missing (*Where an agent's files land*, below). |
-| `POST /v1/files/{id}/open` | Open the file with the OS default application. A result file in the project is opened only when the artifact store keeps its extension — text, Markdown or PDF, code or config, a table, a raster image, HTML, an archive or an office document; anything else (`.sh`, `.command`, `.svg`, `.exe`, `Makefile`, a dotfile such as `.env`) is `409 OPEN_NOT_OFFERED`: show it in its folder instead. That is decided again on what the file resolves to when it is opened, so a result file replaced since by a folder, or by a link to a script or an app in the project, is `409 OPEN_NOT_OFFERED` too, and the default application is never asked. A result file of a missing project is `410 ARTIFACT_PROJECT_MISSING`. |
+| `POST /v1/files/{id}/open` | Open the file with the OS default application. A result file in the project is opened only when the artifact store keeps its extension — text, Markdown or PDF, code or config, a table, a raster image, HTML, an archive or an office document; anything else (`.sh`, `.command`, `.svg`, `.exe`, `Makefile`, a dotfile such as `.env`) is `409 OPEN_NOT_OFFERED`: show it in its folder instead. That is decided again on what the file resolves to when it is opened, so a result file replaced since by a folder, or by a link to a script or an app in the project, is `409 OPEN_NOT_OFFERED` too, and the default application is never asked. An openable result file of a missing project is `410 ARTIFACT_PROJECT_MISSING`, and one no longer there in its project `410 ARTIFACT_GONE`. A by-product is opened at its file in the store, resolved inside its own folder there: a stored file replaced since by a link out of that folder is refused, one that is not a regular file is `409 OPEN_NOT_OFFERED`, and one gone from the store is `410 ARTIFACT_GONE` — the default application is asked in none of these. |
 | `GET /v1/artifacts` | List produced artifacts (filters and paging). Each row carries `in_project` — a result file an agent wrote into the project, which points at the real file — and `openable`, whether `Open` is offered for it. `in_project=true` lists only the project's result files, `in_project=false` only by-products; absent, both. A row whose file was not there the last time it was read carries `missing: true` and is listed only with `include_missing=true`; a result file's mark goes when a later read finds the file again. |
 | `GET /v1/artifacts/{id}` | One artifact. |
 | `GET /v1/artifacts/{id}/versions` | Its versions. A result file in the project has none and answers an empty list: what OpenAlpaca keeps of it is the content it had before `file_write` or `file_edit` replaced or edited it, in the conversation's log (`~/.openalpaca/sessions/<id>/snapshots/`; a shell command's changes keep no copy), and any longer history is the project's own — git's, where the project is a repository. |
@@ -606,8 +606,9 @@ works in).
   versions — OpenAlpaca keeps only the pre-edit copies above, and any longer
   history is the project's own, git's where the project is a repository — and
   its record follows an edit you make yourself. If the file goes, its row is
-  kept and marked `missing`, and a read that finds the file again — once you
-  put it back — clears the mark. A result file of a project that is
+  kept, and the next read — a preview, Open or Export — marks it `missing`
+  (until then it is listed as before); a read that finds the file again —
+  once you put it back — clears the mark. A result file of a project that is
   `missing` — its folder gone, renamed by case only, or moved with a link left
   at its old path — is never read through that path: the content routes and
   Open answer `410 ARTIFACT_PROJECT_MISSING` with the sentence
@@ -1332,7 +1333,12 @@ its process group, as `setsid` or a program that turns itself into a
 background service does, is out of reach). A chat turn cannot be cancelled: a
 command it runs ends at its time limit. A command killed mid-way gets no
 chance to clean up and may leave its own lock files behind — `.git/index.lock`
-after a git command, for example — which you remove by hand.
+after a git command, for example — which you remove by hand. What a command
+prints reaches the agent cut at 512 KB per stream — stdout and stderr each,
+the rest read and dropped while it runs — and a stream cut there ends with a
+line saying so (`[stdout cut at 512 KB; the rest was not kept]`); a command
+tool and a skill script are cut the same way (a failed script's message
+shows the first 500 characters of its stderr).
 
 **The `../` check.** Before a tool runs, its arguments are checked for `../`.
 OpenAlpaca's own tools are exempt — their path arguments carry their own `..`
@@ -1611,8 +1617,13 @@ Confirmation prompts also reach connector channels. When the originating lane
 belongs to Telegram, iMessage or Discord, the connector sends the prompt into
 the conversation and the user replies `/yes` (or `/y`) to approve, `/no` (or
 `/n`) to deny. The prompt shows the daemon's preview above the arguments, as
-the app's card does. (A connector's `/yes` is keyed by chat, not by sender, so it is
-not a user-directed answer: `memory_confirm` is never offered on a connector's
+the app's card does, under `From OpenAlpaca:` with every line of it indented
+two spaces, so nothing a tool or a model wrote there can pass for the
+prompt's own `Arguments:` or `Reply /yes` line. On Telegram and Discord a
+prompt too long for one message is split only between lines, and a line
+longer than a message goes on, indented the same, in the next. (A
+connector's `/yes` is keyed by chat, not by sender, so it is not a
+user-directed answer: `memory_confirm` is never offered on a connector's
 lane, and a suggestion is never raised there.) Multiple pending confirmations in one conversation are answered
 in FIFO order: a prompt sent while others wait says its place and that a reply
 answers the oldest first (`2 of 2 pending; each /yes or /no answers the oldest

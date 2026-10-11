@@ -222,7 +222,7 @@ Controls which tools the skill can use. **Ignored when `requires_capabilities` i
 
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
-| `tools.allow` | `Vec<String>` | `[]` | ENFORCED | Tool allowlist (legacy name-based path). Only these tools are available during the skill's agentic loop. Empty (with no `requires_capabilities`) means no tools. |
+| `tools.allow` | `Vec<String>` | `[]` | ENFORCED | Tool allowlist (legacy name-based path). Only these tools are available during the skill's agentic loop, with the partner `file_read`, `file_write` or `read_result` brings (Section 7, *Tool Set Algorithm*). Empty (with no `requires_capabilities`) means no tools. |
 | `tools.deny` | `Vec<String>` | `[]` | ENFORCED | Tool denylist. Removed from the resolved tool set (both resolution paths) and folded into the sandbox policy's denied capabilities. |
 | `tools.defaults` | `HashMap<String, Value>` | `{}` | DEPRECATED | No runtime effect. A non-empty map logs a deprecation warning at scan time. |
 | `tools.rate_limit` | `RateLimitConfig` | `{max_calls: null}` | ENFORCED | `max_calls` is enforced as a total cap for the invocation. |
@@ -298,7 +298,7 @@ LLM calls skill_script:<name>({"key": "value", ...})
         → args: ["--key=value", ...] (json_to_cli_args conversion)
         → cwd: skill directory (<skill-dir>/)
         → timeout: per-script (default 30s), enforced via tokio::time::timeout
-      → stdout (capped at 512 KB) → Ok(result)
+      → stdout (cut at 512 KB, the cut said on a line of its own) → Ok(result)
       → non-zero exit → Err("Script failed (exit N): <stderr, first 500 chars>")
 ```
 
@@ -324,7 +324,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 
 - **Path traversal prevention**: Script paths are canonicalized via `canonicalize()` and verified to resolve within the skill's `scripts/` directory. Paths that escape (including via symlinks) are blocked at registration time.
 - **Timeout enforcement**: Each script has a configurable timeout (default 30s); timed-out scripts are killed and the tool call fails with `"Script timed out after {N}s"`.
-- **Output cap**: stdout/stderr are capped at 512 KB to prevent memory pressure.
+- **Output cap**: stdout/stderr are capped at 512 KB each to prevent memory pressure — the rest is read and dropped while the script runs — and an output cut there ends with a line saying so (`[stdout cut at 512 KB; the rest was not kept]`). A failed script's message shows the first 500 characters of its stderr.
 - **Namespace isolation**: The `skill_script:` prefix prevents collision with global registry tools; script tools never leak outside their skill invocation.
 - **Sandbox integration**: Script tool names are added to `SandboxPolicy.allowed_capabilities` and pass through the full sandbox pipeline.
 - **No shell injection**: Arguments are passed directly to the process (no shell), so shell metacharacters in argument values are inert.
@@ -545,7 +545,7 @@ Before a skill runs, `preflight_permissions()` validates:
 The invocation handler builds the tool set as follows:
 
 1. **Capability path** — if `requires_capabilities` is non-empty: resolve tools via the registry's capability index (`resolve_capabilities`) — every registered tool whose `provides_capabilities` includes one of the listed capabilities. **`tools.allow` is ignored on this path.**
-2. **Legacy path** — otherwise, if `tools.allow` is non-empty: resolve each name against the tool registry. Unknown names trigger a warning (`Skill '<x>' references unknown tools: [...]`) but don't block invocation.
+2. **Legacy path** — otherwise, if `tools.allow` is non-empty: resolve each name against the tool registry. Unknown names trigger a warning (`Skill '<x>' references unknown tools: [...]`) but don't block invocation. Three names bring their partner, as their capability does: a skill allowed `file_read` also holds `file_list`, one allowed `file_write` also holds `file_edit`, and one allowed `read_result` also holds `artifact_read` — unless `tools.deny` names either of the two. A skill another skill invokes is resolved the same way.
 3. Otherwise: no tools (pure LLM prompt).
 4. **Availability check** (see below): refuse the skill if a requirement is wholly unavailable.
 5. **Bootstrap exception**: during persona bootstrap mode, `update_persona` is force-added to the tool set even if not allowed.
@@ -1109,4 +1109,4 @@ Created from `depends_on` (Section 8); like script tools, they are invocation-sc
 - Each entry requires `file`, `name`, and `description`. A missing required field is a **frontmatter parse error — the entire skill fails to load** (check the daemon log for `SkillCatalog: failed to load ...`).
 
 **Script output truncated**
-- stdout is capped at 512 KB. Emit summaries, not full dumps; write large artifacts to files and return their paths.
+- stdout is cut at 512 KB, and the result then ends with `[stdout cut at 512 KB; the rest was not kept]`. Emit summaries, not full dumps; write large artifacts to files and return their paths.

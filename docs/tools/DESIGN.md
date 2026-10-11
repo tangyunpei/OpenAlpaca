@@ -809,7 +809,8 @@ These become invocable as `skill_script:<name>` during that skill's
 execution.  Arguments are passed as `--key=value` CLI flags; the script
 runs with the skill directory as its working directory.  Path traversal
 protection (canonicalize + prefix check) ensures scripts stay within
-`<skill>/scripts/`, and stdout/stderr are capped at 512 KB.  The full
+`<skill>/scripts/`, and stdout/stderr are capped at 512 KB, a cut output
+ending with a line that says so.  The full
 reference is [Skill_Template_Reference.md](../Skill_Template_Reference.md)
 §4.9.
 
@@ -863,9 +864,9 @@ ceilings of their own under `[orchestrator.costs]` — memory extraction
 | Tool result fed back to the LLM | `tool_result_inline_bytes`, default 32 KB — spilled to `results/` with a 2 KB preview when the loop has a session log, otherwise cut with a notice |
 | `read_result` page | 8 KB default, 64 KB maximum |
 | HTTP backend response body | 1 MB streamed read, then first 8192 chars returned |
-| Command backend stdout/stderr | 512 KB each |
-| `shell_execute` stdout/stderr | 512 KB each |
-| Skill script stdout/stderr | 512 KB each |
+| Command backend stdout/stderr | 512 KB each, a cut stream ending with `[stdout cut at 512 KB; the rest was not kept]` (or `stderr`) |
+| `shell_execute` stdout/stderr | 512 KB each, cut the same way |
+| Skill script stdout/stderr | 512 KB each, cut the same way |
 | Workspace entry content | 32 KB |
 | Artifact body | `max_artifact_bytes`, default 10 MB |
 | `file_read` / `file_write` | 10 MB |

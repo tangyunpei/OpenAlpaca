@@ -442,7 +442,7 @@ argument errors early with clear messages.
 2. Detect unsubstituted placeholders (error)
 3. Build command via `platform::shell_command()`
 4. Execute with `tokio::time::timeout`
-5. Capture stdout + stderr (cap: 512 KB each)
+5. Capture stdout + stderr (cap: 512 KB each; `platform::shown_output` cuts to the cap and appends `[stdout cut at 512 KB; the rest was not kept]`, or `stderr`, when more was written)
 6. Exit code 0 → stdout; otherwise error including exit code and output
 
 ### MCP Backend Execution
@@ -667,7 +667,7 @@ All of these are registered in the shared `ToolRegistry` at daemon startup.
 | `artifact_write` | `name`, `kind`, `content` (required); `note`, `summary`, `metadata` | `artifact_write` | `kind` ∈ `markdown`, `code`, `terminal`, `table`, `plan`, `image`, `html`, `binary`; versioned; max `max_artifact_bytes` (10 MB); store chosen from `request_workspace_root`, else the home store; needs a database |
 | `read_result` | `result_ref` (required), `offset`, `limit` | `read_result` | Reads only inside the calling session's `results/`; page 8 KB default, 64 KB max; needs `ToolContext.session_id` |
 | `artifact_read` | `artifact_id` (required); `offset`, `limit` | `read_result` | A by-product of the turn's owner, of the turn's project or of none; pages like `read_result` (8 KB default, 64 KB max); refuses a result file in the project, another project's by-product, and `image` or `binary` kinds; needs a database |
-| `shell_execute` | `command` (required) | `shell_execute` | Starts in the working folder (a scratch folder is made at first use); the sandbox's per-tool timeout (`max_tool_runtime_secs`, 60 s by default) ends it first, and a 300 s timeout of its own holds when the sandbox is bypassed — on either, or when the call's future is dropped, `run_bounded` kills its process group (unix; the direct child on Windows); output cap 512 KB; injection patterns blocked by the sanitizer, and `../` allowed (R29: a builtin's arguments are exempt); destructive — every command asks, its card naming the folder |
+| `shell_execute` | `command` (required) | `shell_execute` | Starts in the working folder (a scratch folder is made at first use); the sandbox's per-tool timeout (`max_tool_runtime_secs`, 60 s by default) ends it first, and a 300 s timeout of its own holds when the sandbox is bypassed — on either, or when the call's future is dropped, `run_bounded` kills its process group (unix; the direct child on Windows); output cap 512 KB per stream, a cut stream ending with a line that says so; injection patterns blocked by the sanitizer, and `../` allowed (R29: a builtin's arguments are exempt); destructive — every command asks, its card naming the folder |
 | `memory_search` | `query` (required, 1–512 chars); `kind`, `scope`, `limit` (1–50, default 10), `detail` (`index` default, or `snippets`), `date_from`, `date_to` (RFC 3339 or `YYYY-MM-DD`, inclusive), `order_by` (`relevance` default, `newest`, `oldest`), `historical`, `as_of` | `memory_read` | Lexical only (index schema 5, design 09 §6.5): every term against a `unicode61` FTS5 table as a word or a word's beginning (a prefix query when its last token has ≥ 3 characters or is a number after another token, `10:30` finding `10:30am`; when that query fills its cap, each such term again as a whole word in the header and in the body), every term of ≥ 3 characters against a trigram table over titles, aliases and tags, and a term carrying a character of a script `unicode61` cannot split into words (CJK, Thai and the other scripts written without spaces; Devanagari, Tamil and the other scripts built with vowel signs — `query::is_unsegmented`) against a trigram table over those scripts' bodies; a bounded substring scan for a 1–2 character query, no model; `match` names `term`, `prefix`, `trigram`, `phrase`, `title`, `alias` or `fact_key`; filters (status, supersession, tombstones, same-`fact_key` losers, validity, the date bounds) before the limit; every hit re-read and re-hashed. `index` answers one row per note — `id`, `date`, `kind`, `scope`, `status`, `title`, `reason`, `size`, `conflict` — and no body; `snippets` answers cited excerpts by heading and line range with `freshness`, `conflict`, `valid_from`, `valid_to`; both with `partial` and `index_state` |
 | `memory_read` | `ids` (required, 1–10 distinct note ids); `expected_revision`, `section` (single id only) | `memory_read` | One entry per id in the order asked, each with provenance, the bodies sharing 32 KiB (a short one is never cut to make room); an id no note of the caller has answers `{id, error: "not_found"}` in its place; the old `id` argument is `invalid_input`; the service re-checks owner and scope |
 | `memory_timeline` | exactly one of `anchor` (a note id), `query`, `date`; `before`, `after` (0–20, default 5) | `memory_read` | The notes dated around the anchor, in date order, as `memory_search` index rows whose `reason` is `before`, `anchor` or `after`; superseded, archived and ended notes are listed and marked, candidates never |
@@ -747,7 +747,7 @@ the registry made for that one invocation:
 - Executed with the configured interpreter — or directly when none is set,
   which needs the exec bit and a shebang — with a per-script timeout
   (default 30 s), working directory = the skill directory, and a 512 KB
-  output cap.
+  output cap, a cut output ending with a line that says so.
 
 ### 6.4 Workspace Path Helpers
 
@@ -774,13 +774,13 @@ the registry made for that one invocation:
 | `snapshot_max_bytes` (config) | 10 MB | `[orchestrator.sessions]` |
 | `MAX_WORKSPACE_CONTENT_SIZE` | 32 KB | `builtins/mod.rs` |
 | `SPILL_PREVIEW_CHARS` (workspace artifact entry) | 512 chars | `builtins/artifact_write.rs` |
-| `MAX_SCRIPT_OUTPUT_BYTES` | 512 KB | `builtins/mod.rs` |
+| `OUTPUT_CAP` (a skill script's, a command tool's and `shell_execute`'s output, per stream; `shown_output` names the cut) | 512 KB | `tools/platform.rs` |
 | `MAX_TOOL_RESULT_SIZE` (fallback for `tool_result_inline_bytes`) | 32 KB | `agentic_loop/tool_helpers.rs` |
 | `PREVIEW_CHARS` (result spill preview) | 2048 chars | `session_log/record.rs` |
 | `read_result` page | 8 KB default, 64 KB max | `builtins/read_result.rs` |
 | HTTP backend response cap | 1 MB (stream), 8 KB returned | `registry/mod.rs` |
-| Command backend output cap | 512 KB per stream | `registry/mod.rs` |
-| `shell_execute` output cap | 512 KB per stream | `builtins/shell_execute.rs` |
+| Command backend output cap | 512 KB per stream (`OUTPUT_CAP`) | `registry/mod.rs` |
+| `shell_execute` output cap | 512 KB per stream (`OUTPUT_CAP`) | `builtins/shell_execute.rs` |
 
 ---
 

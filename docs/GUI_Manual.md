@@ -789,8 +789,10 @@ is a repository. Its detail has no History or Diff, only Preview, and its row
 follows the file when you edit it yourself. A result file the daemon could not
 find the last time it was read stays listed with a `missing` tag
 (`?include_missing=true`): the Preview reads it again, and once the file is
-back it is shown and the tag goes. While its project is missing the Preview
-shows the daemon's sentence,
+back it is shown. The tag goes the next time the file is read — at once when
+the Preview reads it as text; when an image loads, or an `Open` or an
+`Export` finds the file, at the list's next refresh. While its project is
+missing the Preview shows the daemon's sentence,
 `<root>: this project's folder is gone or has moved; re-point the project to read its files.`,
 and the tag stays until the project is re-pointed and the file read again. The
 header's count is the shown side's own.
@@ -813,7 +815,11 @@ Finder` — over three tabs:
   file marked `missing` the Preview reads it again first: a file that is not
   back says it is no longer at its path in the project, a missing project's
   shows the daemon's sentence, and a kind the Preview does not read (binary, or
-  over 512 KiB) says it could not be read the last time it was asked for.
+  over 512 KiB) says it could not be read the last time it was asked for. An
+  image is read by loading it, which tells the app no reason, so one that does
+  not load says it could not be read the last time it was asked for — not at
+  its path in the project, or its project's folder gone or moved — and not
+  that Export or Open opens it, which fail the same way.
 - **Diff.** `GET …/diff` for the newest pair. The `+ / −` counters are counted
   from the patch rather than read off the response, so they cannot disagree with
   the lines under them. A refusal is stated in its own words: `NOT_DIFFABLE`
@@ -845,7 +851,10 @@ when you click: a result file replaced since by a folder, or by a link to a
 script or an app in the project, is refused the same way, and the toast says
 so. `Export` saves a result file under its base name (`main.rs`, not
 `src/main.rs`). For a result file of a missing project, `Open` and `Export` are
-refused with the daemon's sentence above, as the toast.
+refused with the daemon's sentence above, as the toast. A by-product is opened
+at its file in OpenAlpaca's store, never through a link out of its folder
+there, and a file that is no longer there — a by-product, or a result file in
+its project — is refused with the daemon's own sentence, as the toast.
 
 `Reveal in Finder` — `Show in folder` on Windows and Linux — shows the file in
 its folder instead, through the app's own shell (`reveal_path`, above): Finder

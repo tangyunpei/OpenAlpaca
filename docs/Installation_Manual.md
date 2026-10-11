@@ -303,10 +303,10 @@ Earlier builds kept a project's files inside the project: a `.openalpaca/`
 folder at its top held the artifacts and uploads of its conversations and, on
 a store an earlier build of the Markdown memory used, that project's memory
 notes. This build keeps nothing of its own inside a project: the files written
-there are the ones an agent writes for you, each write asking first. Each
-project gets a folder in the home store instead, `~/.openalpaca/projects/<name>/`,
-named after the project's path — `/Users/you/dev/app` becomes
-`-Users-you-dev-app` — with a
+there are the ones an agent writes for you, each write and each command
+asking first. Each project gets a folder in the home store instead,
+`~/.openalpaca/projects/<name>/`, named after the project's path —
+`/Users/you/dev/app` becomes `-Users-you-dev-app` — with a
 `project.json` that holds the project's permanent id and its path, and the
 project's own `artifacts/`, `uploads/` and `memory/`. A project is the git
 repository a conversation runs in — its top folder, wherever inside it you
