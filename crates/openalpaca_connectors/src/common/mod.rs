@@ -154,12 +154,13 @@ pub fn format_confirmation_prompt(
     let from_openalpaca = preview
         .filter(|text| !text.is_empty())
         .map(|text| {
-            // A blank line stays empty — never its indent alone, which a
-            // chunk's edge could begin or end with (Y.2).
+            // A blank or whitespace-only line is printed empty — never its
+            // indent and spaces alone, which a chunk's edge could begin or
+            // end with (Y.2).
             let indented = text
                 .lines()
                 .map(|line| {
-                    if line.is_empty() {
+                    if line.trim().is_empty() {
                         String::new()
                     } else {
                         format!("  {line}")

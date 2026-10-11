@@ -173,23 +173,23 @@ mod confirmation {
         );
     }
 
-    /// A blank line of the preview — `file_edit`'s card keeps the empty
-    /// lines of the strings it quotes — is printed as an empty line, not as
-    /// its two-space indent alone, so no line of the prompt is only
-    /// whitespace (second residual pass, Y.2).
+    /// A blank or whitespace-only line of the preview — `file_edit`'s card
+    /// keeps the lines of the strings it quotes as they are — is printed as an
+    /// empty line, not as its indent and spaces, so no line of the prompt is
+    /// only whitespace (second residual pass, Y.2).
     #[test]
     fn a_blank_preview_line_is_an_empty_line_not_its_indent() {
         let prompt = format_confirmation_prompt(
             "file_edit",
             &serde_json::json!({"path": "docs/a.md"}),
-            Some("Edits docs/a.md in the project folder /w/app.\nWith:\nfirst\n\nthird"),
+            Some("Edits docs/a.md in the project folder /w/app.\nWith:\nfirst\n\n   \nthird"),
             1,
         );
 
         assert!(
             prompt.contains(
                 "From OpenAlpaca:\n  Edits docs/a.md in the project folder /w/app.\n  With:\n  \
-                 first\n\n  third\nArguments:\n"
+                 first\n\n\n  third\nArguments:\n"
             ),
             "{prompt:?}"
         );
