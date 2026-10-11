@@ -126,6 +126,7 @@ tasks/storage-design/maps/
 tasks/storage-design/panel/
 tasks/storage-design/plan-drafts/
 !tasks/approval-hidden-chars.md
+!tasks/pending-decisions.md
 !config/agents/*.md
 !config/orchestrator/templates/
 !config/orchestrator/templates/*.md
