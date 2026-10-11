@@ -261,12 +261,12 @@ using with an older build is the second case it names. To switch over:
    With it the agent also lists folders (`file_list` comes with `file_read`). A
    running daemon reads the change on its own. One more thing holds for any
    template — yours, or one an earlier build wrote — that names tools in
-   `require_confirmation_for`: that list is used exactly as written, so it never
-   asks for `file_edit`, the tool that changes part of a file, unless it names
-   it, and it keeps asking for `artifact_write` or `workspace_write` when it
-   names them, though they no longer ask by default. Add `file_edit` beside
-   `file_write` in such a list. A skill's `permissions.confirm.tools` list works
-   the same way. The templates this build ships carry no such list.
+   `require_confirmation_for`: that list is used as written, except that one
+   naming `file_write` also asks for `file_edit`, the tool that changes part of
+   a file, which comes with `file_write`; and it keeps asking for
+   `artifact_write` or `workspace_write` when it names them, though they no
+   longer ask by default. A skill's `permissions.confirm.tools` list works the
+   same way. The templates this build ships carry no such list.
 
 The reset leaves `~/.openalpaca/README.md` as it is, and an older build's text
 there is out of date — it may describe no `projects/` folder, list `skills/`

@@ -362,7 +362,10 @@ confirmation before execution, routed via `ConfirmationBroker`.
 **How the confirmation set is chosen:** an explicit non-empty
 `require_confirmation_for` list on the sandbox policy wins (an agent
 template's `require_confirmation_for`, or a skill's
-`permissions.confirm.tools`); otherwise the set is *derived from
+`permissions.confirm.tools`) — with `file_edit` added when it names
+`file_write` (the lead's ruling R-T35: whoever holds `file_write` holds
+`file_edit`, so a list asking writes to prompt asks before an edit too);
+otherwise the set is *derived from
 annotations* — every registered tool with `destructive_hint = true`
 (built-ins: `file_write`, `file_edit`, `update_persona`, `shell_execute`,
 `send`; `artifact_write` and `workspace_write` write only under

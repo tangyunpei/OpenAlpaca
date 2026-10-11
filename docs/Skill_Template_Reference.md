@@ -206,7 +206,7 @@ Controls what the skill is allowed to do.
 
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
-| `permissions.confirm.tools` | `Vec<String>` | `[]` | ENFORCED | Tool names requiring confirmation. Passed to `SandboxPolicy.require_confirmation_for`. When the list is empty, every tool flagged destructive requires confirmation instead (built-ins: `file_write`, `file_edit`, `update_persona`, `shell_execute`, `send`; `artifact_write` and `workspace_write` are not among them). A non-empty list replaces that default. |
+| `permissions.confirm.tools` | `Vec<String>` | `[]` | ENFORCED | Tool names requiring confirmation. Passed to `SandboxPolicy.require_confirmation_for`. When the list is empty, every tool flagged destructive requires confirmation instead (built-ins: `file_write`, `file_edit`, `update_persona`, `shell_execute`, `send`; `artifact_write` and `workspace_write` are not among them). A non-empty list replaces that default — and one that names `file_write` asks for `file_edit` too, since a skill holding `file_write` holds `file_edit` (Section 7, *Tool Set Algorithm*). |
 
 > **Interactive Confirmation**: When a tool in the confirmation set is invoked, the sandbox pauses execution and requests approval through the `ConfirmationBroker` (a `ToolConfirmationRequested` event routed to the active client; the answer comes back via `POST /v1/chat/confirmations/{request_id}`). The approval timeout comes from `execution.agent_defaults.confirmation_timeout_secs` in `daemon.toml` (default 300s). Section 7 lists every way a prompt can end.
 
@@ -792,7 +792,7 @@ context:
 permissions:
   level: readwrite               # readonly | readwrite | admin
   confirm:
-    tools:                       # These tools require user confirmation (replaces the default set)
+    tools:                       # These tools require user confirmation (replaces the default set; file_write brings file_edit)
       - shell_execute
       - file_write
   sandbox:

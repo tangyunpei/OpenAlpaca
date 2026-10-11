@@ -792,7 +792,7 @@ find the last time it was read stays listed with a `missing` tag
 back it is shown. The tag goes the next time the file is read — at once when
 the Preview reads it as text; when an image loads, or an `Open` or an
 `Export` finds the file, at the list's next refresh. While its project is
-missing the Preview shows the daemon's sentence,
+missing the Preview of a file it reads as text shows the daemon's sentence,
 `<root>: this project's folder is gone or has moved; re-point the project to read its files.`,
 and the tag stays until the project is re-pointed and the file read again. The
 header's count is the shown side's own.
@@ -815,11 +815,13 @@ Finder` — over three tabs:
   file marked `missing` the Preview reads it again first: a file that is not
   back says it is no longer at its path in the project, a missing project's
   shows the daemon's sentence, and a kind the Preview does not read (binary, or
-  over 512 KiB) says it could not be read the last time it was asked for. An
-  image is read by loading it, which tells the app no reason, so one that does
-  not load says it could not be read the last time it was asked for — not at
-  its path in the project, or its project's folder gone or moved — and not
-  that Export or Open opens it, which fail the same way.
+  over 512 KiB) says it could not be read the last time it was asked for — not
+  at its path in the project, or its project's folder gone or moved — and what
+  it is. An image is read by loading it, which tells the app no reason, so one
+  that does not load says the same, and that the image is loaded again the
+  next time the Preview is opened; an open Preview also tries again once the
+  row comes back without its mark. Neither note sends you to Export or Open,
+  which fail the same way while the file cannot be found.
 - **Diff.** `GET …/diff` for the newest pair. The `+ / −` counters are counted
   from the patch rather than read off the response, so they cannot disagree with
   the lines under them. A refusal is stated in its own words: `NOT_DIFFABLE`
@@ -854,7 +856,13 @@ so. `Export` saves a result file under its base name (`main.rs`, not
 refused with the daemon's sentence above, as the toast. A by-product is opened
 at its file in OpenAlpaca's store, never through a link out of its folder
 there, and a file that is no longer there — a by-product, or a result file in
-its project — is refused with the daemon's own sentence, as the toast.
+its project — is refused with the daemon's own sentence, as the toast. A
+by-product is opened only when what it resolves to is a kind the Library
+keeps, as for a result file: one whose stored file was replaced since by a
+link to a script in its folder, or one stored under the store's fallback
+extension `.bin` (text whose extension no kind keeps, say), is not offered
+(`409 OPEN_NOT_OFFERED`), and the toast says so; `Reveal in Finder` still
+shows it.
 
 `Reveal in Finder` — `Show in folder` on Windows and Linux — shows the file in
 its folder instead, through the app's own shell (`reveal_path`, above): Finder

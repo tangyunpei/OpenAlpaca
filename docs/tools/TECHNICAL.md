@@ -1167,7 +1167,8 @@ The agent identity comes from `ctx.agent_id` (falls back to `"unknown"`).
    checks, the `../` check only for a tool whose arguments reach a program (R29)
    (allowlist = registered tool names; shell-like = command-backend tools)
 3. **Confirmation gate** — the *effective confirmation set* is
-   `policy.require_confirmation_for` if non-empty, otherwise all
+   `policy.require_confirmation_for` if non-empty (with `file_edit` added
+   when it names `file_write`, R-T35), otherwise all
    registered tools with `destructive_hint = Some(true)`.  For a tool in
    the set, the first matching arm applies:
    - **ApprovalCache hit** (prior approval in this sandbox for these args
