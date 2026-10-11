@@ -1,4 +1,4 @@
-# Storage and project work — design (rev 1.0, approved by the owner with ST-22, ST-23 taken; Stages 0, 1 and 2 built)
+# Storage and project work — design (rev 1.1, approved by the owner with ST-22, ST-23 taken; Stages 0, 1 and 2 built)
 
 **Status:** approved. The owner read rev 0.5 on 2026-10-05 ("everything in the design file is good") and asked for one
 addition, an edit tool, taken as **ST-22**. Owner decisions **ST-1…ST-13** (2026-10-04) and **ST-14…ST-22** (2026-10-05)
@@ -1127,7 +1127,7 @@ live check.
 - **A turn with no project is offered `file_read` and `file_list` by keyword only** (the live check, (h)): on a scratch
   turn the main loop holds the readers only when the message says `read file`, `open file`, `show file` or `cat `, and
   R28's line names only the tools held — R42, R-T6 and R-T22 as designed. Whether a scratch turn should be offered the
-  readers as a project turn is, is a question for the owner, not a decision.
+  readers as a project turn is, is a question for the owner, not a decision: **T37** in `tasks/api-fix-plan.md` §0.
 
 *Results and by-products (S4a, F-A, F-C2, X-R)*
 
@@ -1250,6 +1250,8 @@ own project needs.
 
 ## Revision log
 
+- **rev 1.1 (2026-10-10).** §18's question from the live check — a turn with no project is offered the
+  readers by keyword only — is a pending owner decision now, **T37** in `tasks/api-fix-plan.md` §0 (rev 3.25).
 - **rev 1.0 (2026-10-10).** **Stage 2 built**, from `tasks/storage-design/plan-stage2.md` (approved by the owner on
   2026-10-10, with R-T2 and R-T3 confirmed), as `cfebde4c..d673478e` (172 commits): slices S0–S6 (S0 for ST-23, built
   first; S4 as S4a and S4b; S6 as S6a and S6 text), each reviewed, five with one fix round; the whole-stage review (nine
