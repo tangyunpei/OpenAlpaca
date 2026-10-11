@@ -6,7 +6,13 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -62,10 +68,20 @@ const projectScript: Artifact = {
 /** The row `GET /v1/artifacts/art-1` answers with; `row` unless a test sets it. */
 let served: Artifact = row;
 
+/** What `GET /v1/artifacts/art-1/content` answers; a 404 unless a test sets it. */
+let content: () => Response = notFound;
+
 let requests: string[] = [];
+
+function notFound(): Response {
+  return new Response(JSON.stringify({ error: "not found" }), {
+    status: 404,
+  });
+}
 
 beforeEach(() => {
   served = row;
+  content = notFound;
   requests = [];
   resetConnection();
   useUiStore.setState({
@@ -95,9 +111,12 @@ beforeEach(() => {
       if (url.endsWith("/v1/artifacts/art-1")) {
         return new Response(JSON.stringify(served));
       }
-      return new Response(JSON.stringify({ error: "not found" }), {
-        status: 404,
-      });
+      if (url.endsWith("/v1/artifacts/art-1/content")) return content();
+      // The panel's picker lists the library.
+      if (url.includes("/v1/artifacts?")) {
+        return new Response(JSON.stringify({ artifacts: [served], total: 1 }));
+      }
+      return notFound();
     }),
   );
 });
@@ -239,5 +258,30 @@ describe("FilePanelSlot — a file written into the project", () => {
     expect(within(header).getByText("scripts/release.sh")).toHaveClass(
       "truncate",
     );
+  });
+});
+
+describe("FilePanelSlot — the Preview of a file written into the project (X14)", () => {
+  it("says a marked image could not be read when it does not load (X14)", async () => {
+    served = {
+      ...projectScript,
+      name: "docs/diagram.png",
+      rel_path: "docs/diagram.png",
+      path: "/Users/dev/app/docs/diagram.png",
+      kind: "image",
+      mime_type: "image/png",
+      openable: true,
+      missing: true,
+    };
+    renderSlot();
+
+    fireEvent.error(await screen.findByAltText("docs/diagram.png"));
+
+    expect(
+      await screen.findByText(
+        "This file could not be read the last time it was asked for: it was not at its path in the project, or the project's folder is gone or has moved. Its row is kept, and the image is shown once the file can be read again.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Export or Open/)).not.toBeInTheDocument();
   });
 });

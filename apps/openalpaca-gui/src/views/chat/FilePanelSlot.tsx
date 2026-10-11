@@ -155,6 +155,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
             content={null}
             src={artifactContentUrl(model.id)}
             note={null}
+            failedNote={plan.failedNote}
           />
         ) : (
           <ArtifactPreview

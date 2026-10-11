@@ -27,6 +27,24 @@ describe("ImagePreview (§3.25f) — load failure", () => {
     ).toBeInTheDocument();
   });
 
+  it("says the caller's sentence instead of its own when the caller knows why a load may fail (X14)", () => {
+    const failedNote =
+      "This file could not be read the last time it was asked for.";
+    render(
+      <ImagePreview
+        filename="docs/diagram.png"
+        size="compact"
+        src={SRC}
+        failedNote={failedNote}
+      />,
+    );
+
+    fireEvent.error(screen.getByRole("img", { name: "docs/diagram.png" }));
+
+    expect(screen.getByText(failedNote)).toBeInTheDocument();
+    expect(screen.queryByText(/Export or Open/)).not.toBeInTheDocument();
+  });
+
   it("does not claim a load failure when there was never a src", () => {
     render(
       <ImagePreview

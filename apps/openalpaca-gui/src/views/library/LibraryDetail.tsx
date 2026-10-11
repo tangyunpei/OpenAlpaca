@@ -231,6 +231,7 @@ function PreviewTab({ artifact }: { artifact: Artifact }) {
             ? "Not connected to the daemon, so the image cannot be loaded."
             : null
         }
+        failedNote={plan.failedNote}
       />
     );
   }

@@ -38,6 +38,12 @@ export interface ImagePreviewProps {
   height?: number | null;
   /** Muted line under the filename when the bytes are not loadable. */
   note?: string | null;
+  /**
+   * What to say when `src` fails to load, in place of the component's own
+   * sentence — for a caller that knows why a load may fail (a result file
+   * the daemon marked missing, whose Export and Open fail the same way).
+   */
+  failedNote?: string | null;
   className?: string;
 }
 
@@ -48,6 +54,7 @@ export function ImagePreview({
   width,
   height,
   note,
+  failedNote,
   className,
 }: ImagePreviewProps) {
   const full = size === "full";
@@ -69,9 +76,11 @@ export function ImagePreview({
   // A load failure is the one thing this component learns for itself — the
   // browser rejected a URL the caller believed was good (gone, an expired
   // token, a CSP the webview doesn't admit) — so it overrides whatever note
-  // the caller passed for the "no src at all" case.
+  // the caller passed for the "no src at all" case. A caller that knows why
+  // a load may fail says so instead (`failedNote`).
   const placeholderNote = loadFailed
-    ? "The image could not be loaded — Export or Open opens it in its own app."
+    ? (failedNote ??
+      "The image could not be loaded — Export or Open opens it in its own app.")
     : note;
 
   return (

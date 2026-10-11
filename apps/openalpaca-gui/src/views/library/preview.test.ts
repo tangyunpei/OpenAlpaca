@@ -97,6 +97,23 @@ describe("previewPlan — a file written into the project", () => {
     });
   });
 
+  it("loads a marked project image again, with a note for a failed load that names neither Export nor Open (X14)", () => {
+    const diagram: Artifact = {
+      ...written,
+      name: "docs/diagram.png",
+      rel_path: "docs/diagram.png",
+      kind: "image",
+      mime_type: "image/png",
+    };
+    expect(previewPlan({ ...diagram, missing: true })).toEqual({
+      mode: "image",
+      failedNote:
+        "This file could not be read the last time it was asked for: it was not at its path in the project, or the project's folder is gone or has moved. Its row is kept, and the image is shown once the file can be read again.",
+    });
+    // An image nobody marked keeps the placeholder's own sentence.
+    expect(previewPlan(diagram)).toEqual({ mode: "image", failedNote: null });
+  });
+
   it("still says a missing by-product is no longer on disk", () => {
     expect(previewPlan({ ...notes, missing: true })).toEqual({
       mode: "none",

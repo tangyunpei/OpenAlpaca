@@ -9,7 +9,13 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -600,6 +606,38 @@ describe("Results — a file marked missing (d7-app-1, R-T26)", () => {
         "This file is no longer at docs/notes.md in the project. Its row is kept, and the file is shown again once it is back.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("says a marked image could not be read when it does not load, never that Export or Open opens it (X14)", async () => {
+    const diagram: Artifact = {
+      ...marked,
+      name: "docs/diagram.png",
+      kind: "image",
+      mime_type: "image/png",
+      path: "/Users/dev/app/docs/diagram.png",
+      rel_path: "docs/diagram.png",
+    };
+    route("in_project=true", () => json({ artifacts: [diagram], total: 1 }));
+    route("/v1/artifacts/art-9", () => json(diagram));
+    route("/v1/artifacts/art-9/content", () =>
+      json(
+        { error: { code: "ARTIFACT_PROJECT_MISSING", message: sentence } },
+        410,
+      ),
+    );
+    renderView();
+
+    // The browser's load is the read; jsdom loads nothing, so it is failed
+    // here as a 410 fails it.
+    fireEvent.error(await screen.findByAltText("docs/diagram.png"));
+
+    expect(
+      await screen.findByText(
+        "This file could not be read the last time it was asked for: it was not at its path in the project, or the project's folder is gone or has moved. Its row is kept, and the image is shown once the file can be read again.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Export or Open/)).not.toBeInTheDocument();
+    expect(screen.getByText("missing")).toBeInTheDocument();
   });
 
   it("shows the daemon's sentence when the project's folder is gone or has moved", async () => {

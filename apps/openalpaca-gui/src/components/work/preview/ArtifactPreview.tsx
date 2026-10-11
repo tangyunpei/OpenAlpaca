@@ -80,6 +80,11 @@ export interface ArtifactPreviewProps {
   src?: string | null;
   /** Shown under the empty sentence when `content` is `null`. */
   note?: string | null;
+  /**
+   * An image's sentence when `src` fails to load, in place of the
+   * placeholder's own (`previewPlan`'s `failedNote`).
+   */
+  failedNote?: string | null;
   className?: string;
 }
 
@@ -89,6 +94,7 @@ export function ArtifactPreview({
   size,
   src,
   note,
+  failedNote,
   className,
 }: ArtifactPreviewProps) {
   const parsed = useMemo(() => {
@@ -123,6 +129,7 @@ export function ArtifactPreview({
         width={meta.width ?? null}
         height={meta.height ?? null}
         note={note ?? null}
+        failedNote={failedNote ?? null}
         className={className}
       />
     );

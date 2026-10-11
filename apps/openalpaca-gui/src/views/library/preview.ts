@@ -21,7 +21,11 @@
  *     finds it, so a file the person put back is shown (d7-app-1). Only a
  *     failed read says why — `previewNote`: the file is not at its path in
  *     the project, or the daemon's own sentence for a project whose folder is
- *     gone or has moved (R-T26) — never a guess before the read.
+ *     gone or has moved (R-T26) — never a guess before the read. An image is
+ *     read by the browser's load, whose failure carries no status, so a
+ *     marked image that does not load says what the mark means — the last
+ *     read did not find it — and never sends the person to Export or Open,
+ *     which fail the same way (X14).
  *
  * A note names `Open` only for a row the daemon opens (`openable`, ST-18):
  * a project file of another kind — a `.sh`, a `Makefile` — is sent to Export.
@@ -38,12 +42,25 @@ import { ApiError } from "@/lib/http";
 export const MAX_PREVIEW_BYTES = 512 * 1024;
 
 export type PreviewPlan =
-  /** Load `…/content?token=` into an `<img>`. */
-  | { mode: "image" }
+  /**
+   * Load `…/content?token=` into an `<img>`. `failedNote` is what the
+   * placeholder says when that load fails, in place of its own sentence;
+   * `null` keeps the placeholder's.
+   */
+  | { mode: "image"; failedNote: string | null }
   /** Fetch the bytes as text and render them with this kind's renderer. */
   | { mode: "text"; kind: FileKind; note: string | null }
   /** Draw nothing but the sentence. */
   | { mode: "none"; note: string };
+
+/**
+ * What a marked result image says when its load fails (X14): the mark is a
+ * read that did not find the file — not at its path, or its project missing
+ * (R-T18) — and the load gives no status to tell the two apart, so the note
+ * names both and claims neither.
+ */
+const MARKED_IMAGE_NOTE =
+  "This file could not be read the last time it was asked for: it was not at its path in the project, or the project's folder is gone or has moved. Its row is kept, and the image is shown once the file can be read again.";
 
 /** `image/svg+xml`, `;charset=` and casing aside. */
 function isSvg(mimeType: string): boolean {
@@ -63,6 +80,9 @@ export function previewPlan(artifact: Artifact): PreviewPlan {
   // the read is what finds it again (R37). A plan that reads nothing says
   // what the mark means — the last read failed — without claiming the file
   // is gone, which is false for a project moved behind a link (R-T26).
+  if (artifact.missing && plan.mode === "image") {
+    return { mode: "image", failedNote: MARKED_IMAGE_NOTE };
+  }
   if (artifact.missing && plan.mode === "none") {
     return {
       mode: "none",
@@ -76,7 +96,9 @@ export function previewPlan(artifact: Artifact): PreviewPlan {
 function presentPlan(artifact: Artifact): PreviewPlan {
   const markup = artifact.kind === "html" || isSvg(artifact.mime_type);
 
-  if (artifact.kind === "image" && !markup) return { mode: "image" };
+  if (artifact.kind === "image" && !markup) {
+    return { mode: "image", failedNote: null };
+  }
 
   // `Open` is named only where it is drawn: a row the daemon opens (ST-18).
   const binaryNote = artifact.openable
