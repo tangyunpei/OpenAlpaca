@@ -1046,9 +1046,10 @@ live check.
 - **An explicit confirmation list is used as written, but for `file_edit`** (R30, R-T35; the plan's interfaces
   §10.1): a template's `require_confirmation_for` or a skill's `permissions.confirm.tools` — none shipped since F1 —
   keeps asking for `artifact_write` and `workspace_write` when it names them, despite ST-15, and since R-T35 one naming
-  `file_write` asks for `file_edit` too. The switch-over note's step 8 says so; nothing rewrites a seeded template.
-  `GET /v1/agent-templates` serves the list as written — `[file_write]` — while the effective set also holds
-  `file_edit` (display only; Y's re-review).
+  `file_write` asks for `file_edit` too. With no list an unattended run's by-product writes now run (ST-15); under a
+  list naming them they ask, so an unattended run refuses them (S2). The switch-over note's step 8 says so; nothing
+  rewrites a seeded template. `GET /v1/agent-templates` serves the list as written — `[file_write]` — while the
+  effective set also holds `file_edit` (display only; Y's re-review).
 - **The chat apps' prompts gained the preview** (C6) and nothing else: a connector's `/yes` still answers the oldest
   prompt of a chat, keyed by chat, not sender. A Discord preview line cut between a backslash and the character it
   escapes leaves that character bare after the continuation indent (Y's re-review).
