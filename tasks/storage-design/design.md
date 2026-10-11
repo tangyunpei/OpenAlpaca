@@ -1,15 +1,19 @@
-# Storage and project work — design (rev 0.10, approved by the owner with ST-22, ST-23 taken; Stages 0 and 1 built)
+# Storage and project work — design (rev 1.0, approved by the owner with ST-22, ST-23 taken; Stages 0, 1 and 2 built)
 
 **Status:** approved. The owner read rev 0.5 on 2026-10-05 ("everything in the design file is good") and asked for one
 addition, an edit tool, taken as **ST-22**. Owner decisions **ST-1…ST-13** (2026-10-04) and **ST-14…ST-22** (2026-10-05)
 are taken and are not reopened here. The lead's rulings are numbered **R1…R49** and are the lead's to change; the ones
-the owner was shown on 2026-10-05 are listed in §0.3 and §0.5. **Stage 0 is built** (2026-10-06…07, `931460a4..a9dbed4e`,
-from `tasks/storage-design/plan-stage0.md`, which the owner approved on 2026-10-06; one gate pass at `09b40624`; the
-live check `stage0-live-report.md`, all four fixes PASS). **Stage 1 is built** (2026-10-07…08, `b8b768b6^..44d53783`,
-from `tasks/storage-design/plan-stage1.md`, which the owner approved on 2026-10-07; one gate pass at `00f057fe`; the
-live check `stage1-live-report.md`, `44d53783`). Stage 2 is not built, and is not built before the owner approves its
-plan. Building Stage 1 raised two owner questions; the owner answered both on 2026-10-09 (§0.2): T36 keeps the
-re-point as built, and **ST-23** makes a project whose recorded root no longer leads to itself read missing.
+the owner was shown on 2026-10-05 are listed in §0.3 and §0.5. **Stage 0 is built** (2026-10-06…07,
+`931460a4..a9dbed4e`, from `tasks/storage-design/plan-stage0.md`, which the owner approved on 2026-10-06; one gate pass
+at `09b40624`; the live check `stage0-live-report.md`, all four fixes PASS). **Stage 1 is built** (2026-10-07…08,
+`b8b768b6^..44d53783`, from `tasks/storage-design/plan-stage1.md`, which the owner approved on 2026-10-07; one gate pass
+at `00f057fe`; the live check `stage1-live-report.md`, `44d53783`). **Stage 2 is built** (2026-10-10,
+`cfebde4c..d673478e`, from `tasks/storage-design/plan-stage2.md`, which the owner approved on 2026-10-10; one gate pass
+at `3810d9d8`; the live check `stage2-live-report.md`, `d673478e`); the lead's rulings that shaped it — the plan's
+**R-T1…R-T19** and the build's **R-T20…R-T35** — are listed one line each in the revision log's rev 1.0 entry, and
+Part II opens with the refusals its final wave added. Building Stage 1 raised two owner questions; the owner answered
+both on 2026-10-09 (§0.2): T36 keeps the re-point as built, and **ST-23** makes a project whose recorded root no
+longer leads to itself read missing — built first in Stage 2, as its slice S0.
 
 **Branch:** `feat/markdown-memory` at approval (2026-10-05), its code that of `032f6ae2`, the last commit before
 the design's own. **Evidence:** two rounds of read-only
@@ -64,11 +68,11 @@ recommended: ST-15…ST-21. Building Stage 1 raised two; the owner answered both
   project — the route resolves the path up to the project's root — while the delete refuses that shape with
   `422 WORKSPACE_NOT_A_ROOT` naming the root (the lead's ruling R-S8). §9's `PATCH` row stands. The lead had
   recommended the refusal; the owner kept the re-point as built.
-- **ST-23 — a root that no longer leads to itself is missing.** A project whose recorded root no longer canonicalizes
-  to itself — a folder renamed by case only, or moved with a link left at the old path — reads `missing`, like one
-  whose folder is gone, and the user re-points it (the whole-stage review's R1; its route half is built, §3's
-  *As built*). To be built in Stage 2, slice S0, before anything resolves a project's working folder: `missing` means
-  "the recorded root is not a directory, or no longer canonicalizes to itself", and a recorded root is matched as
+- **ST-23 — a root that no longer leads to itself is missing.** A project whose recorded root no longer canonicalizes to
+  itself — a folder renamed by case only, or moved with a link left at the old path — reads `missing`, like one whose
+  folder is gone, and the user re-points it (the whole-stage review's R1; its route half is built, §3's *As built*).
+  Built in Stage 2's slice S0 (`cfebde4c..c60ecbc1`), before anything resolved a project's working folder: `missing`
+  means "the recorded root is not a directory, or no longer canonicalizes to itself", and a recorded root is matched as
   written before it is resolved wherever the daemon looks a project up — which also closes §18's *review R1's deeper
   cross-wiring*.
 
@@ -88,9 +92,9 @@ recommended: ST-15…ST-21. Building Stage 1 raised two; the owner answered both
 |---|---|
 | The lead reads only 500 characters of a subagent's answer | F2, Stage 0 |
 | The `system_agent` approval bypass (T34) | F1, Stage 0 |
-| The file tools use the conversation's project (FW-2) | Stage 2, §10–§15; `file_edit` (ST-22) for a change inside a file |
-| Reading an artifact back from the main chat was not proven live | R41 and R42 give the main chat `artifact_read` on every turn (Stage 2); Stage 2's live check does the round trip |
-| A click on a stale approval card was not proven live | No design change. Stage 2's live check tries once more: a prompt is answered from the CLI while the app shows its card, then the card is clicked. If that cannot be provoked, it stays proven by the unit tests only, and the report says so. |
+| The file tools use the conversation's project (FW-2) | Stage 2, §10–§15; `file_edit` (ST-22) for a change inside a file — built |
+| Reading an artifact back from the main chat was not proven live | R41 and R42 give the main chat `artifact_read` on every turn (Stage 2); Stage 2's live check does the round trip — done: a workflow's by-product read back from the main chat with `artifact_read`, no card, and a scratch conversation's by-product too (`stage2-live-report.md` (e), (h)) |
+| A click on a stale approval card was not proven live | No design change. Stage 2's live check tries once more: a prompt is answered from the CLI while the app shows its card, then the card is clicked. If that cannot be provoked, it stays proven by the unit tests only, and the report says so. — Stage 2's live check: the stale approval card and the app's surfaces are proven by their vitest suites, the session having no screen access (`stage2-live-report.md` (i)) |
 
 ### 0.5 New in rev 0.4, for the owner's review
 
@@ -203,8 +207,11 @@ A re-point in flight adds `"previous_root"` and `"previous_name"` (§6). Nothing
 root, read on demand, so the daemon, the CLI and the app shell agree and a test's home override holds:
 
 - `lookup(root)` reads `projects/<plain name>/project.json` and, when that names another root,
-  `projects/<plain>-<hash>/project.json`. Two small reads.
-- `list()` scans `projects/*/project.json`. A project is **missing** when its root is not a directory.
+  `projects/<plain>-<hash>/project.json` — for the root as written first and, only when that finds nothing and
+  the root's canonical form differs, for that form (ST-23, Stage 2's S0). Two small reads, four at most.
+- `list()` scans `projects/*/project.json`. A project is **missing** when its root is not a directory or no longer
+  canonicalizes to itself — its folder renamed by case only, or moved with a link left at the old path (ST-23;
+  `projects::root_is_missing`, the one place the flag is decided).
 - `register(root)` creates the folder and the file, create-if-absent, under one process-wide lock.
 
 **Resolve — pure, creates nothing.** Input: the path a client sent. Canonicalise it; walk up; at each folder:
@@ -247,20 +254,29 @@ nothing.
 - In test builds, `register` under a home root that was not set through `OPENALPACA_HOME_STORE` fails loudly, so no
   test can write into a developer's real store.
 
-**As built (rev 0.9).** `register` is called at five sites, not four: a chat turn, an upload and a memory write
-through a route (`MemoryScopeContext::for_turn`, `memory/scope_context.rs:102`), choosing a folder
-(`POST /v1/workspaces`, `projects::choose`), and the dispatch — a `rerun`, `start` or `resume` has no turn of its own,
-so it records the run's root before anything of the run exists (`dispatcher/lead_agent.rs:239-241`; the plan's
-conflict C4). A turn whose client sent no path has no project: nothing is resolved from the daemon's working
-directory (the lead's ruling R-S13). The walk is the one above — the nearest folder at or above the path that is a
-recorded project's root or holds `.git`, R13 ending it first — and R13 also judges a home store that is itself a
-link by the folder holding the link (the whole-stage review's finding R4 — *review R4*; its numbers are not this design's rulings). A route sent a root a project records matches it
-as written before anything is resolved (`projects::by_recorded_root`), so a project whose root now leads elsewhere is
-still the one its row names (review R1); `lookup`, `store_root`, the dispatch's `register` and memory still take such a
-root by its canonical form (§18). A folder that vanishes while it is read is no project, and `list` and `by_id` pass
-it over (review R2). The test-build guard is a Cargo feature, `test-home-guard`, armed through `[dev-dependencies]` in the
-five crates that reach `register`; its panic is a backstop — the rule is that every test that resolves, registers
-or lists projects holds its crate's home-store guard, and no test reads `~/.openalpaca`, not even its metadata.
+**As built (rev 0.9).** `register` is called at five sites, not four: a chat turn, an upload and a memory write through
+a route (`MemoryScopeContext::for_turn`, `memory/scope_context.rs:102`), choosing a folder (`POST /v1/workspaces`,
+`projects::choose`), and the dispatch — a `rerun`, `start` or `resume` has no turn of its own, so it records the run's
+root before anything of the run exists (`dispatcher/lead_agent.rs:239-241`; the plan's conflict C4). A turn whose client
+sent no path has no project: nothing is resolved from the daemon's working directory (the lead's ruling R-S13). The walk
+is the one above — the nearest folder at or above the path that is a recorded project's root or holds `.git`, R13 ending
+it first — and R13 also judges a home store that is itself a link by the folder holding the link (the whole-stage
+review's finding R4 — *review R4*; its numbers are not this design's rulings). A route sent a root a project records
+matches it as written before anything is resolved (`projects::by_recorded_root`), so a project whose root now leads
+elsewhere is still the one its row names (review R1); since Stage 2's S0 (ST-23, rev 1.0) `lookup`, `register` and
+`resolve` match a recorded root as written before its canonical form too — and, since the final wave, as named through a
+link at one of its ancestors (`/var/…` for a root recorded under `/private/var/…`; the lead's ruling R-T29) — so
+`store_root`, the dispatch's `register`, memory, learning and a turn at the old root take it as its own project — which
+reads missing — and never the one its canonical form names; a path that is not its own canonical form is walked as
+written first, a missing project's recorded root found so losing only to a nearer project or repository, and a project
+that still leads to itself is resolved as before (the plan's ruling R-T17). The CLI's `memory --project` and `sessions
+--workspace` send a recorded root as written (the final review's d0-st23-1; residual X9). A by-product's or an upload's
+row filed at such a root records that root too — `store::project_root_of` answers the root `lookup` finds, R14's
+canonical path as it was recorded — and `send` refuses such a project's result file (the plan's ruling R-T19). A folder
+that vanishes while it is read is no project, and `list` and `by_id` pass it over (review R2). The test-build guard is a
+Cargo feature, `test-home-guard`, armed through `[dev-dependencies]` in the five crates that reach `register`; its panic
+is a backstop — the rule is that every test that resolves, registers or lists projects holds its crate's home-store
+guard, and no test reads `~/.openalpaca`, not even its metadata.
 
 ## 4. Where content goes, and how rows address it
 
@@ -343,7 +359,8 @@ or lists projects holds its crate's home-store guard, and no test reads `~/.open
 | Re-point | `Re-point…` on a project | `store rebase <old> <new>` | `PATCH /v1/workspaces` |
 | Delete its data | `Delete data…` on a project | `store purge <project>` | `POST /v1/workspaces/purge` |
 
-**Missing (ST-7).** A project whose root is not a directory is listed as missing, and its data is kept. Its
+**Missing (ST-7, ST-23).** A project whose root is not a directory, or no longer canonicalizes to itself — its
+folder renamed by case only, or moved with a link left at the old path — is listed as missing, and its data is kept. Its
 conversations still open and continue. (In Stage 2 its file tools and shell are refused with one sentence naming the
 two actions.)
 
@@ -474,6 +491,51 @@ review R16); and the delete removes the folder straight after the rows, `project
 files and run commands there. Each write and each command asks first. A file it writes for you is in your project, with a
 card in the chat and a row in the Library that point at it. Drafts and hand-offs stay under `~/.openalpaca`.
 
+**Built** 2026-10-10 as `cfebde4c..d673478e` — 172 commits after `cfebde4c`, the commit recording the owner's approval
+of `tasks/storage-design/plan-stage2.md` (2026-10-10, with the plan's rulings R-T2 and R-T3 confirmed). Per slice, as
+the build's ledger writes ranges (`A..B` leaves `A` out): S0 `cfebde4c..c60ecbc1` (ST-23, built first; its last commit
+the lead's), S1 `c60ecbc1..2922ca8d` (confinement, the `../` filter, the kill), S2 `2922ca8d..f2028d38` (approvals), S3
+`f2028d38..1e4d32fe` (the working folder), S4a `1e4d32fe..cb1451de` (pointer rows, migration `004`, the real write —
+S4a.11 last, R-T1), S4b `cb1451de..59f53260` (`file_edit`), S5 `59f53260..d45f8eb6` (`file_list`, `artifact_read`, who
+holds them), S6a `d45f8eb6..261d4360` (the app), S6 text `261d4360..6bc7042f`; the whole-stage review's fix wave
+`6bc7042f..3810d9d8` (74 commits: clusters F-A…F-F, the residual passes X-R, X-G and Y, and the lead's `d01c9260` and
+`3810d9d8`); the live report `d673478e`. Each slice was reviewed, five of them with one fix round (S0, S1, S3, S5, S6
+text). The whole-stage review — nine reviewers by dimension over `cfebde4c..6bc7042f` — found 0 Critical, 9 Important
+and 22 Minor; every finding was fixed or is recorded in §18. **Gate at `3810d9d8`:** `cargo test --workspace --exclude
+openalpaca_gui` 5,080 passed, 0 failed, 16 ignored; clippy 78, the baseline; `gen_api_docs.py --check` clean; `cargo
+check -p openalpaca_gui` and the live-eval compile clean; the four bun gates green (1,551 tests in 121 files). **The
+live check** (`stage2-live-report.md`, `d673478e`; an isolated store, the daemon under
+`scripts/eval/memory/loopback-only.sb` from its first launch, a scratch git repository made for the test, the HTTP API
+and the CLI, `qwen3.8:27b-mlx`): (a)–(h) and (j) PASS, (b2) the CLI keeps the preview's line breaks, 0 ERROR lines, the
+repository changed by the one approved file only, (i) not exercised live.
+
+### New refusals the final wave added
+
+For the owner: the whole-stage review's fix wave added these refusals. Each enforces a rule this design already had,
+but a person will meet it.
+
+- **Open refuses a result file that resolves to a folder, or to a link to a script or an app** (the lead's ruling
+  R-T25, ST-18): a file in the project is handed to an app only when the file its row resolves to is a regular file
+  of a kind the store keeps; anything else is `409 OPEN_NOT_OFFERED`, Reveal only (`open_asset_for_user`,
+  `apps/openalpacad/src/routes/files_types.rs:160`).
+- **Open decides a by-product on its stored file** (residual Y, `d01c9260`): a by-product whose stored file is a link
+  out of its folder is refused (`500 OPEN_FAILED`, the lead's ruling R-T33), one that resolves to a file of a kind Open
+  does not hand to an app is `409 OPEN_NOT_OFFERED`, and one stored as `.bin` — FW-1's fallback name — is no longer
+  offered Open (`ArtifactRecord::openable`, `crates/openalpaca_storage/src/artifacts/mod.rs:483`).
+- **The run-end notifier refuses what `send` refuses** (the final review's d3-approvals-2; R-T3, R-T20): a run's
+  delivery to a chat app skips a result file, another project's row and a by-product whose file is not inside its own
+  folder in the store (`deliverable_path`, `apps/openalpacad/src/notification/artifacts.rs:87`).
+- **An explicit confirmation list naming `file_write` also asks for `file_edit`** (the lead's ruling R-T35): a
+  template's `require_confirmation_for`, or a skill's `permissions.confirm.tools`, that names `file_write` gets a card
+  for `file_edit` too (`effective_confirmation_set`, `crates/openalpaca_core/src/security/sandbox/mod.rs:765`).
+- **A missing project's result file answers `410 ARTIFACT_PROJECT_MISSING`** (the lead's ruling R-T26): Preview, Open
+  and Export say that the project's folder is gone or has moved and to re-point it, where they answered "gone", and
+  Reveal refuses with the same sentence (`RevealRefusal::ProjectMissing`).
+- **The file tools refuse a leaf swapped to a link after the check, and a target that is not a regular file** (the
+  lead's ruling R-T30; residual X6): `file_read`, `file_write` and `file_edit` open their file without following a link
+  at its leaf (`O_NOFOLLOW` on unix; `open_leaf`, `crates/openalpaca_core/src/tools/builtins/helpers/mod.rs:274`), and
+  a named pipe, a socket or a device is refused before any card rather than blocking the call.
+
 ## 10. The working folder of a turn
 
 - With a project: its root. With none: `~/.openalpaca/scratch/<session-id>/`, created on first use and removed with
@@ -497,6 +559,32 @@ card in the chat and a row in the Library that point at it. Drafts and hand-offs
 - **R28.** The model is told its working folder: one line in the turn's context, on the main loop, the lead, the
   subagent spawn and the skill tier (`prompt_ctx/sources/workspace.rs:25-32` is a stub today, and its gate admits
   only the lead).
+
+**As built (rev 1.0).** `ToolContext.conversation_id` — a field of its own, since `session_id`'s `Some` means
+"the session writer indexes this call" and the agentic loop overwrites it (the plan's C3) — carries the
+conversation on every path that runs a sandboxed tool: the main loop and the skill tier take the session the gateway
+resolved the turn into (`HandleRequest::session_id`, the lead's ruling R-T27; `turn_conversation_id`,
+`orchestrator/handler_helpers.rs:62`, reads the lane's active session only for a handler reached with no gateway),
+nested skills and plugin agents inherit it, the lead takes its `session_id`, and each subagent gets it through
+`SpawnSubagentTool`'s new last parameter (R44). `tools::working_folder`
+(`crates/openalpaca_core/src/tools/working_folder.rs:157`) is the one resolver and creates nothing: `lookup` of
+`request_workspace_root` — a project, `ProjectMissing` (R27, the §6 sentence naming both ways out) or `NotAProject`
+for a root no folder records any more — else `scratch/<conversation id>`, else `NoConversation`;
+`WorkingFolder::ensure()` makes the scratch folder (`0700`) at first use. It goes with the conversation at
+`DELETE /v1/sessions/{id}` and at a project's delete, and stays through a clear, an archive, the size caps and a
+factory reset, whose preview and closing line name it. R28's line is `<working_folder>…</working_folder>`
+(`working_folder_note`): it names only the file tools the loop holds and a shell command only when the loop holds
+`shell_execute`; on a project turn a loop holding no tool that writes a file is told so, and the lead that a subagent
+whose template grants `file_write` writes the project's files (the lead's ruling R-T22). It is given wherever a loop
+runs tools in a working folder: on the main loop as the last line of the relay rules' message (a message of its own
+would take a slot in compaction's recent floor — S3's fix round), and as a user message of its own on the bootstrap
+and attachment-only arms, the file-skill tier, a nested `invoke_skill` loop, the lead after its objective and each
+subagent — not through `prompt_ctx/sources/workspace.rs`, which carries no conversation and builds neither the lead's
+prompt nor a subagent's (C4); `WorkspaceSource` stays the stub it was. A run with no turn of its own — parked by
+`POST /v1/tasks`, a `rerun` or `start`, a scheduled skill, a follow-up with no session — on a lane with no
+conversation is given the lane's session at dispatch: the dispatcher's fallback calls `get_or_create_active_session`,
+the call the report step makes, made earlier (the lead's ruling R-T2), so the run works in that conversation's
+scratch folder; `NoConversation` answers only a call with neither.
 
 ## 11. Confinement, and what it cannot do
 
@@ -534,6 +622,31 @@ names the folder it runs in (R34), and sandbox methods are researched for a late
   cannot name its folder on a card (`tools/config/mod.rs:149`; `registry/mod.rs:667-676`). That is as today; none is
   shipped (`config/tools/` holds `example.toml`). It is recorded with T35.
 
+**As built (rev 1.0).** R29 is `ToolRegistry::traversal_rule`: `Allow` for a builtin whose handler answers
+`arguments_reach_a_program() == false`, `Refuse` for a command, HTTP, plugin or MCP tool, a skill script
+(`ScriptToolBuiltIn` answers `true`) and a name not registered; the sandbox hands it to `sanitize_tool_args_with`.
+`shell_execute` is a builtin, so `../` in a command passes — the shell is a working directory, not a confinement — and
+its injection checks are unchanged. R31 resolves the last component on the write side too
+(`a_write_through_a_link_out_of_the_root_is_refused`, the test that used to pin the hole). Since the final wave the
+three file tools open their file without following a link at its leaf — `O_NOFOLLOW` on unix (`open_leaf`,
+`tools/builtins/helpers/mod.rs:274`), so a link swapped in after the check is refused with the boundary sentence —
+missing folders are made below the canonical root one level at a time and the root is never re-created
+(`make_parents_below`), and a target that is not a regular file is refused before any card, `file_read` opening it
+without waiting (the lead's ruling R-T30; residual X6). R32 is `FolderRules::Project`: `.git` is refused for writing
+only — reading and listing it stay allowed (ST-16; the lead's ruling on F-B2) — and `.openalpaca` for both, in any case
+(ST-9). R33 deleted `is_store_owned_resolved`, `is_soul_path`, `is_user_path` and `is_identity_path`;
+`is_store_owned_path` stays for `workspace_write`'s key check. R45 is `tools::platform::run_bounded`: a new process
+group on unix and `killpg(SIGKILL)` on a timeout or a dropped future — at once, with no grace (the lead's ruling
+R-T23) — and `kill_on_drop` (the direct child only) on Windows; `libc` joined core's unix dependencies (already in
+`Cargo.lock`). Both pipes are read to their end before the child is reaped (S1's fix round), each keeping at most the
+512 KB cap plus one byte and draining the rest (R-T28), and a cut output ends with one line saying so
+(`tools/platform.rs:41`, residual X7). A plugin agent's proxied calls race the run's cancellation as the agentic loop's
+do (`runner/plugin_agent.rs`; the final review's d2-process-1). R23: `send` takes a path resolved like `file_read`'s,
+or an `artifact_id` of the turn's owner — of the turn's project or of none: another project's by-product is refused
+with `artifact_read`'s sentence (the lead's ruling R-T3), a result file of a missing project, first, with a sentence of
+its own (R-T19), and a by-product is read only inside its row's own folder in the store (`ArtifactRecord::content_root`,
+`confine_in_its_folder`; the lead's ruling R-T20) — and its card names the file it sends.
+
 ## 12. Approvals
 
 - **R30.** F1 is the fix for T34. The rule that an explicit `require_confirmation_for` wins stays
@@ -548,6 +661,24 @@ names the folder it runs in (R34), and sandbox methods are researched for a late
 - **R43.** "Always allow" keeps today's scope: one tool, one subagent.
 - **ST-16.** `file_read`, `file_list` and `artifact_read` are read-only and never prompt.
 - An unattended turn refuses a prompting tool at once and says so in the report, as today.
+
+**As built (rev 1.0).** ST-15 is `local_write_annotations()` for `artifact_write` and `workspace_write`. R34 is
+`tools/builtins/approval_preview.rs` (`command_card`, `write_card`, `edit_card`): the daemon composes the cards from the
+working folder and the call's own path and strings, escaping them (`escape_hidden_line`, `escape_hidden_within`,
+`hidden_notice`) and cutting `file_edit`'s two strings at `EDIT_PREVIEW_BYTES` (1,000) — so a preview is no longer only
+"composed from the notes, never from the call's arguments" (`memory_confirm`'s still is) — and a card keeps both
+hidden-character counts, its own and the surface's (R-T12). When a component of the written path is a link inside the
+project, a write or edit card names the file that changes, `(a link to …)`, escaped and counted (the lead's ruling
+R-T31; a spelling the volume corrects by case is no link). A refusal the tool would give anyway is the preview's `Err`,
+so no card is raised for it. The chat apps' prompts print the preview too (`format_confirmation_prompt` gained
+`preview`, C6), every line of it indented, so text in a `new_string` cannot forge the prompt's own `Arguments:` or
+`Reply /yes` line (the final review's d3-approvals-1); a prompt split across messages is split at line boundaries with
+every preview line indented (R-T32), each later message opening with `(approval prompt, continued)` (residual Y), so a
+platform that trims a message's leading whitespace puts no preview text at its margin. A connector lane's shell card
+names its scratch folder. R30's rule — an explicit `require_confirmation_for` wins — stands with one addition: a list
+naming `file_write` also asks for `file_edit` (`effective_confirmation_set`, `security/sandbox/mod.rs:765`; the lead's
+ruling R-T35, for templates and skills alike). Such a list still asks for `artifact_write` and `workspace_write` when it
+names them (§18).
 
 ## 13. Results and by-products (ST-11, ST-12)
 
@@ -626,6 +757,40 @@ asserts the user's bytes and modification time.
   file → refused, naming `file_write`; the copy exists before the change; a second edit updates the same pointer
   row; a U+202E in either string is shown escaped on the card; a CRLF file keeps its line endings.
 
+**As built (rev 1.0).** Migration `004_project_files.sql` adds `in_project` and rebuilds the address index as the table
+says; `ArtifactRecord` carries `in_project` and `openable()` (`artifacts/mod.rs:483`: a result file by its name through
+`store::opens_in_default_app`, ST-18; a by-product by its stored file's name, so one stored as `.bin` is not offered,
+`d01c9260`; an upload always), `FileAsset` no field (C12). R35 is `ArtifactStore::record_project_file(NewProjectFile)`
+in storage — which records one spelling of the path (`a/./b` and `a//b` normalised, `..` and an absolute path refused)
+and no head stamp, so the first read hashes what is on disk (the fix wave's F-A) — and `record_tool_project_file` in
+core, which first re-checks that the project is registered and present (R-T30; a failure is R36's "written but not
+listed") and announces `artifact_written` with `in_project` and `openable` (storage has no bus, C5). `file_write`'s root
+moved in step (4), not (3) (C1): `FileWriteTool` lost its startup root and `builtin_tools` its `workspace_root`
+parameter, and `is_the_home_root` went with its last caller; ST-17 and R46 landed with it, in
+`tools/builtins/pre_edit.rs` (`check_pre_edit`, `keep_pre_edit_copy`), which `file_edit` consumes (C2). The project
+delete keeps no pointer row's file and counts none as a by-product (C13); a pointer row is never linked to a completion
+report — the report's runtime line `Written in the project: …` (at most 20 paths, escaped and bounded by characters) and
+the Work view's split carry R38 (C10) — and the run-end delivery to a chat app refuses what `send` refuses: a result
+file, another project's row, a by-product outside its own folder (`deliverable_path`,
+`apps/openalpacad/src/notification/artifacts.rs:87`; the final review's d3-approvals-2). `POST /v1/files/{id}/open`
+refuses a result file of a kind the store does not keep with `409 OPEN_NOT_OFFERED` from the rows' first commit (C11),
+and since the final wave it re-checks what it opens (`open_asset_for_user`, `routes/files_types.rs:160`): a result file
+only when its resolved file is a regular file of a kept kind (the lead's ruling R-T25), a by-product only inside its
+row's own folder — a link out of it is `500 OPEN_FAILED` (R-T33, ratified as built) — and only when the file it resolves
+to is a kept kind (residual Y), and a result file whose file is gone, its project present, is `410 ARTIFACT_GONE`. A
+missing project's result file is `410 ARTIFACT_PROJECT_MISSING` on the content route, Open, Export and Preview, and
+Reveal refuses it with the same sentence (`RevealRefusal::ProjectMissing`; the lead's ruling R-T26). R37's resolver is
+storage's `confine_to_root`, which canonicalizes an existing path whole (C9). `file_edit` retries an LF `old_string`
+against a CRLF file, so a model's LF text keeps the file's endings, and in a file whose every line break is CRLF it
+writes both strings' line breaks as CRLF (the lead's rulings R-T11 and R-T21;
+`an_old_string_mixing_crlf_and_a_lone_lf_matches_an_all_crlf_file`, `file_edit_tests.rs:165`); its write opens the file
+with no create, so a file gone between the copy and the write is refused (the lead's ruling on F-B1; R47: an edit never
+creates). A result file named as a chat attachment is refused — `422 ATTACHMENT_IN_PROJECT`, with `artifact_read`'s
+sentence (R-T8) — and `GET /v1/status`'s `produced_bytes` counts by-products only (R-T9). The app marks a result file
+`in the project` on the FILE WRITTEN card and in the Library (a `Results in the project` filter, no History or Diff),
+lists one whose file is gone with a `missing` tag and reads it again, so the tag goes once the file is back (the final
+review's d7-app-1), draws every agent-chosen path escaped, and offers `Open` only where `openable` is.
+
 ## 14. Reading
 
 - **R40 `file_list`** (new, read-only): lists a folder under the working folder. Today no tool lists a directory.
@@ -640,6 +805,14 @@ asserts the user's bytes and modification time.
   definition is put on the main loop's surface per request, as `read_result`'s is — and `file_read` and `file_list`
   on a project turn.
 
+**As built (rev 1.0).** `file_list` is strict (closed, one required key) and, with `memory_confirm`, one of the
+two builtins OpenAI receives with `strict: true`; it sorts the names first and stats only the first 500
+(`FILE_LIST_MAX_ENTRIES`), says `1 entry`, lists a `.git` entry and refuses `.openalpaca` in any case (the fix wave's
+F-B2). `artifact_read` pages like `read_result` (8 KiB by default, 64 KiB at most) and refuses a pointer row, another
+project's by-product or upload, and the `image` and `binary` kinds; it resolves the turn's project only for a row that
+names one (S5's M3). Round G's `read_back_path` went in step (3), when `file_read`'s root moved and the path it named no
+longer opened (C7); the by-product result's fourth part has named `artifact_read` since step (5).
+
 ## 15. Who holds which tool
 
 - **The main chat** writes and runs commands by keyword as today (`intent/tool_suggest.rs`; under
@@ -652,6 +825,23 @@ asserts the user's bytes and modification time.
   switch-over note has the line for a seeded store.
 - The tool descriptions and result strings that ST-11 makes wrong are rewritten: `artifact_write` is for by-products,
   and "this file is the deliverable" is said only with no project.
+
+**As built (rev 1.0).** The lead gets `file_read`, `file_list` and `artifact_read` in code, not per template; the
+main loop gets `artifact_read` on every turn with a database, `file_read` on every project turn and `file_list`
+wherever `file_read` is (the lead's ruling R-T6), and `file_edit` beside a keyword-suggested `file_write` on a project
+turn — "a project turn" one predicate, `builtins::is_project_turn` (`scope_from_context`'s project arm), computed once
+per turn (R-T14); `file_write`'s description names `file_edit` (R-T13). On a skill's legacy `tools.allow` list a tool
+brings its partner as the capability does — `file_read` brings `file_list`, `file_write` brings `file_edit`,
+`read_result` brings `artifact_read` — on both skill paths (`PAIRED_TOOLS`, `orchestrator/skill/constraints.rs:151`;
+the final review's d6-surfaces-3, residual X5). The relay rule that said the chat has no file-writing tool now says that
+writing, editing or running a command in the project is the chat's own when the tools are on its surface, and that when
+no tool that writes a file is on its surface a file the user asks for is `start_workflow`'s (R-T7) — the relay rules
+alone say so; `start_workflow`'s description no longer says only a workflow writes a file. `writing_agent` gained
+`file_read`. The lead's allow-list model stays (the lead's ruling R-T24): tests pin the shipped lead template refusing a
+scripted `file_write` and `shell_execute` call. Stage 0's §18 wording item is closed: `check_subagent_status` and the
+lead's prompt say that a run keeping no conversation log cuts a long answer after its first part, and a run parked on a
+lane with no conversation keeps one since R-T2. `file_read`'s not-found hint names `file_list`, which every surface
+holding `file_read` holds.
 
 ---
 
@@ -677,11 +867,14 @@ pass; a live check on the rebuilt daemon through its HTTP API and the CLI (isola
 `scripts/eval/memory/loopback-only.sb` from its first launch); the app's surfaces by their vitest suites, the session
 having no screen access.
 
-**Stage 2.** Guards before the root moves: (1) confinement, the filter and the kill (R29–R33, R23, R45); (2) approvals (ST-15, R34);
-(3) the working folder (R26–R28, R44) — until (4) lands, `file_write` on a project turn stays a by-product; (4) pointer
-rows, migration `004`, R39, the pre-edit copy (ST-17, R46) and `file_edit` (ST-22, R47–R49); (5) `file_list`, `artifact_read`, R42; (6) surfaces and wording. One gate pass; a live
-check in a project folder made for the test, which includes reading a by-product back from the main chat (R41) and
-one more try at a click on a stale approval card (§0.4).
+**Stage 2.** Guards before the root moves: (0) a root that no longer leads to itself is missing and a recorded root is
+matched as written first (ST-23) — first, since (3) refuses a missing project's tools; (1) confinement, the filter and
+the kill (R29–R33, R23, R45); (2) approvals (ST-15, R34); (3) the working folder (R26–R28, R44) — until (4) lands,
+`file_write` on a project turn stays a by-product; (4) pointer rows, migration `004`, R39, the pre-edit copy (ST-17,
+R46) and `file_edit` (ST-22, R47–R49); (5) `file_list`, `artifact_read`, R42; (6) surfaces and wording. One gate pass; a
+live check in a project folder made for the test, which includes reading a by-product back from the main chat (R41) and
+one more try at a click on a stale approval card (§0.4), which the session, having no screen access, left to its vitest
+suite.
 
 ## 17. Records
 
@@ -705,7 +898,9 @@ From Stage 0, each found by its review or its live check and left as it is:
 - A lead run with no session log cuts a long completed subagent answer head-only, although the lead's prompt and
   `check_subagent_status`'s description promise a stub to page with `read_result`. Rare: every run started from a
   chat or a follow-up has a session log; the gap is a run parked by `POST /v1/tasks` on a lane with no session. For
-  Stage 2's wording pass.
+  Stage 2's wording pass. **Worded** in Stage 2 (S6.1b): both texts now say a run with no conversation log
+  cuts a long answer after its first part, and the run it named keeps one: a run parked by `POST /v1/tasks` gets its
+  lane's session, and its log, at dispatch (S3.13, the lead's ruling R-T2).
 - `request_workspace_root`'s list of readers in `ToolContext`'s doc omits the per-turn memory path
   (`prompt_ctx/sources/memory.rs`). The collapse of the three workspace fields recorded at
   `tools/registry/mod.rs:27-28` owns the reader lists.
@@ -740,11 +935,14 @@ review's finding (written *review R1…R33*, apart from this design's own ruling
   ruling R-S14).
 - **Case-insensitive home volumes** keep R6 by construction (`name_for` and `lookup` read the folder through the
   volume) but no test covers a case-sensitive project volume beside a case-insensitive home.
-- **Review R1's deeper cross-wiring** (R-F7): only the routes match a recorded root as written; `lookup`, `store_root`, the
-  dispatch's `register` and memory's resolution still take a root that now leads elsewhere (a case-only rename, a
+- **Review R1's deeper cross-wiring** (R-F7): only the routes match a recorded root as written; `lookup`, `store_root`,
+  the dispatch's `register` and memory's resolution still take a root that now leads elsewhere (a case-only rename, a
   link left at the old path) to the project its canonical form names, so that project's follow-ups write into the
-  other's folder and partitions. `missing` stays "the root is not a directory". **Taken by ST-23 (2026-10-09):** a recorded root is matched as written
-  before it is resolved, and one that no longer canonicalizes to itself reads missing — to be built in Stage 2's S0.
+  other's folder and partitions. `missing` stays "the root is not a directory". **Taken by ST-23 (2026-10-09):** a
+  recorded root is matched as written before it is resolved, and one that no longer canonicalizes to itself reads
+  missing — **built** in Stage 2's S0 (`cfebde4c..c60ecbc1`), which closes this bullet. Planning S0 found that learning
+  also dropped such a project's turns — `check_project` canonicalized the root and read it `Gone`, against ST-21 — which
+  S0.2 fixed.
 - **Review R4's other variant** (R-F7): with `OPENALPACA_HOME_STORE` outside `$HOME`, a `~/.git` makes `$HOME` a project.
   Older than Stage 1.
 - **A root that is not valid UTF-8** is held through `to_string_lossy` and can alias another (S1 M4; Linux; the shape
@@ -760,7 +958,8 @@ review's finding (written *review R1…R33*, apart from this design's own ruling
   error arm for that listing has no route-level test — only a transient failure reaches it, and its storage twin is
   pinned (B4).
 - **A project whose recorded root no longer opens** is listed, but the 30 s reconciliation skips its partition
-  (logged at debug, X6; A-N2).
+  (logged at debug, X6; A-N2). **Closed** by Stage 2's S0 (ST-23): the reconciliation matches such a root as
+  written and scans its partition.
 - **`openalpaca memory --project`** reads the home store's registry itself for a missing absolute root (X9), so a CLI
   and a daemon started with different `OPENALPACA_HOME_STORE` can disagree, as the local verbs already can.
 
@@ -775,7 +974,9 @@ review's finding (written *review R1…R33*, apart from this design's own ruling
 - **`store rebase --dry-run`** advises "delete that project's data first" for a target that is an unfinished
   re-point's root, where the daemon answers `RepointUnfinished`'s `409` naming the restart (B1).
 - **A turn's file writes during a re-point** (review R13's file half): `file_write` and `artifact_write` on the old root are
-  refused "… is not a project OpenAlpaca knows", which a model may route around through the shell.
+  refused "… is not a project OpenAlpaca knows", which a model may route around through the shell. Since
+  Stage 2 the shell and every file tool refuse such a turn with the same sentence (the working folder's
+  `NotAProject`), so there is no route around.
 
 *Memory and learning*
 
@@ -835,6 +1036,147 @@ review's finding (written *review R1…R33*, apart from this design's own ruling
   made elsewhere until `Use`; after a delete elsewhere the Project card's note says the folder "may have moved"; a
   pinned conversation's project re-syncs from the sidebar's loaded page only.
 
+From Stage 2, each found while planning, building, reviewing or checking it, and left as it is. The source is the
+plan's ruling (R-T…), a slice's review (S0…S6 text, its minors M…), the whole-stage review's finding (named by its
+dimension, d0-st23…d8-docs), the fix wave's clusters (F-A…F-F) and residual passes (X…, Y) and their re-reviews, or the
+live check.
+
+*The plan's rulings (R-T16) and the approvals*
+
+- **An explicit confirmation list is used as written, but for `file_edit`** (R30, R-T35; the plan's interfaces
+  §10.1): a template's `require_confirmation_for` or a skill's `permissions.confirm.tools` — none shipped since F1 —
+  keeps asking for `artifact_write` and `workspace_write` when it names them, despite ST-15, and since R-T35 one naming
+  `file_write` asks for `file_edit` too. The switch-over note's step 8 says so; nothing rewrites a seeded template.
+  `GET /v1/agent-templates` serves the list as written — `[file_write]` — while the effective set also holds
+  `file_edit` (display only; Y's re-review).
+- **The chat apps' prompts gained the preview** (C6) and nothing else: a connector's `/yes` still answers the oldest
+  prompt of a chat, keyed by chat, not sender. A Discord preview line cut between a backslash and the character it
+  escapes leaves that character bare after the continuation indent (Y's re-review).
+- **An edit's card can go stale before the click** (S4b): the card is planned when it is raised and the body plans
+  again after the approval, so a file changed in between is edited where the same `old_string` stands then, or
+  refused if it no longer occurs; nothing compares the approved plan with the body's.
+- **The bytes read and the bytes copied can differ** (S4b): another writer between the plan's read and the pre-edit
+  copy leaves the copy holding the newer content, which the edit replaces; nothing is lost, but the edit is not a
+  compare-and-swap.
+- **A result file's row follows its latest writer** (R35): the update rewrites `task_id` and `agent_id`, so a run
+  whose report is finalised after another run rewrote the same path does not list it in its `Written in the project`
+  line.
+- **The delete card counts no result-file rows** (S4a.7): the project delete removes pointer rows with a statement of
+  their own, uncounted; counting them needs a `PurgeCounts` field and a wire change.
+- **Plugin agents and plugin skills get no `<working_folder>` line** (R28, R-T22): a plugin agent's instructions are
+  the system prompt and the objective, and a plugin skill takes a query string; both carry the conversation.
+- **R45's kill has edges:** a process that leaves its group (`setsid`, a double fork) is out of reach; on Windows only
+  the direct child is killed; the daemon's force-exit path runs no drop, so it kills nothing; a command in its own
+  process group no longer gets a terminal's Ctrl-C; and a background-group command that reads `/dev/tty` stops until
+  its time limit.
+- **The kill is an immediate `SIGKILL`** (the lead's ruling R-T23; the final review's d2-process-3): a command killed
+  mid-way may leave its own lock files behind (for example `.git/index.lock`), which the Daemon Manual says. A
+  `SIGTERM` grace with a detached reaper is the idea for later.
+- **No test-build tripwire in `WorkingFolder::ensure`** (S3): an unguarded test that reached a scratch folder would
+  make `~/.openalpaca/scratch/<id>`; none does, and the guard audit is the protection, as for `projects::register`.
+- **Between S3.3 and S4a.11 `file_write` had neither R33's rules nor its new root** (the lead's ruling R-T4):
+  production wrote a by-product throughout (the startup root is the home store); only a hand-started development
+  daemon could have written into `state/` or the persona, after an approval card. Unreleased commits only.
+- **Between S2 and S3 a project turn's shell card named the folder before the command ran there** (S2's C8):
+  unreleased commits only, closed by S3.
+- **A shell command can still reach anything you can** (ST-14, accepted): the card is the only stop. The research on
+  sandbox methods above is the remedy. A command's changes keep no pre-edit copy — only `file_write` and `file_edit`
+  keep one — and the documents say so (S6 text).
+
+*Projects and ST-23 (S0, F-A)*
+
+- **`reconcile_owner`'s `NotRegistered` arm is untested** (S0's M1): it logs at debug and is reached only by a race.
+- **The case-only tests do not assert the spelling the user's folder is listed in** (S0's M3): as the plan wrote them;
+  where their premise does not hold they fail loudly rather than pass falsely.
+- **Letter case and NFC/NFD spellings stay outside R-T17** (R-T29's remainder): a recorded root is matched as written
+  and as named through a link at one of its ancestors, but a root asked for in another case or normalisation than the
+  one recorded is resolved by its canonical form.
+- **Reveal given an ancestor-link spelling of a missing project's root reads `OutsideStore`**, not `ProjectMissing`
+  (F-A); the app asks with the recorded path, so it does not meet it.
+
+*Confinement and processes (S1, F-B1, F-C1, X-R)*
+
+- **The card/send check-then-use race** (S1): a link swapped in between `send`'s card and the send is followed, and
+  `send`'s `file_path` and `file_list` stat their path without `O_NOFOLLOW` (R-T30 names the three file tools only).
+- **A link swapped in at a middle folder is still followed** (R-T30's remainder), by the leaf's open and by the walk
+  that makes missing folders; closing it needs a walk with `openat`. Off unix the leaf's open follows a link too
+  (`open_leaf`, `tools/builtins/helpers/mod.rs:274`).
+- **A named pipe swapped in between the check and the open blocks the call until its timeout** (X6's window):
+  `file_write`'s and `file_edit`'s stat and their open are two steps.
+- **A plugin agent's `spawn` and `step` calls are not raced against the run's cancellation**, nor is the agentic loop's
+  step from the model's reply to its tool batch (`runner/agentic_loop/mod.rs:1156`): a cancel landing then lets one
+  proxied call begin — a command killed at once, or a card withdrawn at once (F-C1's re-review).
+- **A script's failed run shows the first 500 characters of its stderr** (`tools/builtins/mod.rs:612`), so X7's line
+  naming a cut cannot show there.
+
+*The working folder and sessions (S3, F-D)*
+
+- **R28's line is a message of its own** everywhere but on the main loop — the file-skill tier, a nested skill, the
+  lead, a subagent, the bootstrap and attachment-only arms — so compaction keeps one row fewer verbatim there; the
+  lead's and a subagent's line could be folded into the working state (S3).
+- **`remove_scratch` and `ensure` check, then act** (S3): a link swapped in at `scratch/` between the two is a window.
+- **A deleted conversation's scratch folder can come back** while a tool of it still runs, and nothing sweeps an
+  orphaned one (S3); `remove_scratch_folder` runs `remove_dir_all` synchronously inside the async handlers, as the
+  session directories' removal does.
+- **Unguarded tests put `<$HOME>/.openalpaca/scratch/<id>` into mock requests** (S3): pure computation, nothing is
+  made; a guard in each would remove the question.
+- **R-T27's remainder:** `build_context` still reads the lane's active session for a raced turn's history and working
+  state, so a turn the gateway put in one conversation while the lane's active session moved to another acts in the
+  first's folder and reads and writes its history and state in the second (F-D's re-review).
+- **A turn with no project is offered `file_read` and `file_list` by keyword only** (the live check, (h)): on a scratch
+  turn the main loop holds the readers only when the message says `read file`, `open file`, `show file` or `cat `, and
+  R28's line names only the tools held — R42, R-T6 and R-T22 as designed. Whether a scratch turn should be offered the
+  readers as a project turn is, is a question for the owner, not a decision.
+
+*Results and by-products (S4a, F-A, F-C2, X-R)*
+
+- **R-T3 refuses another project's upload by id too** (S4a): `send` and `artifact_read` keep one rule for a by-product
+  and an upload.
+- **R-T20's `content_root` follows a link standing at `<store>/artifacts` or `<store>/uploads` itself**, as the
+  Library does; putting one there needs an approved shell write at the store's root (ST-14).
+- **`refresh_project_file` reads a result file whole to hash it** (S4a); streaming it is later work.
+- **Rows recorded under a `docs/./plan.md` spelling by an earlier build of this branch stay separate** from the
+  normalised path's row (F-A records one spelling from now on).
+- **`workspace_write` stores any `file_asset_id` silently** (the final review's d3-approvals-2): the delivery is checked
+  at the notifier (`deliverable_path`), so the model is not told at the write.
+- **A dangling link out of a by-product's folder answers `410 ARTIFACT_GONE`** on Open, not the confinement's refusal
+  (R-T33's wording, X-R's re-review); nothing is opened either way.
+
+*`file_edit` and the readers (S4b, S5)*
+
+- **A CRLF `old_string` or `new_string` shows `<U+000D>` at each line end on `file_edit`'s card** and counts as hidden
+  characters — correct by the escaped-surfaces rule; the escape set stays (S4b).
+- **`file_edit`, `file_read` and `file_list` reach the bootstrap and attachment-only arms of a project turn** (S4b,
+  S5's M2): an attachment-only project turn becomes a sandboxed tool loop holding them (the readers never ask),
+  untested there. Under `tool_selection = "full"` `file_edit` is on every turn and refused without a project.
+- **A skill is pointed at an `artifact_read` it may not hold** (S5's M5): `file_read`'s description and `file_write`'s
+  by-product result name it, and a file-based skill holds it only when granted `read_result`, which brings it (X5).
+- **A store seeded before S5.8 keeps `writing_agent.md` without `file_read`**: the switch-over note's step 8 has the
+  line.
+
+*The app (S6a, F-E, X-G)*
+
+- **`FilePanelSlot` fetches versions and a diff for a pointer row** though only Preview is shown (idle requests).
+- **The palette's Find and the panel's picker still hide marked result rows**; the Library's results list shows them,
+  with their `missing` tag.
+- **An image result file's load, or an Open or Export, that clears the mark does not re-read the rows**: the tag goes
+  at the list's next refetch (a text preview clears it at once).
+
+*Documents, tests and tooling (S6 text, X-G, Y, the gate)*
+
+- **`plan-stage2.md` keeps "git keeps its history"** as written, the plan of record; the documents were corrected in
+  `6bc7042f` — an edited file's earlier content is the pre-edit copy in the conversation's log, and git's history only
+  where the project is a repository.
+- **`DESIGN_SPEC.md` rev 31 was amended in place for the second residual pass** (Y); its log entry says so.
+- **The plan's live-check driver passed `kind` to `driver.record` twice** (`results.py`): the live check fixed its
+  scratch copy, and the plan of record is unchanged.
+- **`rustfmt` drift stays in test files the stage touched** (five hunks in `openalpaca_storage`'s
+  `artifacts/tests.rs`, among others): each cluster brought only its own lines to rustfmt's shape, and
+  `cargo fmt --check` is not a gate.
+- **`memory::learning::tests::episodes::an_episode_is_one_active_extracted_other_note_with_the_designs_fields` flaked
+  once** (`summariser_calls_today`) in a full core run during the residual pass — code no Stage 2 commit touched — and
+  passed in its re-runs and in the gate at `3810d9d8`. To watch.
+
 ## 19. What the panel changed (rev 0.1 → 0.2)
 
 - **Blocking, fixed.** Removing `moved_from` would have made every existing snapshot unreadable (R19). Deleting a
@@ -872,9 +1214,9 @@ refuted outright, and 24 further findings (9 major).
 ## 21. What a beta waits for
 
 On 2026-10-05 the owner asked whether the app is ready for a beta. It is not. Stage 0's fixes are built
-(`931460a4..a9dbed4e`, 2026-10-06…07), and so is Stage 1 (`b8b768b6^..44d53783`, 2026-10-07…08): nothing is written
-in a repository any more. Agents not in the project (Stage 2) and B1–B3 below remain. The gaps, and where each is
-fixed:
+(`931460a4..a9dbed4e`, 2026-10-06…07), and so are Stage 1 (`b8b768b6^..44d53783`, 2026-10-07…08) — nothing of
+OpenAlpaca's own is written in a repository any more — and Stage 2 (`cfebde4c..d673478e`, 2026-10-10): agents work in
+the project's folder, each write and command asking first. B1–B3 below remain. The gaps, and where each is fixed:
 
 | Gap | Fix | Stage |
 |---|---|---|
@@ -882,7 +1224,7 @@ fixed:
 | Every program the daemon started inherited the master key | F3, built | 0 |
 | A workflow's report could name the wrong path for a file it wrote (the 500-character cut) | F2, built | 0 |
 | A CLI chat inside any git repository creates `<repo>/.openalpaca/` in the tester's repository | Part I, built | 1 |
-| From the app, agents cannot read, write or edit the project's files, and the shell runs in the daemon's folder | Part II, with `file_edit` (ST-22) | 2 |
+| From the app, agents cannot read, write or edit the project's files, and the shell runs in the daemon's folder | Part II, with `file_edit` (ST-22), built | 2 |
 
 Three things a beta needs that no stage covers:
 
@@ -899,7 +1241,7 @@ Three things a beta needs that no stage covers:
 - **B3. The manuals say what the beta can and cannot do.** One list in `docs/Installation_Manual.md`: the shell is
   not confined to the project (ST-14); extension tools never ask (T35); learning is below its own targets
   (`tasks/memory-redesign/10-learning-evaluation.md`); a store from before 2026-09-28 is refused and the way through
-  is the factory reset; and, until Stage 2 ships, that agents do not touch the project's files.
+  is the factory reset.
 
 Which stages the beta waits for is the owner's call. Stage 0 with B1–B3 is enough for a few testers who know the
 limits; Stage 1 is what keeps every tester's repository clean; Stage 2 is what a tester who expects help with their
@@ -907,6 +1249,112 @@ own project needs.
 
 ## Revision log
 
+- **rev 1.0 (2026-10-10).** **Stage 2 built**, from `tasks/storage-design/plan-stage2.md` (approved by the owner on
+  2026-10-10, with R-T2 and R-T3 confirmed), as `cfebde4c..d673478e` (172 commits): slices S0–S6 (S0 for ST-23, built
+  first; S4 as S4a and S4b; S6 as S6a and S6 text), each reviewed, five with one fix round; the whole-stage review (nine
+  reviewers by dimension over `cfebde4c..6bc7042f`: 0 Critical, 9 Important, 22 Minor) and its fix wave
+  `6bc7042f..3810d9d8` (74 commits: clusters F-A…F-F, the residual passes X-R, X-G and Y, the lead's `d01c9260` and
+  `3810d9d8`); one gate pass at `3810d9d8` (5,080 passed, 0 failed, 16 ignored; clippy 78; the four bun gates green,
+  1,551 tests in 121 files); the live check `stage2-live-report.md` (`d673478e`; (a)–(h) and (j) PASS, (b2) the CLI
+  keeps the preview's line breaks, 0 ERROR lines, the repository changed by the one approved file only, (i) not
+  exercised live). The title, the status line, §0.4 (FW-2's row and its two live items) and §21 say so (its row 5 built,
+  B3's clause about Stage 2 gone); Part II gains a lead-in with each slice's range, the gate and the live check, a
+  subsection for the owner, *New refusals the final wave added*, and *As built* paragraphs after §10–§15; §16's Stage 2
+  clause names ST-23 first and the stale card left to its vitest suite; §18 marks Stage 0's wording item worded and
+  Stage 1's re-point bullet closed by the working folder's refusal, closes *review R1's deeper cross-wiring* and Stage
+  1's X6 (ST-23, built first as S0, which §0.2, §3, §6 and §16 now say), and gains Stage 2's residue (an explicit list
+  used as written but for `file_edit` (and `GET /v1/agent-templates` showing it as written), the connectors'
+  oldest-prompt `/yes` and Discord's cut backslash, the stale edit card, the bytes read and copied, the latest writer's
+  row, the delete card's count, the plugin surfaces' missing line, R45's edges and R-T23's immediate kill, the `ensure`
+  tripwire, R-T4's window, S2's C8, the unconfined shell's uncopied changes, S0's M1 and M3, R-T29's case and NFC
+  remainder, Reveal's ancestor-link spelling, the card/send race, R-T30's middle folder and non-unix leaf, X6's pipe
+  window, the plugin agent's cancel window, X7 in a script's stderr, R28's separate messages, the scratch folder's
+  windows and orphans, R-T27's remainder, a scratch turn offered the readers by keyword only (a question for the owner),
+  R-T3's uploads, R-T20's store-root link, the whole-file hash, the earlier `./` rows, `workspace_write`'s
+  `file_asset_id`, a dangling by-product link's 410, the CRLF card, the bootstrap and attachment-only arms, a skill's
+  `artifact_read`, `writing_agent`'s seeded template, the app's idle requests, hidden marked rows and the mark's
+  re-read, the plan's two text defects, `DESIGN_SPEC.md` rev 31 amended in place, the rustfmt drift and the episode
+  test's flake).
+  The lead's rulings that shaped the build — the plan's interfaces corrections, one line each:
+  - C1: `file_write`'s root moved in step (4) with the real write, not in (3); production stayed a by-product between.
+  - C2: ST-17 and R46 landed in step (4) with `pre_edit.rs`; `file_edit` consumes it.
+  - C3: `ToolContext.conversation_id`, a field apart from `session_id`.
+  - C4: R28's line is given at each site that runs a loop, not through `WorkspaceSource`, which stays a stub — on the
+    main loop as the relay rules' last line (S3's fix round), elsewhere as a message of its own (§10's *As built*).
+  - C5: the core wrapper announces `artifact_written`; storage has no bus.
+  - C6: the chat apps' confirmation prompts print the preview.
+  - C7: `read_back_path` went in step (3); `artifact_read`'s sentence came in (5).
+  - C8: between steps (2) and (3) a project turn's shell card named the folder before the command ran there; unreleased,
+    closed by (3).
+  - C9: R37 reads a pointer row through storage's `confine_to_root`.
+  - C10: a pointer row is never linked to a report message; the report's runtime line and the Work view carry R38.
+  - C11: `409 OPEN_NOT_OFFERED` landed with the rows, the app's hiding with the surfaces.
+  - C12: `ArtifactRecord`, not `FileAsset`, carries `in_project`.
+  - C13: ST-19's delete keeps no pointer row's file and counts none as a by-product.
+  The lead's rulings on the plan's drafts, R-T1…R-T19 (`plan-stage2.md`, *Rulings*), one line each:
+  - R-T1: S4a's `file_write` real write landed last in its slice, after every reader that guards a result file.
+  - R-T2: a run parked by `POST /v1/tasks` on a lane with no session gets the lane's session at dispatch — as built,
+    every dispatch with no turn of its own (confirmed by the owner, 2026-10-10).
+  - R-T3: `send` by `artifact_id` refuses another project's by-product with `artifact_read`'s sentence (confirmed by the
+    owner, 2026-10-10).
+  - R-T4: the S3.3 → S4a.11 window of `file_write` is accepted and recorded in §18.
+  - R-T5: `file_write` with neither a project nor a conversation saves a by-product.
+  - R-T6: `file_list` comes wherever `file_read` is on the main loop's surface.
+  - R-T7: the relay rules say a file asked for with no writing tool on the surface is `start_workflow`'s.
+  - R-T8: a result file named as a chat attachment is refused, `422 ATTACHMENT_IN_PROJECT`.
+  - R-T9: `GET /v1/status`'s `produced_bytes` counts by-products only.
+  - R-T10: `no_artifact_reason` stays; the report's runtime line names the result files.
+  - R-T11: `file_edit` keeps an all-CRLF file all-CRLF.
+  - R-T12: a card keeps both hidden-character counts, its own and the surface's.
+  - R-T13: `file_write`'s description names `file_edit`.
+  - R-T14: one project-turn predicate, `builtins::is_project_turn`, computed once per turn.
+  - R-T15: every recorded spec conflict in the drafts stands as drafted.
+  - R-T16: the residue in §18's *From Stage 2* list is recorded, not built.
+  - R-T17: S0 built ST-23 first; a path that is not its own canonical form is walked as written first, a missing
+    project's recorded root found so losing only to a nearer project or repository, and a project that still leads to
+    itself resolving as before; the case-only tests skip on a case-sensitive volume.
+  - R-T18: a missing project's result file reads as gone and is never read, refreshed, opened or revealed through a
+    link left at its old root.
+  - R-T19: a by-product's or an upload's row filed at a missing project's old root names that project
+    (`project_root_of` answers the root `lookup` finds), and `send` by `artifact_id` refuses its result file.
+  The lead's rulings while building and on the whole-stage review, R-T20…R-T35 (the build's ledger and the fix wave's
+  brief), one line each:
+  - R-T20: `send` by `artifact_id` reads a by-product only inside its row's own folder in the store
+    (`ArtifactRecord::content_root`), as the Library does, so a link at its path never sends `state/`.
+  - R-T21: R-T11 widened — in an all-CRLF file both strings' line breaks are written as CRLF, `old_string`'s too.
+  - R-T22: R28's line names only the tools the loop holds; a project loop with no writing tool is told so, the lead that
+    a subagent writes the project's files; the bootstrap and attachment-only arms and a nested `invoke_skill` get it.
+  - R-T23: the group kill stays an immediate `SIGKILL`; a `SIGTERM` grace goes to §18, and the Daemon Manual names the
+    lock files a killed command may leave.
+  - R-T24: the lead's allow-list model stays; tests pin the shipped lead template refusing a scripted `file_write` and
+    `shell_execute`.
+  - R-T25: Open re-checks what it opens — a result file only when its resolved file is a regular file of a kind ST-18
+    keeps.
+  - R-T26: a missing project's result file answers `410 ARTIFACT_PROJECT_MISSING` with R-T19's sentence, and Reveal
+    refuses it with the same (`RevealRefusal::ProjectMissing`).
+  - R-T27: the turn's conversation comes from the gateway (`HandleRequest::session_id`); the lane's active session only
+    for a handler reached with no gateway.
+  - R-T28: `run_bounded` keeps at most the cap plus one byte of each pipe and drains the rest; both pipes are read to
+    their end before the child is reaped.
+  - R-T29: a recorded root is also matched as named — its parent's canonical form joined with its name — so an
+    ancestor-link spelling finds a missing project; case and NFC stay outside (§18).
+  - R-T30: on unix the three file tools open their file with `O_NOFOLLOW`; missing folders are made below the
+    canonical root one level at a time; the pointer row re-checks its project; a middle-folder swap goes to §18.
+  - R-T31: a write or edit card names the file an in-project link leads to, escaped and counted — only when a
+    component of the path is a link (the lead's ruling on F-B1: a case spelling is no link).
+  - R-T32: a connector prompt split across messages splits at line boundaries and keeps every preview line indented.
+  - R-T33: Open of a by-product is confined like `send` (R-T20), and a gone result file is `410 ARTIFACT_GONE`; ratified
+    as built — a link out of the folder answers `500 OPEN_FAILED` with its sentence, no new code.
+  - R-T34: `DESIGN_SPEC.md` takes rev 31 for the fix wave.
+  - R-T35: an explicit confirmation list naming `file_write` also asks for `file_edit`, for templates and skills alike.
+  The lead's unnumbered rulings on the slices' and the wave's minors:
+  - S6a's M4: the Event log's row escapes a written file's name with no count line — it is no approval surface.
+  - F-B1: `file_edit`'s write opens with no create, so a file gone between the copy and the write is refused (R47).
+  - F-B2: R32's `.git` rule is a write rule — `file_list` lists a `.git` entry and refuses `.openalpaca` in any case.
+  - S6 text's M1: the cards' comments say nothing the model wrote reaches a card raw; the project root printed there is
+    the person's own and is not escaped (Stage 1's review R25).
+  - Y: the app's note for a refusal other than `ARTIFACT_GONE` on a result file draws it escaped with no count line
+    (S6a's M4).
 - **rev 0.10 (2026-10-09).** The owner answered Stage 1's two questions: **T36 — no change** (the re-point of an
   `old_path` inside a project stays as built; §9's `PATCH` row stands), and **ST-23** (§0.1) — a project whose recorded
   root no longer leads to its own folder (a case-only rename, a link left at the old path) reads missing and is
