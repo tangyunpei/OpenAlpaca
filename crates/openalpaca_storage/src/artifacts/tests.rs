@@ -2902,7 +2902,7 @@ fn a_by_product_is_outside_the_project_and_opens() {
     let (by_product, _) = f.store().put(new).unwrap();
 
     assert!(!by_product.in_project);
-    assert!(by_product.openable(), "every by-product opens");
+    assert!(by_product.openable(), "a by-product stored under a kind's extension opens");
     let ids = |in_project: Option<bool>| -> Vec<String> {
         let mut q = ArtifactQuery::new(OWNER);
         q.in_project = in_project;
@@ -2917,6 +2917,29 @@ fn a_by_product_is_outside_the_project_and_opens() {
     assert_eq!(ids(Some(false)), vec![by_product.id.clone()]);
     assert!(ids(Some(true)).is_empty(), "no result file yet");
     assert_eq!(ids(None), vec![by_product.id.clone()], "absent: both");
+}
+
+/// ST-18 on a by-product follows the file Open would hand to an app: a
+/// by-product whose text no kind admits is stored under the fallback `.bin`
+/// (FW-1), which no default app may be given, so it is not offered Open —
+/// the route refuses it too (`by_product_path`, the second residual pass's
+/// Y.3) — while an upload is still offered, staged as a copy under its name.
+#[test]
+fn a_by_product_stored_as_bin_is_not_offered_open() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Code, "deploy", b"echo hi\n");
+    new.name_hint = Some("deploy.sh");
+    new.created = at(1);
+    let (stored, _) = f.store().put(new).unwrap();
+
+    assert!(
+        stored.storage_path.ends_with(".bin"),
+        "text no kind admits is stored as .bin: {}",
+        stored.storage_path
+    );
+    assert!(!stored.in_project);
+    assert!(!stored.openable(), "a .bin by-product is Reveal only (ST-18)");
 }
 
 // ============================================================================

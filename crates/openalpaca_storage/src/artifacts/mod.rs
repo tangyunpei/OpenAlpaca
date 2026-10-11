@@ -472,12 +472,25 @@ impl ArtifactRecord {
         self.missing_since.is_some()
     }
 
-    /// ST-18: whether Open is offered — every by-product and upload; a result
-    /// file only when its name has an extension a kind keeps
-    /// ([`crate::store::opens_in_default_app`]): `.sh`, `.command`,
-    /// `Makefile` get Reveal only.
+    /// ST-18: whether Open is offered — decided, like the route's own check,
+    /// on the file Open would hand to the default app
+    /// ([`crate::store::opens_in_default_app`]): a result file by its name in
+    /// the project (`.sh`, `.command`, `Makefile` get Reveal only); a
+    /// by-product by its stored file's name, so one whose text no kind admits
+    /// — stored under the fallback `.bin` (FW-1) — is Reveal only, as Open's
+    /// route refuses it (the second residual pass, Y.3); an upload always,
+    /// since Open stages a copy under its name.
     pub fn openable(&self) -> bool {
-        !self.in_project || crate::store::opens_in_default_app(&self.name)
+        if self.in_project {
+            return crate::store::opens_in_default_app(&self.name);
+        }
+        match self.origin {
+            ArtifactOrigin::Produced => Path::new(&self.storage_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(crate::store::opens_in_default_app),
+            ArtifactOrigin::Upload => true,
+        }
     }
 
     /// The folder a by-product's or an upload's bytes lie under — its store's

@@ -515,7 +515,8 @@ pub enum ServerEvent {
 }
 
 /// `ArtifactWritten::openable` in a frame that predates it: every artifact
-/// announced before Stage 2 was a by-product, and every by-product opens.
+/// announced before Stage 2 was a by-product, and an older daemon offered
+/// Open for every one.
 fn openable_by_default() -> bool {
     true
 }

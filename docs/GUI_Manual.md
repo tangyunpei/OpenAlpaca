@@ -859,10 +859,10 @@ there, and a file that is no longer there — a by-product, or a result file in
 its project — is refused with the daemon's own sentence, as the toast. A
 by-product is opened only when what it resolves to is a kind the Library
 keeps, as for a result file: one whose stored file was replaced since by a
-link to a script in its folder, or one stored under the store's fallback
-extension `.bin` (text whose extension no kind keeps, say), is not offered
-(`409 OPEN_NOT_OFFERED`), and the toast says so; `Reveal in Finder` still
-shows it.
+link to a script in its folder is refused (`409 OPEN_NOT_OFFERED`), and the
+toast says so; one stored under the store's fallback extension `.bin` (text
+whose extension no kind keeps, say) is not offered `Open` at all. `Reveal in
+Finder` still shows either.
 
 `Reveal in Finder` — `Show in folder` on Windows and Linux — shows the file in
 its folder instead, through the app's own shell (`reveal_path`, above): Finder
