@@ -85,7 +85,8 @@ pub(super) enum OpenFileApiError {
     /// `.sh`, `.command`, `Makefile` — is shown in its folder, never handed
     /// to the system's default app, which could run it. Since R-T25 the
     /// same answer is given when what the row resolves to is not such a
-    /// file: a folder, or a link inside the project to a script or an app.
+    /// file: a folder, or a link inside the project to a script or an app —
+    /// and since Y.3 the same for a by-product's file in the store.
     NotOffered {
         name: String,
     },
@@ -273,10 +274,14 @@ pub(super) async fn open_asset_for_user(
 /// hands it to the default app — resolved under its row's own folder in the
 /// store (`ArtifactRecord::content_root`, as `send` and the Library's reads
 /// confine it), so a link put at the file is never followed out of that
-/// folder, and offered only when it is a regular file. A file that is not
-/// there is `Gone` — `410 ARTIFACT_GONE`, as the content routes answer —
-/// a link out of the folder is refused, and anything but a regular file is
-/// `NotOffered`. Read only: nothing is written or stamped.
+/// folder, and offered only when it is a regular file whose own name a kind
+/// keeps (ST-18 on what was resolved, as for a result file — R-T25; the
+/// second residual pass's Y.3). A file that is not there is `Gone` — `410
+/// ARTIFACT_GONE`, as the content routes answer — a link out of the folder
+/// is refused, and anything else is `NotOffered`: a folder, a link inside
+/// the folder to a script, and a by-product stored under the store's
+/// fallback extension (`.bin`), which no kind keeps either. Read only:
+/// nothing is written or stamped.
 fn by_product_path(
     record: &openalpaca_storage::ArtifactRecord,
 ) -> Result<PathBuf, OpenFileApiError> {
@@ -303,8 +308,17 @@ fn by_product_path(
             record.name
         ))
     })?;
+    // Y.3 (R-T25 for a by-product): ST-18 is decided on what was resolved.
+    // A link inside the folder is followed, so the row's name says nothing
+    // of the target: only a regular file whose own name a kind keeps is
+    // handed to the default app — never a script or an app bundle.
+    let kept = || {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(openalpaca_storage::store::opens_in_default_app)
+    };
     match std::fs::metadata(&path) {
-        Ok(metadata) if metadata.is_file() => Ok(path),
+        Ok(metadata) if metadata.is_file() && kept() => Ok(path),
         Ok(_) => Err(OpenFileApiError::NotOffered {
             name: record.name.clone(),
         }),

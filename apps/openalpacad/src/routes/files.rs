@@ -1073,6 +1073,37 @@ mod tests {
         assert_eq!(std::fs::read(&script).unwrap(), b"#!/bin/sh\necho ran\n");
     }
 
+    /// Second residual pass, Y.3 (R-T25 for a by-product): a by-product
+    /// `notes.md` whose stored file was replaced by a link to a script in the
+    /// same folder of the store — inside it, so the confinement accepts it —
+    /// is refused `NotOffered` naming the row: ST-18 is decided on the file
+    /// the link leads to, `run.command`, which no kind keeps. The opener is
+    /// never called, and the script is left as it was.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_by_product_replaced_by_a_link_to_a_script_in_its_folder_is_not_opened() {
+        let _gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = by_product(&db, "Notes");
+        let stored = std::path::Path::new(&row.storage_path);
+        let script = stored.with_file_name("run.command");
+        std::fs::write(&script, b"#!/bin/sh\necho ran\n").expect("script");
+        std::fs::remove_file(stored).expect("remove");
+        std::os::unix::fs::symlink(&script, stored).expect("link");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("Reveal only");
+        assert_eq!(
+            err,
+            OpenFileApiError::NotOffered {
+                name: row.name.clone()
+            },
+            "the opener was never called"
+        );
+        assert_eq!(std::fs::read(&script).unwrap(), b"#!/bin/sh\necho ran\n");
+    }
+
     /// R-T33: a by-product whose stored file was replaced by a folder is
     /// refused `NotOffered` — a folder is not a file the default app opens.
     #[tokio::test]
