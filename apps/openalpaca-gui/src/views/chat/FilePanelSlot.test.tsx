@@ -261,7 +261,63 @@ describe("FilePanelSlot — a file written into the project", () => {
   });
 });
 
-describe("FilePanelSlot — the Preview of a file written into the project (X14)", () => {
+describe("FilePanelSlot — the Preview of a file written into the project (X15, X14)", () => {
+  function text(body: string): Response {
+    return new Response(body, {
+      status: 200,
+      headers: { "content-type": "text/plain" },
+    });
+  }
+
+  it("draws a 410's hidden characters escaped, with their count", async () => {
+    // The path is the agent's, and the daemon's refusal repeats it.
+    const name = "scripts/\u{202E}release\u{200B}.sh";
+    served = { ...projectScript, name, rel_path: name, missing: true };
+    content = () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "ARTIFACT_GONE",
+            message: `artifact art-1 is gone: /Users/dev/app/${name} no longer exists`,
+          },
+        }),
+        { status: 410 },
+      );
+    renderSlot();
+
+    expect(
+      await screen.findByText(
+        "This file is no longer at scripts/<U+202E>release<U+200B>.sh in the project. Its row is kept, and the file is shown again once it is back. Note: this request contains 2 hidden characters, shown as <U+…>.",
+      ),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/[\u{202E}\u{200B}]/u);
+  });
+
+  it("reads the row and the library again once a marked file is read", async () => {
+    let back = false;
+    served = { ...projectScript, missing: true };
+    content = () => {
+      back = true;
+      served = { ...projectScript, missing: false };
+      return text("echo release\n");
+    };
+    renderSlot();
+
+    await waitFor(() => expect(back).toBe(true));
+    // The read cleared the mark on the daemon (R37): the row and the
+    // panel's list of the library are read again.
+    await waitFor(() =>
+      expect(
+        requests.filter((r) => r.endsWith("/v1/artifacts/art-1")).length,
+      ).toBeGreaterThan(1),
+    );
+    await waitFor(() =>
+      expect(
+        requests.filter((r) => r.includes("/v1/artifacts?")).length,
+      ).toBeGreaterThan(1),
+    );
+  });
+
   it("says a marked image could not be read when it does not load (X14)", async () => {
     served = {
       ...projectScript,
