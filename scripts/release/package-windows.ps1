@@ -125,7 +125,10 @@ try {
 
 # Locate MSI
 $msiPath = $null
+# The shell builds into target\gui (src-tauri\.cargo\config.toml); the other
+# two are where an older tree put the bundle.
 $msiCandidates = @(
+    (Join-Path $RepoRoot 'target\gui\release\bundle\msi'),
     (Join-Path $RepoRoot 'target\release\bundle\msi'),
     (Join-Path $RepoRoot 'apps\openalpaca-gui\src-tauri\target\release\bundle\msi')
 )

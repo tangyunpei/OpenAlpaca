@@ -100,11 +100,19 @@ echo "==> Building Tauri app bundle"
   bunx tauri build --bundles app
 )
 
-APP_BUNDLE_PATH="$REPO_ROOT/target/release/bundle/macos/openalpaca-gui.app"
-if [[ ! -d "$APP_BUNDLE_PATH" ]]; then
-  APP_BUNDLE_PATH="$REPO_ROOT/apps/openalpaca-gui/src-tauri/target/release/bundle/macos/openalpaca-gui.app"
-fi
-[[ -d "$APP_BUNDLE_PATH" ]] || die "Tauri app bundle not found: $APP_BUNDLE_PATH"
+# The shell builds into target/gui (src-tauri/.cargo/config.toml); the other
+# two are where an older tree put the bundle.
+APP_BUNDLE_PATH=""
+for candidate in \
+  "$REPO_ROOT/target/gui/release/bundle/macos/openalpaca-gui.app" \
+  "$REPO_ROOT/target/release/bundle/macos/openalpaca-gui.app" \
+  "$REPO_ROOT/apps/openalpaca-gui/src-tauri/target/release/bundle/macos/openalpaca-gui.app"; do
+  if [[ -d "$candidate" ]]; then
+    APP_BUNDLE_PATH="$candidate"
+    break
+  fi
+done
+[[ -n "$APP_BUNDLE_PATH" ]] || die "Tauri app bundle not found under target/gui/, target/ or src-tauri/target/ (release/bundle/macos/)."
 
 echo "==> Verifying the bundled daemon against the staged sidecar"
 BUNDLED_DAEMON="$APP_BUNDLE_PATH/Contents/MacOS/openalpacad"

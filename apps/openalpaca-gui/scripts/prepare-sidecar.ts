@@ -37,12 +37,14 @@
  * without it. A release never reuses: `--reuse` (or the variable) with
  * `--release` is refused.
  *
- * Target directories. The daemon builds into whatever cargo resolves — the
- * workspace `target/` unless CARGO_TARGET_DIR says otherwise; the script sets
- * none. The Tauri shell's own checks run with `CARGO_TARGET_DIR=target/gui`
- * (CLAUDE.md, build hygiene) because tauri-build copies the staged sidecar to
- * `<target dir>/<profile>/openalpacad`, the very path the daemon's own build
- * writes.
+ * Target directories. The daemon builds into whatever cargo resolves at the
+ * workspace root — `target/` unless CARGO_TARGET_DIR says otherwise; the
+ * script sets none. The Tauri shell builds into `target/gui`:
+ * src-tauri/.cargo/config.toml says so for `tauri dev` and `tauri build`,
+ * which run cargo from src-tauri/, and a root `cargo check -p openalpaca_gui`
+ * sets `CARGO_TARGET_DIR=target/gui` (CLAUDE.md, build hygiene). tauri-build
+ * copies the staged sidecar to `<shell target dir>/<profile>/openalpacad`,
+ * which is therefore never the daemon cargo built.
  */
 
 import { spawn, spawnSync } from "node:child_process";

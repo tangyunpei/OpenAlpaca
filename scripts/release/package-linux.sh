@@ -96,7 +96,10 @@ echo "==> Building Tauri app bundle"
 )
 
 APPIMAGE_PATH=""
+# The shell builds into target/gui (src-tauri/.cargo/config.toml); the other
+# two are where an older tree put the bundle.
 for candidate in \
+  "$REPO_ROOT/target/gui/release/bundle/appimage/openalpaca-gui_"*.AppImage \
   "$REPO_ROOT/target/release/bundle/appimage/openalpaca-gui_"*.AppImage \
   "$REPO_ROOT/apps/openalpaca-gui/src-tauri/target/release/bundle/appimage/openalpaca-gui_"*.AppImage; do
   if [[ -f "$candidate" ]]; then
