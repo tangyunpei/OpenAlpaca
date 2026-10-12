@@ -70,9 +70,11 @@ jobs:
         run: bun run build
 
   # The only Windows job, and deliberately the smallest one: no Rust, no bun,
-  # just the Pester suite for install-windows.ps1 / uninstall-windows.ps1. They
-  # are the one piece of shipped code the ubuntu jobs cannot exercise at all,
-  # which is why their store root drifted away from the daemon's unnoticed.
+  # just the Pester suite for install-windows.ps1 / uninstall-windows.ps1 (and
+  # package-windows.ps1's hash helpers, dot-sourced the same way). The two
+  # installers are the one piece of shipped code the ubuntu jobs cannot
+  # exercise at all, which is why their store root drifted away from the
+  # daemon's unnoticed.
   windows-release-scripts:
     name: Test (Windows release scripts)
     runs-on: windows-latest

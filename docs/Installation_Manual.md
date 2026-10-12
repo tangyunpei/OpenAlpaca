@@ -47,8 +47,17 @@ From repository root:
 ./scripts/release/package-macos.sh
 ```
 
-It must run on macOS, and it packages for the host architecture only. It builds
-the two release binaries and the Tauri app bundle itself.
+It must run on macOS, and it packages for the host architecture only. It
+installs the GUI's JS dependencies from the frozen lockfile
+(`bun install --frozen-lockfile`), builds the daemon once —
+`apps/openalpaca-gui/scripts/prepare-sidecar.ts --release`, which stages
+cargo's artifact as the Tauri sidecar and records its sha256 beside it — builds
+the CLI alone (`cargo build --release --locked -p openalpaca`), builds the Tauri
+app bundle, and then checks that the daemon inside the bundle and the
+`libexec/openalpacad` it packages are byte for byte that one build; it stops if
+they differ (an unsigned bundle is assumed: signing changes the bytes). `package-linux.sh` and `package-windows.ps1` follow the same
+sequence (the daemon is read out of the AppImage with `--appimage-extract`, out
+of the MSI with an administrative `msiexec /a` install into a scratch folder).
 
 Expected output:
 
@@ -718,7 +727,11 @@ the platform's data-directory convention.
 
 - **Build:** `./scripts/release/package-linux.sh`, on a Linux machine
   (`x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`). It needs
-  `sha256sum` where the macOS script needs `shasum`. Output:
+  `sha256sum` (and `find`) where the macOS script needs `shasum`. The daemon
+  inside the AppImage is compared with the staged build but not required to
+  match it: linuxdeploy sets a `RUNPATH` on it while it makes the AppImage, so
+  a difference is reported as a warning, and the byte check that stops the
+  script is `libexec/openalpacad` against the staged build. Output:
   `dist/openalpaca-linux-<target>-v<version>.tar.gz` plus `.sha256`.
 - **GUI:** an AppImage, installed to `<prefix>/gui/openalpaca-gui.AppImage`
   with a desktop entry (`OpenAlpaca`) and an icon under `~/.local/share/`.
@@ -731,7 +744,8 @@ the platform's data-directory convention.
 
 ### Windows
 
-**Status: experimental.** CI tests the two installer scripts on Windows, but
+**Status: experimental.** CI tests the two installer scripts and the packaging
+script's hash helpers on Windows, but
 never builds or runs the binaries there, and the CLI's daemon start/stop code
 is written against Unix signals. Expect `package-windows.ps1` to fail at the
 build step until that is ported.

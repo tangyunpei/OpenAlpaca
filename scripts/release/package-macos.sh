@@ -51,13 +51,52 @@ STAGING_DIR="$STAGING_BASE/$PACKAGE_NAME"
 ARCHIVE_PATH="$DIST_DIR/${PACKAGE_NAME}.tar.gz"
 SHA_PATH="${ARCHIVE_PATH}.sha256"
 
-echo "==> Building Rust binaries"
-cargo build --release -p openalpaca -p openalpacad
+GUI_DIR="$REPO_ROOT/apps/openalpaca-gui"
+STAGED_SIDECAR="$GUI_DIR/src-tauri/bin/openalpacad-$HOST_TARGET"
+STAGED_SHA_FILE="$STAGED_SIDECAR.sha256"
 
+sha256_of() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
+# The hex digest of a `shasum -a 256`-format file (`<hex>  <name>`), as
+# prepare-sidecar.ts writes it beside the staged sidecar.
+read_sha256_file() {
+  local digest
+  digest="$(awk 'NR == 1 { print $1 }' "$1")"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || die "No sha256 digest in $1"
+  printf '%s\n' "$digest"
+}
+
+echo "==> Installing JS dependencies (frozen lockfile)"
+(
+  cd "$GUI_DIR"
+  bun install --frozen-lockfile
+)
+
+# One canonical daemon-only build: prepare-sidecar.ts builds openalpacad
+# through cargo, stages cargo's own artifact at src-tauri/bin/ and records its
+# sha256. That staged file is the sidecar Tauri bundles AND the libexec/ daemon
+# packaged below.
+echo "==> Building and staging the daemon (release)"
+(
+  cd "$GUI_DIR"
+  bun run scripts/prepare-sidecar.ts --release
+)
+[[ -f "$STAGED_SIDECAR" ]] || die "Staged sidecar not found: $STAGED_SIDECAR"
+STAGED_SHA="$(read_sha256_file "$STAGED_SHA_FILE")"
+[[ "$(sha256_of "$STAGED_SIDECAR")" == "$STAGED_SHA" ]] \
+  || die "Staged sidecar does not match $STAGED_SHA_FILE"
+
+echo "==> Building the CLI"
+cargo build --release --locked -p openalpaca
+
+# beforeBuildCommand runs prepare-sidecar.ts --release again; cargo finds the
+# daemon fresh and re-stages the same bytes. The checks after the build hold
+# the bundle to the hash recorded above, before `tauri build` ran.
 echo "==> Building Tauri app bundle"
 (
-  cd "$REPO_ROOT/apps/openalpaca-gui"
-  bun install
+  cd "$GUI_DIR"
   bunx tauri build --bundles app
 )
 
@@ -67,17 +106,26 @@ if [[ ! -d "$APP_BUNDLE_PATH" ]]; then
 fi
 [[ -d "$APP_BUNDLE_PATH" ]] || die "Tauri app bundle not found: $APP_BUNDLE_PATH"
 
+echo "==> Verifying the bundled daemon against the staged sidecar"
+BUNDLED_DAEMON="$APP_BUNDLE_PATH/Contents/MacOS/openalpacad"
+[[ -f "$BUNDLED_DAEMON" ]] || die "Bundled daemon not found: $BUNDLED_DAEMON"
+BUNDLED_SHA="$(sha256_of "$BUNDLED_DAEMON")"
+[[ "$BUNDLED_SHA" == "$STAGED_SHA" ]] \
+  || die "The daemon inside the app bundle ($BUNDLED_SHA) is not the staged sidecar ($STAGED_SHA). This check assumes an unsigned bundle: with APPLE_SIGNING_IDENTITY or APPLE_CERTIFICATE set, tauri signs the binaries and their bytes change."
+[[ "$(read_sha256_file "$STAGED_SHA_FILE")" == "$STAGED_SHA" ]] \
+  || die "The staged sidecar changed while the app bundle was built; rerun the script."
+
 OPENALPACA_BIN="$REPO_ROOT/target/release/openalpaca"
-OPENALPACAD_BIN="$REPO_ROOT/target/release/openalpacad"
 [[ -x "$OPENALPACA_BIN" ]] || die "Binary not found: $OPENALPACA_BIN"
-[[ -x "$OPENALPACAD_BIN" ]] || die "Binary not found: $OPENALPACAD_BIN"
 
 echo "==> Preparing staging directory"
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR/bin" "$STAGING_DIR/libexec" "$STAGING_DIR/gui" "$STAGING_DIR/config"
 
 install -m 755 "$OPENALPACA_BIN" "$STAGING_DIR/bin/openalpaca"
-install -m 755 "$OPENALPACAD_BIN" "$STAGING_DIR/libexec/openalpacad"
+install -m 755 "$STAGED_SIDECAR" "$STAGING_DIR/libexec/openalpacad"
+[[ "$(sha256_of "$STAGING_DIR/libexec/openalpacad")" == "$STAGED_SHA" ]] \
+  || die "libexec/openalpacad does not match the staged sidecar."
 cp -R "$APP_BUNDLE_PATH" "$STAGING_DIR/gui/openalpaca-gui.app"
 
 # Never package repository runtime config directly (it may contain secrets).
