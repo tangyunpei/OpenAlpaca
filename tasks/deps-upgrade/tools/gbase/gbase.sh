@@ -243,7 +243,8 @@ expect_lock() {
 # pair_check WHERE API DIALOG — DU-26's invariant, P04's R20 check: the lock holds one `tauri`,
 # sharing its minor with @tauri-apps/api API, and one `tauri-plugin-dialog`, equal to
 # @tauri-apps/plugin-dialog DIALOG. A broken pair ends the run: Rust never moves a Tauri minor
-# alone, and `tauri = "2.12"` is a caret requirement (^2.12) — only the plugin's `=` holds by itself.
+# alone. `tauri = "~2.12"` and `tauri-build = "~2.7"` are tilde requirements (the minor held, plan-rev3
+# rev 3.10 — a caret would admit 2.13) and the plugin's `=` holds it exactly; this check is the backstop.
 pair_check() {
   local where=$1 api=$2 dialog=$3 t d
   [ "$MODE" = check ] && return 0
@@ -333,8 +334,10 @@ begin_step() {
 # The Tauri pair (P31a, DU-26 (a'), plan-rev3 rev 3.9): both halves at the versions the measured
 # locks hold [M-oct10: gui D's lock, gui-B-pins.log]. One constant per version, so the plugin
 # crate's `=` pin and its npm twin are the same string and cannot drift apart.
-TAURI_REQ="2.12"           # [workspace.dependencies] tauri = "2.12"
-TAURI_BUILD_REQ="2.7"      # [workspace.dependencies] tauri-build = "2.7"
+TAURI_MINOR="2.12"
+TAURI_BUILD_MINOR="2.7"
+TAURI_REQ="~$TAURI_MINOR"              # [workspace.dependencies] tauri = "~2.12" (tilde: the minor held)
+TAURI_BUILD_REQ="~$TAURI_BUILD_MINOR"  # [workspace.dependencies] tauri-build = "~2.7"
 TAURI_PRECISE="2.12.3"     # `cargo update -p tauri --precise`: a targeted update lands on 2.12.2 (swift-rs)
 DIALOG="2.8.2"             # tauri-plugin-dialog = "=2.8.2" and @tauri-apps/plugin-dialog 2.8.2
 JS_API="2.12.3"            # @tauri-apps/api — shares tauri's minor
@@ -369,7 +372,7 @@ tauri-plugin-dialog = \"=$DIALOG\""
   if live; then
     say "    Tauri sub-graph after the pair (P31a's body records it): $(tauri_subgraph)"
     expect_lock tauri "$(ere_exact "$TAURI_PRECISE")" "step 1b"
-    expect_lock tauri-build "$(ere_minor "$TAURI_BUILD_REQ")" "step 1b"
+    expect_lock tauri-build "$(ere_minor "$TAURI_BUILD_MINOR")" "step 1b"
     expect_lock tauri-plugin-dialog "$(ere_exact "$DIALOG")" "step 1b"
   fi
   pair_check "step 1b" "$JS_API" "$DIALOG"
@@ -383,9 +386,9 @@ step_2() {
   run_logged 02-update "${CARGO[@]}" update
   if live; then
     say "    Tauri sub-graph after the refresh (P04's body records it): $(tauri_subgraph)"
-    # `tauri = "2.12"` and `tauri-build = "2.7"` are carets (^2.12, ^2.7): the refresh may take a
-    # newer patch (a release after 2026-10-10, listed below); a new minor breaks the pair and stops here.
-    expect_lock tauri-build "$(ere_minor "$TAURI_BUILD_REQ")" "step 2"
+    # `tauri = "~2.12"` and `tauri-build = "~2.7"` are tilde requirements: the refresh may take a newer
+    # patch (a release after 2026-10-10, listed below), never a new minor; the checks are the backstop.
+    expect_lock tauri-build "$(ere_minor "$TAURI_BUILD_MINOR")" "step 2"
   fi
   pair_check "step 2" "$JS_API" "$DIALOG"
   run_logged 02-check "${CARGO[@]}" check --workspace --all-targets --exclude openalpaca_gui
