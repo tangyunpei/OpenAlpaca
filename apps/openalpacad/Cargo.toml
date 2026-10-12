@@ -60,6 +60,9 @@ openalpaca_mcp = { path = "../../crates/openalpaca_mcp", features = ["test-utils
 # A real WebSocket client for `src/graceful_shutdown_tests.rs`. Already in the
 # lockfile — the CLI's `daemon tail` uses it — so no new external crate.
 tokio-tungstenite.workspace = true
+# `ServiceExt::oneshot` for the CORS test in `router.rs`. tower is already in
+# the lockfile (axum's), so no new external crate either.
+tower.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

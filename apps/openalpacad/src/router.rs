@@ -477,7 +477,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(chat_sse)
         .merge(content)
         .with_state(state)
-        .layer(CorsLayer::permissive())
+        .layer(cors_layer())
+}
+
+/// The CORS policy every response carries. The daemon binds loopback and
+/// gates every `/v1/*` route by its bearer token, so the policy is wide open;
+/// the GUI's webview relies on it (`cors_tests` pins what it relies on).
+fn cors_layer() -> CorsLayer {
+    CorsLayer::permissive()
 }
 
 /// Health check endpoint (includes instance_id for validation)
@@ -497,4 +504,72 @@ async fn root_handler() -> Json<serde_json::Value> {
         "name": "OpenAlpaca Daemon",
         "version": env!("CARGO_PKG_VERSION")
     }))
+}
+
+/// The CORS policy every response carries (deps plan P24). The GUI's webview
+/// calls the daemon cross-origin, and relies on `*` for the allowed origin,
+/// methods and headers on a preflight and for the exposed headers on a
+/// response; tower-http puts the method and header allowances on a preflight
+/// only, so the two are pinned apart. `Vary` is deliberately not asserted:
+/// which request headers it names is tower-http's choice, not the contract.
+#[cfg(test)]
+mod cors_tests {
+    use super::cors_layer;
+    use axum::{
+        Router,
+        body::Body,
+        http::{Method, Request, Response, header},
+        routing::get,
+    };
+    use tower::ServiceExt as _;
+
+    fn app() -> Router {
+        Router::new()
+            .route("/v1/health", get(|| async { "ok" }))
+            .layer(cors_layer())
+    }
+
+    fn header<'a>(response: &'a Response<Body>, name: &str) -> Option<&'a str> {
+        response
+            .headers()
+            .get(name)
+            .map(|value| value.to_str().expect("an ASCII header value"))
+    }
+
+    #[tokio::test]
+    async fn a_cross_origin_get_allows_any_origin_and_exposes_every_header() {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/health")
+            .header(header::ORIGIN, "tauri://localhost")
+            .body(Body::empty())
+            .unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(header(&response, "access-control-allow-origin"), Some("*"));
+        assert_eq!(
+            header(&response, "access-control-expose-headers"),
+            Some("*")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_preflight_allows_any_origin_method_and_header() {
+        let request = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/v1/health")
+            .header(header::ORIGIN, "tauri://localhost")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .header(
+                header::ACCESS_CONTROL_REQUEST_HEADERS,
+                "authorization, content-type",
+            )
+            .body(Body::empty())
+            .unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(header(&response, "access-control-allow-origin"), Some("*"));
+        assert_eq!(header(&response, "access-control-allow-methods"), Some("*"));
+        assert_eq!(header(&response, "access-control-allow-headers"), Some("*"));
+    }
 }
