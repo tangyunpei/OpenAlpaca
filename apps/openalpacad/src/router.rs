@@ -490,12 +490,19 @@ fn cors_layer() -> CorsLayer {
 /// Health check endpoint (includes instance_id for validation)
 /// No token required - minimal info only
 async fn health_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
+    Json(health_json(&state.instance_id))
+}
+
+/// `GET /v1/health`'s body: the public liveness probe the GUI polls every
+/// 30 s, clearing its client when `instance_id` changes. Its shape is a wire
+/// contract (`health_tests` pins it).
+fn health_json(instance_id: &str) -> serde_json::Value {
+    serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "pid": std::process::id(),
-        "instance_id": state.instance_id
-    }))
+        "instance_id": instance_id
+    })
 }
 
 /// Root endpoint (basic info)
@@ -571,5 +578,31 @@ mod cors_tests {
         assert_eq!(header(&response, "access-control-allow-origin"), Some("*"));
         assert_eq!(header(&response, "access-control-allow-methods"), Some("*"));
         assert_eq!(header(&response, "access-control-allow-headers"), Some("*"));
+    }
+}
+
+/// `GET /v1/health`'s body is a wire contract (deps plan Q01): the public
+/// liveness probe `useHealth` polls every 30 s, clearing its client when
+/// `instance_id` changes. Exactly these four keys, in serde_json's order
+/// (sorted — the workspace does not turn `preserve_order` on), `status` always
+/// `ok`, `version` this crate's, and the daemon's own pid.
+#[cfg(test)]
+mod health_tests {
+    use super::health_json;
+
+    #[test]
+    fn the_health_body_is_pinned() {
+        let body = health_json("0f1e2d3c-4b5a-4968-8776-655443322110");
+        assert_eq!(
+            serde_json::to_string(&body).unwrap(),
+            format!(
+                concat!(
+                    r#"{{"instance_id":"0f1e2d3c-4b5a-4968-8776-655443322110","#,
+                    r#""pid":{pid},"status":"ok","version":"{version}"}}"#
+                ),
+                pid = std::process::id(),
+                version = env!("CARGO_PKG_VERSION"),
+            )
+        );
     }
 }
