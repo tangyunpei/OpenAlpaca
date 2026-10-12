@@ -68,7 +68,7 @@ answers on 2026-10-11: `toml11 = "=1.1.6"` (`tomlcmp/Cargo.toml`), `toml_edit =
 "=0.25.17"` (`tedit/new/Cargo.toml`), `serde-saphyr = "=1.3.0"`
 (`yamlcmp/Cargo.toml`). The cut's lock — on or after 2026-10-17 under DU-23 (a) —
 holds **toml 1.1.8** (eligible from 2026-10-16; the measured final lock,
-`../gbase/locks/recut-lock-99-final-held.lock`, holds `1.1.8+spec-1.1.0`), while
+`../gbase/locks/recut-lock-99-final.lock`, holds `1.1.8+spec-1.1.0`), while
 its toml_edit 0.25.17 and serde-saphyr 1.3.0 are these pins. So before the run,
 change `tomlcmp/Cargo.toml`'s `toml11` line to `=1.1.8`, rebuild tomlcmp (its
 `Cargo.lock` follows) and run that build: the comparison must be against the

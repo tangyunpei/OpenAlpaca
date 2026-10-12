@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # gbase.sh — the G-base driver: the dependency wave's re-cut, re-run at the branch point.
 #
-# plan-rev3.md §5.1 items 6 and 6a (rev 3.1), §5.2's named gate G-base. From one
-# canonical scratch root it exports the base commit and runs the EIGHT steps of the
-# re-cut in order — each step its anchored manifest edits, its source hunks, its cargo
-# commands, a `cargo check` and a lock snapshot compared with the shipped one — then the
-# full suite, the docs check, the four bun gates on the P31+P32+P33 JS set and G-GUI.
+# plan-rev3.md §5.1 items 6, 6a and 6b (rev 3.9), §5.2's named gate G-base. From one
+# canonical scratch root it exports the base commit and runs the re-cut in order — the
+# toolchain step, the Tauri pair's Rust half (step 1b, P31a: the pair first, no hold), then
+# the re-cut's steps 2-8 — each step its anchored manifest edits, its source hunks, its
+# cargo commands, a `cargo check` and a lock snapshot compared with the shipped one — then
+# the full suite, the docs check, the four bun gates on the P31a+P31+P32+P33 JS set and G-GUI.
 # It exits non-zero at the FIRST failed command; nothing is recorded-and-continued.
 # Every log lands under $T/logs/. README.md beside this file says how to read a run.
 #
@@ -29,32 +30,33 @@ EDITS_ONLY=0
 WITH_STEPBACKS=0
 DATES=0
 REPO=""
+JOBS=${CARGO_BUILD_JOBS:-8}   # every cargo call's CARGO_BUILD_JOBS: the caller's, else 8
 
 usage() {
   cat <<'EOF'
 usage: gbase.sh --base <commit> [--toolchain <ver>] [--bun <path>] [--steps <N|all>]
-                [--strict] [--with-stepbacks] [--dates] [--repo <path>]
+                [--strict] [--dates] [--repo <path>]
        gbase.sh --base <commit> --dry-run       print the plan after the pre-flight checks; exit 0
-       gbase.sh --base <commit> --edits-only    export, apply the eight steps' edits and patches, run no cargo
-       gbase.sh --self-test [--toolchain <ver>] prove the three failure modes on a toy workspace
+       gbase.sh --base <commit> --edits-only    export, apply the steps' edits and patches, run no cargo
+       gbase.sh --self-test [--toolchain <ver>] prove the failure modes and assertions on a toy workspace
 
   --base <commit>      the branch point to export (`git archive`); required unless --self-test
   --toolchain <ver>    the Rust toolchain the wave pins and every cargo call uses (default 1.99.0;
                        `cargo +<ver>` must already be installed — this script installs nothing)
   --bun <path>         the Bun binary for the four GUI gates (required when the final phase runs)
-  --steps <N|all>      run steps 1..N and stop before the final phase (default: all)
-  --strict             a lock difference that is not the P04 hold's (steps 3-7) or a requested
-                       step-back's is a failure, not a line for a human
-  --with-stepbacks     DU-23 (b): after the Tauri hold, step the six packages younger than 7 days
-                       back to their eligible versions (off by default: DU-23 (a), a cut on or after
-                       2026-10-17 takes the measured set)
+  --steps <N|all>      run the steps up to N (1, 1b, 2..8; 1b is the Tauri pair, after 1) and stop
+                       before the final phase (default: all)
+  --strict             a lock difference that is not rmcp's 3.5.0 -> 3.5.1 (DU-25 (v4), steps 6-8)
+                       is a failure, not a line for a human
+  --with-stepbacks     refused (exit 2): DU-23 (b)'s step-back mode never covered the Tauri pair
+                       or the JS set (README.md, "Exit status")
   --dates              after the run, look up on crates.io (User-Agent openalpaca-deps-check) when
                        each version a lock difference introduced was published; off by default
   --repo <path>        the repository to export from (default: the one holding this script)
 
 Exit status: 0 — every step and gate passed (lock differences, if any, were printed, and under
 --strict there were none); 1 — the first failed command, anchor, patch, comparison or gate (the
-message names it and the log); 2 — a usage error or a missing prerequisite.
+message names it and the log); 2 — a usage error, --with-stepbacks, or a missing prerequisite.
 EOF
 }
 
@@ -77,9 +79,27 @@ while [ $# -gt 0 ]; do
 done
 
 case "$STEPS" in
-  all|1|2|3|4|5|6|7|8) ;;
-  *) echo "gbase: --steps takes 1..8 or all, not '$STEPS'" >&2; exit 2 ;;
+  all|1|1b|2|3|4|5|6|7|8) ;;
+  *) echo "gbase: --steps takes 1, 1b, 2..8 or all, not '$STEPS'" >&2; exit 2 ;;
 esac
+
+# DU-23 (b) — a cut before 2026-10-17 stepping young releases back — is refused in every mode:
+# the six step-backs it ran never covered the Tauri pair or the JS set, and the pair the driver
+# takes (DU-23 (a)'s, below) is not eligible before the cut and has no measured (b) reference.
+if [ "$WITH_STEPBACKS" -eq 1 ]; then
+  cat >&2 <<'EOF'
+gbase: --with-stepbacks is refused. It was DU-23 (b)'s mode for a cut before 2026-10-17: after
+the step-2 refresh, step six crates (toml, toml_edit, uuid, serde_json, tokio-util, signal-hook)
+back to releases at least 7 days old. It never covered the Tauri pair or the JS set. The driver
+takes DU-23 (a)'s pair (tauri 2.12.3, tauri-plugin-dialog 2.8.2, @tauri-apps/api 2.12.3,
+@tauri-apps/cli 2.12.2), which is not eligible before 2026-10-17T17:47Z (the cli before
+20:07:30Z), and DU-23 (b)'s pair has no measured reference lock, so such a run would take the
+ineligible pair and step 1b's comparison would report it equal. Run at or after
+2026-10-17T20:08Z without the option: P04 needs none of the six step-backs then. (README.md,
+"Exit status".)
+EOF
+  exit 2
+fi
 
 # ---------------------------------------------------------------------------- helpers
 T=""              # the canonical scratch root, set by make_root
@@ -207,21 +227,45 @@ lock_versions() { # lock_versions NAME [LOCK] -> the versions the lock holds for
   awk -v p="$1" '$0 == "name = \"" p "\"" { getline; sub(/^version = "/, ""); sub(/"$/, ""); print }' "${2:-Cargo.lock}"
 }
 
-# spec_for NAME PATTERN — the `-p` spelling: bare when the lock holds NAME once, NAME@VER otherwise
-# (the one version matching PATTERN). P04 (ii): `toml@1.1.8`, never the ambiguous bare `toml`.
-spec_for() {
-  local name=$1 pat=$2 vers n v
+ere_exact() { printf '^%s$' "$(printf '%s' "$1" | sed 's/[.]/[.]/g')"; }   # 2.8.2 -> ^2[.]8[.]2$
+ere_minor() { printf '^%s[.]' "$(printf '%s' "$1" | sed 's/[.]/[.]/g')"; } # 2.12  -> ^2[.]12[.]
+
+# expect_lock NAME ERE WHY — the lock holds NAME at exactly one version and it matches ERE;
+# anything else ends the run.
+expect_lock() {
+  local name=$1 ere=$2 why=$3 vers n
   vers=$(lock_versions "$name")
   n=$(printf '%s\n' "$vers" | grep -c . || true)
-  if [ "$n" -le 1 ]; then printf '%s\n' "$name"; return 0; fi
-  v=$(printf '%s\n' "$vers" | grep -E -- "$pat" || true)
-  [ "$(printf '%s\n' "$v" | grep -c . || true)" = 1 ] \
-    || die "cannot spell the step-back for $name: the lock holds $(printf '%s ' $vers)"
-  printf '%s@%s\n' "$name" "$v"
+  if [ "$n" = 1 ] && printf '%s\n' "$vers" | grep -Eq -- "$ere"; then return 0; fi
+  die "$why: the lock holds $name at '$(printf '%s ' $vers)' (want exactly one version matching $ere)"
 }
 
-# compare_lock LABEL EXPECTED ACTUAL [--expected LABEL=NAMES]... — print the differences;
-# an unexpected one fails the run under --strict.
+# pair_check WHERE API DIALOG — DU-26's invariant, P04's R20 check: the lock holds one `tauri`,
+# sharing its minor with @tauri-apps/api API, and one `tauri-plugin-dialog`, equal to
+# @tauri-apps/plugin-dialog DIALOG. A broken pair ends the run: Rust never moves a Tauri minor
+# alone, and `tauri = "2.12"` is a caret requirement (^2.12) — only the plugin's `=` holds by itself.
+pair_check() {
+  local where=$1 api=$2 dialog=$3 t d
+  [ "$MODE" = check ] && return 0
+  if ! live; then plan "    pair check ($where): tauri shares a minor with @tauri-apps/api $api; tauri-plugin-dialog = @tauri-apps/plugin-dialog $dialog"; return 0; fi
+  expect_lock tauri "$(ere_minor "${api%.*}")" "$where: the Tauri pair is broken (@tauri-apps/api $api)"
+  expect_lock tauri-plugin-dialog "$(ere_exact "$dialog")" "$where: the Tauri pair is broken (@tauri-apps/plugin-dialog $dialog)"
+  t=$(lock_versions tauri); d=$(lock_versions tauri-plugin-dialog)
+  say "    the Tauri pair holds ($where): tauri $t ~ @tauri-apps/api $api; tauri-plugin-dialog $d = @tauri-apps/plugin-dialog $dialog"
+}
+
+tauri_subgraph() { # one line: the Tauri sub-graph's versions in the lock (P04's and P31a's bodies record it)
+  local p set=""
+  for p in tauri tauri-build tauri-plugin-dialog tauri-plugin-fs tauri-utils tauri-runtime tauri-runtime-wry \
+           tauri-codegen tauri-macros tauri-plugin wry tao swift-rs; do
+    set="$set$p $(lock_versions "$p" | tr '\n' '/' | sed 's|/$||')  "
+  done
+  printf '%s\n' "$set"
+}
+
+# compare_lock LABEL EXPECTED ACTUAL [--expected LABEL=SPECS]... — print the differences;
+# an unexpected one fails the run under --strict. A SPEC is a name (any difference on it) or
+# name:OLD->NEW (exactly that move) — lockdiff.py's docstring.
 compare_lock() {
   local label=$1 exp=$2 act=$3; shift 3
   local out rc=0 head moved added removed unexpected total
@@ -232,8 +276,17 @@ compare_lock() {
     return 0
   fi
   python3 -I "$HERE/lockdiff.py" "$@" "$exp" "$act" > "$out" 2>&1 || rc=$?
-  [ "$rc" -le 1 ] || { cat "$out" >&2; die "lockdiff.py failed (rc=$rc)"; }
+  # lockdiff.py exits 1 for "a difference was found" and 2 for anything else (a usage error, a
+  # file that is not a Cargo.lock, an unforeseen error); and whatever its status, output whose
+  # first line is not the summary is no comparison — a lockdiff.py that dies before main (a
+  # syntax error) exits 1 with Python's error report, which the field-wise parse below would
+  # read as 0 0 0 0, "the same (name, version) set".
+  [ "$rc" -le 1 ] || { cat "$out" >&2; die "lockdiff.py failed (rc=$rc): no comparison of $(basename "$exp") and $(basename "$act")"; }
   head=$(head -n 1 "$out")
+  case "$head" in
+    'moved: '*) ;;
+    *) cat "$out" >&2; die "lockdiff.py gave no summary (rc=$rc): no comparison of $(basename "$exp") and $(basename "$act")" ;;
+  esac
   # field-wise, never by regex: a `.*moved: ` pattern also matches inside `removed: `
   set -- $(printf '%s\n' "$head" | awk '{ for (i = 1; i < NF; i++) { if ($i == "moved:") m = $(i+1); if ($i == "added:") a = $(i+1); if ($i == "removed:") r = $(i+1); if ($i == "unexpected:") u = $(i+1) } } END { print m + 0, a + 0, r + 0, u + 0 }')
   moved=$1; added=$2; removed=$3; unexpected=$4
@@ -253,7 +306,7 @@ compare_lock() {
   return 0
 }
 
-# snapshot_compare N SHIPPED [--expected LABEL=NAMES]... — copy the lock to locks/step-N.lock and compare.
+# snapshot_compare N SHIPPED [--expected LABEL=SPECS]... — copy the lock to locks/step-N.lock and compare.
 snapshot_compare() {
   local n=$1 shipped=$2; shift 2
   [ "$MODE" = check ] && return 0
@@ -272,14 +325,24 @@ begin_step() {
   say "== step $1: $2   ($(now))"
 }
 
-# ---------------------------------------------------------------------------- the eight steps
+# ---------------------------------------------------------------------------- the steps
 # Every version below is the measured re-cut's (plan-rev3 §5.3, DU-23 (a)); the shipped locks
-# under locks/ describe exactly this sequence at 7295f91b.
+# under locks/ describe this sequence at 7295f91b — the re-cut's un-held snapshots, and for step 1b
+# the gui group's stage D (README.md, "The pair step's reference").
 
-STEPBACK_LABEL="step-back"
-stepback_expect() { # the --expected spec for the six step-backs, or nothing
-  if [ "$WITH_STEPBACKS" -eq 1 ]; then printf -- '--expected\n%s=toml,toml_edit,uuid,serde_json,tokio-util,signal-hook\n' "$STEPBACK_LABEL"; fi
-}
+# The Tauri pair (P31a, DU-26 (a'), plan-rev3 rev 3.9): both halves at the versions the measured
+# locks hold [M-oct10: gui D's lock, gui-B-pins.log]. One constant per version, so the plugin
+# crate's `=` pin and its npm twin are the same string and cannot drift apart.
+TAURI_REQ="2.12"           # [workspace.dependencies] tauri = "2.12"
+TAURI_BUILD_REQ="2.7"      # [workspace.dependencies] tauri-build = "2.7"
+TAURI_PRECISE="2.12.3"     # `cargo update -p tauri --precise`: a targeted update lands on 2.12.2 (swift-rs)
+DIALOG="2.8.2"             # tauri-plugin-dialog = "=2.8.2" and @tauri-apps/plugin-dialog 2.8.2
+JS_API="2.12.3"            # @tauri-apps/api — shares tauri's minor
+JS_CLI="2.12.2"            # @tauri-apps/cli
+
+# DU-25 (v4), rev 3.9: rmcp is taken at the newest 3.5.x — no --precise — so from step 6 on the
+# lock differs from the measured snapshots (cut with `--precise 3.5.0`) by exactly this move.
+RMCP_EXPECT="DU-25(v4)=rmcp:3.5.0->3.5.1,rmcp-macros:3.5.0->3.5.1"
 
 step_1() {
   begin_step 1 "toolchain pin and rust-version (P03)"
@@ -293,41 +356,42 @@ step_1() {
   snapshot_compare 1 recut-lock-01-toolchain.lock
 }
 
-step_2() {
-  begin_step 2 "semver refresh, the ten-crate Tauri hold$( [ "$WITH_STEPBACKS" -eq 1 ] && printf ', the DU-23 (b) step-backs')  (P04)"
-  run_logged 02-update "${CARGO[@]}" update
-  local i=0 pair name ver
-  for pair in \
-      "tauri-plugin-dialog 2.7.3" "tauri-plugin-fs 2.5.2" "tauri 2.11.6" "tauri-build 2.6.3" \
-      "tauri-runtime-wry 2.11.4" "tauri-runtime 2.11.3" "tauri-macros 2.6.3" "tauri-codegen 2.6.3" \
-      "tauri-plugin 2.6.3" "tauri-utils 2.9.3"; do
-    i=$((i + 1)); name=${pair% *}; ver=${pair#* }
-    run_logged "02-hold-$(printf '%02d' "$i")-$name" "${CARGO[@]}" update -p "$name" --precise "$ver"
-  done
-  if [ "$WITH_STEPBACKS" -eq 1 ]; then
-    local triple pat spec
-    i=0
-    for triple in "toml ^1[.] 1.1.6" "toml_edit ^0[.]25[.] 0.25.15" "uuid . 1.27.0" \
-                  "serde_json . 1.0.151" "tokio-util . 0.7.19" "signal-hook . 0.4.4"; do
-      i=$((i + 1))
-      set -- $triple; name=$1; pat=$2; ver=$3
-      if live; then spec=$(spec_for "$name" "$pat"); else spec="$name[@<locked>]"; fi
-      run_logged "02-stepback-$i-$name" "${CARGO[@]}" update -p "$spec" --precise "$ver"
-    done
-  fi
+step_1b() {
+  begin_step 1b "the Tauri pair's Rust half: tauri $TAURI_REQ, tauri-build $TAURI_BUILD_REQ, tauri-plugin-dialog =$DIALOG in [workspace.dependencies]  (P31a)"
+  edit Cargo.toml 'tauri-plugin-dialog = "2"' "tauri = \"$TAURI_REQ\"
+tauri-build = \"$TAURI_BUILD_REQ\"
+tauri-plugin-dialog = \"=$DIALOG\""
+  edit apps/openalpaca-gui/src-tauri/Cargo.toml 'tauri-build = { version = "2", features = [] }' 'tauri-build.workspace = true'
+  edit apps/openalpaca-gui/src-tauri/Cargo.toml 'tauri = { version = "2", features = [] }' 'tauri.workspace = true'
+  run_logged 01b-pair-update "${CARGO[@]}" update -p tauri -p tauri-build -p tauri-plugin-dialog
+  live && say "    tauri after the targeted update: $(lock_versions tauri | tr '\n' ' ')(gui D measured 2.12.2: swift-rs holds 2.12.3 back)"
+  run_logged 01b-pair-precise "${CARGO[@]}" update -p tauri --precise "$TAURI_PRECISE"
   if live; then
-    local p set=""
-    for p in tauri tauri-build tauri-plugin-dialog tauri-plugin-fs tauri-utils tauri-runtime tauri-runtime-wry tauri-codegen tauri-macros tauri-plugin wry tao; do
-      set="$set$p $(lock_versions "$p" | tr '\n' '/' | sed 's|/$||')  "
-    done
-    say "    Tauri sub-graph after the hold (P04's body records it): $set"
+    say "    Tauri sub-graph after the pair (P31a's body records it): $(tauri_subgraph)"
+    expect_lock tauri "$(ere_exact "$TAURI_PRECISE")" "step 1b"
+    expect_lock tauri-build "$(ere_minor "$TAURI_BUILD_REQ")" "step 1b"
+    expect_lock tauri-plugin-dialog "$(ere_exact "$DIALOG")" "step 1b"
   fi
-  run_logged 02-check "${CARGO[@]}" check --workspace --all-targets --exclude openalpaca_gui
-  live && say "    $(count_diag "$T/logs/02-check.log")"
-  snapshot_compare 2 recut-lock-02-update-held.lock $(stepback_expect)
+  pair_check "step 1b" "$JS_API" "$DIALOG"
+  run_logged 01b-check "${CARGO[@]}" check --workspace --all-targets --exclude openalpaca_gui
+  live && say "    $(count_diag "$T/logs/01b-check.log")"
+  snapshot_compare 1b guiD-lock-01b-pair.lock
 }
 
-HOLD_EXPECT="hold=$HERE/hold-footprint.txt"   # the P04 hold's 58 names; steps 3-7 compare with un-held snapshots
+step_2() {
+  begin_step 2 "semver refresh — a plain cargo update, no Tauri step  (P04)"
+  run_logged 02-update "${CARGO[@]}" update
+  if live; then
+    say "    Tauri sub-graph after the refresh (P04's body records it): $(tauri_subgraph)"
+    # `tauri = "2.12"` and `tauri-build = "2.7"` are carets (^2.12, ^2.7): the refresh may take a
+    # newer patch (a release after 2026-10-10, listed below); a new minor breaks the pair and stops here.
+    expect_lock tauri-build "$(ere_minor "$TAURI_BUILD_REQ")" "step 2"
+  fi
+  pair_check "step 2" "$JS_API" "$DIALOG"
+  run_logged 02-check "${CARGO[@]}" check --workspace --all-targets --exclude openalpaca_gui
+  live && say "    $(count_diag "$T/logs/02-check.log")"
+  snapshot_compare 2 recut-lock-02-update.lock
+}
 
 step_3() {
   begin_step 3 "storage: rusqlite 0.40.2, lru 0.18, sysinfo 0.39.6  (P06-P08)"
@@ -336,7 +400,7 @@ step_3() {
   edit Cargo.toml 'sysinfo = "0.38.1"' 'sysinfo = "0.39.6"'
   run_logged 03-check "${CARGO[@]}" check --workspace --all-targets --exclude openalpaca_gui
   live && say "    $(count_diag "$T/logs/03-check.log")"
-  snapshot_compare 3 recut-lock-03-storage.lock --expected "$HOLD_EXPECT" $(stepback_expect)
+  snapshot_compare 3 recut-lock-03-storage.lock
 }
 
 step_4() {
@@ -352,7 +416,7 @@ keyring = { version = "4.2", default-features = false, features = ["v1"] }'
   apply_patch step-4-secrets
   run_logged 04-check "${CARGO[@]}" check --workspace --all-targets --exclude openalpaca_gui
   live && say "    $(count_diag "$T/logs/04-check.log")"
-  snapshot_compare 4 recut-lock-04-secrets.lock --expected "$HOLD_EXPECT" $(stepback_expect)
+  snapshot_compare 4 recut-lock-04-secrets.lock
 }
 
 step_5() {
@@ -363,29 +427,31 @@ step_5() {
   edit Cargo.toml 'calamine = "0.26"' 'calamine = "0.36"'
   run_logged 05-check "${CARGO[@]}" check --workspace --all-targets --exclude openalpaca_gui
   live && say "    $(count_diag "$T/logs/05-check.log")"
-  snapshot_compare 5 recut-lock-05-documents.lock --expected "$HOLD_EXPECT" $(stepback_expect)
+  snapshot_compare 5 recut-lock-05-documents.lock
 }
 
 step_6() {
-  begin_step 6 "MCP client: rmcp 0.16 -> 3.5.0, the source hunks, the lock pinned at 3.5.0  (P19)"
+  begin_step 6 "MCP client: rmcp 0.16 -> 3.5.x (the newest, no --precise), the source hunks  (P19)"
+  # The manifest line is the measured diff's (`3.5.0`, the floor); P19's own commit writes the
+  # floor equal to the version taken (R05). The changed requirement is resolved by the re-cut's own
+  # first command less its --precise (recut-06-rmcp-update.log: rmcp and rmcp-macros 0.16.0 -> 3.5.1,
+  # process-wrap 10.0.1, darling 0.23 gone); rev 3.1-3.8 then stepped both back to 3.5.0.
   edit crates/openalpaca_mcp/Cargo.toml \
     'rmcp = { version = "0.16", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }' \
     'rmcp = { version = "3.5.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }'
   apply_patch step-6-rmcp
-  # Measured: the first --precise resolves the changed manifest and lands on 3.5.1; the second downgrades.
-  run_logged 06-rmcp-precise-1 "${CARGO[@]}" update -p rmcp --precise 3.5.0
-  live && say "    rmcp after the first --precise: $(lock_versions rmcp | tr '\n' ' ')"
-  run_logged 06-rmcp-precise-2 "${CARGO[@]}" update -p rmcp --precise 3.5.0
-  run_logged 06-rmcp-macros-precise "${CARGO[@]}" update -p rmcp-macros --precise 3.5.0
+  run_logged 06-rmcp-update "${CARGO[@]}" update -p rmcp
   if live; then
     local r m
-    r=$(lock_versions rmcp | tr '\n' ' '); m=$(lock_versions rmcp-macros | tr '\n' ' ')
-    say "    rmcp: ${r}rmcp-macros: ${m}"
-    [ "$r" = "3.5.0 " ] && [ "$m" = "3.5.0 " ] || die "the lock does not pin rmcp 3.5.0 / rmcp-macros 3.5.0 (rmcp: ${r}rmcp-macros: ${m})"
+    r=$(lock_versions rmcp); m=$(lock_versions rmcp-macros)
+    say "    rmcp: $(printf '%s ' $r)rmcp-macros: $(printf '%s ' $m)(the measured cut's first resolution: 3.5.1 / 3.5.1)"
+    expect_lock rmcp '^3[.]5[.]' "step 6"
+    expect_lock rmcp-macros '^3[.]5[.]' "step 6"
+    [ "$r" = "$m" ] || die "step 6: rmcp $r and rmcp-macros $m differ"
   fi
   run_logged 06-check "${CARGO[@]}" check --workspace --all-targets --exclude openalpaca_gui
   live && say "    $(count_diag "$T/logs/06-check.log")"
-  snapshot_compare 6 recut-lock-06-rmcp.lock --expected "$HOLD_EXPECT" $(stepback_expect)
+  snapshot_compare 6 recut-lock-06-rmcp.lock --expected "$RMCP_EXPECT"
 }
 
 step_7() {
@@ -395,7 +461,7 @@ step_7() {
   edit Cargo.toml 'rustyline = "17"' 'rustyline = "18"'
   run_logged 07-check "${CARGO[@]}" check --workspace --all-targets --exclude openalpaca_gui
   live && say "    $(count_diag "$T/logs/07-check.log")"
-  snapshot_compare 7 recut-lock-07-web.lock --expected "$HOLD_EXPECT" $(stepback_expect)
+  snapshot_compare 7 recut-lock-07-web.lock --expected "$RMCP_EXPECT"
 }
 
 step_8() {
@@ -406,16 +472,18 @@ step_8() {
   apply_patch step-8-config
   run_logged 08-check "${CARGO[@]}" check --workspace --all-targets --exclude openalpaca_gui
   live && say "    $(count_diag "$T/logs/08-check.log")"
-  # The step-8 snapshot IS the wave's final lock: compared with the held final snapshot, no hold
-  # filter (recut-lock-08-config.lock, shipped too, is the un-held re-cut's and equals its 99-final).
-  snapshot_compare 8 recut-lock-99-final-held.lock $(stepback_expect)
+  # The step-8 snapshot IS the wave's final lock: compared with the re-cut's final snapshot
+  # (recut-lock-99-final.lock, byte-identical to its recut-lock-08-config.lock).
+  snapshot_compare 8 recut-lock-99-final.lock --expected "$RMCP_EXPECT"
 }
 
-run_steps() {
+STEP_ORDER="1 1b 2 3 4 5 6 7 8"   # 1b, the Tauri pair (P31a), lands right after the toolchain (P03)
+
+run_steps() { # run_steps LAST — the steps of STEP_ORDER up to and including LAST
   local last=$1 n
-  for n in 1 2 3 4 5 6 7 8; do
-    [ "$n" -le "$last" ] || break
+  for n in $STEP_ORDER; do
     "step_$n"
+    [ "$n" != "$last" ] || break
   done
 }
 
@@ -429,7 +497,7 @@ final_tests() {
   local store="$T/test-store" home="$T/test-home" rustup_home="" cargo_home="" before="" after="" new="" p=0 f=0 g=0
   rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"; cargo_home="${CARGO_HOME:-$HOME/.cargo}"
   if live; then mkdir -p "$store/config" "$home"; before=$(sleep_orphans); fi
-  run_logged_rc 90-test nice -n 10 env CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 \
+  run_logged_rc 90-test nice -n 10 env CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=$JOBS" \
     "CARGO_TARGET_DIR=$T/target" "OPENALPACA_HOME_STORE=$store" "OPENALPACA_CONFIG_DIR=$store/config" \
     "HOME=$home" "RUSTUP_HOME=$rustup_home" "CARGO_HOME=$cargo_home" \
     cargo "+$TOOLCHAIN" test --workspace --exclude openalpaca_gui --no-fail-fast
@@ -462,9 +530,9 @@ final_docs_check() {
     || die "gen_api_docs.py --check: expected rc 1 with exactly docs/api/crates/openalpaca_mcp.md, got rc $LAST_RC with: ${changed:-none}"
 }
 
-# The JS set: P31 (minor/patch pins, measured set under DU-23 (a)) + P32 (Vite 8, Vitest 5)
-# + P33 (@vitejs/plugin-react). NOT P31a's @tauri-apps/* pins: the Rust side is held at
-# tauri 2.11.6 (step 2), and the pair moves together in P31a (R20).
+# The JS set: P31a (the three @tauri-apps/* pins, the pair's JS half — its Rust half is step 1b)
+# + P31 (minor/patch pins, measured set under DU-23 (a)) + P32 (Vite 8, Vitest 5)
+# + P33 (@vitejs/plugin-react) — stage B2's pins with C's and C3's [M-oct10: gui-B-pins.log].
 js_edits() {
   local f=apps/openalpaca-gui/package.json old new
   while IFS='|' read -r old new; do
@@ -487,13 +555,23 @@ js_edits() {
     "vite": "7.3.6",|    "vite": "8.3.4",
     "vitest": "4.1.11"|    "vitest": "5.0.3"
 EOF
+  edit "$f" '    "@tauri-apps/api": "2.11.1",' "    \"@tauri-apps/api\": \"$JS_API\","
+  edit "$f" '    "@tauri-apps/plugin-dialog": "2.7.3",' "    \"@tauri-apps/plugin-dialog\": \"$DIALOG\","
+  edit "$f" '    "@tauri-apps/cli": "2.11.4",' "    \"@tauri-apps/cli\": \"$JS_CLI\","
   edit apps/openalpaca-gui/vite.config.ts 'import react from "@vitejs/plugin-react-swc";' 'import react from "@vitejs/plugin-react";'
+}
+
+js_pin() { # js_pin PACKAGE — the version apps/openalpaca-gui/package.json pins PACKAGE at
+  sed -n "s|^    \"$1\": \"\(.*\)\",\{0,1\}\$|\1|p" apps/openalpaca-gui/package.json
 }
 
 final_js() {
   CURRENT_STEP="final-js"
-  say ""; say "== final: the P31+P32+P33 JS set, a fresh root bun.lock, the four bun gates   ($(now))"
+  say ""; say "== final: the P31a+P31+P32+P33 JS set, a fresh root bun.lock, the four bun gates   ($(now))"
   js_edits
+  # DU-26's pair, read back from package.json against the final lock (step 8's)
+  if live; then pair_check "final: package.json against Cargo.lock" "$(js_pin @tauri-apps/api)" "$(js_pin @tauri-apps/plugin-dialog)"
+  else pair_check "final: package.json against Cargo.lock" "$JS_API" "$DIALOG"; fi
   local -a BUNENV
   BUNENV=(env "BUN_INSTALL=$T/bun-home" "BUN_INSTALL_CACHE_DIR=$T/bun-cache" \
     "BUN_RUNTIME_TRANSPILER_CACHE_PATH=$T/bun-cache/transpiler" "OPENALPACA_HOME_STORE=$T/test-store" \
@@ -545,7 +623,7 @@ final_gui() {
 summary() {
   local total=$(( LOCK_UNEXPECTED + LOCK_EXPECTED ))
   if [ "$total" -eq 0 ]; then LOCK_LINE="every compared lock equal to its shipped snapshot"
-  else LOCK_LINE="$LOCK_UNEXPECTED unexpected, $LOCK_EXPECTED expected (P04 hold / step-back) — $T/logs/lock-differences.txt"; fi
+  else LOCK_LINE="$LOCK_UNEXPECTED unexpected, $LOCK_EXPECTED expected (rmcp 3.5.1, DU-25 (v4)) — $T/logs/lock-differences.txt"; fi
   if [ "$DATES" -eq 1 ] && [ "$total" -gt 0 ]; then
     say ""; say "== release dates of the versions the differences introduced (crates.io; User-Agent openalpaca-deps-check)"
     python3 -I "$HERE/lockdates.py" < "$T/logs/lock-differences.txt" > "$T/logs/lock-dates.txt" 2>&1 || true
@@ -568,11 +646,11 @@ preflight() {
     say "bun: $("$BUN" --version 2>&1) at $BUN"
   fi
   local f
-  for f in lockdiff.py lockdates.py hold-footprint.txt patches/step-4-secrets.patch patches/step-6-rmcp.patch \
+  for f in lockdiff.py lockdates.py patches/step-4-secrets.patch patches/step-6-rmcp.patch \
            patches/step-8-config.patch locks/recut-lock-00-head.lock locks/recut-lock-01-toolchain.lock \
-           locks/recut-lock-02-update-held.lock locks/recut-lock-03-storage.lock locks/recut-lock-04-secrets.lock \
-           locks/recut-lock-05-documents.lock locks/recut-lock-06-rmcp.lock locks/recut-lock-07-web.lock \
-           locks/recut-lock-99-final-held.lock; do
+           locks/guiD-lock-01b-pair.lock locks/recut-lock-02-update.lock locks/recut-lock-03-storage.lock \
+           locks/recut-lock-04-secrets.lock locks/recut-lock-05-documents.lock locks/recut-lock-06-rmcp.lock \
+           locks/recut-lock-07-web.lock locks/recut-lock-99-final.lock; do
     [ -f "$HERE/$f" ] || die "pre-flight: missing shipped file $HERE/$f"
   done
 
@@ -586,6 +664,8 @@ preflight() {
   ( STRICT=0; compare_lock "base-vs-measured-head" "$HERE/locks/recut-lock-00-head.lock" "$T/locks/step-0-base.lock" ) >/dev/null
   if cmp -s Cargo.lock "$HERE/locks/recut-lock-00-head.lock"; then
     say "the base's Cargo.lock is byte-identical to the measured head's (7295f91b)"
+  elif [ "$(head -n 1 "$T/logs/lockdiff-base-vs-measured-head.txt" | awk '{ print $2 + $4 + $6 }')" = 0 ]; then
+    say "NOTE: the base's Cargo.lock holds the measured head's (name, version) set; its bytes differ (a dependency edge — logs/lockdiff-base-vs-measured-head.txt, and \`diff\` it with locks/recut-lock-00-head.lock)"
   else
     say "NOTE: the base's Cargo.lock differs from the measured head's — the per-step comparisons will show it; see logs/lock-differences.txt"
   fi
@@ -634,7 +714,7 @@ a = { path = "../a" }
 EOF
   echo 'fn main() { println!("{}", a::one()); }' > "$toy/b/src/main.rs"
   cd "$toy"
-  CARGO=(nice -n 10 env CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 "CARGO_TARGET_DIR=$T/target" cargo "+$TOOLCHAIN")
+  CARGO=(nice -n 10 env CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=$JOBS" "CARGO_TARGET_DIR=$T/target" cargo "+$TOOLCHAIN")
 
   verdict() { # verdict NAME COND-RC DESCRIPTION
     if [ "$2" -eq 0 ]; then pass=$((pass + 1)); say "  PASS $1: $3"; else fail=$((fail + 1)); say "  FAIL $1: $3"; fi
@@ -707,6 +787,84 @@ EOF
     verdict iii-equal 1 "rc=$rc"
   fi
 
+  # (iv) an exact expectation (name:OLD->NEW, the form of step 6's rmcp label) covers exactly that
+  # move: under --strict the labelled difference passes, the same name moving elsewhere stops it
+  rc=0
+  ( STRICT=1; compare_lock "selftest-exact" "$T/locks/selftest-lock-A.lock" "$T/locks/selftest-lock-B.lock" \
+      --expected 'toy=a:0.1.0->0.1.1' ) > "$T/logs/selftest-04a-exact-label.log" 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ] && grep -q 'a: 0.1.0 -> 0.1.1  \[toy\]' "$T/logs/selftest-04a-exact-label.log" && grep -q 'unexpected: 0' "$T/logs/selftest-04a-exact-label.log"; then
+    verdict iv-exact 0 "'a:0.1.0->0.1.1' labels that move expected, and --strict passes (logs/selftest-04a-exact-label.log)"
+  else
+    verdict iv-exact 1 "rc=$rc; see logs/selftest-04a-exact-label.log"
+  fi
+  rc=0
+  ( STRICT=1; compare_lock "selftest-exact-other" "$T/locks/selftest-lock-A.lock" "$T/locks/selftest-lock-B.lock" \
+      --expected 'toy=a:0.1.0->0.1.2'; touch "$T/must-not-exist-5" ) > "$T/logs/selftest-04b-exact-other.log" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$T/must-not-exist-5" ] && grep -q 'unexpected lock difference' "$T/logs/selftest-04b-exact-other.log"; then
+    verdict iv-exact-other 0 "'a:0.1.0->0.1.2' does not cover a move to 0.1.1: --strict stopped the driver (rc=$rc)"
+  else
+    verdict iv-exact-other 1 "rc=$rc; see logs/selftest-04b-exact-other.log"
+  fi
+
+  # (v) expect_lock: the version a step asserts (step 1b's pair, step 6's rmcp) — a match passes,
+  # a mismatch stops the driver with nothing after it
+  rc=0; ( expect_lock a '^0[.]1[.]1$' "selftest" ) > "$T/logs/selftest-05a-expect-match.log" 2>&1 || rc=$?
+  verdict v-match "$rc" "expect_lock a ^0.1.1\$ passes on a lock holding a 0.1.1 (rc=$rc)"
+  rc=0
+  ( expect_lock a '^0[.]2[.]' "selftest"; touch "$T/must-not-exist-6" ) > "$T/logs/selftest-05b-expect-mismatch.log" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$T/must-not-exist-6" ] && grep -q "holds a at '0.1.1 '" "$T/logs/selftest-05b-expect-mismatch.log"; then
+    verdict v-mismatch 0 "expect_lock a ^0.2. stopped the driver on a 0.1.1 lock (rc=$rc; logs/selftest-05b-expect-mismatch.log)"
+  else
+    verdict v-mismatch 1 "rc=$rc; see logs/selftest-05b-expect-mismatch.log"
+  fi
+
+  # (vi) pair_check (DU-26): on a lock holding tauri 2.12.3 and tauri-plugin-dialog 2.8.2, the
+  # api 2.12.x / dialog 2.8.2 pair passes; a new api minor, or a dialog one patch off, stops it
+  mkdir -p "$T/toy-pair"
+  printf '[[package]]\nname = "tauri"\nversion = "2.12.3"\n\n[[package]]\nname = "tauri-plugin-dialog"\nversion = "2.8.2"\n' > "$T/toy-pair/Cargo.lock"
+  rc=0; ( cd "$T/toy-pair" && pair_check selftest 2.12.9 2.8.2 ) > "$T/logs/selftest-06a-pair-holds.log" 2>&1 || rc=$?
+  verdict vi-holds "$rc" "tauri 2.12.3 ~ api 2.12.9, dialog 2.8.2 = 2.8.2: the pair holds (rc=$rc)"
+  rc=0
+  ( cd "$T/toy-pair" && { pair_check selftest 2.13.0 2.8.2; touch "$T/must-not-exist-7"; } ) > "$T/logs/selftest-06b-pair-minor.log" 2>&1 || rc=$?
+  local rc2=0
+  ( cd "$T/toy-pair" && { pair_check selftest 2.12.3 2.8.1; touch "$T/must-not-exist-8"; } ) > "$T/logs/selftest-06c-pair-dialog.log" 2>&1 || rc2=$?
+  if [ "$rc" -ne 0 ] && [ "$rc2" -ne 0 ] && [ ! -e "$T/must-not-exist-7" ] && [ ! -e "$T/must-not-exist-8" ] \
+     && grep -q 'pair is broken' "$T/logs/selftest-06b-pair-minor.log" && grep -q 'pair is broken' "$T/logs/selftest-06c-pair-dialog.log"; then
+    verdict vi-broken 0 "api 2.13.0 against tauri 2.12.3, and dialog 2.8.1 against 2.8.2, each stopped the driver (rc=$rc, $rc2)"
+  else
+    verdict vi-broken 1 "rc=$rc, $rc2; see logs/selftest-06b-pair-minor.log, logs/selftest-06c-pair-dialog.log"
+  fi
+
+  # (vii) a lock comparison lockdiff.py could not make stops the driver, --strict or not: a
+  # non-lock file — bytes that are not UTF-8, or UTF-8 text with no [[package]] — refused by
+  # lockdiff.py (exit 2); and a lockdiff.py that dies before its summary (a syntax error: exit 1
+  # and Python's error report, which compare_lock's field-wise parse would read as "the same
+  # set"), refused by compare_lock's summary-line check
+  printf '\377\376not a lock\n' > "$T/toy-not-utf8.lock"
+  printf '# not a Cargo.lock\nhello = "world"\n' > "$T/toy-no-package.lock"
+  rc=0
+  ( STRICT=0; compare_lock "selftest-not-utf8" "$T/locks/selftest-lock-A.lock" "$T/toy-not-utf8.lock"; touch "$T/must-not-exist-9" ) \
+    > "$T/logs/selftest-07a-not-utf8.log" 2>&1 || rc=$?
+  rc2=0
+  ( STRICT=0; compare_lock "selftest-no-package" "$T/locks/selftest-lock-A.lock" "$T/toy-no-package.lock"; touch "$T/must-not-exist-10" ) \
+    > "$T/logs/selftest-07b-no-package.log" 2>&1 || rc2=$?
+  if [ "$rc" -ne 0 ] && [ "$rc2" -ne 0 ] && [ ! -e "$T/must-not-exist-9" ] && [ ! -e "$T/must-not-exist-10" ] \
+     && grep -q 'FAIL: lockdiff.py' "$T/logs/selftest-07a-not-utf8.log" && grep -q 'FAIL: lockdiff.py' "$T/logs/selftest-07b-no-package.log"; then
+    verdict vii-nonlock 0 "a non-UTF-8 file and a UTF-8 file with no [[package]], each compared with a lock, stopped the driver (rc=$rc, $rc2; logs/selftest-07a-not-utf8.log, logs/selftest-07b-no-package.log)"
+  else
+    verdict vii-nonlock 1 "rc=$rc, $rc2; see logs/selftest-07a-not-utf8.log, logs/selftest-07b-no-package.log"
+  fi
+  mkdir -p "$T/toy-broken-tools"
+  printf 'def main(:\n' > "$T/toy-broken-tools/lockdiff.py"
+  rc=0
+  ( HERE="$T/toy-broken-tools"; STRICT=0; compare_lock "selftest-no-summary" "$T/locks/selftest-lock-A.lock" "$T/locks/selftest-lock-B.lock"; touch "$T/must-not-exist-11" ) \
+    > "$T/logs/selftest-07c-no-summary.log" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$T/must-not-exist-11" ] && grep -q 'lockdiff.py gave no summary (rc=1)' "$T/logs/selftest-07c-no-summary.log"; then
+    verdict vii-nosummary 0 "a lockdiff.py that dies before its summary (rc 1, Python's error report) stopped the driver (rc=$rc; logs/selftest-07c-no-summary.log)"
+  else
+    verdict vii-nosummary 1 "rc=$rc; see logs/selftest-07c-no-summary.log"
+  fi
+
   say ""
   say "SELF-TEST: $pass passed, $fail failed; logs: $T/logs"
   [ "$fail" -eq 0 ] || exit 1
@@ -722,9 +880,9 @@ main() {
   if [ -z "$REPO" ]; then
     REPO=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null) || { echo "gbase: $HERE is not inside a repository; pass --repo" >&2; exit 2; }
   fi
-  say "repository: $REPO  base: $BASE  toolchain: $TOOLCHAIN  steps: $STEPS  strict: $STRICT  step-backs: $WITH_STEPBACKS  dry-run: $DRY  edits-only: $EDITS_ONLY"
-  CARGO=(nice -n 10 env CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 "CARGO_TARGET_DIR=$T/target" cargo "+$TOOLCHAIN")
-  CARGO_GUI=(nice -n 10 env CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 "CARGO_TARGET_DIR=$T/target-gui" cargo "+$TOOLCHAIN")
+  say "repository: $REPO  base: $BASE  toolchain: $TOOLCHAIN  steps: $STEPS  strict: $STRICT  dry-run: $DRY  edits-only: $EDITS_ONLY"
+  CARGO=(nice -n 10 env CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=$JOBS" "CARGO_TARGET_DIR=$T/target" cargo "+$TOOLCHAIN")
+  CARGO_GUI=(nice -n 10 env CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=$JOBS" "CARGO_TARGET_DIR=$T/target-gui" cargo "+$TOOLCHAIN")
 
   preflight
 
@@ -751,7 +909,7 @@ main() {
   run_steps "$last"
   if [ "$EDITS_ONLY" -eq 1 ]; then
     [ "$STEPS" = all ] && js_edits
-    say ""; say "EDITS-ONLY OK: the eight steps' manifest edits and patches$( [ "$STEPS" = all ] && printf ' and the JS edits') are applied in $T/src; no cargo ran."
+    say ""; say "EDITS-ONLY OK: the manifest edits and patches of steps up to $last$( [ "$STEPS" = all ] && printf ' and the JS edits') are applied in $T/src; no cargo ran."
     exit 0
   fi
   if [ "$STEPS" != all ]; then

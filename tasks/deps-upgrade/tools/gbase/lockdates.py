@@ -15,9 +15,10 @@ One request a second, a 20 s timeout each, and the generic User-Agent
 `(date unavailable: <reason>)` on its line; the exit status is 0 regardless — this
 is an annotation of a report, not a gate. gbase.sh runs it only under --dates.
 
-A line lockdiff.py labels (`[hold]`, a step-back) is an expected difference and is
-not looked up, and neither is the informational `== base-vs-measured-head` block,
-so a held run asks crates.io about the unexpected differences alone.
+A line lockdiff.py labels (gbase.sh passes one label, `[DU-25(v4)]`: rmcp's 3.5.0 ->
+3.5.1) is an expected difference and is not looked up, and neither is the informational
+`== base-vs-measured-head` block, so a run asks crates.io about the unexpected
+differences alone.
 """
 import json
 import re
