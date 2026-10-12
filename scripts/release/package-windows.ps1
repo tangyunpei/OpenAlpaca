@@ -111,9 +111,11 @@ Write-Host "==> Building the CLI"
 cargo build --release --locked -p openalpaca
 if ($LASTEXITCODE -ne 0) { Die "Cargo build failed." }
 
-# beforeBuildCommand runs prepare-sidecar.ts --release again; cargo finds the
-# daemon fresh and re-stages the same bytes. The checks after the build hold
-# the MSI to the hash recorded above, before `tauri build` ran.
+# beforeBuildCommand runs prepare-sidecar.ts again, as Tauri's hook: the
+# host's triple (TAURI_ENV_TARGET_TRIPLE) and, with TAURI_ENV_DEBUG unset, the
+# release profile; cargo finds the daemon fresh and re-stages the same bytes.
+# The checks after the build hold the MSI to the hash recorded above, before
+# `tauri build` ran.
 Write-Host "==> Building Tauri app bundle"
 Push-Location $guiDir
 try {

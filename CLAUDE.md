@@ -165,7 +165,7 @@ bun run check                    # tsc --noEmit on both tsconfigs (CI gate)
 bun run test                     # vitest (CI gate)
 bun run format:check             # prettier (CI gate) — `bun run format` fixes
 bun run build                    # production frontend build (CI gate)
-bun run prepare:sidecar:dev      # bundle the daemon as a Tauri sidecar (or :release)
+bun run prepare:sidecar          # stage the daemon as the Tauri sidecar: Tauri's profile and triple in its hooks, by hand dev on the host (or prepare:sidecar:release)
 ```
 
 **Build hygiene — `target/` reached 147.6 GiB (530,884 files) before these rules; each line removes one measured growth driver** (`tasks/deps-upgrade/modernization-plan.md` §1):

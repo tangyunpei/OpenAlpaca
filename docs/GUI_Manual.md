@@ -32,8 +32,9 @@ bun install
 bun run tauri dev
 ```
 
-`tauri dev` runs `bun run prepare:sidecar:dev` (which stages the daemon binary
-as the Tauri sidecar) and then the Vite dev server on port 1420, per
+`tauri dev` runs `bun run prepare:sidecar` (which stages the daemon binary
+as the Tauri sidecar, in the profile and for the triple `tauri dev` hands it —
+a dev build for this machine) and then the Vite dev server on port 1420, per
 `src-tauri/tauri.conf.json`.
 
 `bun run dev` starts the frontend alone. It is useful for layout work, but the

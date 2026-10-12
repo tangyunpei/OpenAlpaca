@@ -85,10 +85,12 @@ STAGED_SHA="$(read_sha256_file "$STAGED_SHA_FILE")"
 echo "==> Building the CLI"
 cargo build --release --locked -p openalpaca
 
-# beforeBuildCommand runs prepare-sidecar.ts --release again; cargo finds the
-# daemon fresh and re-stages the same bytes. The checks after the build hold
-# libexec/ to the hash recorded above, before `tauri build` ran, and compare
-# the AppImage's own copy with it (linuxdeploy rewrites that copy; see below).
+# beforeBuildCommand runs prepare-sidecar.ts again, as Tauri's hook: the
+# host's triple (TAURI_ENV_TARGET_TRIPLE) and, with TAURI_ENV_DEBUG unset, the
+# release profile; cargo finds the daemon fresh and re-stages the same bytes.
+# The checks after the build hold libexec/ to the hash recorded above, before
+# `tauri build` ran, and compare the AppImage's own copy with it (linuxdeploy
+# rewrites that copy; see below).
 echo "==> Building Tauri app bundle"
 (
   cd "$GUI_DIR"

@@ -14,7 +14,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "tauri": "tauri",
-    "prepare:sidecar:dev": "bun run scripts/prepare-sidecar.ts",
+    "prepare:sidecar": "bun run scripts/prepare-sidecar.ts",
     "prepare:sidecar:release": "bun run scripts/prepare-sidecar.ts --release"
   },
   "dependencies": {
