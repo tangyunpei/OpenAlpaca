@@ -133,6 +133,9 @@ tasks/storage-design/plan-drafts/
 !tasks/deps-upgrade/*.md
 !tasks/deps-upgrade/reports/
 !tasks/deps-upgrade/reports/*.md
+!tasks/deps-upgrade/baselines/
+!tasks/deps-upgrade/baselines/*/
+!tasks/deps-upgrade/baselines/*/*.md
 tasks/deps-upgrade/*.tar.gz
 !tasks/deps-upgrade-audit-*.md
 !tasks/pending-decisions.md
