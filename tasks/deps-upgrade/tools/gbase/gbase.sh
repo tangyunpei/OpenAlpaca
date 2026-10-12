@@ -494,12 +494,31 @@ run_steps() { # run_steps LAST — the steps of STEP_ORDER up to and including L
 # lexical sort, not -n: `comm` below needs the two lists in `sort`'s own order
 sleep_orphans() { ps -o pid= -o ppid= -o command= -A 2>/dev/null | awk '$2 == 1 && /sleep 3600/ && !/awk/ { print $1 }' | sort || true; }
 
+# P14's characterisation pins (plan-rev3 §5.3 P14, landed 05541f1b) fix today's sniffing and
+# extraction so the wave's changes are seen; P15–P18 each move their own. The measured diff the
+# driver replays predates P14 and carries none of those moves, so on the wave's lock exactly these
+# fail — and each must, or the behaviour it pins did not move as measured (rehearsal 2026-10-12).
+P14_PINS="security::sanitizer::tests::a_declared_text_upload_with_a_pdf_or_dwg_signature_inside_passes_today P17/P18
+security::sanitizer::tests::the_two_connector_media_uploads_pass_today P17a/P18
+extraction::tests::a_docx_with_bzip2_entries_is_read_by_zip_2 P16
+extraction::tests::an_aes_128_pdf_is_a_retryable_error_today P15
+extraction::tests::xlsx_cell_text_is_pinned_as_calamine_0_26_reads_it P16
+routes::files::tests::a_declared_csv_starting_with_a_dwg_signature_is_accepted P17/P18
+routes::files::tests::a_declared_text_file_naming_a_pdf_header_past_offset_0_is_accepted P17/P18"
+
 final_tests() {
   CURRENT_STEP="final-tests"
   say ""; say "== final: the full suite   ($(now))"
   local store="$T/test-store" home="$T/test-home" rustup_home="" cargo_home="" before="" after="" new="" p=0 f=0 g=0
   rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"; cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-  if live; then mkdir -p "$store/config" "$home"; before=$(sleep_orphans); fi
+  if live; then
+    mkdir -p "$store/config" "$home"; before=$(sleep_orphans)
+    # Two tests need a git checkout around them (memory/scope_context.rs:174's precondition and
+    # request_workspace_threading); `git archive` exports none (rehearsal 2026-10-12).
+    git -C "$T/src" init -q || die "git init in the export failed"
+  else
+    plan "    git -C \$T/src init -q   (two tests need a git checkout)"
+  fi
   run_logged_rc 90-test nice -n 10 env CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=$JOBS" \
     "CARGO_TARGET_DIR=$T/target" "OPENALPACA_HOME_STORE=$store" "OPENALPACA_CONFIG_DIR=$store/config" \
     "HOME=$home" "RUSTUP_HOME=$rustup_home" "CARGO_HOME=$cargo_home" \
@@ -516,7 +535,19 @@ final_tests() {
     say "    orphaned 'sleep 3600' children left by the daemon's tests (ppid 1, started in this run), killed: $(printf '%s ' $new)"
     kill $new 2>/dev/null || true
   fi
-  [ "$LAST_RC" -eq 0 ] && [ "$f" -eq 0 ] || die "the suite failed: $TEST_LINE (log: $T/logs/90-test.log)"
+  local failed unexpected missing name
+  failed=$(sed -n 's/^test \(.*\) \.\.\. FAILED$/\1/p' "$T/logs/90-test.log" | sort -u)
+  unexpected=$(comm -23 <(printf '%s\n' "$failed" | grep . || true) <(printf '%s\n' "$P14_PINS" | awk '{print $1}' | sort -u))
+  missing=$(comm -13 <(printf '%s\n' "$failed" | grep . || true) <(printf '%s\n' "$P14_PINS" | awk '{print $1}' | sort -u))
+  [ -z "$unexpected" ] || die "the suite failed outside P14's pins: $(printf '%s ' $unexpected)(log: $T/logs/90-test.log)"
+  if grep -q '^error: test failed' "$T/logs/90-test.log" && [ -z "$failed" ]; then
+    die "cargo test failed with no FAILED test line (a crash or a build error; log: $T/logs/90-test.log)"
+  fi
+  say "    P14's pins failing as the wave moves them: $(printf '%s\n' "$failed" | grep -c . || true) of $(printf '%s\n' "$P14_PINS" | grep -c .)"
+  if [ -n "$missing" ]; then
+    for name in $missing; do say "    NOTE: P14 pin did not fail — the behaviour it pins did not move as measured: $name ($(printf '%s\n' "$P14_PINS" | awk -v n="$name" '$1 == n {print $2}'))"; done
+    [ "$STRICT" -eq 0 ] || die "under --strict every P14 pin must fail on the wave's lock"
+  fi
   # the suite runs without --locked (G-check's rule), so hold it to step 8's lock as G-GUI is held to its own
   cmp -s Cargo.lock "$T/locks/step-8.lock" || die "the suite changed Cargo.lock after step 8 (compare $T/locks/step-8.lock)"
 }
