@@ -41,10 +41,15 @@
  * workspace root — `target/` unless CARGO_TARGET_DIR says otherwise; the
  * script sets none. The Tauri shell builds into `target/gui`:
  * src-tauri/.cargo/config.toml says so for `tauri dev` and `tauri build`,
- * which run cargo from src-tauri/, and a root `cargo check -p openalpaca_gui`
- * sets `CARGO_TARGET_DIR=target/gui` (CLAUDE.md, build hygiene). tauri-build
- * copies the staged sidecar to `<shell target dir>/<profile>/openalpacad`,
- * which is therefore never the daemon cargo built.
+ * which run cargo from src-tauri/, and a `cargo check -p openalpaca_gui` from
+ * the root must be run with `CARGO_TARGET_DIR=target/gui` by hand (CLAUDE.md,
+ * build hygiene; nothing sets it there). tauri-build copies the staged sidecar
+ * to `<shell target dir>/<profile>/openalpacad` — in target/gui never the
+ * daemon cargo built; in a shared target dir, cargo's own dev daemon (measured:
+ * a root check with the release copy staged put the release bytes there).
+ * tauri-build re-copies only when the staged file is newer than its last run
+ * (`cargo:rerun-if-changed`), so the stage is stamped with the time it was
+ * made: a copy can carry cargo's older artifact time and go unseen.
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -56,6 +61,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { basename, join, resolve } from "node:path";
@@ -359,6 +365,10 @@ for (const stale of [destPath, shaPath, provenancePath]) {
 }
 copyFileSync(artifact.executable, destPath);
 if (!isWindows) chmodSync(destPath, 0o755);
+// The copy can keep the artifact's mtime (measured on APFS); stamp it now so
+// tauri-build's rerun-if-changed sees every new stage, even an older build.
+const stagedAt = new Date();
+utimesSync(destPath, stagedAt, stagedAt);
 
 const sha256 = sha256File(destPath);
 writeFileSync(shaPath, `${sha256}  ${sidecarName}\n`);
@@ -376,7 +386,7 @@ const provenance = {
   cargo_lock_sha256: sha256File(join(workspaceRoot, "Cargo.lock")),
   git_head: gitHead === null ? null : gitHead.trim(),
   git_dirty: gitStatus === null ? null : gitStatus.trim().length > 0,
-  staged_at: new Date().toISOString(),
+  staged_at: stagedAt.toISOString(),
 };
 writeFileSync(provenancePath, `${JSON.stringify(provenance, null, 2)}\n`);
 
